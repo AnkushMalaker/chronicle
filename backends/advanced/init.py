@@ -28,16 +28,27 @@ class ChronicleSetup:
         self.console = Console()
         self.config: Dict[str, Any] = {}
         self.args = args or argparse.Namespace()
-        self.config_yml_path = Path("../../config.yml")  # Repo root config.yml
-        self.config_yml_data = None
 
         # Check if we're in the right directory
         if not Path("pyproject.toml").exists() or not Path("src").exists():
             self.console.print("[red][ERROR][/red] Please run this script from the backends/advanced directory")
             sys.exit(1)
 
-        # Load config.yml if it exists
-        self.load_config_yml()
+        # Initialize ConfigManager
+        repo_root = Path.cwd().parent.parent  # backends/advanced -> repo root
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+
+        from config_manager import ConfigManager
+
+        self.config_manager = ConfigManager(service_path="backends/advanced")
+        self.console.print(f"[blue][INFO][/blue] Using config.yml at: {self.config_manager.config_yml_path}")
+
+        # Load existing config or create default structure
+        self.config_yml_data = self.config_manager.get_full_config()
+        if not self.config_yml_data:
+            self.console.print("[yellow][WARNING][/yellow] config.yml not found, will create default structure")
+            self.config_yml_data = self._get_default_config_structure()
 
     def print_header(self, title: str):
         """Print a colorful header"""
@@ -126,21 +137,6 @@ class ChronicleSetup:
 
         return f"{key_clean[:show_chars]}{'*' * min(15, len(key_clean) - show_chars * 2)}{key_clean[-show_chars:]}"
 
-    def load_config_yml(self):
-        """Load config.yml from repository root"""
-        if not self.config_yml_path.exists():
-            self.console.print(f"[yellow][WARNING][/yellow] config.yml not found at {self.config_yml_path}")
-            self.console.print("[yellow]Will create a new config.yml during setup[/yellow]")
-            self.config_yml_data = self._get_default_config_structure()
-            return
-
-        try:
-            with open(self.config_yml_path, 'r') as f:
-                self.config_yml_data = yaml.safe_load(f)
-            self.console.print(f"[blue][INFO][/blue] Loaded existing config.yml")
-        except Exception as e:
-            self.console.print(f"[red][ERROR][/red] Failed to load config.yml: {e}")
-            self.config_yml_data = self._get_default_config_structure()
 
     def _get_default_config_structure(self) -> Dict[str, Any]:
         """Return default config.yml structure if file doesn't exist"""
@@ -163,36 +159,6 @@ class ChronicleSetup:
             }
         }
 
-    def save_config_yml(self):
-        """Save config.yml back to repository root"""
-        try:
-            # Backup existing config.yml if it exists
-            if self.config_yml_path.exists():
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                backup_path = self.config_yml_path.parent / f"config.yml.backup.{timestamp}"
-                shutil.copy2(self.config_yml_path, backup_path)
-                self.console.print(f"[blue][INFO][/blue] Backed up config.yml to {backup_path.name}")
-
-            # Write updated config
-            with open(self.config_yml_path, 'w') as f:
-                yaml.dump(self.config_yml_data, f, default_flow_style=False, sort_keys=False)
-
-            self.console.print("[green][SUCCESS][/green] config.yml updated successfully")
-        except Exception as e:
-            self.console.print(f"[red][ERROR][/red] Failed to save config.yml: {e}")
-            raise
-
-    def update_config_default(self, key: str, value: str):
-        """Update a default value in config.yml"""
-        if "defaults" not in self.config_yml_data:
-            self.config_yml_data["defaults"] = {}
-        self.config_yml_data["defaults"][key] = value
-
-    def update_memory_config(self, updates: Dict[str, Any]):
-        """Update memory configuration in config.yml"""
-        if "memory" not in self.config_yml_data:
-            self.config_yml_data["memory"] = {}
-        self.config_yml_data["memory"].update(updates)
 
     def setup_authentication(self):
         """Configure authentication settings"""
@@ -306,8 +272,8 @@ class ChronicleSetup:
             if api_key:
                 self.config["OPENAI_API_KEY"] = api_key
                 # Update config.yml to use OpenAI models
-                self.update_config_default("llm", "openai-llm")
-                self.update_config_default("embedding", "openai-embed")
+                self.config_manager.update_config_defaults({"llm": "openai-llm", "embedding": "openai-embed"})
+                self.config_yml_data = self.config_manager.get_full_config()  # Reload to stay in sync
                 self.console.print("[green][SUCCESS][/green] OpenAI configured in config.yml")
                 self.console.print("[blue][INFO][/blue] Set defaults.llm: openai-llm")
                 self.console.print("[blue][INFO][/blue] Set defaults.embedding: openai-embed")
@@ -317,8 +283,8 @@ class ChronicleSetup:
         elif choice == "2":
             self.console.print("[blue][INFO][/blue] Ollama selected")
             # Update config.yml to use Ollama models
-            self.update_config_default("llm", "local-llm")
-            self.update_config_default("embedding", "local-embed")
+            self.config_manager.update_config_defaults({"llm": "local-llm", "embedding": "local-embed"})
+            self.config_yml_data = self.config_manager.get_full_config()  # Reload to stay in sync
             self.console.print("[green][SUCCESS][/green] Ollama configured in config.yml")
             self.console.print("[blue][INFO][/blue] Set defaults.llm: local-llm")
             self.console.print("[blue][INFO][/blue] Set defaults.embedding: local-embed")
@@ -327,7 +293,8 @@ class ChronicleSetup:
         elif choice == "3":
             self.console.print("[blue][INFO][/blue] Skipping LLM setup - memory extraction disabled")
             # Disable memory extraction in config.yml
-            self.update_memory_config({"extraction": {"enabled": False}})
+            self.config_manager.update_memory_config({"extraction": {"enabled": False}})
+            self.config_yml_data = self.config_manager.get_full_config()  # Reload to stay in sync
 
     def setup_memory(self):
         """Configure memory provider - updates config.yml"""
@@ -347,9 +314,10 @@ class ChronicleSetup:
             qdrant_url = self.prompt_value("Qdrant URL", "qdrant")
             self.config["QDRANT_BASE_URL"] = qdrant_url
 
-            # Update config.yml
-            self.update_memory_config({"provider": "chronicle"})
-            self.console.print("[green][SUCCESS][/green] Chronicle memory provider configured in config.yml")
+            # Update config.yml (also updates .env automatically)
+            self.config_manager.update_memory_config({"provider": "chronicle"})
+            self.config_yml_data = self.config_manager.get_full_config()  # Reload to stay in sync
+            self.console.print("[green][SUCCESS][/green] Chronicle memory provider configured in config.yml and .env")
 
         elif choice == "2":
             self.console.print("[blue][INFO][/blue] OpenMemory MCP selected")
@@ -359,8 +327,8 @@ class ChronicleSetup:
             user_id = self.prompt_value("OpenMemory user ID", "openmemory")
             timeout = self.prompt_value("OpenMemory timeout (seconds)", "30")
 
-            # Update config.yml with OpenMemory MCP settings
-            self.update_memory_config({
+            # Update config.yml with OpenMemory MCP settings (also updates .env automatically)
+            self.config_manager.update_memory_config({
                 "provider": "openmemory_mcp",
                 "openmemory_mcp": {
                     "server_url": mcp_url,
@@ -369,7 +337,8 @@ class ChronicleSetup:
                     "timeout": int(timeout)
                 }
             })
-            self.console.print("[green][SUCCESS][/green] OpenMemory MCP configured in config.yml")
+            self.config_yml_data = self.config_manager.get_full_config()  # Reload to stay in sync
+            self.console.print("[green][SUCCESS][/green] OpenMemory MCP configured in config.yml and .env")
             self.console.print("[yellow][WARNING][/yellow] Remember to start OpenMemory: cd ../../extras/openmemory-mcp && docker compose up -d")
 
         elif choice == "3":
@@ -378,15 +347,16 @@ class ChronicleSetup:
             mycelia_url = self.prompt_value("Mycelia API URL", "http://localhost:5173")
             timeout = self.prompt_value("Mycelia timeout (seconds)", "30")
 
-            # Update config.yml with Mycelia settings
-            self.update_memory_config({
+            # Update config.yml with Mycelia settings (also updates .env automatically)
+            self.config_manager.update_memory_config({
                 "provider": "mycelia",
                 "mycelia": {
                     "api_url": mycelia_url,
                     "timeout": int(timeout)
                 }
             })
-            self.console.print("[green][SUCCESS][/green] Mycelia memory provider configured in config.yml")
+            self.config_yml_data = self.config_manager.get_full_config()  # Reload to stay in sync
+            self.console.print("[green][SUCCESS][/green] Mycelia memory provider configured in config.yml and .env")
             self.console.print("[yellow][WARNING][/yellow] Make sure Mycelia is running at the configured URL")
 
     def setup_optional_services(self):
@@ -559,10 +529,8 @@ class ChronicleSetup:
 
         self.console.print("[green][SUCCESS][/green] .env file configured successfully with secure permissions")
 
-        # Save config.yml with all updates
-        self.console.print()
-        self.console.print("[blue][INFO][/blue] Saving configuration to config.yml...")
-        self.save_config_yml()
+        # Note: config.yml is automatically saved by ConfigManager when updates are made
+        self.console.print("[blue][INFO][/blue] Configuration saved to config.yml and .env (via ConfigManager)")
 
     def copy_config_templates(self):
         """Copy other configuration files"""
