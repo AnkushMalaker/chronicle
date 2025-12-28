@@ -1,5 +1,6 @@
 import React from 'react';
 import { TouchableOpacity, Text, StyleSheet, View } from 'react-native';
+import theme from '../theme/design-system';
 
 interface ScanControlsProps {
   scanning: boolean;
@@ -34,45 +35,35 @@ export const ScanControls: React.FC<ScanControlsProps> = ({
 
 const styles = StyleSheet.create({
   section: {
-    marginBottom: 25,
-    padding: 15,
-    backgroundColor: 'white',
-    borderRadius: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 2,
+    marginBottom: theme.spacing.lg,
+    padding: theme.spacing.md,
+    backgroundColor: theme.colors.background.primary,
+    borderRadius: theme.borderRadius.md,
+    ...theme.shadows.sm,
   },
   sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    marginBottom: 15,
-    color: '#333',
+    fontSize: theme.typography.fontSize.lg,
+    fontWeight: theme.typography.fontWeight.semibold,
+    marginBottom: theme.spacing.md,
+    color: theme.colors.text.primary,
   },
   button: {
-    backgroundColor: '#007AFF',
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 8,
+    ...theme.components.button.primary,
     alignItems: 'center',
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
+    ...theme.shadows.sm,
   },
   buttonWarning: {
-    backgroundColor: '#FF9500',
+    backgroundColor: theme.colors.warning.main,
   },
   buttonDisabled: {
-    backgroundColor: '#A0A0A0',
-    opacity: 0.7,
+    backgroundColor: theme.colors.gray[300],
+    borderWidth: 1,
+    borderColor: theme.colors.border.medium,
   },
   buttonText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '600',
+    color: theme.colors.primary.contrast,  // Dark text for WCAG AA on emerald
+    fontSize: theme.typography.fontSize.md,
+    fontWeight: theme.typography.fontWeight.semibold,
   },
 });
 

@@ -7,6 +7,7 @@ import {
   StyleSheet,
   ActivityIndicator,
 } from 'react-native';
+import theme from '../theme/design-system';
 
 interface PhoneAudioButtonProps {
   isRecording: boolean;
@@ -115,8 +116,8 @@ const PhoneAudioButton: React.FC<PhoneAudioButtonProps> = ({
 
 const styles = StyleSheet.create({
   container: {
-    marginVertical: 10,
-    paddingHorizontal: 20,
+    marginVertical: theme.spacing.sm + 2,
+    paddingHorizontal: theme.spacing.lg + 4,
   },
   buttonWrapper: {
     alignSelf: 'stretch',
@@ -125,9 +126,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 8,
+    paddingVertical: theme.spacing.md - 4,
+    paddingHorizontal: theme.spacing.lg + 4,
+    borderRadius: theme.borderRadius.sm,
     minHeight: 48,
   },
   buttonContent: {
@@ -136,65 +137,67 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   buttonIdle: {
-    backgroundColor: '#007AFF',
+    backgroundColor: theme.colors.primary.main,  // Primary emerald for main action
   },
   buttonRecording: {
-    backgroundColor: '#FF3B30',
+    backgroundColor: theme.colors.error.main,  // Red when recording
   },
   buttonDisabled: {
-    backgroundColor: '#C7C7CC',
+    backgroundColor: theme.colors.gray[300],  // More visible disabled state
+    borderWidth: 1,
+    borderColor: theme.colors.border.medium,
   },
   buttonError: {
-    backgroundColor: '#FF9500',
+    backgroundColor: theme.colors.warning.main,
   },
   buttonText: {
-    color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: '600',
-    marginLeft: 8,
+    color: theme.colors.primary.contrast,  // Dark text for WCAG AA contrast
+    fontSize: theme.typography.fontSize.md,
+    fontWeight: theme.typography.fontWeight.semibold,
+    marginLeft: theme.spacing.sm,
   },
   icon: {
-    fontSize: 20,
+    fontSize: theme.typography.fontSize.xl,
   },
   statusText: {
     textAlign: 'center',
-    marginTop: 8,
-    fontSize: 12,
-    color: '#8E8E93',
+    marginTop: theme.spacing.sm,
+    fontSize: theme.typography.fontSize.xs,
+    color: theme.colors.text.tertiary,
   },
   errorText: {
     textAlign: 'center',
-    marginTop: 8,
-    fontSize: 12,
-    color: '#FF3B30',
+    marginTop: theme.spacing.sm,
+    fontSize: theme.typography.fontSize.xs,
+    color: theme.colors.error.main,
   },
   disabledText: {
     textAlign: 'center',
-    marginTop: 8,
-    fontSize: 12,
-    color: '#8E8E93',
+    marginTop: theme.spacing.sm,
+    fontSize: theme.typography.fontSize.xs,
+    color: theme.colors.text.tertiary,
     fontStyle: 'italic',
   },
   audioLevelContainer: {
-    marginTop: 12,
+    marginTop: theme.spacing.md - 4,
     alignItems: 'center',
   },
   audioLevelBackground: {
     width: '100%',
     height: 4,
-    backgroundColor: '#E5E5EA',
+    backgroundColor: theme.colors.gray[200],
     borderRadius: 2,
     overflow: 'hidden',
   },
   audioLevelBar: {
     height: '100%',
-    backgroundColor: '#34C759',
+    backgroundColor: theme.colors.primary.main,  // Green bar for audio level
     borderRadius: 2,
   },
   audioLevelText: {
-    marginTop: 4,
+    marginTop: theme.spacing.xs,
     fontSize: 10,
-    color: '#8E8E93',
+    color: theme.colors.text.tertiary,
   },
 });
 

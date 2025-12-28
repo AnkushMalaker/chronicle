@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import type { ServerConnection } from '../types/serverConnection';
 
 const LAST_CONNECTED_DEVICE_ID_KEY = 'LAST_CONNECTED_DEVICE_ID';
 const WEBSOCKET_URL_KEY = 'WEBSOCKET_URL_KEY';
@@ -7,6 +8,8 @@ const USER_ID_KEY = 'USER_ID_KEY';
 const AUTH_EMAIL_KEY = 'AUTH_EMAIL_KEY';
 const AUTH_PASSWORD_KEY = 'AUTH_PASSWORD_KEY';
 const JWT_TOKEN_KEY = 'JWT_TOKEN_KEY';
+const SERVER_CONNECTIONS_KEY = 'SERVER_CONNECTIONS_KEY';
+const ACTIVE_SERVER_ID_KEY = 'ACTIVE_SERVER_ID_KEY';
 
 export const saveLastConnectedDeviceId = async (deviceId: string | null): Promise<void> => {
   try {
@@ -206,5 +209,92 @@ export const clearAuthData = async (): Promise<void> => {
     console.log('[Storage] All auth data cleared.');
   } catch (error) {
     console.error('[Storage] Error clearing auth data:', error);
+  }
+};
+
+// Server Connections
+export const saveServerConnections = async (connections: ServerConnection[]): Promise<void> => {
+  try {
+    await AsyncStorage.setItem(SERVER_CONNECTIONS_KEY, JSON.stringify(connections));
+    console.log('[Storage] Server connections saved:', connections.length);
+  } catch (error) {
+    console.error('[Storage] Error saving server connections:', error);
+  }
+};
+
+export const getServerConnections = async (): Promise<ServerConnection[]> => {
+  try {
+    const data = await AsyncStorage.getItem(SERVER_CONNECTIONS_KEY);
+    if (data) {
+      const connections = JSON.parse(data) as ServerConnection[];
+      console.log('[Storage] Retrieved server connections:', connections.length);
+      return connections;
+    }
+    return [];
+  } catch (error) {
+    console.error('[Storage] Error retrieving server connections:', error);
+    return [];
+  }
+};
+
+export const addServerConnection = async (connection: ServerConnection): Promise<void> => {
+  try {
+    const connections = await getServerConnections();
+    connections.push(connection);
+    await saveServerConnections(connections);
+    console.log('[Storage] Server connection added:', connection.name);
+  } catch (error) {
+    console.error('[Storage] Error adding server connection:', error);
+  }
+};
+
+export const updateServerConnection = async (connection: ServerConnection): Promise<void> => {
+  try {
+    const connections = await getServerConnections();
+    const index = connections.findIndex(c => c.id === connection.id);
+    if (index !== -1) {
+      connections[index] = connection;
+      await saveServerConnections(connections);
+      console.log('[Storage] Server connection updated:', connection.name);
+    }
+  } catch (error) {
+    console.error('[Storage] Error updating server connection:', error);
+  }
+};
+
+export const deleteServerConnection = async (connectionId: string): Promise<void> => {
+  try {
+    const connections = await getServerConnections();
+    const filtered = connections.filter(c => c.id !== connectionId);
+    await saveServerConnections(filtered);
+    console.log('[Storage] Server connection deleted:', connectionId);
+  } catch (error) {
+    console.error('[Storage] Error deleting server connection:', error);
+  }
+};
+
+// Active Server ID
+export const saveActiveServerId = async (serverId: string | null): Promise<void> => {
+  try {
+    if (serverId) {
+      await AsyncStorage.setItem(ACTIVE_SERVER_ID_KEY, serverId);
+      console.log('[Storage] Active server ID saved:', serverId);
+    } else {
+      await AsyncStorage.removeItem(ACTIVE_SERVER_ID_KEY);
+      console.log('[Storage] Active server ID removed.');
+    }
+  } catch (error) {
+    console.error('[Storage] Error saving active server ID:', error);
+  }
+};
+
+export const getActiveServerId = async (): Promise<string | null> => {
+  try {
+    const serverId = await AsyncStorage.getItem(ACTIVE_SERVER_ID_KEY);
+    console.log('[Storage] Retrieved active server ID:', serverId);
+    return serverId;
+  } catch (error) {
+    console.error('[Storage] Error retrieving active server ID:', error);
+    return null;
   }
 }; 

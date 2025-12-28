@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, ActivityIndicator } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, ActivityIndicator, Platform, ScrollView } from 'react-native';
+import theme from '../theme/design-system';
 
 interface BackendStatusProps {
   backendUrl: string;
@@ -13,6 +14,14 @@ interface HealthStatus {
   lastChecked?: Date;
 }
 
+// URL Presets for quick connection
+const URL_PRESETS = [
+  { label: 'Local Simple Backend', value: 'ws://localhost:8000/ws', description: 'No auth required' },
+  { label: 'Local Advanced Backend', value: 'ws://localhost:8000/ws_pcm', description: 'Requires login' },
+  { label: 'Tailscale (Advanced)', value: 'wss://100.x.x.x/ws_pcm', description: 'Replace with your Tailscale IP' },
+  { label: 'Custom URL', value: '', description: 'Enter manually below' },
+];
+
 export const BackendStatus: React.FC<BackendStatusProps> = ({
   backendUrl,
   onBackendUrlChange,
@@ -22,6 +31,20 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
     status: 'unknown',
     message: 'Not checked',
   });
+
+  const [selectedPreset, setSelectedPreset] = useState<string>('');
+  const [customUrl, setCustomUrl] = useState<string>(backendUrl);
+
+  // Initialize preset selection based on current URL
+  useEffect(() => {
+    const matchingPreset = URL_PRESETS.find(preset => preset.value === backendUrl);
+    if (matchingPreset) {
+      setSelectedPreset(matchingPreset.value);
+    } else {
+      setSelectedPreset(''); // Custom
+      setCustomUrl(backendUrl);
+    }
+  }, []);
 
   const checkBackendHealth = async (showAlert: boolean = false) => {
     if (!backendUrl.trim()) {
@@ -40,21 +63,21 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
     try {
       // Convert WebSocket URL to HTTP URL for health check
       let baseUrl = backendUrl.trim();
-      
+
       // Handle different URL formats
       if (baseUrl.startsWith('ws://')) {
         baseUrl = baseUrl.replace('ws://', 'http://');
       } else if (baseUrl.startsWith('wss://')) {
         baseUrl = baseUrl.replace('wss://', 'https://');
       }
-      
+
       // Remove any WebSocket path if present
       baseUrl = baseUrl.split('/ws')[0];
-      
+
       // Try health endpoint first
       const healthUrl = `${baseUrl}/health`;
       console.log('[BackendStatus] Checking health at:', healthUrl);
-      
+
       const response = await fetch(healthUrl, {
         method: 'GET',
         headers: {
@@ -63,7 +86,7 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
           ...(jwtToken ? { 'Authorization': `Bearer ${jwtToken}` } : {}),
         },
       });
-      
+
       console.log('[BackendStatus] Health check response status:', response.status);
 
       if (response.ok) {
@@ -73,7 +96,7 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
           message: `Connected (${healthData.status || 'OK'})`,
           lastChecked: new Date(),
         });
-        
+
         if (showAlert) {
           Alert.alert('Connection Success', 'Successfully connected to backend!');
         }
@@ -83,7 +106,7 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
           message: 'Authentication required',
           lastChecked: new Date(),
         });
-        
+
         if (showAlert) {
           Alert.alert('Authentication Required', 'Please login to access the backend.');
         }
@@ -92,7 +115,7 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
       }
     } catch (error) {
       console.error('[BackendStatus] Health check error:', error);
-      
+
       let errorMessage = 'Connection failed';
       if (error instanceof Error) {
         if (error.message.includes('Network request failed')) {
@@ -103,13 +126,13 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
           errorMessage = error.message;
         }
       }
-      
+
       setHealthStatus({
         status: 'unhealthy',
         message: errorMessage,
         lastChecked: new Date(),
       });
-      
+
       if (showAlert) {
         Alert.alert(
           'Connection Failed',
@@ -119,29 +142,44 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
     }
   };
 
-  // Auto-check health when backend URL or JWT token changes
+  // Debounced health check - now waits 1.5 seconds after typing stops
   useEffect(() => {
     if (backendUrl.trim()) {
       const timer = setTimeout(() => {
         checkBackendHealth(false);
-      }, 500); // Debounce
-      
+      }, 1500); // Increased from 500ms to 1.5s for better UX
+
       return () => clearTimeout(timer);
     }
   }, [backendUrl, jwtToken]);
 
+  const handlePresetChange = (value: string) => {
+    setSelectedPreset(value);
+    if (value) {
+      // Preset selected
+      onBackendUrlChange(value);
+      setCustomUrl(value);
+    }
+  };
+
+  const handleCustomUrlChange = (text: string) => {
+    setCustomUrl(text);
+    onBackendUrlChange(text);
+    setSelectedPreset(''); // Switch to custom mode
+  };
+
   const getStatusColor = (status: HealthStatus['status']): string => {
     switch (status) {
       case 'healthy':
-        return '#4CD964';
+        return theme.colors.status.healthy;
       case 'checking':
-        return '#FF9500';
+        return theme.colors.status.checking;
       case 'unhealthy':
-        return '#FF3B30';
+        return theme.colors.status.unhealthy;
       case 'auth_required':
-        return '#FF9500';
+        return theme.colors.status.checking;
       default:
-        return '#8E8E93';
+        return theme.colors.status.unknown;
     }
   };
 
@@ -160,22 +198,62 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
     }
   };
 
+  const currentPresetDescription = URL_PRESETS.find(p => p.value === selectedPreset)?.description;
+
   return (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Backend Connection</Text>
-      
+    <View style={styles.section} testID="backend-status-section">
+      <Text style={styles.sectionTitle} testID="backend-status-title">Backend Connection</Text>
+
+      {/* Quick Connect Presets */}
+      <Text style={styles.inputLabel}>Quick Connect:</Text>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.presetsScrollView}
+        contentContainerStyle={styles.presetsContainer}
+      >
+        {URL_PRESETS.map(preset => (
+          <TouchableOpacity
+            key={preset.value || 'custom'}
+            testID={`preset-${preset.label.toLowerCase().replace(/\s+/g, '-')}`}
+            style={[
+              styles.presetButton,
+              selectedPreset === preset.value && styles.presetButtonActive
+            ]}
+            onPress={() => handlePresetChange(preset.value)}
+          >
+            <Text style={[
+              styles.presetButtonText,
+              selectedPreset === preset.value && styles.presetButtonTextActive
+            ]}>
+              {preset.label}
+            </Text>
+            <Text style={styles.presetDescription}>
+              {preset.description}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
+
+      {/* Custom URL Input */}
       <Text style={styles.inputLabel}>Backend URL:</Text>
       <TextInput
+        testID="backend-url-input"
         style={styles.textInput}
-        value={backendUrl}
-        onChangeText={onBackendUrlChange}
-        placeholder="ws://localhost:8000/ws (simple) or ws://localhost:8080/v1/listen (advanced)"
+        value={customUrl}
+        onChangeText={handleCustomUrlChange}
+        placeholder="ws://192.168.1.100:8000/ws_pcm"
         autoCapitalize="none"
         keyboardType="url"
         returnKeyType="done"
         autoCorrect={false}
+        autoComplete="off"
+        spellCheck={false}
+        clearButtonMode="while-editing"
+        enablesReturnKeyAutomatically={true}
       />
 
+      {/* Connection Status */}
       <View style={styles.statusContainer}>
         <View style={styles.statusRow}>
           <Text style={styles.statusLabel}>Status:</Text>
@@ -197,7 +275,10 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
         )}
       </View>
 
+      {/* Test Connection Button */}
       <TouchableOpacity
+        testID="test-connection-button"
+        accessibilityLabel="Test backend connection"
         style={[styles.button, healthStatus.status === 'checking' ? styles.buttonDisabled : null]}
         onPress={() => checkBackendHealth(true)}
         disabled={healthStatus.status === 'checking'}
@@ -208,9 +289,7 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
       </TouchableOpacity>
 
       <Text style={styles.helpText}>
-        Enter the WebSocket URL of your backend server. Simple backend: http://localhost:8000/ (no auth). 
-        Advanced backend: http://localhost:8080/ (requires login). Status is automatically checked.
-        The websocket URL can be different or the same as the HTTP URL, with /ws_omi suffix
+        Select a quick connect option above, or enter a custom URL. Connection is automatically tested after typing stops.
       </Text>
     </View>
   );
@@ -218,46 +297,72 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
 
 const styles = StyleSheet.create({
   section: {
-    marginBottom: 25,
-    padding: 15,
-    backgroundColor: 'white',
-    borderRadius: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 2,
+    marginBottom: theme.spacing.lg,
+    padding: theme.spacing.md,
+    backgroundColor: theme.colors.background.primary,
+    borderRadius: theme.borderRadius.md,
+    ...theme.shadows.sm,
   },
   sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    marginBottom: 15,
-    color: '#333',
+    fontSize: theme.typography.fontSize.lg,
+    fontWeight: theme.typography.fontWeight.semibold,
+    marginBottom: theme.spacing.md,
+    color: theme.colors.text.primary,
   },
   inputLabel: {
-    fontSize: 14,
-    color: '#333',
-    marginBottom: 5,
-    fontWeight: '500',
+    fontSize: theme.typography.fontSize.sm,
+    color: theme.colors.text.secondary,
+    marginBottom: theme.spacing.xs,
+    marginTop: theme.spacing.sm,
+    fontWeight: theme.typography.fontWeight.medium,
+  },
+  presetsScrollView: {
+    marginBottom: theme.spacing.md,
+  },
+  presetsContainer: {
+    flexDirection: 'row',
+    gap: theme.spacing.sm,
+    paddingVertical: theme.spacing.xs,
+  },
+  presetButton: {
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+    backgroundColor: theme.colors.gray[100],
+    borderRadius: theme.borderRadius.sm,
+    borderWidth: 2,
+    borderColor: theme.colors.border.light,
+    minWidth: 140,
+  },
+  presetButtonActive: {
+    backgroundColor: theme.colors.primary.dark + '30',  // Dark mode primary tint
+    borderColor: theme.colors.primary.main,
+    ...theme.shadows.sm,
+  },
+  presetButtonText: {
+    fontSize: theme.typography.fontSize.sm,
+    fontWeight: theme.typography.fontWeight.semibold,
+    color: theme.colors.text.primary,
+    marginBottom: 2,
+  },
+  presetButtonTextActive: {
+    color: theme.colors.primary.main,
+  },
+  presetDescription: {
+    fontSize: theme.typography.fontSize.xs,
+    color: theme.colors.text.tertiary,
+    fontStyle: 'italic',
   },
   textInput: {
-    backgroundColor: '#f0f0f0',
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 6,
-    padding: 10,
-    fontSize: 14,
-    width: '100%',
-    marginBottom: 15,
-    color: '#333',
+    ...theme.components.input,
+    marginBottom: theme.spacing.md,
   },
   statusContainer: {
-    marginBottom: 15,
-    padding: 10,
-    backgroundColor: '#f8f9fa',
-    borderRadius: 6,
+    marginBottom: theme.spacing.md,
+    padding: theme.spacing.sm,
+    backgroundColor: theme.colors.background.secondary,
+    borderRadius: theme.borderRadius.sm,
     borderWidth: 1,
-    borderColor: '#e9ecef',
+    borderColor: theme.colors.border.light,
   },
   statusRow: {
     flexDirection: 'row',
@@ -265,9 +370,9 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   statusLabel: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: '#333',
+    fontSize: theme.typography.fontSize.sm,
+    fontWeight: theme.typography.fontWeight.medium,
+    color: theme.colors.text.primary,
   },
   statusValue: {
     flexDirection: 'row',
@@ -276,43 +381,41 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
   },
   statusIcon: {
-    fontSize: 16,
-    marginRight: 6,
+    fontSize: theme.typography.fontSize.md,
+    marginRight: theme.spacing.xs + 2,
   },
   statusText: {
-    fontSize: 14,
-    fontWeight: '500',
+    fontSize: theme.typography.fontSize.sm,
+    fontWeight: theme.typography.fontWeight.medium,
   },
   lastCheckedText: {
-    fontSize: 12,
-    color: '#666',
-    marginTop: 5,
+    fontSize: theme.typography.fontSize.xs,
+    color: theme.colors.text.secondary,
+    marginTop: theme.spacing.xs,
     textAlign: 'center',
     fontStyle: 'italic',
   },
   button: {
-    backgroundColor: '#007AFF',
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 8,
+    ...theme.components.button.primary,
     alignItems: 'center',
-    marginBottom: 10,
-    elevation: 2,
+    marginBottom: theme.spacing.sm,
   },
   buttonDisabled: {
-    backgroundColor: '#A0A0A0',
-    opacity: 0.7,
+    backgroundColor: theme.colors.gray[300],
+    borderWidth: 1,
+    borderColor: theme.colors.border.medium,
   },
   buttonText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '600',
+    color: theme.colors.primary.contrast,
+    fontSize: theme.typography.fontSize.md,
+    fontWeight: theme.typography.fontWeight.semibold,
   },
   helpText: {
-    fontSize: 12,
-    color: '#666',
+    fontSize: theme.typography.fontSize.xs,
+    color: theme.colors.text.tertiary,
     textAlign: 'center',
     fontStyle: 'italic',
+    lineHeight: theme.typography.lineHeight.relaxed * theme.typography.fontSize.xs,
   },
 });
 

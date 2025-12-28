@@ -1,6 +1,7 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { OmiDevice } from 'friend-lite-react-native';
+import theme from '../theme/design-system';
 
 interface DeviceListItemProps {
   device: OmiDevice;
@@ -59,48 +60,49 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 5, // Added some horizontal padding
+    paddingVertical: theme.spacing.md - 4,
+    paddingHorizontal: theme.spacing.xs,
     borderBottomWidth: 1,
-    borderBottomColor: '#eee',
+    borderBottomColor: theme.colors.border.light,
   },
   deviceInfoContainer: {
-    flex: 1, // Allow text to take available space and wrap if needed
-    marginRight: 10, // Space between text and button
+    flex: 1,
+    marginRight: theme.spacing.sm,
   },
   deviceName: {
-    fontSize: 16,
-    fontWeight: '500',
-    color: '#333',
+    fontSize: theme.typography.fontSize.md,
+    fontWeight: theme.typography.fontWeight.medium,
+    color: theme.colors.text.primary,
   },
   deviceInfo: {
-    fontSize: 12,
-    color: '#666',
+    fontSize: theme.typography.fontSize.xs,
+    color: theme.colors.text.secondary,
     marginTop: 2,
   },
   button: {
-    backgroundColor: '#007AFF',
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 8,
+    backgroundColor: theme.colors.primary.main,
+    paddingVertical: theme.spacing.md - 4,
+    paddingHorizontal: theme.spacing.lg + 4,
+    borderRadius: theme.borderRadius.sm,
     alignItems: 'center',
     elevation: 1,
   },
   smallButton: {
-    paddingVertical: 8,
-    paddingHorizontal: 12,
+    paddingVertical: theme.spacing.sm,
+    paddingHorizontal: theme.spacing.md - 4,
   },
   buttonDanger: {
-    backgroundColor: '#FF3B30',
+    backgroundColor: theme.colors.error.main,
   },
   buttonDisabled: {
-    backgroundColor: '#A0A0A0',
-    opacity: 0.7,
+    backgroundColor: theme.colors.gray[300],
+    borderWidth: 1,
+    borderColor: theme.colors.border.medium,
   },
   buttonText: {
-    color: 'white',
-    fontSize: 14, // Slightly smaller for small buttons
-    fontWeight: '600',
+    color: theme.colors.primary.contrast,  // Dark text for WCAG AA on emerald
+    fontSize: theme.typography.fontSize.sm,
+    fontWeight: theme.typography.fontWeight.semibold,
   },
 });
 

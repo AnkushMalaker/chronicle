@@ -18,6 +18,8 @@
     "expo": "~53.0.9",
     "expo-build-properties": "~0.14.8",
     "expo-dev-client": "~5.2.4",
+    "expo-file-system": "^19.0.21",
+    "expo-sqlite": "^16.0.10",
     "expo-status-bar": "~2.2.3",
     "friend-lite-react-native": "^1.0.2",
     "install": "^0.13.0",

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, ActivityIndicator } from 'react-native';
 import { saveAuthEmail, saveAuthPassword, saveJwtToken, getAuthEmail, getAuthPassword, clearAuthData } from '../utils/storage';
+import theme from '../theme/design-system';
 
 interface AuthSectionProps {
   backendUrl: string;
@@ -181,69 +182,55 @@ export const AuthSection: React.FC<AuthSectionProps> = ({
 
 const styles = StyleSheet.create({
   section: {
-    marginBottom: 25,
-    padding: 15,
-    backgroundColor: 'white',
-    borderRadius: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 2,
+    marginBottom: theme.spacing.lg,
+    padding: theme.spacing.md,
+    backgroundColor: theme.colors.background.primary,
+    borderRadius: theme.borderRadius.md,
+    ...theme.shadows.sm,
   },
   sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    marginBottom: 15,
-    color: '#333',
+    fontSize: theme.typography.fontSize.lg,
+    fontWeight: theme.typography.fontWeight.semibold,
+    marginBottom: theme.spacing.md,
+    color: theme.colors.text.primary,
   },
   inputLabel: {
-    fontSize: 14,
-    color: '#333',
-    marginBottom: 5,
-    marginTop: 10,
-    fontWeight: '500',
+    fontSize: theme.typography.fontSize.sm,
+    color: theme.colors.text.primary,
+    marginBottom: theme.spacing.xs,
+    marginTop: theme.spacing.sm,
+    fontWeight: theme.typography.fontWeight.medium,
   },
   textInput: {
-    backgroundColor: '#f0f0f0',
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 6,
-    padding: 10,
-    fontSize: 14,
-    width: '100%',
-    marginBottom: 10,
-    color: '#333',
+    ...theme.components.input,
+    marginBottom: theme.spacing.sm,
   },
   button: {
-    backgroundColor: '#007AFF',
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 8,
+    ...theme.components.button.primary,
     alignItems: 'center',
-    marginTop: 15,
-    elevation: 2,
+    marginTop: theme.spacing.md,
   },
   buttonDisabled: {
-    backgroundColor: '#A0A0A0',
-    opacity: 0.7,
+    backgroundColor: theme.colors.gray[300],
+    borderWidth: 1,
+    borderColor: theme.colors.border.medium,
   },
   buttonDanger: {
-    backgroundColor: '#FF3B30',
+    backgroundColor: theme.colors.error.main,
   },
   buttonText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '600',
+    color: theme.colors.primary.contrast,  // Dark text for WCAG AA on emerald
+    fontSize: theme.typography.fontSize.md,
+    fontWeight: theme.typography.fontWeight.semibold,
   },
   loadingContainer: {
     flexDirection: 'row',
     alignItems: 'center',
   },
   helpText: {
-    fontSize: 12,
-    color: '#666',
-    marginTop: 10,
+    fontSize: theme.typography.fontSize.xs,
+    color: theme.colors.text.secondary,
+    marginTop: theme.spacing.sm,
     textAlign: 'center',
     fontStyle: 'italic',
   },
@@ -253,11 +240,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   authenticatedText: {
-    fontSize: 14,
-    color: '#4CD964',
-    fontWeight: '500',
+    fontSize: theme.typography.fontSize.sm,
+    color: theme.colors.success.main,
+    fontWeight: theme.typography.fontWeight.medium,
     flex: 1,
-    marginRight: 10,
+    marginRight: theme.spacing.sm,
   },
 });
 
