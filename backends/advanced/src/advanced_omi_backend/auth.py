@@ -50,6 +50,15 @@ COOKIE_SECURE = _verify_configured("COOKIE_SECURE", optional=True) == "true"
 ADMIN_PASSWORD = _verify_configured("ADMIN_PASSWORD")
 ADMIN_EMAIL = _verify_configured("ADMIN_EMAIL", optional=True) or "admin@example.com"
 
+# Accepted token issuers - comma-separated list of services whose tokens we accept
+# Default: "chronicle,ushadow" (accept tokens from both chronicle and ushadow)
+ACCEPTED_ISSUERS = [
+    iss.strip() 
+    for iss in os.getenv("ACCEPTED_TOKEN_ISSUERS", "chronicle,ushadow").split(",") 
+    if iss.strip()
+]
+logger.info(f"Accepting tokens from issuers: {ACCEPTED_ISSUERS}")
+
 
 class UserManager(BaseUserManager[User, PydanticObjectId]):
     """User manager with minimal customization for fastapi-users."""
@@ -104,34 +113,65 @@ def get_jwt_strategy() -> JWTStrategy:
     )
 
 
-def generate_jwt_for_user(user_id: str, user_email: str) -> str:
-    """Generate a JWT token for a user to authenticate with external services.
+def validate_token_issuer(token: str) -> bool:
+    """Validate that a token was issued by an accepted issuer.
+    
+    Args:
+        token: JWT token string
+        
+    Returns:
+        True if token issuer is in ACCEPTED_ISSUERS, False otherwise
+    """
+    try:
+        # Decode without verification to check issuer
+        payload = jwt.decode(token, options={"verify_signature": False})
+        issuer = payload.get("iss")
+        if issuer and issuer in ACCEPTED_ISSUERS:
+            return True
+        # Also accept tokens without issuer (legacy tokens)
+        if issuer is None:
+            return True
+        logger.warning(f"Token rejected: issuer '{issuer}' not in {ACCEPTED_ISSUERS}")
+        return False
+    except Exception as e:
+        logger.error(f"Error validating token issuer: {e}")
+        return False
 
-    This function creates a JWT token that can be used to authenticate with
-    services that share the same AUTH_SECRET_KEY, such as Mycelia.
+
+def generate_jwt_for_user(
+    user_id: str, 
+    user_email: str,
+    audiences: list[str] = None
+) -> str:
+    """Generate a JWT token for cross-service authentication.
+
+    Creates a JWT token that can be used to authenticate with any service 
+    that shares the same AUTH_SECRET_KEY and accepts this issuer.
+
+    Note: ushadow is the central auth provider. Chronicle can still issue
+    tokens for backward compatibility, but new integrations should use ushadow.
 
     Args:
         user_id: User's unique identifier (MongoDB ObjectId as string)
         user_email: User's email address
+        audiences: List of services this token is valid for.
+                   Defaults to accepted issuers from ACCEPTED_TOKEN_ISSUERS env var.
 
     Returns:
         JWT token string valid for JWT_LIFETIME_SECONDS (default: 24 hours)
-
-    Example:
-        >>> token = generate_jwt_for_user("507f1f77bcf86cd799439011", "user@example.com")
-        >>> # Use token to call Mycelia API
     """
-    # Create JWT payload matching Chronicle's standard format
+    if audiences is None:
+        audiences = ACCEPTED_ISSUERS.copy()
+    
     payload = {
-        "sub": user_id,  # Subject = user ID
+        "sub": user_id,
         "email": user_email,
-        "iss": "chronicle",  # Issuer
-        "aud": "chronicle",  # Audience
+        "iss": "chronicle",  # This service is the issuer
+        "aud": audiences,
         "exp": datetime.utcnow() + timedelta(seconds=JWT_LIFETIME_SECONDS),
-        "iat": datetime.utcnow(),  # Issued at
+        "iat": datetime.utcnow(),
     }
 
-    # Sign the token with the same secret key
     token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
     return token
 
