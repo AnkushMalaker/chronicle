@@ -47,6 +47,7 @@ _DEEPGRAM_API_KEY_OVERRIDE=${DEEPGRAM_API_KEY}
 _OPENAI_API_KEY_OVERRIDE=${OPENAI_API_KEY}
 _LLM_PROVIDER_OVERRIDE=${LLM_PROVIDER}
 _MEMORY_PROVIDER_OVERRIDE=${MEMORY_PROVIDER}
+_CONFIG_FILE_OVERRIDE=${CONFIG_FILE}
 
 if [ -n "$DEEPGRAM_API_KEY" ] && [ -z "$_TRANSCRIPTION_PROVIDER_OVERRIDE" ]; then
     print_info "Using environment variables from CI/environment..."
@@ -90,6 +91,15 @@ if [ -n "$_MEMORY_PROVIDER_OVERRIDE" ]; then
     export MEMORY_PROVIDER=$_MEMORY_PROVIDER_OVERRIDE
     print_info "Using command-line override: MEMORY_PROVIDER=$MEMORY_PROVIDER"
 fi
+if [ -n "$_CONFIG_FILE_OVERRIDE" ]; then
+    export CONFIG_FILE=$_CONFIG_FILE_OVERRIDE
+    print_info "Using command-line override: CONFIG_FILE=$CONFIG_FILE"
+fi
+
+# Set default CONFIG_FILE if not provided
+# This allows testing with different provider combinations
+# Usage: CONFIG_FILE=../../tests/configs/parakeet-ollama.yml ./run-test.sh
+export CONFIG_FILE=${CONFIG_FILE:-../../config/config.yml}
 
 # Verify required environment variables based on configured providers
 TRANSCRIPTION_PROVIDER=${TRANSCRIPTION_PROVIDER:-deepgram}
@@ -161,6 +171,9 @@ print_info "Using environment variables from .env file for test configuration"
 # Clean test environment
 print_info "Cleaning test environment..."
 sudo rm -rf ./test_audio_chunks/ ./test_data/ ./test_debug_dir/ ./mongo_data_test/ ./qdrant_data_test/ ./test_neo4j/ || true
+
+# Use unique project name to avoid conflicts with development environment
+export COMPOSE_PROJECT_NAME="advanced-backend-test"
 
 # Stop any existing test containers
 print_info "Stopping existing test containers..."

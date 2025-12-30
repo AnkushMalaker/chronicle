@@ -28,7 +28,7 @@ class ChronicleSetup:
         self.console = Console()
         self.config: Dict[str, Any] = {}
         self.args = args or argparse.Namespace()
-        self.config_yml_path = Path("../../config.yml")  # Repo root config.yml
+        self.config_yml_path = Path("../../config/config.yml")  # Main config at config/config.yml
         self.config_yml_data = None
 
         # Check if we're in the right directory
@@ -726,7 +726,7 @@ class ChronicleSetup:
             self.console.print()
             self.console.print("📝 [bold]Configuration files updated:[/bold]")
             self.console.print(f"  • .env - API keys and environment variables")
-            self.console.print(f"  • ../../config.yml - Model and memory provider configuration")
+            self.console.print(f"  • ../../config/config.yml - Model and memory provider configuration")
             self.console.print()
             self.console.print("For detailed documentation, see:")
             self.console.print("  • Docs/quickstart.md")

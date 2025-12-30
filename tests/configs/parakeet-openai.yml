@@ -1,0 +1,73 @@
+# Test Configuration: Parakeet (STT) + OpenAI (LLM)
+# Hybrid stack - local transcription, cloud LLM
+
+defaults:
+  llm: openai-llm
+  embedding: openai-embed
+  stt: stt-parakeet-batch
+  vector_store: vs-qdrant
+
+models:
+  - name: openai-llm
+    description: OpenAI GPT-4o-mini
+    model_type: llm
+    model_provider: openai
+    api_family: openai
+    model_name: gpt-4o-mini
+    model_url: https://api.openai.com/v1
+    api_key: ${OPENAI_API_KEY:-}
+    model_params:
+      temperature: 0.2
+      max_tokens: 2000
+    model_output: json
+
+  - name: openai-embed
+    description: OpenAI text-embedding-3-small
+    model_type: embedding
+    model_provider: openai
+    api_family: openai
+    model_name: text-embedding-3-small
+    model_url: https://api.openai.com/v1
+    api_key: ${OPENAI_API_KEY:-}
+    embedding_dimensions: 1536
+    model_output: vector
+
+  - name: vs-qdrant
+    description: Qdrant vector database
+    model_type: vector_store
+    model_provider: qdrant
+    api_family: qdrant
+    model_url: http://${QDRANT_BASE_URL:-qdrant}:${QDRANT_PORT:-6333}
+    model_params:
+      host: ${QDRANT_BASE_URL:-qdrant}
+      port: ${QDRANT_PORT:-6333}
+      collection_name: omi_memories
+
+  - name: stt-parakeet-batch
+    description: Parakeet NeMo ASR (batch) - local offline transcription
+    model_type: stt
+    model_provider: parakeet
+    api_family: http
+    model_url: ${PARAKEET_ASR_URL:-http://localhost:8767}
+    api_key: ''
+    operations:
+      stt_transcribe:
+        method: POST
+        path: /transcribe
+        content_type: multipart/form-data
+        response:
+          type: json
+          extract:
+            text: text
+            words: words
+            segments: segments
+
+memory:
+  provider: chronicle
+  timeout_seconds: 1200
+  extraction:
+    enabled: true
+    prompt: |
+      Extract important information from this conversation and return a JSON object with an array named "facts".
+      Include personal preferences, plans, names, dates, locations, numbers, and key details.
+      Keep items concise and useful.

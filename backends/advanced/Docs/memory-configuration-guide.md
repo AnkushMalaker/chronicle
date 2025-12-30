@@ -6,10 +6,10 @@ This guide helps you set up and configure the memory system for the Friend Advan
 
 1. **Copy the template configuration**:
 ```bash
-Edit the `memory` section of `config.yml`.
+Edit the `memory` section of `config/config.yml`.
 ```
 
-2. **Edit `config.yml`** with your preferred settings in the `memory` section:
+2. **Edit `config/config.yml`** with your preferred settings in the `memory` section:
 ```yaml
 memory:
   provider: "mem0"  # or "basic" for simpler setup
@@ -127,6 +127,6 @@ memory:
 
 ## Next Steps
 
-- Configure action items detection in `config.yml` (memory.extraction)
+- Configure action items detection in `config/config.yml` (memory.extraction)
 - Set up custom prompt templates for your use case
 - Monitor memory processing in the debug dashboard

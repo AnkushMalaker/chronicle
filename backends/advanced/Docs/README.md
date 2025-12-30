@@ -13,7 +13,7 @@ Welcome to chronicle! This guide provides the optimal reading sequence to unders
 - What the system does (voice → memories)
 - Key features and capabilities
 - Basic setup and configuration
-- **Code References**: `src/advanced_omi_backend/main.py`, `config.yml`, `docker-compose.yml`
+- **Code References**: `src/advanced_omi_backend/main.py`, `config/config.yml`, `docker-compose.yml`
 
 ### 2. **[System Architecture](./architecture.md)** 
 **Read second** - Complete technical architecture with diagrams
@@ -70,7 +70,7 @@ Welcome to chronicle! This guide provides the optimal reading sequence to unders
 
 ## 🔍 **Configuration & Customization**
 
-### 6. **Configuration File** → `../config.yml`
+### 6. **Configuration File** → `../config/config.yml`
 **Central configuration for all extraction**
 - Memory extraction settings and prompts
 - Quality control and debug settings
@@ -86,11 +86,11 @@ Welcome to chronicle! This guide provides the optimal reading sequence to unders
 1. [quickstart.md](./quickstart.md) - System overview
 2. [architecture.md](./architecture.md) - Technical architecture  
 3. `src/advanced_omi_backend/main.py` - Core imports and setup
-4. `config.yml` - Configuration overview
+4. `config/config.yml` - Configuration overview
 
 ### **"I want to work on memory extraction"**
 1. [memories.md](./memories.md) - Memory system details
-2. `../config.yml` - Models and memory configuration
+2. `../config/config.yml` - Models and memory configuration
 3. `src/advanced_omi_backend/memory/memory_service.py` - Implementation
 4. `src/advanced_omi_backend/controllers/memory_controller.py` - Processing triggers
 
@@ -130,7 +130,7 @@ backends/advanced-backend/
 │   │   └── memory_service.py      # Memory system (Mem0)
 │   └── model_registry.py          # Configuration loading
 │
-├── config.yml                     # 📋 Central configuration
+├── config/config.yml                     # 📋 Central configuration
 ├── MEMORY_DEBUG_IMPLEMENTATION.md # Debug system details
 ```
 
@@ -148,7 +148,7 @@ backends/advanced-backend/
 
 ### **Configuration**
 - **Loading**: `src/advanced_omi_backend/model_registry.py`
-- **File**: `config.yml`
+- **File**: `config/config.yml`
 - **Usage**: `src/advanced_omi_backend/memory/memory_service.py`
 
 ### **Authentication**
@@ -162,7 +162,7 @@ backends/advanced-backend/
 
 1. **Follow the references**: Each doc links to specific code files and line numbers
 2. **Use the debug API**: `GET /api/debug/memory/stats` shows live system status
-3. **Check configuration first**: Many behaviors are controlled by `config.yml`
+3. **Check configuration first**: Many behaviors are controlled by `config/config.yml`
 4. **Understand the memory pipeline**: Memories (end-of-conversation)
 5. **Test with curl**: All API endpoints have curl examples in the docs
 
@@ -175,20 +175,20 @@ backends/advanced-backend/
 1. **Set up the system**: Follow [quickstart.md](./quickstart.md) to get everything running
 2. **Test the API**: Use the curl examples in the documentation to test endpoints
 3. **Explore the debug system**: Check `GET /api/debug/memory/stats` to see live data
-4. **Modify configuration**: Edit `config.yml` (memory section) to see how it affects extraction
+4. **Modify configuration**: Edit `config/config.yml` (memory section) to see how it affects extraction
 5. **Read the code**: Start with `src/advanced_omi_backend/main.py` and follow the references in each doc
 
 ### **Contributing Guidelines**
 
 - **Add code references**: When updating docs, include file paths and line numbers
 - **Test your changes**: Use the debug API to verify your modifications work
-- **Update configuration**: Add new settings to `config.yml` when needed
+- **Update configuration**: Add new settings to `config/config.yml` when needed
 - **Follow the architecture**: Keep memories in their respective services
 
 ### **Getting Help**
 
 - **Debug API**: `GET /api/debug/memory/*` endpoints show real-time system status
-- **Configuration**: Check `config.yml` for behavior controls
+- **Configuration**: Check `config/config.yml` for behavior controls
 - **Logs**: Check Docker logs with `docker compose logs chronicle-backend`
 - **Documentation**: Each doc file links to relevant code sections
 

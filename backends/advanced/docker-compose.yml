@@ -12,7 +12,7 @@ services:
       - ./data/audio_chunks:/app/audio_chunks
       - ./data/debug_dir:/app/debug_dir
       - ./data:/app/data
-      - ../../config.yml:/app/config.yml  # Removed :ro to allow UI config saving
+      - ../../config/config.yml:/app/config.yml  # Removed :ro to allow UI config saving
     environment:
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - MISTRAL_API_KEY=${MISTRAL_API_KEY}
@@ -65,7 +65,7 @@ services:
       - ./start-workers.sh:/app/start-workers.sh
       - ./data/audio_chunks:/app/audio_chunks
       - ./data:/app/data
-      - ../../config.yml:/app/config.yml  # Removed :ro for consistency
+      - ../../config/config.yml:/app/config.yml  # Removed :ro for consistency
     environment:
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - MISTRAL_API_KEY=${MISTRAL_API_KEY}

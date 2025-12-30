@@ -13,12 +13,12 @@ cleanup() {
         return
     fi
     cleanup_called=true
-    
+
     print_info "Cleaning up on exit..."
     # Kill any background processes in this process group
     pkill -P $$ 2>/dev/null || true
-    # Clean up test containers
-    docker compose -f docker-compose-test.yml down -v 2>/dev/null || true
+    # Clean up test containers (use project name for consistency)
+    COMPOSE_PROJECT_NAME="speaker-recognition-test" docker compose -f docker-compose-test.yml down -v 2>/dev/null || true
 }
 
 # Set up signal traps for proper cleanup (but not EXIT to avoid double cleanup)
@@ -123,6 +123,9 @@ print_info "Installing dependencies with uv..."
 uv sync --extra cpu --group test
 
 print_info "Environment variables configured for testing"
+
+# Use unique project name to avoid conflicts with development environment
+export COMPOSE_PROJECT_NAME="speaker-recognition-test"
 
 # Clean test environment
 print_info "Cleaning test environment..."

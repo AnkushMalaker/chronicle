@@ -4,8 +4,16 @@
 !**/.env.template
 **/memory_config.yaml
 !**/memory_config.yaml.template
-config.yml
-!config.yml.template
+tests/setup/.env.test
+
+# Main config (user-specific)
+config/config.yml
+!config/config.yml.template
+
+# Config backups
+config/*.backup.*
+config/*.backup*
+
 example/*
 **/node_modules/*
 **/ollama-data/*

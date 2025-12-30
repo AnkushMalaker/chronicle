@@ -42,6 +42,16 @@ print_info "============================"
 CLEANUP_CONTAINERS="${CLEANUP_CONTAINERS:-true}"
 OUTPUTDIR="${OUTPUTDIR:-results}"
 
+# Set default CONFIG_FILE if not provided
+# This allows testing with different provider combinations
+# Usage: CONFIG_FILE=../tests/configs/parakeet-ollama.yml ./run-robot-tests.sh
+export CONFIG_FILE="${CONFIG_FILE:-../config/config.yml}"
+
+# Convert CONFIG_FILE to absolute path (Docker Compose resolves relative paths from compose file location)
+if [[ ! "$CONFIG_FILE" = /* ]]; then
+    CONFIG_FILE="$(cd "$(dirname "$CONFIG_FILE")" && pwd)/$(basename "$CONFIG_FILE")"
+fi
+
 # Load environment variables (CI or local)
 if [ -f "setup/.env.test" ] && [ -z "$DEEPGRAM_API_KEY" ]; then
     print_info "Loading environment variables from setup/.env.test..."
@@ -69,6 +79,7 @@ fi
 
 print_info "DEEPGRAM_API_KEY length: ${#DEEPGRAM_API_KEY}"
 print_info "OPENAI_API_KEY length: ${#OPENAI_API_KEY}"
+print_info "Using config file: $CONFIG_FILE"
 
 # Create test environment file if it doesn't exist
 if [ ! -f "setup/.env.test" ]; then
@@ -100,6 +111,9 @@ cd ../backends/advanced
 
 print_info "Starting test infrastructure..."
 
+# Use unique project name to avoid conflicts with development environment
+export COMPOSE_PROJECT_NAME="advanced-backend-test"
+
 # Ensure required config files exist
 # memory_config.yaml no longer used; memory settings live in config.yml
 
@@ -109,7 +123,7 @@ docker compose -f docker-compose-test.yml down -v 2>/dev/null || true
 
 # Force remove any stuck containers with test names
 print_info "Removing any stuck test containers..."
-docker rm -f advanced-mongo-test-1 advanced-redis-test-1 advanced-qdrant-test-1 advanced-chronicle-backend-test-1 advanced-workers-test-1 advanced-webui-test-1 2>/dev/null || true
+docker rm -f advanced-backend-test-mongo-test-1 advanced-backend-test-redis-test-1 advanced-backend-test-qdrant-test-1 advanced-backend-test-chronicle-backend-test-1 advanced-backend-test-workers-test-1 advanced-backend-test-webui-test-1 2>/dev/null || true
 
 # Start infrastructure services (MongoDB, Redis, Qdrant)
 print_info "Starting MongoDB, Redis, and Qdrant (fresh containers)..."
