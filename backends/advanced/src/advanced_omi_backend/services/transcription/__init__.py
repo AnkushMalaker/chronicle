@@ -126,6 +126,13 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
             resp.raise_for_status()
             data = resp.json()
 
+            # DEBUG: Log Deepgram response structure
+            if "results" in data and "channels" in data.get("results", {}):
+                channels = data["results"]["channels"]
+                if channels and "alternatives" in channels[0]:
+                    alt = channels[0]["alternatives"][0]
+                    logger.info(f"DEBUG Registry: Deepgram alternative keys: {list(alt.keys())}")
+
         # Extract normalized shape
         text, words, segments = "", [], []
         extract = (op.get("response", {}) or {}).get("extract") or {}
@@ -133,6 +140,13 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
             text = _dotted_get(data, extract.get("text")) or ""
             words = _dotted_get(data, extract.get("words")) or []
             segments = _dotted_get(data, extract.get("segments")) or []
+
+            # DEBUG: Log what we extracted
+            logger.info(f"DEBUG Registry: Extracted {len(segments)} segments from response")
+            if segments and len(segments) > 0:
+                logger.info(f"DEBUG Registry: First segment keys: {list(segments[0].keys()) if isinstance(segments[0], dict) else 'not a dict'}")
+                logger.info(f"DEBUG Registry: First segment: {segments[0]}")
+
         return {"text": text, "words": words, "segments": segments}
 
 class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):

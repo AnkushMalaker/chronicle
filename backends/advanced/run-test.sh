@@ -39,8 +39,16 @@ print_info "Advanced Backend Integration Test Runner"
 print_info "========================================"
 
 # Load environment variables (CI or local)
-# Priority: CI environment > .env.test > .env
-if [ -n "$DEEPGRAM_API_KEY" ]; then
+# Priority: Command-line env vars > CI environment > .env.test > .env
+# Save any pre-existing environment variables to preserve command-line overrides
+_TRANSCRIPTION_PROVIDER_OVERRIDE=${TRANSCRIPTION_PROVIDER}
+_PARAKEET_ASR_URL_OVERRIDE=${PARAKEET_ASR_URL}
+_DEEPGRAM_API_KEY_OVERRIDE=${DEEPGRAM_API_KEY}
+_OPENAI_API_KEY_OVERRIDE=${OPENAI_API_KEY}
+_LLM_PROVIDER_OVERRIDE=${LLM_PROVIDER}
+_MEMORY_PROVIDER_OVERRIDE=${MEMORY_PROVIDER}
+
+if [ -n "$DEEPGRAM_API_KEY" ] && [ -z "$_TRANSCRIPTION_PROVIDER_OVERRIDE" ]; then
     print_info "Using environment variables from CI/environment..."
 elif [ -f ".env.test" ]; then
     print_info "Loading environment variables from .env.test..."
@@ -57,6 +65,30 @@ else
     print_info "For local development: cp .env.template .env and configure required API keys"
     print_info "For CI: ensure required API keys are set based on configured providers"
     exit 1
+fi
+
+# Restore command-line overrides (these take highest priority)
+if [ -n "$_TRANSCRIPTION_PROVIDER_OVERRIDE" ]; then
+    export TRANSCRIPTION_PROVIDER=$_TRANSCRIPTION_PROVIDER_OVERRIDE
+    print_info "Using command-line override: TRANSCRIPTION_PROVIDER=$TRANSCRIPTION_PROVIDER"
+fi
+if [ -n "$_PARAKEET_ASR_URL_OVERRIDE" ]; then
+    export PARAKEET_ASR_URL=$_PARAKEET_ASR_URL_OVERRIDE
+    print_info "Using command-line override: PARAKEET_ASR_URL=$PARAKEET_ASR_URL"
+fi
+if [ -n "$_DEEPGRAM_API_KEY_OVERRIDE" ]; then
+    export DEEPGRAM_API_KEY=$_DEEPGRAM_API_KEY_OVERRIDE
+fi
+if [ -n "$_OPENAI_API_KEY_OVERRIDE" ]; then
+    export OPENAI_API_KEY=$_OPENAI_API_KEY_OVERRIDE
+fi
+if [ -n "$_LLM_PROVIDER_OVERRIDE" ]; then
+    export LLM_PROVIDER=$_LLM_PROVIDER_OVERRIDE
+    print_info "Using command-line override: LLM_PROVIDER=$LLM_PROVIDER"
+fi
+if [ -n "$_MEMORY_PROVIDER_OVERRIDE" ]; then
+    export MEMORY_PROVIDER=$_MEMORY_PROVIDER_OVERRIDE
+    print_info "Using command-line override: MEMORY_PROVIDER=$MEMORY_PROVIDER"
 fi
 
 # Verify required environment variables based on configured providers
@@ -161,17 +193,25 @@ else
     TEST_EXIT_CODE=$?
     print_error "Integration tests FAILED with exit code: $TEST_EXIT_CODE"
 
-    # Clean up test containers before exiting
-    print_info "Cleaning up test containers after failure..."
-    docker compose -f docker-compose-test.yml down -v || true
-    docker system prune -f || true
+    # Clean up test containers before exiting (unless CLEANUP_CONTAINERS=false)
+    if [ "${CLEANUP_CONTAINERS:-true}" != "false" ]; then
+        print_info "Cleaning up test containers after failure..."
+        docker compose -f docker-compose-test.yml down -v || true
+        docker system prune -f || true
+    else
+        print_warning "Skipping cleanup (CLEANUP_CONTAINERS=false) - containers left running for debugging"
+    fi
 
     exit $TEST_EXIT_CODE
 fi
 
-# Clean up test containers
-print_info "Cleaning up test containers..."
-docker compose -f docker-compose-test.yml down -v || true
-docker system prune -f || true
+# Clean up test containers (unless CLEANUP_CONTAINERS=false)
+if [ "${CLEANUP_CONTAINERS:-true}" != "false" ]; then
+    print_info "Cleaning up test containers..."
+    docker compose -f docker-compose-test.yml down -v || true
+    docker system prune -f || true
+else
+    print_warning "Skipping cleanup (CLEANUP_CONTAINERS=false) - containers left running"
+fi
 
 print_success "Advanced Backend integration tests completed!"

@@ -27,12 +27,13 @@ async def main():
     """Main worker entry point."""
     logger.info("🚀 Starting Parakeet audio stream worker")
 
-    # Get configuration from environment
+    # Check that config.yml has Parakeet configured
+    # The registry provider will load configuration from config.yml
     service_url = os.getenv("PARAKEET_ASR_URL")
     if not service_url:
-        logger.warning("PARAKEET_ASR_URL environment variable not set - Parakeet audio stream worker will not start")
-        logger.warning("Audio transcription will use alternative providers if configured")
-        return
+        logger.warning("PARAKEET_ASR_URL environment variable not set")
+        logger.warning("Ensure config.yml has a default 'stt' model configured for Parakeet")
+        logger.warning("Audio transcription will use alternative providers if configured in config.yml")
 
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
@@ -47,9 +48,9 @@ async def main():
     # Create consumer with balanced buffer size
     # 20 chunks = ~5 seconds of audio
     # Balance between transcription accuracy and latency
+    # Consumer uses registry-driven provider from config.yml
     consumer = ParakeetStreamConsumer(
         redis_client=redis_client,
-        service_url=service_url,
         buffer_chunks=20  # 5 seconds - good context without excessive delay
     )
 

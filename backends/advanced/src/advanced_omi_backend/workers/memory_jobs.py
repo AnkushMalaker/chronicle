@@ -89,8 +89,11 @@ async def process_memory_job(conversation_id: str, *, redis_client=None) -> Dict
             if text:
                 dialogue_lines.append(f"{speaker}: {text}")
         full_conversation = "\n".join(dialogue_lines)
-    elif conversation_model.transcript and isinstance(conversation_model.transcript, str):
-        # Fallback: if segments are empty but transcript text exists
+
+    # Fallback: if segments have no text content but transcript exists, use transcript
+    # This handles cases where speaker recognition fails/is disabled
+    if len(full_conversation) < 10 and conversation_model.transcript and isinstance(conversation_model.transcript, str):
+        logger.info(f"Segments empty or too short, falling back to transcript text for {conversation_id}")
         full_conversation = conversation_model.transcript
 
     if len(full_conversation) < 10:

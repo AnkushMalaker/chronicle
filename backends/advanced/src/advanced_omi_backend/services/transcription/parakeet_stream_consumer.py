@@ -6,10 +6,9 @@ Writes to: transcription:results:{session_id}
 """
 
 import logging
-import os
 
 from advanced_omi_backend.services.audio_stream.consumer import BaseAudioStreamConsumer
-from advanced_omi_backend.services.transcription.parakeet import ParakeetProvider
+from advanced_omi_backend.services.transcription import get_transcription_provider
 
 logger = logging.getLogger(__name__)
 
@@ -24,23 +23,23 @@ class ParakeetStreamConsumer:
     This inherits from BaseAudioStreamConsumer and implements transcribe_audio().
     """
 
-    def __init__(self, redis_client, service_url: str = None, buffer_chunks: int = 30):
+    def __init__(self, redis_client, buffer_chunks: int = 30):
         """
         Initialize Parakeet consumer.
 
         Dynamically discovers all audio:stream:* streams and claims them using Redis locks.
+        Uses config.yml stt-parakeet-batch configuration for transcription.
 
         Args:
             redis_client: Connected Redis client
-            service_url: Parakeet service URL (defaults to PARAKEET_ASR_URL env var)
             buffer_chunks: Number of chunks to buffer before transcribing (default: 30 = ~7.5s)
         """
-        self.service_url = service_url or os.getenv("PARAKEET_ASR_URL")
-        if not self.service_url:
-            raise ValueError("PARAKEET_ASR_URL is required")
-
-        # Initialize Parakeet provider
-        self.provider = ParakeetProvider(service_url=self.service_url)
+        # Get registry-driven transcription provider
+        self.provider = get_transcription_provider(mode="batch")
+        if not self.provider:
+            raise RuntimeError(
+                "Failed to load transcription provider. Ensure config.yml has a default 'stt' model configured."
+            )
 
         # Create a concrete subclass that implements transcribe_audio
         class _ConcreteConsumer(BaseAudioStreamConsumer):

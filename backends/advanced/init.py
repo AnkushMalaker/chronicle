@@ -410,10 +410,55 @@ class ChronicleSetup:
                 self.console.print("[green][SUCCESS][/green] Speaker Recognition configured")
                 self.console.print("[blue][INFO][/blue] Start with: cd ../../extras/speaker-recognition && docker compose up -d")
         
-        # Check if ASR service URL provided via args  
+        # Check if ASR service URL provided via args
         if hasattr(self.args, 'parakeet_asr_url') and self.args.parakeet_asr_url:
             self.config["PARAKEET_ASR_URL"] = self.args.parakeet_asr_url
             self.console.print(f"[green][SUCCESS][/green] Parakeet ASR configured via args: {self.args.parakeet_asr_url}")
+
+    def setup_obsidian(self):
+        """Configure Obsidian/Neo4j integration"""
+        # Check if enabled via command line
+        if hasattr(self.args, 'enable_obsidian') and self.args.enable_obsidian:
+            enable_obsidian = True
+            neo4j_password = getattr(self.args, 'neo4j_password', None)
+
+            if not neo4j_password:
+                self.console.print("[yellow][WARNING][/yellow] --enable-obsidian provided but no password")
+                neo4j_password = self.prompt_password("Neo4j password (min 8 chars)")
+        else:
+            # Interactive prompt (fallback)
+            self.console.print()
+            self.console.print("[bold cyan]Obsidian/Neo4j Integration[/bold cyan]")
+            self.console.print("Enable graph-based knowledge management for Obsidian vault notes")
+            self.console.print()
+
+            try:
+                enable_obsidian = Confirm.ask("Enable Obsidian/Neo4j integration?", default=False)
+            except EOFError:
+                self.console.print("Using default: No")
+                enable_obsidian = False
+
+            if enable_obsidian:
+                neo4j_password = self.prompt_password("Neo4j password (min 8 chars)")
+
+        if enable_obsidian:
+            # Update .env with credentials
+            self.config["NEO4J_HOST"] = "neo4j-mem0"
+            self.config["NEO4J_USER"] = "neo4j"
+            self.config["NEO4J_PASSWORD"] = neo4j_password
+
+            # Update config.yml with feature flag
+            if "memory" not in self.config_yml_data:
+                self.config_yml_data["memory"] = {}
+            if "obsidian" not in self.config_yml_data["memory"]:
+                self.config_yml_data["memory"]["obsidian"] = {}
+
+            self.config_yml_data["memory"]["obsidian"]["enabled"] = True
+            self.config_yml_data["memory"]["obsidian"]["neo4j_host"] = "neo4j-mem0"
+            self.config_yml_data["memory"]["obsidian"]["timeout"] = 30
+
+            self.console.print("[green][SUCCESS][/green] Obsidian/Neo4j configured")
+            self.console.print("[blue][INFO][/blue] Neo4j will start automatically with --profile obsidian")
 
     def setup_network(self):
         """Configure network settings"""
@@ -589,6 +634,11 @@ class ChronicleSetup:
         memory_provider = self.config_yml_data.get("memory", {}).get("provider", "chronicle")
         self.console.print(f"✅ Memory Provider: {memory_provider} (config.yml)")
 
+        # Show Obsidian/Neo4j status
+        if self.config.get('OBSIDIAN_ENABLED') == 'true':
+            neo4j_host = self.config.get('NEO4J_HOST', 'not set')
+            self.console.print(f"✅ Obsidian/Neo4j: Enabled ({neo4j_host})")
+
         # Auto-determine URLs based on HTTPS configuration
         if self.config.get('HTTPS_ENABLED') == 'true':
             server_ip = self.config.get('SERVER_IP', 'localhost')
@@ -604,9 +654,14 @@ class ChronicleSetup:
         """Show next steps"""
         self.print_section("Next Steps")
         self.console.print()
-        
+
         self.console.print("1. Start the main services:")
-        self.console.print("   [cyan]docker compose up --build -d[/cyan]")
+        # Include --profile obsidian if Obsidian is enabled
+        if self.config.get('OBSIDIAN_ENABLED') == 'true':
+            self.console.print("   [cyan]docker compose --profile obsidian up --build -d[/cyan]")
+            self.console.print("   [dim](Includes Neo4j for Obsidian integration)[/dim]")
+        else:
+            self.console.print("   [cyan]docker compose up --build -d[/cyan]")
         self.console.print()
         
         # Auto-determine URLs for next steps
@@ -653,6 +708,7 @@ class ChronicleSetup:
             self.setup_llm()
             self.setup_memory()
             self.setup_optional_services()
+            self.setup_obsidian()
             self.setup_network()
             self.setup_https()
 
@@ -695,9 +751,13 @@ def main():
                        help="Parakeet ASR service URL (default: prompt user)")
     parser.add_argument("--enable-https", action="store_true",
                        help="Enable HTTPS configuration (default: prompt user)")
-    parser.add_argument("--server-ip", 
+    parser.add_argument("--server-ip",
                        help="Server IP/domain for SSL certificate (default: prompt user)")
-    
+    parser.add_argument("--enable-obsidian", action="store_true",
+                       help="Enable Obsidian/Neo4j integration (default: prompt user)")
+    parser.add_argument("--neo4j-password",
+                       help="Neo4j password (default: prompt user)")
+
     args = parser.parse_args()
     
     setup = ChronicleSetup(args)

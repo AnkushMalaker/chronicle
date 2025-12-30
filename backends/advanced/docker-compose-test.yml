@@ -32,7 +32,7 @@ services:
       - ADMIN_EMAIL=test-admin@example.com
       # Transcription provider configuration
       - TRANSCRIPTION_PROVIDER=${TRANSCRIPTION_PROVIDER:-deepgram}
-      # - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
+      - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
       # Memory provider configuration
       - MEMORY_PROVIDER=${MEMORY_PROVIDER:-chronicle}
       - OPENMEMORY_MCP_URL=${OPENMEMORY_MCP_URL:-http://host.docker.internal:8765}
@@ -144,6 +144,7 @@ services:
       - ADMIN_PASSWORD=test-admin-password-123
       - ADMIN_EMAIL=test-admin@example.com
       - TRANSCRIPTION_PROVIDER=${TRANSCRIPTION_PROVIDER:-deepgram}
+      - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
       - MEMORY_PROVIDER=${MEMORY_PROVIDER:-chronicle}
       - OPENMEMORY_MCP_URL=${OPENMEMORY_MCP_URL:-http://host.docker.internal:8765}
       - OPENMEMORY_USER_ID=${OPENMEMORY_USER_ID:-openmemory}
