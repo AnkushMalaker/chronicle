@@ -41,7 +41,6 @@ print_info "========================================"
 # Load environment variables (CI or local)
 # Priority: Command-line env vars > CI environment > .env.test > .env
 # Save any pre-existing environment variables to preserve command-line overrides
-_TRANSCRIPTION_PROVIDER_OVERRIDE=${TRANSCRIPTION_PROVIDER}
 _PARAKEET_ASR_URL_OVERRIDE=${PARAKEET_ASR_URL}
 _DEEPGRAM_API_KEY_OVERRIDE=${DEEPGRAM_API_KEY}
 _OPENAI_API_KEY_OVERRIDE=${OPENAI_API_KEY}
@@ -49,7 +48,7 @@ _LLM_PROVIDER_OVERRIDE=${LLM_PROVIDER}
 _MEMORY_PROVIDER_OVERRIDE=${MEMORY_PROVIDER}
 _CONFIG_FILE_OVERRIDE=${CONFIG_FILE}
 
-if [ -n "$DEEPGRAM_API_KEY" ] && [ -z "$_TRANSCRIPTION_PROVIDER_OVERRIDE" ]; then
+if [ -n "$DEEPGRAM_API_KEY" ]; then
     print_info "Using environment variables from CI/environment..."
 elif [ -f ".env.test" ]; then
     print_info "Loading environment variables from .env.test..."
@@ -69,10 +68,6 @@ else
 fi
 
 # Restore command-line overrides (these take highest priority)
-if [ -n "$_TRANSCRIPTION_PROVIDER_OVERRIDE" ]; then
-    export TRANSCRIPTION_PROVIDER=$_TRANSCRIPTION_PROVIDER_OVERRIDE
-    print_info "Using command-line override: TRANSCRIPTION_PROVIDER=$TRANSCRIPTION_PROVIDER"
-fi
 if [ -n "$_PARAKEET_ASR_URL_OVERRIDE" ]; then
     export PARAKEET_ASR_URL=$_PARAKEET_ASR_URL_OVERRIDE
     print_info "Using command-line override: PARAKEET_ASR_URL=$PARAKEET_ASR_URL"
@@ -101,35 +96,47 @@ fi
 # Usage: CONFIG_FILE=../../tests/configs/parakeet-ollama.yml ./run-test.sh
 export CONFIG_FILE=${CONFIG_FILE:-../../config/config.yml}
 
-# Verify required environment variables based on configured providers
-TRANSCRIPTION_PROVIDER=${TRANSCRIPTION_PROVIDER:-deepgram}
+print_info "Using config file: $CONFIG_FILE"
+
+# Read STT provider from config.yml (source of truth)
+STT_PROVIDER=$(uv run python -c "
+from advanced_omi_backend.model_registry import get_models_registry
+registry = get_models_registry()
+if registry and registry.defaults:
+    stt_model = registry.get_default('stt')
+    if stt_model:
+        print(stt_model.model_provider or '')
+" 2>/dev/null || echo "")
+
+# Fallback to environment variable for backward compatibility (will be removed)
+if [ -z "$STT_PROVIDER" ]; then
+    STT_PROVIDER=${TRANSCRIPTION_PROVIDER:-deepgram}
+    print_warning "Could not read STT provider from config.yml, using TRANSCRIPTION_PROVIDER: $STT_PROVIDER"
+fi
+
+# LLM provider can still use env var as it's not part of this refactor
 LLM_PROVIDER=${LLM_PROVIDER:-openai}
 
 print_info "Configured providers:"
-print_info "  TRANSCRIPTION_PROVIDER: $TRANSCRIPTION_PROVIDER"
-print_info "  LLM_PROVIDER: $LLM_PROVIDER"
+print_info "  STT Provider (from config.yml): $STT_PROVIDER"
+print_info "  LLM Provider: $LLM_PROVIDER"
 
-# Check transcription provider API key
-case "$TRANSCRIPTION_PROVIDER" in
+# Check transcription provider API key based on config.yml
+case "$STT_PROVIDER" in
     deepgram)
         if [ -z "$DEEPGRAM_API_KEY" ]; then
-            print_error "DEEPGRAM_API_KEY not set (required for TRANSCRIPTION_PROVIDER=deepgram)"
+            print_error "DEEPGRAM_API_KEY not set (required for STT provider: deepgram)"
             exit 1
         fi
         print_info "DEEPGRAM_API_KEY length: ${#DEEPGRAM_API_KEY}"
         ;;
-    mistral)
-        if [ -z "$MISTRAL_API_KEY" ]; then
-            print_error "MISTRAL_API_KEY not set (required for TRANSCRIPTION_PROVIDER=mistral)"
-            exit 1
-        fi
-        print_info "MISTRAL_API_KEY length: ${#MISTRAL_API_KEY}"
-        ;;
-    offline|parakeet)
-        print_info "Using offline/local transcription - no API key required"
+    parakeet)
+        print_info "Using Parakeet (local transcription) - no API key required"
+        PARAKEET_ASR_URL=${PARAKEET_ASR_URL:-http://localhost:8767}
+        print_info "PARAKEET_ASR_URL: $PARAKEET_ASR_URL"
         ;;
     *)
-        print_warning "Unknown TRANSCRIPTION_PROVIDER: $TRANSCRIPTION_PROVIDER"
+        print_warning "Unknown STT provider from config.yml: $STT_PROVIDER"
         ;;
 esac
 

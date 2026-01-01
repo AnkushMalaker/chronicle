@@ -59,6 +59,7 @@ Get Job Status
 
 Check job status
     [Documentation]    Check the status of a specific job by ID
+    ...                Fails immediately if job is in 'failed' state when expecting 'completed'
     [Arguments]    ${job_id}    ${expected_status}
 
     ${job}=    Get Job status    ${job_id}
@@ -68,6 +69,12 @@ Check job status
 
     ${actual_status}=    Set Variable    ${job}[status]
     Log    Job ${job_id} status: ${actual_status} (expected: ${expected_status})
+
+    # Fail fast if job is in failed state when we're expecting completed
+    IF    '${actual_status}' == 'failed' and '${expected_status}' == 'completed'
+        ${error_msg}=    Evaluate    $job.get('exc_info') or $job.get('error', 'Unknown error')
+        Fail    Job ${job_id} failed: ${error_msg}
+    END
 
     Should Be Equal As Strings    ${actual_status}    ${expected_status}    Job status is '${actual_status}', expected '${expected_status}'
 

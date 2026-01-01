@@ -107,27 +107,50 @@ Verify Memory Extraction
 
 
 Wait For Memory Extraction
-    [Documentation]    Wait for memory job to complete and verify memories extracted.
-    ...                Fails fast if job doesn't exist, fails immediately, or service is unhealthy.
-    [Arguments]    ${memory_job_id}    ${min_memories}=1    ${timeout}=120
+    [Documentation]    Wait for memory job to complete and fetch extracted memories.
+    ...                Returns a result dictionary with success status, job details, and memories.
+    ...                Does not perform assertions - calling tests should verify the results.
+    ...
+    ...                Return value structure:
+    ...                {
+    ...                  'success': True/False,
+    ...                  'error_message': 'Error description' (only if success=False),
+    ...                  'status': 'completed'/'failed'/'timeout'/'not_found',
+    ...                  'job': {job object} (if available),
+    ...                  'memories': [list of memories] (if successful),
+    ...                  'memory_count': int (if successful)
+    ...                }
+    [Arguments]    ${memory_job_id}    ${timeout}=120
 
     Log    Waiting for memory job ${memory_job_id} to complete...
 
-    # 1. Verify job exists before waiting (fail fast if job ID is invalid)
+    # 1. Check if job exists before waiting
     ${job_status}=    Get Job Status    ${memory_job_id}
-    Should Not Be Equal    ${job_status}    ${None}
-    ...    Memory job ${memory_job_id} not found in queue - cannot wait for completion
+    IF    ${job_status} == ${None}
+        ${result}=    Create Dictionary
+        ...    success=${False}
+        ...    error_message=Memory job ${memory_job_id} not found in queue
+        ...    status=not_found
+        RETURN    ${result}
+    END
 
-    # 2. Check if job already failed (fail fast instead of waiting 120s)
+    # 2. Check if job already failed
     ${current_status}=    Set Variable    ${job_status}[status]
     IF    '${current_status}' == 'failed'
         ${error_info}=    Evaluate    $job_status.get('exc_info', 'Unknown error')
-        Fail    Memory job ${memory_job_id} already failed: ${error_info}
+        ${result}=    Create Dictionary
+        ...    success=${False}
+        ...    error_message=Memory job already failed: ${error_info}
+        ...    status=failed
+        ...    job=${job_status}
+        RETURN    ${result}
     END
 
     # 3. Wait for job completion with status monitoring
     ${start_time}=    Get Time    epoch
     ${end_time}=    Evaluate    ${start_time} + ${timeout}
+    ${final_job}=    Set Variable    ${job_status}
+    ${final_status}=    Set Variable    ${current_status}
 
     WHILE    True
         # Get current job status
@@ -135,10 +158,17 @@ Wait For Memory Extraction
 
         # Handle job not found (e.g., expired from queue)
         IF    ${job} == ${None}
-            Fail    Memory job ${memory_job_id} disappeared from queue during wait
+            ${result}=    Create Dictionary
+            ...    success=${False}
+            ...    error_message=Memory job ${memory_job_id} disappeared from queue during wait
+            ...    status=not_found
+            ...    job=${final_job}
+            RETURN    ${result}
         END
 
         ${status}=    Set Variable    ${job}[status]
+        ${final_job}=    Set Variable    ${job}
+        ${final_status}=    Set Variable    ${status}
 
         # Success case - job completed
         IF    '${status}' == 'completed' or '${status}' == 'finished'
@@ -146,16 +176,26 @@ Wait For Memory Extraction
             BREAK
         END
 
-        # Failure case - job failed (fail fast)
+        # Failure case - job failed
         IF    '${status}' == 'failed'
             ${error_info}=    Evaluate    $job.get('exc_info', 'Unknown error')
-            Fail    Memory job ${memory_job_id} failed during processing: ${error_info}
+            ${result}=    Create Dictionary
+            ...    success=${False}
+            ...    error_message=Memory job failed during processing: ${error_info}
+            ...    status=failed
+            ...    job=${job}
+            RETURN    ${result}
         END
 
         # Timeout check
         ${current_time}=    Get Time    epoch
         IF    ${current_time} >= ${end_time}
-            Fail    Memory job ${memory_job_id} did not complete within ${timeout}s (last status: ${status})
+            ${result}=    Create Dictionary
+            ...    success=${False}
+            ...    error_message=Memory job did not complete within ${timeout}s (last status: ${status})
+            ...    status=timeout
+            ...    job=${job}
+            RETURN    ${result}
         END
 
         # Log progress every iteration
@@ -165,23 +205,32 @@ Wait For Memory Extraction
         Sleep    5s
     END
 
-    # 4. Fetch memories from API with error handling
+    # 4. Fetch memories from API
     TRY
         ${response}=    GET On Session    api    /api/memories    expected_status=200
+        ${memories_data}=    Set Variable    ${response.json()}
+        ${memories}=    Set Variable    ${memories_data}[memories]
+        ${memory_count}=    Get Length    ${memories}
+
+        # Return success result
+        ${result}=    Create Dictionary
+        ...    success=${True}
+        ...    status=completed
+        ...    job=${final_job}
+        ...    memories=${memories}
+        ...    memory_count=${memory_count}
+
+        Log    Successfully extracted ${memory_count} memories
+        RETURN    ${result}
     EXCEPT    AS    ${error}
-        Fail    Failed to fetch memories from API: ${error}
+        # Return error if API fetch fails
+        ${result}=    Create Dictionary
+        ...    success=${False}
+        ...    error_message=Failed to fetch memories from API: ${error}
+        ...    status=api_error
+        ...    job=${final_job}
+        RETURN    ${result}
     END
-
-    ${memories_data}=    Set Variable    ${response.json()}
-    ${memories}=    Set Variable    ${memories_data}[memories]
-    ${memory_count}=    Get Length    ${memories}
-
-    # 5. Verify minimum memories were extracted
-    Should Be True    ${memory_count} >= ${min_memories}
-    ...    Expected at least ${min_memories} memories, found ${memory_count}
-
-    Log    Successfully extracted ${memory_count} memories
-    RETURN    ${memories}
 
 
 Check Memory Similarity With OpenAI

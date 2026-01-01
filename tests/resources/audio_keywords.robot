@@ -72,7 +72,8 @@ Upload Audio File
 Upload Audio File And Wait For Memory
     [Documentation]    Upload audio file and wait for complete processing including memory extraction.
     ...                This is for E2E testing - use Upload Audio File for upload-only tests.
-    [Arguments]    ${audio_file_path}    ${device_name}=robot-test    ${folder}=.
+    ...                Performs assertions inline to verify successful memory extraction.
+    [Arguments]    ${audio_file_path}    ${device_name}=robot-test    ${folder}=.    ${min_memories}=1
 
     # Upload file (uses existing keyword)
     ${conversation}=    Upload Audio File    ${audio_file_path}    ${device_name}    ${folder}
@@ -90,8 +91,24 @@ Upload Audio File And Wait For Memory
 
     Log    Found memory job: ${memory_job_id}
 
-    # Wait for memory extraction (uses keyword from memory_keywords.robot)
-    ${memories}=    Wait For Memory Extraction    ${memory_job_id}    min_memories=1
+    # Wait for memory extraction (returns result dictionary)
+    ${result}=    Wait For Memory Extraction    ${memory_job_id}
+
+    # Verify memory extraction succeeded
+    Should Be True    ${result}[success]
+    ...    Memory extraction failed: ${result.get('error_message', 'Unknown error')}
+
+    # Verify job completed successfully
+    Should Be Equal As Strings    ${result}[status]    completed
+    ...    Expected job status 'completed', got '${result}[status]'
+
+    # Verify minimum memories were extracted
+    ${memory_count}=    Set Variable    ${result}[memory_count]
+    Should Be True    ${memory_count} >= ${min_memories}
+    ...    Expected at least ${min_memories} memories, found ${memory_count}
+
+    ${memories}=    Set Variable    ${result}[memories]
+    Log    Successfully extracted ${memory_count} memories
 
     RETURN    ${conversation}    ${memories}
 
