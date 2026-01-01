@@ -76,7 +76,8 @@ extras/openmemory-mcp/data/*
 backends/advanced/nginx.conf
 backends/advanced/Caddyfile
 
-app/ios/Pods
+app/ios/*
+app/android/*
 results
 log.html
 output.xml
