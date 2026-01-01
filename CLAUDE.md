@@ -116,11 +116,11 @@ cp .env.template .env  # Configure API keys
 
 # Manual test execution (for debugging)
 source .env && export DEEPGRAM_API_KEY && export OPENAI_API_KEY
-uv run pytest tests/test_integration.py::test_full_pipeline_integration -v -s
+uv run robot --outputdir test-results --loglevel INFO ../../tests/integration/integration_test.robot
 
 # Leave test containers running for debugging (don't auto-cleanup)
 CLEANUP_CONTAINERS=false source .env && export DEEPGRAM_API_KEY && export OPENAI_API_KEY
-uv run pytest tests/test_integration.py::test_full_pipeline_integration -v -s
+uv run robot --outputdir test-results --loglevel INFO ../../tests/integration/integration_test.robot
 
 # Manual cleanup when needed
 docker compose -f docker-compose-test.yml down -v
@@ -390,7 +390,7 @@ docker compose up --build -d
 
 ### Testing Strategy
 - **Local Test Scripts**: Simplified scripts (`./run-test.sh`) mirror CI workflows for local development
-- **End-to-End Integration**: `test_integration.py` validates complete audio processing pipeline
+- **End-to-End Integration**: Robot Framework tests (`tests/integration/integration_test.robot`) validate complete audio processing pipeline
 - **Speaker Recognition Tests**: `test_speaker_service_integration.py` validates speaker identification
 - **Environment Flexibility**: Tests work with both local .env files and CI environment variables
 - **Automated Cleanup**: Test containers are automatically removed after execution

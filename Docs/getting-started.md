@@ -179,9 +179,9 @@ After configuration, verify everything works with the integration test suite:
 
 # Alternative: Manual test with detailed logging
 source .env && export DEEPGRAM_API_KEY OPENAI_API_KEY && \
-  uv run pytest tests/test_integration.py -vv -s --log-cli-level=INFO
+  uv run robot --outputdir ../../test-results --loglevel INFO ../../tests/integration/integration_test.robot
 ```
-This end-to-end test validates the complete audio processing pipeline.
+This end-to-end test validates the complete audio processing pipeline using Robot Framework.
 
 ## Using the System
 

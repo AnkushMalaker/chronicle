@@ -86,6 +86,6 @@ uv sync --dev
 cp .env.template .env.test
 # Add your API keys to .env.test
 
-# Run test (modify CACHED_MODE in test_integration.py if needed)
-uv run pytest test_integration.py::test_full_pipeline_integration -v -s
+# Run Robot Framework integration tests
+uv run robot --outputdir test-results --loglevel INFO tests/integration/integration_test.robot
 ```

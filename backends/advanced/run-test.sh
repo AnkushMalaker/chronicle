@@ -205,9 +205,14 @@ fi
 # Set environment variables for the test
 export DOCKER_BUILDKIT=0
 
-# Run the integration test with extended timeout (mem0 needs time for comprehensive extraction)
-print_info "Starting integration test (timeout: 15 minutes)..."
-if timeout 900 uv run pytest tests/test_integration.py::test_full_pipeline_integration -v -s --tb=short --log-cli-level=INFO; then
+# Configure Robot Framework test mode
+# TEST_MODE=dev: Robot tests keep containers running (cleanup handled by run-test.sh)
+# This allows CLEANUP_CONTAINERS flag to work as expected
+export TEST_MODE=dev
+
+# Run the Robot Framework integration tests with extended timeout (mem0 needs time for comprehensive extraction)
+print_info "Starting Robot Framework integration tests (timeout: 15 minutes)..."
+if timeout 900 uv run robot --outputdir ../../test-results --loglevel INFO ../../tests/integration/integration_test.robot; then
     print_success "Integration tests completed successfully!"
 else
     TEST_EXIT_CODE=$?

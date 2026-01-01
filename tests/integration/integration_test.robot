@@ -131,7 +131,7 @@ Audio Playback And Segment Timing Test
 
 End To End Pipeline With Memory Validation Test
     [Documentation]    Complete E2E test with memory extraction and OpenAI quality validation.
-    ...                This test matches Python test_integration.py coverage exactly.
+    ...                Provides comprehensive integration testing of the entire audio processing pipeline.
     ...                Separate from other tests to avoid breaking existing upload-only tests.
     [Tags]    e2e	memory
     [Timeout]    600s
