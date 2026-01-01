@@ -262,21 +262,37 @@ class ConfigManager:
         Update memory configuration in config.yml.
 
         Args:
-            updates: Dict of updates to merge into memory config
+            updates: Dict of updates to merge into memory config (deep merge)
         """
         config = self._load_config_yml()
 
         if "memory" not in config:
             config["memory"] = {}
 
-        # Deep merge updates
-        config["memory"].update(updates)
+        # Deep merge updates recursively
+        self._deep_merge(config["memory"], updates)
 
         self._save_config_yml(config)
 
         # If provider was updated, also update .env
         if "provider" in updates and self.env_path:
             self._update_env_file("MEMORY_PROVIDER", updates["provider"])
+
+    def _deep_merge(self, base: dict, updates: dict) -> None:
+        """
+        Recursively merge updates into base dictionary.
+
+        Args:
+            base: Base dictionary to merge into (modified in-place)
+            updates: Updates to merge
+        """
+        for key, value in updates.items():
+            if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+                # Recursively merge nested dictionaries
+                self._deep_merge(base[key], value)
+            else:
+                # Direct assignment for non-dict values
+                base[key] = value
 
     def get_config_defaults(self) -> Dict[str, Any]:
         """
