@@ -94,6 +94,14 @@ jobs:
         TEST_DEVICE_NAME=robot-test
         EOF
 
+    - name: Create test config.yml
+      run: |
+        echo "Copying test configuration file..."
+        mkdir -p config
+        cp tests/configs/deepgram-openai.yml config/config.yml
+        echo "✓ Test config.yml created from tests/configs/deepgram-openai.yml"
+        ls -lh config/config.yml
+
     - name: Start test environment
       working-directory: backends/advanced
       env:
