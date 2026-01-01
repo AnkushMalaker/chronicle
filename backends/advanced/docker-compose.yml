@@ -15,9 +15,6 @@ services:
       - ../../config/config.yml:/app/config.yml  # Removed :ro to allow UI config saving
     environment:
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
-      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
-      - MISTRAL_MODEL=${MISTRAL_MODEL}
-      - TRANSCRIPTION_PROVIDER=${TRANSCRIPTION_PROVIDER}
       - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
       - HF_TOKEN=${HF_TOKEN}
@@ -68,9 +65,6 @@ services:
       - ../../config/config.yml:/app/config.yml  # Removed :ro for consistency
     environment:
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
-      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
-      - MISTRAL_MODEL=${MISTRAL_MODEL}
-      - TRANSCRIPTION_PROVIDER=${TRANSCRIPTION_PROVIDER}
       - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GROQ_API_KEY=${GROQ_API_KEY}

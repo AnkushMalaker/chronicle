@@ -175,16 +175,19 @@ class ChronicleSetup:
         self.console.print("[green][SUCCESS][/green] Admin account configured")
 
     def setup_transcription(self):
-        """Configure transcription provider"""
+        """Configure transcription provider - updates config.yml and .env"""
         self.print_section("Speech-to-Text Configuration")
-        
+
+        self.console.print("[blue][INFO][/blue] Provider selection is configured in config.yml (defaults.stt)")
+        self.console.print("[blue][INFO][/blue] API keys are stored in .env")
+        self.console.print()
+
         choices = {
-            "1": "Deepgram (recommended - high quality, requires API key)",
-            "2": "Mistral (Voxtral models - requires API key)", 
-            "3": "Offline (Parakeet ASR - requires GPU, runs locally)",
-            "4": "None (skip transcription setup)"
+            "1": "Deepgram (recommended - high quality, cloud-based)",
+            "2": "Offline (Parakeet ASR - requires GPU, runs locally)",
+            "3": "None (skip transcription setup)"
         }
-        
+
         choice = self.prompt_choice("Choose your transcription provider:", choices, "1")
 
         if choice == "1":
@@ -202,44 +205,34 @@ class ChronicleSetup:
                 api_key = self.prompt_value("Deepgram API key (leave empty to skip)", "")
 
             if api_key:
-                self.config["TRANSCRIPTION_PROVIDER"] = "deepgram"
+                # Write API key to .env
                 self.config["DEEPGRAM_API_KEY"] = api_key
-                self.console.print("[green][SUCCESS][/green] Deepgram configured")
+
+                # Update config.yml to use Deepgram
+                self.config_manager.update_config_defaults({"stt": "stt-deepgram"})
+                self.config_yml_data = self.config_manager.get_full_config()  # Reload
+
+                self.console.print("[green][SUCCESS][/green] Deepgram configured in config.yml and .env")
+                self.console.print("[blue][INFO][/blue] Set defaults.stt: stt-deepgram")
             else:
                 self.console.print("[yellow][WARNING][/yellow] No API key provided - transcription will not work")
 
         elif choice == "2":
-            self.config["TRANSCRIPTION_PROVIDER"] = "mistral"
-            self.console.print("[blue][INFO][/blue] Mistral selected")
-            self.console.print("Get your API key from: https://console.mistral.ai/")
-
-            # Check for existing API key
-            existing_key = self.read_existing_env_value("MISTRAL_API_KEY")
-            if existing_key and existing_key not in ['your_mistral_api_key_here', 'your-mistral-key-here']:
-                masked_key = self.mask_api_key(existing_key)
-                prompt_text = f"Mistral API key ({masked_key}) [press Enter to reuse, or enter new]"
-                api_key_input = self.prompt_value(prompt_text, "")
-                api_key = api_key_input if api_key_input else existing_key
-            else:
-                api_key = self.prompt_value("Mistral API key (leave empty to skip)", "")
-
-            model = self.prompt_value("Mistral model", "voxtral-mini-2507")
-
-            if api_key:
-                self.config["MISTRAL_API_KEY"] = api_key
-                self.config["MISTRAL_MODEL"] = model
-                self.console.print("[green][SUCCESS][/green] Mistral configured")
-            else:
-                self.console.print("[yellow][WARNING][/yellow] No API key provided - transcription will not work")
-
-        elif choice == "3":
-            self.config["TRANSCRIPTION_PROVIDER"] = "parakeet"
             self.console.print("[blue][INFO][/blue] Offline Parakeet ASR selected")
             parakeet_url = self.prompt_value("Parakeet ASR URL", "http://host.docker.internal:8767")
+
+            # Write URL to .env for ${PARAKEET_ASR_URL} placeholder in config.yml
             self.config["PARAKEET_ASR_URL"] = parakeet_url
+
+            # Update config.yml to use Parakeet
+            self.config_manager.update_config_defaults({"stt": "stt-parakeet-batch"})
+            self.config_yml_data = self.config_manager.get_full_config()  # Reload
+
+            self.console.print("[green][SUCCESS][/green] Parakeet configured in config.yml and .env")
+            self.console.print("[blue][INFO][/blue] Set defaults.stt: stt-parakeet-batch")
             self.console.print("[yellow][WARNING][/yellow] Remember to start Parakeet service: cd ../../extras/asr-services && docker compose up parakeet")
 
-        elif choice == "4":
+        elif choice == "3":
             self.console.print("[blue][INFO][/blue] Skipping transcription setup")
 
     def setup_llm(self):
@@ -592,7 +585,15 @@ class ChronicleSetup:
         self.console.print()
 
         self.console.print(f"✅ Admin Account: {self.config.get('ADMIN_EMAIL', 'Not configured')}")
-        self.console.print(f"✅ Transcription: {self.config.get('TRANSCRIPTION_PROVIDER', 'Not configured')}")
+
+        # Show transcription from config.yml
+        stt_default = self.config_yml_data.get("defaults", {}).get("stt", "not set")
+        stt_model = next(
+            (m for m in self.config_yml_data.get("models", []) if m.get("name") == stt_default),
+            None
+        )
+        stt_provider = stt_model.get("model_provider", "unknown") if stt_model else "not configured"
+        self.console.print(f"✅ Transcription: {stt_provider} ({stt_default}) - config.yml")
 
         # Show LLM config from config.yml
         llm_default = self.config_yml_data.get("defaults", {}).get("llm", "not set")

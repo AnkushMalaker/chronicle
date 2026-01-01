@@ -2,6 +2,9 @@ defaults:
   llm: openai-llm
   embedding: openai-embed
   stt: stt-deepgram
+  # Transcription provider selection:
+  # - stt-deepgram: Cloud-based (requires DEEPGRAM_API_KEY in .env)
+  # - stt-parakeet-batch: Local ASR (requires Parakeet service running)
   tts: tts-http
   vector_store: vs-qdrant
 models:
@@ -96,7 +99,7 @@ models:
   model_type: stt
   model_provider: parakeet
   api_family: http
-  model_url: http://172.17.0.1:8767
+  model_url: http://${PARAKEET_ASR_URL:-172.17.0.1:8767}
   api_key: ''
   operations:
     stt_transcribe:
