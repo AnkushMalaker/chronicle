@@ -4,6 +4,7 @@ Chronicle Root Setup Orchestrator
 Handles service selection and delegation only - no configuration duplication
 """
 
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -320,7 +321,6 @@ def setup_config_file():
 
     if not config_file.exists():
         if config_template.exists():
-            import shutil
             # Ensure config/ directory exists
             config_file.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(config_template, config_file)
