@@ -9,7 +9,8 @@ from typing import Literal, Optional, overload
 import jwt
 from beanie import PydanticObjectId
 from dotenv import load_dotenv
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi_users import BaseUserManager, FastAPIUsers
 from fastapi_users.authentication import (
     AuthenticationBackend,
@@ -23,10 +24,8 @@ from advanced_omi_backend.users import User, UserCreate, get_user_db
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-JWT_LIFETIME_SECONDS = int(os.getenv("JWT_LIFETIME_SECONDS", "86400"))
-
 # JWT configuration
-JWT_LIFETIME_SECONDS = 86400  # 24 hours
+JWT_LIFETIME_SECONDS = int(os.getenv("JWT_LIFETIME_SECONDS", "86400")) # 24 hours
 
 
 @overload
@@ -107,9 +106,17 @@ bearer_transport = BearerTransport(tokenUrl="auth/jwt/login")
 
 
 def get_jwt_strategy() -> JWTStrategy:
-    """Get JWT strategy for token generation and validation."""
+    """Get JWT strategy for token generation and validation.
+    
+    Configures token_audience to accept:
+    - fastapi-users:auth (Chronicle-generated tokens)
+    - ushadow (cross-service tokens from ushadow)
+    - chronicle (tokens intended for Chronicle)
+    """
     return JWTStrategy(
-        secret=SECRET_KEY, lifetime_seconds=JWT_LIFETIME_SECONDS
+        secret=SECRET_KEY, 
+        lifetime_seconds=JWT_LIFETIME_SECONDS,
+        token_audience=["fastapi-users:auth", "ushadow", "chronicle"],
     )
 
 
@@ -136,6 +143,111 @@ def validate_token_issuer(token: str) -> bool:
     except Exception as e:
         logger.error(f"Error validating token issuer: {e}")
         return False
+
+
+async def validate_cross_service_token(token: str) -> Optional[User]:
+    """Validate a cross-service JWT token and return the user.
+    
+    This handles tokens issued by other services (like ushadow) that have
+    custom audience claims. Unlike fastapi-users' JWTStrategy which expects
+    audience=["fastapi-users:auth"], this accepts tokens with audience
+    containing "chronicle" or "ushadow".
+    
+    Args:
+        token: JWT token string
+        
+    Returns:
+        User if token is valid and user exists, None otherwise
+    """
+    try:
+        # First decode without verification to check claims
+        unverified = jwt.decode(token, options={"verify_signature": False})
+        issuer = unverified.get("iss")
+        audience = unverified.get("aud")
+        
+        logger.debug(f"Cross-service token: iss={issuer}, aud={audience}")
+        
+        # Check issuer
+        if issuer and issuer not in ACCEPTED_ISSUERS:
+            logger.warning(f"Token rejected: issuer '{issuer}' not in {ACCEPTED_ISSUERS}")
+            return None
+        
+        # Determine which audience to verify against
+        # Accept tokens intended for "chronicle" or any accepted issuer
+        verify_audience = None
+        if isinstance(audience, list):
+            # Find an acceptable audience from the token's audience list
+            for aud in audience:
+                if aud in ACCEPTED_ISSUERS or aud == "chronicle":
+                    verify_audience = aud
+                    break
+        elif isinstance(audience, str):
+            if audience in ACCEPTED_ISSUERS or audience == "chronicle":
+                verify_audience = audience
+        
+        # Now decode with full verification
+        try:
+            if verify_audience:
+                payload = jwt.decode(
+                    token, 
+                    SECRET_KEY, 
+                    algorithms=["HS256"],
+                    audience=verify_audience
+                )
+            else:
+                # No audience or unrecognized - decode without audience check
+                payload = jwt.decode(
+                    token, 
+                    SECRET_KEY, 
+                    algorithms=["HS256"],
+                    options={"verify_aud": False}
+                )
+        except jwt.ExpiredSignatureError:
+            logger.warning("Cross-service token expired")
+            return None
+        except jwt.InvalidSignatureError:
+            logger.warning("Cross-service token has invalid signature")
+            return None
+        except jwt.InvalidAudienceError as e:
+            logger.warning(f"Cross-service token audience mismatch: {e}")
+            return None
+        
+        # Get user ID from token
+        user_id = payload.get("sub")
+        if not user_id:
+            logger.warning("Token missing 'sub' claim")
+            return None
+        
+        # Look up user in database
+        try:
+            user_db_gen = get_user_db()
+            user_db = await user_db_gen.__anext__()
+            
+            # Parse user ID to ObjectId
+            from beanie import PydanticObjectId
+            try:
+                oid = PydanticObjectId(user_id)
+            except Exception:
+                logger.warning(f"Invalid user ID format in token: {user_id}")
+                return None
+            
+            user = await user_db.get(oid)
+            if user and user.is_active:
+                logger.info(f"Cross-service auth successful for user {user.user_id} ({user.email})")
+                return user
+            elif user:
+                logger.warning(f"User {user_id} exists but is inactive")
+            else:
+                logger.warning(f"User {user_id} not found in database")
+            
+        except Exception as e:
+            logger.error(f"Error looking up user from token: {e}")
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error validating cross-service token: {e}")
+        return None
 
 
 def generate_jwt_for_user(
@@ -195,9 +307,74 @@ fastapi_users = FastAPIUsers[User, PydanticObjectId](
     [cookie_backend, bearer_backend],
 )
 
-# User dependencies for protecting endpoints
-current_active_user = fastapi_users.current_user(active=True)
-current_active_user_optional = fastapi_users.current_user(active=True, optional=True)
+# HTTP Bearer scheme for extracting tokens
+_optional_bearer = HTTPBearer(auto_error=False)
+
+# Internal fastapi-users dependencies (used as fallback)
+_fastapi_users_active = fastapi_users.current_user(active=True)
+_fastapi_users_optional = fastapi_users.current_user(active=True, optional=True)
+
+
+async def current_active_user(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_optional_bearer),
+) -> User:
+    """
+    Combined auth dependency that supports both cross-service and native tokens.
+
+    This replaces the default fastapi-users current_user to support tokens from
+    ushadow (with aud=["ushadow", "chronicle"]) as well as Chronicle-native tokens.
+
+    All endpoints using current_active_user automatically get cross-service support.
+
+    Raises:
+        HTTPException(401): If no valid token found
+    """
+    # Try Bearer token first (cross-service)
+    if credentials:
+        token = credentials.credentials
+        user = await validate_cross_service_token(token)
+        if user:
+            logger.debug(f"Cross-service auth successful for user {user.user_id}")
+            return user
+
+    # Try cookie authentication (Chronicle-native)
+    try:
+        cookie_token = request.cookies.get("fastapiusersauth")
+        if cookie_token:
+            # Try cross-service validation first (in case it's from ushadow)
+            user = await validate_cross_service_token(cookie_token)
+            if user:
+                logger.debug(f"Cross-service cookie auth for user {user.user_id}")
+                return user
+
+            # Fall back to fastapi-users strategy for native Chronicle tokens
+            strategy = get_jwt_strategy()
+            user_db_gen = get_user_db()
+            user_db = await user_db_gen.__anext__()
+            user_manager = UserManager(user_db)
+            user = await strategy.read_token(cookie_token, user_manager)
+            if user and user.is_active:
+                logger.debug(f"Native cookie auth for user {user.user_id}")
+                return user
+    except Exception as e:
+        logger.warning(f"Cookie auth failed: {e}")
+
+    logger.warning("Authentication failed - no valid token")
+    raise HTTPException(status_code=401, detail="Authentication required")
+
+
+async def current_active_user_optional(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_optional_bearer),
+) -> Optional[User]:
+    """Optional version - returns None instead of raising 401."""
+    try:
+        return await current_active_user(request, credentials)
+    except HTTPException:
+        return None
+
+
 current_superuser = fastapi_users.current_user(active=True, superuser=True)
 
 
@@ -284,27 +461,25 @@ async def create_admin_user_if_needed():
 async def websocket_auth(websocket, token: Optional[str] = None) -> Optional[User]:
     """
     WebSocket authentication that supports both cookie and token-based auth.
+    
+    Supports cross-service tokens from ushadow with custom audience claims,
+    as well as Chronicle's own cookies.
+    
     Returns None if authentication fails (allowing graceful handling).
     """
-    strategy = get_jwt_strategy()
-
-    # Try JWT token from query parameter first
+    # Try JWT token from query parameter first (cross-service auth)
     if token:
         logger.info(f"Attempting WebSocket auth with query token (first 20 chars): {token[:20]}...")
-        try:
-            user_db_gen = get_user_db()
-            user_db = await user_db_gen.__anext__()
-            user_manager = UserManager(user_db)
-            user = await strategy.read_token(token, user_manager)
-            if user and user.is_active:
-                logger.info(f"WebSocket auth successful for user {user.user_id} using query token.")
-                return user
-            else:
-                logger.warning(f"Token validated but user inactive or not found: user={user}")
-        except Exception as e:
-            logger.error(f"WebSocket auth with query token failed: {type(e).__name__}: {e}", exc_info=True)
+        
+        # Use cross-service validation which handles custom audiences
+        user = await validate_cross_service_token(token)
+        if user:
+            logger.info(f"WebSocket auth successful for user {user.user_id} using cross-service token.")
+            return user
+        else:
+            logger.warning("Cross-service token validation failed, trying cookie auth...")
 
-    # Try cookie authentication
+    # Try cookie authentication (Chronicle's own auth)
     logger.debug("Attempting WebSocket auth with cookie.")
     try:
         cookie_header = next(
@@ -313,12 +488,21 @@ async def websocket_auth(websocket, token: Optional[str] = None) -> Optional[Use
         if cookie_header:
             match = re.search(r"fastapiusersauth=([^;]+)", cookie_header)
             if match:
+                cookie_token = match.group(1)
+                # Try cross-service validation for cookie too (in case it's from ushadow)
+                user = await validate_cross_service_token(cookie_token)
+                if user:
+                    logger.info(f"WebSocket auth successful for user {user.user_id} using cookie.")
+                    return user
+                    
+                # Fall back to fastapi-users strategy for native Chronicle tokens
+                strategy = get_jwt_strategy()
                 user_db_gen = get_user_db()
                 user_db = await user_db_gen.__anext__()
                 user_manager = UserManager(user_db)
-                user = await strategy.read_token(match.group(1), user_manager)
+                user = await strategy.read_token(cookie_token, user_manager)
                 if user and user.is_active:
-                    logger.info(f"WebSocket auth successful for user {user.user_id} using cookie.")
+                    logger.info(f"WebSocket auth successful for user {user.user_id} using native cookie.")
                     return user
     except Exception as e:
         logger.warning(f"WebSocket auth with cookie failed: {e}")
