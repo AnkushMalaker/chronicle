@@ -181,12 +181,14 @@ monitor_worker_health &
 MONITOR_PID=$!
 echo "🩺 Self-healing monitor started: PID $MONITOR_PID"
 
-# Wait for any worker process to exit
-wait -n
+# Keep the script running and let the self-healing monitor handle worker failures
+# Don't use wait -n (fail-fast on first worker exit) - this kills all workers when one fails
+# Instead, wait for the monitor process or explicit shutdown signal
+echo "⏳ Workers running - self-healing monitor will restart failed workers automatically"
+wait $MONITOR_PID
 
-# If we get here, one worker process has exited - kill everything
-echo "⚠️  One worker exited, stopping all workers..."
-kill $MONITOR_PID 2>/dev/null || true
+# If monitor exits (should only happen on SIGTERM/SIGINT), shut down gracefully
+echo "🛑 Monitor exited, shutting down all workers..."
 kill $RQ_WORKER_1_PID 2>/dev/null || true
 kill $RQ_WORKER_2_PID 2>/dev/null || true
 kill $RQ_WORKER_3_PID 2>/dev/null || true
@@ -198,5 +200,5 @@ kill $AUDIO_PERSISTENCE_WORKER_PID 2>/dev/null || true
 [ -n "$AUDIO_STREAM_PARAKEET_WORKER_PID" ] && kill $AUDIO_STREAM_PARAKEET_WORKER_PID 2>/dev/null || true
 wait
 
-echo "🔄 All workers stopped"
-exit 1
+echo "✅ All workers stopped gracefully"
+exit 0

@@ -228,6 +228,13 @@ async def recognise_speakers_job(
             error_type = speaker_result.get("error")
             error_message = speaker_result.get("message", "Unknown error")
             logger.error(f"🎤 Speaker recognition service error: {error_type} - {error_message}")
+
+            # Raise exception for connection failures so dependent jobs are canceled
+            # This ensures RQ marks the job as "failed" instead of "completed"
+            if error_type in ("connection_failed", "timeout", "client_error"):
+                raise RuntimeError(f"Speaker recognition service unavailable: {error_type} - {error_message}")
+
+            # For other errors (e.g., processing errors), return error dict without failing
             return {
                 "success": False,
                 "conversation_id": conversation_id,

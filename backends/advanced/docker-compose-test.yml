@@ -271,6 +271,11 @@ services:
   #       condition: service_healthy
   #   restart: unless-stopped
 
+# Use default bridge network for test isolation (no external network dependency)
+networks:
+  default:
+    driver: bridge
+
 # CI Considerations (for future implementation):
 # - GitHub Actions can run these services in isolated containers
 # - Port conflicts won't exist in CI since each job runs in isolation
