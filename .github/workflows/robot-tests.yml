@@ -61,7 +61,6 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: "3.12"
-        cache: 'pip'
 
     - name: Install uv
       uses: astral-sh/setup-uv@v4
@@ -93,6 +92,14 @@ jobs:
         TEST_TIMEOUT=120
         TEST_DEVICE_NAME=robot-test
         EOF
+
+    - name: Create test config.yml
+      run: |
+        echo "Copying test configuration file..."
+        mkdir -p config
+        cp tests/configs/deepgram-openai.yml config/config.yml
+        echo "✓ Test config.yml created from tests/configs/deepgram-openai.yml"
+        ls -lh config/config.yml
 
     - name: Start test environment
       working-directory: backends/advanced

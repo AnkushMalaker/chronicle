@@ -11,6 +11,8 @@ Resource         ../setup/teardown_keywords.robot
 Resource         ../resources/session_keywords.robot
 Resource         ../resources/audio_keywords.robot
 Resource         ../resources/conversation_keywords.robot
+Resource         ../resources/memory_keywords.robot
+Resource         ../resources/queue_keywords.robot
 Variables        ../setup/test_env.py
 Variables        ../setup/test_data.py
 Suite Setup      Suite Setup
@@ -126,6 +128,44 @@ Audio Playback And Segment Timing Test
 
     Log    All ${segment_count} segments have valid timestamps (0s - ${last_end}s)    INFO
     Log    Audio Playback And Segment Timing Test Completed Successfully    INFO
+
+End To End Pipeline With Memory Validation Test
+    [Documentation]    Complete E2E test with memory extraction and OpenAI quality validation.
+    ...                Provides comprehensive integration testing of the entire audio processing pipeline.
+    ...                Separate from other tests to avoid breaking existing upload-only tests.
+    [Tags]    e2e	memory
+    [Timeout]    600s
+
+    Log    Starting End-to-End Pipeline Test with Memory Validation    INFO
+
+    # Phase 1: Upload audio and wait for complete processing
+    Log    Uploading audio file and waiting for full processing    INFO
+    ${conversation}    ${memories}=    Upload Audio File And Wait For Memory
+    ...    ${TEST_AUDIO_FILE}
+    ...    ${TEST_DEVICE_NAME}
+
+    Set Global Variable    ${TEST_CONVERSATION}    ${conversation}
+
+    # Phase 2: Verify transcription quality
+    Log    Verifying transcription quality    INFO
+    Verify Transcription Quality    ${TEST_CONVERSATION}    ${EXPECTED_TRANSCRIPT}
+
+    # Phase 3: Verify memories were extracted
+    ${memory_count}=    Get Length    ${memories}
+    Should Be True    ${memory_count} > 0    No memories extracted
+    Log    Extracted ${memory_count} memories    INFO
+
+    # Phase 4: Verify memory quality with OpenAI (matches Python test!)
+    Log    Validating memory quality with OpenAI    INFO
+    Verify Memory Quality With OpenAI    ${memories}    ${EXPECTED_MEMORIES}
+
+    # Phase 5: Verify chat integration
+    Log    Verifying chat integration    INFO
+    Verify Chat Integration    api    ${TEST_CONVERSATION}
+
+    Log    End-to-End Pipeline Test Completed Successfully    INFO
+    Log    ✅ Transcript verified    INFO
+    Log    ✅ ${memory_count} memories extracted and validated with OpenAI    INFO
 
 *** Keywords ***
 

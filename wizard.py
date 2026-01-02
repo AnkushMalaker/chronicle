@@ -4,6 +4,7 @@ Chronicle Root Setup Orchestrator
 Handles service selection and delegation only - no configuration duplication
 """
 
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -314,19 +315,20 @@ def setup_git_hooks():
         console.print(f"⚠️  [yellow]Could not setup git hooks: {e} (optional)[/yellow]")
 
 def setup_config_file():
-    """Setup config.yml from template if it doesn't exist"""
-    config_file = Path("config.yml")
-    config_template = Path("config.yml.template")
+    """Setup config/config.yml from template if it doesn't exist"""
+    config_file = Path("config/config.yml")
+    config_template = Path("config/config.yml.template")
 
     if not config_file.exists():
         if config_template.exists():
-            import shutil
+            # Ensure config/ directory exists
+            config_file.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(config_template, config_file)
-            console.print("✅ [green]Created config.yml from template[/green]")
+            console.print("✅ [green]Created config/config.yml from template[/green]")
         else:
-            console.print("⚠️  [yellow]config.yml.template not found, skipping config setup[/yellow]")
+            console.print("⚠️  [yellow]config/config.yml.template not found, skipping config setup[/yellow]")
     else:
-        console.print("ℹ️  [blue]config.yml already exists, keeping existing configuration[/blue]")
+        console.print("ℹ️  [blue]config/config.yml already exists, keeping existing configuration[/blue]")
 
 def main():
     """Main orchestration logic"""

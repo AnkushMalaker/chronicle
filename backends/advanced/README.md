@@ -100,14 +100,21 @@ See [Docs/HTTPS_SETUP.md](Docs/HTTPS_SETUP.md) for detailed configuration.
 To run integration tests with different transcription providers:
 
 ```bash
-# Test with Parakeet ASR (offline transcription)
-# Automatically starts test ASR service - no manual setup required
-source .env && export DEEPGRAM_API_KEY && export OPENAI_API_KEY && TRANSCRIPTION_PROVIDER=parakeet uv run pytest tests/test_integration.py::test_full_pipeline_integration -v -s --tb=short
+# Test with different configurations using config.yml files
+# Test configs located in tests/configs/
 
-# Test with Deepgram (default)
-source .env && export DEEPGRAM_API_KEY && export OPENAI_API_KEY && uv run pytest tests/test_integration.py::test_full_pipeline_integration -v -s --tb=short
+# Test with Parakeet ASR + Ollama (offline, no API keys)
+CONFIG_FILE=../../tests/configs/parakeet-ollama.yml ./run-test.sh
+
+# Test with Deepgram + OpenAI (cloud-based)
+CONFIG_FILE=../../tests/configs/deepgram-openai.yml ./run-test.sh
+
+# Manual Robot Framework test execution
+source .env && export DEEPGRAM_API_KEY OPENAI_API_KEY && \
+  uv run robot --outputdir ../../test-results --loglevel INFO ../../tests/integration/integration_test.robot
 ```
 
 **Prerequisites:**
-- API keys configured in `.env` file
-- For debugging: Set `CACHED_MODE = True` in test file to keep containers running
+- API keys configured in `.env` file (for cloud providers)
+- Test configurations in `tests/configs/` directory
+- For debugging: Set `CLEANUP_CONTAINERS=false` environment variable to keep containers running

@@ -6,7 +6,7 @@ This document explains the different setup scripts available in Friend-Lite and 
 
 | Script | Purpose | When to Use |
 |--------|---------|-------------|
-| `init.py` | **Main interactive setup wizard** | **Recommended for all users** - First time setup with guided configuration (located at repo root). Memory now configured in `config.yml`. |
+| `init.py` | **Main interactive setup wizard** | **Recommended for all users** - First time setup with guided configuration (located at repo root). Memory now configured in `config/config.yml`. |
 | `setup-https.sh` | HTTPS certificate generation | **Optional** - When you need secure connections for microphone access |
 
 ## Main Setup Script: `init.py`

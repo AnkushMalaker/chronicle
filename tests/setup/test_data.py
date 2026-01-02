@@ -36,6 +36,20 @@ TEST_DEVICE_NAME = "Robot-test-device"
 # Expected content for transcript quality verification
 EXPECTED_TRANSCRIPT = "glass blowing"
 
+# Expected memories for DIY Glass Blowing audio (from Python integration test)
+# Source: backends/advanced/tests/assets/expected_memories.json
+EXPECTED_MEMORIES = [
+    "Nick assists significantly in the glass blowing process",
+    "Excitement and nervousness expressed during the process",
+    "Furnace contains about 400 pounds of liquid glass",
+    "Choice of color for the flower is light blue",
+    "Caitlin is mentioned as a participant",
+    "Class involves making a trumpet flower",
+    "Gravity is used as a tool in glass blowing",
+    "Nick did most of the turning during the demonstration",
+    "The video is sponsored by Squarespace."
+]
+
 # Expected segment timestamps for DIY Glass Blowing audio (4-minute version, 500 chunks)
 # These are the cropped audio timestamps after silence removal
 # Updated 2025-01-22 based on actual test output with streaming websocket processing

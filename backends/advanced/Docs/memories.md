@@ -10,7 +10,7 @@ This document explains how to configure and customize the memory service in the 
 - **Repository Layer**: `src/advanced_omi_backend/conversation_repository.py` (clean data access)
 - **Processing Manager**: `src/advanced_omi_backend/processors.py` (MemoryProcessor class)
 - **Conversation Management**: `src/advanced_omi_backend/conversation_manager.py` (lifecycle coordination)
-- **Configuration**: `config.yml` (memory section) + `src/model_registry.py`
+- **Configuration**: `config/config.yml` (memory section) + `src/model_registry.py`
 
 ## Overview
 
@@ -180,7 +180,7 @@ OPENAI_MODEL=gpt-5-mini  # Recommended for reliable JSON output
 # OPENAI_MODEL=gpt-3.5-turbo  # Budget option
 ```
 
-Or configure via `config.yml` (memory block):
+Or configure via `config/config.yml` (memory block):
 
 ```yaml
 memory_extraction:

@@ -128,7 +128,11 @@ async def health_check():
                 if transcription_provider
                 else "Not configured"
             ),
-            "transcription_provider": _stt_name or "not set",
+            "transcription_provider": (
+                REGISTRY.get_default("stt").name if REGISTRY and REGISTRY.get_default("stt")
+                else "not configured"
+            ),
+
             "provider_type": (
                 transcription_provider.mode if transcription_provider else "none"
             ),

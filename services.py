@@ -17,7 +17,7 @@ console = Console()
 
 def load_config_yml():
     """Load config.yml from repository root"""
-    config_path = Path(__file__).parent / 'config.yml'
+    config_path = Path(__file__).parent / 'config' / 'config.yml'
     if not config_path.exists():
         return None
 
@@ -25,7 +25,7 @@ def load_config_yml():
         with open(config_path, 'r') as f:
             return yaml.safe_load(f)
     except Exception as e:
-        console.print(f"[yellow]⚠️  Warning: Could not load config.yml: {e}[/yellow]")
+        console.print(f"[yellow]⚠️  Warning: Could not load config/config.yml: {e}[/yellow]")
         return None
 
 SERVICES = {

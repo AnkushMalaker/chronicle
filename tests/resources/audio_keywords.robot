@@ -69,6 +69,50 @@ Upload Audio File
       RETURN    ${conversation}
 
 
+Upload Audio File And Wait For Memory
+    [Documentation]    Upload audio file and wait for complete processing including memory extraction.
+    ...                This is for E2E testing - use Upload Audio File for upload-only tests.
+    ...                Performs assertions inline to verify successful memory extraction.
+    [Arguments]    ${audio_file_path}    ${device_name}=robot-test    ${folder}=.    ${min_memories}=1
+
+    # Upload file (uses existing keyword)
+    ${conversation}=    Upload Audio File    ${audio_file_path}    ${device_name}    ${folder}
+
+    # Get conversation ID to find memory job
+    ${conversation_id}=    Set Variable    ${conversation}[conversation_id]
+    Log    Conversation ID: ${conversation_id}
+
+    # Find memory job for this conversation
+    ${memory_jobs}=    Get Jobs By Type And Conversation    process_memory_job    ${conversation_id}
+    Should Not Be Empty    ${memory_jobs}    No memory job found for conversation ${conversation_id}
+
+    ${memory_job}=    Set Variable    ${memory_jobs}[0]
+    ${memory_job_id}=    Set Variable    ${memory_job}[job_id]
+
+    Log    Found memory job: ${memory_job_id}
+
+    # Wait for memory extraction (returns result dictionary)
+    ${result}=    Wait For Memory Extraction    ${memory_job_id}
+
+    # Verify memory extraction succeeded
+    Should Be True    ${result}[success]
+    ...    Memory extraction failed: ${result.get('error_message', 'Unknown error')}
+
+    # Verify job completed successfully
+    Should Be Equal As Strings    ${result}[status]    completed
+    ...    Expected job status 'completed', got '${result}[status]'
+
+    # Verify minimum memories were extracted
+    ${memory_count}=    Set Variable    ${result}[memory_count]
+    Should Be True    ${memory_count} >= ${min_memories}
+    ...    Expected at least ${min_memories} memories, found ${memory_count}
+
+    ${memories}=    Set Variable    ${result}[memories]
+    Log    Successfully extracted ${memory_count} memories
+
+    RETURN    ${conversation}    ${memories}
+
+
 Get Cropped Audio Info
     [Documentation]    Get cropped audio information for a conversation
     [Arguments]     ${audio_uuid}

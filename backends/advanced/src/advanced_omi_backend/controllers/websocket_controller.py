@@ -302,22 +302,22 @@ async def _initialize_streaming_session(
     client_state.stream_audio_format = audio_format
     application_logger.info(f"🆔 Created stream session: {client_state.stream_session_id}")
 
-    # Determine transcription provider from environment
-    transcription_provider = os.getenv("TRANSCRIPTION_PROVIDER", "").lower()
-    if transcription_provider == "parakeet":
-        provider = "parakeet"
-    elif transcription_provider == "deepgram":
-        provider = "deepgram"
-    else:
-        # Auto-detect: prefer Parakeet if URL is set, otherwise Deepgram
-        parakeet_url = os.getenv("PARAKEET_ASR_URL")
-        deepgram_key = os.getenv("DEEPGRAM_API_KEY")
-        if parakeet_url:
-            provider = "parakeet"
-        elif deepgram_key:
-            provider = "deepgram"
-        else:
-            raise ValueError("No transcription provider configured (DEEPGRAM_API_KEY or PARAKEET_ASR_URL required)")
+    # Determine transcription provider from config.yml
+    from advanced_omi_backend.model_registry import get_models_registry
+
+    registry = get_models_registry()
+    if not registry:
+        raise ValueError("config.yml not found - cannot determine transcription provider")
+
+    stt_model = registry.get_default("stt")
+    if not stt_model:
+        raise ValueError("No default STT model configured in config.yml (defaults.stt)")
+
+    provider = stt_model.model_provider.lower()
+    if provider not in ["deepgram", "parakeet"]:
+        raise ValueError(f"Unsupported STT provider: {provider}. Expected: deepgram or parakeet")
+
+    application_logger.info(f"📋 Using STT provider: {provider} (model: {stt_model.name})")
     
     # Initialize session tracking in Redis
     await audio_stream_producer.init_session(

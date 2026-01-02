@@ -179,9 +179,9 @@ After configuration, verify everything works with the integration test suite:
 
 # Alternative: Manual test with detailed logging
 source .env && export DEEPGRAM_API_KEY OPENAI_API_KEY && \
-  uv run pytest tests/test_integration.py -vv -s --log-cli-level=INFO
+  uv run robot --outputdir ../../test-results --loglevel INFO ../../tests/integration/integration_test.robot
 ```
-This end-to-end test validates the complete audio processing pipeline.
+This end-to-end test validates the complete audio processing pipeline using Robot Framework.
 
 ## Using the System
 
@@ -342,7 +342,7 @@ curl -X POST "http://localhost:8000/api/process-audio-files" \
 
 **Implementation**: 
 - **Memory System**: `src/advanced_omi_backend/memory/memory_service.py` + `src/advanced_omi_backend/controllers/memory_controller.py`
-- **Configuration**: memory settings in `config.yml` (memory section)
+- **Configuration**: memory settings in `config/config.yml` (memory section)
 
 ### Authentication & Security
 - **Email Authentication**: Login with email and password
@@ -541,10 +541,10 @@ OPENMEMORY_MCP_URL=http://host.docker.internal:8765
 
 > 🎯 **New to memory configuration?** Read our [Memory Configuration Guide](./memory-configuration-guide.md) for a step-by-step setup guide with examples.
 
-The system uses **centralized configuration** via `config.yml` for all models (LLM, embeddings, vector store) and memory extraction settings.
+The system uses **centralized configuration** via `config/config.yml` for all models (LLM, embeddings, vector store) and memory extraction settings.
 
 ### Configuration File Location
-- **Path**: repository `config.yml` (override with `CONFIG_FILE` env var)
+- **Path**: repository `config/config.yml` (override with `CONFIG_FILE` env var)
 - **Hot-reload**: Changes are applied on next processing cycle (no restart required)
 - **Fallback**: If file is missing, system uses safe defaults with environment variables
 
@@ -613,7 +613,7 @@ If you experience JSON parsing errors in fact extraction:
 
 2. **Enable fact extraction** with reliable JSON output:
    ```yaml
-   # In config.yml (memory section)
+   # In config/config.yml (memory section)
    fact_extraction:
      enabled: true  # Safe to enable with GPT-4o
    ```
@@ -727,5 +727,5 @@ curl -H "Authorization: Bearer $ADMIN_TOKEN" \
 - **Connect audio clients** using the WebSocket API
 - **Explore the dashboard** to manage conversations and users
 - **Review the user data architecture** for understanding data organization
-- **Customize memory extraction** by editing the `memory` section in `config.yml`
+- **Customize memory extraction** by editing the `memory` section in `config/config.yml`
 - **Monitor processing performance** using debug API endpoints

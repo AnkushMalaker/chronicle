@@ -1,12 +1,12 @@
   1. Docs/quickstart.md (15 min)
   2. Docs/architecture.md (20 min)
   3. main.py - just the imports and WebSocket sections (15 min)
-  4. config.yml (memory section) (10 min)
+  4. config/config.yml (memory section) (10 min)
 
   🔧 "I want to work on memory extraction"
 
   1. Docs/quickstart.md → Docs/memories.md
-  2. config.yml (memory.extraction section)
+  2. config/config.yml (memory.extraction section)
   3. main.py lines 1047-1065 (trigger)
   4. main.py lines 1163-1195 (processing)
   5. src/memory/memory_service.py

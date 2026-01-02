@@ -14,7 +14,7 @@ services:
       - ./data/test_audio_chunks:/app/audio_chunks
       - ./data/test_debug_dir:/app/debug_dir
       - ./data/test_data:/app/data
-      - ../../config.yml:/app/config.yml:ro  # Mount config.yml for model registry and memory settings
+      - ${CONFIG_FILE:-../../config/config.yml}:/app/config.yml:ro  # Mount config.yml for model registry and memory settings
     environment:
       # Override with test-specific settings
       - MONGODB_URI=mongodb://mongo-test:27017/test_db
@@ -58,8 +58,8 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8000/readiness"]
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 30s
+      retries: 10
+      start_period: 60s
     restart: unless-stopped
 
   webui-test:
@@ -129,7 +129,7 @@ services:
       - ./data/test_audio_chunks:/app/audio_chunks
       - ./data/test_debug_dir:/app/debug_dir
       - ./data/test_data:/app/data
-      - ../../config.yml:/app/config.yml:ro  # Mount config.yml for model registry and memory settings
+      - ${CONFIG_FILE:-../../config/config.yml}:/app/config.yml:ro  # Mount config.yml for model registry and memory settings
     environment:
       # Same environment as backend
       - MONGODB_URI=mongodb://mongo-test:27017/test_db

@@ -12,12 +12,9 @@ services:
       - ./data/audio_chunks:/app/audio_chunks
       - ./data/debug_dir:/app/debug_dir
       - ./data:/app/data
-      - ../../config.yml:/app/config.yml  # Removed :ro to allow UI config saving
+      - ../../config/config.yml:/app/config.yml  # Removed :ro to allow UI config saving
     environment:
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
-      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
-      - MISTRAL_MODEL=${MISTRAL_MODEL}
-      - TRANSCRIPTION_PROVIDER=${TRANSCRIPTION_PROVIDER}
       - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
       - HF_TOKEN=${HF_TOKEN}
@@ -63,12 +60,9 @@ services:
       - ./start-workers.sh:/app/start-workers.sh
       - ./data/audio_chunks:/app/audio_chunks
       - ./data:/app/data
-      - ../../config.yml:/app/config.yml  # Removed :ro for consistency
+      - ../../config/config.yml:/app/config.yml  # Removed :ro for consistency
     environment:
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
-      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
-      - MISTRAL_MODEL=${MISTRAL_MODEL}
-      - TRANSCRIPTION_PROVIDER=${TRANSCRIPTION_PROVIDER}
       - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GROQ_API_KEY=${GROQ_API_KEY}
