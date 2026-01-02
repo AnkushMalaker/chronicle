@@ -35,6 +35,10 @@ if [ ! -f "Makefile" ] || [ ! -d "endpoints" ]; then
     exit 1
 fi
 
+# Set absolute paths for consistent directory references
+TESTS_DIR="$(pwd)"
+BACKEND_DIR="$(cd ../backends/advanced && pwd)"
+
 print_info "Robot Framework Test Runner"
 print_info "============================"
 
@@ -107,7 +111,7 @@ EOF
 fi
 
 # Navigate to backend directory for docker compose
-cd ../backends/advanced
+cd "$BACKEND_DIR"
 
 print_info "Starting test infrastructure..."
 
@@ -226,7 +230,7 @@ done
 print_success "All services ready!"
 
 # Return to tests directory
-cd ../../tests
+cd "$TESTS_DIR"
 
 # Run Robot Framework tests via Makefile
 # Dependencies are handled automatically by 'uv run' in Makefile
@@ -243,13 +247,13 @@ fi
 # Show service logs if tests failed
 if [ $TEST_EXIT_CODE -ne 0 ]; then
     print_info "Showing service logs..."
-    cd ../backends/advanced
+    cd "$BACKEND_DIR"
     echo "=== Backend Logs (last 50 lines) ==="
     docker compose -f docker-compose-test.yml logs --tail=50 chronicle-backend-test
     echo ""
     echo "=== Worker Logs (last 50 lines) ==="
     docker compose -f docker-compose-test.yml logs --tail=50 workers-test
-    cd ../../tests
+    cd "$TESTS_DIR"
 fi
 
 # Display test results summary
@@ -291,16 +295,63 @@ if stats is not None:
 PYTHON_SCRIPT
 fi
 
+# Capture container logs before cleanup (always, for debugging)
+print_info "Capturing container logs for debugging..."
+LOG_DIR="${TESTS_DIR}/${OUTPUTDIR}/container-logs"
+mkdir -p "$LOG_DIR"
+
+cd "$BACKEND_DIR"
+
+# Capture container status
+print_info "Capturing container status..."
+docker compose -f docker-compose-test.yml ps > "$LOG_DIR/container-status.txt" 2>&1 || true
+
+# Capture worker registration status
+print_info "Capturing worker registration status..."
+docker compose -f docker-compose-test.yml exec -T workers-test uv run python -c '
+from rq import Worker
+from redis import Redis
+import os
+
+redis_url = os.getenv("REDIS_URL", "redis://redis-test:6379/0")
+r = Redis.from_url(redis_url)
+workers = Worker.all(connection=r)
+
+print(f"Total workers: {len(workers)}")
+print(f"\nWorker details:")
+for i, worker in enumerate(workers, 1):
+    print(f"  {i}. {worker.name}")
+    print(f"     State: {worker.state}")
+    print(f"     Queues: {[q.name for q in worker.queues]}")
+    print(f"     Current job: {worker.get_current_job()}")
+    print()
+' > "$LOG_DIR/worker-status.txt" 2>&1 || echo "Failed to capture worker status" > "$LOG_DIR/worker-status.txt"
+
+# Capture logs from all services
+print_info "Capturing service logs..."
+SERVICES=(chronicle-backend-test workers-test mongo-test redis-test qdrant-test speaker-service-test)
+for service in "${SERVICES[@]}"; do
+    docker compose -f docker-compose-test.yml logs --tail=200 "$service" > "$LOG_DIR/${service}.log" 2>&1 || true
+done
+
+# Capture container resource usage
+print_info "Capturing container resource usage..."
+docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}" > "$LOG_DIR/container-stats.txt" 2>&1 || true
+
+print_success "Container logs saved to: $LOG_DIR"
+
+cd "$TESTS_DIR"
+
 # Cleanup test containers
 if [ "$CLEANUP_CONTAINERS" = "true" ]; then
     print_info "Cleaning up test containers..."
-    cd ../backends/advanced
+    cd "$BACKEND_DIR"
     docker compose -f docker-compose-test.yml down -v
-    cd ../../tests
+    cd "$TESTS_DIR"
     print_success "Cleanup complete"
 else
     print_warning "Skipping container cleanup (CLEANUP_CONTAINERS=false)"
-    print_info "To cleanup manually: cd backends/advanced && docker compose -f docker-compose-test.yml down -v"
+    print_info "To cleanup manually: cd $BACKEND_DIR && docker compose -f docker-compose-test.yml down -v"
 fi
 
 if [ $TEST_EXIT_CODE -eq 0 ]; then
