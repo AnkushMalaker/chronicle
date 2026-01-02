@@ -28,6 +28,7 @@ jobs:
       env:
         DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
         OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: |
         echo "Verifying required secrets..."
         if [ -z "$DEEPGRAM_API_KEY" ]; then
@@ -38,8 +39,13 @@ jobs:
           echo "❌ ERROR: OPENAI_API_KEY secret is not set"
           exit 1
         fi
+        if [ -z "$HF_TOKEN" ]; then
+          echo "❌ ERROR: HF_TOKEN secret is not set"
+          exit 1
+        fi
         echo "✓ DEEPGRAM_API_KEY is set (length: ${#DEEPGRAM_API_KEY})"
         echo "✓ OPENAI_API_KEY is set (length: ${#OPENAI_API_KEY})"
+        echo "✓ HF_TOKEN is set (length: ${#HF_TOKEN})"
         echo "✓ All required secrets verified"
 
     - name: Set up Docker Buildx
@@ -106,6 +112,7 @@ jobs:
       env:
         DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
         OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
         LLM_PROVIDER: openai
         TRANSCRIPTION_PROVIDER: deepgram
         MEMORY_PROVIDER: friend_lite
@@ -114,6 +121,7 @@ jobs:
         echo "Checking environment variables..."
         echo "DEEPGRAM_API_KEY is set: $([ -n "$DEEPGRAM_API_KEY" ] && echo 'YES' || echo 'NO')"
         echo "OPENAI_API_KEY is set: $([ -n "$OPENAI_API_KEY" ] && echo 'YES' || echo 'NO')"
+        echo "HF_TOKEN is set: $([ -n "$HF_TOKEN" ] && echo 'YES' || echo 'NO')"
         echo "LLM_PROVIDER: $LLM_PROVIDER"
         echo "TRANSCRIPTION_PROVIDER: $TRANSCRIPTION_PROVIDER"
 
@@ -128,6 +136,7 @@ jobs:
         # Export API keys so docker-compose can use them
         export DEEPGRAM_API_KEY
         export OPENAI_API_KEY
+        export HF_TOKEN
         export LLM_PROVIDER
         export TRANSCRIPTION_PROVIDER
         export MEMORY_PROVIDER
