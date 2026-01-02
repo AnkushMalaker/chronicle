@@ -73,9 +73,11 @@ class ConfigManager:
                 return current
             current = current.parent
 
-        # Fallback to cwd if not found
-        logger.warning("Could not find config/config.yml, using current directory as repo root")
-        return Path.cwd()
+        # Raise error if not found
+        raise RuntimeError(
+            f"Could not find config/config.yml in directory tree starting from {Path.cwd()}. "
+            "Please ensure you're running from within the Chronicle repository."
+        )
 
     def _detect_service_path(self) -> Optional[str]:
         """Auto-detect service path from current working directory."""
@@ -100,15 +102,28 @@ class ConfigManager:
     def _load_config_yml(self) -> Dict[str, Any]:
         """Load config.yml file."""
         if not self.config_yml_path.exists():
-            logger.warning(f"config.yml not found at {self.config_yml_path}")
-            return {}
+            raise RuntimeError(
+                f"Configuration file not found at {self.config_yml_path}. "
+                "Please ensure config/config.yml exists in the repository root."
+            )
 
         try:
             with open(self.config_yml_path, 'r') as f:
-                return yaml.safe_load(f) or {}
+                config = yaml.safe_load(f)
+                if config is None:
+                    raise RuntimeError(
+                        f"Configuration file {self.config_yml_path} is empty or invalid. "
+                        "Please ensure it contains valid YAML configuration."
+                    )
+                return config
+        except yaml.YAMLError as e:
+            raise RuntimeError(
+                f"Invalid YAML in configuration file {self.config_yml_path}: {e}"
+            )
         except Exception as e:
-            logger.error(f"Failed to load config.yml: {e}")
-            return {}
+            raise RuntimeError(
+                f"Failed to load configuration file {self.config_yml_path}: {e}"
+            )
 
     def _save_config_yml(self, config: Dict[str, Any]):
         """Save config.yml file with backup."""
