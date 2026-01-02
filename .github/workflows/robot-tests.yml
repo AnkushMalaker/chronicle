@@ -77,28 +77,6 @@ jobs:
       run: |
         uv pip install --system robotframework robotframework-requests python-dotenv websockets
 
-    - name: Create test environment file
-      working-directory: tests/setup
-      run: |
-        cat > .env.test << EOF
-        # API URLs
-        API_URL=http://localhost:8001
-        BACKEND_URL=http://localhost:8001
-        FRONTEND_URL=http://localhost:3001
-
-        # Test Admin Credentials
-        ADMIN_EMAIL=test-admin@example.com
-        ADMIN_PASSWORD=test-admin-password-123
-
-        # API Keys (from GitHub secrets)
-        OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
-        DEEPGRAM_API_KEY=${{ secrets.DEEPGRAM_API_KEY }}
-
-        # Test Configuration
-        TEST_TIMEOUT=120
-        TEST_DEVICE_NAME=robot-test
-        EOF
-
     - name: Create test config.yml
       run: |
         echo "Copying test configuration file..."
@@ -107,125 +85,17 @@ jobs:
         echo "✓ Test config.yml created from tests/configs/deepgram-openai.yml"
         ls -lh config/config.yml
 
-    - name: Start test environment
-      working-directory: backends/advanced
-      env:
-        DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
-        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        LLM_PROVIDER: openai
-        TRANSCRIPTION_PROVIDER: deepgram
-        MEMORY_PROVIDER: friend_lite
-      run: |
-        # Debug: Check if secrets are available
-        echo "Checking environment variables..."
-        echo "DEEPGRAM_API_KEY is set: $([ -n "$DEEPGRAM_API_KEY" ] && echo 'YES' || echo 'NO')"
-        echo "OPENAI_API_KEY is set: $([ -n "$OPENAI_API_KEY" ] && echo 'YES' || echo 'NO')"
-        echo "HF_TOKEN is set: $([ -n "$HF_TOKEN" ] && echo 'YES' || echo 'NO')"
-        echo "LLM_PROVIDER: $LLM_PROVIDER"
-        echo "TRANSCRIPTION_PROVIDER: $TRANSCRIPTION_PROVIDER"
-
-        # Clean any existing test containers for fresh start
-        echo "Cleaning up any existing test containers..."
-        docker compose -f docker-compose-test.yml down -v || true
-
-        # Start ALL services in parallel - Docker Compose handles dependencies via healthchecks
-        echo "Starting all services in parallel (docker-compose-test.yml)..."
-        echo "Note: Using test compose file with source mounts for faster startup"
-
-        # Export API keys so docker-compose can use them
-        export DEEPGRAM_API_KEY
-        export OPENAI_API_KEY
-        export HF_TOKEN
-        export LLM_PROVIDER
-        export TRANSCRIPTION_PROVIDER
-        export MEMORY_PROVIDER
-
-        DOCKER_BUILDKIT=0 docker compose -f docker-compose-test.yml up -d
-
-        # Show container status
-        echo "Container status:"
-        docker compose -f docker-compose-test.yml ps
-
-        # Single wait for backend readiness (backend depends_on ensures infra is ready)
-        echo "Waiting for backend readiness (up to 120s)..."
-        for i in {1..40}; do
-          if curl -s http://localhost:8001/readiness > /dev/null 2>&1; then
-            echo "✓ Backend is ready (all dependencies satisfied)"
-            break
-          fi
-          # Show logs every 10 attempts to help debug
-          if [ $((i % 10)) -eq 0 ]; then
-            echo "Still waiting... showing recent logs:"
-            docker compose -f docker-compose-test.yml logs --tail=20 chronicle-backend-test
-          fi
-          if [ $i -eq 40 ]; then
-            echo "✗ Backend failed to start - showing full logs:"
-            docker compose -f docker-compose-test.yml logs
-            exit 1
-          fi
-          echo "Attempt $i/40..."
-          sleep 3
-        done
-
-        echo "✓ Backend is ready!"
-
-        # Verify workers are registered with Redis (Robot tests need stable workers)
-        echo "Waiting for workers to register with Redis (up to 60s)..."
-        for i in {1..30}; do
-          WORKER_COUNT=$(docker compose -f docker-compose-test.yml exec -T workers-test uv run python -c 'from rq import Worker; from redis import Redis; import os; r = Redis.from_url(os.getenv("REDIS_URL", "redis://redis-test:6379/0")); print(len(Worker.all(connection=r)))' 2>/dev/null || echo "0")
-
-          if [ "$WORKER_COUNT" -ge 6 ]; then
-            echo "✓ Found $WORKER_COUNT workers registered"
-            # Show worker details
-            docker compose -f docker-compose-test.yml exec -T workers-test uv run python -c 'from rq import Worker; from redis import Redis; import os; r = Redis.from_url(os.getenv("REDIS_URL", "redis://redis-test:6379/0")); workers = Worker.all(connection=r); print(f"Total registered workers: {len(workers)}"); [print(f"  - {w.name}: queues={w.queue_names()}, state={w.get_state()}") for w in workers]'
-            break
-          fi
-
-          if [ $i -eq 30 ]; then
-            echo "✗ Workers failed to register after 60s"
-            echo "Showing worker logs:"
-            docker compose -f docker-compose-test.yml logs --tail=50 workers-test
-            exit 1
-          fi
-
-          echo "Attempt $i/30: $WORKER_COUNT workers registered (waiting for 6+)..."
-          sleep 2
-        done
-
-        echo "✓ All services ready!"
-
-    - name: Verify checked out code
-      working-directory: tests
-      run: |
-        echo "Current git commit:"
-        git log -1 --oneline
-        echo ""
-        echo "Test files in current checkout:"
-        find . -name "*.robot" -type f | head -10
-        echo ""
-        echo "Sample of tags in test files:"
-        grep -h "\[Tags\]" endpoints/*.robot infrastructure/*.robot integration/*.robot 2>/dev/null | head -20 || echo "No tag files found"
-
-    - name: Clean previous test results
-      working-directory: tests
-      run: |
-        echo "Cleaning any previous test results..."
-        rm -rf results
-        mkdir -p results
-        echo "✓ Fresh results directory created"
-
     - name: Run Robot Framework tests
       working-directory: tests
       env:
-        # Required for backend imports in test libraries
-        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        OPENAI_BASE_URL: https://api.openai.com/v1
-        OPENAI_MODEL: gpt-4o-mini
+        # Required for test runner script
         DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        CLEANUP_CONTAINERS: "false"  # Don't cleanup in CI - handled by workflow
       run: |
-        # Run all tests (don't fail workflow to allow artifact upload)
-        make all OUTPUTDIR=results
+        # Use the unified test script that mirrors local development
+        ./run-robot-tests.sh
         TEST_EXIT_CODE=$?
         echo "test_exit_code=$TEST_EXIT_CODE" >> $GITHUB_ENV
         exit 0  # Don't fail here, we'll fail at the end after uploading artifacts

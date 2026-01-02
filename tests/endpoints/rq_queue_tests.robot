@@ -19,7 +19,7 @@ Suite Teardown      Suite Teardown
 Test Setup       Test Cleanup
 *** Variables ***
 ${TEST_TIMEOUT}             20s
-${COMPOSE_FILE}             backends/advanced/docker-compose-test.yml
+${COMPOSE_FILE}             docker-compose-test.yml
 
 *** Keywords ***
 
@@ -29,11 +29,11 @@ Restart Backend Service
 
     # Stop backend container
     Run Process    docker    compose    -f    ${COMPOSE_FILE}    stop    chronicle-backend-test
-    ...    cwd=.    timeout=30s
+    ...    cwd=${BACKEND_DIR}    timeout=30s
 
     # Start backend container again
     Run Process    docker    compose    -f    ${COMPOSE_FILE}    start    chronicle-backend-test
-    ...    cwd=.    timeout=60s
+    ...    cwd=${BACKEND_DIR}    timeout=60s
 
     # Wait for backend to be ready again
     Wait Until Keyword Succeeds    ${TEST_TIMEOUT}    5s

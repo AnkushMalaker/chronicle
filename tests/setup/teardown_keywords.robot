@@ -38,7 +38,7 @@ Dev Mode Teardown
     Log To Console    \n=== Dev Mode Teardown (Default) ===
     Log To Console    ✓ Keeping containers running for next test run
     Log To Console    Tip: Use 'TEST_MODE=prod' for full cleanup or run manually:
-    Log To Console         docker compose -f backends/advanced/docker-compose-ci.yml down -v
+    Log To Console         docker compose -f ${BACKEND_DIR}/docker-compose-ci.yml down -v
 
     # Only delete HTTP sessions
     Delete All Sessions
@@ -52,9 +52,9 @@ Prod Mode Teardown
     Stop Docker Services    remove_volumes=${True}
 
     # Clean up any remaining volumes
-    Run Process    rm    -rf    backends/advanced/data/test_mongo_data    shell=True
-    Run Process    rm    -rf    ${EXECDIR}/backends/advanced/data/test_qdrant_data    shell=True
-    Run Process    rm    -rf    ${EXECDIR}/backends/advanced/data/test_audio_chunks    shell=True
+    Run Process    rm    -rf    ${BACKEND_DIR}/data/test_mongo_data    shell=True
+    Run Process    rm    -rf    ${BACKEND_DIR}/data/test_qdrant_data    shell=True
+    Run Process    rm    -rf    ${BACKEND_DIR}/data/test_audio_chunks    shell=True
 
     # Delete all HTTP sessions
     Delete All Sessions

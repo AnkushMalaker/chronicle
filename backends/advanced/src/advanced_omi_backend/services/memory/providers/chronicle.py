@@ -84,9 +84,16 @@ class MemoryService(MemoryServiceBase):
             vector_ok = await self.vector_store.test_connection()
 
             if not llm_ok:
-                raise RuntimeError("LLM provider connection failed")
+                raise RuntimeError(
+                    f"LLM provider connection failed for {self.config.llm_provider.value}. "
+                    f"Check API keys, network connectivity, and service availability. "
+                    f"Memory processing cannot proceed without a working LLM connection."
+                )
             if not vector_ok:
-                raise RuntimeError("Vector store connection failed")
+                raise RuntimeError(
+                    f"Vector store connection failed for {self.config.vector_store_provider.value}. "
+                    f"Check that Qdrant service is running and accessible."
+                )
 
             self._initialized = True
             memory_logger.info(
