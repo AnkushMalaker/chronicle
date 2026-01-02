@@ -121,9 +121,13 @@ export COMPOSE_PROJECT_NAME="advanced-backend-test"
 print_info "Cleaning up any existing test environment..."
 docker compose -f docker-compose-test.yml down -v 2>/dev/null || true
 
-# Force remove any stuck containers with test names
+# Force remove any stuck containers with test names (uses COMPOSE_PROJECT_NAME)
 print_info "Removing any stuck test containers..."
-docker rm -f advanced-backend-test-mongo-test-1 advanced-backend-test-redis-test-1 advanced-backend-test-qdrant-test-1 advanced-backend-test-chronicle-backend-test-1 advanced-backend-test-workers-test-1 advanced-backend-test-webui-test-1 2>/dev/null || true
+# Dynamically construct container names from docker-compose services
+TEST_SERVICES=(mongo-test redis-test qdrant-test chronicle-backend-test workers-test webui-test speaker-service-test)
+for service in "${TEST_SERVICES[@]}"; do
+    docker rm -f "${COMPOSE_PROJECT_NAME}-${service}-1" 2>/dev/null || true
+done
 
 # Start infrastructure services (MongoDB, Redis, Qdrant)
 print_info "Starting MongoDB, Redis, and Qdrant (fresh containers)..."
@@ -224,14 +228,8 @@ print_success "All services ready!"
 # Return to tests directory
 cd ../../tests
 
-# Install Robot Framework dependencies if not in CI
-if [ -z "$CI" ]; then
-    print_info "Installing Robot Framework dependencies..."
-    uv venv --quiet --python 3.12 || true  # May already exist
-    uv pip install --quiet robotframework robotframework-requests python-dotenv websockets
-fi
-
 # Run Robot Framework tests via Makefile
+# Dependencies are handled automatically by 'uv run' in Makefile
 print_info "Running Robot Framework tests..."
 print_info "Output directory: $OUTPUTDIR"
 

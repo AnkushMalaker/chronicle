@@ -166,7 +166,7 @@ if [ ! -f "diarization_config.json" ] && [ -f "diarization_config.json.template"
     print_success "diarization_config.json created"
 fi
 
-# Note: Robot Framework dependencies are installed in the root .venv via test-requirements.txt
+# Note: Robot Framework dependencies are managed via tests/test-requirements.txt
 # The integration tests use Docker containers for service dependencies
 
 # Set up environment variables for testing
