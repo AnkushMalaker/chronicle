@@ -47,9 +47,9 @@ CLEANUP_CONTAINERS="${CLEANUP_CONTAINERS:-true}"
 OUTPUTDIR="${OUTPUTDIR:-results}"
 
 # Set default CONFIG_FILE if not provided
-# This allows testing with different provider combinations
-# Usage: CONFIG_FILE=../tests/configs/parakeet-ollama.yml ./run-robot-tests.sh
-export CONFIG_FILE="${CONFIG_FILE:-../config/config.yml}"
+# Use test config by default (disables speaker recognition for CI performance)
+# Override: CONFIG_FILE=../config/config.yml ./run-robot-tests.sh
+export CONFIG_FILE="${CONFIG_FILE:-configs/deepgram-openai.yml}"
 
 # Convert CONFIG_FILE to absolute path (Docker Compose resolves relative paths from compose file location)
 if [[ ! "$CONFIG_FILE" = /* ]]; then

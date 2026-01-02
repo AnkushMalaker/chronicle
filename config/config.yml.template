@@ -209,3 +209,11 @@ memory:
     enabled: false
     neo4j_host: neo4j-mem0
     timeout: 30
+
+speaker_recognition:
+  # Enable/disable speaker recognition (overrides DISABLE_SPEAKER_RECOGNITION env var)
+  enabled: true
+  # Service URL (defaults to SPEAKER_SERVICE_URL env var if not specified)
+  service_url: null
+  # Request timeout in seconds
+  timeout: 60

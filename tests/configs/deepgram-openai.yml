@@ -82,3 +82,8 @@ memory:
       Extract important information from this conversation and return a JSON object with an array named "facts".
       Include personal preferences, plans, names, dates, locations, numbers, and key details.
       Keep items concise and useful.
+
+speaker_recognition:
+  # Disable speaker recognition in CI tests (too slow, blocks workers)
+  enabled: false
+  timeout: 60
