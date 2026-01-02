@@ -58,6 +58,23 @@ async def check_enrolled_speakers_job(
         transcription_results=raw_results
     )
 
+    # Check for errors from speaker service
+    if speaker_result and speaker_result.get("error"):
+        error_type = speaker_result.get("error")
+        error_message = speaker_result.get("message", "Unknown error")
+        logger.error(f"🎤 [SPEAKER CHECK] Speaker service error: {error_type} - {error_message}")
+
+        # Fail the job - don't create conversation if speaker service failed
+        return {
+            "success": False,
+            "session_id": session_id,
+            "error": f"Speaker recognition failed: {error_type}",
+            "error_details": error_message,
+            "enrolled_present": False,
+            "identified_speakers": [],
+            "processing_time_seconds": time.time() - start_time
+        }
+
     # Extract identified speakers
     identified_speakers = []
     if speaker_result and "segments" in speaker_result:
@@ -206,7 +223,22 @@ async def recognise_speakers_job(
             user_id=user_id
         )
 
-        if not speaker_result or "segments" not in speaker_result:
+        # Check for errors from speaker service
+        if speaker_result.get("error"):
+            error_type = speaker_result.get("error")
+            error_message = speaker_result.get("message", "Unknown error")
+            logger.error(f"🎤 Speaker recognition service error: {error_type} - {error_message}")
+            return {
+                "success": False,
+                "conversation_id": conversation_id,
+                "version_id": version_id,
+                "error": f"Speaker recognition failed: {error_type}",
+                "error_details": error_message,
+                "processing_time_seconds": time.time() - start_time
+            }
+
+        # Service worked but found no segments (legitimate empty result)
+        if not speaker_result or "segments" not in speaker_result or not speaker_result["segments"]:
             logger.warning(f"🎤 Speaker recognition returned no segments")
             return {
                 "success": True,
