@@ -181,6 +181,10 @@ class AppModels(BaseModel):
         default_factory=dict,
         description="Memory service configuration"
     )
+    speaker_recognition: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Speaker recognition service configuration"
+    )
     
     def get_by_name(self, name: str) -> Optional[ModelDef]:
         """Get a model by its unique name.

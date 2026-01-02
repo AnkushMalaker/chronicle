@@ -39,8 +39,7 @@ services:
       - OPENMEMORY_USER_ID=${OPENMEMORY_USER_ID:-openmemory}
       - MYCELIA_URL=http://mycelia-backend-test:5173
       - MYCELIA_DB=mycelia_test
-      # Enable speaker recognition in test environment
-      - DISABLE_SPEAKER_RECOGNITION=false
+      # Speaker recognition controlled by config.yml (disabled in test config for CI performance)
       - SPEAKER_SERVICE_URL=http://speaker-service-test:8085
       - CORS_ORIGINS=http://localhost:3001,http://localhost:8001,https://localhost:3001,https://localhost:8001
       # Set low inactivity timeout for tests (2 seconds instead of 60)
@@ -182,7 +181,7 @@ services:
       - OPENMEMORY_USER_ID=${OPENMEMORY_USER_ID:-openmemory}
       - MYCELIA_URL=http://mycelia-backend-test:5173
       - MYCELIA_DB=mycelia_test
-      - DISABLE_SPEAKER_RECOGNITION=false
+      # Speaker recognition controlled by config.yml (disabled in test config for CI performance)
       - SPEAKER_SERVICE_URL=http://speaker-service-test:8085
       # Set low inactivity timeout for tests (2 seconds instead of 60)
       - SPEECH_INACTIVITY_THRESHOLD_SECONDS=2

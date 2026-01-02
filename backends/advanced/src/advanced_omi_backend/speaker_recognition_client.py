@@ -3,6 +3,8 @@ Speaker recognition client for integrating with the speaker recognition service.
 
 This module provides an optional integration with the speaker recognition service
 to enhance transcripts with actual speaker names instead of generic labels.
+
+Configuration is managed via config.yml (speaker_recognition section).
 """
 
 import asyncio
@@ -15,6 +17,8 @@ from typing import Dict, List, Optional
 import aiohttp
 from aiohttp import ClientConnectorError
 
+from advanced_omi_backend.model_registry import get_models_registry
+
 logger = logging.getLogger(__name__)
 
 
@@ -25,23 +29,42 @@ class SpeakerRecognitionClient:
         """
         Initialize the speaker recognition client.
 
+        Configuration is read from config.yml (speaker_recognition section).
+        The 'enabled' flag controls whether speaker recognition is active.
+
         Args:
             service_url: URL of the speaker recognition service (e.g., http://speaker-service:8085)
-                        If not provided, uses SPEAKER_SERVICE_URL env var
+                        If not provided, uses config.yml service_url or SPEAKER_SERVICE_URL env var
         """
-        # Check if speaker recognition is explicitly disabled
-        if os.getenv("DISABLE_SPEAKER_RECOGNITION", "").lower() in ["true", "1", "yes"]:
-            self.service_url = None
+        # Load speaker recognition config from config.yml
+        registry = get_models_registry()
+        if not registry or not registry.speaker_recognition:
+            # No config found, default to disabled
             self.enabled = False
-            logger.info("Speaker recognition client disabled (DISABLE_SPEAKER_RECOGNITION=true)")
-        else:
-            self.service_url = service_url or os.getenv("SPEAKER_SERVICE_URL")
-            self.enabled = bool(self.service_url)
+            self.service_url = None
+            logger.info("Speaker recognition client disabled (no configuration found)")
+            return
 
-            if self.enabled:
-                logger.info(f"Speaker recognition client initialized with URL: {self.service_url}")
-            else:
-                logger.info("Speaker recognition client disabled (no service URL configured)")
+        speaker_config = registry.speaker_recognition
+        if not speaker_config.get("enabled", True):
+            # Disabled in config
+            self.enabled = False
+            self.service_url = None
+            logger.info("Speaker recognition client disabled (config.yml enabled=false)")
+            return
+
+        # Enabled - determine URL (priority: param > config > env var)
+        self.service_url = (
+            service_url
+            or speaker_config.get("service_url")
+            or os.getenv("SPEAKER_SERVICE_URL")
+        )
+        self.enabled = bool(self.service_url)
+
+        if self.enabled:
+            logger.info(f"Speaker recognition client initialized with URL: {self.service_url}")
+        else:
+            logger.info("Speaker recognition client disabled (no service URL configured)")
 
     async def diarize_identify_match(
         self, audio_path: str, transcript_data: Dict, user_id: Optional[str] = None
