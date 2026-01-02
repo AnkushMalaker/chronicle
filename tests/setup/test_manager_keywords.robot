@@ -62,8 +62,8 @@ Clear Test Databases
     Log To Console    Qdrant collections cleared
 
     # Clear audio files (except fixtures subfolder)
-    Run Process    bash    -c    find ${EXECDIR}/backends/advanced/data/test_audio_chunks -maxdepth 1 -name "*.wav" -delete || true    shell=True
-    Run Process    bash    -c    rm -rf ${EXECDIR}/backends/advanced/data/test_debug_dir/* || true    shell=True
+    Run Process    bash    -c    find ${BACKEND_DIR}/data/test_audio_chunks -maxdepth 1 -name "*.wav" -delete || true    shell=True
+    Run Process    bash    -c    rm -rf ${BACKEND_DIR}/data/test_debug_dir/* || true    shell=True
     Log To Console    Audio files cleared (fixtures/ subfolder preserved)
 
     # Clear container audio files (except fixtures subfolder)
@@ -90,8 +90,8 @@ Clear All Test Data
     Run Process    curl    -s    -X    DELETE    http://localhost:6337/collections/conversations    shell=True
 
     # Clear all audio files
-    Run Process    bash    -c    rm -rf ${EXECDIR}/backends/advanced/data/test_audio_chunks/* || true    shell=True
-    Run Process    bash    -c    rm -rf ${EXECDIR}/backends/advanced/data/test_debug_dir/* || true    shell=True
+    Run Process    bash    -c    rm -rf ${BACKEND_DIR}/data/test_audio_chunks/* || true    shell=True
+    Run Process    bash    -c    rm -rf ${BACKEND_DIR}/data/test_debug_dir/* || true    shell=True
 
     # Clear all Redis data
     Run Process    docker    exec    ${REDIS_CONTAINER}    redis-cli    FLUSHALL    shell=True

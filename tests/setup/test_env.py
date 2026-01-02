@@ -8,7 +8,14 @@ from dotenv import load_dotenv
 # 2. .env.test (test-specific configuration)
 # 3. .env (default configuration)
 
-backend_dir = Path(__file__).parent.parent.parent / "backends" / "advanced"
+# Find repository root (tests/setup/test_env.py -> go up 2 levels)
+REPO_ROOT = Path(__file__).parent.parent.parent
+backend_dir = REPO_ROOT / "backends" / "advanced"
+
+# Export absolute paths for Robot Framework keywords
+BACKEND_DIR = str(backend_dir.absolute())
+REPO_ROOT_DIR = str(REPO_ROOT.absolute())
+SPEAKER_RECOGNITION_DIR = str((REPO_ROOT / "extras" / "speaker-recognition").absolute())
 
 # Load in reverse order of precedence (since override=False won't overwrite existing vars)
 # Load .env.test first (will set test-specific values)

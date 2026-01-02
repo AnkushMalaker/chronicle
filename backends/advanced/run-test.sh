@@ -166,9 +166,8 @@ if [ ! -f "diarization_config.json" ] && [ -f "diarization_config.json.template"
     print_success "diarization_config.json created"
 fi
 
-# Install dependencies with uv
-print_info "Installing dependencies with uv..."
-uv sync --dev --group test
+# Note: Robot Framework dependencies are managed via tests/test-requirements.txt
+# The integration tests use Docker containers for service dependencies
 
 # Set up environment variables for testing
 print_info "Setting up test environment variables..."
@@ -211,8 +210,9 @@ export DOCKER_BUILDKIT=0
 export TEST_MODE=dev
 
 # Run the Robot Framework integration tests with extended timeout (mem0 needs time for comprehensive extraction)
+# IMPORTANT: Robot tests must be run from the repository root where backends/ and tests/ are siblings
 print_info "Starting Robot Framework integration tests (timeout: 15 minutes)..."
-if timeout 900 uv run robot --outputdir ../../test-results --loglevel INFO ../../tests/integration/integration_test.robot; then
+if (cd ../.. && timeout 900 robot --outputdir test-results --loglevel INFO tests/integration/integration_test.robot); then
     print_success "Integration tests completed successfully!"
 else
     TEST_EXIT_CODE=$?

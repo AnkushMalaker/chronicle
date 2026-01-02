@@ -79,7 +79,7 @@ Get Enrolled Speakers Test
     Dictionary Should Contain Key    ${response_data}    speakers
 
     # If service is available, verify speakers data
-    Should Be True    isinstance($response_data[speakers], list)
+    Should Be True    isinstance($response_data["speakers"], list)
 
 Get Speaker Service Status Test
     [Documentation]    Test checking speaker recognition service status (admin only)

@@ -144,16 +144,16 @@ class SpeakerRecognitionClient:
 
         except ClientConnectorError as e:
             logger.error(f"🎤 Failed to connect to speaker recognition service: {e}")
-            return {}
+            return {"error": "connection_failed", "message": str(e), "segments": []}
         except asyncio.TimeoutError as e:
             logger.error(f"🎤 Timeout connecting to speaker recognition service: {e}")
-            return {}
+            return {"error": "timeout", "message": str(e), "segments": []}
         except aiohttp.ClientError as e:
             logger.warning(f"🎤 Client error during speaker recognition: {e}")
-            return {}
+            return {"error": "client_error", "message": str(e), "segments": []}
         except Exception as e:
             logger.error(f"🎤 Error during speaker recognition: {e}")
-            return {}
+            return {"error": "unknown_error", "message": str(e), "segments": []}
 
     async def diarize_and_identify(
         self, audio_path: str, words: None, user_id: Optional[str] = None  # NOT IMPLEMENTED
@@ -265,18 +265,18 @@ class SpeakerRecognitionClient:
 
         except ClientConnectorError as e:
             logger.error(f"🎤 [DIARIZE] ❌ Failed to connect to speaker recognition service at {self.service_url}: {e}")
-            return {}
+            return {"error": "connection_failed", "message": str(e), "segments": []}
         except asyncio.TimeoutError as e:
             logger.error(f"🎤 [DIARIZE] ❌ Timeout connecting to speaker recognition service: {e}")
-            return {}
+            return {"error": "timeout", "message": str(e), "segments": []}
         except aiohttp.ClientError as e:
             logger.warning(f"🎤 [DIARIZE] ❌ Client error during speaker recognition: {e}")
-            return {}
+            return {"error": "client_error", "message": str(e), "segments": []}
         except Exception as e:
             logger.error(f"🎤 [DIARIZE] ❌ Error during speaker diarization and identification: {e}")
             import traceback
             logger.debug(traceback.format_exc())
-            return {}
+            return {"error": "unknown_error", "message": str(e), "segments": []}
 
     async def identify_speakers(self, audio_path: str, segments: List[Dict]) -> Dict[str, str]:
         """

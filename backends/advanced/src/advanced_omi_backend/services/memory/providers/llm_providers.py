@@ -8,14 +8,11 @@ Each provider handles memory extraction, embedding generation, and
 memory action proposals using their respective APIs.
 """
 
+import asyncio
 import json
 import logging
 import os
-import httpx
 from typing import Any, Dict, List, Optional
-
-# TODO: Re-enable spacy when Docker build is fixed
-# import spacy
 
 from ..base import LLMProviderBase
 from ..prompts import (
@@ -30,10 +27,14 @@ from ..update_memory_utils import (
 )
 from ..utils import extract_json_from_text
 
+# TODO: Re-enable spacy when Docker build is fixed
+# import spacy
+
+
 memory_logger = logging.getLogger("memory_service")
 
 # New: config-driven model registry + universal client
-from advanced_omi_backend.model_registry import get_models_registry, ModelDef
+from advanced_omi_backend.model_registry import ModelDef, get_models_registry
 
 
 def _is_langfuse_enabled() -> bool:
@@ -62,7 +63,7 @@ def _get_openai_client(api_key: str, base_url: str, is_async: bool = False):
         memory_logger.debug("Using OpenAI client with Langfuse tracing")
     else:
         # Use regular OpenAI client without tracing
-        from openai import OpenAI, AsyncOpenAI
+        from openai import AsyncOpenAI, OpenAI
         openai = type('OpenAI', (), {'OpenAI': OpenAI, 'AsyncOpenAI': AsyncOpenAI})()
         memory_logger.debug("Using OpenAI client without tracing")
 
@@ -174,18 +175,33 @@ class OpenAIProvider(LLMProviderBase):
 
         if not self.llm_def:
             raise RuntimeError("No default LLM defined in config.yml")
+
         # Store parameters for LLM
         self.api_key = self.llm_def.api_key or ""
         self.base_url = self.llm_def.model_url
         self.model = self.llm_def.model_name
         self.temperature = float(self.llm_def.model_params.get("temperature", 0.1))
         self.max_tokens = int(self.llm_def.model_params.get("max_tokens", 2000))
-        
+
         # Store parameters for embeddings (use separate config if available)
         self.embedding_model = (self.embed_def.model_name if self.embed_def else self.llm_def.model_name)
         self.embedding_api_key = (self.embed_def.api_key if self.embed_def else self.api_key)
         self.embedding_base_url = (self.embed_def.model_url if self.embed_def else self.base_url)
-        
+
+        # CRITICAL: Validate API keys are present - fail fast instead of hanging
+        if not self.api_key or self.api_key.strip() == "":
+            raise RuntimeError(
+                f"API key is missing or empty for LLM provider '{self.llm_def.model_provider}' (model: {self.model}). "
+                f"Please set the API key in config.yml or environment variables. "
+                f"Cannot proceed without valid API credentials."
+            )
+
+        if self.embed_def and (not self.embedding_api_key or self.embedding_api_key.strip() == ""):
+            raise RuntimeError(
+                f"API key is missing or empty for embedding provider '{self.embed_def.model_provider}' (model: {self.embedding_model}). "
+                f"Please set the API key in config.yml or environment variables."
+            )
+
         # Lazy client creation
         self._client = None
 
@@ -285,20 +301,21 @@ class OpenAIProvider(LLMProviderBase):
             raise
 
     async def test_connection(self) -> bool:
-        """Test OpenAI connection.
+        """Test OpenAI connection with timeout.
 
         Returns:
             True if connection successful, False otherwise
         """
+
         try:
-            try:
+            # Add 10-second timeout to prevent hanging on API calls
+            async with asyncio.timeout(10):
                 client = _get_openai_client(api_key=self.api_key, base_url=self.base_url, is_async=True)
                 await client.models.list()
                 return True
-            except Exception as e:
-                memory_logger.error(f"OpenAI connection test failed: {e}")
-                return False
-            
+        except asyncio.TimeoutError:
+            memory_logger.error(f"OpenAI connection test timed out after 10s - check network connectivity and API endpoint")
+            return False
         except Exception as e:
             memory_logger.error(f"OpenAI connection test failed: {e}")
             return False

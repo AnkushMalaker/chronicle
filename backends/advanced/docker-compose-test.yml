@@ -39,9 +39,9 @@ services:
       - OPENMEMORY_USER_ID=${OPENMEMORY_USER_ID:-openmemory}
       - MYCELIA_URL=http://mycelia-backend-test:5173
       - MYCELIA_DB=mycelia_test
-      # Disable speaker recognition in test environment to prevent segment duplication
+      # Enable speaker recognition in test environment
       - DISABLE_SPEAKER_RECOGNITION=false
-      - SPEAKER_SERVICE_URL=https://localhost:8085
+      - SPEAKER_SERVICE_URL=http://speaker-service-test:8085
       - CORS_ORIGINS=http://localhost:3001,http://localhost:8001,https://localhost:3001,https://localhost:8001
       # Set low inactivity timeout for tests (2 seconds instead of 60)
       - SPEECH_INACTIVITY_THRESHOLD_SECONDS=2
@@ -54,6 +54,8 @@ services:
         condition: service_healthy
       redis-test:
         condition: service_started
+      speaker-service-test:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/readiness"]
       interval: 10s
@@ -119,6 +121,36 @@ services:
       timeout: 3s
       retries: 5
 
+  speaker-service-test:
+    build:
+      context: ../../extras/speaker-recognition
+      dockerfile: Dockerfile
+      args:
+        PYTORCH_CUDA_VERSION: cpu
+    image: speaker-recognition-test:latest
+    ports:
+      - "8086:8085"  # Avoid conflict with dev speaker service on 8085
+    volumes:
+      - ../../extras/speaker-recognition/src:/app/src
+      - ../../extras/speaker-recognition/model_cache:/models
+      - ../../extras/speaker-recognition/audio_chunks:/app/audio_chunks
+      - ../../extras/speaker-recognition/debug:/app/debug
+      - ../../extras/speaker-recognition/speaker_data:/app/data
+    environment:
+      - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN}
+      - SIMILARITY_THRESHOLD=0.15
+      - SPEAKER_SERVICE_HOST=0.0.0.0
+      - SPEAKER_SERVICE_PORT=8085
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
   workers-test:
     build:
       context: .
@@ -151,7 +183,7 @@ services:
       - MYCELIA_URL=http://mycelia-backend-test:5173
       - MYCELIA_DB=mycelia_test
       - DISABLE_SPEAKER_RECOGNITION=false
-      - SPEAKER_SERVICE_URL=https://localhost:8085
+      - SPEAKER_SERVICE_URL=http://speaker-service-test:8085
       # Set low inactivity timeout for tests (2 seconds instead of 60)
       - SPEECH_INACTIVITY_THRESHOLD_SECONDS=2
       # Wait for audio queue to drain before timing out (test mode)
@@ -165,6 +197,8 @@ services:
         condition: service_started
       qdrant-test:
         condition: service_started
+      speaker-service-test:
+        condition: service_healthy
     restart: unless-stopped
 
   # Mycelia - AI memory and timeline service (test environment)
@@ -236,6 +270,11 @@ services:
   #     chronicle-backend-test:
   #       condition: service_healthy
   #   restart: unless-stopped
+
+# Use default bridge network for test isolation (no external network dependency)
+networks:
+  default:
+    driver: bridge
 
 # CI Considerations (for future implementation):
 # - GitHub Actions can run these services in isolated containers

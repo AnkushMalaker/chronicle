@@ -85,7 +85,7 @@ Prod Mode Setup
     Log To Console    Tearing down existing containers and volumes...
 
     Stop Docker Services    remove_volumes=${True}
-    Run Process    rm    -rf    data/test_mongo_data    data/test_qdrant_data    data/test_audio_chunks    cwd=backends/advanced    shell=True
+    Run Process    rm    -rf    data/test_mongo_data    data/test_qdrant_data    data/test_audio_chunks    cwd=${BACKEND_DIR}    shell=True
 
     Log To Console    Building and starting fresh containers...
     Start Docker Services    build=${True}
@@ -95,7 +95,7 @@ Prod Mode Setup
 Start Docker Services
     [Documentation]    Start Docker services using docker-compose
     ...                Checks if services are already running to avoid redundant starts
-    [Arguments]    ${compose_file}=docker-compose-test.yml    ${working_dir}=backends/advanced    ${build}=${False}
+    [Arguments]    ${compose_file}=docker-compose-test.yml    ${working_dir}=${BACKEND_DIR}    ${build}=${False}
 
     ${is_up}=    Run Keyword And Return Status    Check Services Ready    ${API_URL}
 
@@ -120,7 +120,7 @@ Start Docker Services
 
 Stop Docker Services
     [Documentation]    Stop Docker services using docker-compose
-    [Arguments]    ${compose_file}=docker-compose-test.yml    ${working_dir}=backends/advanced    ${remove_volumes}=${False}
+    [Arguments]    ${compose_file}=docker-compose-test.yml    ${working_dir}=${BACKEND_DIR}    ${remove_volumes}=${False}
 
     IF    ${remove_volumes}
         Run Process    docker    compose    -f    ${compose_file}    down    -v    cwd=${working_dir}    shell=True
@@ -130,7 +130,7 @@ Stop Docker Services
 
 Rebuild Docker Services
     [Documentation]    Rebuild and restart Docker services
-    [Arguments]    ${compose_file}=docker-compose-test.yml    ${working_dir}=backends/advanced
+    [Arguments]    ${compose_file}=docker-compose-test.yml    ${working_dir}=${BACKEND_DIR}
 
     Log To Console    Rebuilding containers with latest code...
     Run Process    docker    compose    -f    ${compose_file}    up    -d    --build    cwd=${working_dir}    shell=True
@@ -155,7 +155,7 @@ Start Speaker Recognition Service
     END
 
     Log    Starting speaker-recognition-service
-    Run Process    docker    compose    -f    extras/speaker-recognition/docker-compose-test.yml    up    -d    --build    shell=True
+    Run Process    docker    compose    -f    docker-compose-test.yml    up    -d    --build    cwd=${SPEAKER_RECOGNITION_DIR}    shell=True
 
     Log    Waiting for speaker recognition service to start...
     Wait Until Keyword Succeeds    60s    5s    Check Services Ready    ${SPEAKER_RECOGNITION_URL}
@@ -166,9 +166,9 @@ Stop Speaker Recognition Service
     [Arguments]    ${remove_volumes}=${False}
 
     IF    ${remove_volumes}
-        Run Process    docker    compose    -f    extras/speaker-recognition/docker-compose-test.yml    down    -v    shell=True
+        Run Process    docker    compose    -f    docker-compose-test.yml    down    -v    cwd=${SPEAKER_RECOGNITION_DIR}    shell=True
     ELSE
-        Run Process    docker    compose    -f    extras/speaker-recognition/docker-compose-test.yml    down    shell=True
+        Run Process    docker    compose    -f    docker-compose-test.yml    down    cwd=${SPEAKER_RECOGNITION_DIR}    shell=True
     END
 
 Check Environment Variables
