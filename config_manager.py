@@ -57,24 +57,24 @@ class ConfigManager:
         self.service_path = self.repo_root / service_path if service_path else None
 
         # Paths
-        self.config_yml_path = self.repo_root / "config.yml"
+        self.config_yml_path = self.repo_root / "config" / "config.yml"
         self.env_path = self.service_path / ".env" if self.service_path else None
 
         logger.debug(f"ConfigManager initialized: repo_root={self.repo_root}, "
                     f"service_path={self.service_path}, config_yml={self.config_yml_path}")
 
     def _find_repo_root(self) -> Path:
-        """Find repository root by searching for config.yml."""
+        """Find repository root by searching for config/config.yml."""
         current = Path.cwd()
 
-        # Walk up until we find config.yml
+        # Walk up until we find config/config.yml
         while current != current.parent:
-            if (current / "config.yml").exists():
+            if (current / "config" / "config.yml").exists():
                 return current
             current = current.parent
 
         # Fallback to cwd if not found
-        logger.warning("Could not find config.yml, using current directory as repo root")
+        logger.warning("Could not find config/config.yml, using current directory as repo root")
         return Path.cwd()
 
     def _detect_service_path(self) -> Optional[str]:

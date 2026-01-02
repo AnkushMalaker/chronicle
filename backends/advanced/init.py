@@ -22,6 +22,10 @@ from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.text import Text
 
+# Add repo root to path for config_manager import
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from config_manager import ConfigManager
+
 
 class ChronicleSetup:
     def __init__(self, args=None):
@@ -37,12 +41,6 @@ class ChronicleSetup:
             sys.exit(1)
 
         # Initialize ConfigManager
-        repo_root = Path.cwd().parent.parent  # backends/advanced -> repo root
-        if str(repo_root) not in sys.path:
-            sys.path.insert(0, str(repo_root))
-
-        from config_manager import ConfigManager
-
         self.config_manager = ConfigManager(service_path="backends/advanced")
         self.console.print(f"[blue][INFO][/blue] Using config.yml at: {self.config_manager.config_yml_path}")
 
