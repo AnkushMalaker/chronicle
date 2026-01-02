@@ -9,7 +9,10 @@ import asyncio
 import logging
 import os
 from abc import ABC, abstractmethod
-from typing import Dict
+from typing import Dict, Any, Optional
+
+from advanced_omi_backend.services.memory.config import load_config_yml as _load_root_config
+from advanced_omi_backend.services.memory.config import resolve_value as _resolve_value
 
 from advanced_omi_backend.model_registry import get_models_registry
 
@@ -53,10 +56,10 @@ class OpenAILLMClient(LLMClient):
         temperature: float = 0.1,
     ):
         super().__init__(model, temperature)
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.base_url = base_url or os.getenv("OPENAI_BASE_URL")
-        self.model = model or os.getenv("OPENAI_MODEL")
-        
+        # Do not read from environment here; values are provided by config.yml
+        self.api_key = api_key
+        self.base_url = base_url
+        self.model = model
         if not self.api_key or not self.base_url or not self.model:
             raise ValueError(f"LLM configuration incomplete: api_key={'set' if self.api_key else 'MISSING'}, base_url={'set' if self.base_url else 'MISSING'}, model={'set' if self.model else 'MISSING'}")
 

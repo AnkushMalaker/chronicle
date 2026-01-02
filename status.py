@@ -18,6 +18,7 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.live import Live
 from rich.layout import Layout
+from dotenv import dotenv_values
 
 # Import service definitions from services.py
 from services import SERVICES, check_service_configured
@@ -44,11 +45,26 @@ def get_container_status(service_name: str) -> Dict[str, Any]:
         # Get container status using docker compose ps
         cmd = ['docker', 'compose', 'ps', '--format', 'json']
 
-        # Handle special profiles for backend (HTTPS)
+        # Handle special profiles for backend (HTTPS and Obsidian)
         if service_name == 'backend':
+            profiles = []
+            
+            # Check for HTTPS profile
             caddyfile_path = service_path / 'Caddyfile'
             if caddyfile_path.exists():
-                cmd = ['docker', 'compose', '--profile', 'https', 'ps', '--format', 'json']
+                profiles.append('https')
+            
+            # Check for Obsidian/Neo4j profile
+            env_file = service_path / '.env'
+            if env_file.exists():
+                env_values = dotenv_values(env_file)
+                neo4j_host = env_values.get('NEO4J_HOST', '')
+                if neo4j_host and neo4j_host not in ['', 'your-neo4j-host-here', 'your_neo4j_host_here']:
+                    profiles.append('obsidian')
+            
+            # Apply profiles if any are needed
+            if profiles:
+                cmd = ['docker', 'compose'] + [item for profile in profiles for item in ['--profile', profile]] + ['ps', '--format', 'json']
 
         # Handle speaker-recognition profiles
         if service_name == 'speaker-recognition':

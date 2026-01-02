@@ -469,7 +469,7 @@ def main():
     # Inform about Obsidian/Neo4j if configured
     if obsidian_enabled:
         console.print(f"\n📚 [bold cyan]Obsidian Integration Detected[/bold cyan]")
-        console.print("   Neo4j will be started with the 'obsidian' profile")
+        console.print("   Neo4j will be automatically started with the 'obsidian' profile")
         console.print("   when you start the backend service.")
     
     # Next Steps

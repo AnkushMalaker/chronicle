@@ -92,6 +92,25 @@ async def auth_health_check():
 @router.get("/health")
 async def health_check():
     """Comprehensive health check for all services."""
+    # Load model config once for display fields
+    _llm_def = None
+    _llm_provider = "openai"
+    _llm_model = None
+    _llm_base_url = None
+    _stt_name = None
+
+    try:
+        registry = get_models_registry()
+        if registry:
+            _defaults = registry.defaults
+            _llm_name = _defaults.get("llm")
+            _stt_name = _defaults.get("stt")
+            _llm_def = registry.models.get(_llm_name)
+            _llm_provider = _llm_def.model_provider if _llm_def else "openai"
+            _llm_model = _llm_def.model_name if _llm_def else None
+            _llm_base_url = _llm_def.model_url if _llm_def else None
+    except Exception as e:
+        logger.warning(f"Failed to load model config for health check: {e}")
     health_status = {
         "status": "healthy",
         "timestamp": int(time.time()),
@@ -109,7 +128,7 @@ async def health_check():
                 if transcription_provider
                 else "Not configured"
             ),
-            "transcription_provider": os.getenv("TRANSCRIPTION_PROVIDER", "auto-detect"),
+            "transcription_provider": _stt_name or "not set",
             "provider_type": (
                 transcription_provider.mode if transcription_provider else "none"
             ),

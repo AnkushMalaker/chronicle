@@ -10,6 +10,7 @@ dependencies = [
     "fastmcp>=0.5.0", # MCP server for conversation access
     "mem0ai", # Using main branch with PR #3250 AsyncMemory fix
     "langchain_neo4j",
+    "neo4j>=5.0.0,<6.0.0",
     "motor>=3.7.1",
     "ollama>=0.4.8",
     "friend-lite-sdk",
@@ -17,6 +18,7 @@ dependencies = [
     "uvicorn>=0.34.2",
     "wyoming>=1.6.1",
     "aiohttp>=3.8.0",
+    "httpx>=0.28.0,<1.0.0",
     "fastapi-users[beanie]>=14.0.1",
     "PyYAML>=6.0.1",
     "langfuse>=3.3.0",
@@ -54,7 +56,7 @@ profile = "black"
 line-length = 100
 
 [tool.uv.sources]
-mem0ai = { git = "https://github.com/AnkushMalaker/mem0.git", rev = "async-client-unbound-var-fix" }
+mem0ai = { git = "https://github.com/AnkushMalaker/mem0.git", rev = "main" }
 
 [tool.poetry.dependencies]
 robotframework = "^6.1.1"

@@ -30,6 +30,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 class ChatMessageRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000, description="The user's message")
     session_id: Optional[str] = Field(None, description="Session ID (creates new session if not provided)")
+    include_obsidian_memory: Optional[bool] = Field(False, description="Whether to include context from Obsidian vault")
 
 
 class ChatMessageResponse(BaseModel):
@@ -309,7 +310,8 @@ async def send_message_stream(
                 async for event in chat_service.generate_response_stream(
                     session_id=session_id,
                     user_id=str(current_user.id),
-                    message_content=request.message
+                    message_content=request.message,
+                    include_obsidian_memory=request.include_obsidian_memory
                 ):
                     # Format as Server-Sent Event
                     event_data = json.dumps(event, default=str)
