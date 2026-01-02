@@ -64,20 +64,8 @@ class ConfigManager:
                     f"service_path={self.service_path}, config_yml={self.config_yml_path}")
 
     def _find_repo_root(self) -> Path:
-        """Find repository root by searching for config/config.yml."""
-        current = Path.cwd()
-
-        # Walk up until we find config/config.yml
-        while current != current.parent:
-            if (current / "config" / "config.yml").exists():
-                return current
-            current = current.parent
-
-        # Raise error if not found
-        raise RuntimeError(
-            f"Could not find config/config.yml in directory tree starting from {Path.cwd()}. "
-            "Please ensure you're running from within the Chronicle repository."
-        )
+        """Find repository root using __file__ location (config_manager.py is always at repo root)."""
+        return Path(__file__).parent
 
     def _detect_service_path(self) -> Optional[str]:
         """Auto-detect service path from current working directory."""
