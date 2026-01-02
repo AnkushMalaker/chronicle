@@ -44,6 +44,14 @@ Get Worker Count From Health Endpoint
     ${worker_count}=    Set Variable    ${redis_service}[worker_count]
     RETURN    ${worker_count}
 
+Verify Minimum Worker Count
+    [Documentation]    Verify that at least the minimum number of workers are registered
+    [Arguments]    ${min_count}
+    ${worker_count}=    Get Worker Count From Health Endpoint
+    Log To Console    Current worker count: ${worker_count}
+    Should Be True    ${worker_count} >= ${min_count}    msg=Expected at least ${min_count} workers, got ${worker_count}
+    RETURN    ${worker_count}
+
 Simulate Worker Registration Loss
     [Documentation]    Simulate the scenario where workers lose Redis registration
     ...                This happens when:
@@ -176,6 +184,13 @@ Worker Count Validation Test
     ...                - Worker state information is accurate
     [Tags]    health	queue
 
+    # Wait for workers to register (up to 20s, checking every 2s)
+    Log To Console    \n⏳ Waiting for workers to register (up to 20s)...
+    ${worker_count}=    Wait Until Keyword Succeeds    20s    2s
+    ...    Verify Minimum Worker Count    6
+    Log To Console    ✅ Workers registered: ${worker_count}
+
+    # Get full health details for validation
     ${response}=    GET On Session    api    /health
     Should Be Equal As Integers    ${response.status_code}    200
 
@@ -191,7 +206,7 @@ Worker Count Validation Test
     Dictionary Should Contain Key    ${redis_service}    active_workers
     Dictionary Should Contain Key    ${redis_service}    idle_workers
 
-    # Verify worker count is reasonable (7 workers: 6 RQ + 1 audio stream)
+    # Get worker state details
     ${worker_count}=    Set Variable    ${redis_service}[worker_count]
     ${active_workers}=    Set Variable    ${redis_service}[active_workers]
     ${idle_workers}=    Set Variable    ${redis_service}[idle_workers]
@@ -201,8 +216,8 @@ Worker Count Validation Test
     Log To Console    Active workers: ${active_workers}
     Log To Console    Idle workers: ${idle_workers}
 
-    # Verify expected worker count (should be 7: 6 RQ workers + 1 audio stream worker)
-    # Note: Audio stream worker might not register in RQ, so we expect 6-7 workers
+    # Verify expected worker count (should be 7: 6 RQ workers + 1 audio persistence worker)
+    # Audio stream workers (Deepgram/Parakeet) are NOT RQ workers, so they don't register
     Should Be True    ${worker_count} >= 6    msg=Expected at least 6 RQ workers registered
     Should Be True    ${worker_count} <= 8    msg=Expected no more than 8 workers
 
