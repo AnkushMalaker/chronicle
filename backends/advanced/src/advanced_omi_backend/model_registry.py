@@ -317,7 +317,8 @@ def load_models_config(force_reload: bool = False) -> Optional[AppModels]:
     defaults = raw.get("defaults", {}) or {}
     model_list = raw.get("models", []) or []
     memory_settings = raw.get("memory", {}) or {}
-    
+    speaker_recognition_cfg = raw.get("speaker_recognition", {}) or {}
+
     # Parse and validate models using Pydantic
     models: Dict[str, ModelDef] = {}
     for m in model_list:
@@ -334,7 +335,8 @@ def load_models_config(force_reload: bool = False) -> Optional[AppModels]:
     _REGISTRY = AppModels(
         defaults=defaults,
         models=models,
-        memory=memory_settings
+        memory=memory_settings,
+        speaker_recognition=speaker_recognition_cfg
     )
     return _REGISTRY
 

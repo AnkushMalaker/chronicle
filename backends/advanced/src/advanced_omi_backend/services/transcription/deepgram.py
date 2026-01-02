@@ -6,6 +6,9 @@ Uses the registry-driven transcription provider for Deepgram batch transcription
 
 import logging
 
+from advanced_omi_backend.services.audio_stream.consumer import BaseAudioStreamConsumer
+from advanced_omi_backend.services.transcription import get_transcription_provider
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,8 +35,6 @@ class DeepgramStreamConsumer:
             redis_client: Connected Redis client
             buffer_chunks: Number of chunks to buffer before transcribing (default: 30 = ~7.5s)
         """
-        from advanced_omi_backend.services.audio_stream.consumer import BaseAudioStreamConsumer
-        from advanced_omi_backend.services.transcription import get_transcription_provider
 
         # Get registry-driven transcription provider
         self.provider = get_transcription_provider(mode="batch")

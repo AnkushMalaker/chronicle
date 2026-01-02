@@ -406,6 +406,7 @@ class ChronicleSetup:
 
         if enable_obsidian:
             # Update .env with credentials
+            self.config["OBSIDIAN_ENABLED"] = "true"
             self.config["NEO4J_HOST"] = "neo4j-mem0"
             self.config["NEO4J_USER"] = "neo4j"
             self.config["NEO4J_PASSWORD"] = neo4j_password
