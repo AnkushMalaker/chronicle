@@ -44,6 +44,7 @@ export default function Chat() {
   const [showMemoryPanel, setShowMemoryPanel] = useState(false)
   const [isExtractingMemories, setIsExtractingMemories] = useState(false)
   const [extractionMessage, setExtractionMessage] = useState('')
+  const [includeObsidian, setIncludeObsidian] = useState(false)
   
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -199,7 +200,7 @@ export default function Chat() {
       setMessages(prev => [...prev, userMessage])
 
       // Send message and handle streaming response
-      const response = await chatApi.sendMessage(messageText, sessionId)
+      const response = await chatApi.sendMessage(messageText, sessionId, includeObsidian)
       
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`)
@@ -514,6 +515,19 @@ export default function Chat() {
                 >
                   <Send className="h-5 w-5" />
                 </button>
+              </div>
+              
+              <div className="mt-2 flex items-center">
+                <input
+                  type="checkbox"
+                  id="includeObsidian"
+                  checked={includeObsidian}
+                  onChange={(e) => setIncludeObsidian(e.target.checked)}
+                  className="h-4 w-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                />
+                <label htmlFor="includeObsidian" className="ml-2 text-sm text-gray-700 dark:text-gray-300 cursor-pointer select-none">
+                  Include Obsidian Memory
+                </label>
               </div>
             </div>
           </>

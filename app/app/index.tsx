@@ -28,6 +28,7 @@ import DeviceListItem from './components/DeviceListItem';
 import DeviceDetails from './components/DeviceDetails';
 import AuthSection from './components/AuthSection';
 import BackendStatus from './components/BackendStatus';
+import ObsidianIngest from './components/ObsidianIngest';
 import PhoneAudioButton from './components/PhoneAudioButton';
 
 export default function App() {
@@ -537,6 +538,14 @@ export default function App() {
             currentUserEmail={currentUserEmail}
             onAuthStatusChange={handleAuthStatusChange}
           />
+
+          {/* Obsidian Ingestion - Only when authenticated */}
+          {isAuthenticated && (
+            <ObsidianIngest
+              backendUrl={webSocketUrl}
+              jwtToken={jwtToken}
+            />
+          )}
 
           {/* Phone Audio Streaming Button */}
           <PhoneAudioButton

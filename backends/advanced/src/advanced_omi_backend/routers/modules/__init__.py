@@ -20,6 +20,7 @@ from .client_routes import router as client_router
 from .conversation_routes import router as conversation_router
 from .health_routes import router as health_router
 from .memory_routes import router as memory_router
+from .obsidian_routes import router as obsidian_router
 from .queue_routes import router as queue_router
 from .system_routes import router as system_router
 from .user_routes import router as user_router
@@ -32,6 +33,7 @@ __all__ = [
    "conversation_router",
    "health_router",
    "memory_router",
+   "obsidian_router",
    "queue_router",
    "system_router",
    "user_router",

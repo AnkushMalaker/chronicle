@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Brain, RefreshCw, CheckCircle, Trash2, Save, RotateCcw, AlertCircle } from 'lucide-react'
 import { systemApi, memoriesApi } from '../services/api'
+import { useAuth } from '../contexts/AuthContext'
 
 interface MemorySettingsProps {
   className?: string
@@ -14,6 +15,7 @@ export default function MemorySettings({ className }: MemorySettingsProps) {
   const [deleting, setDeleting] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const { isAdmin } = useAuth()
 
   useEffect(() => {
     loadMemoryConfig()
@@ -30,7 +32,14 @@ export default function MemorySettings({ className }: MemorySettingsProps) {
       setMessage('Configuration loaded successfully')
       setTimeout(() => setMessage(''), 3000)
     } catch (err: any) {
-      setError(err.response?.data?.error || 'Failed to load memory configuration')
+      const status = err.response?.status
+      if (status === 401) {
+        setError('Unauthorized: admin privileges required to load memory configuration')
+      } else if (status === 404 || status === 405) {
+        setError('Backend does not expose memory configuration endpoints')
+      } else {
+        setError(err.response?.data?.error || 'Failed to load memory configuration')
+      }
     } finally {
       setLoading(false)
     }
@@ -122,6 +131,10 @@ export default function MemorySettings({ className }: MemorySettingsProps) {
     }
   }
 
+  if (!isAdmin) {
+    return null
+  }
+
   return (
     <div className={className}>
       <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
@@ -194,6 +207,12 @@ export default function MemorySettings({ className }: MemorySettingsProps) {
             />
             <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
               Edit the YAML configuration directly. Changes will be validated before saving and hot-reloaded without service restart.
+              {error && (error.includes('does not expose') || error.includes('Unauthorized')) && (
+                <>
+                  {' '}
+                  Ensure the backend has memory config endpoints and you are logged in as an admin.
+                </>
+              )}
             </p>
           </div>
 
@@ -202,7 +221,7 @@ export default function MemorySettings({ className }: MemorySettingsProps) {
             <div className="flex flex-wrap items-center gap-3">
               <button
                 onClick={validateConfig}
-                disabled={validating || !configYaml.trim()}
+                disabled={validating || !configYaml.trim() || !!error}
                 className="flex items-center justify-center space-x-2 px-4 py-2 bg-yellow-600 text-white rounded-md hover:bg-yellow-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-w-[120px]"
               >
                 <CheckCircle className={`h-4 w-4 ${validating ? 'animate-pulse' : ''}`} />
@@ -220,7 +239,7 @@ export default function MemorySettings({ className }: MemorySettingsProps) {
 
               <button
                 onClick={saveConfig}
-                disabled={saving || !configYaml.trim()}
+                disabled={saving || !configYaml.trim() || !!error}
                 className="flex items-center justify-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-w-[160px]"
               >
                 <Save className={`h-4 w-4 ${saving ? 'animate-pulse' : ''}`} />

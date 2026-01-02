@@ -35,8 +35,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      # neo4j-mem0:
-      #   condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/readiness"]
       interval: 30s
@@ -168,8 +166,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
-
-  ##  Additional
 
   neo4j-mem0:
     image: neo4j:5.15-community

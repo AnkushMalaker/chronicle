@@ -23,6 +23,11 @@ from motor.motor_asyncio import AsyncIOMotorCollection
 from advanced_omi_backend.database import get_database
 from advanced_omi_backend.llm_client import get_llm_client
 from advanced_omi_backend.services.memory import get_memory_service
+from advanced_omi_backend.services.memory.base import MemoryEntry
+from advanced_omi_backend.services.obsidian_service import (
+    get_obsidian_service,
+    ObsidianSearchError,
+)
 from advanced_omi_backend.users import User
 
 logger = logging.getLogger(__name__)
@@ -279,7 +284,7 @@ class ChatService:
             logger.error(f"Failed to add message to session {message.session_id}: {e}")
             return False
 
-    async def get_relevant_memories(self, query: str, user_id: str) -> List[Dict]:
+    async def get_relevant_memories(self, query: str, user_id: str) -> List[MemoryEntry]:
         """Get relevant memories for the user's query."""
         try:
             memories = await self.memory_service.search_memories(
@@ -294,7 +299,7 @@ class ChatService:
             return []
 
     async def format_conversation_context(
-        self, session_id: str, user_id: str, current_message: str
+        self, session_id: str, user_id: str, current_message: str, include_obsidian_memory: bool = False
     ) -> Tuple[str, List[str]]:
         """Format conversation context with memory integration."""
         # Get recent conversation history
@@ -302,7 +307,7 @@ class ChatService:
         
         # Get relevant memories
         memories = await self.get_relevant_memories(current_message, user_id)
-        memory_ids = [memory.get("id", "") for memory in memories if memory.get("id")]
+        memory_ids = [memory.id for memory in memories if memory.id]
 
         # Build context string
         context_parts = []
@@ -311,10 +316,33 @@ class ChatService:
         if memories:
             context_parts.append("# Relevant Personal Memories:")
             for i, memory in enumerate(memories, 1):
-                memory_text = memory.get("memory", memory.get("text", ""))
+                memory_text = memory.content
                 if memory_text:
                     context_parts.append(f"{i}. {memory_text}")
             context_parts.append("")
+
+        # Add Obsidian context if requested
+        if include_obsidian_memory:
+            try:
+                obsidian_service = get_obsidian_service()
+                obsidian_result = await obsidian_service.search_obsidian(current_message)
+                obsidian_context = obsidian_result["results"]
+                if obsidian_context:
+                    context_parts.append("# Relevant Obsidian Notes:")
+                    for entry in obsidian_context:
+                        context_parts.append(entry)
+                    context_parts.append("")
+                    logger.info(f"Added {len(obsidian_context)} Obsidian notes to context")
+            except ObsidianSearchError as exc:
+                logger.error(
+                    "Failed to get Obsidian context (%s stage): %s",
+                    exc.stage,
+                    exc,
+                )
+                raise
+            except Exception as e:
+                logger.error(f"Failed to get Obsidian context: {e}")
+                raise e
 
         # Add conversation history
         if messages:
@@ -332,7 +360,7 @@ class ChatService:
         return context, memory_ids
 
     async def generate_response_stream(
-        self, session_id: str, user_id: str, message_content: str
+        self, session_id: str, user_id: str, message_content: str, include_obsidian_memory: bool = False
     ) -> AsyncGenerator[Dict, None]:
         """Generate streaming response with memory context."""
         if not self._initialized:
@@ -351,7 +379,7 @@ class ChatService:
 
             # Format context with memories
             context, memory_ids = await self.format_conversation_context(
-                session_id, user_id, message_content
+                session_id, user_id, message_content, include_obsidian_memory=include_obsidian_memory
             )
 
             # Send memory context used

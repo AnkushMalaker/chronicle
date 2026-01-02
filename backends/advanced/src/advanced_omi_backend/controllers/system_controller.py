@@ -17,7 +17,6 @@ from advanced_omi_backend.config import (
 )
 from advanced_omi_backend.model_registry import _find_config_path, load_models_config
 from advanced_omi_backend.models.user import User
-from advanced_omi_backend.task_manager import get_task_manager
 
 logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
