@@ -76,7 +76,7 @@ class DeepgramStreamConsumer:
                     }
 
                 except Exception as e:
-                    logger.error(f"Deepgram transcription failed: {e}", exc_info=True)
+                    logger.exception(f"Deepgram transcription failed: {e}")
                     raise
 
         # Instantiate the concrete consumer

@@ -44,7 +44,7 @@ async def write_transcript(text: str, output_file: Path | None = None):
                 f.write(f"{text}\n")
             logger.info(f"Transcript written to: {output_file}")
         except Exception as e:
-            logger.error(f"Failed to write to output file {output_file}: {e}")
+            logger.exception(f"Failed to write to output file {output_file}: {e}")
 
 
 async def run_mic_transcription(asr_url: str, device_index: int | None = None, output_file: Path | None = None):
@@ -253,7 +253,7 @@ async def run_file_transcription(asr_url: str, file_path: str | Path, output_fil
                     logger.info("Stopping file reader...")
                     return
                 except Exception as e:
-                    logger.error(f"Error reading file: {e}")
+                    logger.exception(f"Error reading file: {e}")
                     raise
 
             async def transcriptions():
@@ -370,7 +370,7 @@ Examples:
             with open(output_file, 'w', encoding='utf-8') as f:
                 f.write("")  # Clear file
         except Exception as e:
-            logger.error(f"Failed to initialize output file {output_file}: {e}")
+            logger.exception(f"Failed to initialize output file {output_file}: {e}")
             return 1
 
     try:
@@ -384,7 +384,7 @@ Examples:
     except KeyboardInterrupt:
         print("\nExiting...")
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.exception(f"Error: {e}")
         return 1
     
     return 0

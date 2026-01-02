@@ -46,7 +46,7 @@ async def get_active_clients(user: User, client_manager: ClientManager):
             }
 
     except Exception as e:
-        logger.error(f"Error getting active clients: {e}")
+        logger.exception(f"Error getting active clients")
         return JSONResponse(
             status_code=500,
             content={"error": "Failed to get active clients"},

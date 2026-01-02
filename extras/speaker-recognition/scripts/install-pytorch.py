@@ -43,10 +43,10 @@ def install_pytorch():
         return True
         
     except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to install PyTorch: {e}")
+        logger.exception(f"Failed to install PyTorch: {e}")
         return False
     except Exception as e:
-        logger.error(f"Unexpected error installing PyTorch: {e}")
+        logger.exception(f"Unexpected error installing PyTorch: {e}")
         return False
 
 if __name__ == "__main__":

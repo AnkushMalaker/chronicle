@@ -435,7 +435,7 @@ class StreamManager:
                 logger.info(f"Stream {stream_id} started for {device_name}")
             except Exception as e:
                 session.error = str(e)
-                logger.error(f"Stream {stream_id} failed to start: {e}")
+                logger.exception(f"Stream {stream_id} failed to start: {e}")
 
         future = asyncio.run_coroutine_threadsafe(_connect_and_start(), loop)
         future.result(timeout=10)  # Wait for connection
@@ -553,4 +553,4 @@ class StreamManager:
             try:
                 self.stop_stream(stream_id)
             except Exception as e:
-                logger.warning(f"Error stopping stream {stream_id}: {e}")
+                logger.exception(f"Error stopping stream {stream_id}: {e}")

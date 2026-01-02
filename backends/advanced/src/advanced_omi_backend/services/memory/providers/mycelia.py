@@ -101,7 +101,7 @@ class MyceliaMemoryService(MemoryServiceBase):
             memory_logger.info("✅ Mycelia memory service initialized successfully")
 
         except Exception as e:
-            memory_logger.error(f"❌ Failed to initialize Mycelia service: {e}")
+            memory_logger.exception(f"❌ Failed to initialize Mycelia service: {e}")
             raise RuntimeError(f"Mycelia initialization failed: {e}")
 
     async def _get_user_jwt(self, user_id: str, user_email: Optional[str] = None) -> str:
@@ -277,12 +277,12 @@ class MyceliaMemoryService(MemoryServiceBase):
                 memory_logger.info(f"🧠 Extracted {len(facts)} facts from transcript via OpenAI")
                 return facts
             except json.JSONDecodeError as e:
-                memory_logger.error(f"Failed to parse LLM response as JSON: {e}")
+                memory_logger.exception(f"Failed to parse LLM response as JSON: {e}")
                 memory_logger.error(f"LLM response was: {content[:300]}")
                 return []
 
         except Exception as e:
-            memory_logger.error(f"Failed to extract memories via OpenAI: {e}")
+            memory_logger.exception(f"Failed to extract memories via OpenAI: {e}")
             raise RuntimeError(f"OpenAI memory extraction failed: {e}") from e
 
     async def _extract_temporal_entity_via_llm(
@@ -352,16 +352,16 @@ class MyceliaMemoryService(MemoryServiceBase):
                 return temporal_entity
 
             except json.JSONDecodeError as e:
-                memory_logger.error(f"❌ Failed to parse temporal extraction JSON: {e}")
+                memory_logger.exception(f"❌ Failed to parse temporal extraction JSON: {e}")
                 memory_logger.error(f"Content (first 300 chars): {content[:300]}")
                 return None
             except Exception as e:
-                memory_logger.error(f"Failed to validate temporal entity: {e}")
+                memory_logger.exception(f"Failed to validate temporal entity: {e}")
                 memory_logger.error(f"Data: {content[:300] if content else 'None'}")
                 return None
 
         except Exception as e:
-            memory_logger.error(f"Failed to extract temporal data via OpenAI: {e}")
+            memory_logger.exception(f"Failed to extract temporal data via OpenAI: {e}")
             # Don't fail the entire memory creation if temporal extraction fails
             return None
 
@@ -489,7 +489,7 @@ class MyceliaMemoryService(MemoryServiceBase):
                 return (False, [])
 
         except Exception as e:
-            memory_logger.error(f"Failed to add memory via Mycelia: {e}")
+            memory_logger.exception(f"Failed to add memory via Mycelia: {e}")
             return (False, [])
 
     async def search_memories(
@@ -541,7 +541,7 @@ class MyceliaMemoryService(MemoryServiceBase):
             return memories
 
         except Exception as e:
-            memory_logger.error(f"Failed to search memories via Mycelia: {e}")
+            memory_logger.exception(f"Failed to search memories via Mycelia: {e}")
             return []
 
     async def get_all_memories(self, user_id: str, limit: int = 100) -> List[MemoryEntry]:
@@ -574,7 +574,7 @@ class MyceliaMemoryService(MemoryServiceBase):
             return memories
 
         except Exception as e:
-            memory_logger.error(f"Failed to get memories via Mycelia: {e}")
+            memory_logger.exception(f"Failed to get memories via Mycelia: {e}")
             return []
 
     async def count_memories(self, user_id: str) -> Optional[int]:
@@ -606,7 +606,7 @@ class MyceliaMemoryService(MemoryServiceBase):
             return response.json()
 
         except Exception as e:
-            memory_logger.error(f"Failed to count memories via Mycelia: {e}")
+            memory_logger.exception(f"Failed to count memories via Mycelia: {e}")
             return None
 
     async def get_memory(
@@ -643,7 +643,7 @@ class MyceliaMemoryService(MemoryServiceBase):
                 return None
 
         except Exception as e:
-            memory_logger.error(f"Failed to get memory via Mycelia: {e}")
+            memory_logger.exception(f"Failed to get memory via Mycelia: {e}")
             return None
 
     async def update_memory(
@@ -721,7 +721,7 @@ class MyceliaMemoryService(MemoryServiceBase):
                 return False
 
         except Exception as e:
-            memory_logger.error(f"Failed to update memory via Mycelia: {e}")
+            memory_logger.exception(f"Failed to update memory via Mycelia: {e}")
             return False
 
     async def delete_memory(
@@ -758,7 +758,7 @@ class MyceliaMemoryService(MemoryServiceBase):
                 return False
 
         except Exception as e:
-            memory_logger.error(f"Failed to delete memory via Mycelia: {e}")
+            memory_logger.exception(f"Failed to delete memory via Mycelia: {e}")
             return False
 
     async def delete_all_user_memories(self, user_id: str) -> int:
@@ -793,7 +793,7 @@ class MyceliaMemoryService(MemoryServiceBase):
             return deleted_count
 
         except Exception as e:
-            memory_logger.error(f"Failed to delete user memories via Mycelia: {e}")
+            memory_logger.exception(f"Failed to delete user memories via Mycelia: {e}")
             return 0
 
     async def test_connection(self) -> bool:
@@ -814,7 +814,7 @@ class MyceliaMemoryService(MemoryServiceBase):
             return response.status_code == 200
 
         except Exception as e:
-            memory_logger.error(f"Mycelia connection test failed: {e}")
+            memory_logger.exception(f"Mycelia connection test failed: {e}")
             return False
 
     async def aclose(self) -> None:
@@ -825,7 +825,7 @@ class MyceliaMemoryService(MemoryServiceBase):
                 await self._client.aclose()
                 memory_logger.info("✅ Mycelia HTTP client closed successfully")
             except Exception as e:
-                memory_logger.error(f"Error closing Mycelia HTTP client: {e}")
+                memory_logger.exception(f"Error closing Mycelia HTTP client: {e}")
         self._initialized = False
 
     def shutdown(self) -> None:
@@ -851,14 +851,14 @@ class MyceliaMemoryService(MemoryServiceBase):
                         asyncio.ensure_future(self.aclose(), loop=loop)
                         memory_logger.info("✅ Close operation scheduled on running event loop")
                     except Exception as e:
-                        memory_logger.error(f"Error scheduling close on running loop: {e}")
+                        memory_logger.exception(f"Error scheduling close on running loop: {e}")
                 else:
                     # No running loop, safe to use run_until_complete
                     try:
                         asyncio.get_event_loop().run_until_complete(self.aclose())
                     except Exception as e:
-                        memory_logger.error(f"Error during shutdown: {e}")
+                        memory_logger.exception(f"Error during shutdown: {e}")
             except Exception as e:
-                memory_logger.error(f"Unexpected error during shutdown: {e}")
+                memory_logger.exception(f"Unexpected error during shutdown: {e}")
 
         self._initialized = False

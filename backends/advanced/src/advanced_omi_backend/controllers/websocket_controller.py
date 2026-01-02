@@ -144,8 +144,8 @@ async def cleanup_client_state(client_id: str):
             logger.info(f"🧹 Cleaned up job tracking key for client {client_id}")
         else:
             logger.debug(f"No speech detection job found for client {client_id}")
-    except Exception as e:
-        logger.warning(f"⚠️ Error during job cancellation for client {client_id}: {e}")
+    except Exception:
+        logger.exception(f"⚠️ Error during job cancellation for client {client_id}")
 
     # Mark all active sessions for this client as complete AND delete Redis streams
     try:
@@ -264,8 +264,8 @@ async def _setup_websocket_connection(
             ready_msg = json.dumps({"type": "ready", "message": "WebSocket connection established"}) + "\n"
             await ws.send_text(ready_msg)
             application_logger.debug(f"✅ Sent ready message to {client_id}")
-        except Exception as e:
-            application_logger.error(f"Failed to send ready message to {client_id}: {e}")
+        except Exception:
+            application_logger.exception(f"Failed to send ready message to {client_id}")
 
     # Create client state
     client_state = await create_client_state(client_id, user, device_name)

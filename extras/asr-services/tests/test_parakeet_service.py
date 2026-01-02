@@ -77,9 +77,9 @@ class ParakeetServiceTester:
                 
             self.service_started = True
             logger.info("✅ Parakeet ASR service started successfully")
-            
+
         except Exception as e:
-            logger.error(f"Error starting Parakeet service: {e}")
+            logger.exception(f"Error starting Parakeet service: {e}")
             raise
             
     def cleanup_service(self):
@@ -101,9 +101,9 @@ class ParakeetServiceTester:
                 logger.warning(f"Service cleanup may have failed: {result.stderr}")
             else:
                 logger.info("✅ Parakeet ASR service cleaned up")
-                
+
         except Exception as e:
-            logger.warning(f"Error during service cleanup: {e}")
+            logger.exception(f"Error during service cleanup: {e}")
         finally:
             self.service_started = False
         
@@ -152,9 +152,9 @@ class ParakeetServiceTester:
             result = response.json()
             logger.info(f"✅ Transcription completed: {len(result.get('text', ''))} chars")
             return result
-            
+
         except Exception as e:
-            logger.error(f"❌ Transcription failed: {e}")
+            logger.exception(f"❌ Transcription failed: {e}")
             raise
 
 @pytest.fixture

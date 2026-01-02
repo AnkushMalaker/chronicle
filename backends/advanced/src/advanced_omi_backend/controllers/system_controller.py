@@ -285,7 +285,7 @@ async def update_memory_config_raw(config_yaml: str):
         try:
             new_mem = yaml.safe_load(config_yaml) or {}
         except yaml.YAMLError as e:
-            raise ValueError(f"Invalid YAML syntax: {str(e)}")
+            raise ValueError(f"Invalid YAML syntax: {str(e)}") from e
 
         cfg_path = _find_config_path()
         if not os.path.exists(cfg_path):
@@ -322,7 +322,7 @@ async def validate_memory_config(config_yaml: str):
         try:
             parsed = yaml.safe_load(config_yaml)
         except yaml.YAMLError as e:
-            raise HTTPException(status_code=400, detail=f"Invalid YAML syntax: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Invalid YAML syntax: {str(e)}") from e
         if not isinstance(parsed, dict):
             raise HTTPException(status_code=400, detail="Configuration must be a YAML object")
         # Minimal checks
@@ -333,7 +333,7 @@ async def validate_memory_config(config_yaml: str):
         raise
     except Exception as e:
         logger.exception("Error validating memory config")
-        raise HTTPException(status_code=500, detail=f"Error validating memory config: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error validating memory config: {str(e)}") from e
 
 
 async def reload_memory_config():

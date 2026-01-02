@@ -100,7 +100,7 @@ class OpenMemoryMCPService(MemoryServiceBase):
             )
             
         except Exception as e:
-            memory_logger.error(f"OpenMemory MCP service initialization failed: {e}")
+            memory_logger.exception(f"OpenMemory MCP service initialization failed: {e}")
             raise RuntimeError(f"Initialization failed: {e}")
     
     async def add_memory(
@@ -175,10 +175,10 @@ class OpenMemoryMCPService(MemoryServiceBase):
             return True, []
             
         except MCPError as e:
-            memory_logger.error(f"❌ OpenMemory MCP error for {source_id}: {e}")
+            memory_logger.exception(f"❌ OpenMemory MCP error for {source_id}: {e}")
             raise e
         except Exception as e:
-            memory_logger.error(f"❌ OpenMemory MCP service failed for {source_id}: {e}")
+            memory_logger.exception(f"❌ OpenMemory MCP service failed for {source_id}: {e}")
             raise e
     
     async def search_memories(
@@ -226,10 +226,10 @@ class OpenMemoryMCPService(MemoryServiceBase):
             return memory_entries
 
         except MCPError as e:
-            memory_logger.error(f"Search memories failed: {e}")
+            memory_logger.exception(f"Search memories failed: {e}")
             return []
         except Exception as e:
-            memory_logger.error(f"Search memories failed: {e}")
+            memory_logger.exception(f"Search memories failed: {e}")
             return []
         finally:
             # Restore original user context
@@ -273,10 +273,10 @@ class OpenMemoryMCPService(MemoryServiceBase):
             return memory_entries
 
         except MCPError as e:
-            memory_logger.error(f"Get all memories failed: {e}")
+            memory_logger.exception(f"Get all memories failed: {e}")
             return []
         except Exception as e:
-            memory_logger.error(f"Get all memories failed: {e}")
+            memory_logger.exception(f"Get all memories failed: {e}")
             return []
         finally:
             # Restore original user_id
@@ -313,7 +313,7 @@ class OpenMemoryMCPService(MemoryServiceBase):
             return memory_entry
 
         except Exception as e:
-            memory_logger.error(f"Failed to get memory: {e}")
+            memory_logger.exception(f"Failed to get memory: {e}")
             return None
         finally:
             # Restore original user_id
@@ -358,7 +358,7 @@ class OpenMemoryMCPService(MemoryServiceBase):
             return success
 
         except Exception as e:
-            memory_logger.error(f"Failed to update memory: {e}")
+            memory_logger.exception(f"Failed to update memory: {e}")
             return False
         finally:
             # Restore original user_id
@@ -382,7 +382,7 @@ class OpenMemoryMCPService(MemoryServiceBase):
                 memory_logger.info(f"🗑️ Deleted memory {memory_id} via MCP")
             return success
         except Exception as e:
-            memory_logger.error(f"Delete memory failed: {e}")
+            memory_logger.exception(f"Delete memory failed: {e}")
             return False
     
     async def delete_all_user_memories(self, user_id: str) -> int:
@@ -407,7 +407,7 @@ class OpenMemoryMCPService(MemoryServiceBase):
             return count
             
         except Exception as e:
-            memory_logger.error(f"Delete user memories failed: {e}")
+            memory_logger.exception(f"Delete user memories failed: {e}")
             return 0
         finally:
             # Restore original user_id
@@ -424,7 +424,7 @@ class OpenMemoryMCPService(MemoryServiceBase):
                 await self.initialize()
             return await self.mcp_client.test_connection()
         except Exception as e:
-            memory_logger.error(f"Connection test failed: {e}")
+            memory_logger.exception(f"Connection test failed: {e}")
             return False
     
     def shutdown(self) -> None:
@@ -494,7 +494,7 @@ class OpenMemoryMCPService(MemoryServiceBase):
             )
             
         except Exception as e:
-            memory_logger.error(f"Failed to convert MCP result to MemoryEntry: {e}")
+            memory_logger.exception(f"Failed to convert MCP result to MemoryEntry: {e}")
             return None
     
     async def _update_database_relationships(

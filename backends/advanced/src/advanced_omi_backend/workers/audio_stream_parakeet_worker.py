@@ -83,7 +83,7 @@ async def main():
         await consumer.stop()
 
     except Exception as e:
-        logger.error(f"Worker error: {e}", exc_info=True)
+        logger.exception(f"Worker error: {e}")
         sys.exit(1)
     finally:
         await redis_client.aclose()

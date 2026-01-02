@@ -45,7 +45,7 @@ class AudioSegmentManager:
                 with open(manifest_path, 'r') as f:
                     return json.load(f)
             except Exception as e:
-                logger.error(f"Error loading manifest: {e}")
+                logger.exception(f"Error loading manifest: {e}")
                 return self._create_empty_manifest(speaker_id)
         else:
             return self._create_empty_manifest(speaker_id)

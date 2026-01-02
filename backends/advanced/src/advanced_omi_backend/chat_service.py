@@ -161,7 +161,7 @@ class ChatService:
             logger.info("Chat service initialized successfully")
 
         except Exception as e:
-            logger.error(f"Failed to initialize chat service: {e}")
+            logger.exception(f"Failed to initialize chat service: {e}")
             raise
 
     async def create_session(self, user_id: str, title: str = None) -> ChatSession:
@@ -273,10 +273,10 @@ class ChatService:
                 {"session_id": message.session_id, "user_id": message.user_id},
                 {"$set": update_data}
             )
-            
+
             return True
         except Exception as e:
-            logger.error(f"Failed to add message to session {message.session_id}: {e}")
+            logger.exception(f"Failed to add message to session {message.session_id}: {e}")
             return False
 
     async def get_relevant_memories(self, query: str, user_id: str) -> List[Dict]:
@@ -290,7 +290,7 @@ class ChatService:
             logger.info(f"Retrieved {len(memories)} relevant memories for query: {query[:50]}...")
             return memories
         except Exception as e:
-            logger.error(f"Failed to retrieve memories for user {user_id}: {e}")
+            logger.exception(f"Failed to retrieve memories for user {user_id}: {e}")
             return []
 
     async def format_conversation_context(
@@ -421,7 +421,7 @@ If no relevant memories are available, respond normally based on the conversatio
             }
 
         except Exception as e:
-            logger.error(f"Error generating response for session {session_id}: {e}")
+            logger.exception(f"Error generating response for session {session_id}: {e}")
             yield {
                 "type": "error",
                 "data": {"error": str(e)},
@@ -440,7 +440,7 @@ If no relevant memories are available, respond normally based on the conversatio
             )
             return result.modified_count > 0
         except Exception as e:
-            logger.error(f"Failed to update session title: {e}")
+            logger.exception(f"Failed to update session title: {e}")
             return False
 
     async def get_chat_statistics(self, user_id: str) -> Dict:
@@ -467,7 +467,7 @@ If no relevant memories are available, respond normally based on the conversatio
                 "last_chat": latest_session["updated_at"] if latest_session else None
             }
         except Exception as e:
-            logger.error(f"Failed to get chat statistics for user {user_id}: {e}")
+            logger.exception(f"Failed to get chat statistics for user {user_id}: {e}")
             return {"total_sessions": 0, "total_messages": 0, "last_chat": None}
 
     async def extract_memories_from_session(self, session_id: str, user_id: str) -> Tuple[bool, List[str], int]:
@@ -528,9 +528,9 @@ If no relevant memories are available, respond normally based on the conversatio
             else:
                 logger.error(f"❌ Failed to extract memories from chat session {session_id}")
                 return False, [], 0
-                
+
         except Exception as e:
-            logger.error(f"Failed to extract memories from session {session_id}: {e}")
+            logger.exception(f"Failed to extract memories from session {session_id}: {e}")
             return False, [], 0
 
 

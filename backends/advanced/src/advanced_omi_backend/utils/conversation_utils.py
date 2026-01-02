@@ -188,8 +188,8 @@ Title:"""
         title = await async_generate(prompt, temperature=0.3)
         return title.strip().strip('"').strip("'") or "Conversation"
 
-    except Exception as e:
-        logger.warning(f"Failed to generate LLM title: {e}")
+    except Exception:
+        logger.exception(f"Failed to generate LLM title")
         # Fallback to simple title generation
         words = text.split()[:6]
         title = " ".join(words)
@@ -256,8 +256,8 @@ Summary:"""
         summary = await async_generate(prompt, temperature=0.3)
         return summary.strip().strip('"').strip("'") or "No content"
 
-    except Exception as e:
-        logger.warning(f"Failed to generate LLM short summary: {e}")
+    except Exception:
+        logger.exception(f"Failed to generate LLM short summary")
         # Fallback to simple summary generation
         return (
             conversation_text[:120] + "..."
@@ -355,8 +355,8 @@ DETAILED SUMMARY:"""
         summary = await async_generate(prompt, temperature=0.3)
         return summary.strip().strip('"').strip("'") or "No meaningful content to summarize"
 
-    except Exception as e:
-        logger.warning(f"Failed to generate detailed summary: {e}")
+    except Exception:
+        logger.exception(f"Failed to generate detailed summary")
         # Fallback to returning cleaned transcript
         lines = conversation_text.split("\n")
         cleaned = "\n".join(line.strip() for line in lines if line.strip())

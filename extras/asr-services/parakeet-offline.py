@@ -127,7 +127,7 @@ class SharedTranscriber:
             )  # 0.1s silence
             logger.info("Shared NeMo ASR model warmed up successfully.")
         except Exception as e:
-            logger.error(f"Error during ASR model warm-up: {e}")
+            logger.exception(f"Error during ASR model warm-up: {e}")
 
     async def _transcribe_chunked(self, speech: Sequence[AudioChunk]) -> dict:
         """Chunked transcription method for long audio."""
@@ -194,7 +194,7 @@ class SharedTranscriber:
             try:
                 os.unlink(tmpfile_name)
             except Exception as e:
-                logger.warning(f"Failed to delete temporary file {tmpfile_name}: {e}")
+                logger.exception(f"Failed to delete temporary file {tmpfile_name}: {e}")
 
     async def _transcribe(self, speech: Sequence[AudioChunk]) -> dict:
         """Internal transcription method that returns structured result."""
@@ -282,9 +282,9 @@ class SharedTranscriber:
             else:
                 logger.warning("NeMo returned empty results")
                 return {"text": "", "words": [], "segments": []}
-                
+
         except Exception as e:
-            logger.error(f"Error during transcription: {e}")
+            logger.exception(f"Error during transcription: {e}")
             # Re-raise the exception so HTTP endpoint can return proper error code
             raise e
         finally:
@@ -384,9 +384,9 @@ class StreamingSession:
                     if "end" in speech_dict:
                         vad_trigger = True
                         break
-                        
+
             except Exception as e:
-                logger.warning(f"VAD processing error: {e}")
+                logger.exception(f"VAD processing error: {e}")
         
         return time_trigger or buffer_trigger or vad_trigger
 
@@ -648,7 +648,7 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
     except Exception as e:
-        logger.error(f"WebSocket error: {e}")
+        logger.exception(f"WebSocket error: {e}")
     finally:
         # Cleanup
         if session_id and session_id in active_sessions:

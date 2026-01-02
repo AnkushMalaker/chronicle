@@ -42,7 +42,7 @@ def download_models():
         return True
         
     except Exception as e:
-        logger.warning(f"Failed to download models during build (will download at runtime): {e}")
+        logger.exception(f"Failed to download models during build (will download at runtime): {e}")
         return True  # Don't fail the build
 
 if __name__ == "__main__":

@@ -75,7 +75,7 @@ class TranscriptionResultsAggregator:
             return results
 
         except Exception as e:
-            logger.error(f"🔄 Error getting results for session {session_id}: {e}")
+            logger.exception(f"🔄 Error getting results for session {session_id}: {e}")
             return []
 
     async def get_combined_results(self, session_id: str) -> dict:
@@ -203,5 +203,5 @@ class TranscriptionResultsAggregator:
             return results, new_last_id
 
         except Exception as e:
-            logger.error(f"🔄 Error getting realtime results for session {session_id}: {e}")
+            logger.exception(f"🔄 Error getting realtime results for session {session_id}: {e}")
             return [], last_id

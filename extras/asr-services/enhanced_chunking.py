@@ -144,7 +144,7 @@ class TimestampedFrameBatchChunkedRNNT(FrameBatchChunkedRNNT):
 
             return [self.merged_hypothesis] if self.merged_hypothesis else self.all_hypotheses
         except Exception as e:
-            logger.error(f"Hypothesis joining FAILED: {e}")
+            logger.exception(f"Hypothesis joining FAILED: {e}")
             raise e  # Don't silently fall back
 
     def _join_hypotheses(self, hypotheses):
@@ -354,7 +354,7 @@ def extract_timestamps_from_hypotheses_native(hypotheses: List[Hypothesis], chun
         return words
 
     except Exception as e:
-        logger.error(f"Native timestamp extraction FAILED: {e}")
+        logger.exception(f"Native timestamp extraction FAILED: {e}")
         raise e  # Don't silently fall back
 
 
@@ -466,7 +466,7 @@ def extract_timestamps_from_hypotheses(hypotheses: List[Hypothesis], chunk_start
         return words
 
     except Exception as e:
-        logger.error(f"Critical error in extract_timestamps_from_hypotheses: {e}")
+        logger.exception(f"Critical error in extract_timestamps_from_hypotheses: {e}")
         return []
 
 
@@ -595,5 +595,5 @@ async def transcribe_with_enhanced_chunking(model, audio_file_path: str,
         return response
 
     except Exception as e:
-        logger.error(f"Enhanced chunking failed: {e}")
+        logger.exception(f"Enhanced chunking failed: {e}")
         raise

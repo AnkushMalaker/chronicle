@@ -381,7 +381,7 @@ def write_pcm_to_wav(
         )
 
     except Exception as e:
-        logger.error(f"❌ Failed to write PCM to WAV: {e}")
+        logger.exception(f"❌ Failed to write PCM to WAV")
         raise
 
 

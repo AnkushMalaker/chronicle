@@ -199,7 +199,7 @@ class OpenAIProvider(LLMProviderBase):
             return cleaned_facts
                 
         except Exception as e:
-            memory_logger.error(f"OpenAI memory extraction failed: {e}")
+            memory_logger.exception(f"OpenAI memory extraction failed: {e}")
             return []
         
     async def _process_chunk(self, system_prompt: str, chunk: str, index: int) -> List[str]:
@@ -242,7 +242,7 @@ class OpenAIProvider(LLMProviderBase):
             return _parse_memories_content(facts)
             
         except Exception as e:
-            memory_logger.error(f"Error processing chunk {index}: {e}")
+            memory_logger.exception(f"Error processing chunk {index}: {e}")
             return []
 
     async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
@@ -261,7 +261,7 @@ class OpenAIProvider(LLMProviderBase):
             return [data.embedding for data in response.data]
             
         except Exception as e:
-            memory_logger.error(f"OpenAI embedding generation failed: {e}")
+            memory_logger.exception(f"OpenAI embedding generation failed: {e}")
             raise e
 
     async def test_connection(self) -> bool:
@@ -276,11 +276,11 @@ class OpenAIProvider(LLMProviderBase):
                 await client.models.list()
                 return True
             except Exception as e:
-                memory_logger.error(f"OpenAI connection test failed: {e}")
+                memory_logger.exception(f"OpenAI connection test failed: {e}")
                 return False
-            
+
         except Exception as e:
-            memory_logger.error(f"OpenAI connection test failed: {e}")
+            memory_logger.exception(f"OpenAI connection test failed: {e}")
             return False
 
     async def propose_memory_actions(
@@ -330,7 +330,7 @@ class OpenAIProvider(LLMProviderBase):
             return result
 
         except Exception as e:
-            memory_logger.error(f"OpenAI propose_memory_actions failed: {e}")
+            memory_logger.exception(f"OpenAI propose_memory_actions failed: {e}")
             return {}
 
 

@@ -75,7 +75,7 @@ class AudioStreamService:
             # We'll create them dynamically in publish_audio_chunk
             pass
         except Exception as e:
-            logger.error(f"Error ensuring consumer groups: {e}")
+            logger.exception(f"Error ensuring consumer groups: {e}")
 
     async def publish_audio_chunk(
         self,

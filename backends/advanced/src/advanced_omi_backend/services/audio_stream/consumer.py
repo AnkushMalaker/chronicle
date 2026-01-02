@@ -110,7 +110,7 @@ class BaseAudioStreamConsumer(ABC):
                 await self.stream_locks[stream_name].release()
                 logger.info(f"🔓 Released stream: {stream_name}")
             except Exception as e:
-                logger.warning(f"Failed to release lock for {stream_name}: {e}")
+                logger.exception(f"Failed to release lock for {stream_name}: {e}")
             finally:
                 del self.stream_locks[stream_name]
 
@@ -120,7 +120,7 @@ class BaseAudioStreamConsumer(ABC):
             try:
                 await lock.reacquire()
             except Exception as e:
-                logger.warning(f"Failed to renew lock for {stream_name}: {e}")
+                logger.exception(f"Failed to renew lock for {stream_name}: {e}")
                 # Lock expired, remove from our list
                 del self.stream_locks[stream_name]
                 if stream_name in self.active_streams:
@@ -340,7 +340,7 @@ class BaseAudioStreamConsumer(ABC):
                             break
                 else:
                     # Other ResponseError - log and continue
-                    logger.error(f"➡️ [{self.consumer_name}] Redis ResponseError: {e}")
+                    logger.exception(f"➡️ [{self.consumer_name}] Redis ResponseError: {e}")
 
                 await asyncio.sleep(1)
 

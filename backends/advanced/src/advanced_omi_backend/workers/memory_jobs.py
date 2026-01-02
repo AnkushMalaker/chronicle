@@ -223,7 +223,7 @@ async def process_memory_job(conversation_id: str, *, redis_client=None) -> Dict
                                 {"memory_id": memory_id, "text": memory_text[:200]}
                             )
                 except Exception as e:
-                    logger.warning(f"Failed to fetch memory details for UI: {e}")
+                    logger.exception(f"Failed to fetch memory details for UI: {e}")
 
                 current_job.meta.update(
                     {

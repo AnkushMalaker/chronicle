@@ -103,10 +103,10 @@ async def get_jwt_token(username: str, password: str, backend_url: str) -> Optio
         logger.error("❌ Authentication request timed out")
         return None
     except httpx.RequestError as e:
-        logger.error(f"❌ Authentication request failed: {e}")
+        logger.exception(f"❌ Authentication request failed: {e}")
         return None
     except Exception as e:
-        logger.error(f"❌ Unexpected authentication error: {e}")
+        logger.exception(f"❌ Unexpected authentication error: {e}")
         return None
 
 
@@ -232,7 +232,7 @@ class ESP32TCPServer(TCPServer):
             )
 
         except Exception as e:
-            logger.error(f"Error processing ESP32 audio data: {e}")
+            logger.exception(f"Error processing ESP32 audio data: {e}")
             return None
 
 
@@ -246,7 +246,7 @@ async def ensure_socket_connection(socket_client: SocketClient) -> bool:
             logger.info("✅ Authenticated WebSocket connection established")
             return True
         except Exception as e:
-            logger.error(f"❌ Failed to connect to WebSocket: {e}")
+            logger.exception(f"❌ Failed to connect to WebSocket: {e}")
             if attempt < max_retries - 1:
                 await exponential_backoff_sleep(attempt)
             else:
@@ -299,10 +299,10 @@ async def send_with_retry(socket_client: SocketClient, chunk: AudioChunk) -> tup
             
             # Check for authentication-related errors
             if any(auth_err in error_str for auth_err in ['401', 'unauthorized', 'forbidden', 'authentication']):
-                logger.warning(f"❌ Authentication error detected: {e}")
+                logger.exception(f"❌ Authentication error detected: {e}")
                 return False, True  # Failed, needs new auth token
-            
-            logger.warning(f"⚠️ Failed to send chunk (attempt {attempt + 1}): {e}")
+
+            logger.exception(f"⚠️ Failed to send chunk (attempt {attempt + 1}): {e}")
             if attempt < max_retries - 1:
                 if await ensure_socket_connection(socket_client):
                     continue  # Try again with reconnected client
@@ -359,7 +359,7 @@ async def process_esp32_audio(
                 try:
                     await file_sink.write(chunk)
                 except Exception as e:
-                    logger.warning(f"⚠️ Failed to write to file sink: {e}")
+                    logger.exception(f"⚠️ Failed to write to file sink: {e}")
 
             # Send to authenticated backend
             if socket_client:
@@ -405,7 +405,7 @@ async def process_esp32_audio(
         logger.info("🛑 ESP32 audio processor cancelled")
         raise
     except Exception as e:
-        logger.error(f"❌ Error in ESP32 audio processor: {e}")
+        logger.exception(f"❌ Error in ESP32 audio processor: {e}")
         raise
 
 
@@ -459,7 +459,7 @@ async def run_audio_processor(args, esp32_file_sink):
             logger.info("🛑 Interrupted – stopping")
             break
         except Exception as e:
-            logger.error(f"❌ Audio processor error: {e}")
+            logger.exception(f"❌ Audio processor error: {e}")
             logger.info(f"🔄 Restarting with exponential backoff...")
             await exponential_backoff_sleep(retry_attempt)
             retry_attempt += 1
@@ -551,7 +551,7 @@ async def main():
             logger.error("💡 Update AUTH_USERNAME and AUTH_PASSWORD constants or use command line arguments")
             return
     except Exception as e:
-        logger.error(f"❌ Authentication test error: {e}")
+        logger.exception(f"❌ Authentication test error: {e}")
         logger.error("💡 Make sure the backend is running and accessible")
         return
 
@@ -585,7 +585,7 @@ async def main():
     except KeyboardInterrupt:
         logger.info("Interrupted – shutting down")
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        logger.exception(f"Fatal error: {e}")
     finally:
         logger.info("Recording session ended")
 

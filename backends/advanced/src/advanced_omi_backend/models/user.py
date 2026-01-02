@@ -111,8 +111,8 @@ async def get_user_by_id(user_id: str) -> Optional[User]:
     """Get user by MongoDB ObjectId string."""
     try:
         return await User.get(PydanticObjectId(user_id))
-    except Exception as e:
-        logger.error(f"Failed to get user by ID {user_id}: {e}")
+    except Exception:
+        logger.exception(f"Failed to get user by ID {user_id}")
         # Re-raise for proper error handling upstream
         raise
 

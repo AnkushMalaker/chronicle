@@ -80,10 +80,10 @@ class OpenAILLMClient(LLMClient):
                 self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
                 self.logger.info(f"OpenAI client initialized (no tracing), base_url: {self.base_url}")
         except ImportError:
-            self.logger.error("OpenAI library not installed. Install with: pip install openai")
+            self.logger.exception("OpenAI library not installed. Install with: pip install openai")
             raise
         except Exception as e:
-            self.logger.error(f"Failed to initialize OpenAI client: {e}")
+            self.logger.exception(f"Failed to initialize OpenAI client: {e}")
             raise
 
     def generate(
@@ -107,7 +107,7 @@ class OpenAILLMClient(LLMClient):
             response = self.client.chat.completions.create(**params)
             return response.choices[0].message.content.strip()
         except Exception as e:
-            self.logger.error(f"Error generating completion: {e}")
+            self.logger.exception(f"Error generating completion: {e}")
             raise
 
     def health_check(self) -> Dict:
@@ -130,7 +130,7 @@ class OpenAILLMClient(LLMClient):
                     "api_key_configured": bool(self.api_key and self.api_key != "dummy"),
                 }
         except Exception as e:
-            self.logger.error(f"Health check failed: {e}")
+            self.logger.exception(f"Health check failed: {e}")
             return {
                 "status": "❌ Failed",
                 "error": str(e),

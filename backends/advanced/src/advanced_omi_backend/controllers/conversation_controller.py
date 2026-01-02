@@ -77,7 +77,7 @@ async def close_current_conversation(client_id: str, user: User, client_manager:
         )
 
     except Exception as e:
-        logger.error(f"Error closing conversation for client {client_id}: {e}")
+        logger.exception(f"Error closing conversation for client {client_id}")
         return JSONResponse(
             content={"error": f"Failed to close conversation: {str(e)}"},
             status_code=500,
@@ -128,7 +128,7 @@ async def get_conversation(conversation_id: str, user: User):
         return {"conversation": response}
 
     except Exception as e:
-        logger.error(f"Error fetching conversation {conversation_id}: {e}")
+        logger.exception(f"Error fetching conversation {conversation_id}")
         return JSONResponse(status_code=500, content={"error": "Error fetching conversation"})
 
 
@@ -267,7 +267,7 @@ async def delete_conversation(conversation_id: str, user: User):
         )
 
     except Exception as e:
-        logger.error(f"Error deleting conversation {conversation_id}: {e}")
+        logger.exception(f"Error deleting conversation {conversation_id}")
         return JSONResponse(
             status_code=500,
             content={"error": f"Failed to delete conversation: {str(e)}"}
@@ -400,7 +400,7 @@ async def reprocess_transcript(conversation_id: str, user: User):
         })
 
     except Exception as e:
-        logger.error(f"Error starting transcript reprocessing: {e}")
+        logger.exception(f"Error starting transcript reprocessing")
         return JSONResponse(status_code=500, content={"error": "Error starting transcript reprocessing"})
 
 
@@ -465,7 +465,7 @@ async def reprocess_memory(conversation_id: str, transcript_version_id: str, use
         })
 
     except Exception as e:
-        logger.error(f"Error starting memory reprocessing: {e}")
+        logger.exception(f"Error starting memory reprocessing")
         return JSONResponse(status_code=500, content={"error": "Error starting memory reprocessing"})
 
 
@@ -501,7 +501,7 @@ async def activate_transcript_version(conversation_id: str, version_id: str, use
         })
 
     except Exception as e:
-        logger.error(f"Error activating transcript version: {e}")
+        logger.exception(f"Error activating transcript version")
         return JSONResponse(status_code=500, content={"error": "Error activating transcript version"})
 
 
@@ -534,7 +534,7 @@ async def activate_memory_version(conversation_id: str, version_id: str, user: U
         })
 
     except Exception as e:
-        logger.error(f"Error activating memory version: {e}")
+        logger.exception(f"Error activating memory version")
         return JSONResponse(status_code=500, content={"error": "Error activating memory version"})
 
 
@@ -577,5 +577,5 @@ async def get_conversation_version_history(conversation_id: str, user: User):
         return JSONResponse(content=history)
 
     except Exception as e:
-        logger.error(f"Error fetching version history: {e}")
+        logger.exception(f"Error fetching version history")
         return JSONResponse(status_code=500, content={"error": "Error fetching version history"})

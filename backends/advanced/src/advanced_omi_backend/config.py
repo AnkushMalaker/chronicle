@@ -88,8 +88,8 @@ def load_diarization_settings_from_file():
                 config_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy(template_path, config_path)
                 logger.info(f"Created diarization config from template at {config_path}")
-            except Exception as e:
-                logger.warning(f"Could not copy template to {config_path}: {e}")
+            except Exception:
+                logger.exception(f"Could not copy template to {config_path}")
     
     # Load from file if it exists
     if config_path.exists():
@@ -99,7 +99,7 @@ def load_diarization_settings_from_file():
                 logger.info(f"Loaded diarization settings from {config_path}")
                 return _diarization_settings
         except Exception as e:
-            logger.error(f"Error loading diarization settings from {config_path}: {e}")
+            logger.exception(f"Error loading diarization settings from {config_path}")
     
     # Fall back to defaults
     _diarization_settings = DEFAULT_DIARIZATION_SETTINGS.copy()
@@ -127,7 +127,7 @@ def save_diarization_settings_to_file(settings):
         logger.info(f"Saved diarization settings to {config_path}")
         return True
     except Exception as e:
-        logger.error(f"Error saving diarization settings to {config_path}: {e}")
+        logger.exception(f"Error saving diarization settings to {config_path}")
         return False
 
 

@@ -104,8 +104,8 @@ def get_memory_service() -> MemoryServiceBase:
                     memory_logger.info(f"✅ Global memory service created: {type(_memory_service).__name__}")
 
                 except Exception as e:
-                    memory_logger.error(f"❌ Failed to create memory service: {e}")
-                    raise RuntimeError(f"Memory service creation failed: {e}")
+                    memory_logger.exception(f"❌ Failed to create memory service: {e}")
+                    raise RuntimeError(f"Memory service creation failed: {e}") from e
 
     return _memory_service
 
@@ -119,7 +119,7 @@ def shutdown_memory_service() -> None:
             _memory_service.shutdown()
             memory_logger.info("🔄 Memory service shut down")
         except Exception as e:
-            memory_logger.error(f"Error shutting down memory service: {e}")
+            memory_logger.exception(f"Error shutting down memory service: {e}")
         finally:
             _memory_service = None
 

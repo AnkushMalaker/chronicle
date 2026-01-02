@@ -107,7 +107,7 @@ class ConfigManager:
             with open(self.config_yml_path, 'r') as f:
                 return yaml.safe_load(f) or {}
         except Exception as e:
-            logger.error(f"Failed to load config.yml: {e}")
+            logger.exception(f"Failed to load config.yml: {e}")
             return {}
 
     def _save_config_yml(self, config: Dict[str, Any]):
@@ -127,7 +127,7 @@ class ConfigManager:
             logger.info(f"Saved config.yml to {self.config_yml_path}")
 
         except Exception as e:
-            logger.error(f"Failed to save config.yml: {e}")
+            logger.exception(f"Failed to save config.yml: {e}")
             raise
 
     def _update_env_file(self, key: str, value: str):
@@ -175,7 +175,7 @@ class ConfigManager:
             logger.info(f"Updated {key}={value} in .env file")
 
         except Exception as e:
-            logger.error(f"Failed to update .env file: {e}")
+            logger.exception(f"Failed to update .env file: {e}")
             raise
 
     def get_memory_provider(self) -> str:

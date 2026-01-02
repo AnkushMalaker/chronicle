@@ -65,7 +65,7 @@ async def auth_health_check():
                 await asyncio.wait_for(memory_service.test_connection(), timeout=2.0)
                 memory_status = "ok"
             except Exception as e:
-                logger.warning(f"Memory service health check failed: {e}")
+                logger.exception(f"Memory service health check failed: {e}")
                 memory_status = "degraded"
         else:
             memory_status = "unavailable"
@@ -77,7 +77,7 @@ async def auth_health_check():
             "timestamp": int(time.time())
         }
     except Exception as e:
-        logger.error(f"Auth health check failed: {e}")
+        logger.exception(f"Auth health check failed: {e}")
         return JSONResponse(
             status_code=500,
             content={
@@ -500,7 +500,7 @@ async def readiness_check():
         await asyncio.wait_for(mongo_client.admin.command("ping"), timeout=2.0)
         return JSONResponse(content={"status": "ready", "timestamp": int(time.time())}, status_code=200)
     except Exception as e:
-        logger.error(f"Readiness check failed: {e}")
+        logger.exception(f"Readiness check failed: {e}")
         return JSONResponse(
             content={"status": "not_ready", "error": str(e), "timestamp": int(time.time())}, 
             status_code=503

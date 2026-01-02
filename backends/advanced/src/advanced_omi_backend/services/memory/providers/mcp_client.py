@@ -169,10 +169,10 @@ class MCPClient:
             return [str(uuid.uuid4())]
             
         except httpx.HTTPError as e:
-            memory_logger.error(f"HTTP error adding memories: {e}")
+            memory_logger.exception(f"HTTP error adding memories: {e}")
             raise MCPError(f"HTTP error: {e}")
         except Exception as e:
-            memory_logger.error(f"Error adding memories: {e}")
+            memory_logger.exception(f"Error adding memories: {e}")
             raise MCPError(f"Failed to add memories: {e}")
     
     async def search_memory(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
@@ -244,7 +244,7 @@ class MCPClient:
             return formatted_memories[:limit]
             
         except Exception as e:
-            memory_logger.error(f"Error searching memories: {e}")
+            memory_logger.exception(f"Error searching memories: {e}")
             return []
     
     async def list_memories(self, limit: int = 100) -> List[Dict[str, Any]]:
@@ -313,7 +313,7 @@ class MCPClient:
             return formatted_memories
             
         except Exception as e:
-            memory_logger.error(f"Error listing memories: {e}")
+            memory_logger.exception(f"Error listing memories: {e}")
             return []
     
     async def delete_all_memories(self) -> int:
@@ -358,7 +358,7 @@ class MCPClient:
             return len(memory_ids)
 
         except Exception as e:
-            memory_logger.error(f"Error deleting all memories: {e}")
+            memory_logger.exception(f"Error deleting all memories: {e}")
             return 0
 
     async def get_memory(self, memory_id: str) -> Optional[Dict[str, Any]]:
@@ -398,10 +398,10 @@ class MCPClient:
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 return None
-            memory_logger.error(f"HTTP error getting memory: {e}")
+            memory_logger.exception(f"HTTP error getting memory: {e}")
             return None
         except Exception as e:
-            memory_logger.error(f"Error getting memory: {e}")
+            memory_logger.exception(f"Error getting memory: {e}")
             return None
 
     async def update_memory(
@@ -445,10 +445,10 @@ class MCPClient:
             return True
 
         except httpx.HTTPStatusError as e:
-            memory_logger.error(f"HTTP error updating memory: {e.response.status_code}")
+            memory_logger.exception(f"HTTP error updating memory: {e.response.status_code}")
             return False
         except Exception as e:
-            memory_logger.error(f"Error updating memory: {e}")
+            memory_logger.exception(f"Error updating memory: {e}")
             return False
 
     async def delete_memory(self, memory_id: str, user_id: Optional[str] = None, user_email: Optional[str] = None) -> bool:
@@ -473,7 +473,7 @@ class MCPClient:
             return True
             
         except Exception as e:
-            memory_logger.warning(f"Error deleting memory {memory_id}: {e}")
+            memory_logger.exception(f"Error deleting memory {memory_id}: {e}")
             return False
     
     async def test_connection(self) -> bool:
@@ -500,7 +500,7 @@ class MCPClient:
             return False
             
         except Exception as e:
-            memory_logger.error(f"OpenMemory server connection test failed: {e}")
+            memory_logger.exception(f"OpenMemory server connection test failed: {e}")
             return False
 
 

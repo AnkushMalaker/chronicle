@@ -92,7 +92,7 @@ class QdrantVectorStore(VectorStoreBase):
                             f"Collection {self.collection_name} exists with correct dimensions ({self.embedding_dims})"
                         )
                 except Exception as e:
-                    memory_logger.warning(f"Error checking collection info: {e}. Recreating...")
+                    memory_logger.exception(f"Error checking collection info: {e}. Recreating...")
                     try:
                         await self.client.delete_collection(self.collection_name)
                     except:
@@ -114,7 +114,7 @@ class QdrantVectorStore(VectorStoreBase):
                 )
                 
         except Exception as e:
-            memory_logger.error(f"Qdrant initialization failed: {e}")
+            memory_logger.exception(f"Qdrant initialization failed: {e}")
             raise
 
     async def add_memories(self, memories: List[MemoryEntry]) -> List[str]:
@@ -144,7 +144,7 @@ class QdrantVectorStore(VectorStoreBase):
             return []
             
         except Exception as e:
-            memory_logger.error(f"Qdrant add memories failed: {e}")
+            memory_logger.exception(f"Qdrant add memories failed: {e}")
             return []
 
     async def search_memories(self, query_embedding: List[float], user_id: str, limit: int, score_threshold: float = 0.0) -> List[MemoryEntry]:
@@ -202,7 +202,7 @@ class QdrantVectorStore(VectorStoreBase):
             return memories
             
         except Exception as e:
-            memory_logger.error(f"Qdrant search failed: {e}")
+            memory_logger.exception(f"Qdrant search failed: {e}")
             return []
 
     async def get_memories(self, user_id: str, limit: int) -> List[MemoryEntry]:
@@ -237,7 +237,7 @@ class QdrantVectorStore(VectorStoreBase):
             return memories
             
         except Exception as e:
-            memory_logger.error(f"Qdrant get memories failed: {e}")
+            memory_logger.exception(f"Qdrant get memories failed: {e}")
             return []
 
     async def delete_memory(self, memory_id: str, user_id: Optional[str] = None, user_email: Optional[str] = None) -> bool:
@@ -264,7 +264,7 @@ class QdrantVectorStore(VectorStoreBase):
             return True
             
         except Exception as e:
-            memory_logger.error(f"Qdrant delete memory failed: {e}")
+            memory_logger.exception(f"Qdrant delete memory failed: {e}")
             return False
 
     async def delete_user_memories(self, user_id: str) -> int:
@@ -293,7 +293,7 @@ class QdrantVectorStore(VectorStoreBase):
             return count
             
         except Exception as e:
-            memory_logger.error(f"Qdrant delete user memories failed: {e}")
+            memory_logger.exception(f"Qdrant delete user memories failed: {e}")
             return 0
 
     async def test_connection(self) -> bool:
@@ -305,7 +305,7 @@ class QdrantVectorStore(VectorStoreBase):
             return False
             
         except Exception as e:
-            memory_logger.error(f"Qdrant connection test failed: {e}")
+            memory_logger.exception(f"Qdrant connection test failed: {e}")
             return False
 
     async def update_memory(
@@ -350,7 +350,7 @@ class QdrantVectorStore(VectorStoreBase):
             )
             return True
         except Exception as e:
-            memory_logger.error(f"Qdrant update memory failed: {e}")
+            memory_logger.exception(f"Qdrant update memory failed: {e}")
             return False
 
     async def count_memories(self, user_id: str) -> int:
@@ -376,7 +376,7 @@ class QdrantVectorStore(VectorStoreBase):
             return result.count
             
         except Exception as e:
-            memory_logger.error(f"Qdrant count memories failed: {e}")
+            memory_logger.exception(f"Qdrant count memories failed: {e}")
             return 0
 
 

@@ -143,16 +143,16 @@ class SpeakerRecognitionClient:
                         return result
 
         except ClientConnectorError as e:
-            logger.error(f"🎤 Failed to connect to speaker recognition service: {e}")
+            logger.exception(f"🎤 Failed to connect to speaker recognition service: {e}")
             return {}
         except asyncio.TimeoutError as e:
-            logger.error(f"🎤 Timeout connecting to speaker recognition service: {e}")
+            logger.exception(f"🎤 Timeout connecting to speaker recognition service: {e}")
             return {}
         except aiohttp.ClientError as e:
-            logger.warning(f"🎤 Client error during speaker recognition: {e}")
+            logger.exception(f"🎤 Client error during speaker recognition: {e}")
             return {}
         except Exception as e:
-            logger.error(f"🎤 Error during speaker recognition: {e}")
+            logger.exception(f"🎤 Error during speaker recognition: {e}")
             return {}
 
     async def diarize_and_identify(
@@ -264,18 +264,16 @@ class SpeakerRecognitionClient:
                         return result
 
         except ClientConnectorError as e:
-            logger.error(f"🎤 [DIARIZE] ❌ Failed to connect to speaker recognition service at {self.service_url}: {e}")
+            logger.exception(f"🎤 [DIARIZE] ❌ Failed to connect to speaker recognition service at {self.service_url}: {e}")
             return {}
         except asyncio.TimeoutError as e:
-            logger.error(f"🎤 [DIARIZE] ❌ Timeout connecting to speaker recognition service: {e}")
+            logger.exception(f"🎤 [DIARIZE] ❌ Timeout connecting to speaker recognition service: {e}")
             return {}
         except aiohttp.ClientError as e:
-            logger.warning(f"🎤 [DIARIZE] ❌ Client error during speaker recognition: {e}")
+            logger.exception(f"🎤 [DIARIZE] ❌ Client error during speaker recognition: {e}")
             return {}
         except Exception as e:
-            logger.error(f"🎤 [DIARIZE] ❌ Error during speaker diarization and identification: {e}")
-            import traceback
-            logger.debug(traceback.format_exc())
+            logger.exception(f"🎤 [DIARIZE] ❌ Error during speaker diarization and identification: {e}")
             return {}
 
     async def identify_speakers(self, audio_path: str, segments: List[Dict]) -> Dict[str, str]:
@@ -351,10 +349,10 @@ class SpeakerRecognitionClient:
                         return speaker_mapping
 
         except aiohttp.ClientError as e:
-            logger.warning(f"Failed to connect to speaker recognition service: {e}")
+            logger.exception(f"Failed to connect to speaker recognition service: {e}")
             return {}
         except Exception as e:
-            logger.error(f"Error during speaker identification: {e}")
+            logger.exception(f"Error during speaker identification: {e}")
             return {}
 
     def _process_diarization_result(
@@ -408,7 +406,7 @@ class SpeakerRecognitionClient:
             return speaker_mapping
 
         except Exception as e:
-            logger.error(f"🎤 Error processing diarization result: {e}")
+            logger.exception(f"🎤 Error processing diarization result: {e}")
             return {}
 
     async def get_enrolled_speakers(self, user_id: Optional[str] = None) -> Dict:
@@ -440,10 +438,10 @@ class SpeakerRecognitionClient:
                     return result
 
         except aiohttp.ClientError as e:
-            logger.warning(f"🎤 Failed to connect to speaker recognition service: {e}")
+            logger.exception(f"🎤 Failed to connect to speaker recognition service: {e}")
             return {"speakers": []}
         except Exception as e:
-            logger.error(f"🎤 Error getting enrolled speakers: {e}")
+            logger.exception(f"🎤 Error getting enrolled speakers: {e}")
             return {"speakers": []}
 
     async def check_if_enrolled_speaker_present(
@@ -574,7 +572,7 @@ class SpeakerRecognitionClient:
                 return (False, result)  # Return both boolean and speaker recognition results
 
         except Exception as e:
-            logger.error(f"🎤 [SPEAKER CHECK] ❌ Speaker recognition check failed: {e}", exc_info=True)
+            logger.exception(f"🎤 [SPEAKER CHECK] ❌ Speaker recognition check failed: {e}")
             return (False, {})  # Fail closed - don't create conversation on error
 
         finally:
@@ -622,5 +620,5 @@ class SpeakerRecognitionClient:
                 return False
 
         except Exception as e:
-            logger.error(f"Error during speaker service health check: {e}")
+            logger.exception(f"Error during speaker service health check: {e}")
             return False

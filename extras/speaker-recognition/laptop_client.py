@@ -286,7 +286,7 @@ async def cmd_enroll(args):
                 logger.error(f"❌ Failed to enroll speaker - unexpected response: {result}")
                 
     except Exception as e:
-        logger.error(f"Error during enrollment: {e}")
+        logger.exception(f"Error during enrollment: {e}")
     finally:
         # Clean up temporary file only if we recorded it
         if cleanup_audio:
@@ -321,7 +321,7 @@ async def cmd_identify(args):
                 save_audio(audio_path, args.save_file)
                 
     except Exception as e:
-        logger.error(f"Error during identification: {e}")
+        logger.exception(f"Error during identification: {e}")
     finally:
         # Clean up temporary file
         Path(audio_path).unlink(missing_ok=True)
@@ -355,7 +355,7 @@ async def cmd_verify(args):
                 save_audio(audio_path, args.save_file)
                 
     except Exception as e:
-        logger.error(f"Error during verification: {e}")
+        logger.exception(f"Error during verification: {e}")
     finally:
         # Clean up temporary file
         Path(audio_path).unlink(missing_ok=True)
@@ -381,7 +381,7 @@ async def cmd_list(args):
                 logger.info("📋 No speakers enrolled")
                 
     except Exception as e:
-        logger.error(f"Error listing speakers: {e}")
+        logger.exception(f"Error listing speakers: {e}")
 
 
 async def cmd_remove(args):
@@ -402,7 +402,7 @@ async def cmd_remove(args):
                 logger.error(f"❌ Failed to remove speaker: {args.speaker_id}")
                 
     except Exception as e:
-        logger.error(f"Error removing speaker: {e}")
+        logger.exception(f"Error removing speaker: {e}")
 
 
 async def cmd_diarize(args):
@@ -466,7 +466,7 @@ async def cmd_diarize(args):
                 save_audio(audio_path, args.save_file)
                 
     except Exception as e:
-        logger.error(f"Error during diarization: {e}")
+        logger.exception(f"Error during diarization: {e}")
     finally:
         # Clean up temporary file only if we recorded it
         if cleanup_audio:
@@ -555,7 +555,7 @@ def main():
     except KeyboardInterrupt:
         logger.info("Operation cancelled by user")
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+        logger.exception(f"Unexpected error: {e}")
 
 
 if __name__ == "__main__":

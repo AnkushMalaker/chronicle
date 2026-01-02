@@ -50,7 +50,7 @@ def check_service_health_with_url(service_url):
             logger.info(f"✅ Speaker service is running (Device: {data.get('device', 'unknown')}, Speakers: {data.get('speakers', 0)})")
             return True
     except Exception as e:
-        logger.error(f"❌ Cannot connect to speaker service at {service_url}: {e}")
+        logger.exception(f"❌ Cannot connect to speaker service at {service_url}: {e}")
         logger.info("Make sure the speaker service is running: docker compose up speaker-recognition")
     return False
 
@@ -94,7 +94,7 @@ def enroll_single_file(file_path: str, speaker_id: str, speaker_name: str, start
                 return False
                 
     except Exception as e:
-        logger.error(f"❌ Error during enrollment: {e}")
+        logger.exception(f"❌ Error during enrollment: {e}")
         return False
 
 
@@ -131,7 +131,7 @@ def enroll_multiple_files(file_paths: List[str], speaker_id: str, speaker_name: 
             return False
             
     except Exception as e:
-        logger.error(f"❌ Error during batch enrollment: {e}")
+        logger.exception(f"❌ Error during batch enrollment: {e}")
         return False
 
 
@@ -200,7 +200,7 @@ def download_youtube_audio(url: str, start: Optional[float] = None, end: Optiona
             return output_path
             
     except Exception as e:
-        logger.error(f"❌ Error downloading YouTube audio: {e}")
+        logger.exception(f"❌ Error downloading YouTube audio: {e}")
         return None
 
 
@@ -232,7 +232,7 @@ def list_speakers() -> bool:
             return False
             
     except Exception as e:
-        logger.error(f"❌ Error listing speakers: {e}")
+        logger.exception(f"❌ Error listing speakers: {e}")
         return False
 
 
@@ -251,7 +251,7 @@ def delete_speaker(speaker_id: str) -> bool:
             return False
             
     except Exception as e:
-        logger.error(f"❌ Error deleting speaker: {e}")
+        logger.exception(f"❌ Error deleting speaker: {e}")
         return False
 
 

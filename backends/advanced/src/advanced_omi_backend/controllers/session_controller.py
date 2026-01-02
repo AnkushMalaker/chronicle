@@ -63,7 +63,7 @@ async def get_session_info(redis_client, session_id: str) -> Optional[Dict]:
         }
 
     except Exception as e:
-        logger.error(f"Error getting session info for {session_id}: {e}")
+        logger.exception(f"Error getting session info for {session_id}")
         return None
 
 
@@ -99,7 +99,7 @@ async def get_all_sessions(redis_client, limit: int = 100) -> List[Dict]:
         return sessions
 
     except Exception as e:
-        logger.error(f"Error getting all sessions: {e}")
+        logger.exception(f"Error getting all sessions")
         return []
 
 
@@ -119,7 +119,7 @@ async def get_session_conversation_count(redis_client, session_id: str) -> int:
         conversation_count_bytes = await redis_client.get(conversation_count_key)
         return int(conversation_count_bytes.decode()) if conversation_count_bytes else 0
     except Exception as e:
-        logger.error(f"Error getting conversation count for session {session_id}: {e}")
+        logger.exception(f"Error getting conversation count for session {session_id}")
         return 0
 
 
@@ -141,7 +141,7 @@ async def increment_session_conversation_count(redis_client, session_id: str) ->
         logger.info(f"📊 Conversation count for session {session_id}: {count}")
         return count
     except Exception as e:
-        logger.error(f"Error incrementing conversation count for session {session_id}: {e}")
+        logger.exception(f"Error incrementing conversation count for session {session_id}")
         return 0
 
 

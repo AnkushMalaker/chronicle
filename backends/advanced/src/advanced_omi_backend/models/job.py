@@ -60,8 +60,8 @@ async def _ensure_beanie_initialized():
             _beanie_initialized = True
             logger.info("✅ Beanie initialized in RQ worker process")
 
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize Beanie in RQ worker: {e}")
+        except Exception:
+            logger.exception(f"❌ Failed to initialize Beanie in RQ worker")
             raise
 
 

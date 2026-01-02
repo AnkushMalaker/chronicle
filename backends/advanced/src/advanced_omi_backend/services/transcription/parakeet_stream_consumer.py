@@ -74,7 +74,7 @@ class ParakeetStreamConsumer:
                     }
 
                 except Exception as e:
-                    logger.error(f"Parakeet transcription failed: {e}", exc_info=True)
+                    logger.exception(f"Parakeet transcription failed: {e}")
                     raise
 
         # Instantiate the concrete consumer

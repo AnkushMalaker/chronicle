@@ -62,23 +62,23 @@ async def lifespan(app: FastAPI):
             document_models=[User, Conversation, AudioFile],
         )
         application_logger.info("Beanie initialized for all document models")
-    except Exception as e:
-        application_logger.error(f"Failed to initialize Beanie: {e}")
+    except Exception:
+        application_logger.exception(f"Failed to initialize Beanie")
         raise
 
     # Create admin user if needed
     try:
         await create_admin_user_if_needed()
-    except Exception as e:
-        application_logger.error(f"Failed to create admin user: {e}")
+    except Exception:
+        application_logger.exception(f"Failed to create admin user")
         # Don't raise here as this is not critical for startup
 
     # Sync admin user with Mycelia OAuth (if using Mycelia memory provider)
     try:
         from advanced_omi_backend.services.mycelia_sync import sync_admin_on_startup
         await sync_admin_on_startup()
-    except Exception as e:
-        application_logger.error(f"Failed to sync admin with Mycelia OAuth: {e}")
+    except Exception:
+        application_logger.exception(f"Failed to sync admin with Mycelia OAuth")
         # Don't raise here as this is not critical for startup
 
     # Initialize Redis connection for RQ
@@ -87,8 +87,8 @@ async def lifespan(app: FastAPI):
         redis_conn.ping()
         application_logger.info("Redis connection established for RQ")
         application_logger.info("RQ workers can be started with: rq worker transcription memory default")
-    except Exception as e:
-        application_logger.error(f"Failed to connect to Redis for RQ: {e}")
+    except Exception:
+        application_logger.exception(f"Failed to connect to Redis for RQ")
         application_logger.warning("RQ queue system will not be available - check Redis connection")
 
     # Initialize audio stream service for Redis Streams
@@ -97,8 +97,8 @@ async def lifespan(app: FastAPI):
         await audio_service.connect()
         application_logger.info("Audio stream service connected to Redis Streams")
         application_logger.info("Audio stream workers can be started with: python -m advanced_omi_backend.workers.audio_stream_worker")
-    except Exception as e:
-        application_logger.error(f"Failed to connect audio stream service: {e}")
+    except Exception:
+        application_logger.exception(f"Failed to connect audio stream service")
         application_logger.warning("Redis Streams audio processing will not be available")
 
     # Initialize Redis client for audio streaming producer (used by WebSocket handlers)
@@ -137,8 +137,8 @@ async def lifespan(app: FastAPI):
             try:
                 from advanced_omi_backend.controllers.websocket_controller import cleanup_client_state
                 await cleanup_client_state(client_id)
-            except Exception as e:
-                application_logger.error(f"Error cleaning up client {client_id}: {e}")
+            except Exception:
+                application_logger.exception(f"Error cleaning up client {client_id}")
 
         # RQ workers shut down automatically when process ends
         # No special cleanup needed for Redis connections
@@ -148,16 +148,16 @@ async def lifespan(app: FastAPI):
             audio_service = get_audio_stream_service()
             await audio_service.disconnect()
             application_logger.info("Audio stream service disconnected")
-        except Exception as e:
-            application_logger.error(f"Error disconnecting audio stream service: {e}")
+        except Exception:
+            application_logger.exception(f"Error disconnecting audio stream service")
 
         # Close Redis client for audio streaming producer
         try:
             if hasattr(app.state, 'redis_audio_stream') and app.state.redis_audio_stream:
                 await app.state.redis_audio_stream.close()
                 application_logger.info("Redis client for audio streaming producer closed")
-        except Exception as e:
-            application_logger.error(f"Error closing Redis audio streaming client: {e}")
+        except Exception:
+            application_logger.exception(f"Error closing Redis audio streaming client")
 
         # Stop metrics collection and save final report
         application_logger.info("Metrics collection stopped")

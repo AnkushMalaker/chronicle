@@ -83,7 +83,7 @@ async def create_chat_session(
             updated_at=session.updated_at.isoformat()
         )
     except Exception as e:
-        logger.error(f"Failed to create chat session for user {current_user.id}: {e}")
+        logger.exception(f"Failed to create chat session for user {current_user.id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create chat session"
@@ -122,7 +122,7 @@ async def get_chat_sessions(
         
         return session_responses
     except Exception as e:
-        logger.error(f"Failed to get chat sessions for user {current_user.id}: {e}")
+        logger.exception(f"Failed to get chat sessions for user {current_user.id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve chat sessions"
@@ -154,7 +154,7 @@ async def get_chat_session(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get chat session {session_id} for user {current_user.id}: {e}")
+        logger.exception(f"Failed to get chat session {session_id} for user {current_user.id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve chat session"
@@ -201,7 +201,7 @@ async def update_chat_session(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to update chat session {session_id} for user {current_user.id}: {e}")
+        logger.exception(f"Failed to update chat session {session_id} for user {current_user.id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update chat session"
@@ -228,7 +228,7 @@ async def delete_chat_session(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to delete chat session {session_id} for user {current_user.id}: {e}")
+        logger.exception(f"Failed to delete chat session {session_id} for user {current_user.id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete chat session"
@@ -273,7 +273,7 @@ async def get_session_messages(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to get messages for session {session_id}, user {current_user.id}: {e}")
+        logger.exception(f"Failed to get messages for session {session_id}, user {current_user.id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve messages"
@@ -319,7 +319,7 @@ async def send_message_stream(
                 yield "data: [DONE]\n\n"
                 
             except Exception as e:
-                logger.error(f"Error in streaming response: {e}")
+                logger.exception(f"Error in streaming response: {e}")
                 error_event = {
                     "type": "error",
                     "data": {"error": str(e)},
@@ -340,7 +340,7 @@ async def send_message_stream(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to process message for user {current_user.id}: {e}")
+        logger.exception(f"Failed to process message for user {current_user.id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to process message"
@@ -362,7 +362,7 @@ async def get_chat_statistics(
             last_chat=stats["last_chat"].isoformat() if stats["last_chat"] else None
         )
     except Exception as e:
-        logger.error(f"Failed to get chat statistics for user {current_user.id}: {e}")
+        logger.exception(f"Failed to get chat statistics for user {current_user.id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve chat statistics"
@@ -398,9 +398,9 @@ async def extract_memories_from_session(
                 "count": 0,
                 "message": "Failed to extract memories from chat session"
             }
-        
+
     except Exception as e:
-        logger.error(f"Failed to extract memories from session {session_id} for user {current_user.id}: {e}")
+        logger.exception(f"Failed to extract memories from session {session_id} for user {current_user.id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to extract memories from chat session"
@@ -422,7 +422,7 @@ async def chat_health_check():
             "timestamp": time.time()
         }
     except Exception as e:
-        logger.error(f"Chat service health check failed: {e}")
+        logger.exception(f"Chat service health check failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Chat service is not available"

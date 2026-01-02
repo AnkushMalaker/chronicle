@@ -156,7 +156,7 @@ async def handle_end_of_conversation(
                 redis_conn.set(f"speech_detection_job:{client_id}", speech_job.id, ex=3600)
                 logger.info(f"📌 Stored speech detection job ID for client {client_id}")
             except Exception as e:
-                logger.warning(f"⚠️ Failed to store job ID for {client_id}: {e}")
+                logger.exception(f"⚠️ Failed to store job ID for {client_id}: {e}")
 
             logger.info(f"✅ Enqueued speech detection job {speech_job.id}")
         else:

@@ -175,7 +175,7 @@ class BackgroundTaskManager:
                             logger.info(f"Long-running tasks: {', '.join(long_running[:5])}")
 
                 except Exception as e:
-                    logger.error(f"Error in periodic cleanup: {e}", exc_info=True)
+                    logger.exception(f"Error in periodic cleanup: {e}")
 
         except asyncio.CancelledError:
             logger.info("Periodic cleanup cancelled")

@@ -181,7 +181,7 @@ async def process_cropping_job(
         }
 
     except Exception as e:
-        logger.error(f"❌ RQ: Audio cropping failed for conversation {conversation_id}: {e}")
+        logger.exception(f"❌ RQ: Audio cropping failed for conversation {conversation_id}: {e}")
         raise
 
 
@@ -229,7 +229,7 @@ async def audio_streaming_persistence_job(
         logger.info(f"📦 Created audio persistence consumer group for {audio_stream_name}")
     except Exception as e:
         if "BUSYGROUP" not in str(e):
-            logger.warning(f"Failed to create audio consumer group: {e}")
+            logger.exception(f"Failed to create audio consumer group: {e}")
         logger.debug(f"Audio consumer group already exists for {audio_stream_name}")
 
     # Job control

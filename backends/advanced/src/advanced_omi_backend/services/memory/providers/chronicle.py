@@ -95,7 +95,7 @@ class MemoryService(MemoryServiceBase):
             )
 
         except Exception as e:
-            memory_logger.error(f"Memory service initialization failed: {e}")
+            memory_logger.exception(f"Memory service initialization failed: {e}")
             raise
 
     async def add_memory(
@@ -204,7 +204,7 @@ class MemoryService(MemoryServiceBase):
             memory_logger.error(f"⏰ Memory processing timed out for {source_id}")
             raise e
         except Exception as e:
-            memory_logger.error(f"❌ Add memory failed for {source_id}: {e}")
+            memory_logger.exception(f"❌ Add memory failed for {source_id}: {e}")
             raise e
 
     async def search_memories(self, query: str, user_id: str, limit: int = 10, score_threshold: float = 0.0) -> List[MemoryEntry]:
@@ -241,7 +241,7 @@ class MemoryService(MemoryServiceBase):
             return results
 
         except Exception as e:
-            memory_logger.error(f"Search memories failed: {e}")
+            memory_logger.exception(f"Search memories failed: {e}")
             return []
 
     async def get_all_memories(self, user_id: str, limit: int = 100) -> List[MemoryEntry]:
@@ -265,7 +265,7 @@ class MemoryService(MemoryServiceBase):
             memory_logger.info(f"📚 Retrieved {len(memories)} memories for user {user_id}")
             return memories
         except Exception as e:
-            memory_logger.error(f"Get all memories failed: {e}")
+            memory_logger.exception(f"Get all memories failed: {e}")
             return []
 
     async def count_memories(self, user_id: str) -> Optional[int]:
@@ -287,7 +287,7 @@ class MemoryService(MemoryServiceBase):
             memory_logger.info(f"🔢 Total {count} memories for user {user_id}")
             return count
         except Exception as e:
-            memory_logger.error(f"Count memories failed: {e}")
+            memory_logger.exception(f"Count memories failed: {e}")
             return None
 
     async def delete_memory(self, memory_id: str, user_id: Optional[str] = None, user_email: Optional[str] = None) -> bool:
@@ -308,7 +308,7 @@ class MemoryService(MemoryServiceBase):
                 memory_logger.info(f"🗑️ Deleted memory {memory_id}")
             return success
         except Exception as e:
-            memory_logger.error(f"Delete memory failed: {e}")
+            memory_logger.exception(f"Delete memory failed: {e}")
             return False
 
     async def delete_all_user_memories(self, user_id: str) -> int:
@@ -328,7 +328,7 @@ class MemoryService(MemoryServiceBase):
             memory_logger.info(f"🗑️ Deleted {count} memories for user {user_id}")
             return count
         except Exception as e:
-            memory_logger.error(f"Delete user memories failed: {e}")
+            memory_logger.exception(f"Delete user memories failed: {e}")
             return 0
 
     async def test_connection(self) -> bool:
@@ -342,7 +342,7 @@ class MemoryService(MemoryServiceBase):
                 await self.initialize()
             return True
         except Exception as e:
-            memory_logger.error(f"Connection test failed: {e}")
+            memory_logger.exception(f"Connection test failed: {e}")
             return False
 
     def shutdown(self) -> None:

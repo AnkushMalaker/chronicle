@@ -88,7 +88,7 @@ class YouTubeTranscriber:
             return audio_path, title
             
         except Exception as e:
-            self.logger.error(f"Audio download failed for {url}: {str(e)}", exc_info=True)
+            self.logger.exception(f"Audio download failed for {url}: {str(e)}")
             raise
     
     def segment_audio(self, audio_path: str, title: str) -> List[str]:
@@ -134,7 +134,7 @@ class YouTubeTranscriber:
             return segments
             
         except Exception as e:
-            self.logger.error(f"Audio segmentation failed for {audio_path}: {str(e)}", exc_info=True)
+            self.logger.exception(f"Audio segmentation failed for {audio_path}: {str(e)}")
             raise
     
     def transcribe_audio(self, audio_path: str, use_cache: bool = True, diarize: bool = True) -> dict:
@@ -219,7 +219,7 @@ class YouTubeTranscriber:
                 return None
             
         except Exception as e:
-            self.logger.error(f"Transcription error for {audio_path}: {str(e)}", exc_info=True)
+            self.logger.exception(f"Transcription error for {audio_path}: {str(e)}")
             return None
     
     def save_raw_json(self, response, title: str, segment_num: int):
@@ -245,7 +245,7 @@ class YouTubeTranscriber:
             self.logger.info(f"Saved raw JSON to: {filepath}")
             
         except Exception as e:
-            self.logger.error(f"Failed to save raw JSON for {title}-{segment_num}: {str(e)}", exc_info=True)
+            self.logger.exception(f"Failed to save raw JSON for {title}-{segment_num}: {str(e)}")
     
     def format_transcript(self, response, title: str, segment_num: int):
         """Format transcript with speaker info and timestamps"""
@@ -340,7 +340,7 @@ class YouTubeTranscriber:
             self.logger.info(f"Saved transcript to: {filepath}")
             
         except Exception as e:
-            self.logger.error(f"Failed to format transcript for {title}-{segment_num}: {str(e)}", exc_info=True)
+            self.logger.exception(f"Failed to format transcript for {title}-{segment_num}: {str(e)}")
     
     async def process_youtube_url(self, url: str):
         """Process a single YouTube URL through the entire pipeline"""
@@ -354,7 +354,7 @@ class YouTubeTranscriber:
                 title = self.sanitize_filename(info['title'])
                 duration = info.get('duration', 0)
         except Exception as e:
-            self.logger.error(f"Failed to extract video info for {url}: {str(e)}")
+            self.logger.exception(f"Failed to extract video info for {url}: {str(e)}")
             raise
         
         # Check if audio segments already exist

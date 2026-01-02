@@ -32,8 +32,8 @@ async def get_users():
             users.append(user)
         return users
     except Exception as e:
-        logger.error(f"Error fetching users: {e}")
-        raise HTTPException(status_code=500, detail="Error fetching users")
+        logger.exception(f"Error fetching users: {e}")
+        raise HTTPException(status_code=500, detail="Error fetching users") from e
 
 
 async def create_user(user_data: UserCreate):
@@ -69,10 +69,7 @@ async def create_user(user_data: UserCreate):
         )
 
     except Exception as e:
-        import traceback
-        error_details = traceback.format_exc()
-        logger.error(f"Error creating user: {e}")
-        logger.error(f"Full traceback: {error_details}")
+        logger.exception(f"Error creating user: {e}")
         return JSONResponse(
             status_code=500,
             content={"message": f"Error creating user: {str(e)}"},
@@ -86,7 +83,7 @@ async def update_user(user_id: str, user_data: UserUpdate):
         try:
             object_id = ObjectId(user_id)
         except Exception as e:
-            logger.error(f"Invalid ObjectId format for user_id {user_id}: {e}")
+            logger.exception(f"Invalid ObjectId format for user_id {user_id}: {e}")
             return JSONResponse(
                 status_code=400,
                 content={"message": f"Invalid user_id format: {user_id}. Must be a valid ObjectId."},
@@ -122,10 +119,7 @@ async def update_user(user_id: str, user_data: UserUpdate):
         )
 
     except Exception as e:
-        import traceback
-        error_details = traceback.format_exc()
-        logger.error(f"Error updating user: {e}")
-        logger.error(f"Full traceback: {error_details}")
+        logger.exception(f"Error updating user: {e}")
         return JSONResponse(
             status_code=500,
             content={"message": f"Error updating user: {str(e)}"},
@@ -188,7 +182,7 @@ async def delete_user(
                 )
                 deleted_data["memories_deleted"] = memory_count
             except Exception as mem_error:
-                logger.error(f"Error deleting memories for user {user_id}: {mem_error}")
+                logger.exception(f"Error deleting memories for user {user_id}: {mem_error}")
                 deleted_data["memories_deleted"] = 0
                 deleted_data["memory_deletion_error"] = str(mem_error)
 
@@ -211,7 +205,7 @@ async def delete_user(
         )
 
     except Exception as e:
-        logger.error(f"Error deleting user {user_id}: {e}")
+        logger.exception(f"Error deleting user {user_id}: {e}")
         return JSONResponse(
             status_code=500,
             content={"message": f"Error deleting user: {str(e)}"},

@@ -238,7 +238,7 @@ async def create_admin_user_if_needed():
         )
 
     except Exception as e:
-        logger.error(f"Failed to create admin user: {e}", exc_info=True)
+        logger.exception(f"Failed to create admin user: {e}")
 
 
 async def websocket_auth(websocket, token: Optional[str] = None) -> Optional[User]:
@@ -262,7 +262,7 @@ async def websocket_auth(websocket, token: Optional[str] = None) -> Optional[Use
             else:
                 logger.warning(f"Token validated but user inactive or not found: user={user}")
         except Exception as e:
-            logger.error(f"WebSocket auth with query token failed: {type(e).__name__}: {e}", exc_info=True)
+            logger.exception(f"WebSocket auth with query token failed: {type(e).__name__}: {e}")
 
     # Try cookie authentication
     logger.debug("Attempting WebSocket auth with cookie.")

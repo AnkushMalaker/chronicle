@@ -46,7 +46,7 @@ async def list_jobs(
         return result
 
     except Exception as e:
-        logger.error(f"Failed to list jobs: {e}")
+        logger.exception(f"Failed to list jobs: {e}")
         return {"error": "Failed to list jobs", "jobs": [], "pagination": {"total": 0, "limit": limit, "offset": offset, "has_more": False}}
 
 
@@ -87,8 +87,8 @@ async def get_job_status(
         # Re-raise HTTPException unchanged (e.g., 403 Forbidden)
         raise
     except Exception as e:
-        logger.error(f"Failed to get job status {job_id}: {e}")
-        raise HTTPException(status_code=404, detail="Job not found")
+        logger.exception(f"Failed to get job status {job_id}: {e}")
+        raise HTTPException(status_code=404, detail="Job not found") from e
 
 
 @router.get("/jobs/{job_id}")
@@ -138,8 +138,8 @@ async def get_job(
         # Re-raise HTTPException unchanged (e.g., 403 Forbidden)
         raise
     except Exception as e:
-        logger.error(f"Failed to get job {job_id}: {e}")
-        raise HTTPException(status_code=404, detail="Job not found")
+        logger.exception(f"Failed to get job {job_id}: {e}")
+        raise HTTPException(status_code=404, detail="Job not found") from e
 
 
 @router.delete("/jobs/{job_id}")
@@ -181,8 +181,8 @@ async def cancel_job(
         # Re-raise HTTPException unchanged (e.g., 403 Forbidden)
         raise
     except Exception as e:
-        logger.error(f"Failed to cancel/delete job {job_id}: {e}")
-        raise HTTPException(status_code=404, detail=f"Job not found or could not be cancelled: {str(e)}")
+        logger.exception(f"Failed to cancel/delete job {job_id}: {e}")
+        raise HTTPException(status_code=404, detail=f"Job not found or could not be cancelled: {str(e)}") from e
 
 
 @router.get("/jobs/by-session/{session_id}")
@@ -330,8 +330,8 @@ async def get_jobs_by_session(
         }
 
     except Exception as e:
-        logger.error(f"Failed to get jobs for session {session_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get jobs for session: {str(e)}")
+        logger.exception(f"Failed to get jobs for session {session_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get jobs for session: {str(e)}") from e
 
 
 @router.get("/stats")
@@ -344,7 +344,7 @@ async def get_queue_stats_endpoint(
         return stats
 
     except Exception as e:
-        logger.error(f"Failed to get queue stats: {e}")
+        logger.exception(f"Failed to get queue stats: {e}")
         return {"total_jobs": 0, "queued_jobs": 0, "processing_jobs": 0, "completed_jobs": 0, "failed_jobs": 0, "cancelled_jobs": 0, "deferred_jobs": 0}
 
 
@@ -377,8 +377,8 @@ async def get_queue_worker_details(
         return status
 
     except Exception as e:
-        logger.error(f"Failed to get queue worker details: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get worker details: {str(e)}")
+        logger.exception(f"Failed to get queue worker details: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get worker details: {str(e)}") from e
 
 
 @router.get("/streams")
@@ -472,7 +472,7 @@ async def get_stream_stats(
                     "groups": groups_info
                 }
             except Exception as e:
-                logger.error(f"Error getting info for stream {stream_key}: {e}")
+                logger.exception(f"Error getting info for stream {stream_key}: {e}")
                 return None
 
         # Fetch all stream info in parallel
@@ -486,7 +486,7 @@ async def get_stream_stats(
         }
 
     except Exception as e:
-        logger.error(f"Failed to get stream stats: {e}", exc_info=True)
+        logger.exception(f"Failed to get stream stats: {e}")
         return {
             "error": str(e),
             "total_streams": 0,
@@ -538,7 +538,7 @@ async def flush_jobs(
                             job.delete()
                             total_removed += 1
                     except Exception as e:
-                        logger.error(f"Error deleting job {job_id}: {e}")
+                        logger.exception(f"Error deleting job {job_id}: {e}")
 
             if "failed" in request.statuses:
                 registry = FailedJobRegistry(queue=queue)
@@ -549,7 +549,7 @@ async def flush_jobs(
                             job.delete()
                             total_removed += 1
                     except Exception as e:
-                        logger.error(f"Error deleting job {job_id}: {e}")
+                        logger.exception(f"Error deleting job {job_id}: {e}")
 
             if "cancelled" in request.statuses:
                 registry = CanceledJobRegistry(queue=queue)
@@ -560,7 +560,7 @@ async def flush_jobs(
                             job.delete()
                             total_removed += 1
                     except Exception as e:
-                        logger.error(f"Error deleting job {job_id}: {e}")
+                        logger.exception(f"Error deleting job {job_id}: {e}")
 
         return {
             "total_removed": total_removed,
@@ -569,8 +569,8 @@ async def flush_jobs(
         }
 
     except Exception as e:
-        logger.error(f"Failed to flush jobs: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to flush jobs: {str(e)}")
+        logger.exception(f"Failed to flush jobs: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to flush jobs: {str(e)}") from e
 
 
 @router.post("/flush-all")
@@ -661,12 +661,12 @@ async def flush_all_jobs(
 
                     except Exception as e:
                         # Job might already be deleted or not exist - try to remove from registry anyway
-                        logger.warning(f"Error deleting job {job_id}: {e}")
+                        logger.exception(f"Error deleting job {job_id}: {e}")
                         try:
                             registry.remove(job_id)
                             logger.info(f"Removed stale job reference {job_id} from {registry_name} registry")
                         except Exception as reg_error:
-                            logger.error(f"Could not remove {job_id} from registry: {reg_error}")
+                            logger.exception(f"Could not remove {job_id} from registry: {reg_error}")
 
         # Also clean up audio streams and consumer locks
         deleted_keys = 0
@@ -715,8 +715,8 @@ async def flush_all_jobs(
         }
 
     except Exception as e:
-        logger.error(f"Failed to flush all jobs: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to flush all jobs: {str(e)}")
+        logger.exception(f"Failed to flush all jobs: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to flush all jobs: {str(e)}") from e
 
 
 @router.get("/sessions")
@@ -767,7 +767,7 @@ async def get_redis_sessions(
                         "conversation_count": conversation_count
                     })
             except Exception as e:
-                logger.error(f"Error getting session info for {key}: {e}")
+                logger.exception(f"Error getting session info for {key}: {e}")
 
         await redis_client.close()
 
@@ -777,8 +777,8 @@ async def get_redis_sessions(
         }
 
     except Exception as e:
-        logger.error(f"Failed to get sessions: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to get sessions: {str(e)}")
+        logger.exception(f"Failed to get sessions: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get sessions: {str(e)}") from e
 
 
 @router.post("/sessions/clear")
@@ -820,7 +820,7 @@ async def clear_old_sessions(
                             deleted_count += 1
                             logger.info(f"Deleted old session: {key.decode()}")
             except Exception as e:
-                logger.error(f"Error processing session {key}: {e}")
+                logger.exception(f"Error processing session {key}: {e}")
 
         await redis_client.close()
 
@@ -830,8 +830,8 @@ async def clear_old_sessions(
         }
 
     except Exception as e:
-        logger.error(f"Failed to clear sessions: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to clear sessions: {str(e)}")
+        logger.exception(f"Failed to clear sessions: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to clear sessions: {str(e)}") from e
 
 
 @router.get("/dashboard")
@@ -918,7 +918,7 @@ async def get_dashboard_data(
 
                 return all_jobs
             except Exception as e:
-                logger.error(f"Error fetching {status_name} jobs: {e}")
+                logger.exception(f"Error fetching {status_name} jobs: {e}")
                 return []
 
         async def fetch_stats():
@@ -926,7 +926,7 @@ async def get_dashboard_data(
             try:
                 return get_job_stats()
             except Exception as e:
-                logger.error(f"Error fetching stats: {e}")
+                logger.exception(f"Error fetching stats: {e}")
                 return {"total_jobs": 0, "queued_jobs": 0, "processing_jobs": 0, "completed_jobs": 0, "failed_jobs": 0}
 
         async def fetch_streaming_status():
@@ -937,7 +937,7 @@ async def get_dashboard_data(
                 # Use the actual request object from the parent function
                 return await session_controller.get_streaming_status(request)
             except Exception as e:
-                logger.error(f"Error fetching streaming status: {e}")
+                logger.exception(f"Error fetching streaming status: {e}")
                 return {"active_sessions": [], "stream_health": {}, "rq_queues": {}}
 
         async def fetch_session_jobs(session_id: str):
@@ -1029,7 +1029,7 @@ async def get_dashboard_data(
 
                 return {"session_id": session_id, "jobs": all_jobs}
             except Exception as e:
-                logger.error(f"Error fetching jobs for session {session_id}: {e}")
+                logger.exception(f"Error fetching jobs for session {session_id}: {e}")
                 return {"session_id": session_id, "jobs": []}
 
         # Execute all fetches in parallel
@@ -1095,5 +1095,5 @@ async def get_dashboard_data(
         }
 
     except Exception as e:
-        logger.error(f"Failed to get dashboard data: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to get dashboard data: {str(e)}")
+        logger.exception(f"Failed to get dashboard data: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get dashboard data: {str(e)}") from e
