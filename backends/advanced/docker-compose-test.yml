@@ -14,7 +14,7 @@ services:
       - ./data/test_audio_chunks:/app/audio_chunks
       - ./data/test_debug_dir:/app/debug_dir
       - ./data/test_data:/app/data
-      - ${CONFIG_FILE:-../../config/config.yml}:/app/config.yml:ro  # Mount config.yml for model registry and memory settings
+      - ${CONFIG_FILE:-../../config/config.yml}:/app/config.yml  # Mount config.yml for model registry and memory settings (writable for admin config updates)
     environment:
       # Override with test-specific settings
       - MONGODB_URI=mongodb://mongo-test:27017/test_db
@@ -160,7 +160,7 @@ services:
       - ./data/test_audio_chunks:/app/audio_chunks
       - ./data/test_debug_dir:/app/debug_dir
       - ./data/test_data:/app/data
-      - ${CONFIG_FILE:-../../config/config.yml}:/app/config.yml:ro  # Mount config.yml for model registry and memory settings
+      - ${CONFIG_FILE:-../../config/config.yml}:/app/config.yml  # Mount config.yml for model registry and memory settings (writable for admin config updates)
     environment:
       # Same environment as backend
       - MONGODB_URI=mongodb://mongo-test:27017/test_db
