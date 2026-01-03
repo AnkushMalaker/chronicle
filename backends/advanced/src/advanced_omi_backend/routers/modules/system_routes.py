@@ -8,7 +8,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 from advanced_omi_backend.auth import current_active_user, current_superuser
@@ -152,7 +152,7 @@ async def save_chat_config(
         yaml_content = await request.body()
         yaml_str = yaml_content.decode('utf-8')
         result = await system_controller.save_chat_config_yaml(yaml_str)
-        return result
+        return JSONResponse(content=result)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -170,7 +170,7 @@ async def validate_chat_config(
         yaml_content = await request.body()
         yaml_str = yaml_content.decode('utf-8')
         result = await system_controller.validate_chat_config_yaml(yaml_str)
-        return result
+        return JSONResponse(content=result)
     except Exception as e:
         logger.error(f"Failed to validate chat config: {e}")
         raise HTTPException(status_code=500, detail=str(e))
