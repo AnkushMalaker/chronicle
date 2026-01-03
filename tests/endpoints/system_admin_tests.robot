@@ -168,9 +168,10 @@ Validate Chat Configuration Test
 
     # Valid prompt should pass
     ${valid_prompt}=   Set Variable    You are a friendly AI assistant that helps users with their daily tasks.
+    &{headers}=        Create Dictionary    Content-Type=text/plain
     ${response}=       POST On Session    api    /api/admin/chat/config/validate
     ...                data=${valid_prompt}
-    ...                headers={"Content-Type": "text/plain"}
+    ...                headers=${headers}
     Should Be Equal As Integers    ${response.status_code}    200
     ${result}=         Set Variable    ${response.json()}
     Should Be True     ${result}[valid] == $True
@@ -179,7 +180,7 @@ Validate Chat Configuration Test
     ${short_prompt}=   Set Variable    Hi
     ${response}=       POST On Session    api    /api/admin/chat/config/validate
     ...                data=${short_prompt}
-    ...                headers={"Content-Type": "text/plain"}
+    ...                headers=${headers}
     Should Be Equal As Integers    ${response.status_code}    200
     ${result}=         Set Variable    ${response.json()}
     Should Be True     ${result}[valid] == $False
@@ -191,9 +192,10 @@ Save And Retrieve Chat Configuration Test
 
     # Save custom prompt
     ${custom_prompt}=  Set Variable    You are a specialized AI assistant for technical support and troubleshooting.
+    &{headers}=        Create Dictionary    Content-Type=text/plain
     ${response}=       POST On Session    api    /api/admin/chat/config
     ...                data=${custom_prompt}
-    ...                headers={"Content-Type": "text/plain"}
+    ...                headers=${headers}
     Should Be Equal As Integers    ${response.status_code}    200
     ${result}=         Set Variable    ${response.json()}
     Should Be True     ${result}[success] == $True
