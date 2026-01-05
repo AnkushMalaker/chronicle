@@ -50,6 +50,14 @@ COOKIE_SECURE = _verify_configured("COOKIE_SECURE", optional=True) == "true"
 ADMIN_PASSWORD = _verify_configured("ADMIN_PASSWORD")
 ADMIN_EMAIL = _verify_configured("ADMIN_EMAIL", optional=True) or "admin@example.com"
 
+# Accepted token issuers - comma-separated list of services whose tokens we accept
+# Default: "chronicle,ushadow" (accept tokens from both chronicle and ushadow)
+ACCEPTED_ISSUERS = [
+    iss.strip() 
+    for iss in os.getenv("ACCEPTED_TOKEN_ISSUERS", "chronicle,ushadow").split(",") 
+    if iss.strip()
+]
+logger.info(f"Accepting tokens from issuers: {ACCEPTED_ISSUERS}")
 
 class UserManager(BaseUserManager[User, PydanticObjectId]):
     """User manager with minimal customization for fastapi-users."""
@@ -100,7 +108,8 @@ bearer_transport = BearerTransport(tokenUrl="auth/jwt/login")
 def get_jwt_strategy() -> JWTStrategy:
     """Get JWT strategy for token generation and validation."""
     return JWTStrategy(
-        secret=SECRET_KEY, lifetime_seconds=JWT_LIFETIME_SECONDS
+        secret=SECRET_KEY, lifetime_seconds=JWT_LIFETIME_SECONDS,
+        token_audience=["fastapi-users:auth"] + ACCEPTED_ISSUERS
     )
 
 
