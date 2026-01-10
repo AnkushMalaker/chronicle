@@ -147,8 +147,14 @@ If you choose Mycelia as your memory provider during setup wizard, the wizard wi
 
 **Run the setup wizard:**
 ```bash
+# Using convenience script (recommended)
+./wizard.sh
+
+# Or use direct command:
 uv run --with-requirements setup-requirements.txt python wizard.py
 ```
+
+**Note**: Convenience scripts (`./wizard.sh`, `./start.sh`, `./restart.sh`, `./stop.sh`, `./status.sh`) are wrappers around `wizard.py` and `services.py` that simplify the longer `uv run` commands.
 
 ### What the Setup Wizard Will Ask You
 
@@ -289,9 +295,14 @@ Before connecting your phone, make sure everything works:
 ### Service Issues
 
 **General Service Management:**
-- **Services not responding**: Try restarting with `./restart.sh` or `uv run --with-requirements setup-requirements.txt python services.py restart --all`
-- **Check service status**: Use `uv run --with-requirements setup-requirements.txt python services.py status`
-- **Stop all services**: Use `uv run --with-requirements setup-requirements.txt python services.py stop --all`
+- **Services not responding**: Try restarting with `./restart.sh`
+- **Check service status**: Use `./status.sh`
+- **Stop all services**: Use `./stop.sh`
+
+*Full commands (what the convenience scripts wrap):*
+- Restart: `uv run --with-requirements setup-requirements.txt python services.py restart --all`
+- Status: `uv run --with-requirements setup-requirements.txt python services.py status`
+- Stop: `uv run --with-requirements setup-requirements.txt python services.py stop --all`
 
 **Cloud Services (Deepgram/OpenAI):**
 - **Transcription not working**: Check Deepgram API key is correct

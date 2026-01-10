@@ -20,6 +20,9 @@ This directory contains Chronicle's centralized configuration files.
 
 ```bash
 # Option 1: Run the interactive wizard (recommended)
+./wizard.sh
+
+# Or use direct command:
 uv run --with-requirements setup-requirements.txt python wizard.py
 
 # Option 2: Manual setup
@@ -102,5 +105,5 @@ The setup wizard automatically backs up `config.yml` before making changes:
 
 For detailed configuration guides, see:
 - `/Docs/memory-configuration-guide.md` - Memory settings
-- `/backends/advanced/Docs/quickstart.md` - Setup guide
-- `/CLAUDE.md` - Project overview
+- `/quickstart.md` - Setup guide
+- `/CLAUDE.md` - Project overview and technical reference

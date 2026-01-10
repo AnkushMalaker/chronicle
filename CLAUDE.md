@@ -26,20 +26,21 @@ Chronicle includes an **interactive setup wizard** for easy configuration. The w
 
 ### Quick Start
 ```bash
-# Run the interactive setup wizard from project root
-uv run python wizard.py
+# Run the interactive setup wizard from project root (recommended)
+./wizard.sh
 
-# Or use the quickstart guide for step-by-step instructions
-# See quickstart.md for detailed walkthrough
+# Or use direct command:
+uv run --with-requirements setup-requirements.txt python wizard.py
+
+# For step-by-step instructions, see quickstart.md
 ```
+
+**Note on Convenience Scripts**: Chronicle provides wrapper scripts (`./wizard.sh`, `./start.sh`, `./restart.sh`, `./stop.sh`, `./status.sh`) that simplify the longer `uv run --with-requirements setup-requirements.txt python` commands. Use these for everyday operations.
 
 ### Setup Documentation
 For detailed setup instructions and troubleshooting, see:
 - **[@quickstart.md](quickstart.md)**: Beginner-friendly step-by-step setup guide
 - **[@Docs/init-system.md](Docs/init-system.md)**: Complete initialization system architecture and design
-- **[@Docs/getting-started.md](Docs/getting-started.md)**: Technical quickstart with advanced configuration
-- **[@backends/advanced/SETUP_SCRIPTS.md](backends/advanced/SETUP_SCRIPTS.md)**: Setup scripts reference and usage examples
-- **[@backends/advanced/Docs/quickstart.md](backends/advanced/Docs/quickstart.md)**: Backend-specific setup guide
 
 ### Wizard Architecture
 The initialization system uses a **root orchestrator pattern**:
@@ -380,6 +381,134 @@ sudo rm -rf data/
 docker compose down -v
 docker compose up --build -d
 ```
+
+## Add Existing Data
+
+### Audio File Upload & Processing
+
+The system supports processing existing audio files through the file upload API. This allows you to import and process pre-recorded conversations without requiring a live WebSocket connection.
+
+**Upload and Process WAV Files:**
+```bash
+export USER_TOKEN="your-jwt-token"
+
+# Upload single WAV file
+curl -X POST "http://localhost:8000/api/process-audio-files" \
+  -H "Authorization: Bearer $USER_TOKEN" \
+  -F "files=@/path/to/audio.wav" \
+  -F "device_name=file_upload"
+
+# Upload multiple WAV files
+curl -X POST "http://localhost:8000/api/process-audio-files" \
+  -H "Authorization: Bearer $USER_TOKEN" \
+  -F "files=@/path/to/recording1.wav" \
+  -F "files=@/path/to/recording2.wav" \
+  -F "device_name=import_batch"
+```
+
+**Response Example:**
+```json
+{
+  "message": "Successfully processed 2 audio files",
+  "processed_files": [
+    {
+      "filename": "recording1.wav",
+      "sample_rate": 16000,
+      "channels": 1,
+      "duration_seconds": 120.5,
+      "size_bytes": 3856000
+    },
+    {
+      "filename": "recording2.wav",
+      "sample_rate": 44100,
+      "channels": 2,
+      "duration_seconds": 85.2,
+      "size_bytes": 7532800
+    }
+  ],
+  "client_id": "user01-import_batch"
+}
+```
+
+## HAVPE Relay Configuration
+
+For ESP32 audio streaming using the HAVPE relay (`extras/havpe-relay/`):
+
+```bash
+# Environment variables for HAVPE relay
+export AUTH_USERNAME="user@example.com"       # Email address
+export AUTH_PASSWORD="your-password"
+export DEVICE_NAME="havpe"                    # Device identifier
+
+# Run the relay
+cd extras/havpe-relay
+uv run python main.py --backend-url http://your-server:8000 --backend-ws-url ws://your-server:8000
+```
+
+The relay will automatically:
+- Authenticate using `AUTH_USERNAME` (email address)
+- Generate client ID as `objectid_suffix-havpe`
+- Forward ESP32 audio to the backend with proper authentication
+- Handle token refresh and reconnection
+
+## Distributed Deployment
+
+### Single Machine vs Distributed Setup
+
+**Single Machine (Default):**
+```bash
+# Everything on one machine
+docker compose up --build -d
+```
+
+**Distributed Setup (GPU + Backend separation):**
+
+#### GPU Machine Setup
+```bash
+# Start GPU-accelerated services
+cd extras/asr-services
+docker compose up moonshine -d
+
+cd extras/speaker-recognition
+docker compose up --build -d
+
+# Ollama with GPU support
+docker run -d --gpus=all -p 11434:11434 \
+  -v ollama:/root/.ollama \
+  ollama/ollama:latest
+```
+
+#### Backend Machine Configuration
+```bash
+# .env configuration for distributed services
+OLLAMA_BASE_URL=http://[gpu-machine-tailscale-ip]:11434
+SPEAKER_SERVICE_URL=http://[gpu-machine-tailscale-ip]:8085
+PARAKEET_ASR_URL=http://[gpu-machine-tailscale-ip]:8080
+
+# Start lightweight backend services
+docker compose up --build -d
+```
+
+#### Tailscale Networking
+```bash
+# Install on each machine
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+
+# Find machine IPs
+tailscale ip -4
+```
+
+**Benefits of Distributed Setup:**
+- GPU services on dedicated hardware
+- Lightweight backend on VPS/Raspberry Pi
+- Automatic Tailscale IP support (100.x.x.x) - no CORS configuration needed
+- Encrypted inter-service communication
+
+**Service Examples:**
+- GPU machine: LLM inference, ASR, speaker recognition
+- Backend machine: FastAPI, WebUI, databases
+- Database machine: MongoDB, Qdrant (optional separation)
 
 ## Development Notes
 
