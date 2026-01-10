@@ -15,9 +15,8 @@ cp .env.template .env
 # Edit .env and add your Hugging Face token
 ```
 Get your HF token from https://huggingface.co/settings/tokens
-Accept the terms and conditions for 
-https://huggingface.co/pyannote/speaker-diarization-3.1
-https://huggingface.co/pyannote/segmentation-3.0
+Accept the terms and conditions for
+https://huggingface.co/pyannote/speaker-diarization-community-1
 
 
 ### 2. Choose CPU or GPU setup

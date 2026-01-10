@@ -20,7 +20,7 @@ class AudioBackend:
     def __init__(self, hf_token: str, device: torch.device):
         self.device = device
         self.diar = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1", token=hf_token
+            "pyannote/speaker-diarization-community-1", token=hf_token
         ).to(device)
         
         # Configure pipeline with proper segmentation parameters to reduce over-segmentation

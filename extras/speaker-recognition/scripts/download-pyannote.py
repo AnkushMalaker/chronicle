@@ -33,7 +33,7 @@ def download_models():
         # Import and download models
         
         logger.info("Downloading speaker diarization model...")
-        Pipeline.from_pretrained('pyannote/speaker-diarization-3.1', token=hf_token)
+        Pipeline.from_pretrained('pyannote/speaker-diarization-community-1', token=hf_token)
         
         logger.info("Downloading speaker embedding model...")
         PretrainedSpeakerEmbedding('pyannote/wespeaker-voxceleb-resnet34-LM', token=hf_token)

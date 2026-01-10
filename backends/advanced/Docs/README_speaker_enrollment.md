@@ -175,9 +175,9 @@ python enroll_speaker.py --identify "audio_chunk_test_recognition_67890.wav"
 Edit `speaker_recognition/speaker_recognition.py` to adjust:
 
 - `SIMILARITY_THRESHOLD = 0.85`: Cosine similarity threshold for identification
-- `device`: CUDA device for GPU acceleration  
+- `device`: CUDA device for GPU acceleration
 - Embedding model: Currently uses `speechbrain/spkrec-ecapa-voxceleb`
-- Diarization model: Currently uses `pyannote/speaker-diarization-3.1`
+- Diarization model: Currently uses `pyannote/speaker-diarization-community-1`
 
 ### Audio Settings
 
