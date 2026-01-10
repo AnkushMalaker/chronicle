@@ -7,11 +7,11 @@
 git clone <repo>
 cd chronicle
 
-# Configure all services
-uv run --with-requirements setup-requirements.txt python init.py
+# Configure all services (using convenience script)
+./wizard.sh
 
-# Start all configured services  
-uv run --with-requirements setup-requirements.txt python services.py start --all --build
+# Start all configured services
+./start.sh
 ```
 
 ### 2. Service Access Points
@@ -91,6 +91,26 @@ REACT_UI_HTTPS=true
 
 ## Service Management Commands
 
+**Convenience Scripts (Recommended):**
+```bash
+# Check what's running
+./status.sh
+
+# Start all configured services
+./start.sh
+
+# Restart all services
+./restart.sh
+
+# Stop all services
+./stop.sh
+```
+
+**Note**: Convenience scripts wrap the longer `uv run --with-requirements setup-requirements.txt python` commands for ease of use.
+
+<details>
+<summary>Full commands (click to expand)</summary>
+
 ```bash
 # Check what's running
 uv run --with-requirements setup-requirements.txt python services.py status
@@ -111,11 +131,7 @@ uv run --with-requirements setup-requirements.txt python services.py restart bac
 uv run --with-requirements setup-requirements.txt python services.py stop --all
 ```
 
-**Convenience Scripts:**
-```bash
-./start.sh    # Quick start all configured services
-./restart.sh  # Quick restart all configured services
-```
+</details>
 
 **Important:** Use `restart` for configuration changes (.env updates). For code changes, use `stop` + `start --build` to rebuild images.
 

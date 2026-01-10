@@ -171,8 +171,8 @@ Backends and ASR services use standardized audio streaming:
 
 ### Single Machine (Recommended for beginners)
 1. **Clone the repository**
-2. **Run interactive setup**: `uv run --with-requirements setup-requirements.txt python init.py`
-3. **Start all services**: `python services.py start --all --build`
+2. **Run interactive setup**: `./wizard.sh`
+3. **Start all services**: `./start.sh`
 4. **Access WebUI**: `http://localhost:5173` for the React web dashboard
 
 ### Distributed Setup (Advanced users with multiple machines)
@@ -215,8 +215,8 @@ Backends and ASR services use standardized audio streaming:
 
 ### For Production Use
 1. Use **Advanced Backend** for full features
-2. Run the orchestrated setup: `uv run --with-requirements setup-requirements.txt python init.py`
-3. Start all services: `python services.py start --all --build`
+2. Run the orchestrated setup: `./wizard.sh`
+3. Start all services: `./start.sh`
 4. Access the Web UI at http://localhost:5173 for conversation management
 
 ### For OMI Users

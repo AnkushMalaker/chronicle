@@ -38,7 +38,10 @@ The root orchestrator handles service selection and delegates configuration to i
 Set up multiple services together with automatic URL coordination:
 
 ```bash
-# From project root
+# From project root (using convenience script)
+./wizard.sh
+
+# Or use direct command:
 uv run --with-requirements setup-requirements.txt python wizard.py
 ```
 
@@ -136,7 +139,28 @@ Services use `host.docker.internal` for inter-container communication:
 Chronicle now separates **configuration** from **service lifecycle management**:
 
 ### Unified Service Management
-Use the `services.py` script for all service operations:
+
+**Convenience Scripts (Recommended):**
+```bash
+# Start all configured services
+./start.sh
+
+# Check service status
+./status.sh
+
+# Restart all services
+./restart.sh
+
+# Stop all services
+./stop.sh
+```
+
+**Note**: Convenience scripts wrap the longer `uv run --with-requirements setup-requirements.txt python` commands for ease of use.
+
+<details>
+<summary>Full commands (click to expand)</summary>
+
+Use the `services.py` script directly for more control:
 
 ```bash
 # Start all configured services
@@ -161,19 +185,12 @@ uv run --with-requirements setup-requirements.txt python services.py stop --all
 uv run --with-requirements setup-requirements.txt python services.py stop asr-services openmemory-mcp
 ```
 
-**Convenience Scripts:**
-```bash
-# Quick start (from project root)
-./start.sh
-
-# Quick restart (from project root)
-./restart.sh
-```
+</details>
 
 **Important Notes:**
 - **Restart** restarts containers without rebuilding - use for configuration changes (.env updates)
-- **For code changes**, use `stop` + `start --build` to rebuild images
-- Example: `uv run --with-requirements setup-requirements.txt python services.py stop --all && uv run --with-requirements setup-requirements.txt python services.py start --all --build`
+- **For code changes**, use `./stop.sh` then `./start.sh` to rebuild images
+- Convenience scripts handle common operations; use direct commands for specific service selection
 
 ### Manual Service Management
 You can also manage services individually:
