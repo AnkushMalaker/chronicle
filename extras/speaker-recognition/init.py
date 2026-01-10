@@ -7,6 +7,7 @@ Interactive configuration for speaker recognition service
 import argparse
 import getpass
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -188,10 +189,18 @@ class SpeakerRecognitionSetup:
         """Configure compute mode (CPU/GPU)"""
         self.print_section("Compute Mode Configuration")
 
+        # Detect macOS (Darwin) and auto-default to CPU
+        is_macos = platform.system() == 'Darwin'
+
         # Check if provided via command line
         if hasattr(self.args, 'compute_mode') and self.args.compute_mode:
             compute_mode = self.args.compute_mode
             self.console.print(f"[green][SUCCESS][/green] Compute mode configured from command line: {compute_mode}")
+        elif is_macos:
+            # Auto-default to CPU on macOS
+            compute_mode = "cpu"
+            self.console.print("[blue][INFO][/blue] Detected macOS - GPU acceleration not available (Apple Silicon/Intel)")
+            self.console.print("[green][SUCCESS][/green] Using CPU mode")
         else:
             choices = {
                 "1": "CPU-only (works everywhere)",

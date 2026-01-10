@@ -6,6 +6,7 @@ Interactive configuration for offline ASR (Parakeet) service
 
 import argparse
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -131,10 +132,18 @@ class ASRServicesSetup:
         """Configure PyTorch CUDA version"""
         self.print_section("PyTorch CUDA Version Configuration")
 
+        # Detect macOS (Darwin) and auto-default to CPU
+        is_macos = platform.system() == 'Darwin'
+
         # Check if provided via command line
         if hasattr(self.args, 'pytorch_cuda_version') and self.args.pytorch_cuda_version:
             cuda_version = self.args.pytorch_cuda_version
             self.console.print(f"[green][SUCCESS][/green] PyTorch CUDA version configured from command line: {cuda_version}")
+        elif is_macos:
+            # Auto-default to CPU on macOS
+            cuda_version = "cpu"
+            self.console.print("[blue][INFO][/blue] Detected macOS - GPU acceleration not available (Apple Silicon/Intel)")
+            self.console.print("[green][SUCCESS][/green] Using CPU-only PyTorch build")
         else:
             # Detect system CUDA version and suggest as default
             detected_cuda = self.detect_cuda_version()

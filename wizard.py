@@ -14,7 +14,7 @@ import yaml
 from dotenv import get_key
 from rich import print as rprint
 from rich.console import Console
-from rich.prompt import Confirm
+from rich.prompt import Confirm, Prompt
 
 console = Console()
 
@@ -153,18 +153,22 @@ def cleanup_unselected_services(selected_services):
                 console.print(f"🧹 [dim]Backed up {service_name} configuration to {backup_file.name} (service not selected)[/dim]")
 
 def run_service_setup(service_name, selected_services, https_enabled=False, server_ip=None,
-                     obsidian_enabled=False, neo4j_password=None):
+                     obsidian_enabled=False, neo4j_password=None, transcription_provider='deepgram'):
     """Execute individual service setup script"""
     if service_name == 'advanced':
         service = SERVICES['backend'][service_name]
-        
+
         # For advanced backend, pass URLs of other selected services and HTTPS config
         cmd = service['cmd'].copy()
         if 'speaker-recognition' in selected_services:
             cmd.extend(['--speaker-service-url', 'http://speaker-service:8085'])
         if 'asr-services' in selected_services:
             cmd.extend(['--parakeet-asr-url', 'http://host.docker.internal:8767'])
-        
+
+        # Pass transcription provider choice from wizard
+        if transcription_provider:
+            cmd.extend(['--transcription-provider', transcription_provider])
+
         # Add HTTPS configuration
         if https_enabled and server_ip:
             cmd.extend(['--enable-https', '--server-ip', server_ip])
@@ -331,6 +335,37 @@ def setup_config_file():
     else:
         console.print("ℹ️  [blue]config/config.yml already exists, keeping existing configuration[/blue]")
 
+def select_transcription_provider():
+    """Ask user which transcription provider they want"""
+    console.print("\n🎤 [bold cyan]Transcription Provider[/bold cyan]")
+    console.print("Choose your speech-to-text provider:")
+    console.print()
+
+    choices = {
+        "1": "Deepgram (cloud-based, high quality, requires API key)",
+        "2": "Parakeet ASR (offline, runs locally, requires GPU)",
+        "3": "None (skip transcription setup)"
+    }
+
+    for key, desc in choices.items():
+        console.print(f"  {key}) {desc}")
+    console.print()
+
+    while True:
+        try:
+            choice = Prompt.ask("Enter choice", default="1")
+            if choice in choices:
+                if choice == "1":
+                    return "deepgram"
+                elif choice == "2":
+                    return "parakeet"
+                elif choice == "3":
+                    return "none"
+            console.print(f"[red]Invalid choice. Please select from {list(choices.keys())}[/red]")
+        except EOFError:
+            console.print("Using default: Deepgram")
+            return "deepgram"
+
 def main():
     """Main orchestration logic"""
     console.print("🎉 [bold green]Welcome to Chronicle![/bold green]\n")
@@ -344,9 +379,17 @@ def main():
     # Show what's available
     show_service_status()
 
+    # Ask about transcription provider FIRST (determines which services are needed)
+    transcription_provider = select_transcription_provider()
+
     # Service Selection
     selected_services = select_services()
-    
+
+    # Auto-add asr-services if Parakeet was chosen
+    if transcription_provider == "parakeet" and 'asr-services' not in selected_services:
+        console.print("[blue][INFO][/blue] Auto-adding ASR services for Parakeet transcription")
+        selected_services.append('asr-services')
+
     if not selected_services:
         console.print("\n[yellow]No services selected. Exiting.[/yellow]")
         return
@@ -442,10 +485,10 @@ def main():
     
     success_count = 0
     failed_services = []
-    
+
     for service in selected_services:
         if run_service_setup(service, selected_services, https_enabled, server_ip,
-                            obsidian_enabled, neo4j_password):
+                            obsidian_enabled, neo4j_password, transcription_provider):
             success_count += 1
         else:
             failed_services.append(service)
