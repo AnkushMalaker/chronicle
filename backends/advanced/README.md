@@ -34,14 +34,9 @@ Modern React-based web dashboard located in `./webui/` with:
 - **Transcription Provider**: Choose between Deepgram, Mistral, or Offline (Parakeet)
 - **LLM Provider**: Choose between OpenAI (recommended) or Ollama for memory extraction
 - **Memory Provider**: Choose between Friend-Lite Native or OpenMemory MCP
+- **HTTPS Configuration**: Optional SSL setup for microphone access (uses Caddy)
 - **Optional Services**: Speaker Recognition, network configuration
 - **API Keys**: Prompts for all required keys with helpful links
-
-**HTTPS Setup (Optional):**
-```bash
-# For microphone access and secure connections
-./setup-https.sh your-tailscale-ip
-```
 
 #### 2. Start Services 
 
@@ -55,25 +50,13 @@ docker compose up --build -d
 
 **HTTPS Mode (For network access and microphone features):**
 ```bash
-# Start with nginx SSL proxy - requires SSL setup first (see below)
-docker compose up --build -d
+# Start with HTTPS (requires Caddy configuration from wizard)
+docker compose --profile https up --build -d
 ```
 - **Web Dashboard**: https://localhost/ or https://your-ip/
 - **Backend API**: https://localhost/api/ or https://your-ip/api/
 
-#### 3. HTTPS Setup (Optional - For Network Access & Microphone Features)
-
-For network access and microphone features, HTTPS can be configured during initialization or separately:
-
-```bash
-# If not done during init.sh, run HTTPS setup
-./init-https.sh 100.83.66.30  # Replace with your IP
-
-# Start with HTTPS proxy
-docker compose up --build -d
-```
-
-#### Access URLs
+#### 3. Access URLs
 
 **Friend-Lite Advanced Backend (Primary - ports 80/443):**
 - **HTTPS Dashboard**: https://localhost/ or https://your-ip/
@@ -91,7 +74,7 @@ docker compose up --build -d
 - 🌐 **Network Access** from other devices via Tailscale/LAN
 - 🔄 **Automatic protocol detection** - Frontend auto-configures for HTTP/HTTPS
 
-See [Docs/HTTPS_SETUP.md](Docs/HTTPS_SETUP.md) for detailed configuration.
+See [Docs/ssl-certificates.md](../../Docs/ssl-certificates.md) for how SSL is configured.
 
 ## Testing
 

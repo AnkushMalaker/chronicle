@@ -469,30 +469,7 @@ class ChronicleSetup:
                 except subprocess.CalledProcessError:
                     self.console.print("[yellow][WARNING][/yellow] SSL certificate generation failed")
             else:
-                self.console.print(f"[yellow][WARNING][/yellow] SSL script not found at {ssl_script}")
-            
-            # Generate nginx.conf from template
-            self.console.print("[blue][INFO][/blue] Creating nginx configuration...")
-            nginx_template = script_dir / "nginx.conf.template"
-            if nginx_template.exists():
-                try:
-                    with open(nginx_template, 'r') as f:
-                        nginx_content = f.read()
-                    
-                    # Replace TAILSCALE_IP with server_ip
-                    nginx_content = nginx_content.replace('TAILSCALE_IP', server_ip)
-                    
-                    with open('nginx.conf', 'w') as f:
-                        f.write(nginx_content)
-                    
-                    self.console.print(f"[green][SUCCESS][/green] nginx.conf created for: {server_ip}")
-                    self.config["HTTPS_ENABLED"] = "true"
-                    self.config["SERVER_IP"] = server_ip
-                    
-                except Exception as e:
-                    self.console.print(f"[yellow][WARNING][/yellow] nginx.conf generation failed: {e}")
-            else:
-                self.console.print("[yellow][WARNING][/yellow] nginx.conf.template not found")
+                self.console.print(f"[yellow][WARNING][/warning] SSL script not found at {ssl_script}")
 
             # Generate Caddyfile from template
             self.console.print("[blue][INFO][/blue] Creating Caddyfile configuration...")
@@ -519,6 +496,8 @@ class ChronicleSetup:
                             f.write(caddyfile_content)
 
                         self.console.print(f"[green][SUCCESS][/green] Caddyfile created for: {server_ip}")
+                        self.config["HTTPS_ENABLED"] = "true"
+                        self.config["SERVER_IP"] = server_ip
 
                 except Exception as e:
                     self.console.print(f"[red]❌ ERROR: Caddyfile generation failed: {e}[/red]")
