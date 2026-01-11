@@ -38,7 +38,7 @@ Full Pipeline Integration Test
 
     # Phase 5: Transcription Verification
     Verify Transcription Quality    ${TEST_CONVERSATION}    ${EXPECTED_TRANSCRIPT}
-
+    
     # Phase 6: Memory Extraction Verification
     Verify Memory Extraction    api    ${TEST_CONVERSATION}
 
@@ -149,7 +149,7 @@ End To End Pipeline With Memory Validation Test
     # Phase 2: Verify transcription quality
     Log    Verifying transcription quality    INFO
     Verify Transcription Quality    ${TEST_CONVERSATION}    ${EXPECTED_TRANSCRIPT}
-
+    
     # Phase 3: Verify memories were extracted
     ${memory_count}=    Get Length    ${memories}
     Should Be True    ${memory_count} > 0    No memories extracted
@@ -195,12 +195,21 @@ Verify Transcription Quality
     ${transcript_length}=    Get Length    ${transcript_text}
     Should Be True    ${transcript_length} >= 50    Transcript too short: ${transcript_length} characters
 
-    # Check segments exist (if transcript is array format)
-    ${segment_count}=    Run Keyword If    isinstance($transcript_raw, list)
-    ...    Get Length    ${transcript_raw}
-    ...    ELSE    Set Variable    1
-
-    Should Be True    ${segment_count} > 0    No transcript segments found
+     # Segment validation
+    Dictionary Should Contain Key    ${conversation}    segments
+    ${segments}=    Set Variable    ${conversation}[segments]
+    ${segment_count}=    Get Length    ${segments}
+    Should Be True    ${segment_count} > 0    No segments found
+    
+    # Validate segment structure
+    FOR    ${segment}    IN    @{segments}
+        Dictionary Should Contain Key    ${segment}    start
+        Dictionary Should Contain Key    ${segment}    end
+        Dictionary Should Contain Key    ${segment}    text
+        Dictionary Should Contain Key    ${segment}    speaker
+        Should not be empty    ${segment}[text]    Empty segment text
+        Should Be True    ${segment}[end] > ${segment}[start]    Invalid segment timing
+    END
 
     Log    Transcription quality verification passed    INFO
     Log    Transcript length: ${transcript_length} characters, Segments: ${segment_count}    INFO
