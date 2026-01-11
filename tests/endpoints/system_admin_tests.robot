@@ -149,6 +149,37 @@ Delete All User Memories Test
     Dictionary Should Contain Key    ${result}    message
 
 
+Config Override Defaults Test
+    [Documentation]    Test that config.yml values correctly override defaults.yml values
+    [Tags]    infra	memory	permissions
+
+    # Save a memory config with a custom timeout_seconds value (different from default 1200)
+    ${line1}=          Set Variable    provider: chronicle
+    ${line2}=          Set Variable    timeout_seconds: 999
+    ${line3}=          Set Variable    extraction:
+    ${line4}=          Set Variable    ${SPACE}${SPACE}enabled: true
+    ${custom_config}=  Catenate    SEPARATOR=\n    ${line1}    ${line2}    ${line3}    ${line4}
+    &{headers}=        Create Dictionary    Content-Type=text/plain
+    ${response}=       POST On Session    api    /api/admin/memory/config/raw
+    ...                data=${custom_config}
+    ...                headers=${headers}
+    Should Be Equal As Integers    ${response.status_code}    200
+
+    # Reload config to ensure it's picked up
+    ${response}=       POST On Session    api    /api/admin/memory/config/reload
+    Should Be Equal As Integers    ${response.status_code}    200
+
+    # Get the merged config and verify our override is present
+    ${response}=       GET On Session    api    /api/admin/memory/config/raw
+    Should Be Equal As Integers    ${response.status_code}    200
+    ${result}=         Set Variable    ${response.json()}
+    ${config_text}=    Set Variable    ${result}[config_yaml]
+
+    # Verify the custom value (999) is present, not the default (1200)
+    Should Contain        ${config_text}    timeout_seconds: 999     msg=Config should contain overridden value from config.yml
+    Should Not Contain    ${config_text}    timeout_seconds: 1200    msg=Config should not contain default value from defaults.yml
+
+
 Get Chat Configuration Test
     [Documentation]    Test getting chat system prompt (admin only)
     [Tags]    infra	permissions
@@ -160,7 +191,7 @@ Get Chat Configuration Test
     ${prompt}=         Set Variable    ${response.text}
     Should Not Be Empty    ${prompt}
     Should Not Contain     ${prompt}    system_prompt:    msg=Should not contain YAML key
-    Should Contain         ${prompt}    helpful AI assistant    msg=Should contain default prompt content
+    Should Contain         ${prompt}    specialized AI assistant    msg=Should contain default prompt content
 
 Validate Chat Configuration Test
     [Documentation]    Test chat configuration validation

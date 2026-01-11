@@ -48,6 +48,24 @@ Get Conversation By ID Test
     Dictionary Should Contain Key    ${conversation}    conversation_id
     Dictionary Should Contain Key    ${conversation}    audio_uuid
     Dictionary Should Contain Key    ${conversation}    created_at
+    Should Not Be Empty    ${conversation}    title
+    Should Not Be Empty    ${conversation}    summary
+    Should Not Be Empty    ${conversation}    detailed_summary
+    Should Not Be Empty    ${conversation}    transcript
+    
+    ${segments}=    Set Variable    ${conversation}[segments]
+    
+    # Validate segment structure
+    FOR    ${segment}    IN    @{segments}
+        Dictionary Should Contain Key    ${segment}    start
+        Dictionary Should Contain Key    ${segment}    end
+        Dictionary Should Contain Key    ${segment}    text
+        Dictionary Should Contain Key    ${segment}    speaker
+        Should not be empty    ${segment}[text]    Empty segment text
+        Should Be True    ${segment}[end] > ${segment}[start]    Invalid segment timing
+    END
+
+
     Should Be Equal    ${conversation}[conversation_id]    ${conversation_id}
 
 Reprocess test and get Conversation Versions Test
