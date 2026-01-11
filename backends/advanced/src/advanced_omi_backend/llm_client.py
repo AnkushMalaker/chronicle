@@ -11,9 +11,6 @@ import os
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 
-from advanced_omi_backend.services.memory.config import load_config_yml as _load_root_config
-from advanced_omi_backend.services.memory.config import resolve_value as _resolve_value
-
 from advanced_omi_backend.model_registry import get_models_registry
 
 logger = logging.getLogger(__name__)
