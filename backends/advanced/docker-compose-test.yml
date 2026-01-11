@@ -160,8 +160,7 @@ services:
       - ./data/test_audio_chunks:/app/audio_chunks
       - ./data/test_debug_dir:/app/debug_dir
       - ./data/test_data:/app/data
-      - ${CONFIG_FILE:-../../config/config.yml}:/app/config.yml  # Mount config.yml for model registry and memory settings (writable for admin config updates)
-      - ../../config/defaults.yml:/app/defaults.yml:ro  # Built-in defaults
+      - ../../config:/app/config  # Mount entire config directory (contains config.yml, defaults.yml, templates)
     environment:
       # Same environment as backend
       - MONGODB_URI=mongodb://mongo-test:27017/test_db

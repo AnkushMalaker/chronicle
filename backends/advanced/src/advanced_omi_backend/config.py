@@ -271,8 +271,8 @@ def _find_config_path() -> Path:
 
     Search order:
     1. CONFIG_FILE environment variable
-    2. Current working directory
-    3. /app/config.yml (Docker container)
+    2. /app/config/config.yml (Docker container with config directory mount)
+    3. Current working directory
     4. Walk up from module directory
 
     Returns:
@@ -283,8 +283,8 @@ def _find_config_path() -> Path:
     if cfg_env and Path(cfg_env).exists():
         return Path(cfg_env)
 
-    # Common locations (container vs repo root)
-    candidates = [Path("config.yml"), Path("/app/config.yml")]
+    # Common locations (container with config dir mount vs repo root)
+    candidates = [Path("/app/config/config.yml"), Path("config.yml")]
 
     # Also walk up from current file's parents defensively
     try:
@@ -299,8 +299,8 @@ def _find_config_path() -> Path:
         if c.exists():
             return c
 
-    # Last resort: return /app/config.yml path (may not exist yet)
-    return Path("/app/config.yml")
+    # Last resort: return /app/config/config.yml path (may not exist yet)
+    return Path("/app/config/config.yml")
 
 
 def get_config(force_reload: bool = False) -> Dict[str, Any]:

@@ -12,8 +12,7 @@ services:
       - ./data/audio_chunks:/app/audio_chunks
       - ./data/debug_dir:/app/debug_dir
       - ./data:/app/data
-      - ../../config/config.yml:/app/config.yml  # Removed :ro to allow UI config saving
-      - ../../config/defaults.yml:/app/defaults.yml:ro  # Built-in defaults
+      - ../../config:/app/config  # Mount entire config directory (contains config.yml, defaults.yml, templates)
     environment:
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
