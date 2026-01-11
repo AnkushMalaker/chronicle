@@ -1,0 +1,96 @@
+# Default model registry configuration
+# These provide fallback defaults when config.yml is missing or incomplete
+# Priority: config.yml > environment variables > defaults.yml
+
+defaults:
+  llm: openai-llm
+  embedding: openai-embed
+  stt: stt-deepgram
+  vector_store: vs-qdrant
+
+models:
+  # OpenAI LLM (default)
+  - name: openai-llm
+    description: OpenAI GPT-4o-mini
+    model_type: llm
+    model_provider: openai
+    api_family: openai
+    model_name: ${OPENAI_MODEL:-gpt-4o-mini}
+    model_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+    api_key: ${OPENAI_API_KEY:-}
+    model_params:
+      temperature: 0.2
+      max_tokens: 2000
+    model_output: json
+
+  # OpenAI Embeddings (default)
+  - name: openai-embed
+    description: OpenAI text-embedding-3-small
+    model_type: embedding
+    model_provider: openai
+    api_family: openai
+    model_name: text-embedding-3-small
+    model_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+    api_key: ${OPENAI_API_KEY:-}
+    embedding_dimensions: 1536
+    model_output: vector
+
+  # Deepgram STT (default)
+  - name: stt-deepgram
+    description: Deepgram Nova 3 (batch)
+    model_type: stt
+    model_provider: deepgram
+    api_family: http
+    model_url: https://api.deepgram.com/v1
+    api_key: ${DEEPGRAM_API_KEY:-}
+    operations:
+      stt_transcribe:
+        method: POST
+        path: /listen
+        headers:
+          Authorization: Token ${DEEPGRAM_API_KEY:-}
+          Content-Type: audio/raw
+        query:
+          model: nova-3
+          language: multi
+          smart_format: 'true'
+          punctuate: 'true'
+          diarize: 'true'
+          utterances: 'true'
+          encoding: linear16
+          sample_rate: '16000'
+          channels: '1'
+        response:
+          type: json
+          extract:
+            text: results.channels[0].alternatives[0].transcript
+            words: results.channels[0].alternatives[0].words
+            segments: results.utterances
+
+  # Qdrant Vector Store (default)
+  - name: vs-qdrant
+    description: Qdrant vector database
+    model_type: vector_store
+    model_provider: qdrant
+    api_family: qdrant
+    model_url: http://${QDRANT_BASE_URL:-qdrant}:${QDRANT_PORT:-6333}
+    model_params:
+      host: ${QDRANT_BASE_URL:-qdrant}
+      port: ${QDRANT_PORT:-6333}
+      collection_name: omi_memories
+
+memory:
+  provider: chronicle
+  timeout_seconds: 1200
+  extraction:
+    enabled: true
+    prompt: 'Extract important information from this conversation and return a JSON object with an array named "facts". Include personal preferences, plans, names, dates, locations, numbers, and key details. Keep items concise and useful.
+
+      '
+
+speaker_recognition:
+  enabled: false
+  service_url: null
+  timeout: 60
+
+chat: {}

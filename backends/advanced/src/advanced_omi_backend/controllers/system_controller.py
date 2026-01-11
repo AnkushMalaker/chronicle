@@ -12,11 +12,16 @@ import yaml
 from fastapi import HTTPException
 
 from advanced_omi_backend.config import (
+    get_config,
+    get_config_path,
     load_diarization_settings_from_file,
+    reload_config,
     save_diarization_settings_to_file,
 )
-from advanced_omi_backend.model_registry import _find_config_path, load_models_config
+from advanced_omi_backend.model_registry import load_models_config
 from advanced_omi_backend.models.user import User
+from advanced_omi_backend.services.memory import get_memory_service
+from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 
 logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
@@ -178,10 +183,6 @@ async def update_speaker_configuration(user: User, primary_speakers: list[dict])
 async def get_enrolled_speakers(user: User):
     """Get enrolled speakers from speaker recognition service."""
     try:
-        from advanced_omi_backend.speaker_recognition_client import (
-            SpeakerRecognitionClient,
-        )
-
         # Initialize speaker recognition client
         speaker_client = SpeakerRecognitionClient()
         
@@ -211,10 +212,6 @@ async def get_enrolled_speakers(user: User):
 async def get_speaker_service_status():
     """Check speaker recognition service health status."""
     try:
-        from advanced_omi_backend.speaker_recognition_client import (
-            SpeakerRecognitionClient,
-        )
-
         # Initialize speaker recognition client
         speaker_client = SpeakerRecognitionClient()
         
@@ -255,17 +252,20 @@ async def get_speaker_service_status():
 # Memory Configuration Management Functions
 
 async def get_memory_config_raw():
-    """Get current memory configuration (memory section of config.yml) as YAML."""
-    try:
-        cfg_path = _find_config_path()
-        if not os.path.exists(cfg_path):
-            raise FileNotFoundError(f"Config file not found: {cfg_path}")
+    """Get current memory configuration (memory section of merged config) as YAML.
 
-        with open(cfg_path, 'r') as f:
-            data = yaml.safe_load(f) or {}
-        memory_section = data.get("memory", {})
+    Returns the merged configuration from defaults.yml + config.yml + env vars,
+    which represents the actual runtime configuration.
+
+    Falls back to empty memory config if configuration cannot be loaded.
+    """
+    try:
+        # Get merged configuration (defaults + config.yml + env vars)
+        merged_config = get_config()
+        memory_section = merged_config.get("memory", {})
         config_yaml = yaml.safe_dump(memory_section, sort_keys=False)
 
+        cfg_path = get_config_path()
         return {
             "config_yaml": config_yaml,
             "config_path": str(cfg_path),
@@ -273,8 +273,15 @@ async def get_memory_config_raw():
             "status": "success",
         }
     except Exception as e:
-        logger.exception("Error reading memory config")
-        raise e
+        logger.warning(f"Error reading memory config, using empty config: {e}")
+        # Return empty memory config as fallback
+        cfg_path = get_config_path()
+        return {
+            "config_yaml": yaml.safe_dump({}, sort_keys=False),
+            "config_path": str(cfg_path),
+            "section": "memory",
+            "status": "fallback",
+        }
 
 
 async def update_memory_config_raw(config_yaml: str):
@@ -286,28 +293,39 @@ async def update_memory_config_raw(config_yaml: str):
         except yaml.YAMLError as e:
             raise ValueError(f"Invalid YAML syntax: {str(e)}")
 
-        cfg_path = _find_config_path()
-        if not os.path.exists(cfg_path):
-            raise FileNotFoundError(f"Config file not found: {cfg_path}")
+        cfg_path = get_config_path()
 
-        # Backup
-        backup_path = f"{cfg_path}.bak"
-        shutil.copy2(cfg_path, backup_path)
+        # Backup existing config if it exists
+        backup_created = False
+        if os.path.exists(cfg_path):
+            backup_path = f"{cfg_path}.bak"
+            shutil.copy2(cfg_path, backup_path)
+            backup_created = True
+            logger.info(f"Created config backup at {backup_path}")
 
-        # Update memory section and write file
-        with open(cfg_path, 'r') as f:
-            data = yaml.safe_load(f) or {}
+        # Load current config.yml (or start with empty dict)
+        if os.path.exists(cfg_path):
+            with open(cfg_path, 'r') as f:
+                data = yaml.safe_load(f) or {}
+        else:
+            data = {}
+            logger.info(f"Creating new config.yml at {cfg_path}")
+
+        # Update memory section
         data["memory"] = new_mem
+
+        # Write to config.yml
         with open(cfg_path, 'w') as f:
             yaml.safe_dump(data, f, sort_keys=False)
 
-        # Reload registry
-        load_models_config(force_reload=True)
+        # Reload both config cache and model registry
+        reload_config()  # Reload central config cache
+        load_models_config(force_reload=True)  # Reload model registry
 
         return {
             "message": "Memory configuration updated and reloaded successfully",
             "config_path": str(cfg_path),
-            "backup_created": os.path.exists(backup_path),
+            "backup_created": backup_created,
             "status": "success",
         }
     except Exception as e:
@@ -338,7 +356,7 @@ async def validate_memory_config(config_yaml: str):
 async def reload_memory_config():
     """Reload config.yml (registry)."""
     try:
-        cfg_path = _find_config_path()
+        cfg_path = get_config_path()
         load_models_config(force_reload=True)
         return {"message": "Configuration reloaded", "config_path": str(cfg_path), "status": "success"}
     except Exception as e:
@@ -349,8 +367,6 @@ async def reload_memory_config():
 async def delete_all_user_memories(user: User):
     """Delete all memories for the current user."""
     try:
-        from advanced_omi_backend.services.memory import get_memory_service
-
         memory_service = get_memory_service()
 
         # Delete all memories for the user
@@ -460,37 +476,37 @@ async def set_memory_provider(provider: str):
 # Chat Configuration Management Functions
 
 async def get_chat_config_yaml() -> str:
-    """Get chat system prompt as plain text."""
-    try:
-        config_path = _find_config_path()
+    """Get chat system prompt as plain text from merged configuration.
 
-        default_prompt = """You are a helpful AI assistant with access to the user's personal memories and conversation history.
+    Returns the merged configuration from defaults.yml + config.yml + env vars,
+    which represents the actual runtime configuration.
+
+    Falls back to default prompt if configuration cannot be loaded.
+    """
+    default_prompt = """You are a helpful AI assistant with access to the user's personal memories and conversation history.
 
 Use the provided memories and conversation context to give personalized, contextual responses. If memories are relevant, reference them naturally in your response. Be conversational and helpful.
 
 If no relevant memories are available, respond normally based on the conversation context."""
 
-        if not os.path.exists(config_path):
-            return default_prompt
-
-        with open(config_path, 'r') as f:
-            full_config = yaml.safe_load(f) or {}
-
-        chat_config = full_config.get('chat', {})
+    try:
+        # Get merged configuration (defaults + config.yml + env vars)
+        merged_config = get_config()
+        chat_config = merged_config.get('chat', {})
         system_prompt = chat_config.get('system_prompt', default_prompt)
 
         # Return just the prompt text, not the YAML structure
         return system_prompt
 
     except Exception as e:
-        logger.error(f"Error loading chat config: {e}")
-        raise
+        logger.warning(f"Error loading chat config, using default prompt: {e}")
+        return default_prompt
 
 
 async def save_chat_config_yaml(prompt_text: str) -> dict:
     """Save chat system prompt from plain text."""
     try:
-        config_path = _find_config_path()
+        config_path = get_config_path()
 
         # Validate plain text prompt
         if not prompt_text or not isinstance(prompt_text, str):
@@ -505,28 +521,30 @@ async def save_chat_config_yaml(prompt_text: str) -> dict:
         # Create chat config dict
         chat_config = {'system_prompt': prompt_text}
 
-        # Load full config
-        if os.path.exists(config_path):
-            with open(config_path, 'r') as f:
-                full_config = yaml.safe_load(f) or {}
-        else:
-            full_config = {}
-
-        # Backup existing config
+        # Backup existing config if it exists
         if os.path.exists(config_path):
             backup_path = str(config_path) + '.backup'
             shutil.copy2(config_path, backup_path)
             logger.info(f"Created config backup at {backup_path}")
 
+        # Load current config.yml (not merged - we only write to config.yml)
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                full_config = yaml.safe_load(f) or {}
+        else:
+            full_config = {}
+            logger.info(f"Creating new config.yml at {config_path}")
+
         # Update chat section
         full_config['chat'] = chat_config
 
-        # Save
+        # Save to config.yml
         with open(config_path, 'w') as f:
             yaml.dump(full_config, f, default_flow_style=False, allow_unicode=True)
 
-        # Reload config in memory (hot-reload)
-        load_models_config(force_reload=True)
+        # Reload both model registry and config cache (hot-reload)
+        reload_config()  # Reload central config cache
+        load_models_config(force_reload=True)  # Reload model registry
 
         logger.info("Chat configuration updated successfully")
 

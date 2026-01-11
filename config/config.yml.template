@@ -1,194 +1,166 @@
+# Chronicle Configuration Template
+#
+# Default models are provided in defaults.yml - you only need to override what you want to change.
+# This file shows examples of custom model configurations.
+#
+# To use this template:
+# 1. Copy to config.yml: cp config.yml.template config.yml
+# 2. Uncomment and customize the models you want to use
+# 3. Update the defaults section to point to your preferred models
+
+# Default model selections
+# These reference model names defined in the models section below or in defaults.yml
 defaults:
-  llm: openai-llm
-  embedding: openai-embed
-  stt: stt-deepgram
-  # Transcription provider selection:
-  # - stt-deepgram: Cloud-based (requires DEEPGRAM_API_KEY in .env)
-  # - stt-parakeet-batch: Local ASR (requires Parakeet service running)
-  tts: tts-http
-  vector_store: vs-qdrant
+  llm: openai-llm              # LLM for memory extraction (from defaults.yml)
+  embedding: openai-embed      # Embedding model (from defaults.yml)
+  stt: stt-deepgram            # Speech-to-text service (from defaults.yml)
+  # Transcription provider options:
+  # - stt-deepgram: Cloud-based Deepgram (requires DEEPGRAM_API_KEY)
+  # - stt-parakeet-batch: Local Parakeet ASR (requires Parakeet service running)
+  tts: tts-http                # Text-to-speech service
+  vector_store: vs-qdrant      # Vector database (from defaults.yml)
+
+# Custom model definitions
+# Add your own models here to override or extend the defaults
 models:
-- name: emberfang-llm
-  description: Emberfang One LLM
-  model_type: llm
-  model_provider: openai
-  model_name: gpt-oss-20b-f16
-  model_url: http://192.168.1.166:8084/v1
-  api_key: '1234'
-  model_params:
-    temperature: 0.2
-    max_tokens: 2000
-  model_output: json
-- name: emberfang-embed
-  description: Emberfang embeddings (nomic-embed-text)
-  model_type: embedding
-  model_provider: openai
-  model_name: nomic-embed-text-v1.5
-  model_url: http://192.168.1.166:8084/v1
-  api_key: '1234'
-  embedding_dimensions: 768
-  model_output: vector
-- name: local-llm
-  description: Local Ollama LLM
-  model_type: llm
-  model_provider: ollama
-  api_family: openai
-  model_name: llama3.1:latest
-  model_url: http://localhost:11434/v1
-  api_key: ${OPENAI_API_KEY:-ollama}
-  model_params:
-    temperature: 0.2
-    max_tokens: 2000
-  model_output: json
-- name: local-embed
-  description: Local embeddings via Ollama nomic-embed-text
-  model_type: embedding
-  model_provider: ollama
-  api_family: openai
-  model_name: nomic-embed-text:latest
-  model_url: http://localhost:11434/v1
-  api_key: ${OPENAI_API_KEY:-ollama}
-  embedding_dimensions: 768
-  model_output: vector
-- name: openai-llm
-  description: OpenAI GPT-4o-mini
-  model_type: llm
-  model_provider: openai
-  api_family: openai
-  model_name: gpt-4o-mini
-  model_url: https://api.openai.com/v1
-  api_key: ${OPENAI_API_KEY:-}
-  model_params:
-    temperature: 0.2
-    max_tokens: 2000
-  model_output: json
-- name: openai-embed
-  description: OpenAI text-embedding-3-small
-  model_type: embedding
-  model_provider: openai
-  api_family: openai
-  model_name: text-embedding-3-small
-  model_url: https://api.openai.com/v1
-  api_key: ${OPENAI_API_KEY:-}
-  embedding_dimensions: 1536
-  model_output: vector
-- name: groq-llm
-  description: Groq LLM via OpenAI-compatible API
-  model_type: llm
-  model_provider: groq
-  api_family: openai
-  model_name: llama-3.1-70b-versatile
-  model_url: https://api.groq.com/openai/v1
-  api_key: ${GROQ_API_KEY:-}
-  model_params:
-    temperature: 0.2
-    max_tokens: 2000
-  model_output: json
-- name: vs-qdrant
-  description: Qdrant vector database
-  model_type: vector_store
-  model_provider: qdrant
-  api_family: qdrant
-  model_url: http://${QDRANT_BASE_URL:-qdrant}:${QDRANT_PORT:-6333}
-  model_params:
-    host: ${QDRANT_BASE_URL:-qdrant}
-    port: ${QDRANT_PORT:-6333}
-    collection_name: omi_memories
-- name: stt-parakeet-batch
-  description: Parakeet NeMo ASR (batch)
-  model_type: stt
-  model_provider: parakeet
-  api_family: http
-  model_url: http://${PARAKEET_ASR_URL:-172.17.0.1:8767}
-  api_key: ''
-  operations:
-    stt_transcribe:
-      method: POST
-      path: /transcribe
-      content_type: multipart/form-data
-      response:
-        type: json
-        extract:
-          text: text
-          words: words
-          segments: segments
-- name: stt-deepgram
-  description: Deepgram Nova 3 (batch)
-  model_type: stt
-  model_provider: deepgram
-  api_family: http
-  model_url: https://api.deepgram.com/v1
-  api_key: ${DEEPGRAM_API_KEY:-}
-  operations:
-    stt_transcribe:
-      method: POST
-      path: /listen
-      headers:
-        Authorization: Token ${DEEPGRAM_API_KEY:-}
-        Content-Type: audio/raw
-      query:
-        model: nova-3
-        language: multi
-        smart_format: 'true'
-        punctuate: 'true'
-        diarize: 'true'
-        encoding: linear16
-        sample_rate: 16000
-        channels: '1'
-      response:
-        type: json
-        extract:
-          text: results.channels[0].alternatives[0].transcript
-          words: results.channels[0].alternatives[0].words
-          segments: results.channels[0].alternatives[0].paragraphs.paragraphs
-- name: tts-http
-  description: Generic JSON TTS endpoint
-  model_type: tts
-  model_provider: custom
-  api_family: http
-  model_url: http://localhost:9000
-  operations:
-    tts_synthesize:
-      method: POST
-      path: /synthesize
-      headers:
-        Content-Type: application/json
-      response:
-        type: json
-- name: stt-parakeet-stream
-  description: Parakeet streaming transcription over WebSocket
-  model_type: stt_stream
-  model_provider: parakeet
-  api_family: websocket
-  model_url: ws://localhost:9001/stream
-  operations:
-    start:
-      message:
-        type: transcribe
-        config:
-          vad_enabled: true
-          vad_silence_ms: 1000
-          time_interval_seconds: 30
-          return_interim_results: true
-          min_audio_seconds: 0.5
-    chunk_header:
-      message:
-        type: audio_chunk
-        rate: 16000
-        width: 2
-        channels: 1
-    end:
-      message:
-        type: stop
-    expect:
-      interim_type: interim_result
-      final_type: final_result
-      extract:
-        text: text
-        words: words
-        segments: segments
+
+# Example: Custom LLM server (emberfang)
+# - name: emberfang-llm
+#   description: Emberfang One LLM
+#   model_type: llm
+#   model_provider: openai
+#   model_name: gpt-oss-20b-f16
+#   model_url: http://192.168.1.166:8084/v1
+#   api_key: '1234'
+#   model_params:
+#     temperature: 0.2
+#     max_tokens: 2000
+#   model_output: json
+
+# Example: Custom embedding server
+# - name: emberfang-embed
+#   description: Emberfang embeddings (nomic-embed-text)
+#   model_type: embedding
+#   model_provider: openai
+#   model_name: nomic-embed-text-v1.5
+#   model_url: http://192.168.1.166:8084/v1
+#   api_key: '1234'
+#   embedding_dimensions: 768
+#   model_output: vector
+
+# Example: Local Ollama LLM
+# - name: local-llm
+#   description: Local Ollama LLM
+#   model_type: llm
+#   model_provider: ollama
+#   api_family: openai
+#   model_name: llama3.1:latest
+#   model_url: http://localhost:11434/v1
+#   api_key: ${OPENAI_API_KEY:-ollama}
+#   model_params:
+#     temperature: 0.2
+#     max_tokens: 2000
+#   model_output: json
+
+# Example: Local Ollama embeddings
+# - name: local-embed
+#   description: Local embeddings via Ollama nomic-embed-text
+#   model_type: embedding
+#   model_provider: ollama
+#   api_family: openai
+#   model_name: nomic-embed-text:latest
+#   model_url: http://localhost:11434/v1
+#   api_key: ${OPENAI_API_KEY:-ollama}
+#   embedding_dimensions: 768
+#   model_output: vector
+
+# Example: Groq LLM (fast inference)
+# - name: groq-llm
+#   description: Groq LLM via OpenAI-compatible API
+#   model_type: llm
+#   model_provider: groq
+#   api_family: openai
+#   model_name: llama-3.1-70b-versatile
+#   model_url: https://api.groq.com/openai/v1
+#   api_key: ${GROQ_API_KEY:-}
+#   model_params:
+#     temperature: 0.2
+#     max_tokens: 2000
+#   model_output: json
+
+# Example: Local Parakeet ASR (offline transcription)
+# - name: stt-parakeet-batch
+#   description: Parakeet NeMo ASR (batch)
+#   model_type: stt
+#   model_provider: parakeet
+#   api_family: http
+#   model_url: http://${PARAKEET_ASR_URL:-172.17.0.1:8767}
+#   api_key: ''
+#   operations:
+#     stt_transcribe:
+#       method: POST
+#       path: /transcribe
+#       content_type: multipart/form-data
+#       response:
+#         type: json
+#         extract:
+#           text: text
+#           words: words
+#           segments: segments
+
+# Example: Generic TTS endpoint
+# - name: tts-http
+#   description: Generic JSON TTS endpoint
+#   model_type: tts
+#   model_provider: custom
+#   api_family: http
+#   model_url: http://localhost:9000
+#   operations:
+#     tts_synthesize:
+#       method: POST
+#       path: /synthesize
+#       headers:
+#         Content-Type: application/json
+#       response:
+#         type: json
+
+# Example: Parakeet streaming transcription
+# - name: stt-parakeet-stream
+#   description: Parakeet streaming transcription over WebSocket
+#   model_type: stt_stream
+#   model_provider: parakeet
+#   api_family: websocket
+#   model_url: ws://localhost:9001/stream
+#   operations:
+#     start:
+#       message:
+#         type: transcribe
+#         config:
+#           vad_enabled: true
+#           vad_silence_ms: 1000
+#           time_interval_seconds: 30
+#           return_interim_results: true
+#           min_audio_seconds: 0.5
+#     chunk_header:
+#       message:
+#         type: audio_chunk
+#         rate: 16000
+#         width: 2
+#         channels: 1
+#     end:
+#       message:
+#         type: stop
+#     expect:
+#       interim_type: interim_result
+#       final_type: final_result
+#       extract:
+#         text: text
+#         words: words
+#         segments: segments
+
+# Memory system configuration
 memory:
-  provider: chronicle
+  provider: chronicle  # Options: chronicle, openmemory_mcp, mycelia, obsidian
   timeout_seconds: 1200
   extraction:
     enabled: true
@@ -197,23 +169,27 @@ memory:
       dates, locations, numbers, and key details. Keep items concise and useful.
 
       '
+  # OpenMemory MCP configuration (when provider: openmemory_mcp)
   openmemory_mcp:
     server_url: http://localhost:8765
     client_name: chronicle
     user_id: default
     timeout: 30
+  # Mycelia configuration (when provider: mycelia)
   mycelia:
     api_url: http://localhost:5173
     timeout: 30
+  # Obsidian/Neo4j configuration (when provider: obsidian)
   obsidian:
     enabled: false
     neo4j_host: neo4j-mem0
     timeout: 30
 
+# Speaker recognition configuration
 speaker_recognition:
-  # Enable/disable speaker recognition (overrides DISABLE_SPEAKER_RECOGNITION env var)
-  enabled: true
-  # Service URL (defaults to SPEAKER_SERVICE_URL env var if not specified)
+  # Enable/disable speaker recognition
+  enabled: false
+  # Service URL (uses SPEAKER_SERVICE_URL env var if not specified)
   service_url: null
   # Request timeout in seconds
   timeout: 60

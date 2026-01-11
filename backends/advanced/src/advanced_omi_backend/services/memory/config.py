@@ -2,8 +2,6 @@
 
 import logging
 import os
-import yaml
-from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Optional, Union
@@ -65,22 +63,13 @@ class MemoryConfig:
 
 
 def load_config_yml() -> Dict[str, Any]:
-    """Load config.yml from standard locations."""
-    # Check /app/config.yml (Docker) or root relative to file
-    current_dir = Path(__file__).parent.resolve()
-    # Path inside Docker: /app/config.yml (if mounted) or ../../../config.yml relative to src
-    paths = [
-        Path("/app/config.yml"),
-        current_dir.parent.parent.parent.parent.parent / "config.yml",  # Relative to src/
-        Path("./config.yml"),
-    ]
+    """Load merged configuration (defaults.yml + config.yml + env vars).
 
-    for path in paths:
-        if path.exists():
-            with open(path, "r") as f:
-                return yaml.safe_load(f) or {}
-
-    raise FileNotFoundError(f"config.yml not found in any of: {[str(p) for p in paths]}")
+    This function maintains backward compatibility while using the central
+    configuration system. It returns the full merged configuration.
+    """
+    from advanced_omi_backend.config import get_config
+    return get_config()
 
 
 def create_openmemory_config(
