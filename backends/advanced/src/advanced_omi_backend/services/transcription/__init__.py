@@ -129,18 +129,18 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
             # DEBUG: Log Deepgram response structure
             if "results" in data and "channels" in data.get("results", {}):
                 results = data["results"]
-                logger.info(f"DEBUG Registry: Deepgram results keys: {list(results.keys())}")
+                logger.debug(f"DEBUG Registry: Deepgram results keys: {list(results.keys())}")
 
                 channels = results.get("channels", [])
                 if channels and "alternatives" in channels[0]:
                     alt = channels[0]["alternatives"][0]
-                    logger.info(f"DEBUG Registry: Deepgram alternative keys: {list(alt.keys())}")
+                    logger.debug(f"DEBUG Registry: Deepgram alternative keys: {list(alt.keys())}")
 
                 # Check if utterances exist at results level
                 if "utterances" in results:
-                    logger.info(f"DEBUG Registry: Found utterances at results level: {len(results['utterances'])} utterances")
+                    logger.debug(f"DEBUG Registry: Found utterances at results level: {len(results['utterances'])} utterances")
                     if results['utterances']:
-                        logger.info(f"DEBUG Registry: First utterance: {results['utterances'][0]}")
+                        logger.debug(f"DEBUG Registry: First utterance: {results['utterances'][0]}")
                 else:
                     logger.warning(f"DEBUG Registry: NO utterances found in results! Available keys: {list(results.keys())}")
 
