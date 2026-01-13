@@ -143,6 +143,38 @@ Mycelia is an optional self-hosted AI memory system that Friend-Lite can use as 
 **Build/Setup:**
 If you choose Mycelia as your memory provider during setup wizard, the wizard will configure the necessary services automatically. No manual build steps required!
 
+## ⚠️ Troubleshooting: Mycelia Submodule Clone Error
+
+Some users may encounter the following error when cloning the repository:
+```bash
+fatal: remote error: upload-pack: not our ref  fatal: Fetched in submodule path 'extras/mycelia', but it did not contain .
+```
+
+### Why this happens
+The `extras/mycelia` submodule is **optional** and may temporarily reference a commit
+that is no longer available upstream.
+
+### Recommended solutions
+
+#### Option 1: Clone without submodules (recommended for most users)
+If you don't need Mycelia, simply clone without `--recursive`:
+
+```bash
+git clone https://github.com/chronicle-ai/chronicle.git
+cd chronicle
+```
+This uses the default Friend-Lite memory backend, which works for most setups.
+
+#### Option 2: Disable the Mycelia submodule after cloning
+
+If you already cloned with --recursive and hit the error:
+```bash
+git submodule deinit -f extras/mycelia
+rm -rf .git/modules/extras/mycelia
+rm -rf extras/mycelia
+```
+Then continue with the setup wizard as normal.
+
 </details>
 
 **Run the setup wizard:**
