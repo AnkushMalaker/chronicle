@@ -12,6 +12,7 @@ from enum import Enum
 import uuid
 
 from beanie import Document, Indexed
+from pymongo import IndexModel
 
 
 class Conversation(Document):
@@ -82,12 +83,18 @@ class Conversation(Document):
 
     # Core identifiers
     conversation_id: Indexed(str, unique=True) = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique conversation identifier")
-    audio_uuid: Indexed(str) = Field(description="Session/audio identifier (for tracking audio files)")
     user_id: Indexed(str) = Field(description="User who owns this conversation")
     client_id: Indexed(str) = Field(description="Client device identifier")
 
-    # Legacy audio path field - no longer used, audio stored as MongoDB chunks
-    audio_path: Optional[str] = Field(None, description="Legacy field, not populated for new conversations")
+    # External file tracking (for deduplication of imported files)
+    external_source_id: Optional[str] = Field(
+        None,
+        description="External file identifier (e.g., Google Drive file_id) for deduplication"
+    )
+    external_source_type: Optional[str] = Field(
+        None,
+        description="Type of external source (gdrive, dropbox, s3, etc.)"
+    )
 
     # MongoDB chunk-based audio storage (new system)
     audio_chunks_count: Optional[int] = Field(
@@ -324,13 +331,13 @@ class Conversation(Document):
             "conversation_id",
             "user_id",
             "created_at",
-            [("user_id", 1), ("created_at", -1)]  # Compound index for user queries
+            [("user_id", 1), ("created_at", -1)],  # Compound index for user queries
+            IndexModel([("external_source_id", 1)], sparse=True)  # Sparse index for deduplication
         ]
 
 
 # Factory function for creating conversations
 def create_conversation(
-    audio_uuid: str,
     user_id: str,
     client_id: str,
     conversation_id: Optional[str] = None,
@@ -338,12 +345,13 @@ def create_conversation(
     summary: Optional[str] = None,
     transcript: Optional[str] = None,
     segments: Optional[List["Conversation.SpeakerSegment"]] = None,
+    external_source_id: Optional[str] = None,
+    external_source_type: Optional[str] = None,
 ) -> Conversation:
     """
     Factory function to create a new conversation.
 
     Args:
-        audio_uuid: Unique identifier for the audio session
         user_id: User who owns this conversation
         client_id: Client device identifier
         conversation_id: Optional unique conversation identifier (auto-generated if not provided)
@@ -351,13 +359,14 @@ def create_conversation(
         summary: Optional conversation summary
         transcript: Optional transcript text
         segments: Optional speaker segments
+        external_source_id: Optional external file ID for deduplication (e.g., Google Drive file_id)
+        external_source_type: Optional external source type (gdrive, dropbox, etc.)
 
     Returns:
         Conversation instance
     """
     # Build the conversation data
     conv_data = {
-        "audio_uuid": audio_uuid,
         "user_id": user_id,
         "client_id": client_id,
         "created_at": datetime.now(),
@@ -370,7 +379,9 @@ def create_conversation(
         "memory_versions": [],
         "active_memory_version": None,
         "memories": [],
-        "memory_count": 0
+        "memory_count": 0,
+        "external_source_id": external_source_id,
+        "external_source_type": external_source_type,
     }
 
     # Only set conversation_id if provided, otherwise let the model auto-generate it

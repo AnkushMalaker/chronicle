@@ -16,6 +16,7 @@ Refactored to use a modular architecture with proper separation of concerns:
 """
 
 import logging
+
 import uvicorn
 
 from advanced_omi_backend.app_factory import create_app

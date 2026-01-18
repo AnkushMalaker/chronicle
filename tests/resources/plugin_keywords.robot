@@ -173,3 +173,63 @@ Plugin Event Count Should Be Greater Than
     ...    msg=Expected new ${event_type} events, but count is still ${current_count} (baseline: ${baseline_count})
 
     RETURN    ${new_events}
+
+Should Contain Event
+    [Documentation]    Verify event type exists, optionally filtered by conversation_id
+    [Arguments]    ${event_type}    ${conversation_id}=${EMPTY}
+
+    ${events}=    Get Plugin Events By Type    ${event_type}
+    Should Not Be Empty    ${events}
+    ...    msg=No events found for event type '${event_type}'
+
+    IF    '${conversation_id}' != ''
+        # Filter events by conversation_id in the data field
+        ${found}=    Set Variable    ${False}
+        FOR    ${event}    IN    @{events}
+            ${event_data}=    Set Variable    ${event}[data]
+            ${event_conv_id}=    Evaluate    $event_data.get('conversation_id', '')
+            IF    '${event_conv_id}' == '${conversation_id}'
+                ${found}=    Set Variable    ${True}
+                BREAK
+            END
+        END
+        Should Be True    ${found}
+        ...    msg=No events found for conversation '${conversation_id}' with event type '${event_type}'
+    END
+
+Verify Event Metadata
+    [Documentation]    Verify specific metadata field value exists in events
+    [Arguments]    ${event_type}    ${metadata_key}    ${expected_value}    ${conversation_id}=${EMPTY}
+
+    ${events}=    Get Plugin Events By Type    ${event_type}
+    Should Not Be Empty    ${events}
+    ...    msg=No events found for event type '${event_type}'
+
+    # Find matching event (optionally filtered by conversation_id)
+    ${found}=    Set Variable    ${False}
+    FOR    ${event}    IN    @{events}
+        # If conversation_id filter specified, check if this is the right conversation
+        ${is_match}=    Set Variable    ${True}
+        IF    '${conversation_id}' != ''
+            ${event_data}=    Set Variable    ${event}[data]
+            ${event_conv_id}=    Evaluate    $event_data.get('conversation_id', '')
+            IF    '${event_conv_id}' != '${conversation_id}'
+                ${is_match}=    Set Variable    ${False}
+            END
+        END
+
+        # If this is a matching event, check metadata
+        IF    ${is_match}
+            ${event_metadata}=    Set Variable    ${event}[metadata]
+            Dictionary Should Contain Key    ${event_metadata}    ${metadata_key}
+            ...    msg=Event metadata missing key '${metadata_key}'
+            ${actual_value}=    Get From Dictionary    ${event_metadata}    ${metadata_key}
+            IF    '${actual_value}' == '${expected_value}'
+                ${found}=    Set Variable    ${True}
+                BREAK
+            END
+        END
+    END
+
+    Should Be True    ${found}
+    ...    msg=No events found with metadata '${metadata_key}=${expected_value}' for event type '${event_type}'

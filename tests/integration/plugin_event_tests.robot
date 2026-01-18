@@ -106,6 +106,10 @@ Conversation Complete Should Trigger Event
     ${events}=    Get Plugin Events By Type    conversation.complete
     Should Not Be Empty    ${events}
 
+    # Verify end_reason metadata in plugin event
+    ${conversation_id}=    Set Variable    ${conversation}[conversation_id]
+    Verify Event Metadata    conversation.complete    end_reason    file_upload    ${conversation_id}
+
 Memory Processing Should Trigger Event
     [Documentation]    Verify memory.processed event after memory extraction
     [Tags]    memory
@@ -129,6 +133,53 @@ Memory Processing Should Trigger Event
     # Verify event structure
     ${events}=    Get Plugin Events By Type    memory.processed
     Should Not Be Empty    ${events}
+
+WebSocket Disconnect Should Trigger Conversation Complete Event
+    [Documentation]    Verify conversation.complete event when WebSocket disconnects
+    [Tags]    audio-streaming	conversation
+    [Timeout]    60s
+
+    # Clear events
+    Clear Plugin Events
+
+    # Get baseline count
+    ${baseline_count}=    Get Plugin Event Count    conversation.complete
+
+    # Open WebSocket stream
+    ${stream_id}=    Open Audio Stream    device_name=plugin-test-ws
+    ${client_id}=    Get Client ID From Device Name    plugin-test-ws
+
+    # Send audio chunks to create conversation
+    ${chunks_sent}=    Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=50
+
+    # Wait for conversation creation (speech detection takes a few seconds)
+    Sleep    5s    Allow time for speech detection and conversation creation
+
+    # Get conversation ID from jobs (before disconnect)
+    ${jobs}=    Get Jobs By Type And Client    open_conversation    ${client_id}
+    Should Not Be Empty    ${jobs}    At least one conversation job should exist
+    ${conversation_id}=    Evaluate    ${jobs}[0]['meta'].get('conversation_id', '')
+    Should Not Be Equal    ${conversation_id}    ${EMPTY}    Conversation ID should be set
+
+    # Disconnect WebSocket (triggers conversation close with websocket_disconnect end_reason)
+    ${total_chunks}=    Close Audio Stream    ${stream_id}
+    Log    Closed WebSocket stream, sent ${total_chunks} total chunks
+
+    # Wait for plugin event dispatch (polls every 2s, max 10s)
+    ${new_events}=    Wait For Plugin Event    conversation.complete    ${baseline_count}    timeout=10s
+
+    Should Be True    ${new_events} > 0
+    ...    msg=At least one conversation.complete event should be logged
+
+    # Verify plugin event has correct end_reason metadata
+    Verify Event Metadata    conversation.complete    end_reason    websocket_disconnect    ${conversation_id}
+
+    # Verify conversation has end_reason set in database
+    ${updated_conversation}=    Get Conversation By ID    ${conversation_id}
+    Should Be Equal    ${updated_conversation}[end_reason]    websocket_disconnect
+    ...    msg=Conversation should have websocket_disconnect end_reason
+    Should Not Be Equal    ${updated_conversation}[completed_at]    ${None}
+    ...    msg=Conversation should have completed_at timestamp
 
 Verify All Events Are Logged
     [Documentation]    Comprehensive test that verifies all event types are logged

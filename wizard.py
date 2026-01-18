@@ -4,7 +4,6 @@ Chronicle Root Setup Orchestrator
 Handles service selection and delegation only - no configuration duplication
 """
 
-import getpass
 import shutil
 import subprocess
 import sys
@@ -12,47 +11,21 @@ from datetime import datetime
 from pathlib import Path
 
 import yaml
-from dotenv import get_key
 from rich import print as rprint
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
+# Import shared setup utilities
+from setup_utils import (
+    prompt_password,
+    prompt_value,
+    prompt_with_existing_masked,
+    read_env_value,
+    mask_value,
+    is_placeholder
+)
+
 console = Console()
-
-def read_env_value(env_file_path, key):
-    """Read a value from an .env file using python-dotenv"""
-    env_path = Path(env_file_path)
-    if not env_path.exists():
-        return None
-
-    value = get_key(str(env_path), key)
-    # get_key returns None if key doesn't exist or value is empty
-    return value if value else None
-
-def is_placeholder(value, *placeholder_variants):
-    """
-    Check if a value is a placeholder by normalizing both the value and placeholders.
-    Treats 'your-key-here' and 'your_key_here' as equivalent.
-
-    Args:
-        value: The value to check
-        placeholder_variants: One or more placeholder strings to check against
-
-    Returns:
-        True if value matches any placeholder variant (after normalization)
-    """
-    if not value:
-        return True
-
-    # Normalize by replacing hyphens with underscores
-    normalized_value = value.replace('-', '_').lower()
-
-    for placeholder in placeholder_variants:
-        normalized_placeholder = placeholder.replace('-', '_').lower()
-        if normalized_value == normalized_placeholder:
-            return True
-
-    return False
 
 SERVICES = {
     'backend': {
@@ -312,95 +285,23 @@ def show_service_status():
         status = "✅" if exists else "⏸️"
         console.print(f"  {status} {service_config['description']} - {msg}")
 
-def prompt_value(prompt_text, default=""):
-    """Prompt user for a value with a default"""
-    if default:
-        display_prompt = f"{prompt_text} [{default}]"
-    else:
-        display_prompt = prompt_text
-
-    try:
-        value = console.input(f"[cyan]{display_prompt}:[/cyan] ").strip()
-        return value if value else default
-    except EOFError:
-        return default
-
-def prompt_password(prompt_text):
-    """Prompt user for a password (hidden input)"""
-    try:
-        return getpass.getpass(f"{prompt_text}: ")
-    except (EOFError, KeyboardInterrupt):
-        return ""
-
-def mask_value(value, show_chars=5):
-    """Mask a value showing only first and last few characters"""
-    if not value or len(value) <= show_chars * 2:
-        return value
-
-    # Remove quotes if present
-    value_clean = value.strip("'\"")
-
-    return f"{value_clean[:show_chars]}{'*' * min(15, len(value_clean) - show_chars * 2)}{value_clean[-show_chars:]}"
-
-def prompt_with_existing_masked(prompt_text, existing_value, placeholders=None, is_password=False, default=""):
-    """
-    Prompt for a value, showing masked existing value if present.
-
-    Args:
-        prompt_text: The prompt to display
-        existing_value: Existing value from config (or None)
-        placeholders: List of placeholder values to treat as "not set"
-        is_password: Whether to use password input (hidden)
-        default: Default value if no existing value
-
-    Returns:
-        User input value, existing value if reused, or default
-    """
-    placeholders = placeholders or []
-
-    # Check if existing value is valid (not empty and not a placeholder)
-    has_valid_existing = existing_value and existing_value not in placeholders
-
-    if has_valid_existing:
-        # Show masked value with option to reuse
-        if is_password:
-            masked = mask_value(existing_value)
-            display_prompt = f"{prompt_text} ({masked}) [press Enter to reuse, or enter new]"
-        else:
-            display_prompt = f"{prompt_text} ({existing_value}) [press Enter to reuse, or enter new]"
-
-        if is_password:
-            user_input = prompt_password(display_prompt)
-        else:
-            user_input = prompt_value(display_prompt, "")
-
-        # If user pressed Enter (empty input), reuse existing value
-        return user_input if user_input else existing_value
-    else:
-        # No existing value, prompt normally
-        if is_password:
-            return prompt_password(prompt_text)
-        else:
-            return prompt_value(prompt_text, default)
-
 def run_plugin_setup(plugin_id, plugin_info):
     """Run a plugin's setup.py script"""
     setup_path = plugin_info['setup_path']
 
     try:
-        # Run plugin setup script
+        # Run plugin setup script interactively (don't capture output)
+        # This allows the plugin to prompt for user input
         result = subprocess.run(
             ['uv', 'run', '--with-requirements', 'setup-requirements.txt', 'python', str(setup_path)],
-            cwd=str(Path.cwd()),
-            capture_output=True,
-            text=True
+            cwd=str(Path.cwd())
         )
 
         if result.returncode == 0:
-            console.print(f"[green]✅ {plugin_id} configured successfully[/green]")
+            console.print(f"\n[green]✅ {plugin_id} configured successfully[/green]")
             return True
         else:
-            console.print(f"[red]❌ {plugin_id} setup failed: {result.stderr}[/red]")
+            console.print(f"\n[red]❌ {plugin_id} setup failed with exit code {result.returncode}[/red]")
             return False
 
     except Exception as e:
@@ -603,9 +504,6 @@ def main():
         console.print("\n[yellow]No services selected. Exiting.[/yellow]")
         return
 
-    # Plugin Configuration
-    setup_plugins()  # Discovers and delegates to plugin setup scripts
-
     # HF Token Configuration (if services require it)
     hf_token = setup_hf_token_if_needed(selected_services)
 
@@ -698,6 +596,11 @@ def main():
             success_count += 1
         else:
             failed_services.append(service)
+
+    # Plugin Configuration (AFTER backend .env is created)
+    # This ensures plugins can add their secrets to the existing .env file
+    # without the backend init overwriting them
+    setup_plugins()
 
     # Check for Obsidian/Neo4j configuration (read from config.yml)
     obsidian_enabled = False

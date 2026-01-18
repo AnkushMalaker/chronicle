@@ -17,7 +17,7 @@ services:
       - ./data/test_debug_dir:/app/debug  # Fixed: mount to /app/debug for plugin database
       - ./data/test_data:/app/data
       - ../../config:/app/config  # Mount config directory with defaults.yml and config.yml
-      - ${PLUGINS_CONFIG:-../../tests/config/plugins.test.yml}:/app/plugins.yml  # Mount test plugins config
+      - ${PLUGINS_CONFIG:-../../tests/config/plugins.test.yml}:/app/config/plugins.yml  # Mount test plugins config to correct location
     environment:
       # Override with test-specific settings
       - MONGODB_URI=mongodb://mongo-test:27017/test_db
@@ -169,7 +169,7 @@ services:
       - ./data/test_debug_dir:/app/debug  # Fixed: mount to /app/debug for plugin database
       - ./data/test_data:/app/data
       - ../../config:/app/config  # Mount config directory with defaults.yml and config.yml
-      - ${PLUGINS_CONFIG:-../../tests/config/plugins.test.yml}:/app/plugins.yml  # Mount test plugins config
+      - ${PLUGINS_CONFIG:-../../tests/config/plugins.test.yml}:/app/config/plugins.yml  # Mount test plugins config to correct location
     environment:
       # Same environment as backend
       - MONGODB_URI=mongodb://mongo-test:27017/test_db

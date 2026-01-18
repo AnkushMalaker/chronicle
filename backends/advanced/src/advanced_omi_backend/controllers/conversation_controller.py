@@ -109,10 +109,8 @@ async def get_conversation(conversation_id: str, user: User):
         # Build response with explicit curated fields
         response = {
             "conversation_id": conversation.conversation_id,
-            "audio_uuid": conversation.audio_uuid,
             "user_id": conversation.user_id,
             "client_id": conversation.client_id,
-            "audio_path": conversation.audio_path,
             "audio_chunks_count": conversation.audio_chunks_count,
             "audio_total_duration": conversation.audio_total_duration,
             "audio_compression_ratio": conversation.audio_compression_ratio,
@@ -175,10 +173,8 @@ async def get_conversations(user: User, include_deleted: bool = False):
         for conv in user_conversations:
             conversations.append({
                 "conversation_id": conv.conversation_id,
-                "audio_uuid": conv.audio_uuid,
                 "user_id": conv.user_id,
                 "client_id": conv.client_id,
-                "audio_path": conv.audio_path,
                 "audio_chunks_count": conv.audio_chunks_count,
                 "audio_total_duration": conv.audio_total_duration,
                 "audio_compression_ratio": conv.audio_compression_ratio,
@@ -248,7 +244,6 @@ async def _hard_delete_conversation(conversation: Conversation) -> JSONResponse:
     """Permanently delete conversation and chunks (admin only)."""
     conversation_id = conversation.conversation_id
     client_id = conversation.client_id
-    audio_uuid = conversation.audio_uuid
 
     # Delete conversation document
     await conversation.delete()
@@ -268,8 +263,7 @@ async def _hard_delete_conversation(conversation: Conversation) -> JSONResponse:
             "message": f"Successfully permanently deleted conversation '{conversation_id}'",
             "deleted_chunks": deleted_chunks,
             "conversation_id": conversation_id,
-            "client_id": client_id,
-            "audio_uuid": audio_uuid
+            "client_id": client_id
         }
     )
 
@@ -411,8 +405,6 @@ async def reprocess_transcript(conversation_id: str, user: User):
             return JSONResponse(status_code=403, content={"error": "Access forbidden. You can only reprocess your own conversations."})
 
         # Get audio_uuid from conversation
-        audio_uuid = conversation_model.audio_uuid
-
         # Validate audio chunks exist in MongoDB
         chunks = await AudioChunkDocument.find(
             AudioChunkDocument.conversation_id == conversation_id
@@ -439,14 +431,13 @@ async def reprocess_transcript(conversation_id: str, user: User):
         transcript_job = transcription_queue.enqueue(
             transcribe_full_audio_job,
             conversation_id,
-            audio_uuid,
             version_id,
             "reprocess",
             job_timeout=600,
             result_ttl=JOB_RESULT_TTL,
             job_id=f"reprocess_{conversation_id[:8]}",
             description=f"Transcribe audio for {conversation_id[:8]}",
-            meta={'audio_uuid': audio_uuid, 'conversation_id': conversation_id}
+            meta={'conversation_id': conversation_id}
         )
         logger.info(f"📥 RQ: Enqueued transcription job {transcript_job.id}")
 
@@ -468,7 +459,7 @@ async def reprocess_transcript(conversation_id: str, user: User):
                 result_ttl=JOB_RESULT_TTL,
                 job_id=f"speaker_{conversation_id[:8]}",
                 description=f"Recognize speakers for {conversation_id[:8]}",
-                meta={'audio_uuid': audio_uuid, 'conversation_id': conversation_id}
+                meta={'conversation_id': conversation_id}
             )
             speaker_dependency = speaker_job  # Chain for next job
             logger.info(f"📥 RQ: Enqueued speaker recognition job {speaker_job.id} (depends on {transcript_job.id})")
@@ -486,7 +477,7 @@ async def reprocess_transcript(conversation_id: str, user: User):
             result_ttl=JOB_RESULT_TTL,
             job_id=f"memory_{conversation_id[:8]}",
             description=f"Extract memories for {conversation_id[:8]}",
-            meta={'audio_uuid': audio_uuid, 'conversation_id': conversation_id}
+            meta={'conversation_id': conversation_id}
         )
         if speaker_job:
             logger.info(f"📥 RQ: Enqueued memory job {memory_job.id} (depends on speaker job {speaker_job.id})")

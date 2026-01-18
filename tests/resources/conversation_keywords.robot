@@ -76,9 +76,9 @@ Activate Memory Version
 
 Delete Conversation
     [Documentation]    Delete a conversation
-    [Arguments]     ${audio_uuid}
+    [Arguments]     ${conversation_id}
 
-    ${response}=    DELETE On Session    api    /api/conversations/${audio_uuid}    headers=${headers}
+    ${response}=    DELETE On Session    api    /api/conversations/${conversation_id}    headers=${headers}
     RETURN    ${response.json()}
 
 Delete Conversation Version
@@ -97,15 +97,15 @@ Close Current Conversation
 
 Add Speaker To Conversation
     [Documentation]    Add a speaker to the speakers_identified list
-    [Arguments]    ${audio_uuid}    ${speaker_id}
+    [Arguments]    ${conversation_id}    ${speaker_id}
     &{params}=     Create Dictionary    speaker_id=${speaker_id}
 
-    ${response}=    POST On Session    api    /api/conversations/${audio_uuid}/speakers    headers=${headers}    params=${params}
+    ${response}=    POST On Session    api    /api/conversations/${conversation_id}/speakers    headers=${headers}    params=${params}
     RETURN    ${response.json()}
 
 Update Transcript Segment
     [Documentation]    Update a specific transcript segment
-    [Arguments]    ${audio_uuid}    ${segment_index}    ${speaker_id}=${None}    ${start_time}=${None}    ${end_time}=${None}
+    [Arguments]    ${conversation_id}    ${segment_index}    ${speaker_id}=${None}    ${start_time}=${None}    ${end_time}=${None}
     &{params}=     Create Dictionary
 
     IF    '${speaker_id}' != '${None}'
@@ -118,7 +118,7 @@ Update Transcript Segment
         Set To Dictionary    ${params}    end_time=${end_time}
     END
 
-    ${response}=    PUT On Session    api    /api/conversations/${audio_uuid}/transcript/${segment_index}    headers=${headers}    params=${params}
+    ${response}=    PUT On Session    api    /api/conversations/${conversation_id}/transcript/${segment_index}    headers=${headers}    params=${params}
     RETURN    ${response.json()}
 
 

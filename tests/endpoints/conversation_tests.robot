@@ -29,7 +29,6 @@ Get User Conversations Test
             FOR    ${conversation}    IN    @{client_conversations}
                 # Verify conversation structure
                 Dictionary Should Contain Key    ${conversation}    conversation_id
-                Dictionary Should Contain Key    ${conversation}    audio_uuid
                 Dictionary Should Contain Key    ${conversation}    created_at
             END
         END
@@ -46,7 +45,6 @@ Get Conversation By ID Test
 
     # Verify conversation structure
     Dictionary Should Contain Key    ${conversation}    conversation_id
-    Dictionary Should Contain Key    ${conversation}    audio_uuid
     Dictionary Should Contain Key    ${conversation}    created_at
     Should Be Equal    ${conversation}[conversation_id]    ${conversation_id}
 

@@ -178,13 +178,47 @@ This will:
 - Check LLM API keys are valid
 - Plugin will fall back to truncated transcript if LLM fails
 
-## Security Considerations
+## 🔒 Security Best Practices
 
-1. **Never commit SMTP passwords** to git
-2. **Use environment variables** for sensitive config
-3. **Enable TLS/SSL** for encrypted connections
+### NEVER Commit Secrets to YAML Files
+
+**WRONG** ❌:
+```yaml
+# config/plugins.yml
+smtp_password: xnetcqctkkfgzllh  # Hardcoded secret - SECURITY RISK!
+```
+
+**CORRECT** ✅:
+```yaml
+# config/plugins.yml
+smtp_password: ${SMTP_PASSWORD}  # Reference to environment variable
+```
+
+```bash
+# backends/advanced/.env (gitignored)
+SMTP_PASSWORD=xnetcqctkkfgzllh  # Actual secret stored safely
+```
+
+### Configuration Architecture
+
+The setup wizard automatically:
+- ✅ Saves SMTP credentials to `backends/advanced/.env`
+- ✅ Updates `config/plugins.yml` with `${ENV_VAR}` references
+- ✅ Prevents accidental secret commits
+
+**Always use the setup wizard** instead of manual configuration:
+```bash
+uv run python backends/advanced/src/advanced_omi_backend/plugins/email_summarizer/setup.py
+```
+
+### Additional Security Tips
+
+1. **Never commit SMTP passwords** to git (use .env only)
+2. **Use environment variable references** (`${SMTP_PASSWORD}`) in YAML files
+3. **Enable TLS/SSL** for encrypted SMTP connections
 4. **Gmail App Passwords** are safer than account passwords
 5. **Rotate credentials** periodically
+6. **Review commits** before pushing to ensure no hardcoded secrets
 
 ## Development
 

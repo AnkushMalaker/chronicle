@@ -207,13 +207,13 @@ class EmailSummarizerPlugin(BasePlugin):
 
     async def _get_user_email(self, user_id: str) -> Optional[str]:
         """
-        Get user email from database.
+        Get notification email from user.
 
         Args:
             user_id: User identifier (MongoDB ObjectId)
 
         Returns:
-            User email if found, None otherwise
+            User's notification_email, or None if not set
         """
         try:
             from bson import ObjectId
@@ -221,11 +221,18 @@ class EmailSummarizerPlugin(BasePlugin):
             # Query users collection
             user = await self.db['users'].find_one({'_id': ObjectId(user_id)})
 
-            if user and 'email' in user:
-                return user['email']
+            if not user:
+                logger.warning(f"User {user_id} not found")
+                return None
 
-            logger.warning(f"User {user_id} not found or has no email")
-            return None
+            notification_email = user.get('notification_email')
+
+            if not notification_email:
+                logger.warning(f"User {user_id} has no notification_email set")
+                return None
+
+            logger.debug(f"Sending notification to {notification_email} for user {user_id}")
+            return notification_email
 
         except Exception as e:
             logger.error(f"Error fetching user email: {e}", exc_info=True)

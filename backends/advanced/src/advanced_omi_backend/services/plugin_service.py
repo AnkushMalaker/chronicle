@@ -74,6 +74,72 @@ def expand_env_vars(value: Any) -> Any:
         return value
 
 
+def load_plugin_config(plugin_id: str, orchestration_config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Load complete plugin configuration from multiple sources.
+
+    Configuration is loaded and merged in this order:
+    1. Plugin-specific config.yml (non-secret settings)
+    2. Expand environment variables from .env (secrets)
+    3. Merge orchestration settings from config/plugins.yml (enabled, events, condition)
+
+    Args:
+        plugin_id: Plugin identifier (e.g., 'email_summarizer')
+        orchestration_config: Orchestration settings from config/plugins.yml
+
+    Returns:
+        Complete merged plugin configuration
+
+    Example:
+        >>> load_plugin_config('email_summarizer', {'enabled': True, 'events': [...]})
+        {
+            'enabled': True,
+            'events': ['conversation.complete'],
+            'condition': {'type': 'always'},
+            'subject_prefix': 'Conversation Summary',
+            'smtp_host': 'smtp.gmail.com',  # Expanded from ${SMTP_HOST}
+            ...
+        }
+    """
+    config = {}
+
+    # 1. Load plugin-specific config.yml if it exists
+    try:
+        import advanced_omi_backend.plugins
+        plugins_dir = Path(advanced_omi_backend.plugins.__file__).parent
+        plugin_config_path = plugins_dir / plugin_id / "config.yml"
+
+        if plugin_config_path.exists():
+            logger.debug(f"Loading plugin config from: {plugin_config_path}")
+            with open(plugin_config_path, 'r') as f:
+                plugin_config = yaml.safe_load(f) or {}
+                config.update(plugin_config)
+                logger.debug(f"Loaded {len(plugin_config)} config keys for '{plugin_id}'")
+        else:
+            logger.debug(f"No config.yml found for plugin '{plugin_id}' at {plugin_config_path}")
+
+    except Exception as e:
+        logger.warning(f"Failed to load config.yml for plugin '{plugin_id}': {e}")
+
+    # 2. Expand environment variables (reads from .env)
+    config = expand_env_vars(config)
+
+    # 3. Merge orchestration settings from config/plugins.yml
+    config['enabled'] = orchestration_config.get('enabled', False)
+    config['events'] = orchestration_config.get('events', [])
+    config['condition'] = orchestration_config.get('condition', {'type': 'always'})
+
+    # Add plugin ID for reference
+    config['plugin_id'] = plugin_id
+
+    logger.debug(
+        f"Plugin '{plugin_id}' config merged: enabled={config['enabled']}, "
+        f"events={config['events']}, keys={list(config.keys())}"
+    )
+
+    return config
+
+
 def get_plugin_router() -> Optional[PluginRouter]:
     """Get the global plugin router instance.
 
@@ -228,10 +294,10 @@ def init_plugin_router() -> Optional[PluginRouter]:
             # Core plugin names (for informational logging only)
             CORE_PLUGIN_NAMES = {'homeassistant', 'test_event'}
 
-            # Initialize each enabled plugin
-            for plugin_id, plugin_config in plugins_data.items():
-                logger.info(f"🔍 Processing plugin '{plugin_id}', enabled={plugin_config.get('enabled', False)}")
-                if not plugin_config.get('enabled', False):
+            # Initialize each plugin listed in config/plugins.yml
+            for plugin_id, orchestration_config in plugins_data.items():
+                logger.info(f"🔍 Processing plugin '{plugin_id}', enabled={orchestration_config.get('enabled', False)}")
+                if not orchestration_config.get('enabled', False):
                     continue
 
                 try:
@@ -242,6 +308,9 @@ def init_plugin_router() -> Optional[PluginRouter]:
                             f"Make sure the plugin directory exists in plugins/ with proper structure."
                         )
                         continue
+
+                    # Load complete plugin configuration (merges plugin config.yml + .env + orchestration)
+                    plugin_config = load_plugin_config(plugin_id, orchestration_config)
 
                     # Get plugin class from discovered plugins
                     plugin_class = discovered_plugins[plugin_id]

@@ -40,13 +40,8 @@ Single Audio File Upload Test
 
     # Verify conversation structure
     Dictionary Should Contain Key    ${conversation}    conversation_id
-    Dictionary Should Contain Key    ${conversation}    audio_uuid
     Dictionary Should Contain Key    ${conversation}    transcript
     Dictionary Should Contain Key    ${conversation}    segments
-
-    # audio_path is legacy field (None for MongoDB storage)
-    # Just verify it exists in the dictionary, can be None
-    Dictionary Should Contain Key    ${conversation}    audio_path
 
     # Verify transcript was generated
     ${transcript}=    Set Variable    ${conversation}[transcript]
@@ -54,7 +49,7 @@ Single Audio File Upload Test
     Should Be True    ${transcript_length} > 100    msg=Transcript too short: ${transcript_length} chars
 
     Log To Console    ✅ Uploaded audio file
-    Log To Console    💾 Storage: MongoDB chunks (audio_path is legacy field)
+    Log To Console    💾 Storage: MongoDB chunks
     Log To Console    📝 Transcript: ${transcript_length} characters
     Log To Console    🆔 Conversation ID: ${conversation}[conversation_id]
 
@@ -72,9 +67,6 @@ Audio File Upload With Fixtures Folder Test
     ${conversation}=    Upload Audio File    ${TEST_AUDIO_FILE}    device_name=fixture-upload    folder=fixtures
 
     # audio_path is legacy field (None for MongoDB storage)
-    # Folder parameter is accepted but audio is stored in MongoDB
-    Dictionary Should Contain Key    ${conversation}    audio_path
-
     # Verify conversation was created
     Dictionary Should Contain Key    ${conversation}    conversation_id
     Dictionary Should Contain Key    ${conversation}    transcript

@@ -284,11 +284,13 @@ async def save_diarization_settings_controller(settings: dict):
             "min_duration_off", "min_speakers", "max_speakers"
         }
 
+        # Filter to only valid keys (allow round-trip GET→POST)
+        filtered_settings = {}
         for key, value in settings.items():
             if key not in valid_keys:
-                raise HTTPException(status_code=400, detail=f"Invalid setting key: {key}")
+                continue  # Skip unknown keys instead of rejecting
 
-            # Type validation
+            # Type validation for known keys only
             if key in ["min_speakers", "max_speakers"]:
                 if not isinstance(value, int) or value < 1 or value > 20:
                     raise HTTPException(status_code=400, detail=f"Invalid value for {key}: must be integer 1-20")
@@ -299,13 +301,19 @@ async def save_diarization_settings_controller(settings: dict):
                 if not isinstance(value, (int, float)) or value < 0:
                     raise HTTPException(status_code=400, detail=f"Invalid value for {key}: must be positive number")
 
+            filtered_settings[key] = value
+
+        # Reject if NO valid keys provided (completely invalid request)
+        if not filtered_settings:
+            raise HTTPException(status_code=400, detail="No valid diarization settings provided")
+
         # Get current settings and merge with new values
         current_settings = load_diarization_settings()
-        current_settings.update(settings)
+        current_settings.update(filtered_settings)
 
         # Save using OmegaConf
         if save_diarization_settings(current_settings):
-            logger.info(f"Updated and saved diarization settings: {settings}")
+            logger.info(f"Updated and saved diarization settings: {filtered_settings}")
 
             return {
                 "message": "Diarization settings saved successfully",

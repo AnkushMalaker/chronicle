@@ -185,21 +185,16 @@ async def cancel_job(
         raise HTTPException(status_code=404, detail=f"Job not found or could not be cancelled: {str(e)}")
 
 
-@router.get("/jobs/by-session/{session_id}")
-async def get_jobs_by_session(
-    session_id: str,
+@router.get("/jobs/by-client/{client_id}")
+async def get_jobs_by_client(
+    client_id: str,
     current_user: User = Depends(current_active_user)
 ):
-    """Get all jobs associated with a specific streaming session."""
+    """Get all jobs associated with a specific client device."""
     try:
         from rq.registry import FinishedJobRegistry, FailedJobRegistry, StartedJobRegistry, CanceledJobRegistry, DeferredJobRegistry, ScheduledJobRegistry
         from advanced_omi_backend.controllers.queue_controller import get_queue
         from advanced_omi_backend.models.conversation import Conversation
-
-        # First, get conversation_id(s) for this session (for memory jobs)
-        conversation_ids = set()
-        conversations = await Conversation.find(Conversation.audio_uuid == session_id).to_list()
-        conversation_ids = {conv.conversation_id for conv in conversations}
 
         all_jobs = []
         processed_job_ids = set()  # Track which jobs we've already processed
@@ -291,26 +286,15 @@ async def get_jobs_by_session(
                     try:
                         job = Job.fetch(job_id, connection=redis_conn)
 
-                        # Check if this job belongs to the requested session
-                        matches_session = False
+                        # Check if this job belongs to the requested client
+                        matches_client = False
 
-                        # NEW: Check job.meta first (preferred method for all new jobs)
-                        if job.meta and 'audio_uuid' in job.meta:
-                            if job.meta['audio_uuid'] == session_id:
-                                matches_session = True
-                        # FALLBACK: Check args for backward compatibility with existing queued jobs
-                        elif job.args and len(job.args) > 0:
-                            # Check args[0] first (most common for streaming jobs)
-                            if job.args[0] == session_id:
-                                matches_session = True
-                            # Check args[1] for transcription jobs
-                            elif len(job.args) > 1 and job.args[1] == session_id:
-                                matches_session = True
-                            # Check args[3] for memory jobs (conversation_id)
-                            elif len(job.args) > 3 and job.args[3] in conversation_ids:
-                                matches_session = True
+                        # Check job.meta for client_id (current standard)
+                        if job.meta and 'client_id' in job.meta:
+                            if job.meta['client_id'] == client_id:
+                                matches_client = True
 
-                        if matches_session:
+                        if matches_client:
                             # Process this job and all its dependents
                             process_job_and_dependents(job, queue_name, status_name)
 
@@ -321,17 +305,17 @@ async def get_jobs_by_session(
         # Sort by created_at
         all_jobs.sort(key=lambda x: x["created_at"] or "", reverse=False)
 
-        logger.info(f"Found {len(all_jobs)} jobs for session {session_id} (including dependents)")
+        logger.info(f"Found {len(all_jobs)} jobs for client {client_id} (including dependents)")
 
         return {
-            "session_id": session_id,
+            "client_id": client_id,
             "jobs": all_jobs,
             "total": len(all_jobs)
         }
 
     except Exception as e:
-        logger.error(f"Failed to get jobs for session {session_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get jobs for session: {str(e)}")
+        logger.error(f"Failed to get jobs for client {client_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get jobs for client: {str(e)}")
 
 
 @router.get("/stats")
@@ -843,7 +827,7 @@ async def clear_old_sessions(
 @router.get("/dashboard")
 async def get_dashboard_data(
     request: Request,
-    expanded_sessions: str = Query(default="", description="Comma-separated list of session IDs to fetch jobs for"),
+    expanded_clients: str = Query(default="", description="Comma-separated list of client IDs to fetch jobs for"),
     current_user: User = Depends(current_active_user)
 ):
     """Get all data needed for the Queue dashboard in a single API call.
@@ -852,15 +836,15 @@ async def get_dashboard_data(
     - Jobs grouped by status (queued, processing, completed, failed)
     - Queue statistics
     - Streaming status
-    - Session jobs for expanded sessions
+    - Client jobs for expanded clients
     """
     try:
         from advanced_omi_backend.controllers import system_controller
         from rq.registry import FinishedJobRegistry, FailedJobRegistry, StartedJobRegistry
         from advanced_omi_backend.controllers.queue_controller import get_queue
 
-        # Parse expanded sessions list
-        expanded_session_ids = [s.strip() for s in expanded_sessions.split(",") if s.strip()] if expanded_sessions else []
+        # Parse expanded clients list
+        expanded_client_ids = [c.strip() for c in expanded_clients.split(",") if c.strip()] if expanded_clients else []
 
         # Fetch all data in parallel
         import asyncio
@@ -946,15 +930,11 @@ async def get_dashboard_data(
                 logger.error(f"Error fetching streaming status: {e}")
                 return {"active_sessions": [], "stream_health": {}, "rq_queues": {}}
 
-        async def fetch_session_jobs(session_id: str):
-            """Fetch jobs for a specific session."""
+        async def fetch_client_jobs(client_id: str):
+            """Fetch jobs for a specific client device."""
             try:
-                # Reuse the existing logic from get_jobs_by_session endpoint
+                # Reuse the existing logic from get_jobs_by_client endpoint
                 from advanced_omi_backend.models.conversation import Conversation
-
-                # Get conversation IDs for this session
-                conversations = await Conversation.find(Conversation.audio_uuid == session_id).to_list()
-                conversation_ids = {conv.conversation_id for conv in conversations}
 
                 all_jobs = []
                 processed_job_ids = set()
@@ -999,14 +979,12 @@ async def get_dashboard_data(
                             try:
                                 job = Job.fetch(job_id, connection=redis_conn)
 
-                                # Check if job belongs to this session
-                                matches_session = False
-                                if job.meta and 'audio_uuid' in job.meta and job.meta['audio_uuid'] == session_id:
-                                    matches_session = True
-                                elif job.args and len(job.args) > 0 and job.args[0] == session_id:
-                                    matches_session = True
+                                # Check if job belongs to this client
+                                matches_client = False
+                                if job.meta and 'client_id' in job.meta and job.meta['client_id'] == client_id:
+                                    matches_client = True
 
-                                if not matches_session:
+                                if not matches_client:
                                     continue
 
                                 # Check user permission
@@ -1033,10 +1011,10 @@ async def get_dashboard_data(
                                 logger.debug(f"Error fetching job {job_id}: {e}")
                                 continue
 
-                return {"session_id": session_id, "jobs": all_jobs}
+                return {"client_id": client_id, "jobs": all_jobs}
             except Exception as e:
-                logger.error(f"Error fetching jobs for session {session_id}: {e}")
-                return {"session_id": session_id, "jobs": []}
+                logger.error(f"Error fetching jobs for client {client_id}: {e}")
+                return {"client_id": client_id, "jobs": []}
 
         # Execute all fetches in parallel
         queued_jobs_task = fetch_jobs_by_status("queued", limit=100)
@@ -1045,7 +1023,7 @@ async def get_dashboard_data(
         failed_jobs_task = fetch_jobs_by_status("failed", limit=50)
         stats_task = fetch_stats()
         streaming_status_task = fetch_streaming_status()
-        session_jobs_tasks = [fetch_session_jobs(sid) for sid in expanded_session_ids]
+        client_jobs_tasks = [fetch_client_jobs(cid) for cid in expanded_client_ids]
 
         results = await asyncio.gather(
             queued_jobs_task,
@@ -1054,7 +1032,7 @@ async def get_dashboard_data(
             failed_jobs_task,
             stats_task,
             streaming_status_task,
-            *session_jobs_tasks,
+            *client_jobs_tasks,
             return_exceptions=True
         )
 
@@ -1065,20 +1043,19 @@ async def get_dashboard_data(
         stats = results[4] if not isinstance(results[4], Exception) else {"total_jobs": 0}
         streaming_status = results[5] if not isinstance(results[5], Exception) else {"active_sessions": []}
         recent_conversations = []
-        session_jobs_results = results[6:] if len(results) > 6 else []
+        client_jobs_results = results[6:] if len(results) > 6 else []
 
-        # Convert session jobs list to dict
-        session_jobs = {}
-        for result in session_jobs_results:
+        # Convert client jobs list to dict
+        client_jobs = {}
+        for result in client_jobs_results:
             if not isinstance(result, Exception) and result:
-                session_jobs[result["session_id"]] = result["jobs"]
+                client_jobs[result["client_id"]] = result["jobs"]
 
         # Convert conversations to dict format for frontend
         conversations_list = []
         for conv in recent_conversations:
             conversations_list.append({
                 "conversation_id": conv.conversation_id,
-                "audio_uuid": conv.audio_uuid,
                 "user_id": str(conv.user_id) if conv.user_id else None,
                 "created_at": conv.created_at.isoformat() if conv.created_at else None,
                 "title": conv.title,
@@ -1096,7 +1073,7 @@ async def get_dashboard_data(
             "stats": stats,
             "streaming_status": streaming_status,
             "recent_conversations": conversations_list,
-            "session_jobs": session_jobs,
+            "client_jobs": client_jobs,
             "timestamp": asyncio.get_event_loop().time()
         }
 

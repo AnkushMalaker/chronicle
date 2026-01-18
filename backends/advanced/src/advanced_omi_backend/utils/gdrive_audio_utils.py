@@ -89,9 +89,10 @@ async def download_audio_files_from_drive(folder_id: str) -> List[StarletteUploa
         for item in audio_files_metadata:
             file_id = item["id"] # Get the Google Drive File ID
 
-            # Check if the file is already processed (check Conversation by audio_uuid)
+            # Check if the file is already processed (check Conversation by external_source_id)
             existing = await Conversation.find_one(
-                Conversation.audio_uuid == file_id
+                Conversation.external_source_id == file_id,
+                Conversation.external_source_type == "gdrive"
             )
 
             if existing:
@@ -101,8 +102,8 @@ async def download_audio_files_from_drive(folder_id: str) -> List[StarletteUploa
 
             # synchronous call now (but make the parent function async)
             wrapped_file = await download_and_wrap_drive_file(service, item)
-            #  Attach the file_id to the UploadFile object for later use
-            wrapped_file.audio_uuid = file_id
+            #  Attach the file_id to the UploadFile object for later use (for external_source_id)
+            wrapped_file.file_id = file_id
             wrapped_files.append(wrapped_file)
             
         if not wrapped_files and skipped_count > 0:

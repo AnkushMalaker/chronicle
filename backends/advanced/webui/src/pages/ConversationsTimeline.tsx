@@ -5,8 +5,7 @@ import 'react-vertical-timeline-component/style.min.css'
 import { conversationsApi } from '../services/api'
 
 interface Conversation {
-  conversation_id?: string
-  audio_uuid: string
+  conversation_id: string
   title?: string
   summary?: string
   detailed_summary?: string
@@ -14,7 +13,6 @@ interface Conversation {
   client_id: string
   segment_count?: number
   memory_count?: number
-  audio_path?: string
   duration_seconds?: number
   has_memory?: boolean
   transcript?: string
@@ -261,7 +259,7 @@ export default function ConversationsTimeline() {
 
             return (
               <VerticalTimelineElement
-                key={conv.conversation_id || conv.audio_uuid}
+                key={conv.conversation_id}
                 date={date.toLocaleString('en-US', {
                   month: 'short',
                   day: 'numeric',

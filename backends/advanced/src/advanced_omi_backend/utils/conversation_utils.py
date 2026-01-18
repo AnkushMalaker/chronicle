@@ -497,7 +497,6 @@ async def update_job_progress_metadata(
     current_job.meta.update(
         {
             "conversation_id": conversation_id,
-            "audio_uuid": session_id,  # Link to session for job grouping
             "client_id": client_id,  # Ensure client_id is always present
             "transcript": (
                 combined["text"][:500] + "..." if len(combined["text"]) > 500 else combined["text"]

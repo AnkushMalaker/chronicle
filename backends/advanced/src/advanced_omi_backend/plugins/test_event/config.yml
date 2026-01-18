@@ -1,0 +1,9 @@
+# Test Event Plugin Configuration
+#
+# This plugin is for development and integration testing only.
+# It logs all plugin events to SQLite for verification.
+#
+# Enable in config/plugins.yml by setting enabled: true
+
+# Database path for event storage
+db_path: ${TEST_PLUGIN_DB_PATH:-/app/debug/test_plugin_events.db}

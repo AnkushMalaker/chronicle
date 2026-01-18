@@ -125,7 +125,6 @@ async def apply_speaker_recognition(
 @async_job(redis=True, beanie=True)
 async def transcribe_full_audio_job(
     conversation_id: str,
-    audio_uuid: str,
     version_id: str,
     trigger: str = "reprocess",
     *,
@@ -145,7 +144,6 @@ async def transcribe_full_audio_job(
 
     Args:
         conversation_id: Conversation ID
-        audio_uuid: Audio UUID (unused but kept for compatibility)
         version_id: Version ID for new transcript
         trigger: Trigger source
         redis_client: Redis client (injected by decorator)
@@ -593,7 +591,6 @@ async def stream_speech_detection_job(
             {
                 "status": "listening_for_speech",
                 "session_id": session_id,
-                "audio_uuid": session_id,
                 "client_id": client_id,
                 "session_level": True,  # Mark as session-level job
             }
@@ -710,7 +707,7 @@ async def stream_speech_detection_job(
                 result_ttl=600,
                 job_id=f"speaker-check_{session_id[:12]}_{conversation_count}",
                 description=f"Speaker check for conversation #{conversation_count+1}",
-                meta={"audio_uuid": session_id, "client_id": client_id},
+                meta={"client_id": client_id},
             )
 
             # Poll for result (with timeout)
@@ -807,15 +804,15 @@ async def stream_speech_detection_job(
             client_id,
             speech_detected_at,
             speech_job_id,  # Pass speech detection job ID
-            job_timeout=3600,
+            job_timeout=10800,  # 3 hours to match max_runtime in open_conversation_job
             result_ttl=JOB_RESULT_TTL,  # Use configured TTL (24 hours) instead of 10 minutes
             job_id=f"open-conv_{session_id[:12]}_{conversation_count}",
             description=f"Conversation #{conversation_count+1} for {session_id[:12]}",
-            meta={"audio_uuid": session_id, "client_id": client_id},
+            meta={"client_id": client_id},
         )
 
         # Track the job
-        await redis_client.set(open_job_key, open_job.id, ex=3600)
+        await redis_client.set(open_job_key, open_job.id, ex=10800)  # 3 hours to match job timeout
 
         # Store metadata in speech detection job
         if current_job:
@@ -832,7 +829,6 @@ async def stream_speech_detection_job(
                     "detected_speakers": identified_speakers,
                     "speech_detected_at": datetime.fromtimestamp(speech_detected_at).isoformat(),
                     "session_id": session_id,
-                    "audio_uuid": session_id,  # For job grouping
                     "client_id": client_id,  # For job grouping
                 }
             )

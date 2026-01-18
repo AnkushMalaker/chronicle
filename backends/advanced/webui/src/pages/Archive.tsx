@@ -4,8 +4,7 @@ import { conversationsApi } from '../services/api'
 import { authApi } from '../services/api'
 
 interface Conversation {
-  conversation_id?: string
-  audio_uuid: string
+  conversation_id: string
   title?: string
   summary?: string
   created_at?: string
@@ -224,7 +223,7 @@ export default function Archive() {
         ) : (
           conversations.map((conversation) => (
             <div
-              key={conversation.conversation_id || conversation.audio_uuid}
+              key={conversation.conversation_id}
               className="rounded-lg p-6 border bg-red-50 dark:bg-red-900/20 border-red-300 dark:border-red-700"
             >
               {/* Deleted Conversation Banner */}

@@ -6,8 +6,7 @@ import { getStorageKey } from '../utils/storage'
 import { WaveformDisplay } from '../components/audio/WaveformDisplay'
 
 interface Conversation {
-  conversation_id?: string
-  audio_uuid: string
+  conversation_id: string
   title?: string
   summary?: string
   detailed_summary?: string
@@ -15,7 +14,6 @@ interface Conversation {
   client_id: string
   segment_count?: number  // From list endpoint
   memory_count?: number  // From list endpoint
-  audio_path?: string
   audio_chunks_count?: number  // Number of MongoDB audio chunks
   audio_total_duration?: number  // Total duration in seconds
   duration_seconds?: number
@@ -584,13 +582,12 @@ export default function Conversations() {
         ) : (
           conversations.map((conversation) => (
             <div
-              key={conversation.conversation_id || conversation.audio_uuid}
+              key={conversation.conversation_id}
               className="rounded-lg p-6 border bg-gray-50 dark:bg-gray-700 border-gray-200 dark:border-gray-600"
             >
-              {/* Version Selector Header - Only show for conversations with conversation_id */}
-              {conversation.conversation_id && (
-                <ConversationVersionHeader
-                  conversationId={conversation.conversation_id}
+              {/* Version Selector Header */}
+              <ConversationVersionHeader
+                conversationId={conversation.conversation_id}
                   versionInfo={{
                     transcript_count: conversation.transcript_version_count || 0,
                     memory_count: conversation.memory_version_count || 0,
@@ -616,8 +613,7 @@ export default function Conversations() {
                     }
                   }}
                 />
-              )}
-              
+
               {/* Conversation Header */}
               <div className="flex justify-between items-start mb-4">
                 <div className="flex flex-col space-y-2">
@@ -679,8 +675,7 @@ export default function Conversations() {
                   <button
                     onClick={(e) => {
                       e.stopPropagation()
-                      const dropdownKey = conversation.conversation_id || conversation.audio_uuid
-                      setOpenDropdown(openDropdown === dropdownKey ? null : dropdownKey)
+                      setOpenDropdown(openDropdown === conversation.conversation_id ? null : conversation.conversation_id)
                     }}
                     className="p-1 rounded-full hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
                     title="Conversation options"
@@ -689,7 +684,7 @@ export default function Conversations() {
                   </button>
 
                   {/* Dropdown Menu */}
-                  {openDropdown === (conversation.conversation_id || conversation.audio_uuid) && (
+                  {openDropdown === conversation.conversation_id && (
                     <div className="absolute right-0 top-8 w-48 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-600 py-2 z-10">
                       <button
                         onClick={() => handleReprocessTranscript(conversation)}
@@ -850,10 +845,9 @@ export default function Conversations() {
                           const speaker = segment.speaker || 'Unknown'
                           const speakerColor = speakerColorMap[speaker]
                           // Use conversation_id for unique segment IDs
-                          const conversationKey = conversation.conversation_id || conversation.audio_uuid
-                          const segmentId = `${conversationKey}-${index}`
+                          const segmentId = `${conversation.conversation_id}-${index}`
                           const isPlaying = playingSegment === segmentId
-                          const hasAudio = !!conversation.audio_path
+                          const hasAudio = !!conversation.audio_chunks_count && conversation.audio_chunks_count > 0
                           const isEditing = editingSegment === segmentId
 
                           return (
@@ -866,7 +860,7 @@ export default function Conversations() {
                               {/* Play/Pause Button */}
                               {hasAudio && !isEditing && (
                                 <button
-                                  onClick={() => handleSegmentPlayPause(conversationKey, index, segment)}
+                                  onClick={() => handleSegmentPlayPause(conversation.conversation_id, index, segment)}
                                   className={`flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center transition-colors mt-0.5 ${
                                     isPlaying
                                       ? 'bg-blue-600 text-white hover:bg-blue-700'
@@ -898,14 +892,14 @@ export default function Conversations() {
                                     <textarea
                                       value={editedSegmentText}
                                       onChange={(e) => setEditedSegmentText(e.target.value)}
-                                      onKeyDown={(e) => handleSegmentKeyDown(e, conversationKey, index, segment.text)}
+                                      onKeyDown={(e) => handleSegmentKeyDown(e, conversation.conversation_id, index, segment.text)}
                                       className="w-full min-h-[60px] px-3 py-2 text-sm border-2 border-blue-500 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
                                       autoFocus
                                       disabled={savingSegment}
                                     />
                                     <div className="flex items-center gap-2">
                                       <button
-                                        onClick={() => handleSaveSegmentEdit(conversationKey, index, segment.text)}
+                                        onClick={() => handleSaveSegmentEdit(conversation.conversation_id, index, segment.text)}
                                         disabled={savingSegment || editedSegmentText === segment.text}
                                         className="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                                       >
@@ -927,7 +921,7 @@ export default function Conversations() {
                                   </div>
                                 ) : (
                                   <span
-                                    onClick={() => conversation.conversation_id && handleStartSegmentEdit(conversationKey, index, segment.text)}
+                                    onClick={() => conversation.conversation_id && handleStartSegmentEdit(conversation.conversation_id, index, segment.text)}
                                     className="text-gray-900 dark:text-gray-100 ml-1 cursor-pointer hover:bg-yellow-100 dark:hover:bg-yellow-900/30 px-1 rounded transition-colors"
                                     title="Click to edit segment"
                                   >

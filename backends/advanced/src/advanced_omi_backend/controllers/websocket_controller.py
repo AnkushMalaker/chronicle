@@ -838,8 +838,7 @@ async def _process_batch_audio_complete(
             f"📦 Batch mode: Combined {len(client_state.batch_audio_chunks)} chunks into {len(complete_audio)} bytes"
         )
 
-        # Generate audio UUID and timestamp
-        audio_uuid = str(uuid.uuid4())
+        # Timestamp for logging
         timestamp = int(time.time() * 1000)
 
         # Get audio format from batch metadata (set during audio-start)
@@ -859,7 +858,6 @@ async def _process_batch_audio_complete(
         version_id = str(uuid.uuid4())
 
         conversation = create_conversation(
-            audio_uuid=audio_uuid,
             user_id=user_id,
             client_id=client_id,
             title="Batch Recording",
@@ -904,14 +902,13 @@ async def _process_batch_audio_complete(
         transcription_job = transcription_queue.enqueue(
             transcribe_full_audio_job,
             conversation_id,
-            audio_uuid,
             version_id,
             "batch",  # trigger
             job_timeout=1800,  # 30 minutes
             result_ttl=JOB_RESULT_TTL,
             job_id=transcribe_job_id,
             description=f"Transcribe batch audio {conversation_id[:8]}",
-            meta={'audio_uuid': audio_uuid, 'conversation_id': conversation_id, 'client_id': client_id}
+            meta={'conversation_id': conversation_id, 'client_id': client_id}
         )
 
         application_logger.info(f"📥 Batch mode: Enqueued transcription job {transcription_job.id}")
@@ -919,7 +916,6 @@ async def _process_batch_audio_complete(
         # Enqueue post-conversation processing job chain (depends on transcription)
         job_ids = start_post_conversation_jobs(
             conversation_id=conversation_id,
-            audio_uuid=audio_uuid,
             user_id=None,  # Will be read from conversation in DB by jobs
             depends_on_job=transcription_job,  # Wait for transcription to complete
             client_id=client_id  # Pass client_id for UI tracking

@@ -31,6 +31,7 @@ audio_logger = logging.getLogger("audio_processing")
 
 def generate_client_id(user: User, device_name: str) -> str:
     """Generate client ID for uploaded files."""
+    logger.error(f"🔍 DEBUG generate_client_id - user.id={user.id}, user.email={user.email}, type={type(user.id)}")
     user_id_suffix = str(user.id)[-6:]
     return f"{user_id_suffix}-{device_name}"
 
@@ -84,14 +85,14 @@ async def upload_and_process_audio_files(
                 content = await file.read()
 
 
-                # Generate audio UUID and timestamp
+                # Track external source for deduplication (Google Drive, etc.)
+                external_source_id = None
+                external_source_type = None
                 if source == "gdrive":
-                    audio_uuid = getattr(file, "audio_uuid", None)
-                    if not audio_uuid:
-                        audio_logger.error(f"Missing audio_uuid for gdrive file: {file.filename}")
-                        audio_uuid = str(uuid.uuid4())
-                else:
-                    audio_uuid = str(uuid.uuid4())
+                    external_source_id = getattr(file, "file_id", None) or getattr(file, "audio_uuid", None)
+                    external_source_type = "gdrive"
+                    if not external_source_id:
+                        audio_logger.warning(f"Missing file_id for gdrive file: {file.filename}")
                 timestamp = int(time.time() * 1000)
 
                 # Validate and prepare audio (read format from WAV file)
@@ -120,11 +121,12 @@ async def upload_and_process_audio_files(
                 title = file.filename.rsplit('.', 1)[0][:50] if file.filename else "Uploaded Audio"
 
                 conversation = create_conversation(
-                    audio_uuid=audio_uuid,
                     user_id=user.user_id,
                     client_id=client_id,
                     title=title,
-                    summary="Processing uploaded audio file..."
+                    summary="Processing uploaded audio file...",
+                    external_source_id=external_source_id,
+                    external_source_type=external_source_type,
                 )
                 await conversation.insert()
                 conversation_id = conversation.conversation_id  # Get the auto-generated ID
@@ -183,14 +185,13 @@ async def upload_and_process_audio_files(
                 transcription_job = transcription_queue.enqueue(
                     transcribe_full_audio_job,
                     conversation_id,
-                    audio_uuid,
                     version_id,
                     "batch",  # trigger
                     job_timeout=1800,  # 30 minutes
                     result_ttl=JOB_RESULT_TTL,
                     job_id=transcribe_job_id,
                     description=f"Transcribe uploaded file {conversation_id[:8]}",
-                    meta={'audio_uuid': audio_uuid, 'conversation_id': conversation_id, 'client_id': client_id}
+                    meta={'conversation_id': conversation_id, 'client_id': client_id}
                 )
 
                 audio_logger.info(f"📥 Enqueued transcription job {transcription_job.id} for uploaded file")
@@ -198,7 +199,6 @@ async def upload_and_process_audio_files(
                 # Enqueue post-conversation processing job chain (depends on transcription)
                 job_ids = start_post_conversation_jobs(
                     conversation_id=conversation_id,
-                    audio_uuid=audio_uuid,
                     user_id=user.user_id,
                     transcript_version_id=version_id,  # Pass the version_id from transcription job
                     depends_on_job=transcription_job,  # Wait for transcription to complete
@@ -208,7 +208,6 @@ async def upload_and_process_audio_files(
                 processed_files.append({
                     "filename": file.filename,
                     "status": "processing",
-                    "audio_uuid": audio_uuid,
                     "conversation_id": conversation_id,
                     "transcript_job_id": transcription_job.id,
                     "speaker_job_id": job_ids['speaker_recognition'],

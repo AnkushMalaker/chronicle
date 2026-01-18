@@ -325,6 +325,31 @@ OLLAMA_BASE_URL=http://ollama:11434
 SPEAKER_SERVICE_URL=http://speaker-recognition:8085
 ```
 
+### Plugin Security Architecture
+
+**Three-File Separation**:
+
+1. **backends/advanced/.env** - Secrets (gitignored)
+   ```bash
+   SMTP_PASSWORD=abcdefghijklmnop
+   OPENAI_API_KEY=sk-proj-...
+   ```
+
+2. **config/plugins.yml** - Orchestration (uses env var references)
+   ```yaml
+   plugins:
+     email_summarizer:
+       enabled: true
+       smtp_password: ${SMTP_PASSWORD}  # Reference, not actual value!
+   ```
+
+3. **plugins/{plugin_id}/config.yml** - Non-secret defaults
+   ```yaml
+   subject_prefix: "Conversation Summary"
+   ```
+
+**CRITICAL**: Never hardcode secrets in `config/plugins.yml`. Always use `${ENV_VAR}` syntax.
+
 ## Quick API Reference
 
 ### Common Endpoints

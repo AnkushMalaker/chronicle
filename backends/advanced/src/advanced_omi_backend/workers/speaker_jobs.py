@@ -68,7 +68,24 @@ async def check_enrolled_speakers_job(
         error_message = speaker_result.get("message", "Unknown error")
         logger.error(f"🎤 [SPEAKER CHECK] Speaker service error: {error_type} - {error_message}")
 
-        # Fail the job - don't create conversation if speaker service failed
+        # For connection failures, assume no enrolled speakers but allow conversation to proceed
+        # Speaker filtering is optional - if service is down, conversation should still be created
+        if error_type in ("connection_failed", "timeout", "client_error"):
+            logger.warning(
+                f"⚠️ Speaker service unavailable ({error_type}), assuming no enrolled speakers. "
+                f"Conversation will proceed normally."
+            )
+            return {
+                "success": True,
+                "session_id": session_id,
+                "speaker_service_unavailable": True,
+                "enrolled_present": False,
+                "identified_speakers": [],
+                "skip_reason": f"Speaker service unavailable: {error_type}",
+                "processing_time_seconds": time.time() - start_time
+            }
+
+        # For other processing errors, also assume no enrolled speakers
         return {
             "success": False,
             "session_id": session_id,
@@ -102,7 +119,6 @@ async def check_enrolled_speakers_job(
             current_job.meta = {}
         current_job.meta.update({
             "session_id": session_id,
-            "audio_uuid": session_id,
             "client_id": client_id,
             "enrolled_present": enrolled_present,
             "identified_speakers": identified_speakers,
@@ -262,10 +278,23 @@ async def recognise_speakers_job(
             error_message = speaker_result.get("message", "Unknown error")
             logger.error(f"🎤 Speaker recognition service error: {error_type} - {error_message}")
 
-            # Raise exception for connection failures so dependent jobs are canceled
-            # This ensures RQ marks the job as "failed" instead of "completed"
+            # For connection failures, skip speaker recognition but allow downstream jobs to proceed
+            # Speaker recognition is optional - memory extraction and other jobs should still run
             if error_type in ("connection_failed", "timeout", "client_error"):
-                raise RuntimeError(f"Speaker recognition service unavailable: {error_type} - {error_message}")
+                logger.warning(
+                    f"⚠️ Speaker service unavailable ({error_type}), skipping speaker recognition. "
+                    f"Downstream jobs (memory, title/summary, events) will proceed normally."
+                )
+                return {
+                    "success": True,
+                    "conversation_id": conversation_id,
+                    "version_id": version_id,
+                    "speaker_recognition_enabled": True,
+                    "speaker_service_unavailable": True,
+                    "identified_speakers": [],
+                    "skip_reason": f"Speaker service unavailable: {error_type}",
+                    "processing_time_seconds": time.time() - start_time
+                }
 
             # For other errors (e.g., processing errors), return error dict without failing
             return {

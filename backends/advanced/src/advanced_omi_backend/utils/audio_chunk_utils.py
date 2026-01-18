@@ -428,7 +428,9 @@ async def reconstruct_audio_segments(
     from advanced_omi_backend.models.conversation import Conversation
 
     # Get conversation metadata
-    conversation = await Conversation.get(conversation_id)
+    conversation = await Conversation.find_one(
+        Conversation.conversation_id == conversation_id
+    )
 
     if not conversation:
         raise ValueError(f"Conversation {conversation_id} not found")
@@ -535,7 +537,9 @@ async def reconstruct_audio_segment(
         raise ValueError(f"end_time ({end_time}) must be > start_time ({start_time})")
 
     # Get conversation metadata
-    conversation = await Conversation.get(conversation_id)
+    conversation = await Conversation.find_one(
+        Conversation.conversation_id == conversation_id
+    )
 
     if not conversation:
         raise ValueError(f"Conversation {conversation_id} not found")

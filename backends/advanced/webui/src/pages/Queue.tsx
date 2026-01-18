@@ -137,9 +137,9 @@ const Queue: React.FC = () => {
     include_completed: false  // For flush_all mode
   });
   const [flushing, setFlushing] = useState(false);
-  const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set());
+  const [expandedConversations, setExpandedConversations] = useState<Set<string>>(new Set());
   const [expandedJobs, setExpandedJobs] = useState<Set<string>>(new Set());
-  const [sessionJobs, setSessionJobs] = useState<{[sessionId: string]: any[]}>({});
+  const [conversationJobs, setConversationJobs] = useState<{[conversationId: string]: any[]}>({});
   const [lastUpdate, setLastUpdate] = useState<number>(Date.now());
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState<boolean>(() => {
     // Load from localStorage, default to true
@@ -153,14 +153,14 @@ const Queue: React.FC = () => {
   const [completedConvTimeRange, setCompletedConvTimeRange] = useState(24); // hours
 
   // Use refs to track current state in interval
-  const expandedSessionsRef = useRef<Set<string>>(new Set());
+  const expandedConversationsRef = useRef<Set<string>>(new Set());
   const streamingStatusRef = useRef<StreamingStatus | null>(null);
   const refreshingRef = useRef<boolean>(false);
 
   // Update refs when state changes
   useEffect(() => {
-    expandedSessionsRef.current = expandedSessions;
-  }, [expandedSessions]);
+    expandedConversationsRef.current = expandedConversations;
+  }, [expandedConversations]);
 
   useEffect(() => {
     streamingStatusRef.current = streamingStatus;
@@ -179,11 +179,11 @@ const Queue: React.FC = () => {
     setRefreshing(true);
 
     try {
-      const currentExpanded = expandedSessionsRef.current;
-      const expandedSessionIds = Array.from(currentExpanded);
+      const currentExpanded = expandedConversationsRef.current;
+      const expandedConversationIds = Array.from(currentExpanded);
 
       // Single API call to get all dashboard data
-      const response = await queueApi.getDashboard(expandedSessionIds);
+      const response = await queueApi.getDashboard(expandedConversationIds);
       const dashboardData = response.data;
 
       // Extract jobs from response
@@ -211,60 +211,64 @@ const Queue: React.FC = () => {
         console.log(`  meta.conversation_id: ${job.meta?.conversation_id}`);
       });
 
-      // Group jobs by session_id (use audio_uuid from metadata)
-      const jobsBySession: {[sessionId: string]: any[]} = {};
+      // Group jobs by conversation_id (primary identifier for conversations)
+      const jobsByConversation: {[conversationId: string]: any[]} = {};
 
       allFetchedJobs.forEach(job => {
         if (!job || !job.job_id) return; // Skip invalid jobs
 
-        // Extract session_id from meta.audio_uuid
-        const sessionId = job.meta?.audio_uuid;
-        if (sessionId) {
-          if (!jobsBySession[sessionId]) {
-            jobsBySession[sessionId] = [];
+        // Extract conversation_id from metadata
+        const conversationId = job.meta?.conversation_id;
+        if (conversationId) {
+          if (!jobsByConversation[conversationId]) {
+            jobsByConversation[conversationId] = [];
           }
-          jobsBySession[sessionId].push(job);
+          jobsByConversation[conversationId].push(job);
 
           // Debug logging for grouping
           if (job.job_type === 'open_conversation_job') {
-            console.log(`✅ Grouped open_conversation_job ${job.job_id} under session ${sessionId}`);
+            console.log(`✅ Grouped open_conversation_job ${job.job_id} under conversation ${conversationId}`);
           }
         } else {
-          // Log jobs that couldn't be grouped
-          console.log(`⚠️ Job ${job.job_id} (${job.job_type}) has no session_id - cannot group`);
+          // Only log warning for non-session-level jobs
+          // Audio persistence jobs are expected to not have conversation_id
+          if (job.meta?.session_level !== true && job.job_type !== 'audio_streaming_persistence_job') {
+            console.log(`⚠️ Job ${job.job_id} (${job.job_type}) has no conversation_id - cannot group`);
+          }
         }
       });
 
-      // Merge session jobs from dashboard response
-      if (dashboardData.session_jobs) {
-        Object.entries(dashboardData.session_jobs).forEach(([sessionId, jobs]: [string, any]) => {
+      // Merge conversation jobs from dashboard response (for backward compatibility, check both session_jobs and conversation_jobs)
+      const dashboardConvJobs = dashboardData.conversation_jobs || dashboardData.session_jobs;
+      if (dashboardConvJobs) {
+        Object.entries(dashboardConvJobs).forEach(([conversationId, jobs]: [string, any]) => {
           // Merge with existing jobs and deduplicate by job_id
-          const existingJobs = jobsBySession[sessionId] || [];
+          const existingJobs = jobsByConversation[conversationId] || [];
           const existingJobIds = new Set(existingJobs.map((j: any) => j.job_id));
           const newJobs = jobs.filter((j: any) => !existingJobIds.has(j.job_id));
-          jobsBySession[sessionId] = [...existingJobs, ...newJobs];
+          jobsByConversation[conversationId] = [...existingJobs, ...newJobs];
         });
       }
 
       // Update state
       setJobs(allFetchedJobs);
-      setSessionJobs(jobsBySession);
+      setConversationJobs(jobsByConversation);
       setStats(dashboardData.stats);
       setStreamingStatus(dashboardData.streaming_status);
       setLastUpdate(Date.now());
 
       // Auto-expand active conversations (those with open_conversation_job in progress)
-      const newExpanded = new Set(expandedSessions);
+      const newExpanded = new Set(expandedConversations);
       const newExpandedJobs = new Set(expandedJobs);
       let expandedCount = 0;
       let expandedJobsCount = 0;
 
       // Find all conversations with active open_conversation_job
-      Object.entries(jobsBySession).forEach(([_sessionId, jobs]) => {
+      Object.entries(jobsByConversation).forEach(([_conversationId, jobs]) => {
         const openConvJob = jobs.find((j: any) => j.job_type === 'open_conversation_job');
-        if (openConvJob && openConvJob.status === 'started') {
+        if (openConvJob && openConvJob.status === 'processing') {
           const conversationId = openConvJob.meta?.conversation_id;
-          if (conversationId && !expandedSessions.has(conversationId)) {
+          if (conversationId && !expandedConversations.has(conversationId)) {
             newExpanded.add(conversationId);
             expandedCount++;
             console.log(`🔓 Auto-expanding active conversation: ${conversationId}`);
@@ -280,10 +284,10 @@ const Queue: React.FC = () => {
         }
       });
 
-      // Update expanded sessions if any new active conversations found
+      // Update expanded conversations if any new active conversations found
       if (expandedCount > 0) {
         console.log(`📂 Auto-expanded ${expandedCount} active conversation(s)`);
-        setExpandedSessions(newExpanded);
+        setExpandedConversations(newExpanded);
       }
 
       // Update expanded jobs if any new jobs found
@@ -639,20 +643,20 @@ const Queue: React.FC = () => {
     return `${Math.floor(durationMs / 3600000)}h ${Math.floor((durationMs % 3600000) / 60000)}m`;
   };
 
-  const toggleSessionExpansion = (sessionId: string) => {
-    const newExpanded = new Set(expandedSessions);
+  const toggleConversationExpansion = (conversationId: string) => {
+    const newExpanded = new Set(expandedConversations);
 
-    if (newExpanded.has(sessionId)) {
+    if (newExpanded.has(conversationId)) {
       // Collapse
-      newExpanded.delete(sessionId);
-      setExpandedSessions(newExpanded);
+      newExpanded.delete(conversationId);
+      setExpandedConversations(newExpanded);
     } else {
       // Expand and trigger refresh to fetch jobs via dashboard endpoint
-      newExpanded.add(sessionId);
-      setExpandedSessions(newExpanded);
+      newExpanded.add(conversationId);
+      setExpandedConversations(newExpanded);
 
       // Trigger a refresh if jobs not already loaded
-      if (!sessionJobs[sessionId]) {
+      if (!conversationJobs[conversationId]) {
         fetchData();
       }
     }
@@ -864,7 +868,7 @@ const Queue: React.FC = () => {
                   const clientId = streamKey.replace('audio:stream:', '');
 
                   // Find all listen jobs for this client with deduplication
-                  const allJobsRaw = Object.values(sessionJobs).flat().filter(job => job != null);
+                  const allJobsRaw = Object.values(conversationJobs).flat().filter(job => job != null);
 
                   // Deduplicate by job_id
                   const jobMap = new Map();
@@ -1051,7 +1055,7 @@ const Queue: React.FC = () => {
                 <h4 className="text-sm font-medium text-gray-700 mb-3">Active Conversations</h4>
                 {(() => {
                   // Group all jobs by conversation_id with deduplication
-                  const allJobsRaw = Object.values(sessionJobs).flat().filter(job => job != null);
+                  const allJobsRaw = Object.values(conversationJobs).flat().filter(job => job != null);
 
                   // Deduplicate by job_id
                   const jobMap = new Map();
@@ -1063,47 +1067,25 @@ const Queue: React.FC = () => {
                   const allJobs = Array.from(jobMap.values());
 
                   // Group ALL jobs by conversation_id (regardless of status)
-                  // Also link jobs by audio_uuid so persistence jobs get grouped with conversation
                   const allConversationJobs = new Map<string, any[]>();
-                  const audioUuidToConversationId = new Map<string, string>();
 
-                  // First pass: collect conversation_id to audio_uuid mappings
-                  allJobs.forEach(job => {
-                    if (!job) return;
-                    const conversationId = job.meta?.conversation_id;
-                    const audioUuid = job.meta?.audio_uuid;
-
-                    if (conversationId && audioUuid) {
-                      audioUuidToConversationId.set(audioUuid, conversationId);
-                    }
-                  });
-
-                  // Second pass: group jobs by conversation_id or audio_uuid
+                  // Group jobs by conversation_id only
                   // EXCLUDE session-level jobs (like audio persistence)
                   allJobs.forEach(job => {
                     if (!job) return;
 
                     // Skip session-level jobs (they run for entire session, not per conversation)
-                    // Also skip audio persistence jobs by job_type (for backward compatibility with old jobs)
+                    // Also skip audio persistence jobs by job_type
                     if (job.meta?.session_level === true || job.job_type === 'audio_streaming_persistence_job') {
                       return;
                     }
 
                     const conversationId = job.meta?.conversation_id;
-                    const audioUuid = job.meta?.audio_uuid;
-
-                    // Determine the grouping key
-                    let groupKey = conversationId;
-                    if (!groupKey && audioUuid) {
-                      // Try to find conversation_id via audio_uuid mapping
-                      groupKey = audioUuidToConversationId.get(audioUuid);
-                    }
-
-                    if (groupKey) {
-                      if (!allConversationJobs.has(groupKey)) {
-                        allConversationJobs.set(groupKey, []);
+                    if (conversationId) {
+                      if (!allConversationJobs.has(conversationId)) {
+                        allConversationJobs.set(conversationId, []);
                       }
-                      allConversationJobs.get(groupKey)!.push(job);
+                      allConversationJobs.get(conversationId)!.push(job);
                     }
                   });
 
@@ -1127,7 +1109,7 @@ const Queue: React.FC = () => {
                   return (
                     <div className="space-y-2">
                       {Array.from(conversationMap.entries()).map(([conversationId, jobs]) => {
-                        const isExpanded = expandedSessions.has(conversationId);
+                        const isExpanded = expandedConversations.has(conversationId);
 
                         // Find the open_conversation_job for metadata, or fallback to any job with metadata
                         const openConvJob = jobs.find(j => j.job_type === 'open_conversation_job');
@@ -1150,7 +1132,7 @@ const Queue: React.FC = () => {
                           <div key={conversationId} className={`rounded-lg border overflow-hidden ${hasFailedJob ? 'bg-red-50 border-red-300' : 'bg-cyan-50 border-cyan-200'}`}>
                             <div
                               className={`flex items-center justify-between p-3 cursor-pointer transition-colors ${hasFailedJob ? 'hover:bg-red-100' : 'hover:bg-cyan-100'}`}
-                              onClick={() => toggleSessionExpansion(conversationId)}
+                              onClick={() => toggleConversationExpansion(conversationId)}
                             >
                               <div className="flex-1">
                                 <div className="flex items-center space-x-2">
@@ -1514,7 +1496,7 @@ const Queue: React.FC = () => {
                 </div>
                 {(() => {
                   // Group all jobs by conversation_id for completed conversations with deduplication
-                  const allJobsRaw = Object.values(sessionJobs).flat().filter(job => job != null);
+                  const allJobsRaw = Object.values(conversationJobs).flat().filter(job => job != null);
 
                   // Deduplicate by job_id
                   const jobMap = new Map();
@@ -1526,47 +1508,25 @@ const Queue: React.FC = () => {
                   const allJobs = Array.from(jobMap.values());
 
                   // Group ALL jobs by conversation_id (regardless of status)
-                  // Also link jobs by audio_uuid so persistence jobs get grouped with conversation
                   const allConversationJobs = new Map<string, any[]>();
-                  const audioUuidToConversationId = new Map<string, string>();
 
-                  // First pass: collect conversation_id to audio_uuid mappings
-                  allJobs.forEach(job => {
-                    if (!job) return;
-                    const conversationId = job.meta?.conversation_id;
-                    const audioUuid = job.meta?.audio_uuid;
-
-                    if (conversationId && audioUuid) {
-                      audioUuidToConversationId.set(audioUuid, conversationId);
-                    }
-                  });
-
-                  // Second pass: group jobs by conversation_id or audio_uuid
+                  // Group jobs by conversation_id only
                   // EXCLUDE session-level jobs (like audio persistence)
                   allJobs.forEach(job => {
                     if (!job) return;
 
                     // Skip session-level jobs (they run for entire session, not per conversation)
-                    // Also skip audio persistence jobs by job_type (for backward compatibility with old jobs)
+                    // Also skip audio persistence jobs by job_type
                     if (job.meta?.session_level === true || job.job_type === 'audio_streaming_persistence_job') {
                       return;
                     }
 
                     const conversationId = job.meta?.conversation_id;
-                    const audioUuid = job.meta?.audio_uuid;
-
-                    // Determine the grouping key
-                    let groupKey = conversationId;
-                    if (!groupKey && audioUuid) {
-                      // Try to find conversation_id via audio_uuid mapping
-                      groupKey = audioUuidToConversationId.get(audioUuid);
-                    }
-
-                    if (groupKey) {
-                      if (!allConversationJobs.has(groupKey)) {
-                        allConversationJobs.set(groupKey, []);
+                    if (conversationId) {
+                      if (!allConversationJobs.has(conversationId)) {
+                        allConversationJobs.set(conversationId, []);
                       }
-                      allConversationJobs.get(groupKey)!.push(job);
+                      allConversationJobs.get(conversationId)!.push(job);
                     }
                   });
 
@@ -1623,7 +1583,7 @@ const Queue: React.FC = () => {
                     <>
                       <div className="space-y-2">
                         {paginatedConversations.map(({ conversationId, jobs }) => {
-                        const isExpanded = expandedSessions.has(conversationId);
+                        const isExpanded = expandedConversations.has(conversationId);
 
                         // Find the open_conversation_job for metadata, or fallback to any job with metadata
                         const openConvJob = jobs.find(j => j.job_type === 'open_conversation_job');
@@ -1676,7 +1636,7 @@ const Queue: React.FC = () => {
                           <div key={conversationId} className={`rounded-lg border overflow-hidden ${bgColor}`}>
                             <div
                               className={`flex items-center justify-between p-3 cursor-pointer transition-colors ${hoverColor}`}
-                              onClick={() => toggleSessionExpansion(conversationId)}
+                              onClick={() => toggleConversationExpansion(conversationId)}
                             >
                               <div className="flex-1">
                                 <div className="flex items-center space-x-2">

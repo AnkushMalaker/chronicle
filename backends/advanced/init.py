@@ -5,7 +5,6 @@ Interactive configuration for all services and API keys
 """
 
 import argparse
-import getpass
 import os
 import platform
 import secrets
@@ -22,9 +21,15 @@ from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.text import Text
 
-# Add repo root to path for config_manager import
+# Add repo root to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from config_manager import ConfigManager
+from setup_utils import (
+    prompt_password as util_prompt_password,
+    prompt_with_existing_masked,
+    mask_value,
+    read_env_value
+)
 
 
 class ChronicleSetup:
@@ -79,19 +84,8 @@ class ChronicleSetup:
             return default
 
     def prompt_password(self, prompt: str) -> str:
-        """Prompt for password (hidden input)"""
-        while True:
-            try:
-                password = getpass.getpass(f"{prompt}: ")
-                if len(password) >= 8:
-                    return password
-                self.console.print("[yellow][WARNING][/yellow] Password must be at least 8 characters")
-            except (EOFError, KeyboardInterrupt):
-                # For non-interactive environments, generate a secure password
-                self.console.print("[yellow][WARNING][/yellow] Non-interactive environment detected")
-                password = f"admin-{secrets.token_hex(8)}"
-                self.console.print(f"Generated secure password: {password}")
-                return password
+        """Prompt for password (delegates to shared utility)"""
+        return util_prompt_password(prompt, min_length=8, allow_generated=True)
 
     def prompt_choice(self, prompt: str, choices: Dict[str, str], default: str = "1") -> str:
         """Prompt for a choice from options"""
@@ -140,29 +134,18 @@ class ChronicleSetup:
             self.console.print(f"[blue][INFO][/blue] Backed up existing .env file to {backup_path}")
 
     def read_existing_env_value(self, key: str) -> str:
-        """Read a value from existing .env file"""
-        env_path = Path(".env")
-        if not env_path.exists():
-            return None
-
-        value = get_key(str(env_path), key)
-        # get_key returns None if key doesn't exist or value is empty
-        return value if value else None
+        """Read a value from existing .env file (delegates to shared utility)"""
+        return read_env_value(".env", key)
 
     def mask_api_key(self, key: str, show_chars: int = 5) -> str:
-        """Mask API key showing only first and last few characters"""
-        if not key or len(key) <= show_chars * 2:
-            return key
-
-        # Remove quotes if present
-        key_clean = key.strip("'\"")
-
-        return f"{key_clean[:show_chars]}{'*' * min(15, len(key_clean) - show_chars * 2)}{key_clean[-show_chars:]}"
+        """Mask API key (delegates to shared utility)"""
+        return mask_value(key, show_chars)
 
     def prompt_with_existing_masked(self, prompt_text: str, env_key: str, placeholders: list,
                                      is_password: bool = False, default: str = "") -> str:
         """
         Prompt for a value, showing masked existing value from .env if present.
+        Delegates to shared utility from setup_utils.
 
         Args:
             prompt_text: The prompt to display
@@ -174,25 +157,15 @@ class ChronicleSetup:
         Returns:
             User input value, existing value if reused, or default
         """
-        existing_value = self.read_existing_env_value(env_key)
-
-        # Check if existing value is valid (not empty and not a placeholder)
-        has_valid_existing = existing_value and existing_value not in placeholders
-
-        if has_valid_existing:
-            # Show masked value with option to reuse
-            if is_password:
-                masked = self.mask_api_key(existing_value)
-                display_prompt = f"{prompt_text} ({masked}) [press Enter to reuse, or enter new]"
-            else:
-                display_prompt = f"{prompt_text} ({existing_value}) [press Enter to reuse, or enter new]"
-
-            user_input = self.prompt_value(display_prompt, "")
-            # If user pressed Enter (empty input), reuse existing value
-            return user_input if user_input else existing_value
-        else:
-            # No existing value, prompt normally
-            return self.prompt_value(prompt_text, default)
+        # Use shared utility with auto-read from .env
+        return prompt_with_existing_masked(
+            prompt_text=prompt_text,
+            env_file_path=".env",
+            env_key=env_key,
+            placeholders=placeholders,
+            is_password=is_password,
+            default=default
+        )
 
 
     def setup_authentication(self):
@@ -474,6 +447,16 @@ class ChronicleSetup:
 
             self.console.print("[green][SUCCESS][/green] Obsidian/Neo4j configured")
             self.console.print("[blue][INFO][/blue] Neo4j will start automatically with --profile obsidian")
+        else:
+            # Explicitly disable Obsidian in config.yml when not enabled
+            self.config_manager.update_memory_config({
+                "obsidian": {
+                    "enabled": False,
+                    "neo4j_host": "neo4j-mem0",
+                    "timeout": 30
+                }
+            })
+            self.console.print("[blue][INFO][/blue] Obsidian/Neo4j integration disabled")
 
     def setup_network(self):
         """Configure network settings"""

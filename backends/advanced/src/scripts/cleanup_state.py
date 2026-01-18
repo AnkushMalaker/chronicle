@@ -563,11 +563,12 @@ class CleanupManager:
         """Clean Redis job queues"""
         logger.info("Cleaning Redis job queues...")
 
-        try:
-            queue_names = ["transcription", "memory", "audio", "default"]
-            total_jobs = 0
+        queue_names = ["transcription", "memory", "audio", "default"]
+        total_jobs = 0
+        failed_queues = []
 
-            for queue_name in queue_names:
+        for queue_name in queue_names:
+            try:
                 queue = Queue(queue_name, connection=self.redis_conn)
 
                 # Count jobs
@@ -602,11 +603,16 @@ class CleanupManager:
 
                 logger.info(f"Cleared {queue_name} queue ({job_count} jobs)")
 
-            stats.redis_jobs_count = total_jobs
-            logger.info(f"Cleared total of {total_jobs} Redis jobs")
+            except Exception as e:
+                logger.error(f"Failed to clean {queue_name} queue: {e}", exc_info=True)
+                failed_queues.append(queue_name)
+                # Continue processing remaining queues
 
-        except Exception as e:
-            logger.warning(f"Failed to clean Redis: {e}")
+        stats.redis_jobs_count = total_jobs
+        logger.info(f"Cleared total of {total_jobs} Redis jobs")
+
+        if failed_queues:
+            logger.warning(f"Failed to clean queues: {', '.join(failed_queues)}")
 
     def _cleanup_legacy_wav(self, stats: CleanupStats):
         """Clean legacy WAV files"""

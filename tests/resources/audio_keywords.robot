@@ -48,10 +48,8 @@ Upload Audio File
       Should Be Equal As Strings    ${upload_response['files'][0]['status']}    processing    Upload failed: ${response.text}
 
       # Extract important values
-      ${audio_uuid}=    Set Variable    ${upload_response['files'][0]['audio_uuid']}
       ${job_id}=        Set Variable    ${upload_response['files'][0]['conversation_id']}
       ${transcript_job_id}=    Set Variable    ${upload_response['files'][0]['transcript_job_id']}
-      Log    Audio UUID: ${audio_uuid}
       Log    Conversation ID: ${job_id}
       Log    Transcript Job ID: ${transcript_job_id}
 
