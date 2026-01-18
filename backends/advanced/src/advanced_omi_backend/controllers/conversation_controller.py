@@ -4,6 +4,7 @@ Conversation controller for handling conversation-related business logic.
 
 import logging
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -13,9 +14,22 @@ from advanced_omi_backend.client_manager import (
     ClientManager,
     client_belongs_to_user,
 )
-from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.config_loader import get_service_config
+from advanced_omi_backend.controllers.queue_controller import (
+    JOB_RESULT_TTL,
+    default_queue,
+    memory_queue,
+    transcription_queue,
+)
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
+from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.job import JobPriority
 from advanced_omi_backend.users import User
+from advanced_omi_backend.workers.memory_jobs import (
+    enqueue_memory_processing,
+    process_memory_job,
+)
+from advanced_omi_backend.workers.speaker_jobs import recognise_speakers_job
 
 logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
@@ -137,10 +151,15 @@ async def get_conversations(user: User, include_deleted: bool = False):
         if not user.is_superuser:
             # Regular users can only see their own conversations
             # Filter by deleted status
-            query = Conversation.user_id == str(user.user_id)
             if not include_deleted:
-                query = query & (Conversation.deleted == False)
-            user_conversations = await Conversation.find(query).sort(-Conversation.created_at).to_list()
+                user_conversations = await Conversation.find(
+                    Conversation.user_id == str(user.user_id),
+                    Conversation.deleted == False
+                ).sort(-Conversation.created_at).to_list()
+            else:
+                user_conversations = await Conversation.find(
+                    Conversation.user_id == str(user.user_id)
+                ).sort(-Conversation.created_at).to_list()
         else:
             # Admins see all conversations
             # Filter by deleted status
@@ -409,18 +428,9 @@ async def reprocess_transcript(conversation_id: str, user: User):
             )
 
         # Create new transcript version ID
-        import uuid
         version_id = str(uuid.uuid4())
 
         # Enqueue job chain with RQ (transcription -> speaker recognition -> memory)
-        from advanced_omi_backend.controllers.queue_controller import (
-            JOB_RESULT_TTL,
-            default_queue,
-            memory_queue,
-            transcription_queue,
-        )
-        from advanced_omi_backend.workers.memory_jobs import process_memory_job
-        from advanced_omi_backend.workers.speaker_jobs import recognise_speakers_job
         from advanced_omi_backend.workers.transcription_jobs import (
             transcribe_full_audio_job,
         )
@@ -441,7 +451,6 @@ async def reprocess_transcript(conversation_id: str, user: User):
         logger.info(f"📥 RQ: Enqueued transcription job {transcript_job.id}")
 
         # Check if speaker recognition is enabled
-        from advanced_omi_backend.config_loader import get_service_config
         speaker_config = get_service_config('speaker_recognition')
         speaker_enabled = speaker_config.get('enabled', True)  # Default to True for backward compatibility
 
@@ -534,12 +543,9 @@ async def reprocess_memory(conversation_id: str, transcript_version_id: str, use
             )
 
         # Create new memory version ID
-        import uuid
         version_id = str(uuid.uuid4())
 
         # Enqueue memory processing job with RQ (RQ handles job tracking)
-        from advanced_omi_backend.models.job import JobPriority
-        from advanced_omi_backend.workers.memory_jobs import enqueue_memory_processing
 
         job = enqueue_memory_processing(
             client_id=conversation_model.client_id,

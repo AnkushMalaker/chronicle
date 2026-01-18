@@ -86,130 +86,54 @@ cp .env.template .env  # Configure environment variables
 sudo rm -rf backends/advanced/data/
 ```
 
-### Testing Infrastructure
+### Running Tests
 
-#### Local Test Scripts
-The project includes simplified test scripts that mirror CI workflows:
+#### Quick Commands
+All test operations are managed through a simple Makefile interface:
 
-```bash
-# Run all tests from project root
-./run-test.sh [advanced-backend|speaker-recognition|all]
-
-# Advanced backend tests only
-./run-test.sh advanced-backend
-
-# Speaker recognition tests only
-./run-test.sh speaker-recognition
-
-# Run all test suites (default)
-./run-test.sh all
-```
-
-#### Advanced Backend Integration Tests
-
-**Three Test Execution Modes:**
-
-1. **No-API Tests** (Fast, No External Dependencies)
 ```bash
 cd tests
 
-# Run tests without API keys (excludes requires-api-keys tag)
-./run-no-api-tests.sh
+# Full test workflow (recommended)
+make test              # Start containers + run all tests
 
-# ~70% of test suite
-# Uses mock services config
-# No DEEPGRAM_API_KEY or OPENAI_API_KEY required
-# Fast feedback (~10-15 minutes)
+# Or step by step
+make start             # Start test containers (with health checks)
+make test-all          # Run all test suites
+make stop              # Stop containers (preserves volumes)
+
+# Run specific test suites
+make test-endpoints    # API endpoint tests (~40 tests, fast)
+make test-integration  # End-to-end workflows (~15 tests, slower)
+make test-infra        # Infrastructure resilience (~5 tests)
+
+# Quick iteration (reuse existing containers)
+make test-quick        # Run tests without restarting containers
 ```
 
-2. **Full Tests with API Keys** (Comprehensive)
+#### Container Management
+All container operations automatically preserve logs before cleanup:
+
 ```bash
-cd tests
-
-# Requires .env file with DEEPGRAM_API_KEY and OPENAI_API_KEY
-cp setup/.env.test.template setup/.env.test  # Configure API keys
-
-# Run full integration test suite (100% of tests)
-./run-robot-tests.sh
-
-# Leave test containers running for debugging
-CLEANUP_CONTAINERS=false ./run-robot-tests.sh
+make start             # Start test containers
+make stop              # Stop containers (keep volumes)
+make restart           # Restart without rebuild
+make rebuild           # Rebuild images + restart (for code changes)
+make containers-clean  # SAVES LOGS → removes everything
+make status            # Show container health
+make logs SERVICE=<name>  # View specific service logs
 ```
 
-3. **API-Only Tests** (Optional)
-```bash
-cd tests
+**Log Preservation:** All cleanup operations save container logs to `tests/logs/YYYY-MM-DD_HH-MM-SS/`
 
-# Run only tests that require API keys
-./run-api-tests.sh
+#### Test Environment
 
-# ~30% of test suite
-# Only E2E tests with transcription/memory extraction
-```
+Test services use isolated ports and database:
+- **Ports:** Backend (8001), MongoDB (27018), Redis (6380), Qdrant (6337/6338)
+- **Database:** `test_db` (separate from production)
+- **Credentials:** `test-admin@example.com` / `test-admin-password-123`
 
-#### Test Separation by API Requirements
-
-Tests are separated into two categories:
-
-- **No API Keys Required** (~70%): Endpoint tests, infrastructure tests, basic integration
-  - Uses `configs/mock-services.yml`
-  - Runs on all PRs by default
-  - Fast CI feedback
-
-- **API Keys Required** (~30%): Full E2E tests with transcription and memory extraction
-  - Uses `configs/deepgram-openai.yml`
-  - Tagged with `requires-api-keys`
-  - Runs on dev/main branches or when PR labeled with `test-with-api-keys`
-
-#### Test Configuration Flags
-- **CLEANUP_CONTAINERS** (default: false): Automatically stop and remove test containers after test completion
-  - Set to `true` for cleanup: `CLEANUP_CONTAINERS=true ./run-robot-tests.sh`
-- **CONFIG_FILE**: Choose test configuration
-  - `configs/mock-services.yml` - No API keys (default for run-no-api-tests.sh)
-  - `configs/deepgram-openai.yml` - With API keys (default for run-robot-tests.sh)
-  - `configs/parakeet-ollama.yml` - Fully local (no external APIs)
-
-#### Test Environment Variables
-Tests use isolated test environment with overridden credentials:
-- **Test Database**: `test_db` (MongoDB on port 27018, separate from production)
-- **Test Ports**: Backend (8001), Qdrant (6337/6338), WebUI (3001)
-- **Test Credentials**:
-  - `AUTH_SECRET_KEY`: test-jwt-signing-key-for-integration-tests
-  - `ADMIN_EMAIL`: test-admin@example.com
-  - `ADMIN_PASSWORD`: test-admin-password-123
-- **API Keys**: Loaded from `.env` file (DEEPGRAM_API_KEY, OPENAI_API_KEY)
-- **Test Settings**: `DISABLE_SPEAKER_RECOGNITION=true` to prevent segment duplication
-
-#### Test Script Features
-- **Environment Compatibility**: Works with both local .env files and CI environment variables
-- **Isolated Test Environment**: Separate ports and database prevent conflicts with running services
-- **Automatic Cleanup**: Configurable via CLEANUP_CONTAINERS flag (default: false for faster re-runs)
-- **Colored Output**: Clear progress indicators and error reporting
-- **Timeout Protection**: 30-minute timeout for test execution
-- **Fresh Testing**: Clean database and containers for each test run
-- **API Key Separation**: Ability to run tests with or without external API dependencies
-
-#### GitHub Workflows
-
-**Three workflows handle test execution:**
-
-1. **`robot-tests.yml`** - PR Tests (No API Keys)
-   - Triggers: All pull requests
-   - Execution: Excludes `requires-api-keys` tests (~70% of suite)
-   - No secrets required
-   - Fast feedback for contributors
-
-2. **`full-tests-with-api.yml`** - Dev/Main Tests (Full Suite)
-   - Triggers: Push to dev/main branches
-   - Execution: All tests including API-dependent (~100% of suite)
-   - Requires: DEEPGRAM_API_KEY, OPENAI_API_KEY
-   - Comprehensive validation before deployment
-
-3. **`pr-tests-with-api.yml`** - Label-Triggered PR Tests
-   - Triggers: PR with `test-with-api-keys` label
-   - Execution: Full test suite before merge
-   - Requires: DEEPGRAM_API_KEY, OPENAI_API_KEY
-   - Useful for testing API integration changes
+**For complete test documentation, see `tests/README.md`**
 
 ### Mobile App Development
 ```bash
@@ -571,12 +495,11 @@ tailscale ip -4
 - **Docker**: Primary deployment method with docker-compose
 
 ### Testing Strategy
-- **Local Test Scripts**: Simplified scripts (`./run-test.sh`) mirror CI workflows for local development
-- **End-to-End Integration**: Robot Framework tests (`tests/integration/integration_test.robot`) validate complete audio processing pipeline
-- **Speaker Recognition Tests**: `test_speaker_service_integration.py` validates speaker identification
+- **Makefile-Based**: All test operations through simple `make` commands (`make test`, `make start`, `make stop`)
+- **Log Preservation**: Container logs always saved before cleanup (never lose debugging info)
+- **End-to-End Integration**: Robot Framework validates complete audio processing pipeline
 - **Environment Flexibility**: Tests work with both local .env files and CI environment variables
-- **Automated Cleanup**: Test containers are automatically removed after execution
-- **CI/CD Integration**: GitHub Actions use the same local test scripts for consistency
+- **CI/CD Integration**: Same test logic locally and in GitHub Actions
 
 ### Code Style
 - **Python**: Black formatter with 100-character line length, isort for imports
@@ -603,14 +526,10 @@ The system includes comprehensive health checks:
 - Memory debug system for transcript processing monitoring
 
 ### Integration Test Infrastructure
-- **Unified Test Scripts**: Local `./run-test.sh` scripts mirror GitHub Actions workflows
-- **Test Environment**: `docker-compose-test.yml` provides isolated services on separate ports
-- **Test Database**: Uses `test_db` database with isolated collections
-- **Service Ports**: Backend (8001), MongoDB (27018), Qdrant (6335/6336), WebUI (5174)
-- **Test Credentials**: Auto-generated `.env.test` files with secure test configurations
-- **Ground Truth**: Expected transcript established via `scripts/test_deepgram_direct.py`
-- **AI Validation**: OpenAI-powered transcript similarity comparison
-- **Test Audio**: 4-minute glass blowing tutorial (`extras/test-audios/DIY*mono*.wav`)
+- **Makefile Interface**: Simple `make` commands for all operations (see `tests/README.md`)
+- **Test Environment**: `docker-compose-test.yml` with isolated services on separate ports
+- **Test Database**: Uses `test_db` database (separate from production)
+- **Log Preservation**: All cleanup operations save logs to `tests/logs/` automatically
 - **CI Compatibility**: Same test logic runs locally and in GitHub Actions
 
 ### Cursor Rule Integration

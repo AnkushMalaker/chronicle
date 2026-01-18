@@ -15,8 +15,7 @@ from typing import Any, Dict, Optional, Type
 import yaml
 
 from advanced_omi_backend.config_loader import get_plugins_yml_path
-from advanced_omi_backend.plugins import PluginRouter
-from advanced_omi_backend.plugins.base import BasePlugin
+from advanced_omi_backend.plugins import BasePlugin, PluginRouter
 
 logger = logging.getLogger(__name__)
 
