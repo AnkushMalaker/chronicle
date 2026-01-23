@@ -962,3 +962,281 @@ async def validate_plugins_config_yaml(yaml_content: str) -> dict:
     except Exception as e:
         logger.error(f"Error validating plugins config: {e}")
         return {"valid": False, "error": f"Validation error: {str(e)}"}
+
+
+# Structured Plugin Configuration Management Functions (Form-based UI)
+
+async def get_plugins_metadata() -> dict:
+    """Get plugin metadata for form-based configuration UI.
+
+    Returns complete metadata for all discovered plugins including:
+    - Plugin information (name, description, enabled status)
+    - Auto-generated schemas from config.yml (or explicit schema.yml)
+    - Current configuration with masked secrets
+    - Orchestration settings (events, conditions)
+
+    Returns:
+        Dict with plugins list containing metadata for each plugin
+    """
+    try:
+        from advanced_omi_backend.services.plugin_service import (
+            discover_plugins,
+            get_plugin_metadata,
+        )
+
+        # Discover all available plugins
+        discovered_plugins = discover_plugins()
+
+        # Load orchestration config from plugins.yml
+        plugins_yml_path = get_plugins_yml_path()
+        orchestration_configs = {}
+
+        if plugins_yml_path.exists():
+            with open(plugins_yml_path, 'r') as f:
+                plugins_data = yaml.safe_load(f) or {}
+                orchestration_configs = plugins_data.get('plugins', {})
+
+        # Build metadata for each plugin
+        plugins_metadata = []
+        for plugin_id, plugin_class in discovered_plugins.items():
+            # Get orchestration config (or empty dict if not configured)
+            orchestration_config = orchestration_configs.get(plugin_id, {
+                'enabled': False,
+                'events': [],
+                'condition': {'type': 'always'}
+            })
+
+            # Get complete metadata including schema
+            metadata = get_plugin_metadata(plugin_id, plugin_class, orchestration_config)
+            plugins_metadata.append(metadata)
+
+        logger.info(f"Retrieved metadata for {len(plugins_metadata)} plugins")
+
+        return {
+            "plugins": plugins_metadata,
+            "status": "success"
+        }
+
+    except Exception as e:
+        logger.exception("Error getting plugins metadata")
+        raise e
+
+
+async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
+    """Update plugin configuration from structured JSON (form data).
+
+    Updates the three-file plugin architecture:
+    1. config/plugins.yml - Orchestration (enabled, events, condition)
+    2. plugins/{plugin_id}/config.yml - Settings with ${ENV_VAR} references
+    3. backends/advanced/.env - Actual secret values
+
+    Args:
+        plugin_id: Plugin identifier
+        config: Structured configuration with 'orchestration', 'settings', 'env_vars' sections
+
+    Returns:
+        Success message with list of updated files
+    """
+    try:
+        from advanced_omi_backend.services.plugin_service import discover_plugins
+        import advanced_omi_backend.plugins
+
+        # Validate plugin exists
+        discovered_plugins = discover_plugins()
+        if plugin_id not in discovered_plugins:
+            raise ValueError(f"Plugin '{plugin_id}' not found")
+
+        updated_files = []
+
+        # 1. Update config/plugins.yml (orchestration)
+        if 'orchestration' in config:
+            plugins_yml_path = get_plugins_yml_path()
+
+            # Load current plugins.yml
+            if plugins_yml_path.exists():
+                with open(plugins_yml_path, 'r') as f:
+                    plugins_data = yaml.safe_load(f) or {}
+            else:
+                plugins_data = {}
+
+            if 'plugins' not in plugins_data:
+                plugins_data['plugins'] = {}
+
+            # Update orchestration config
+            orchestration = config['orchestration']
+            plugins_data['plugins'][plugin_id] = {
+                'enabled': orchestration.get('enabled', False),
+                'events': orchestration.get('events', []),
+                'condition': orchestration.get('condition', {'type': 'always'})
+            }
+
+            # Create backup
+            if plugins_yml_path.exists():
+                backup_path = str(plugins_yml_path) + '.backup'
+                shutil.copy2(plugins_yml_path, backup_path)
+
+            # Create config directory if needed
+            plugins_yml_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Write updated plugins.yml
+            with open(plugins_yml_path, 'w') as f:
+                yaml.dump(plugins_data, f, default_flow_style=False, sort_keys=False)
+
+            updated_files.append(str(plugins_yml_path))
+            logger.info(f"Updated orchestration config for '{plugin_id}' in {plugins_yml_path}")
+
+        # 2. Update plugins/{plugin_id}/config.yml (settings with env var references)
+        if 'settings' in config:
+            plugins_dir = Path(advanced_omi_backend.plugins.__file__).parent
+            plugin_config_path = plugins_dir / plugin_id / "config.yml"
+
+            # Load current config.yml
+            if plugin_config_path.exists():
+                with open(plugin_config_path, 'r') as f:
+                    plugin_config_data = yaml.safe_load(f) or {}
+            else:
+                plugin_config_data = {}
+
+            # Update settings (preserve ${ENV_VAR} references)
+            settings = config['settings']
+            plugin_config_data.update(settings)
+
+            # Create backup
+            if plugin_config_path.exists():
+                backup_path = str(plugin_config_path) + '.backup'
+                shutil.copy2(plugin_config_path, backup_path)
+
+            # Write updated config.yml
+            with open(plugin_config_path, 'w') as f:
+                yaml.dump(plugin_config_data, f, default_flow_style=False, sort_keys=False)
+
+            updated_files.append(str(plugin_config_path))
+            logger.info(f"Updated settings for '{plugin_id}' in {plugin_config_path}")
+
+        # 3. Update .env (only changed env vars)
+        if 'env_vars' in config and config['env_vars']:
+            env_path = os.path.join(os.getcwd(), ".env")
+
+            if not os.path.exists(env_path):
+                raise FileNotFoundError(f".env file not found at {env_path}")
+
+            # Read current .env
+            with open(env_path, 'r') as f:
+                env_lines = f.readlines()
+
+            # Create backup
+            backup_path = f"{env_path}.backup"
+            shutil.copy2(env_path, backup_path)
+
+            # Update env vars (only if not masked)
+            env_vars = config['env_vars']
+            updated_env_lines = []
+            updated_vars = set()
+
+            for line in env_lines:
+                line_updated = False
+                for env_var, value in env_vars.items():
+                    # Skip if value is masked (not actually changed)
+                    if value == '••••••••••••':
+                        continue
+
+                    if line.strip().startswith(f"{env_var}="):
+                        updated_env_lines.append(f"{env_var}={value}\n")
+                        updated_vars.add(env_var)
+                        line_updated = True
+                        break
+
+                if not line_updated:
+                    updated_env_lines.append(line)
+
+            # Add new env vars that weren't found in file
+            for env_var, value in env_vars.items():
+                if value != '••••••••••••' and env_var not in updated_vars:
+                    updated_env_lines.append(f"{env_var}={value}\n")
+                    updated_vars.add(env_var)
+
+            # Write updated .env
+            if updated_vars:
+                with open(env_path, 'w') as f:
+                    f.writelines(updated_env_lines)
+
+                updated_files.append(env_path)
+                logger.info(f"Updated {len(updated_vars)} environment variables in {env_path}")
+
+        return {
+            "success": True,
+            "message": f"Plugin '{plugin_id}' configuration updated successfully. Restart backend for changes to take effect.",
+            "updated_files": updated_files,
+            "requires_restart": True,
+            "status": "success"
+        }
+
+    except Exception as e:
+        logger.exception(f"Error updating structured config for plugin '{plugin_id}'")
+        raise e
+
+
+async def test_plugin_connection(plugin_id: str, config: dict) -> dict:
+    """Test plugin connection/configuration without saving.
+
+    Calls the plugin's test_connection method if available to validate
+    configuration (e.g., SMTP connection, Home Assistant API).
+
+    Args:
+        plugin_id: Plugin identifier
+        config: Configuration to test (same structure as update_plugin_config_structured)
+
+    Returns:
+        Test result with success status and details
+    """
+    try:
+        from advanced_omi_backend.services.plugin_service import discover_plugins, expand_env_vars
+
+        # Validate plugin exists
+        discovered_plugins = discover_plugins()
+        if plugin_id not in discovered_plugins:
+            raise ValueError(f"Plugin '{plugin_id}' not found")
+
+        plugin_class = discovered_plugins[plugin_id]
+
+        # Check if plugin supports testing
+        if not hasattr(plugin_class, 'test_connection'):
+            return {
+                "success": False,
+                "message": f"Plugin '{plugin_id}' does not support connection testing",
+                "status": "unsupported"
+            }
+
+        # Build complete config from provided data
+        test_config = {}
+
+        # Merge settings
+        if 'settings' in config:
+            test_config.update(config['settings'])
+
+        # Add env vars (expand any ${ENV_VAR} references with test values)
+        if 'env_vars' in config:
+            for key, value in config['env_vars'].items():
+                # Skip masked values
+                if value == '••••••••••••':
+                    # Use actual env var value
+                    value = os.getenv(key, '')
+                test_config[key.lower()] = value
+
+        # Expand any remaining env var references
+        test_config = expand_env_vars(test_config)
+
+        # Call plugin's test_connection static method
+        result = await plugin_class.test_connection(test_config)
+
+        logger.info(f"Test connection for '{plugin_id}': {result.get('message', 'No message')}")
+
+        return result
+
+    except Exception as e:
+        logger.exception(f"Error testing connection for plugin '{plugin_id}'")
+        return {
+            "success": False,
+            "message": f"Connection test failed: {str(e)}",
+            "status": "error"
+        }

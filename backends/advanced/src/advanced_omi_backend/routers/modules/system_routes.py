@@ -251,6 +251,78 @@ async def validate_plugins_config(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Structured Plugin Configuration Endpoints (Form-based UI)
+
+@router.get("/admin/plugins/metadata")
+async def get_plugins_metadata(current_user: User = Depends(current_superuser)):
+    """Get plugin metadata for form-based configuration UI. Admin only.
+
+    Returns:
+        - Plugin information (name, description, enabled status)
+        - Auto-generated schemas from config.yml
+        - Current configuration with masked secrets
+        - Orchestration settings (events, conditions)
+    """
+    try:
+        return await system_controller.get_plugins_metadata()
+    except Exception as e:
+        logger.error(f"Failed to get plugins metadata: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class PluginConfigRequest(BaseModel):
+    """Request model for structured plugin configuration updates."""
+    orchestration: Optional[dict] = None
+    settings: Optional[dict] = None
+    env_vars: Optional[dict] = None
+
+
+@router.post("/admin/plugins/config/structured/{plugin_id}")
+async def update_plugin_config_structured(
+    plugin_id: str,
+    config: PluginConfigRequest,
+    current_user: User = Depends(current_superuser)
+):
+    """Update plugin configuration from structured JSON (form data). Admin only.
+
+    Updates the three-file plugin architecture:
+    1. config/plugins.yml - Orchestration (enabled, events, condition)
+    2. plugins/{plugin_id}/config.yml - Settings with ${ENV_VAR} references
+    3. backends/advanced/.env - Actual secret values
+    """
+    try:
+        config_dict = config.dict(exclude_none=True)
+        result = await system_controller.update_plugin_config_structured(plugin_id, config_dict)
+        return JSONResponse(content=result)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to update plugin config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/admin/plugins/test-connection/{plugin_id}")
+async def test_plugin_connection(
+    plugin_id: str,
+    config: PluginConfigRequest,
+    current_user: User = Depends(current_superuser)
+):
+    """Test plugin connection/configuration without saving. Admin only.
+
+    Calls the plugin's test_connection method to validate configuration
+    (e.g., SMTP connection, Home Assistant API).
+    """
+    try:
+        config_dict = config.dict(exclude_none=True)
+        result = await system_controller.test_plugin_connection(plugin_id, config_dict)
+        return JSONResponse(content=result)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to test plugin connection: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/streaming/status")
 async def get_streaming_status(request: Request, current_user: User = Depends(current_superuser)):
     """Get status of active streaming sessions and Redis Streams health. Admin only."""

@@ -30,6 +30,9 @@ class HomeAssistantPlugin(BasePlugin):
 
     SUPPORTED_ACCESS_LEVELS: List[str] = ['transcript']
 
+    name = "Home Assistant"
+    description = "Wake word device control with Home Assistant integration"
+
     def __init__(self, config: Dict[str, Any]):
         """
         Initialize Home Assistant plugin.
@@ -596,3 +599,94 @@ class HomeAssistantPlugin(BasePlugin):
         except Exception as e:
             logger.error(f"Fallback parsing failed: {e}", exc_info=True)
             return None
+
+    @staticmethod
+    async def test_connection(config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Test Home Assistant API connection with provided configuration.
+
+        This static method tests the HA API connection without fully initializing the plugin.
+        Used by the form-based configuration UI to validate settings before saving.
+
+        Args:
+            config: Configuration dictionary with HA settings:
+                - ha_url: Home Assistant URL
+                - ha_token: Long-lived access token
+                - timeout: Request timeout (optional, default 30)
+
+        Returns:
+            Dict with success status, message, and optional details
+
+        Example:
+            >>> result = await HomeAssistantPlugin.test_connection({
+            ...     'ha_url': 'http://homeassistant.local:8123',
+            ...     'ha_token': 'your_long_lived_token'
+            ... })
+            >>> result['success']
+            True
+        """
+        import time
+
+        try:
+            # Validate required config fields
+            required_fields = ['ha_url', 'ha_token']
+            missing_fields = [field for field in required_fields if not config.get(field)]
+
+            if missing_fields:
+                return {
+                    "success": False,
+                    "message": f"Missing required fields: {', '.join(missing_fields)}",
+                    "status": "error"
+                }
+
+            ha_url = config.get('ha_url')
+            ha_token = config.get('ha_token')
+            timeout = config.get('timeout', 30)
+
+            # Create temporary MCP client
+            mcp_client = HAMCPClient(
+                base_url=ha_url,
+                token=ha_token,
+                timeout=timeout
+            )
+
+            # Test API connectivity with Template API
+            logger.info(f"Testing Home Assistant API connection to {ha_url}...")
+            start_time = time.time()
+
+            test_result = await mcp_client._render_template("{{ 1 + 1 }}")
+            connection_time_ms = int((time.time() - start_time) * 1000)
+
+            if str(test_result).strip() != "2":
+                return {
+                    "success": False,
+                    "message": f"Unexpected template result: {test_result}",
+                    "status": "error"
+                }
+
+            # Try to fetch entities count for additional info
+            try:
+                entities = await mcp_client.get_all_entities()
+                entity_count = len(entities)
+            except Exception:
+                entity_count = None
+
+            return {
+                "success": True,
+                "message": f"Successfully connected to Home Assistant at {ha_url}",
+                "status": "success",
+                "details": {
+                    "ha_url": ha_url,
+                    "connection_time_ms": connection_time_ms,
+                    "entity_count": entity_count,
+                    "api_test": "Template rendering successful"
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Home Assistant connection test failed: {e}", exc_info=True)
+            return {
+                "success": False,
+                "message": f"Connection test failed: {str(e)}",
+                "status": "error"
+            }
