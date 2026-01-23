@@ -14,6 +14,7 @@ import asyncio
 import io
 import logging
 import tempfile
+import time
 import wave
 from pathlib import Path
 from typing import List, Optional
@@ -528,6 +529,7 @@ async def reconstruct_audio_segment(
         >>> with open("segment.wav", "wb") as f:
         ...     f.write(wav_bytes)
     """
+    start_timer = time.time()
     from advanced_omi_backend.models.conversation import Conversation
 
     # Validate start_time
@@ -638,12 +640,14 @@ async def reconstruct_audio_segment(
 
     actual_duration = len(pcm_buffer) / bytes_per_second
     expected_duration = end_time - start_time
+    processing_time = time.time() - start_timer
 
     logger.info(
         f"Reconstructed audio segment for {conversation_id[:8]}...: "
         f"{start_time:.1f}s - {end_time:.1f}s "
         f"({len(chunks)} chunks, {len(wav_bytes)} bytes WAV, "
-        f"actual duration: {actual_duration:.2f}s, expected: {expected_duration:.2f}s)"
+        f"actual duration: {actual_duration:.2f}s, expected: {expected_duration:.2f}s, "
+        f"processing time: {processing_time:.2f}s)"
     )
 
     return wav_bytes
@@ -736,8 +740,9 @@ async def convert_audio_to_chunks(
         ... )
         >>> print(f"Created {num_chunks} chunks")
     """
-    from advanced_omi_backend.models.conversation import Conversation
     from bson import Binary
+
+    from advanced_omi_backend.models.conversation import Conversation
 
     logger.info(f"📦 Converting audio to MongoDB chunks: {len(audio_data)} bytes PCM")
 
@@ -886,8 +891,9 @@ async def convert_wav_to_chunks(
     if not wav_file_path.exists():
         raise FileNotFoundError(f"WAV file not found: {wav_file_path}")
 
-    from advanced_omi_backend.models.conversation import Conversation
     from bson import Binary
+
+    from advanced_omi_backend.models.conversation import Conversation
 
     logger.info(f"📦 Converting WAV file to MongoDB chunks: {wav_file_path}")
 
@@ -1042,8 +1048,8 @@ async def wait_for_audio_chunks(
         ... else:
         ...     logger.error("No audio chunks available")
     """
-    import time
     import asyncio
+    import time
 
     wait_start = time.time()
 

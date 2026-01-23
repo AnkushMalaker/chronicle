@@ -17,6 +17,7 @@ from .modules import (
     chat_router,
     client_router,
     conversation_router,
+    finetuning_router,
     memory_router,
     obsidian_router,
     queue_router,
@@ -39,6 +40,7 @@ router.include_router(user_router)
 router.include_router(chat_router)
 router.include_router(client_router)
 router.include_router(conversation_router)
+router.include_router(finetuning_router)
 router.include_router(memory_router)
 router.include_router(obsidian_router)
 router.include_router(system_router)

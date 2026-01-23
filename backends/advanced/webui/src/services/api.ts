@@ -182,6 +182,37 @@ export const annotationsApi = {
 
   rejectSuggestion: (annotation_id: string) =>
     api.patch(`/api/annotations/${annotation_id}/status`, { status: 'rejected' }),
+
+  // Diarization annotations
+  createDiarizationAnnotation: (data: {
+    conversation_id: string
+    segment_index: number
+    original_speaker: string
+    corrected_speaker: string
+    segment_start_time?: number
+  }) => api.post('/api/annotations/diarization', data),
+
+  getDiarizationAnnotations: (conversation_id: string) =>
+    api.get(`/api/annotations/diarization/${conversation_id}`),
+
+  // Apply diarization annotations (creates new version)
+  applyDiarizationAnnotations: (conversation_id: string) =>
+    api.post(`/api/annotations/diarization/${conversation_id}/apply`),
+
+  // Apply ALL pending annotations (diarization + transcript) - creates single new version
+  applyAllAnnotations: (conversation_id: string) =>
+    api.post(`/api/annotations/${conversation_id}/apply`),
+}
+
+export const finetuningApi = {
+  // Process annotations for training
+  processAnnotations: (annotationType: string = 'diarization') =>
+    api.post('/api/finetuning/process-annotations', null, {
+      params: { annotation_type: annotationType }
+    }),
+
+  // Get fine-tuning status
+  getStatus: () => api.get('/api/finetuning/status'),
 }
 
 export const usersApi = {

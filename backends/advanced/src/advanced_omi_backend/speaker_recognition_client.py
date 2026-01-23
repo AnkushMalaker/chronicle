@@ -548,6 +548,156 @@ class SpeakerRecognitionClient:
             logger.error(f"🎤 Error getting enrolled speakers: {e}")
             return {"speakers": []}
 
+    async def get_speaker_by_name(self, speaker_name: str, user_id: int = 1) -> Optional[Dict]:
+        """
+        Look up enrolled speaker by name.
+
+        Args:
+            speaker_name: Name of the speaker to find
+            user_id: User ID to filter speakers (default: 1)
+
+        Returns:
+            Speaker dict with id, name, etc. or None if not found
+        """
+        if not self.enabled:
+            logger.warning("🎤 Speaker recognition disabled, cannot lookup speaker")
+            return None
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.service_url}/speakers",
+                    params={"user_id": user_id},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as response:
+                    if response.status != 200:
+                        logger.warning(f"🎤 Failed to get speakers: status {response.status}")
+                        return None
+
+                    result = await response.json()
+                    speakers = result.get("speakers", [])
+                    
+                    # Case-insensitive name match
+                    for speaker in speakers:
+                        if speaker["name"].lower() == speaker_name.lower():
+                            logger.info(f"🎤 Found speaker '{speaker_name}' with ID: {speaker['id']}")
+                            return speaker
+                    
+                    logger.info(f"🎤 Speaker '{speaker_name}' not found in {len(speakers)} enrolled speakers")
+                    return None
+
+        except aiohttp.ClientError as e:
+            logger.warning(f"🎤 Failed to lookup speaker: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"🎤 Error looking up speaker: {e}")
+            return None
+
+    async def enroll_new_speaker(
+        self, speaker_name: str, audio_data: bytes, user_id: int = 1
+    ) -> Dict:
+        """
+        Enroll a new speaker with audio data.
+
+        Args:
+            speaker_name: Display name for the speaker
+            audio_data: WAV audio bytes
+            user_id: User ID for the speaker (default: 1)
+
+        Returns:
+            Response dict from enrollment endpoint
+        """
+        if not self.enabled:
+            logger.warning("🎤 Speaker recognition disabled, cannot enroll speaker")
+            return {"error": "speaker_recognition_disabled"}
+
+        try:
+            import uuid
+            
+            # Generate speaker ID: user_{user_id}_speaker_{random_hex}
+            speaker_id = f"user_{user_id}_speaker_{uuid.uuid4().hex[:12]}"
+            
+            logger.info(f"🎤 Enrolling new speaker '{speaker_name}' with ID: {speaker_id}")
+
+            async with aiohttp.ClientSession() as session:
+                form_data = aiohttp.FormData()
+                form_data.add_field(
+                    "file", audio_data, filename="segment.wav", content_type="audio/wav"
+                )
+                form_data.add_field("speaker_id", speaker_id)
+                form_data.add_field("speaker_name", speaker_name)
+
+                async with session.post(
+                    f"{self.service_url}/enroll/upload",
+                    data=form_data,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as response:
+                    if response.status != 200:
+                        response_text = await response.text()
+                        logger.error(
+                            f"🎤 ❌ Speaker enrollment failed with status {response.status}: {response_text}"
+                        )
+                        return {"error": "enrollment_failed", "status": response.status}
+
+                    result = await response.json()
+                    logger.info(f"🎤 ✅ Successfully enrolled speaker '{speaker_name}'")
+                    return result
+
+        except aiohttp.ClientError as e:
+            logger.error(f"🎤 ❌ Failed to enroll speaker: {e}")
+            return {"error": "connection_failed", "message": str(e)}
+        except Exception as e:
+            logger.error(f"🎤 ❌ Error enrolling speaker: {e}")
+            return {"error": "unknown_error", "message": str(e)}
+
+    async def append_to_speaker(self, speaker_id: str, audio_data: bytes) -> Dict:
+        """
+        Append audio to existing speaker's embedding (fine-tuning).
+
+        Args:
+            speaker_id: ID of existing speaker
+            audio_data: WAV audio bytes
+
+        Returns:
+            Response dict from append endpoint
+        """
+        if not self.enabled:
+            logger.warning("🎤 Speaker recognition disabled, cannot append to speaker")
+            return {"error": "speaker_recognition_disabled"}
+
+        try:
+            logger.info(f"🎤 Appending audio to speaker: {speaker_id}")
+
+            async with aiohttp.ClientSession() as session:
+                form_data = aiohttp.FormData()
+                form_data.add_field(
+                    "files", audio_data, filename="segment.wav", content_type="audio/wav"
+                )
+                form_data.add_field("speaker_id", speaker_id)
+
+                async with session.post(
+                    f"{self.service_url}/enroll/append",
+                    data=form_data,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as response:
+                    if response.status != 200:
+                        response_text = await response.text()
+                        logger.error(
+                            f"🎤 ❌ Speaker append failed with status {response.status}: {response_text}"
+                        )
+                        return {"error": "append_failed", "status": response.status}
+
+                    result = await response.json()
+                    logger.info(f"🎤 ✅ Successfully appended to speaker {speaker_id}")
+                    return result
+
+        except aiohttp.ClientError as e:
+            logger.error(f"🎤 ❌ Failed to append to speaker: {e}")
+            return {"error": "connection_failed", "message": str(e)}
+        except Exception as e:
+            logger.error(f"🎤 ❌ Error appending to speaker: {e}")
+            return {"error": "unknown_error", "message": str(e)}
+
     async def check_if_enrolled_speaker_present(
         self,
         redis_client,

@@ -113,8 +113,10 @@ def run_compose_command(service_name, command, build=False):
             env_file = service_path / '.env'
             if env_file.exists():
                 env_values = dotenv_values(env_file)
-                compute_mode = env_values.get('COMPUTE_MODE', 'cpu')
-                build_cmd.extend(['--profile', compute_mode])
+                # Derive profile from PYTORCH_CUDA_VERSION (cu126/cu121/etc = gpu, cpu = cpu)
+                pytorch_version = env_values.get('PYTORCH_CUDA_VERSION', 'cpu')
+                profile = 'gpu' if pytorch_version.startswith('cu') else 'cpu'
+                build_cmd.extend(['--profile', profile])
 
         build_cmd.append('build')
 
@@ -194,16 +196,18 @@ def run_compose_command(service_name, command, build=False):
         env_file = service_path / '.env'
         if env_file.exists():
             env_values = dotenv_values(env_file)
-            compute_mode = env_values.get('COMPUTE_MODE', 'cpu')
+            # Derive profile from PYTORCH_CUDA_VERSION (cu126/cu121/etc = gpu, cpu = cpu)
+            pytorch_version = env_values.get('PYTORCH_CUDA_VERSION', 'cpu')
+            profile = 'gpu' if pytorch_version.startswith('cu') else 'cpu'
 
-            cmd.extend(['--profile', compute_mode])
+            cmd.extend(['--profile', profile])
 
             if command == 'up':
                 https_enabled = env_values.get('REACT_UI_HTTPS', 'false')
                 if https_enabled.lower() == 'true':
                     cmd.extend(['up', '-d'])
                 else:
-                    cmd.extend(['up', '-d', 'speaker-service-gpu' if compute_mode == 'gpu' else 'speaker-service-cpu', 'web-ui'])
+                    cmd.extend(['up', '-d', 'speaker-service-gpu' if profile == 'gpu' else 'speaker-service-cpu', 'web-ui'])
             elif command == 'down':
                 cmd.extend(['down'])
         else:
