@@ -217,7 +217,7 @@ export const systemApi = {
       headers: { 'Content-Type': 'text/plain' }
     }),
 
-  // Plugin Configuration Management
+  // Plugin Configuration Management (YAML-based)
   getPluginsConfigRaw: () => api.get('/api/admin/plugins/config'),
   updatePluginsConfigRaw: (configYaml: string) =>
     api.post('/api/admin/plugins/config', configYaml, {
@@ -227,6 +227,27 @@ export const systemApi = {
     api.post('/api/admin/plugins/config/validate', configYaml, {
       headers: { 'Content-Type': 'text/plain' }
     }),
+
+  // Plugin Configuration Management (Structured/Form-based)
+  getPluginsMetadata: () => api.get('/api/admin/plugins/metadata'),
+  updatePluginConfigStructured: (pluginId: string, config: {
+    orchestration?: {
+      enabled: boolean
+      events: string[]
+      condition: { type: string; wake_words?: string[] }
+    }
+    settings?: Record<string, any>
+    env_vars?: Record<string, string>
+  }) => api.post(`/api/admin/plugins/config/structured/${pluginId}`, config),
+  testPluginConnection: (pluginId: string, config: {
+    orchestration?: {
+      enabled: boolean
+      events: string[]
+      condition: { type: string; wake_words?: string[] }
+    }
+    settings?: Record<string, any>
+    env_vars?: Record<string, string>
+  }) => api.post(`/api/admin/plugins/test-connection/${pluginId}`, config),
 
   // Memory Provider Management
   getMemoryProvider: () => api.get('/api/admin/memory/provider'),
