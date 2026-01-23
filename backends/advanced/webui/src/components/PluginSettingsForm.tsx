@@ -9,7 +9,7 @@ interface PluginMetadata {
   name: string
   description: string
   enabled: boolean
-  status: string
+  status: 'active' | 'disabled' | 'error'
   supports_testing: boolean
   config_schema: {
     orchestration: any
@@ -207,7 +207,7 @@ export default function PluginSettingsForm({ className }: PluginSettingsFormProp
         }
       })
 
-      const response = await systemApi.updatePluginConfigStructured(selectedPluginId, {
+      await systemApi.updatePluginConfigStructured(selectedPluginId, {
         orchestration: currentConfig.orchestration,
         settings: currentConfig.settings,
         env_vars: Object.keys(envVarsToSend).length > 0 ? envVarsToSend : undefined
