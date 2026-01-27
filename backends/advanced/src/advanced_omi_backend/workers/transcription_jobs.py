@@ -628,16 +628,16 @@ async def stream_speech_detection_job(
                 error_status = await redis_client.hget(session_key, "transcription_error")
                 if error_status:
                     error_msg = error_status.decode()
-                    logger.warning(f"❌ Transcription error detected: {error_msg}")
-                    logger.info(f"✅ Session ended without speech (transcription error)")
+                    logger.error(f"❌ Transcription service error: {error_msg}")
+                    logger.error(f"❌ Session failed - transcription service unavailable")
                     break
 
                 # Check if we've been waiting too long with no results at all
                 grace_elapsed = time.time() - session_closed_at
                 if grace_elapsed > 5 and not combined.get("chunk_count", 0):
                     # 5+ seconds with no transcription activity at all - likely API key issue
-                    logger.warning(f"⚠️ No transcription activity after {grace_elapsed:.1f}s - possible API key or connectivity issue")
-                    logger.info(f"✅ Session ended without speech (no transcription activity)")
+                    logger.error(f"❌ No transcription activity after {grace_elapsed:.1f}s - possible API key or connectivity issue")
+                    logger.error(f"❌ Session failed - check transcription service configuration")
                     break
 
             await asyncio.sleep(2)
@@ -838,11 +838,20 @@ async def stream_speech_detection_job(
 
     # Session ended without speech
     reason = last_speech_analysis.get('reason', 'No transcription received') if last_speech_analysis else 'No transcription received'
-    logger.warning(
-        f"❌ Session ended without meaningful speech detected\n"
-        f"   Reason: {reason}\n"
-        f"   Runtime: {time.time() - start_time:.1f}s"
-    )
+
+    # Distinguish between transcription failures (error) vs legitimate no speech (info)
+    if reason == 'No transcription received':
+        logger.error(
+            f"❌ Session failed - transcription service did not respond\n"
+            f"   Reason: {reason}\n"
+            f"   Runtime: {time.time() - start_time:.1f}s"
+        )
+    else:
+        logger.info(
+            f"✅ Session ended without meaningful speech\n"
+            f"   Reason: {reason}\n"
+            f"   Runtime: {time.time() - start_time:.1f}s"
+        )
 
     # Check if this is an always_persist conversation that needs to be marked as failed
     # NOTE: We check MongoDB directly because the conversation:current Redis key might have been
@@ -869,7 +878,7 @@ async def stream_speech_detection_job(
 
         await conversation.save()
 
-        logger.info(f"✅ Marked conversation {conversation.conversation_id} as transcription_failed")
+        logger.warning(f"🔴 Marked conversation {conversation.conversation_id} as transcription_failed")
     else:
         logger.info(f"ℹ️ No always_persist placeholder conversation found for session {session_id[:12]}")
 

@@ -59,6 +59,7 @@ services:
       # Wait for audio queue to drain before timing out (test mode)
       - WAIT_FOR_AUDIO_QUEUE_DRAIN=true
       # Mock speaker recognition for tests (avoids resource-intensive ML service)
+      # To test with REAL speaker recognition: set to 'false' and start extras/speaker-recognition service
       - USE_MOCK_SPEAKER_CLIENT=true
     depends_on:
       qdrant-test:
@@ -137,7 +138,7 @@ services:
       context: ../../extras/speaker-recognition
       dockerfile: Dockerfile
       args:
-        PYTORCH_CUDA_VERSION: cpu
+        PYTORCH_CUDA_VERSION: cu12.6
     image: speaker-recognition-test:latest
     ports:
       - "8086:8085"  # Avoid conflict with dev speaker service on 8085
@@ -238,6 +239,7 @@ services:
       # Wait for audio queue to drain before timing out (test mode)
       - WAIT_FOR_AUDIO_QUEUE_DRAIN=true
       # Mock speaker recognition for tests (avoids resource-intensive ML service)
+      # To test with REAL speaker recognition: set to 'false' and start extras/speaker-recognition service
       - USE_MOCK_SPEAKER_CLIENT=true
     depends_on:
       chronicle-backend-test:
