@@ -118,6 +118,8 @@ async def get_conversation(conversation_id: str, user: User):
             "deleted": conversation.deleted,
             "deletion_reason": conversation.deletion_reason,
             "deleted_at": conversation.deleted_at.isoformat() if conversation.deleted_at else None,
+            "processing_status": conversation.processing_status,
+            "always_persist": conversation.always_persist,
             "end_reason": conversation.end_reason.value if conversation.end_reason else None,
             "completed_at": conversation.completed_at.isoformat() if conversation.completed_at else None,
             "title": conversation.title,
@@ -133,6 +135,8 @@ async def get_conversation(conversation_id: str, user: User):
             "active_memory_version": conversation.active_memory_version,
             "transcript_version_count": conversation.transcript_version_count,
             "memory_version_count": conversation.memory_version_count,
+            "active_transcript_version_number": conversation.active_transcript_version_number,
+            "active_memory_version_number": conversation.active_memory_version_number,
         }
 
         return {"conversation": response}
@@ -182,6 +186,8 @@ async def get_conversations(user: User, include_deleted: bool = False):
                 "deleted": conv.deleted,
                 "deletion_reason": conv.deletion_reason,
                 "deleted_at": conv.deleted_at.isoformat() if conv.deleted_at else None,
+                "processing_status": conv.processing_status,
+                "always_persist": conv.always_persist,
                 "title": conv.title,
                 "summary": conv.summary,
                 "detailed_summary": conv.detailed_summary,
@@ -193,6 +199,8 @@ async def get_conversations(user: User, include_deleted: bool = False):
                 "memory_count": conv.memory_count,
                 "transcript_version_count": conv.transcript_version_count,
                 "memory_version_count": conv.memory_version_count,
+                "active_transcript_version_number": conv.active_transcript_version_number,
+                "active_memory_version_number": conv.active_memory_version_number,
             })
 
         return {"conversations": conversations}

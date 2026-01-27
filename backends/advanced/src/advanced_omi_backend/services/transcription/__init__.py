@@ -70,6 +70,12 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
         return self._name
 
     async def transcribe(self, audio_data: bytes, sample_rate: int, diarize: bool = False) -> dict:
+        # Special handling for mock provider (no HTTP server needed)
+        if self.model.model_provider == "mock":
+            from .mock_provider import MockTranscriptionProvider
+            mock = MockTranscriptionProvider(fail_mode=False)
+            return await mock.transcribe(audio_data, sample_rate, diarize)
+
         op = (self.model.operations or {}).get("stt_transcribe") or {}
         method = (op.get("method") or "POST").upper()
         path = (op.get("path") or "/listen")
@@ -372,9 +378,23 @@ def is_transcription_available(mode: str = "batch") -> bool:
     return provider is not None
 
 
+def get_mock_transcription_provider(fail_mode: bool = False) -> BaseTranscriptionProvider:
+    """Return a mock transcription provider (for testing only).
+
+    Args:
+        fail_mode: If True, transcribe() will raise an exception to simulate transcription failure
+
+    Returns:
+        MockTranscriptionProvider instance
+    """
+    from .mock_provider import MockTranscriptionProvider
+    return MockTranscriptionProvider(fail_mode=fail_mode)
+
+
 __all__ = [
     "get_transcription_provider",
     "is_transcription_available",
+    "get_mock_transcription_provider",
     "RegistryBatchTranscriptionProvider",
     "RegistryStreamingTranscriptionProvider",
     "BaseTranscriptionProvider",

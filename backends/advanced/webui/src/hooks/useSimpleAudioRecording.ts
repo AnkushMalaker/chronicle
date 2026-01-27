@@ -21,11 +21,13 @@ export interface SimpleAudioRecordingReturn {
   recordingDuration: number
   error: string | null
   mode: RecordingMode
+  alwaysPersist: boolean
 
   // Actions
   startRecording: () => Promise<void>
   stopRecording: () => void
   setMode: (mode: RecordingMode) => void
+  setAlwaysPersist: (value: boolean) => void
 
   // For components
   analyser: AnalyserNode | null
@@ -43,6 +45,7 @@ export const useSimpleAudioRecording = (): SimpleAudioRecordingReturn => {
   const [recordingDuration, setRecordingDuration] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [mode, setMode] = useState<RecordingMode>('streaming')
+  const [alwaysPersist, setAlwaysPersist] = useState(false)
   
   // Debug stats
   const [debugStats, setDebugStats] = useState<DebugStats>({
@@ -228,6 +231,38 @@ export const useSimpleAudioRecording = (): SimpleAudioRecordingReturn => {
       ws.onmessage = (event) => {
         console.log('📨 Received message from server:', event.data)
         setDebugStats(prev => ({ ...prev, messagesReceived: prev.messagesReceived + 1 }))
+
+        // Parse server messages
+        try {
+          const message = JSON.parse(event.data)
+
+          // Handle error messages from backend
+          if (message.type === 'error') {
+            const errorMsg = message.message || 'Unknown error from server'
+            console.error('❌ Server error:', errorMsg)
+
+            setError(errorMsg)
+            setCurrentStep('error')
+            setDebugStats(prev => ({
+              ...prev,
+              lastError: errorMsg,
+              lastErrorTime: new Date()
+            }))
+
+            // Stop recording and cleanup
+            cleanup()
+            setIsRecording(false)
+          }
+
+          // Handle other message types (interim_transcript, etc.)
+          else if (message.type === 'interim_transcript') {
+            console.log('📝 Received interim transcript:', message.data)
+          }
+
+        } catch (e) {
+          // Not JSON, ignore
+          console.log('📨 Non-JSON message:', event.data)
+        }
       }
     })
   }, [])
@@ -246,13 +281,14 @@ export const useSimpleAudioRecording = (): SimpleAudioRecordingReturn => {
         rate: 16000,
         width: 2,
         channels: 1,
-        mode: mode  // Pass recording mode to backend
+        mode: mode,  // Pass recording mode to backend
+        always_persist: alwaysPersist  // Pass always_persist flag
       },
       payload_length: null
     }
 
     ws.send(JSON.stringify(startMessage) + '\n')
-    console.log('✅ Audio-start message sent with mode:', mode)
+    console.log('✅ Audio-start message sent with mode:', mode, 'always_persist:', alwaysPersist)
   }, [mode])
   
   // Step 4: Start audio streaming
@@ -471,9 +507,11 @@ export const useSimpleAudioRecording = (): SimpleAudioRecordingReturn => {
     recordingDuration,
     error,
     mode,
+    alwaysPersist,
     startRecording,
     stopRecording,
     setMode,
+    setAlwaysPersist,
     analyser: analyserRef.current,
     debugStats,
     formatDuration,

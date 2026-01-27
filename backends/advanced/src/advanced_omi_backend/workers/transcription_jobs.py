@@ -21,6 +21,7 @@ from advanced_omi_backend.controllers.queue_controller import (
 )
 from advanced_omi_backend.utils.conversation_utils import analyze_speech, mark_conversation_deleted
 from advanced_omi_backend.services.plugin_service import get_plugin_router
+from advanced_omi_backend.config import get_backend_config
 
 logger = logging.getLogger(__name__)
 
@@ -357,10 +358,33 @@ async def transcribe_full_audio_job(
     # Calculate processing time (transcription only)
     processing_time = time.time() - start_time
 
-    # Transcription only provides text + words with timestamps
-    # Speaker service will create segments via diarization
-    speaker_segments = []
-    logger.info(f"📊 Transcription complete: {len(words)} words (segments will be created by speaker service)")
+    # Check if we should use provider segments as fallback
+    transcription_config = get_backend_config('transcription')
+    use_provider_segments = transcription_config.get('use_provider_segments', False)
+
+    # If flag enabled and provider returned segments, use them
+    # Otherwise, speaker service will create segments via diarization
+    if use_provider_segments and segments:
+        # Convert dict segments to SpeakerSegment objects
+        speaker_segments = [
+            Conversation.SpeakerSegment(
+                speaker=str(seg.get("speaker", "0")),  # Convert to string for Pydantic validation
+                start=seg.get("start", 0.0),
+                end=seg.get("end", 0.0),
+                text=seg.get("text", "")
+            )
+            for seg in segments
+        ]
+        logger.info(
+            f"✅ Using {len(speaker_segments)} segments from transcription provider "
+            f"(use_provider_segments=true)"
+        )
+    else:
+        speaker_segments = []
+        logger.info(
+            f"📊 Transcription complete: {len(words)} words "
+            f"(segments will be created by speaker service)"
+        )
 
     # Add new transcript version
     provider_normalized = provider_name.lower() if provider_name else "unknown"
@@ -376,12 +400,12 @@ async def transcribe_full_audio_job(
         for w in words
     ]
 
-    # Prepare metadata (transcription only - speaker service will add segments and metadata)
+    # Prepare metadata
     metadata = {
         "trigger": trigger,
         "audio_file_size": len(wav_data),
         "word_count": len(words),
-        "segments_created_by": "speaker_service",  # Speaker service creates segments via diarization
+        "segments_created_by": "provider" if (use_provider_segments and segments) else "speaker_service",
     }
 
     conversation.add_transcript_version(
@@ -819,6 +843,36 @@ async def stream_speech_detection_job(
         f"   Reason: {reason}\n"
         f"   Runtime: {time.time() - start_time:.1f}s"
     )
+
+    # Check if this is an always_persist conversation that needs to be marked as failed
+    # NOTE: We check MongoDB directly because the conversation:current Redis key might have been
+    # deleted by the audio persistence job cleanup (which runs in parallel).
+    from advanced_omi_backend.models.conversation import Conversation
+
+    logger.info(f"🔍 Checking MongoDB for always_persist conversation with client_id: {client_id}")
+
+    # Find conversation by client_id that matches this session
+    # session_id == client_id for streaming sessions (set in _initialize_streaming_session)
+    conversation = await Conversation.find_one(
+        Conversation.client_id == session_id,
+        Conversation.always_persist == True,
+        Conversation.processing_status == "pending_transcription"
+    )
+
+    if conversation:
+        logger.info(f"🔴 Found always_persist placeholder conversation {conversation.conversation_id} for failed session {session_id[:12]}")
+
+        # Update conversation with failure status
+        conversation.processing_status = "transcription_failed"
+        conversation.title = "Audio Recording (Transcription Failed)"
+        conversation.summary = f"Transcription failed: {reason}"
+
+        await conversation.save()
+
+        logger.info(f"✅ Marked conversation {conversation.conversation_id} as transcription_failed")
+    else:
+        logger.info(f"ℹ️ No always_persist placeholder conversation found for session {session_id[:12]}")
+
     return {
         "session_id": session_id,
         "user_id": user_id,

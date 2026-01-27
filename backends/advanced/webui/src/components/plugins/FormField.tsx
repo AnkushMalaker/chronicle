@@ -112,14 +112,22 @@ export default function FormField({
                   setIsEditing(true)
                   onChange(e.target.value)
                 }}
+                onFocus={() => {
+                  // When focusing on a masked field, clear it to allow entering new value
+                  if (isMaskedValue && !isEditing) {
+                    setIsEditing(true)
+                    onChange('')
+                  }
+                }}
                 disabled={disabled}
-                placeholder={isMaskedValue ? 'Enter new value to change' : ''}
+                placeholder={isMaskedValue ? 'Enter new password to change' : 'Enter password'}
                 className="w-full px-3 py-2 pr-10 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
               />
               <button
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                title={showPassword ? 'Hide password' : 'Show password'}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors"
                 disabled={disabled}
               >
                 {showPassword ? (
@@ -136,7 +144,12 @@ export default function FormField({
             )}
             {isMaskedValue && !isEditing && (
               <p className="mt-1 text-xs text-blue-600 dark:text-blue-400">
-                Value is set. Enter new value to change.
+                ✓ Password is set (hidden for security). Click to enter a new password.
+              </p>
+            )}
+            {isEditing && (
+              <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                💡 Click the <Eye className="inline h-3 w-3" /> icon to show/hide password while typing
               </p>
             )}
           </div>

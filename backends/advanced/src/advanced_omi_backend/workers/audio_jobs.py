@@ -26,6 +26,7 @@ async def audio_streaming_persistence_job(
     session_id: str,
     user_id: str,
     client_id: str,
+    always_persist: bool = False,
     *,
     redis_client=None
 ) -> Dict[str, Any]:
@@ -41,6 +42,7 @@ async def audio_streaming_persistence_job(
         session_id: Stream session ID
         user_id: User ID
         client_id: Client ID
+        always_persist: Whether to create placeholder conversation immediately (default: False)
         redis_client: Redis client (injected by decorator)
 
     Returns:
@@ -67,6 +69,53 @@ async def audio_streaming_persistence_job(
         if "BUSYGROUP" not in str(e):
             logger.warning(f"Failed to create audio consumer group: {e}")
         logger.debug(f"Audio consumer group already exists for {audio_stream_name}")
+
+    # If always_persist enabled, create placeholder conversation if it doesn't exist
+    if always_persist:
+        conversation_key = f"conversation:current:{session_id}"
+        existing_conversation_id = await redis_client.get(conversation_key)
+
+        if not existing_conversation_id:
+            logger.info(
+                f"📝 always_persist=True - creating placeholder conversation for session {session_id[:12]}"
+            )
+
+            # Import conversation model
+            from advanced_omi_backend.models.conversation import Conversation
+
+            # Create placeholder conversation
+            conversation = Conversation(
+                user_id=user_id,
+                client_id=client_id,
+                title="Audio Recording (Processing...)",
+                summary="Transcription in progress...",
+                transcript_versions=[],
+                memory_versions=[],
+                processing_status="pending_transcription",
+                always_persist=True
+            )
+            await conversation.insert()
+
+            # Set conversation:current Redis key
+            await redis_client.set(
+                conversation_key,
+                conversation.conversation_id,
+                ex=3600  # 1 hour expiry
+            )
+
+            logger.info(
+                f"✅ Created placeholder conversation {conversation.conversation_id} "
+                f"and set Redis key {conversation_key}"
+            )
+        else:
+            logger.info(
+                f"📋 always_persist=True - placeholder conversation already exists: "
+                f"{existing_conversation_id.decode()}"
+            )
+    else:
+        logger.info(
+            f"🔍 always_persist=False - will wait for speech detection to create conversation"
+        )
 
     # Job control
     session_key = f"audio:session:{session_id}"
@@ -384,8 +433,10 @@ async def audio_streaming_persistence_job(
     # Clean up Redis tracking keys
     audio_job_key = f"audio_persistence:session:{session_id}"
     await redis_client.delete(audio_job_key)
-    conversation_key = f"conversation:current:{session_id}"
-    await redis_client.delete(conversation_key)
+
+    # NOTE: Do NOT delete conversation:current:{session_id} key here!
+    # It's needed for speech detection to reuse placeholder conversations (always_persist feature).
+    # The key already has a TTL (3600s) set when created and will expire automatically.
     logger.info(f"🧹 Cleaned up tracking keys for session {session_id}")
 
     return {

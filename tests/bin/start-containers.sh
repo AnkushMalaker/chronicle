@@ -23,6 +23,14 @@ if [ ! -f "$TESTS_DIR/setup/.env.test" ]; then
     fi
 fi
 
+# Load environment variables from .env.test (API keys, etc.)
+if [ -f "$TESTS_DIR/setup/.env.test" ]; then
+    echo "📝 Loading environment variables from .env.test..."
+    set -a
+    source "$TESTS_DIR/setup/.env.test"
+    set +a
+fi
+
 # Start containers
 echo "🐳 Starting Docker containers..."
 docker compose -f docker-compose-test.yml up -d

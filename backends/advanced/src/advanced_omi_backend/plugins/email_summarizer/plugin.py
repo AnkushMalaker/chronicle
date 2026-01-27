@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.database import get_database
 from advanced_omi_backend.llm_client import async_generate
+from advanced_omi_backend.utils.logging_utils import mask_dict
 
 from ..base import BasePlugin, PluginContext, PluginResult
 from .email_service import SMTPEmailService
@@ -342,6 +343,9 @@ class EmailSummarizerPlugin(BasePlugin):
                 'from_name': config.get('from_name', 'Chronicle AI'),
             }
 
+            # Log config with masked secrets for debugging
+            logger.debug(f"SMTP config for testing: {mask_dict(smtp_config)}")
+
             # Create temporary email service instance
             email_service = SMTPEmailService(smtp_config)
 
@@ -373,8 +377,23 @@ class EmailSummarizerPlugin(BasePlugin):
 
         except Exception as e:
             logger.error(f"SMTP connection test failed: {e}", exc_info=True)
+            error_msg = str(e)
+            
+            # Provide helpful hints based on error type
+            hints = []
+            if "Authentication" in error_msg or "535" in error_msg:
+                hints.append("For Gmail: Enable 2FA and create an App Password at https://myaccount.google.com/apppasswords")
+                hints.append("Verify your username and password are correct")
+            elif "Connection" in error_msg or "timeout" in error_msg.lower():
+                hints.append("Check your SMTP host and port settings")
+                hints.append("Verify firewall/network allows outbound SMTP connections")
+            elif "TLS" in error_msg or "SSL" in error_msg:
+                hints.append("For port 587: Enable TLS")
+                hints.append("For port 465: Disable TLS (uses implicit SSL)")
+            
             return {
                 "success": False,
-                "message": f"Connection test failed: {str(e)}",
-                "status": "error"
+                "message": f"Connection test failed: {error_msg}",
+                "status": "error",
+                "hints": hints
             }

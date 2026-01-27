@@ -38,6 +38,8 @@ interface ConversationVersionDropdownProps {
     memory_count: number
     active_transcript_version?: string
     active_memory_version?: string
+    active_transcript_version_number?: number
+    active_memory_version_number?: number
   }
   onVersionChange: () => void
 }
@@ -135,9 +137,9 @@ export default function ConversationVersionDropdown({
             className="flex items-center space-x-1 px-3 py-1 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-600 rounded text-blue-700 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/30"
           >
             <span>
-              Transcript: v{versionHistory ?
-                versionHistory.transcript_versions.findIndex(v => v.version_id === versionHistory.active_transcript_version) + 1 :
-                1
+              Transcript: {versionHistory ?
+                `v${versionHistory.transcript_versions.findIndex(v => v.version_id === versionHistory.active_transcript_version) + 1}` :
+                (versionInfo?.active_transcript_version_number ? `v${versionInfo.active_transcript_version_number}` : '-')
               }
             </span>
             <ChevronDown className="h-3 w-3" />
@@ -197,9 +199,9 @@ export default function ConversationVersionDropdown({
             className="flex items-center space-x-1 px-3 py-1 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-600 rounded text-green-700 dark:text-green-300 hover:bg-green-100 dark:hover:bg-green-900/30"
           >
             <span>
-              Memory: v{versionHistory ?
-                versionHistory.memory_versions.findIndex(v => v.version_id === versionHistory.active_memory_version) + 1 :
-                1
+              Memory: {versionHistory ?
+                `v${versionHistory.memory_versions.findIndex(v => v.version_id === versionHistory.active_memory_version) + 1}` :
+                (versionInfo?.active_memory_version_number ? `v${versionInfo.active_memory_version_number}` : '-')
               }
             </span>
             <ChevronDown className="h-3 w-3" />

@@ -31,6 +31,8 @@ interface Conversation {
   active_memory_version?: string
   transcript_version_count?: number
   memory_version_count?: number
+  active_transcript_version_number?: number
+  active_memory_version_number?: number
   deleted?: boolean
   deletion_reason?: string
   deleted_at?: string
@@ -719,7 +721,9 @@ export default function Conversations() {
                     transcript_count: conversation.transcript_version_count || 0,
                     memory_count: conversation.memory_version_count || 0,
                     active_transcript_version: conversation.active_transcript_version,
-                    active_memory_version: conversation.active_memory_version
+                    active_memory_version: conversation.active_memory_version,
+                    active_transcript_version_number: conversation.active_transcript_version_number,
+                    active_memory_version_number: conversation.active_memory_version_number
                   }}
                   onVersionChange={async () => {
                     // Update only this specific conversation without reloading all conversations

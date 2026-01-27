@@ -164,6 +164,32 @@ services:
     profiles:
       - speaker  # Optional service - only start when explicitly enabled
 
+  mock-streaming-stt:
+    build:
+      context: ../..
+      dockerfile: tests/Dockerfile.mock-streaming-stt
+    ports:
+      - "9999:9999"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.connect(('localhost',9999)); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  mock-llm:
+    build:
+      context: ../..
+      dockerfile: tests/Dockerfile.mock-llm
+    ports:
+      - "11435:11435"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:11435/health').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
   workers-test:
     build:
       context: .

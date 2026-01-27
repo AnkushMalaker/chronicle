@@ -98,6 +98,45 @@ Open Audio Stream
     Log    Started audio stream ${stream_id} for device ${device_name}
     RETURN    ${stream_id}
 
+Open Audio Stream With Always Persist
+    [Documentation]    Start a WebSocket audio stream with always_persist=True
+    ...                This ensures audio is saved to MongoDB even if transcription fails.
+    ...                Returns stream_id for sending chunks.
+    [Arguments]    ${device_name}=robot-test    ${recording_mode}=streaming
+
+    ${token}=    Get Authentication Token    api    ${ADMIN_EMAIL}    ${ADMIN_PASSWORD}
+
+    ${stream_id}=    Start Audio Stream
+    ...    base_url=${API_URL}
+    ...    token=${token}
+    ...    device_name=${device_name}
+    ...    recording_mode=${recording_mode}
+    ...    always_persist=${True}
+
+    Log    Started audio stream ${stream_id} with always_persist=True
+    RETURN    ${stream_id}
+
+Stream Audio File With Always Persist
+    [Documentation]    Stream a WAV file via WebSocket with always_persist=True
+    ...                This ensures audio is saved to MongoDB even if transcription fails.
+    [Arguments]    ${audio_file_path}    ${device_name}=robot-test    ${recording_mode}=streaming
+
+    File Should Exist    ${audio_file_path}
+
+    ${token}=    Get Authentication Token    api    ${ADMIN_EMAIL}    ${ADMIN_PASSWORD}
+
+    ${chunks_sent}=    Stream Audio File
+    ...    base_url=${API_URL}
+    ...    token=${token}
+    ...    wav_path=${audio_file_path}
+    ...    device_name=${device_name}
+    ...    recording_mode=${recording_mode}
+    ...    always_persist=${True}
+
+    Log    Streamed ${chunks_sent} chunks with always_persist=True
+    Should Be True    ${chunks_sent} > 0
+    RETURN    ${chunks_sent}
+
 Send Audio Chunks To Stream
     [Documentation]    Send audio chunks from a file to an open stream
     [Arguments]    ${stream_id}    ${audio_file_path}    ${num_chunks}=${None}    ${realtime_pacing}=False

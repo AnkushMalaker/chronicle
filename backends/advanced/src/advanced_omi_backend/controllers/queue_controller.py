@@ -325,7 +325,8 @@ def all_jobs_complete_for_client(client_id: str) -> bool:
 def start_streaming_jobs(
     session_id: str,
     user_id: str,
-    client_id: str
+    client_id: str,
+    always_persist: bool = False
 ) -> Dict[str, str]:
     """
     Enqueue jobs for streaming audio session (initial session setup).
@@ -338,6 +339,7 @@ def start_streaming_jobs(
         session_id: Stream session ID (equals client_id for streaming)
         user_id: User identifier
         client_id: Client identifier
+        always_persist: Whether to create placeholder conversation immediately (default: False)
 
     Returns:
         Dict with job IDs: {'speech_detection': job_id, 'audio_persistence': job_id}
@@ -386,6 +388,7 @@ def start_streaming_jobs(
         session_id,
         user_id,
         client_id,
+        always_persist,
         job_timeout=86400,  # 24 hours for all-day sessions
         ttl=None,  # No pre-run expiry (job can wait indefinitely in queue)
         result_ttl=JOB_RESULT_TTL,  # Cleanup AFTER completion

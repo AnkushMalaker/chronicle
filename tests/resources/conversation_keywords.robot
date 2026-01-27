@@ -178,3 +178,45 @@ Conversation Should Have End Reason
     ${actual_end_reason}=    Set Variable    ${conversation}[end_reason]
     Should Be Equal As Strings    ${actual_end_reason}    ${expected_end_reason}
     ...    msg=Expected end_reason '${expected_end_reason}', got '${actual_end_reason}'
+
+Verify Conversation Processing Status
+    [Documentation]    Verify conversation has expected processing_status value
+    [Arguments]    ${conversation_id}    ${expected_status}
+
+    ${conversation}=    Get Conversation By ID    ${conversation_id}
+
+    Should Contain    ${conversation}    processing_status
+    Should Be Equal As Strings    ${conversation}[processing_status]    ${expected_status}
+    ...    Expected processing_status='${expected_status}', got '${conversation}[processing_status]'
+
+    Log    ✅ Conversation ${conversation_id} has processing_status='${expected_status}'
+
+Verify Conversation Always Persist Flag
+    [Documentation]    Verify conversation has always_persist=True
+    [Arguments]    ${conversation_id}
+
+    ${conversation}=    Get Conversation By ID    ${conversation_id}
+
+    Should Contain    ${conversation}    always_persist
+    Should Be True    ${conversation}[always_persist]
+    ...    Expected always_persist=True, got ${conversation}[always_persist]
+
+    Log    ✅ Conversation ${conversation_id} has always_persist=True
+
+Verify Placeholder Conversation Title
+    [Documentation]    Verify conversation has placeholder title
+    [Arguments]    ${conversation_id}
+
+    ${conversation}=    Get Conversation By ID    ${conversation_id}
+
+    # Placeholder title can be either "Processing..." or "Transcription Failed"
+    ${title}=    Set Variable    ${conversation}[title]
+    ${has_processing}=    Run Keyword And Return Status    Should Contain    ${title}    Processing
+    ${has_failed}=    Run Keyword And Return Status    Should Contain    ${title}    Transcription Failed
+
+    ${is_placeholder}=    Evaluate    ${has_processing} or ${has_failed}
+
+    Should Be True    ${is_placeholder}
+    ...    Expected placeholder title, got: ${title}
+
+    Log    ✅ Conversation has placeholder title: ${title}

@@ -524,8 +524,8 @@ class StreamingTranscriptionConsumer:
                     asyncio.create_task(self.process_stream(stream_name))
                     logger.info(f"✅ Now consuming from {stream_name} (group: {self.group_name})")
 
-                # Sleep before next discovery cycle
-                await asyncio.sleep(5)
+                # Sleep before next discovery cycle (1s for fast discovery)
+                await asyncio.sleep(1)
 
         except Exception as e:
             logger.error(f"Fatal error in consumer main loop: {e}", exc_info=True)

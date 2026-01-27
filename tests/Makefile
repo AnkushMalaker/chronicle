@@ -13,11 +13,28 @@ OUTPUTDIR ?= results
 TEST_DIR = endpoints integration infrastructure
 SERVICE ?= chronicle-backend-test
 
+# Test configuration file (set this to use different configs)
+# Can be overridden with CONFIG variable for convenience
+# Examples:
+#   make test CONFIG=deepgram-openai.yml
+#   make test-quick CONFIG=mock-services.yml
+#   make start CONFIG=/app/test-configs/custom.yml
+ifdef CONFIG
+  # If CONFIG is just a filename, prepend the path
+  ifeq ($(findstring /,$(CONFIG)),)
+    export TEST_CONFIG_FILE = /app/test-configs/$(CONFIG)
+  else
+    export TEST_CONFIG_FILE = $(CONFIG)
+  endif
+else
+  export TEST_CONFIG_FILE ?= /app/test-configs/mock-services.yml
+endif
+
 help:
 	@echo "Chronicle Test Targets:"
 	@echo ""
 	@echo "Quick Commands:"
-	@echo "  make test          - Start containers + run all tests (excludes slow/sdk)"
+	@echo "  make test          - Start containers + run tests (excludes slow/sdk/API)"
 	@echo "  make test-quick    - Run tests on existing containers"
 	@echo "  make start         - Start test containers"
 	@echo "  make stop          - Stop containers (keep volumes)"
@@ -27,7 +44,7 @@ help:
 	@echo "  make status        - Show container status"
 	@echo ""
 	@echo "Running Tests:"
-	@echo "  make all         - Run all tests (excludes slow/sdk)"
+	@echo "  make all         - Run all tests (excludes slow/sdk/API)"
 	@echo "  make endpoints   - Run only endpoint tests"
 	@echo "  make integration - Run only integration tests"
 	@echo "  make infra       - Run only infrastructure tests"
@@ -35,6 +52,7 @@ help:
 	@echo "Special Test Tags:"
 	@echo "  make test-slow                    - Run ONLY slow tests (backend restarts)"
 	@echo "  make test-sdk                     - Run ONLY SDK tests (unreleased)"
+	@echo "  make test-with-api-keys           - Run ONLY tests requiring API keys"
 	@echo "  make test-all-with-slow-and-sdk   - Run ALL tests including excluded"
 	@echo ""
 	@echo "Container Management:"
@@ -57,25 +75,35 @@ help:
 	@echo "  make clean-all   - Clean results + containers (saves logs)"
 	@echo ""
 	@echo "Environment Variables:"
-	@echo "  OUTPUTDIR        - Output directory (default: results)"
-	@echo "  SERVICE          - Service name for logs (default: chronicle-backend-test)"
+	@echo "  OUTPUTDIR - Output directory (default: results)"
+	@echo "  SERVICE   - Service name for logs (default: chronicle-backend-test)"
+	@echo "  CONFIG    - Config file to use (e.g., deepgram-openai.yml or full path)"
+	@echo ""
+	@echo "Config Options:"
+	@echo "  mock-services.yml              - No API keys (default, excludes API tests)"
+	@echo "  deepgram-openai.yml            - Real API keys (required for API tests)"
+	@echo "  mock-transcription-failure.yml - Test transcription failure scenarios"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make test                                  # Full workflow"
-	@echo "  make endpoints                             # Only endpoint tests"
-	@echo "  make start-rebuild                         # After code changes"
+	@echo "  make test                          # Default (no API keys)"
+	@echo "  make test-with-api-keys            # Auto-switches to deepgram config"
+	@echo "  make test CONFIG=deepgram-openai.yml  # Custom config"
+	@echo "  make endpoints CONFIG=mock-services.yml  # Endpoint tests with mock"
+	@echo "  make start-rebuild CONFIG=custom.yml     # Rebuild with custom config"
 	@echo "  make containers-logs SERVICE=workers-test  # View worker logs"
+	@echo "  make show-config                   # Show current config"
 
-# Run all tests (excludes slow and sdk tests for faster feedback)
+# Run all tests (excludes slow, sdk, and requires-api-keys tests for faster feedback)
 # Creates a persistent fixture conversation that won't be deleted between suites
 all:
-	@echo "Running all tests (excluding slow and sdk tests)..."
+	@echo "Running all tests (excluding slow, sdk, and requires-api-keys tests)..."
 	CREATE_FIXTURE=true uv run --with-requirements test-requirements.txt robot --outputdir $(OUTPUTDIR) \
 		--name "All Tests" \
 		--console verbose \
 		--loglevel INFO:INFO \
 		--exclude slow \
 		--exclude sdk \
+		--exclude requires-api-keys \
 		$(TEST_DIR)
 
 # Run only endpoint tests
@@ -104,6 +132,15 @@ infra:
 		--console verbose \
 		--loglevel INFO:INFO \
 		infrastructure
+
+# Show current test configuration
+show-config:
+	@echo "Current Test Configuration:"
+	@echo "  TEST_CONFIG_FILE = $(TEST_CONFIG_FILE)"
+	@echo ""
+	@echo "To change config:"
+	@echo "  make test CONFIG=deepgram-openai.yml"
+	@echo "  make test CONFIG=/path/to/custom.yml"
 
 # Clean up test output files
 clean:
@@ -165,9 +202,23 @@ logs: containers-logs
 # ============================================================================
 
 # Full workflow: start containers + run all tests
-test: containers-start all
+# If CONFIG is specified and differs from running containers, recreates them
+test:
+	@if docker compose -f ../backends/advanced/docker-compose-test.yml ps chronicle-backend-test 2>/dev/null | grep -q "Up"; then \
+		echo "ℹ️  Containers already running"; \
+		if [ "$(CONFIG)" != "" ]; then \
+			echo "🔄 CONFIG specified - will recreate containers to apply new config"; \
+			$(MAKE) containers-stop; \
+			$(MAKE) containers-start; \
+		else \
+			echo "✅ Using existing containers (use CONFIG=... to switch config)"; \
+		fi \
+	else \
+		$(MAKE) containers-start; \
+	fi
+	@$(MAKE) all
 
-# Quick workflow: run tests on existing containers
+# Quick workflow: run tests on existing containers (ignores CONFIG changes)
 test-quick: all
 
 # Run ONLY slow tests (backend restarts, long timeouts)
@@ -188,6 +239,27 @@ test-sdk:
 		--console verbose \
 		--loglevel INFO:INFO \
 		--include sdk \
+		$(TEST_DIR)
+
+# Run ONLY tests that require API keys (Deepgram + OpenAI)
+# Automatically switches to deepgram-openai.yml config
+test-with-api-keys:
+	@echo "🔄 Switching to deepgram-openai.yml config..."
+	@if [ -z "$$DEEPGRAM_API_KEY" ] || [ -z "$$OPENAI_API_KEY" ]; then \
+		echo "❌ Error: DEEPGRAM_API_KEY and OPENAI_API_KEY must be set"; \
+		echo "   export DEEPGRAM_API_KEY='your-key-here'"; \
+		echo "   export OPENAI_API_KEY='your-key-here'"; \
+		exit 1; \
+	fi
+	@$(MAKE) containers-stop
+	@TEST_CONFIG_FILE=/app/test-configs/deepgram-openai.yml $(MAKE) containers-start
+	@echo "✅ Containers running with deepgram-openai.yml"
+	@echo "🧪 Running API key tests..."
+	CREATE_FIXTURE=true uv run --with-requirements test-requirements.txt robot --outputdir $(OUTPUTDIR) \
+		--name "API Key Tests" \
+		--console verbose \
+		--loglevel INFO:INFO \
+		--include requires-api-keys \
 		$(TEST_DIR)
 
 # Run ALL tests including slow and SDK tests

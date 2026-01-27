@@ -10,6 +10,8 @@ interface ConversationVersionHeaderProps {
     memory_count: number;
     active_transcript_version?: string;
     active_memory_version?: string;
+    active_transcript_version_number?: number;
+    active_memory_version_number?: number;
   };
   onVersionChange?: () => void;
 }

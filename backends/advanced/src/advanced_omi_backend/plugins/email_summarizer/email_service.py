@@ -14,6 +14,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any, Dict, Optional
 
+from advanced_omi_backend.utils.logging_utils import mask_dict
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,10 +51,13 @@ class SMTPEmailService:
                 "smtp_password, from_email"
             )
 
+        # Log configuration with masked secrets
+        masked_config = mask_dict(config)
         logger.info(
             f"SMTP Email Service initialized: {self.username}@{self.host}:{self.port} "
             f"(TLS: {self.use_tls})"
         )
+        logger.debug(f"SMTP config: {masked_config}")
 
     async def send_email(
         self,
@@ -151,25 +156,38 @@ class SMTPEmailService:
         Raises:
             Exception: If connection fails
         """
-        if self.use_tls:
-            smtp_server = smtplib.SMTP(self.host, self.port, timeout=10)
-            smtp_server.ehlo()
-            smtp_server.starttls()
-            smtp_server.ehlo()
-        else:
-            smtp_server = smtplib.SMTP(self.host, self.port, timeout=10)
-
         try:
-            smtp_server.login(self.username, self.password)
-            logger.debug("SMTP authentication successful")
-        finally:
-            smtp_server.quit()
+            if self.use_tls:
+                smtp_server = smtplib.SMTP(self.host, self.port, timeout=10)
+                smtp_server.ehlo()
+                smtp_server.starttls()
+                smtp_server.ehlo()
+            else:
+                smtp_server = smtplib.SMTP(self.host, self.port, timeout=10)
+
+            try:
+                smtp_server.login(self.username, self.password)
+                logger.debug("SMTP authentication successful")
+            finally:
+                smtp_server.quit()
+        except smtplib.SMTPAuthenticationError as e:
+            # Note: Error message from smtplib should not contain password, but be cautious
+            raise Exception(f"SMTP Authentication failed for {self.username}. Check credentials. For Gmail, use an App Password instead of your regular password. Error: {str(e)}")
+        except smtplib.SMTPConnectError as e:
+            raise Exception(f"Failed to connect to SMTP server {self.host}:{self.port}. Check host and port. Error: {str(e)}")
+        except smtplib.SMTPServerDisconnected as e:
+            raise Exception(f"SMTP server disconnected unexpectedly. Check TLS settings (port 587 needs TLS, port 465 needs SSL). Error: {str(e)}")
+        except TimeoutError as e:
+            raise Exception(f"Connection to {self.host}:{self.port} timed out. Check firewall/network settings. Error: {str(e)}")
+        except Exception as e:
+            raise Exception(f"SMTP connection test failed: {type(e).__name__}: {str(e)}")
 
 
 # Test script for development/debugging
 async def main():
     """Test the SMTP email service."""
     import os
+
     from dotenv import load_dotenv
 
     load_dotenv()

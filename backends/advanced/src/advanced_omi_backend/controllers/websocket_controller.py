@@ -16,6 +16,7 @@ from functools import partial
 from typing import Optional
 
 from fastapi import WebSocket, WebSocketDisconnect, Query
+from starlette.websockets import WebSocketState
 from friend_lite.decoder import OmiOpusDecoder
 import redis.asyncio as redis
 
@@ -266,6 +267,26 @@ async def cleanup_client_state(client_id: str):
         stream_pattern = f"audio:stream:{client_id}"
         stream_key = await async_redis.exists(stream_pattern)
         if stream_key:
+            # Check how many messages are in the stream
+            stream_length = await async_redis.xlen(stream_pattern)
+
+            # Check for pending messages in consumer groups
+            pending_count = 0
+            try:
+                # Check streaming-transcription consumer group for pending messages
+                pending_info = await async_redis.xpending(stream_pattern, "streaming-transcription")
+                if pending_info:
+                    pending_count = pending_info.get('pending', 0)
+            except Exception as e:
+                # Consumer group might not exist yet - that's ok
+                logger.debug(f"No consumer group for {stream_pattern}: {e}")
+
+            if stream_length > 0 or pending_count > 0:
+                logger.warning(
+                    f"⚠️ Closing {stream_pattern} with unprocessed data: "
+                    f"{stream_length} messages in stream, {pending_count} pending in consumer group"
+                )
+
             await async_redis.expire(stream_pattern, 60)  # 60 second TTL for consumer group fan-out
             logger.info(f"⏰ Set 60s TTL on Redis stream: {stream_pattern}")
         else:
@@ -378,6 +399,10 @@ async def _initialize_streaming_session(
     Returns:
         Interim results subscriber task if websocket provided and session initialized, None otherwise
     """
+    application_logger.info(
+        f"🔴 BACKEND: _initialize_streaming_session called for {client_id}"
+    )
+
     if hasattr(client_state, 'stream_session_id'):
         application_logger.debug(f"Session already initialized for {client_id}")
         return None
@@ -426,10 +451,14 @@ async def _initialize_streaming_session(
     # Enqueue streaming jobs (speech detection + audio persistence)
     from advanced_omi_backend.controllers.queue_controller import start_streaming_jobs
 
+    # Get always_persist flag from client state
+    always_persist_flag = getattr(client_state, 'always_persist', False)
+
     job_ids = start_streaming_jobs(
         session_id=client_state.stream_session_id,
         user_id=user_id,
-        client_id=client_id
+        client_id=client_id,
+        always_persist=always_persist_flag
     )
 
     # Store job IDs in Redis session (not in ClientState)
@@ -438,6 +467,9 @@ async def _initialize_streaming_session(
         speech_detection_job_id=job_ids['speech_detection'],
         audio_persistence_job_id=job_ids['audio_persistence']
     )
+
+    # Note: Placeholder conversation creation (if always_persist=True) is now handled
+    # by the audio persistence job itself, making it self-sufficient.
 
     # Launch interim results subscriber if WebSocket provided
     subscriber_task = None
@@ -682,7 +714,7 @@ async def _handle_batch_mode_audio(
     client_id: str
 ) -> None:
     """
-    Handle audio chunk in batch mode - accumulate in memory.
+    Handle audio chunk in batch mode with rolling 30-minute limit.
 
     Args:
         client_state: Client state object
@@ -694,13 +726,52 @@ async def _handle_batch_mode_audio(
     if not hasattr(client_state, 'batch_audio_chunks'):
         client_state.batch_audio_chunks = []
         client_state.batch_audio_format = audio_format
+        client_state.batch_audio_bytes = 0  # Track total bytes
+        client_state.batch_chunks_processed = 0  # Track how many batches processed
         application_logger.info(f"📦 Started batch audio accumulation for {client_id}")
 
     # Accumulate audio
     client_state.batch_audio_chunks.append(audio_data)
+    client_state.batch_audio_bytes += len(audio_data)
     application_logger.debug(
         f"📦 Accumulated chunk #{len(client_state.batch_audio_chunks)} ({len(audio_data)} bytes) for {client_id}"
     )
+
+    # Calculate duration: sample_rate * width * channels = bytes/second
+    sample_rate = audio_format.get("rate", 16000)
+    width = audio_format.get("width", 2)
+    channels = audio_format.get("channels", 1)
+    bytes_per_second = sample_rate * width * channels
+
+    accumulated_seconds = client_state.batch_audio_bytes / bytes_per_second
+    MAX_BATCH_SECONDS = 30 * 60  # 30 minutes
+
+    # Check if we've hit the 30-minute limit
+    if accumulated_seconds >= MAX_BATCH_SECONDS:
+        application_logger.warning(
+            f"⚠️ Batch accumulation reached 30-minute limit "
+            f"({accumulated_seconds:.1f}s, {client_state.batch_audio_bytes / 1024 / 1024:.1f} MB). "
+            f"Processing batch #{client_state.batch_chunks_processed + 1}..."
+        )
+
+        # Process this batch (will create conversation and transcribe)
+        await _process_rolling_batch(
+            client_state,
+            user_id=client_state.user_id,  # Need to store these on session start
+            user_email=client_state.user_email,
+            client_id=client_state.client_id,
+            batch_number=client_state.batch_chunks_processed + 1
+        )
+
+        # Clear buffer for next batch
+        client_state.batch_audio_chunks = []
+        client_state.batch_audio_bytes = 0
+        client_state.batch_chunks_processed += 1
+
+        application_logger.info(
+            f"✅ Rolled batch #{client_state.batch_chunks_processed}. "
+            f"Starting fresh accumulation for next 30 minutes."
+        )
 
 
 async def _handle_audio_chunk(
@@ -747,28 +818,88 @@ async def _handle_audio_chunk(
 async def _handle_audio_session_start(
     client_state,
     audio_format: dict,
-    client_id: str
+    client_id: str,
+    websocket: Optional[WebSocket] = None
 ) -> tuple[bool, str]:
     """
-    Handle audio-start event - set mode and switch to audio streaming.
+    Handle audio-start event - validate mode, set recording mode, and extract always_persist flag.
 
     Args:
         client_state: Client state object
-        audio_format: Audio format dict with mode
+        audio_format: Audio format dict with mode and always_persist
         client_id: Client ID
+        websocket: Optional WebSocket connection (for WebUI error messages)
 
     Returns:
         (audio_streaming_flag, recording_mode)
     """
+    from advanced_omi_backend.services.transcription import is_transcription_available
+
     recording_mode = audio_format.get("mode", "batch")
+    always_persist = audio_format.get("always_persist", False)
+
+    application_logger.info(
+        f"🔴 BACKEND: Received audio-start for {client_id} - "
+        f"mode={recording_mode}, always_persist={always_persist}, full format={audio_format}"
+    )
+
+    # Store on client state for later use
     client_state.recording_mode = recording_mode
+    client_state.always_persist = always_persist
+
+    # VALIDATION: Check if streaming mode is available
+    if recording_mode == "streaming":
+        if not is_transcription_available("streaming"):
+            error_msg = (
+                "Streaming transcription not available. "
+                "Please use Batch mode or configure a streaming STT provider (defaults.stt_stream in config.yml)."
+            )
+
+            application_logger.warning(
+                f"⚠️ Streaming mode requested but stt_stream not configured for {client_id}"
+            )
+
+            # Send error to WebSocket client (for WebUI display)
+            if websocket and websocket.client_state == WebSocketState.CONNECTED:
+                try:
+                    error_response = {
+                        "type": "error",
+                        "error": "streaming_not_configured",
+                        "message": error_msg,
+                        "code": 400
+                    }
+                    await websocket.send_json(error_response)
+                    application_logger.info(f"📤 Sent streaming error to WebUI client {client_id}")
+
+                    # Close the websocket connection after sending error
+                    await websocket.close(code=1008, reason="Streaming transcription not configured")
+                    application_logger.info(f"🔌 Closed WebSocket connection for {client_id} due to streaming config error")
+
+                    # Raise ValueError to exit the handler completely
+                    raise ValueError(error_msg)
+                except ValueError:
+                    # Re-raise ValueError to exit handler
+                    raise
+                except Exception as e:
+                    application_logger.error(f"Failed to send error to client: {e}")
+                    # Still raise ValueError to exit handler
+                    raise ValueError(error_msg)
+
+            # For OMI devices (no websocket), fall back to batch mode silently
+            if not websocket:
+                application_logger.warning(
+                    f"🔄 OMI device {client_id} requested streaming but falling back to batch mode"
+                )
+                recording_mode = "batch"
+                client_state.recording_mode = recording_mode
 
     application_logger.info(
         f"🎙️ Audio session started for {client_id} - "
         f"Format: {audio_format.get('rate')}Hz, "
         f"{audio_format.get('width')}bytes, "
         f"{audio_format.get('channels')}ch, "
-        f"Mode: {recording_mode}"
+        f"Mode: {recording_mode}, "
+        f"Always Persist: {always_persist}"
     )
 
     return True, recording_mode  # Switch to audio streaming mode
@@ -808,6 +939,99 @@ async def _handle_audio_session_stop(
         )
 
     return False  # Switch back to control mode
+
+
+async def _process_rolling_batch(
+    client_state,
+    user_id: str,
+    user_email: str,
+    client_id: str,
+    batch_number: int
+) -> None:
+    """
+    Process accumulated batch audio as a rolling segment.
+
+    Creates conversation titled "Recording Part {batch_number}" and enqueues transcription.
+
+    Args:
+        client_state: Client state with batch_audio_chunks
+        user_id: User ID
+        user_email: User email
+        client_id: Client ID
+        batch_number: Sequential batch number (1, 2, 3...)
+    """
+    if not hasattr(client_state, 'batch_audio_chunks') or not client_state.batch_audio_chunks:
+        application_logger.warning(f"⚠️ No audio chunks to process for rolling batch")
+        return
+
+    try:
+        from advanced_omi_backend.models.conversation import create_conversation
+        from advanced_omi_backend.utils.audio_chunk_utils import convert_audio_to_chunks
+
+        # Combine chunks
+        complete_audio = b''.join(client_state.batch_audio_chunks)
+        application_logger.info(
+            f"📦 Rolling batch #{batch_number}: Combined {len(client_state.batch_audio_chunks)} chunks "
+            f"into {len(complete_audio)} bytes"
+        )
+
+        # Get audio format
+        audio_format = getattr(client_state, 'batch_audio_format', {})
+        sample_rate = audio_format.get("rate", 16000)
+        width = audio_format.get("width", 2)
+        channels = audio_format.get("channels", 1)
+
+        # Create conversation with batch number in title
+        conversation = create_conversation(
+            user_id=user_id,
+            client_id=client_id,
+            title=f"Recording Part {batch_number}",
+            summary="Rolling batch processing..."
+        )
+        await conversation.insert()
+        conversation_id = conversation.conversation_id  # Get the auto-generated ID
+
+        # Convert to MongoDB chunks
+        num_chunks = await convert_audio_to_chunks(
+            conversation_id=conversation_id,
+            audio_data=complete_audio,
+            sample_rate=sample_rate,
+            channels=channels,
+            sample_width=width
+        )
+
+        # Enqueue transcription job
+        from advanced_omi_backend.controllers.queue_controller import (
+            transcription_queue,
+            JOB_RESULT_TTL
+        )
+        from advanced_omi_backend.workers.transcription_jobs import transcribe_full_audio_job
+
+        version_id = str(uuid.uuid4())
+        transcribe_job_id = f"transcribe_rolling_{conversation_id[:12]}_{batch_number}"
+
+        transcription_job = transcription_queue.enqueue(
+            transcribe_full_audio_job,
+            conversation_id,
+            version_id,
+            f"rolling_batch_{batch_number}",  # trigger
+            job_timeout=1800,  # 30 minutes
+            result_ttl=JOB_RESULT_TTL,
+            job_id=transcribe_job_id,
+            description=f"Transcribe rolling batch #{batch_number} {conversation_id[:8]}",
+            meta={'conversation_id': conversation_id, 'client_id': client_id, 'batch_number': batch_number}
+        )
+
+        application_logger.info(
+            f"✅ Rolling batch #{batch_number} created conversation {conversation_id}, "
+            f"enqueued transcription job {transcription_job.id}"
+        )
+
+    except Exception as e:
+        application_logger.error(
+            f"❌ Failed to process rolling batch #{batch_number}: {e}",
+            exc_info=True
+        )
 
 
 async def _process_batch_audio_complete(
@@ -977,7 +1201,14 @@ async def handle_omi_websocket(
 
             if header["type"] == "audio-start":
                 # Handle audio session start
+                application_logger.info(f"🔴 BACKEND: Received audio-start in OMI MODE for {client_id} (header={header})")
                 application_logger.info(f"🎙️ OMI audio session started for {client_id}")
+
+                # Store user context on client state
+                client_state.user_id = user.user_id
+                client_state.user_email = user.email
+                client_state.client_id = client_id
+
                 interim_subscriber_task = await _initialize_streaming_session(
                     client_state,
                     audio_stream_producer,
@@ -1111,13 +1342,35 @@ async def handle_pcm_websocket(
                     application_logger.debug(f"✅ Received message type: {header.get('type')} for {client_id}")
 
                     if header["type"] == "audio-start":
+                        application_logger.info(f"🔴 BACKEND: Received audio-start in CONTROL MODE for {client_id}")
                         application_logger.debug(f"🎙️ Processing audio-start for {client_id}")
-                        # Handle audio session start using helper function
+
+                        # Store user context on client state for rolling batch processing
+                        client_state.user_id = user.user_id
+                        client_state.user_email = user.email
+                        client_state.client_id = client_id
+
+                        # Handle audio session start using helper function (pass websocket for error handling)
                         audio_streaming, recording_mode = await _handle_audio_session_start(
                             client_state,
                             header.get("data", {}),
-                            client_id
+                            client_id,
+                            websocket=ws  # Pass websocket for WebUI error display
                         )
+
+                        # Initialize streaming session (for always_persist and job setup)
+                        if recording_mode == "streaming":
+                            application_logger.info(f"🔴 BACKEND: Initializing streaming session for {client_id}")
+                            interim_subscriber_task = await _initialize_streaming_session(
+                                client_state,
+                                audio_stream_producer,
+                                user.user_id,
+                                user.email,
+                                client_id,
+                                header.get("data", {}),
+                                websocket=ws
+                            )
+
                         continue  # Continue to audio streaming mode
                     
                     elif header["type"] == "ping":

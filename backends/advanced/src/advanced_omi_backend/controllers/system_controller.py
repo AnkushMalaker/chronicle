@@ -127,7 +127,7 @@ async def get_config_diagnostics():
                         "component": "STT (Batch)",
                         "severity": "warning",
                         "message": f"{stt.name} ({stt.model_provider}) - No API key configured",
-                        "resolution": "Transcription will fail without API key"
+                        "resolution": "Transcription can fail without API key"
                     })
             else:
                 diagnostics["issues"].append({
@@ -150,7 +150,7 @@ async def get_config_diagnostics():
                         "component": "STT (Streaming)",
                         "severity": "warning",
                         "message": f"{stt_stream.name} ({stt_stream.model_provider}) - No API key configured",
-                        "resolution": "Real-time transcription will fail without API key"
+                        "resolution": "Real-time transcription can fail without API key"
                     })
             else:
                 diagnostics["warnings"].append({
@@ -172,7 +172,7 @@ async def get_config_diagnostics():
                         "component": "LLM",
                         "severity": "warning",
                         "message": f"{llm.name} ({llm.model_provider}) - No API key configured",
-                        "resolution": "Memory extraction will fail without API key"
+                        "resolution": "Memory extraction can fail without API key"
                     })
             
         else:

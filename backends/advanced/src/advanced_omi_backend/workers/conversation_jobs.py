@@ -222,19 +222,66 @@ async def open_conversation_job(
     current_job = get_current_job()
     current_job.meta = {}
     current_job.save_meta()
-    
-    # Create minimal streaming conversation (conversation_id auto-generated)
-    conversation = create_conversation(
-        user_id=user_id,
-        client_id=client_id,
-        title="Recording...",
-        summary="Transcribing audio...",
-    )
 
-    # Save to database
-    await conversation.insert()
-    conversation_id = conversation.conversation_id  # Get the auto-generated ID
-    logger.info(f"✅ Created streaming conversation {conversation_id} for session {session_id}")
+    # Check if a placeholder conversation already exists for this session
+    conversation_key = f"conversation:current:{session_id}"
+    existing_conversation_id_bytes = await redis_client.get(conversation_key)
+
+    logger.info(f"🔍 Checking for placeholder: key={conversation_key}, found={existing_conversation_id_bytes is not None}")
+
+    conversation = None
+    if existing_conversation_id_bytes:
+        existing_conversation_id = existing_conversation_id_bytes.decode()
+        logger.info(f"🔍 Found Redis key with conversation_id={existing_conversation_id}")
+
+        # Try to fetch the existing conversation by conversation_id
+        conversation = await Conversation.find_one(
+            Conversation.conversation_id == existing_conversation_id
+        )
+
+        if conversation:
+            always_persist = getattr(conversation, 'always_persist', False)
+            processing_status = getattr(conversation, 'processing_status', None)
+            logger.info(
+                f"🔍 Found conversation in DB: always_persist={always_persist}, "
+                f"processing_status={processing_status}"
+            )
+        else:
+            logger.warning(f"⚠️ Conversation {existing_conversation_id} not found in database!")
+
+        # Verify it's a placeholder conversation (always_persist=True, processing_status='pending_transcription')
+        if conversation and getattr(conversation, 'always_persist', False) and \
+           getattr(conversation, 'processing_status', None) == 'pending_transcription':
+            logger.info(
+                f"🔄 Reusing placeholder conversation {conversation.conversation_id} for session {session_id}"
+            )
+            # Update placeholder with active recording status
+            conversation.title = "Recording..."
+            conversation.summary = "Transcribing audio..."
+            await conversation.save()
+            conversation_id = conversation.conversation_id
+        else:
+            if conversation:
+                logger.info(
+                    f"⚠️ Found conversation {existing_conversation_id} but not a valid placeholder "
+                    f"(always_persist={getattr(conversation, 'always_persist', False)}, "
+                    f"processing_status={getattr(conversation, 'processing_status', None)}), creating new"
+                )
+            conversation = None
+    else:
+        logger.info(f"🔍 No Redis key found for {conversation_key}, creating new conversation")
+
+    # If no valid placeholder found, create new conversation
+    if not conversation:
+        conversation = create_conversation(
+            user_id=user_id,
+            client_id=client_id,
+            title="Recording...",
+            summary="Transcribing audio...",
+        )
+        await conversation.insert()
+        conversation_id = conversation.conversation_id
+        logger.info(f"✅ Created streaming conversation {conversation_id} for session {session_id}")
 
     # Link job metadata to conversation (cascading updates)
     current_job.meta["conversation_id"] = conversation_id
@@ -625,6 +672,14 @@ async def open_conversation_job(
         set_as_active=True
     )
 
+    # Update placeholder conversation if it exists
+    if getattr(conversation, 'always_persist', False) and getattr(conversation, 'processing_status', None) == "pending_transcription":
+        # Keep placeholder status - will be updated by title_summary_job
+        logger.info(
+            f"📝 Placeholder conversation {conversation_id} has transcript, "
+            f"waiting for title/summary generation"
+        )
+
     # Save conversation with streaming transcript
     await conversation.save()
     logger.info(
@@ -751,8 +806,28 @@ async def generate_title_summary_job(conversation_id: str, *, redis_client=None)
         logger.info(f"✅ Generated summary: '{conversation.summary}'")
         logger.info(f"✅ Generated detailed summary: {len(conversation.detailed_summary)} chars")
 
+        # Update processing status for placeholder conversations
+        if getattr(conversation, 'processing_status', None) == "pending_transcription":
+            conversation.processing_status = "completed"
+            logger.info(
+                f"✅ Updated placeholder conversation {conversation_id} "
+                f"processing_status to 'completed'"
+            )
+
     except Exception as gen_error:
         logger.error(f"❌ Title/summary generation failed: {gen_error}")
+
+        # Mark placeholder conversation as failed
+        if getattr(conversation, 'processing_status', None) == "pending_transcription":
+            conversation.title = "Audio Recording (Transcription Failed)"
+            conversation.summary = f"Title/summary generation failed: {str(gen_error)}"
+            conversation.processing_status = "transcription_failed"
+            await conversation.save()
+            logger.warning(
+                f"⚠️ Marked placeholder conversation {conversation_id} "
+                f"as transcription_failed (title/summary generation error). Audio is still saved."
+            )
+
         return {
             "success": False,
             "error": str(gen_error),

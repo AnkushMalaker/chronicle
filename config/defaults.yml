@@ -316,6 +316,10 @@ backend:
     provider: deepgram  # or parakeet
     api_key: ${oc.env:DEEPGRAM_API_KEY,''}
     base_url: https://api.deepgram.com
+    # Fallback to provider segments when speaker service unavailable
+    # When true: Use segments from transcription provider (e.g., mock provider in tests)
+    # When false: Expect speaker service to create segments via diarization (default production behavior)
+    use_provider_segments: false
 
   # Diarization settings
   diarization:

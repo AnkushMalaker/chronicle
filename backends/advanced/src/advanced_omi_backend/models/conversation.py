@@ -125,6 +125,16 @@ class Conversation(Document):
     deletion_reason: Optional[str] = Field(None, description="Reason for deletion (no_meaningful_speech, audio_file_not_ready, etc.)")
     deleted_at: Optional[datetime] = Field(None, description="When the conversation was marked as deleted")
 
+    # Always persist audio flag and processing status
+    processing_status: Optional[str] = Field(
+        None,
+        description="Processing status: pending_transcription, transcription_failed, completed"
+    )
+    always_persist: bool = Field(
+        default=False,
+        description="Flag indicating conversation was created for audio persistence"
+    )
+
     # Conversation completion tracking
     end_reason: Optional["Conversation.EndReason"] = Field(None, description="Reason why the conversation ended")
     completed_at: Optional[datetime] = Field(None, description="When the conversation was completed/closed")
@@ -255,6 +265,28 @@ class Conversation(Document):
     def memory_version_count(self) -> int:
         """Get count of memory versions."""
         return len(self.memory_versions)
+
+    @computed_field
+    @property
+    def active_transcript_version_number(self) -> Optional[int]:
+        """Get 1-based version number of the active transcript version."""
+        if not self.active_transcript_version:
+            return None
+        for i, version in enumerate(self.transcript_versions):
+            if version.version_id == self.active_transcript_version:
+                return i + 1
+        return None
+
+    @computed_field
+    @property
+    def active_memory_version_number(self) -> Optional[int]:
+        """Get 1-based version number of the active memory version."""
+        if not self.active_memory_version:
+            return None
+        for i, version in enumerate(self.memory_versions):
+            if version.version_id == self.active_memory_version:
+                return i + 1
+        return None
 
     def add_transcript_version(
         self,
