@@ -15,8 +15,14 @@ from urllib.parse import urlencode
 import httpx
 import websockets
 
+from advanced_omi_backend.config_loader import get_backend_config
 from advanced_omi_backend.model_registry import get_models_registry
-from .base import BaseTranscriptionProvider, BatchTranscriptionProvider, StreamingTranscriptionProvider
+
+from .base import (
+    BaseTranscriptionProvider,
+    BatchTranscriptionProvider,
+    StreamingTranscriptionProvider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -148,9 +154,15 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
             words = _dotted_get(data, extract.get("words")) or []
             segments = _dotted_get(data, extract.get("segments")) or []
 
-            # Ignore segments from all providers - speaker service creates them via diarization
-            segments = []
-            logger.debug(f"Transcription: Extracted {len(words)} words, ignoring provider segments (speaker service will create them)")
+            # Check config to decide whether to keep or discard provider segments
+            transcription_config = get_backend_config("transcription")
+            use_provider_segments = transcription_config.get("use_provider_segments", False)
+
+            if not use_provider_segments:
+                segments = []
+                logger.debug(f"Transcription: Extracted {len(words)} words, ignoring provider segments (use_provider_segments=false)")
+            else:
+                logger.debug(f"Transcription: Extracted {len(words)} words, keeping {len(segments)} provider segments (use_provider_segments=true)")
 
         return {"text": text, "words": words, "segments": segments}
 

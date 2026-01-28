@@ -1225,6 +1225,18 @@ export default function Conversations() {
                     <div>Memory Count: {conversation.memory_count || 0}</div>
                     <div>Client ID: {conversation.client_id}</div>
                   </div>
+
+                  {/* Raw Segments JSON */}
+                  {conversation.segments && conversation.segments.length > 0 && (
+                    <details className="mt-3 p-2 bg-gray-100 dark:bg-gray-800 rounded text-xs">
+                      <summary className="cursor-pointer font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100">
+                        Raw Segments ({conversation.segments.length})
+                      </summary>
+                      <pre className="mt-2 overflow-auto max-h-96 whitespace-pre-wrap text-gray-600 dark:text-gray-400 bg-white dark:bg-gray-900 p-2 rounded border border-gray-200 dark:border-gray-700">
+                        {JSON.stringify(conversation.segments, null, 2)}
+                      </pre>
+                    </details>
+                  )}
                 </div>
               )}
             </div>

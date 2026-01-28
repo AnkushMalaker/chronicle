@@ -1,8 +1,8 @@
 import { Mic, MicOff, Loader2 } from 'lucide-react'
-import { SimpleAudioRecordingReturn } from '../../hooks/useSimpleAudioRecording'
+import { RecordingContextType } from '../../contexts/RecordingContext'
 
 interface SimplifiedControlsProps {
-  recording: SimpleAudioRecordingReturn
+  recording: RecordingContextType
 }
 
 const getStepText = (step: string): string => {

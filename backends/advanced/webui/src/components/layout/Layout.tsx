@@ -2,6 +2,7 @@ import { Link, useLocation, Outlet } from 'react-router-dom'
 import { Music, MessageSquare, MessageCircle, Brain, Users, Upload, Settings, LogOut, Sun, Moon, Shield, Radio, Layers, Calendar, Puzzle, Zap } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
+import GlobalRecordingIndicator from './GlobalRecordingIndicator'
 
 export default function Layout() {
   const location = useLocation()
@@ -37,6 +38,9 @@ export default function Layout() {
               </h1>
             </div>
             <div className="flex items-center space-x-4">
+              {/* Global Recording Indicator */}
+              <GlobalRecordingIndicator />
+
               <button
                 onClick={toggleTheme}
                 className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors text-gray-600 dark:text-gray-300"
@@ -44,7 +48,7 @@ export default function Layout() {
               >
                 {isDark ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
               </button>
-              
+
               {/* User info */}
               <div className="flex items-center space-x-2 text-sm text-gray-700 dark:text-gray-300">
                 <div className="flex items-center space-x-1">

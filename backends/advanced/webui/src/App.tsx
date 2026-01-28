@@ -1,6 +1,7 @@
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
 import { AuthProvider } from './contexts/AuthContext'
 import { ThemeProvider } from './contexts/ThemeContext'
+import { RecordingProvider } from './contexts/RecordingContext'
 import Layout from './components/layout/Layout'
 import LoginPage from './pages/LoginPage'
 import Chat from './pages/Chat'
@@ -28,7 +29,8 @@ function App() {
     <ErrorBoundary>
       <ThemeProvider>
         <AuthProvider>
-          <Router basename={basename} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+          <RecordingProvider>
+            <Router basename={basename} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
             <Routes>
               <Route path="/login" element={<LoginPage />} />
               <Route path="/" element={
@@ -103,7 +105,8 @@ function App() {
                 } />
               </Route>
             </Routes>
-          </Router>
+            </Router>
+          </RecordingProvider>
         </AuthProvider>
       </ThemeProvider>
     </ErrorBoundary>
