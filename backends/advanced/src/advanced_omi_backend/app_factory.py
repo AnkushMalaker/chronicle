@@ -42,6 +42,52 @@ logger = logging.getLogger(__name__)
 application_logger = logging.getLogger("audio_processing")
 
 
+async def initialize_openmemory_user() -> None:
+    """Initialize and register OpenMemory user if using OpenMemory MCP provider.
+
+    This function:
+    - Checks if OpenMemory MCP is configured as the memory provider
+    - Registers the configured user with OpenMemory server
+    - Creates a test memory and deletes it to trigger user creation
+    - Logs success or warning if OpenMemory is not reachable
+    """
+    from advanced_omi_backend.services.memory.config import build_memory_config_from_env, MemoryProvider
+
+    memory_provider_config = build_memory_config_from_env()
+
+    if memory_provider_config.memory_provider != MemoryProvider.OPENMEMORY_MCP:
+        return
+
+    try:
+        from advanced_omi_backend.services.memory.providers.mcp_client import MCPClient
+
+        # Get configured user_id and server_url
+        openmemory_config = memory_provider_config.openmemory_config
+        user_id = openmemory_config.get("user_id", "openmemory") if openmemory_config else "openmemory"
+        server_url = openmemory_config.get("server_url", "http://host.docker.internal:8765") if openmemory_config else "http://host.docker.internal:8765"
+        client_name = openmemory_config.get("client_name", "chronicle") if openmemory_config else "chronicle"
+
+        application_logger.info(f"Registering OpenMemory user: {user_id} at {server_url}")
+
+        # Make a lightweight registration call (create and delete dummy memory)
+        async with MCPClient(server_url=server_url, client_name=client_name, user_id=user_id) as client:
+            # Test connection first
+            is_connected = await client.test_connection()
+            if is_connected:
+                # Create and immediately delete a dummy memory to trigger user creation
+                memory_ids = await client.add_memories("Chronicle initialization - user registration test")
+                if memory_ids:
+                    # Delete the test memory
+                    await client.delete_memory(memory_ids[0])
+                application_logger.info(f"✅ Registered OpenMemory user: {user_id}")
+            else:
+                application_logger.warning(f"⚠️  OpenMemory MCP not reachable at {server_url}")
+                application_logger.info("User will be auto-created on first memory operation")
+    except Exception as e:
+        application_logger.warning(f"⚠️  Could not register OpenMemory user: {e}")
+        application_logger.info("User will be auto-created on first memory operation")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan events."""
@@ -125,6 +171,9 @@ async def lifespan(app: FastAPI):
     # Skip memory service pre-initialization to avoid blocking FastAPI startup
     # Memory service will be lazily initialized when first used
     application_logger.info("Memory service will be initialized on first use (lazy loading)")
+
+    # Register OpenMemory user if using openmemory_mcp provider
+    await initialize_openmemory_user()
 
     # SystemTracker is used for monitoring and debugging
     application_logger.info("Using SystemTracker for monitoring and debugging")

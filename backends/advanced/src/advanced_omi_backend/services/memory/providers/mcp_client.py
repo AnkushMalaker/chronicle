@@ -61,7 +61,7 @@ class MCPClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
     
-    async def add_memories(self, text: str) -> List[str]:
+    async def add_memories(self, text: str, metadata: Dict[str, Any] = None) -> List[str]:
         """Add memories to the OpenMemory server.
         
         Uses the REST API to create memories. OpenMemory will handle:
@@ -109,17 +109,22 @@ class MCPClient:
                 memory_logger.error("No apps found in OpenMemory - cannot create memory")
                 raise MCPError("No apps found in OpenMemory")
 
+            # Merge custom metadata with default metadata
+            default_metadata = {
+                "source": "chronicle",
+                "client": self.client_name,
+                "user_email": self.user_email
+            }
+            if metadata:
+                default_metadata.update(metadata)
+
             # Use REST API endpoint for creating memories
             # The 'app' field can be either app name (string) or app UUID
             payload = {
                 "user_id": self.user_id,
                 "text": text,
-                "app": self.client_name,  # Use app name (OpenMemory accepts name or UUID)
-                "metadata": {
-                    "source": "friend_lite",
-                    "client": self.client_name,
-                    "user_email": self.user_email
-                },
+                "app": self.client_name,
+                "metadata": default_metadata,
                 "infer": True
             }
 
@@ -127,17 +132,7 @@ class MCPClient:
 
             response = await self.client.post(
                 f"{self.server_url}/api/v1/memories/",
-                json={
-                    "user_id": self.user_id,
-                    "text": text,
-                    "app": self.client_name,  # Use app name (OpenMemory accepts name or UUID)
-                    "metadata": {
-                        "source": "chronicle",
-                        "client": self.client_name,
-                        "user_email": self.user_email
-                    },
-                    "infer": True
-                }
+                json=payload
             )
 
             response_body = response.text[:500] if response.status_code != 200 else "..."

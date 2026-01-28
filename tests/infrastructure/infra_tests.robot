@@ -159,7 +159,7 @@ Worker Registration Loss Detection Test
     ...                - Health endpoint reports 0 workers when registration is lost
     ...                - Self-healing mechanism detects the issue
     ...                - Workers automatically re-register within monitoring interval
-    [Tags]    infra	queue
+    [Tags]    infra	queue	slow
 
     # Step 1: Verify workers are initially registered
     Log To Console    \n📊 Step 1: Check initial worker registration

@@ -142,25 +142,21 @@ class OpenMemoryMCPService(MemoryServiceBase):
                 memory_logger.info(f"Skipping empty transcript for {source_id}")
                 return True, []
             
-            # Pass Friend-Lite user details to OpenMemory for proper user tracking
-            # OpenMemory will auto-create users if they don't exist
-            original_user_id = self.mcp_client.user_id
-            original_user_email = self.mcp_client.user_email
-            self.mcp_client.user_id = user_id  # Use the actual Chronicle user's ID
-            self.mcp_client.user_email = user_email  # Use the actual user's email
+            # Use configured OpenMemory user (from config) for all Chronicle users
+            # Chronicle user_id and email are stored in metadata for filtering
+            enriched_transcript = f"[Source: {source_id}, Client: {client_id}] {transcript}"
 
-            try:
-                # Thin client approach: Send raw transcript to OpenMemory MCP server
-                # OpenMemory handles: extraction, deduplication, vector storage, ACL
-                enriched_transcript = f"[Source: {source_id}, Client: {client_id}] {transcript}"
+            memory_logger.info(f"Delegating memory processing to OpenMemory for user {user_id} (email: {user_email}), source {source_id}")
 
-                memory_logger.info(f"Delegating memory processing to OpenMemory for user {user_id} (email: {user_email}), source {source_id}")
-                memory_ids = await self.mcp_client.add_memories(text=enriched_transcript)
+            # Pass Chronicle user details in metadata for filtering/search
+            metadata = {
+                "chronicle_user_id": user_id,
+                "chronicle_user_email": user_email,
+                "source_id": source_id,
+                "client_id": client_id
+            }
 
-            finally:
-                # Restore original user context
-                self.mcp_client.user_id = original_user_id
-                self.mcp_client.user_email = original_user_email
+            memory_ids = await self.mcp_client.add_memories(text=enriched_transcript, metadata=metadata)
             
             # Update database relationships if helper provided
             if memory_ids and db_helper:
@@ -204,23 +200,27 @@ class OpenMemoryMCPService(MemoryServiceBase):
         """
         if not self._initialized:
             await self.initialize()
-        
-        # Update MCP client user context for this search operation
-        original_user_id = self.mcp_client.user_id
-        self.mcp_client.user_id = user_id  # Use the actual Chronicle user's ID
 
+        # Use configured OpenMemory user (not Chronicle user_id)
+        # Search all memories, then filter by chronicle_user_id in metadata
         try:
+            # Get more results since we'll filter by user
             results = await self.mcp_client.search_memory(
                 query=query,
-                limit=limit
+                limit=limit * 3  # Get extra to account for filtering
             )
 
-            # Convert MCP results to MemoryEntry objects
+            # Convert MCP results to MemoryEntry objects and filter by user
             memory_entries = []
             for result in results:
-                memory_entry = self._mcp_result_to_memory_entry(result, user_id)
-                if memory_entry:
-                    memory_entries.append(memory_entry)
+                # Check if memory belongs to this Chronicle user via metadata
+                metadata = result.get("metadata", {})
+                if metadata.get("chronicle_user_id") == user_id:
+                    memory_entry = self._mcp_result_to_memory_entry(result, user_id)
+                    if memory_entry:
+                        memory_entries.append(memory_entry)
+                        if len(memory_entries) >= limit:
+                            break  # Got enough results
 
             memory_logger.info(f"🔍 Found {len(memory_entries)} memories for query '{query}' (user: {user_id})")
             return memory_entries
@@ -231,9 +231,6 @@ class OpenMemoryMCPService(MemoryServiceBase):
         except Exception as e:
             memory_logger.error(f"Search memories failed: {e}")
             return []
-        finally:
-            # Restore original user context
-            self.mcp_client.user_id = original_user_id
     
     async def get_all_memories(
         self, 
@@ -254,20 +251,24 @@ class OpenMemoryMCPService(MemoryServiceBase):
         """
         if not self._initialized:
             await self.initialize()
-        
-        # Update MCP client user context for this operation
-        original_user_id = self.mcp_client.user_id
-        self.mcp_client.user_id = user_id  # Use the actual Chronicle user's ID
 
+        # Use configured OpenMemory user (not Chronicle user_id)
+        # List all memories, then filter by chronicle_user_id in metadata
         try:
-            results = await self.mcp_client.list_memories(limit=limit)
+            # Get more results since we'll filter by user
+            results = await self.mcp_client.list_memories(limit=limit * 3)
 
-            # Convert MCP results to MemoryEntry objects
+            # Convert MCP results to MemoryEntry objects and filter by user
             memory_entries = []
             for result in results:
-                memory_entry = self._mcp_result_to_memory_entry(result, user_id)
-                if memory_entry:
-                    memory_entries.append(memory_entry)
+                # Check if memory belongs to this Chronicle user via metadata
+                metadata = result.get("metadata", {})
+                if metadata.get("chronicle_user_id") == user_id:
+                    memory_entry = self._mcp_result_to_memory_entry(result, user_id)
+                    if memory_entry:
+                        memory_entries.append(memory_entry)
+                        if len(memory_entries) >= limit:
+                            break  # Got enough results
 
             memory_logger.info(f"📚 Retrieved {len(memory_entries)} memories for user {user_id}")
             return memory_entries
@@ -278,9 +279,6 @@ class OpenMemoryMCPService(MemoryServiceBase):
         except Exception as e:
             memory_logger.error(f"Get all memories failed: {e}")
             return []
-        finally:
-            # Restore original user_id
-            self.mcp_client.user_id = original_user_id
 
     async def get_memory(self, memory_id: str, user_id: Optional[str] = None) -> Optional[MemoryEntry]:
         """Get a specific memory by ID.

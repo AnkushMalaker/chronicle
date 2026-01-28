@@ -180,12 +180,13 @@ Multiple Sessions Create Separate Conversations
     ...                creates separate placeholder conversations for each session.
     [Tags]    conversation	audio-streaming
 
-    ${device_name}=    Set Variable    test-multi
+    # NOTE: Device names must be <=10 chars to be unique (backend truncates to 10 chars)
+    # Using short names: multi-1, multi-2, multi-3 (7 chars each)
 
     # Get client IDs for each device
-    ${client_id_1}=    Get Client ID From Device Name    ${device_name}-1
-    ${client_id_2}=    Get Client ID From Device Name    ${device_name}-2
-    ${client_id_3}=    Get Client ID From Device Name    ${device_name}-3
+    ${client_id_1}=    Get Client ID From Device Name    multi-1
+    ${client_id_2}=    Get Client ID From Device Name    multi-2
+    ${client_id_3}=    Get Client ID From Device Name    multi-3
 
     # Get baseline conversation counts for each client
     ${convs_before_1}=    Get Conversations By Client ID    ${client_id_1}
@@ -199,11 +200,11 @@ Multiple Sessions Create Separate Conversations
     ${expected_count_3}=    Evaluate    ${count_before_3} + 1
 
     # Start 3 separate sessions
-    ${stream_1}=    Open Audio Stream With Always Persist    device_name=${device_name}-1
+    ${stream_1}=    Open Audio Stream With Always Persist    device_name=multi-1
     Sleep    1s
-    ${stream_2}=    Open Audio Stream With Always Persist    device_name=${device_name}-2
+    ${stream_2}=    Open Audio Stream With Always Persist    device_name=multi-2
     Sleep    1s
-    ${stream_3}=    Open Audio Stream With Always Persist    device_name=${device_name}-3
+    ${stream_3}=    Open Audio Stream With Always Persist    device_name=multi-3
 
     # Poll for each conversation to be created (audio persistence jobs may take 10-15s)
     ${convs_after_1}=    Wait Until Keyword Succeeds    30s    2s
