@@ -26,7 +26,6 @@ async def audio_streaming_persistence_job(
     session_id: str,
     user_id: str,
     client_id: str,
-    always_persist: bool = False,
     *,
     redis_client=None
 ) -> Dict[str, Any]:
@@ -42,15 +41,22 @@ async def audio_streaming_persistence_job(
         session_id: Stream session ID
         user_id: User ID
         client_id: Client ID
-        always_persist: Whether to create placeholder conversation immediately (default: False)
         redis_client: Redis client (injected by decorator)
 
     Returns:
         Dict with chunk_count, total_bytes, compressed_bytes, duration_seconds
 
-    Note: Replaces disk-based WAV file storage with MongoDB chunk storage.
+    Note:
+        - Replaces disk-based WAV file storage with MongoDB chunk storage.
+        - Reads always_persist_enabled from global config to determine whether to
+          create placeholder conversations immediately.
     """
-    logger.info(f"🎵 Starting MongoDB audio persistence for session {session_id}")
+    # Read always_persist setting from global config
+    from advanced_omi_backend.config import get_misc_settings
+    misc_settings = get_misc_settings()
+    always_persist = misc_settings.get('always_persist_enabled', False)
+
+    logger.info(f"🎵 Starting MongoDB audio persistence for session {session_id} (always_persist={always_persist})")
 
     # Setup audio persistence consumer group (separate from transcription consumer)
     audio_stream_name = f"audio:stream:{client_id}"

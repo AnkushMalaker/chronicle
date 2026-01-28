@@ -232,6 +232,11 @@ export const systemApi = {
   getActiveClients: () => api.get('/api/clients/active'),
   getDiarizationSettings: () => api.get('/api/diarization-settings'),
   saveDiarizationSettings: (settings: any) => api.post('/api/diarization-settings', settings),
+
+  // Miscellaneous Configuration Settings
+  getMiscSettings: () => api.get('/api/misc-settings'),
+  saveMiscSettings: (settings: { always_persist_enabled?: boolean; use_provider_segments?: boolean }) =>
+    api.post('/api/misc-settings', settings),
   
   // Memory Configuration Management
   getMemoryConfigRaw: () => api.get('/api/admin/memory/config/raw'),

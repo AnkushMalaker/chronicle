@@ -21,13 +21,11 @@ export interface SimpleAudioRecordingReturn {
   recordingDuration: number
   error: string | null
   mode: RecordingMode
-  alwaysPersist: boolean
 
   // Actions
   startRecording: () => Promise<void>
   stopRecording: () => void
   setMode: (mode: RecordingMode) => void
-  setAlwaysPersist: (value: boolean) => void
 
   // For components
   analyser: AnalyserNode | null
@@ -45,7 +43,6 @@ export const useSimpleAudioRecording = (): SimpleAudioRecordingReturn => {
   const [recordingDuration, setRecordingDuration] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [mode, setMode] = useState<RecordingMode>('streaming')
-  const [alwaysPersist, setAlwaysPersist] = useState(false)
   
   // Debug stats
   const [debugStats, setDebugStats] = useState<DebugStats>({
@@ -281,14 +278,13 @@ export const useSimpleAudioRecording = (): SimpleAudioRecordingReturn => {
         rate: 16000,
         width: 2,
         channels: 1,
-        mode: mode,  // Pass recording mode to backend
-        always_persist: alwaysPersist  // Pass always_persist flag
+        mode: mode  // Pass recording mode to backend
       },
       payload_length: null
     }
 
     ws.send(JSON.stringify(startMessage) + '\n')
-    console.log('✅ Audio-start message sent with mode:', mode, 'always_persist:', alwaysPersist)
+    console.log('✅ Audio-start message sent with mode:', mode)
   }, [mode])
   
   // Step 4: Start audio streaming
@@ -507,11 +503,9 @@ export const useSimpleAudioRecording = (): SimpleAudioRecordingReturn => {
     recordingDuration,
     error,
     mode,
-    alwaysPersist,
     startRecording,
     stopRecording,
     setMode,
-    setAlwaysPersist,
     analyser: analyserRef.current,
     debugStats,
     formatDuration,

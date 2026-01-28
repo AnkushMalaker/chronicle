@@ -691,10 +691,12 @@ async def open_conversation_job(
     # Enqueue post-conversation processing pipeline (no batch transcription needed - using streaming transcript)
     client_id = conversation.client_id if conversation else None
 
+    # Enqueue post-conversation jobs directly (no fallback dependency in success case)
     job_ids = start_post_conversation_jobs(
         conversation_id=conversation_id,
         user_id=user_id,
         transcript_version_id=version_id,  # Pass the streaming transcript version ID
+        depends_on_job=None,  # No dependency - streaming already succeeded
         client_id=client_id,  # Pass client_id for UI tracking
         end_reason=end_reason  # Pass the determined end_reason (websocket_disconnect, inactivity_timeout, etc.)
     )

@@ -451,14 +451,10 @@ async def _initialize_streaming_session(
     # Enqueue streaming jobs (speech detection + audio persistence)
     from advanced_omi_backend.controllers.queue_controller import start_streaming_jobs
 
-    # Get always_persist flag from client state
-    always_persist_flag = getattr(client_state, 'always_persist', False)
-
     job_ids = start_streaming_jobs(
         session_id=client_state.stream_session_id,
         user_id=user_id,
-        client_id=client_id,
-        always_persist=always_persist_flag
+        client_id=client_id
     )
 
     # Store job IDs in Redis session (not in ClientState)
@@ -468,8 +464,8 @@ async def _initialize_streaming_session(
         audio_persistence_job_id=job_ids['audio_persistence']
     )
 
-    # Note: Placeholder conversation creation (if always_persist=True) is now handled
-    # by the audio persistence job itself, making it self-sufficient.
+    # Note: Placeholder conversation creation is handled by the audio persistence job,
+    # which reads the always_persist_enabled setting from global config.
 
     # Launch interim results subscriber if WebSocket provided
     subscriber_task = None
@@ -822,11 +818,11 @@ async def _handle_audio_session_start(
     websocket: Optional[WebSocket] = None
 ) -> tuple[bool, str]:
     """
-    Handle audio-start event - validate mode, set recording mode, and extract always_persist flag.
+    Handle audio-start event - validate mode and set recording mode.
 
     Args:
         client_state: Client state object
-        audio_format: Audio format dict with mode and always_persist
+        audio_format: Audio format dict with mode
         client_id: Client ID
         websocket: Optional WebSocket connection (for WebUI error messages)
 
@@ -836,16 +832,14 @@ async def _handle_audio_session_start(
     from advanced_omi_backend.services.transcription import is_transcription_available
 
     recording_mode = audio_format.get("mode", "batch")
-    always_persist = audio_format.get("always_persist", False)
 
     application_logger.info(
         f"🔴 BACKEND: Received audio-start for {client_id} - "
-        f"mode={recording_mode}, always_persist={always_persist}, full format={audio_format}"
+        f"mode={recording_mode}, full format={audio_format}"
     )
 
     # Store on client state for later use
     client_state.recording_mode = recording_mode
-    client_state.always_persist = always_persist
 
     # VALIDATION: Check if streaming mode is available
     if recording_mode == "streaming":
@@ -898,8 +892,7 @@ async def _handle_audio_session_start(
         f"Format: {audio_format.get('rate')}Hz, "
         f"{audio_format.get('width')}bytes, "
         f"{audio_format.get('channels')}ch, "
-        f"Mode: {recording_mode}, "
-        f"Always Persist: {always_persist}"
+        f"Mode: {recording_mode}"
     )
 
     return True, recording_mode  # Switch to audio streaming mode
@@ -1358,7 +1351,7 @@ async def handle_pcm_websocket(
                             websocket=ws  # Pass websocket for WebUI error display
                         )
 
-                        # Initialize streaming session (for always_persist and job setup)
+                        # Initialize streaming session
                         if recording_mode == "streaming":
                             application_logger.info(f"🔴 BACKEND: Initializing streaming session for {client_id}")
                             interim_subscriber_task = await _initialize_streaming_session(

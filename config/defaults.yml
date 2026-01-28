@@ -311,6 +311,12 @@ backend:
     model: gpt-4o-mini
     timeout: 60
 
+  # Audio processing settings
+  audio:
+    # When enabled, always persist audio even if no speech is detected
+    # This creates conversations for all audio sessions regardless of speech content
+    always_persist_enabled: false
+
   # Transcription provider configuration
   transcription:
     provider: deepgram  # or parakeet

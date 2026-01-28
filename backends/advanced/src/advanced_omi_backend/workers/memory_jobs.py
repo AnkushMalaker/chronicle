@@ -137,111 +137,117 @@ async def process_memory_job(conversation_id: str, *, redis_client=None) -> Dict
     if memory_result:
         success, created_memory_ids = memory_result
 
-        if success and created_memory_ids:
-            # Add memory version to conversation
-            conversation_model = await Conversation.find_one(
-                Conversation.conversation_id == conversation_id
-            )
-            if conversation_model:
-                processing_time = time.time() - start_time
+        if success:
+            processing_time = time.time() - start_time
 
-                # Get active transcript version for reference
-                transcript_version_id = conversation_model.active_transcript_version or "unknown"
+            # Determine memory provider from memory service
+            memory_provider = "chronicle"  # Default
+            try:
+                memory_service_obj = get_memory_service()
+                provider_name = memory_service_obj.__class__.__name__
+                if "OpenMemory" in provider_name:
+                    memory_provider = "openmemory_mcp"
+            except Exception:
+                pass
 
-                # Determine memory provider from memory service
-                memory_provider = conversation_model.MemoryProvider.CHRONICLE  # Default
-                try:
-                    memory_service_obj = get_memory_service()
-                    provider_name = memory_service_obj.__class__.__name__
-                    if "OpenMemory" in provider_name:
-                        memory_provider = conversation_model.MemoryProvider.OPENMEMORY_MCP
-                except Exception:
-                    pass
-
-                # Create version ID for this memory extraction
-                version_id = str(uuid.uuid4())
-
-                # Add memory version with metadata
-                conversation_model.add_memory_version(
-                    version_id=version_id,
-                    memory_count=len(created_memory_ids),
-                    transcript_version_id=transcript_version_id,
-                    provider=memory_provider,
-                    processing_time_seconds=processing_time,
-                    metadata={"memory_ids": created_memory_ids},
-                    set_as_active=True,
+            # Only create memory version if new memories were created
+            if created_memory_ids:
+                # Add memory version to conversation
+                conversation_model = await Conversation.find_one(
+                    Conversation.conversation_id == conversation_id
                 )
-                await conversation_model.save()
+                if conversation_model:
+                    # Get active transcript version for reference
+                    transcript_version_id = conversation_model.active_transcript_version or "unknown"
 
-            logger.info(
-                f"✅ Completed memory processing for conversation {conversation_id} - created {len(created_memory_ids)} memories in {processing_time:.2f}s"
-            )
+                    # Create version ID for this memory extraction
+                    version_id = str(uuid.uuid4())
 
-            # Update job metadata with memory information
-            from rq import get_current_job
+                    # Add memory version with metadata
+                    conversation_model.add_memory_version(
+                        version_id=version_id,
+                        memory_count=len(created_memory_ids),
+                        transcript_version_id=transcript_version_id,
+                        provider=conversation_model.MemoryProvider.OPENMEMORY_MCP if memory_provider == "openmemory_mcp" else conversation_model.MemoryProvider.CHRONICLE,
+                        processing_time_seconds=processing_time,
+                        metadata={"memory_ids": created_memory_ids},
+                        set_as_active=True,
+                    )
+                    await conversation_model.save()
 
-            current_job = get_current_job()
-            if current_job:
-                if not current_job.meta:
-                    current_job.meta = {}
+                logger.info(
+                    f"✅ Completed memory processing for conversation {conversation_id} - created {len(created_memory_ids)} memories in {processing_time:.2f}s"
+                )
 
-                # Fetch memory details to display in UI
-                memory_details = []
-                try:
-                    for memory_id in created_memory_ids[:5]:  # Limit to first 5 for display
-                        memory_entry = await memory_service.get_memory(memory_id, user_id)
-                        if memory_entry:
-                            # Handle different return types from memory service
-                            memory_text: str
-                            if isinstance(memory_entry, MemoryEntry):
-                                # MemoryEntry object with content attribute
-                                memory_text = memory_entry.content
-                            elif isinstance(memory_entry, dict):
-                                # Dictionary with "content" key
-                                if "content" in memory_entry:
-                                    memory_text = memory_entry["content"]
+                # Update job metadata with memory information
+                from rq import get_current_job
+
+                current_job = get_current_job()
+                if current_job:
+                    if not current_job.meta:
+                        current_job.meta = {}
+
+                    # Fetch memory details to display in UI
+                    memory_details = []
+                    try:
+                        for memory_id in created_memory_ids[:5]:  # Limit to first 5 for display
+                            memory_entry = await memory_service.get_memory(memory_id, user_id)
+                            if memory_entry:
+                                # Handle different return types from memory service
+                                memory_text: str
+                                if isinstance(memory_entry, MemoryEntry):
+                                    # MemoryEntry object with content attribute
+                                    memory_text = memory_entry.content
+                                elif isinstance(memory_entry, dict):
+                                    # Dictionary with "content" key
+                                    if "content" in memory_entry:
+                                        memory_text = memory_entry["content"]
+                                    else:
+                                        logger.error(
+                                            f"Dict memory entry missing 'content' key for {memory_id}: {list(memory_entry.keys())}"
+                                        )
+                                        raise ValueError(
+                                            f"Dict memory entry missing 'content' key for memory {memory_id}"
+                                        )
+                                elif isinstance(memory_entry, str):
+                                    # String content directly
+                                    memory_text = memory_entry
                                 else:
+                                    # Unexpected type
                                     logger.error(
-                                        f"Dict memory entry missing 'content' key for {memory_id}: {list(memory_entry.keys())}"
+                                        f"Unexpected memory entry type for {memory_id}: {type(memory_entry).__name__}"
                                     )
-                                    raise ValueError(
-                                        f"Dict memory entry missing 'content' key for memory {memory_id}"
+                                    raise TypeError(
+                                        f"Unexpected memory entry type: {type(memory_entry).__name__}"
                                     )
-                            elif isinstance(memory_entry, str):
-                                # String content directly
-                                memory_text = memory_entry
-                            else:
-                                # Unexpected type
-                                logger.error(
-                                    f"Unexpected memory entry type for {memory_id}: {type(memory_entry).__name__}"
-                                )
-                                raise TypeError(
-                                    f"Unexpected memory entry type: {type(memory_entry).__name__}"
-                                )
 
-                            # Truncate to 200 chars
-                            memory_details.append(
-                                {"memory_id": memory_id, "text": memory_text[:200]}
-                            )
-                except Exception as e:
-                    logger.warning(f"Failed to fetch memory details for UI: {e}")
+                                # Truncate to 200 chars
+                                memory_details.append(
+                                    {"memory_id": memory_id, "text": memory_text[:200]}
+                                )
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch memory details for UI: {e}")
 
-                current_job.meta.update(
-                    {
-                        "conversation_id": conversation_id,
-                        "memories_created": len(created_memory_ids),
-                        "memory_ids": created_memory_ids[:5],  # Store first 5 IDs
-                        "memory_details": memory_details,
-                        "processing_time": processing_time,
-                    }
+                    current_job.meta.update(
+                        {
+                            "conversation_id": conversation_id,
+                            "memories_created": len(created_memory_ids),
+                            "memory_ids": created_memory_ids[:5],  # Store first 5 IDs
+                            "memory_details": memory_details,
+                            "processing_time": processing_time,
+                        }
+                    )
+                    current_job.save_meta()
+            else:
+                logger.info(
+                    f"ℹ️ Memory processing completed for conversation {conversation_id} - no new memories created (deduplication) in {processing_time:.2f}s"
                 )
-                current_job.save_meta()
 
             # NOTE: Listening jobs are restarted by open_conversation_job (not here)
             # This allows users to resume talking immediately after conversation closes,
             # without waiting for memory processing to complete.
 
-            # Trigger memory-level plugins
+            # Trigger memory-level plugins (ALWAYS dispatch when success, even with 0 new memories)
             try:
                 # Get or initialize plugin router (same pattern as conversation_jobs.py)
                 plugin_router = get_plugin_router()
@@ -260,20 +266,20 @@ async def process_memory_job(conversation_id: str, *, redis_client=None) -> Dict
 
                 if plugin_router:
                     plugin_data = {
-                        'memories': created_memory_ids,
+                        'memories': created_memory_ids or [],
                         'conversation': {
                             'conversation_id': conversation_id,
                             'client_id': client_id,
                             'user_id': user_id,
                             'user_email': user_email,
                         },
-                        'memory_count': len(created_memory_ids),
+                        'memory_count': len(created_memory_ids) if created_memory_ids else 0,
                         'conversation_id': conversation_id,
                     }
 
                     logger.info(
                         f"🔌 DISPATCH: memory.processed event "
-                        f"(conversation={conversation_id[:12]}, memories={len(created_memory_ids)})"
+                        f"(conversation={conversation_id[:12]}, memories={len(created_memory_ids) if created_memory_ids else 0})"
                     )
 
                     plugin_results = await plugin_router.dispatch_event(
@@ -282,7 +288,7 @@ async def process_memory_job(conversation_id: str, *, redis_client=None) -> Dict
                         data=plugin_data,
                         metadata={
                             'processing_time': processing_time,
-                            'memory_provider': str(memory_provider),
+                            'memory_provider': memory_provider,
                         }
                     )
 
@@ -301,12 +307,12 @@ async def process_memory_job(conversation_id: str, *, redis_client=None) -> Dict
 
             return {
                 "success": True,
-                "memories_created": len(created_memory_ids),
+                "memories_created": len(created_memory_ids) if created_memory_ids else 0,
                 "processing_time": processing_time,
             }
         else:
-            # No memories created - still successful
-            return {"success": True, "memories_created": 0, "skipped": True}
+            # Memory extraction failed
+            return {"success": False, "error": "Memory extraction returned failure"}
     else:
         return {"success": False, "error": "Memory service returned False"}
 

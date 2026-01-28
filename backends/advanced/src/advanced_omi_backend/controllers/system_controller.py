@@ -15,6 +15,8 @@ from fastapi import HTTPException
 
 from advanced_omi_backend.config import (
     get_diarization_settings as load_diarization_settings,
+    get_misc_settings as load_misc_settings,
+    save_misc_settings,
 )
 from advanced_omi_backend.config import (
     save_diarization_settings,
@@ -330,6 +332,68 @@ async def save_diarization_settings_controller(settings: dict):
 
     except Exception as e:
         logger.exception("Error saving diarization settings")
+        raise e
+
+
+async def get_misc_settings():
+    """Get current miscellaneous settings."""
+    try:
+        # Get settings using OmegaConf
+        settings = load_misc_settings()
+        return {
+            "settings": settings,
+            "status": "success"
+        }
+    except Exception as e:
+        logger.exception("Error getting misc settings")
+        raise e
+
+
+async def save_misc_settings_controller(settings: dict):
+    """Save miscellaneous settings."""
+    try:
+        # Validate settings
+        valid_keys = {"always_persist_enabled", "use_provider_segments"}
+
+        # Filter to only valid keys
+        filtered_settings = {}
+        for key, value in settings.items():
+            if key not in valid_keys:
+                continue  # Skip unknown keys
+
+            # Type validation
+            if not isinstance(value, bool):
+                raise HTTPException(status_code=400, detail=f"Invalid value for {key}: must be boolean")
+
+            filtered_settings[key] = value
+
+        # Reject if NO valid keys provided
+        if not filtered_settings:
+            raise HTTPException(status_code=400, detail="No valid misc settings provided")
+
+        # Save using OmegaConf
+        if save_misc_settings(filtered_settings):
+            # Get updated settings
+            updated_settings = load_misc_settings()
+            logger.info(f"Updated and saved misc settings: {filtered_settings}")
+
+            return {
+                "message": "Miscellaneous settings saved successfully",
+                "settings": updated_settings,
+                "status": "success"
+            }
+        else:
+            logger.warning("Settings save failed")
+            return {
+                "message": "Settings save failed",
+                "settings": load_misc_settings(),
+                "status": "error"
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error saving misc settings")
         raise e
 
 

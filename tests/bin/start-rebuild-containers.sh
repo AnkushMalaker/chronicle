@@ -5,6 +5,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TESTS_DIR="$SCRIPT_DIR/.."
 BACKEND_DIR="$SCRIPT_DIR/../../backends/advanced"
 
 cd "$BACKEND_DIR"
@@ -15,6 +16,14 @@ echo "   1. Stop containers"
 echo "   2. Rebuild images with latest code"
 echo "   3. Start containers"
 echo ""
+
+# Load environment variables from .env.test (API keys, etc.)
+if [ -f "$TESTS_DIR/setup/.env.test" ]; then
+    echo "📝 Loading environment variables from .env.test..."
+    set -a
+    source "$TESTS_DIR/setup/.env.test"
+    set +a
+fi
 
 # Stop containers
 echo "🛑 Stopping containers..."

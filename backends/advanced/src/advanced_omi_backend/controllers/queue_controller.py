@@ -325,8 +325,7 @@ def all_jobs_complete_for_client(client_id: str) -> bool:
 def start_streaming_jobs(
     session_id: str,
     user_id: str,
-    client_id: str,
-    always_persist: bool = False
+    client_id: str
 ) -> Dict[str, str]:
     """
     Enqueue jobs for streaming audio session (initial session setup).
@@ -339,12 +338,13 @@ def start_streaming_jobs(
         session_id: Stream session ID (equals client_id for streaming)
         user_id: User identifier
         client_id: Client identifier
-        always_persist: Whether to create placeholder conversation immediately (default: False)
 
     Returns:
         Dict with job IDs: {'speech_detection': job_id, 'audio_persistence': job_id}
 
-    Note: user_email is fetched from the database when needed.
+    Note:
+        - user_email is fetched from the database when needed.
+        - always_persist setting is read from global config by the audio persistence job.
     """
     from advanced_omi_backend.workers.transcription_jobs import stream_speech_detection_job
     from advanced_omi_backend.workers.audio_jobs import audio_streaming_persistence_job
@@ -383,12 +383,12 @@ def start_streaming_jobs(
     # Enqueue audio persistence job on dedicated audio queue
     # NOTE: This job handles file rotation for multiple conversations automatically
     # Runs for entire session, not tied to individual conversations
+    # The job reads always_persist_enabled from global config internally
     audio_job = audio_queue.enqueue(
         audio_streaming_persistence_job,
         session_id,
         user_id,
         client_id,
-        always_persist,
         job_timeout=86400,  # 24 hours for all-day sessions
         ttl=None,  # No pre-run expiry (job can wait indefinitely in queue)
         result_ttl=JOB_RESULT_TTL,  # Cleanup AFTER completion

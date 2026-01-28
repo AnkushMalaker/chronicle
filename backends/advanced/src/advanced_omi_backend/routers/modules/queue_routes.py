@@ -72,10 +72,17 @@ async def get_job_status(
             logger.error(f"Failed to determine status for job {job_id}: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
-        return {
+        response = {
             "job_id": job.id,
             "status": status
         }
+
+        # Include error information for failed jobs
+        if status == "failed" and job.exc_info:
+            response["error_message"] = str(job.exc_info)
+            response["exc_info"] = str(job.exc_info)
+
+        return response
 
     except HTTPException:
         # Re-raise HTTPException unchanged (e.g., 403 Forbidden)

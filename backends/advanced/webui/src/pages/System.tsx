@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Settings, RefreshCw, CheckCircle, XCircle, AlertCircle, Activity, Users, Database, Server, Volume2, Mic, Brain } from 'lucide-react'
+import { Settings, RefreshCw, CheckCircle, XCircle, AlertCircle, Activity, Users, Database, Server, Volume2, Mic, Brain, Sliders } from 'lucide-react'
 import { systemApi, speakerApi } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
 import MemorySettings from '../components/MemorySettings'
@@ -92,6 +92,14 @@ export default function System() {
   const [providerLoading, setProviderLoading] = useState(false)
   const [providerMessage, setProviderMessage] = useState('')
 
+  // Miscellaneous settings state
+  const [miscSettings, setMiscSettings] = useState({
+    always_persist_enabled: false,
+    use_provider_segments: false
+  })
+  const [miscLoading, setMiscLoading] = useState(false)
+  const [miscMessage, setMiscMessage] = useState('')
+
   const { isAdmin } = useAuth()
 
   const loadSystemData = async () => {
@@ -167,6 +175,38 @@ export default function System() {
     }
   }
 
+  const loadMiscSettings = async () => {
+    try {
+      setMiscLoading(true)
+      const response = await systemApi.getMiscSettings()
+      if (response.data.status === 'success') {
+        setMiscSettings(response.data.settings)
+      }
+    } catch (err: any) {
+      console.error('Failed to load misc settings:', err)
+    } finally {
+      setMiscLoading(false)
+    }
+  }
+
+  const saveMiscSettings = async () => {
+    try {
+      setMiscLoading(true)
+      setMiscMessage('')
+      const response = await systemApi.saveMiscSettings(miscSettings)
+      if (response.data.status === 'success') {
+        setMiscMessage('Settings saved successfully')
+        setTimeout(() => setMiscMessage(''), 3000)
+      } else {
+        setMiscMessage('Failed to save settings')
+      }
+    } catch (err: any) {
+      setMiscMessage('Error: ' + (err.response?.data?.detail || err.message))
+    } finally {
+      setMiscLoading(false)
+    }
+  }
+
   const saveMemoryProvider = async () => {
     if (selectedProvider === currentProvider) {
       setProviderMessage('Provider is already set to ' + selectedProvider)
@@ -211,6 +251,7 @@ export default function System() {
     loadSystemData()
     loadDiarizationSettings()
     loadMemoryProvider()
+    loadMiscSettings()
   }, [isAdmin])
 
   const getStatusIcon = (healthy: boolean) => {
@@ -799,6 +840,86 @@ export default function System() {
                 className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {diarizationLoading ? 'Saving...' : 'Save Diarization Settings'}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Miscellaneous Configuration */}
+        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center">
+            <Sliders className="h-5 w-5 mr-2 text-blue-600" />
+            Miscellaneous Configuration
+          </h3>
+
+          <div className="space-y-4">
+            {/* Always Persist Audio Toggle */}
+            <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-md">
+              <div className="flex-1">
+                <div className="font-medium text-gray-900 dark:text-gray-100">
+                  Always Persist Audio
+                </div>
+                <div className="text-sm text-gray-600 dark:text-gray-400">
+                  Create conversations for all audio sessions, even when no speech is detected
+                </div>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer ml-4">
+                <input
+                  type="checkbox"
+                  checked={miscSettings.always_persist_enabled}
+                  onChange={(e) => setMiscSettings(prev => ({
+                    ...prev,
+                    always_persist_enabled: e.target.checked
+                  }))}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
+              </label>
+            </div>
+
+            {/* Use Provider Segments Toggle */}
+            <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-md">
+              <div className="flex-1">
+                <div className="font-medium text-gray-900 dark:text-gray-100">
+                  Use Provider Segments
+                </div>
+                <div className="text-sm text-gray-600 dark:text-gray-400">
+                  Use speech segments from transcription provider instead of speaker service diarization
+                </div>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer ml-4">
+                <input
+                  type="checkbox"
+                  checked={miscSettings.use_provider_segments}
+                  onChange={(e) => setMiscSettings(prev => ({
+                    ...prev,
+                    use_provider_segments: e.target.checked
+                  }))}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
+              </label>
+            </div>
+
+            {/* Status Message */}
+            {miscMessage && (
+              <div className={`p-2 rounded-md text-sm ${
+                miscMessage.includes('Error') || miscMessage.includes('Failed')
+                  ? 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300'
+                  : 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300'
+              }`}>
+                {miscMessage}
+              </div>
+            )}
+
+            {/* Save Button */}
+            <div className="pt-4 border-t border-gray-200 dark:border-gray-600">
+              <button
+                onClick={saveMiscSettings}
+                disabled={miscLoading}
+                className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {miscLoading ? 'Saving...' : 'Save Miscellaneous Settings'}
               </button>
             </div>
           </div>

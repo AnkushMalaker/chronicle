@@ -29,9 +29,6 @@ ${TEST_AUDIO_FILE}    ${CURDIR}/../test_assets/DIY_Experts_Glass_Blowing_16khz_m
 *** Keywords ***
 Suite Setup Actions
     [Documentation]    Setup actions before running tests
-    # Start mock transcription server
-    Start Mock Transcription Server
-
     # Initialize API session for test user
     ${session}=    Get Admin API Session
     Set Suite Variable    ${API_SESSION}    ${session}
@@ -40,9 +37,6 @@ Suite Teardown Actions
     [Documentation]    Cleanup after all tests complete
     # Cleanup any remaining audio streams
     Cleanup All Audio Streams
-
-    # Stop mock transcription server
-    Stop Mock Transcription Server
 
 Test Cleanup
     [Documentation]    Cleanup after each test
@@ -61,8 +55,8 @@ Placeholder Conversation Created Immediately With Always Persist
     ${device_name}=    Set Variable    test-placeholder
     ${client_id}=    Get Client ID From Device Name    ${device_name}
 
-    # Get baseline conversation count
-    ${convs_before}=    Get User Conversations
+    # Get baseline conversation count for THIS client_id only
+    ${convs_before}=    Get Conversations By Client ID    ${client_id}
     ${count_before}=    Get Length    ${convs_before}
 
     # Start stream with always_persist=true
@@ -70,12 +64,12 @@ Placeholder Conversation Created Immediately With Always Persist
 
     # Conversation created by audio persistence job (takes 3-5s to start)
     Sleep    5s    # Wait for audio persistence job to create placeholder
-    ${convs_after}=    Get User Conversations
+    ${convs_after}=    Get Conversations By Client ID    ${client_id}
     ${count_after}=    Get Length    ${convs_after}
 
-    # Verify new conversation created
+    # Verify new conversation created for this client
     Should Be True    ${count_after} == ${count_before} + 1
-    ...    Expected 1 new conversation, found ${count_after} - ${count_before}
+    ...    Expected 1 new conversation for client ${client_id}, found ${count_after} - ${count_before}
 
     # Find the new conversation (most recent)
     ${new_conv}=    Set Variable    ${convs_after}[0]
@@ -97,33 +91,42 @@ Placeholder Conversation Created Immediately With Always Persist
 
 
 Normal Behavior Preserved When Always Persist Disabled
-    [Documentation]    Verify that when always_persist=false (default), the system
+    [Documentation]    Verify that when always_persist=false, the system
     ...                behaves as before: no conversation created until speech detected.
+    ...                This test temporarily disables the global always_persist setting.
     [Tags]    conversation	audio-streaming
 
     ${device_name}=    Set Variable    test-normal
     ${client_id}=    Get Client ID From Device Name    ${device_name}
 
-    # Get baseline conversation count
-    ${convs_before}=    Get User Conversations
-    ${count_before}=    Get Length    ${convs_before}
+    # Temporarily disable always_persist for this test
+    Set Always Persist Enabled    ${API_SESSION}    ${False}
 
-    # Start stream with always_persist=false (default behavior)
-    ${stream_id}=    Open Audio Stream    device_name=${device_name}
+    TRY
+        # Get baseline conversation count for THIS client_id only
+        ${convs_before}=    Get Conversations By Client ID    ${client_id}
+        ${count_before}=    Get Length    ${convs_before}
 
-    # Conversation should NOT exist immediately
-    Sleep    3s
-    ${convs_after}=    Get User Conversations
-    ${count_after}=    Get Length    ${convs_after}
+        # Start stream with always_persist=false (disabled via API above)
+        ${stream_id}=    Open Audio Stream    device_name=${device_name}
 
-    # Verify no new conversation created yet
-    Should Be Equal As Integers    ${count_after}    ${count_before}
-    ...    Expected no conversation until speech detected, but found ${count_after} - ${count_before} new conversations
+        # Conversation should NOT exist immediately for this client
+        Sleep    3s
+        ${convs_after}=    Get Conversations By Client ID    ${client_id}
+        ${count_after}=    Get Length    ${convs_after}
 
-    Log    ✅ No placeholder conversation created (always_persist=false)
+        # Verify no new conversation created yet for this client
+        Should Be Equal As Integers    ${count_after}    ${count_before}
+        ...    Expected no conversation for client ${client_id}, but found ${count_after} - ${count_before} new conversations
 
-    # Close stream
-    Close Audio Stream    ${stream_id}
+        Log    ✅ No placeholder conversation created (always_persist=false)
+
+        # Close stream
+        Close Audio Stream    ${stream_id}
+    FINALLY
+        # Re-enable always_persist for other tests
+        Set Always Persist Enabled    ${API_SESSION}    ${True}
+    END
 
 
 Redis Key Set Immediately With Always Persist
@@ -135,8 +138,8 @@ Redis Key Set Immediately With Always Persist
     ${device_name}=    Set Variable    test-redis-key
     ${client_id}=    Get Client ID From Device Name    ${device_name}
 
-    # Get baseline conversation count
-    ${convs_before}=    Get User Conversations
+    # Get baseline conversation count for THIS client_id only
+    ${convs_before}=    Get Conversations By Client ID    ${client_id}
     ${count_before}=    Get Length    ${convs_before}
 
     # Start stream with always_persist=true
@@ -147,12 +150,12 @@ Redis Key Set Immediately With Always Persist
 
     # Get conversation (created by audio persistence job)
     Sleep    5s    # Wait for audio persistence job to create placeholder
-    ${convs_after}=    Get User Conversations
+    ${convs_after}=    Get Conversations By Client ID    ${client_id}
     ${count_after}=    Get Length    ${convs_after}
 
-    # Verify new conversation created
+    # Verify new conversation created for this client
     Should Be True    ${count_after} == ${count_before} + 1
-    ...    Expected 1 new conversation, found ${count_after} - ${count_before}
+    ...    Expected 1 new conversation for client ${client_id}, found ${count_after} - ${count_before}
 
     # Get the new conversation (most recent)
     ${conversation}=    Set Variable    ${convs_after}[0]
@@ -177,9 +180,18 @@ Multiple Sessions Create Separate Conversations
 
     ${device_name}=    Set Variable    test-multi
 
-    # Get baseline conversation count
-    ${convs_before}=    Get User Conversations
-    ${count_before}=    Get Length    ${convs_before}
+    # Get client IDs for each device
+    ${client_id_1}=    Get Client ID From Device Name    ${device_name}-1
+    ${client_id_2}=    Get Client ID From Device Name    ${device_name}-2
+    ${client_id_3}=    Get Client ID From Device Name    ${device_name}-3
+
+    # Get baseline conversation counts for each client
+    ${convs_before_1}=    Get Conversations By Client ID    ${client_id_1}
+    ${convs_before_2}=    Get Conversations By Client ID    ${client_id_2}
+    ${convs_before_3}=    Get Conversations By Client ID    ${client_id_3}
+    ${count_before_1}=    Get Length    ${convs_before_1}
+    ${count_before_2}=    Get Length    ${convs_before_2}
+    ${count_before_3}=    Get Length    ${convs_before_3}
 
     # Start 3 separate sessions
     ${stream_1}=    Open Audio Stream With Always Persist    device_name=${device_name}-1
@@ -189,23 +201,36 @@ Multiple Sessions Create Separate Conversations
     ${stream_3}=    Open Audio Stream With Always Persist    device_name=${device_name}-3
     Sleep    5s    # Wait for all audio persistence jobs to create placeholders
 
-    # Verify 3 new conversations created
-    ${convs_after}=    Get User Conversations
-    ${count_after}=    Get Length    ${convs_after}
+    # Verify each client has exactly 1 new conversation
+    ${convs_after_1}=    Get Conversations By Client ID    ${client_id_1}
+    ${convs_after_2}=    Get Conversations By Client ID    ${client_id_2}
+    ${convs_after_3}=    Get Conversations By Client ID    ${client_id_3}
+    ${count_after_1}=    Get Length    ${convs_after_1}
+    ${count_after_2}=    Get Length    ${convs_after_2}
+    ${count_after_3}=    Get Length    ${convs_after_3}
 
-    ${new_count}=    Evaluate    ${count_after} - ${count_before}
-    Should Be Equal As Integers    ${new_count}    3
-    ...    Expected 3 new conversations, found ${new_count}
+    ${new_count_1}=    Evaluate    ${count_after_1} - ${count_before_1}
+    ${new_count_2}=    Evaluate    ${count_after_2} - ${count_before_2}
+    ${new_count_3}=    Evaluate    ${count_after_3} - ${count_before_3}
+
+    Should Be Equal As Integers    ${new_count_1}    1
+    ...    Expected 1 new conversation for client ${client_id_1}, found ${new_count_1}
+    Should Be Equal As Integers    ${new_count_2}    1
+    ...    Expected 1 new conversation for client ${client_id_2}, found ${new_count_2}
+    Should Be Equal As Integers    ${new_count_3}    1
+    ...    Expected 1 new conversation for client ${client_id_3}, found ${new_count_3}
 
     # Verify each conversation has unique conversation_id
-    ${conv_ids}=    Create List
-    FOR    ${i}    IN RANGE    3
-        ${conv}=    Set Variable    ${convs_after}[${i}]
-        ${conv_id}=    Set Variable    ${conv}[conversation_id]
-        List Should Not Contain Value    ${conv_ids}    ${conv_id}
-        ...    Duplicate conversation_id found: ${conv_id}
-        Append To List    ${conv_ids}    ${conv_id}
-    END
+    ${conv_id_1}=    Set Variable    ${convs_after_1}[0][conversation_id]
+    ${conv_id_2}=    Set Variable    ${convs_after_2}[0][conversation_id]
+    ${conv_id_3}=    Set Variable    ${convs_after_3}[0][conversation_id]
+
+    Should Not Be Equal    ${conv_id_1}    ${conv_id_2}
+    ...    Duplicate conversation_id found: ${conv_id_1}
+    Should Not Be Equal    ${conv_id_2}    ${conv_id_3}
+    ...    Duplicate conversation_id found: ${conv_id_2}
+    Should Not Be Equal    ${conv_id_1}    ${conv_id_3}
+    ...    Duplicate conversation_id found: ${conv_id_1}
 
     Log    ✅ 3 separate conversations created with unique IDs
 
@@ -219,9 +244,10 @@ Audio Chunks Persisted Despite Transcription Failure
     [Documentation]    Verify that when transcription fails (e.g., invalid Deepgram key),
     ...                audio chunks are still saved to MongoDB.
     ...
-    ...                NOTE: This test requires misconfigured transcription service to trigger failure.
-    ...                Test uses mock-transcription-failure.yml config with invalid API key.
-    [Tags]    audio-streaming	mongodb	requires-api-keys
+    ...                IMPORTANT: This test requires the mock-transcription-failure.yml config.
+    ...                Run with: make test CONFIG=mock-transcription-failure.yml
+    ...                The test will SKIP if transcription succeeds (real API keys).
+    [Tags]    audio-streaming	infra	slow
 
     ${device_name}=    Set Variable    test-persist-fail
     ${client_id}=    Get Client ID From Device Name    ${device_name}
@@ -240,19 +266,20 @@ Audio Chunks Persisted Despite Transcription Failure
     ${total_chunks}=    Close Audio Stream    ${stream_id}
     Log    Sent ${total_chunks} total chunks
 
-    # Wait for processing to attempt and fail
-    Sleep    15s
-
-    # Get the conversation (most recent)
-    ${conversations}=    Get User Conversations
+    # Get the conversation for this client - already created by audio persistence job
+    ${conversations}=    Get Conversations By Client ID    ${client_id}
     ${conversation}=    Set Variable    ${conversations}[0]
     ${conversation_id}=    Set Variable    ${conversation}[conversation_id]
 
-    # Verify processing_status is transcription_failed
-    Verify Conversation Processing Status    ${conversation_id}    transcription_failed
+    # Wait for transcription to attempt and fail (poll instead of fixed sleep)
+    Wait Until Keyword Succeeds    60s    5s
+    ...    Verify Conversation Processing Status    ${conversation_id}    transcription_failed
+
+    # Refresh conversation data after status change (title may have updated)
+    ${updated_conv}=    Get Conversation By ID    ${conversation_id}
 
     # Verify title indicates failure
-    ${title}=    Set Variable    ${conversation}[title]
+    ${title}=    Set Variable    ${updated_conv}[title]
     ${title_lower}=    Convert To Lower Case    ${title}
     Should Contain    ${title_lower}    transcription
     Should Contain    ${title_lower}    fail
@@ -277,8 +304,8 @@ Conversation Updates To Completed When Transcription Succeeds
     ${device_name}=    Set Variable    test-complete
     ${client_id}=    Get Client ID From Device Name    ${device_name}
 
-    # Get baseline conversation count
-    ${convs_before}=    Get User Conversations
+    # Get baseline conversation count for THIS client_id only
+    ${convs_before}=    Get Conversations By Client ID    ${client_id}
     ${count_before}=    Get Length    ${convs_before}
 
     # Start stream with always_persist=true
@@ -286,7 +313,7 @@ Conversation Updates To Completed When Transcription Succeeds
 
     # Verify placeholder conversation exists (created by audio persistence job)
     Sleep    5s
-    ${convs_after}=    Get User Conversations
+    ${convs_after}=    Get Conversations By Client ID    ${client_id}
     ${conversation}=    Set Variable    ${convs_after}[0]
     ${conversation_id}=    Set Variable    ${conversation}[conversation_id]
 

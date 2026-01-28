@@ -88,6 +88,9 @@ models:
     start:
       message: {}
 backend:
+  audio:
+    # Enable always_persist for testing - creates placeholder conversations immediately
+    always_persist_enabled: true
   transcription:
     use_provider_segments: true
 speaker_recognition:

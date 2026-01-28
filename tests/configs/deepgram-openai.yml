@@ -114,6 +114,15 @@ models:
       smart_format: true
     start:
       message: {}
+backend:
+  audio:
+    # Enable always_persist for testing - creates placeholder conversations immediately
+    always_persist_enabled: true
+
 speaker_recognition:
-  enabled: false
+  enabled: true  # Using mock client by default (USE_MOCK_SPEAKER_CLIENT=true in docker-compose-test.yml)
   timeout: 60
+  # To test with REAL speaker recognition service:
+  # 1. Start speaker-recognition service: cd extras/speaker-recognition && docker compose up -d
+  # 2. Set USE_MOCK_SPEAKER_CLIENT=false in docker-compose-test.yml (line 62 and 241)
+  # 3. Rebuild test containers: make start-rebuild

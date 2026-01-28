@@ -63,6 +63,21 @@ async def save_diarization_settings(
     return await system_controller.save_diarization_settings_controller(settings)
 
 
+@router.get("/misc-settings")
+async def get_misc_settings(current_user: User = Depends(current_superuser)):
+    """Get miscellaneous configuration settings. Admin only."""
+    return await system_controller.get_misc_settings()
+
+
+@router.post("/misc-settings")
+async def save_misc_settings(
+    settings: dict,
+    current_user: User = Depends(current_superuser)
+):
+    """Save miscellaneous configuration settings. Admin only."""
+    return await system_controller.save_misc_settings_controller(settings)
+
+
 @router.get("/cleanup-settings")
 async def get_cleanup_settings(
     current_user: User = Depends(current_superuser)

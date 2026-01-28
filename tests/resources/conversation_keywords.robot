@@ -16,6 +16,23 @@ Get User Conversations
     ${response}=    GET On Session    api    /api/conversations    expected_status=200
     RETURN    ${response.json()}[conversations]
 
+Get Conversations By Client ID
+    [Documentation]    Get conversations filtered by client_id
+    ...                Returns only conversations matching the specified client_id
+    [Arguments]    ${client_id}
+
+    ${all_conversations}=    Get User Conversations
+    ${filtered}=    Create List
+
+    FOR    ${conv}    IN    @{all_conversations}
+        ${conv_client_id}=    Set Variable    ${conv}[client_id]
+        IF    '${conv_client_id}' == '${client_id}'
+            Append To List    ${filtered}    ${conv}
+        END
+    END
+
+    RETURN    ${filtered}
+
 Get Conversation By ID
     [Documentation]    Get a specific conversation by ID
     [Arguments]       ${conversation_id}

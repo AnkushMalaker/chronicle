@@ -177,3 +177,55 @@ def get_audio_storage_settings() -> dict:
     """
     cfg = get_backend_config('audio_storage')
     return OmegaConf.to_container(cfg, resolve=True)
+
+
+# ============================================================================
+# Miscellaneous Settings (OmegaConf-based)
+# ============================================================================
+
+def get_misc_settings() -> dict:
+    """
+    Get miscellaneous configuration settings using OmegaConf.
+
+    Returns:
+        Dict with always_persist_enabled and use_provider_segments
+    """
+    # Get audio settings for always_persist_enabled
+    audio_cfg = get_backend_config('audio')
+    audio_settings = OmegaConf.to_container(audio_cfg, resolve=True) if audio_cfg else {}
+
+    # Get transcription settings for use_provider_segments
+    transcription_cfg = get_backend_config('transcription')
+    transcription_settings = OmegaConf.to_container(transcription_cfg, resolve=True) if transcription_cfg else {}
+
+    return {
+        'always_persist_enabled': audio_settings.get('always_persist_enabled', False),
+        'use_provider_segments': transcription_settings.get('use_provider_segments', False)
+    }
+
+
+def save_misc_settings(settings: dict) -> bool:
+    """
+    Save miscellaneous settings to config.yml using OmegaConf.
+
+    Args:
+        settings: Dict with always_persist_enabled and/or use_provider_segments
+
+    Returns:
+        True if saved successfully, False otherwise
+    """
+    success = True
+
+    # Save audio settings if always_persist_enabled is provided
+    if 'always_persist_enabled' in settings:
+        audio_settings = {'always_persist_enabled': settings['always_persist_enabled']}
+        if not save_config_section('backend.audio', audio_settings):
+            success = False
+
+    # Save transcription settings if use_provider_segments is provided
+    if 'use_provider_segments' in settings:
+        transcription_settings = {'use_provider_segments': settings['use_provider_segments']}
+        if not save_config_section('backend.transcription', transcription_settings):
+            success = False
+
+    return success
