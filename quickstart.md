@@ -48,6 +48,10 @@ Think of it like having Siri/Alexa, but it's **your own AI** running on **your h
 - **Linux**: [Install Docker](https://docs.docker.com/engine/install/)
 - **After install**: Make sure Docker Desktop is running
 
+> **WSL Users**: Chronicle services will fail to start unless Docker
+> is installed and running inside WSL2
+> (or Docker Desktop with **WSL integration enabled**).
+
 **uv** (Python package manager):
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
