@@ -33,6 +33,20 @@ Get Conversations By Client ID
 
     RETURN    ${filtered}
 
+Wait For Conversation By Client ID
+    [Documentation]    Wait for at least one conversation to exist for the given client_id.
+    ...                Polls until a conversation is found or timeout is reached.
+    ...                Returns the list of conversations for that client.
+    [Arguments]    ${client_id}    ${expected_count}=1
+
+    ${conversations}=    Get Conversations By Client ID    ${client_id}
+    ${count}=    Get Length    ${conversations}
+
+    Should Be True    ${count} >= ${expected_count}
+    ...    Expected at least ${expected_count} conversation(s) for client ${client_id}, found ${count}
+
+    RETURN    ${conversations}
+
 Get Conversation By ID
     [Documentation]    Get a specific conversation by ID
     [Arguments]       ${conversation_id}

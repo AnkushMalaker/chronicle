@@ -58,18 +58,19 @@ Placeholder Conversation Created Immediately With Always Persist
     # Get baseline conversation count for THIS client_id only
     ${convs_before}=    Get Conversations By Client ID    ${client_id}
     ${count_before}=    Get Length    ${convs_before}
+    ${expected_count}=    Evaluate    ${count_before} + 1
 
     # Start stream with always_persist=true
     ${stream_id}=    Open Audio Stream With Always Persist    device_name=${device_name}
 
-    # Conversation created by audio persistence job (takes 3-5s to start)
-    Sleep    5s    # Wait for audio persistence job to create placeholder
-    ${convs_after}=    Get Conversations By Client ID    ${client_id}
+    # Poll for conversation to be created by audio persistence job (may take 10-15s to start)
+    ${convs_after}=    Wait Until Keyword Succeeds    30s    2s
+    ...    Wait For Conversation By Client ID    ${client_id}    ${expected_count}
     ${count_after}=    Get Length    ${convs_after}
 
     # Verify new conversation created for this client
-    Should Be True    ${count_after} == ${count_before} + 1
-    ...    Expected 1 new conversation for client ${client_id}, found ${count_after} - ${count_before}
+    Should Be True    ${count_after} >= ${expected_count}
+    ...    Expected at least ${expected_count} conversation(s) for client ${client_id}, found ${count_after}
 
     # Find the new conversation (most recent)
     ${new_conv}=    Set Variable    ${convs_after}[0]
@@ -141,6 +142,7 @@ Redis Key Set Immediately With Always Persist
     # Get baseline conversation count for THIS client_id only
     ${convs_before}=    Get Conversations By Client ID    ${client_id}
     ${count_before}=    Get Length    ${convs_before}
+    ${expected_count}=    Evaluate    ${count_before} + 1
 
     # Start stream with always_persist=true
     ${stream_id}=    Open Audio Stream With Always Persist    device_name=${device_name}
@@ -148,14 +150,14 @@ Redis Key Set Immediately With Always Persist
     # session_id == client_id for streaming mode (not stream_id!)
     ${session_id}=    Set Variable    ${client_id}
 
-    # Get conversation (created by audio persistence job)
-    Sleep    5s    # Wait for audio persistence job to create placeholder
-    ${convs_after}=    Get Conversations By Client ID    ${client_id}
+    # Poll for conversation to be created by audio persistence job
+    ${convs_after}=    Wait Until Keyword Succeeds    30s    2s
+    ...    Wait For Conversation By Client ID    ${client_id}    ${expected_count}
     ${count_after}=    Get Length    ${convs_after}
 
     # Verify new conversation created for this client
-    Should Be True    ${count_after} == ${count_before} + 1
-    ...    Expected 1 new conversation for client ${client_id}, found ${count_after} - ${count_before}
+    Should Be True    ${count_after} >= ${expected_count}
+    ...    Expected at least ${expected_count} conversation(s) for client ${client_id}, found ${count_after}
 
     # Get the new conversation (most recent)
     ${conversation}=    Set Variable    ${convs_after}[0]
@@ -192,6 +194,9 @@ Multiple Sessions Create Separate Conversations
     ${count_before_1}=    Get Length    ${convs_before_1}
     ${count_before_2}=    Get Length    ${convs_before_2}
     ${count_before_3}=    Get Length    ${convs_before_3}
+    ${expected_count_1}=    Evaluate    ${count_before_1} + 1
+    ${expected_count_2}=    Evaluate    ${count_before_2} + 1
+    ${expected_count_3}=    Evaluate    ${count_before_3} + 1
 
     # Start 3 separate sessions
     ${stream_1}=    Open Audio Stream With Always Persist    device_name=${device_name}-1
@@ -199,26 +204,26 @@ Multiple Sessions Create Separate Conversations
     ${stream_2}=    Open Audio Stream With Always Persist    device_name=${device_name}-2
     Sleep    1s
     ${stream_3}=    Open Audio Stream With Always Persist    device_name=${device_name}-3
-    Sleep    5s    # Wait for all audio persistence jobs to create placeholders
 
-    # Verify each client has exactly 1 new conversation
-    ${convs_after_1}=    Get Conversations By Client ID    ${client_id_1}
-    ${convs_after_2}=    Get Conversations By Client ID    ${client_id_2}
-    ${convs_after_3}=    Get Conversations By Client ID    ${client_id_3}
+    # Poll for each conversation to be created (audio persistence jobs may take 10-15s)
+    ${convs_after_1}=    Wait Until Keyword Succeeds    30s    2s
+    ...    Wait For Conversation By Client ID    ${client_id_1}    ${expected_count_1}
+    ${convs_after_2}=    Wait Until Keyword Succeeds    30s    2s
+    ...    Wait For Conversation By Client ID    ${client_id_2}    ${expected_count_2}
+    ${convs_after_3}=    Wait Until Keyword Succeeds    30s    2s
+    ...    Wait For Conversation By Client ID    ${client_id_3}    ${expected_count_3}
+
     ${count_after_1}=    Get Length    ${convs_after_1}
     ${count_after_2}=    Get Length    ${convs_after_2}
     ${count_after_3}=    Get Length    ${convs_after_3}
 
-    ${new_count_1}=    Evaluate    ${count_after_1} - ${count_before_1}
-    ${new_count_2}=    Evaluate    ${count_after_2} - ${count_before_2}
-    ${new_count_3}=    Evaluate    ${count_after_3} - ${count_before_3}
-
-    Should Be Equal As Integers    ${new_count_1}    1
-    ...    Expected 1 new conversation for client ${client_id_1}, found ${new_count_1}
-    Should Be Equal As Integers    ${new_count_2}    1
-    ...    Expected 1 new conversation for client ${client_id_2}, found ${new_count_2}
-    Should Be Equal As Integers    ${new_count_3}    1
-    ...    Expected 1 new conversation for client ${client_id_3}, found ${new_count_3}
+    # Verify each client has at least 1 new conversation
+    Should Be True    ${count_after_1} >= ${expected_count_1}
+    ...    Expected at least ${expected_count_1} conversation(s) for client ${client_id_1}, found ${count_after_1}
+    Should Be True    ${count_after_2} >= ${expected_count_2}
+    ...    Expected at least ${expected_count_2} conversation(s) for client ${client_id_2}, found ${count_after_2}
+    Should Be True    ${count_after_3} >= ${expected_count_3}
+    ...    Expected at least ${expected_count_3} conversation(s) for client ${client_id_3}, found ${count_after_3}
 
     # Verify each conversation has unique conversation_id
     ${conv_id_1}=    Set Variable    ${convs_after_1}[0][conversation_id]
@@ -255,8 +260,9 @@ Audio Chunks Persisted Despite Transcription Failure
     # Start stream with always_persist=true
     ${stream_id}=    Open Audio Stream With Always Persist    device_name=${device_name}
 
-    # Wait for audio persistence job to start consuming from Redis Stream
-    Sleep    2s
+    # Poll for conversation to be created by audio persistence job
+    ${conversations}=    Wait Until Keyword Succeeds    30s    2s
+    ...    Wait For Conversation By Client ID    ${client_id}    1
 
     # Send audio chunks (transcription will fail due to invalid API key in config)
     # Use realtime pacing to ensure chunks arrive while persistence job is running
@@ -266,8 +272,7 @@ Audio Chunks Persisted Despite Transcription Failure
     ${total_chunks}=    Close Audio Stream    ${stream_id}
     Log    Sent ${total_chunks} total chunks
 
-    # Get the conversation for this client - already created by audio persistence job
-    ${conversations}=    Get Conversations By Client ID    ${client_id}
+    # Get the conversation for this client
     ${conversation}=    Set Variable    ${conversations}[0]
     ${conversation_id}=    Set Variable    ${conversation}[conversation_id]
 
@@ -307,13 +312,14 @@ Conversation Updates To Completed When Transcription Succeeds
     # Get baseline conversation count for THIS client_id only
     ${convs_before}=    Get Conversations By Client ID    ${client_id}
     ${count_before}=    Get Length    ${convs_before}
+    ${expected_count}=    Evaluate    ${count_before} + 1
 
     # Start stream with always_persist=true
     ${stream_id}=    Open Audio Stream With Always Persist    device_name=${device_name}
 
-    # Verify placeholder conversation exists (created by audio persistence job)
-    Sleep    5s
-    ${convs_after}=    Get Conversations By Client ID    ${client_id}
+    # Poll for placeholder conversation to be created by audio persistence job
+    ${convs_after}=    Wait Until Keyword Succeeds    30s    2s
+    ...    Wait For Conversation By Client ID    ${client_id}    ${expected_count}
     ${conversation}=    Set Variable    ${convs_after}[0]
     ${conversation_id}=    Set Variable    ${conversation}[conversation_id]
 

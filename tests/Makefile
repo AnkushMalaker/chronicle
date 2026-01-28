@@ -5,7 +5,7 @@
         containers-start containers-stop containers-restart containers-rebuild \
         containers-start-rebuild containers-clean containers-status containers-logs \
         start stop restart rebuild start-rebuild status logs \
-        test test-quick test-slow test-sdk test-all-with-slow-and-sdk clean-all \
+        test test-quick test-slow test-sdk test-no-api test-with-api-keys test-all-with-slow-and-sdk clean-all \
         results results-path results-detailed
 
 # Default output directory
@@ -27,14 +27,15 @@ ifdef CONFIG
     export TEST_CONFIG_FILE = $(CONFIG)
   endif
 else
-  export TEST_CONFIG_FILE ?= /app/test-configs/mock-services.yml
+  export TEST_CONFIG_FILE ?= /app/test-configs/deepgram-openai.yml
 endif
 
 help:
 	@echo "Chronicle Test Targets:"
 	@echo ""
 	@echo "Quick Commands:"
-	@echo "  make test          - Start containers + run tests (excludes slow/sdk/API)"
+	@echo "  make test          - Start containers + run tests (uses real APIs)"
+	@echo "  make test-no-api   - Run tests without API keys (CI mode)"
 	@echo "  make test-quick    - Run tests on existing containers"
 	@echo "  make start         - Start test containers"
 	@echo "  make stop          - Stop containers (keep volumes)"
@@ -44,7 +45,7 @@ help:
 	@echo "  make status        - Show container status"
 	@echo ""
 	@echo "Running Tests:"
-	@echo "  make all         - Run all tests (excludes slow/sdk/API)"
+	@echo "  make all         - Run all tests (excludes slow/sdk)"
 	@echo "  make endpoints   - Run only endpoint tests"
 	@echo "  make integration - Run only integration tests"
 	@echo "  make infra       - Run only infrastructure tests"
@@ -52,7 +53,7 @@ help:
 	@echo "Special Test Tags:"
 	@echo "  make test-slow                    - Run ONLY slow tests (backend restarts)"
 	@echo "  make test-sdk                     - Run ONLY SDK tests (unreleased)"
-	@echo "  make test-with-api-keys           - Run ONLY tests requiring API keys"
+	@echo "  make test-no-api                  - Run tests without API keys (CI mode)"
 	@echo "  make test-all-with-slow-and-sdk   - Run ALL tests including excluded"
 	@echo ""
 	@echo "Container Management:"
@@ -80,30 +81,29 @@ help:
 	@echo "  CONFIG    - Config file to use (e.g., deepgram-openai.yml or full path)"
 	@echo ""
 	@echo "Config Options:"
-	@echo "  mock-services.yml              - No API keys (default, excludes API tests)"
-	@echo "  deepgram-openai.yml            - Real API keys (required for API tests)"
+	@echo "  deepgram-openai.yml            - Real API keys (default)"
+	@echo "  mock-services.yml              - No API keys (for CI)"
 	@echo "  mock-transcription-failure.yml - Test transcription failure scenarios"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make test                          # Default (no API keys)"
-	@echo "  make test-with-api-keys            # Auto-switches to deepgram config"
-	@echo "  make test CONFIG=deepgram-openai.yml  # Custom config"
+	@echo "  make test                          # Default (uses real APIs)"
+	@echo "  make test-no-api                   # CI mode (no API keys)"
+	@echo "  make test CONFIG=mock-services.yml # Custom config"
 	@echo "  make endpoints CONFIG=mock-services.yml  # Endpoint tests with mock"
 	@echo "  make start-rebuild CONFIG=custom.yml     # Rebuild with custom config"
 	@echo "  make containers-logs SERVICE=workers-test  # View worker logs"
 	@echo "  make show-config                   # Show current config"
 
-# Run all tests (excludes slow, sdk, and requires-api-keys tests for faster feedback)
+# Run all tests (excludes slow and sdk tests for faster feedback)
 # Creates a persistent fixture conversation that won't be deleted between suites
 all:
-	@echo "Running all tests (excluding slow, sdk, and requires-api-keys tests)..."
+	@echo "Running all tests (excluding slow and sdk tests)..."
 	CREATE_FIXTURE=true uv run --with-requirements test-requirements.txt robot --outputdir $(OUTPUTDIR) \
 		--name "All Tests" \
 		--console verbose \
 		--loglevel INFO:INFO \
 		--exclude slow \
 		--exclude sdk \
-		--exclude requires-api-keys \
 		$(TEST_DIR)
 
 # Run only endpoint tests
@@ -242,24 +242,37 @@ test-sdk:
 		$(TEST_DIR)
 
 # Run ONLY tests that require API keys (Deepgram + OpenAI)
-# Automatically switches to deepgram-openai.yml config
+# Uses default deepgram-openai.yml config
 test-with-api-keys:
-	@echo "🔄 Switching to deepgram-openai.yml config..."
+	@echo "🧪 Running tests that require API keys..."
 	@if [ -z "$$DEEPGRAM_API_KEY" ] || [ -z "$$OPENAI_API_KEY" ]; then \
 		echo "❌ Error: DEEPGRAM_API_KEY and OPENAI_API_KEY must be set"; \
 		echo "   export DEEPGRAM_API_KEY='your-key-here'"; \
 		echo "   export OPENAI_API_KEY='your-key-here'"; \
 		exit 1; \
 	fi
-	@$(MAKE) containers-stop
-	@TEST_CONFIG_FILE=/app/test-configs/deepgram-openai.yml $(MAKE) containers-start
-	@echo "✅ Containers running with deepgram-openai.yml"
-	@echo "🧪 Running API key tests..."
 	CREATE_FIXTURE=true uv run --with-requirements test-requirements.txt robot --outputdir $(OUTPUTDIR) \
 		--name "API Key Tests" \
 		--console verbose \
 		--loglevel INFO:INFO \
 		--include requires-api-keys \
+		$(TEST_DIR)
+
+# Run tests without API keys (CI mode)
+# Switches to mock-services.yml config and excludes requires-api-keys tests
+test-no-api:
+	@echo "🔄 Running tests without API keys (CI mode)..."
+	@$(MAKE) containers-stop
+	@TEST_CONFIG_FILE=/app/test-configs/mock-services.yml $(MAKE) containers-start
+	@echo "✅ Containers running with mock-services.yml"
+	@echo "🧪 Running tests (excluding requires-api-keys)..."
+	CREATE_FIXTURE=true uv run --with-requirements test-requirements.txt robot --outputdir $(OUTPUTDIR) \
+		--name "No API Tests" \
+		--console verbose \
+		--loglevel INFO:INFO \
+		--exclude slow \
+		--exclude sdk \
+		--exclude requires-api-keys \
 		$(TEST_DIR)
 
 # Run ALL tests including slow and SDK tests
