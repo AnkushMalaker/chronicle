@@ -51,7 +51,7 @@ models:
   description: Mock STT for testing (batch)
   model_provider: mock
   model_type: stt
-  model_url: http://localhost:9999
+  model_url: http://host.docker.internal:9999
   name: mock-stt
   operations:
     stt_transcribe:
