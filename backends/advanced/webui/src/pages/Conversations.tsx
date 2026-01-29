@@ -3,7 +3,7 @@ import { MessageSquare, RefreshCw, Calendar, User, Play, Pause, MoreVertical, Ro
 import { conversationsApi, annotationsApi, speakerApi, BACKEND_URL } from '../services/api'
 import ConversationVersionHeader from '../components/ConversationVersionHeader'
 import { getStorageKey } from '../utils/storage'
-import { WaveformDisplay } from '../components/audio/WaveformDisplay'
+import { InteractiveWaveform } from '../components/audio/InteractiveWaveform'
 import SpeakerNameDropdown from '../components/SpeakerNameDropdown'
 
 interface Conversation {
@@ -934,12 +934,25 @@ export default function Conversations() {
 
                       {/* Waveform Visualization */}
                       {conversation.conversation_id && conversation.audio_total_duration && (
-                        <WaveformDisplay
+                        <InteractiveWaveform
                           conversationId={conversation.conversation_id}
                           duration={conversation.audio_total_duration}
+                          segments={conversation.segments}
                           currentTime={conversation.conversation_id ? audioCurrentTime[conversation.conversation_id] : undefined}
                           onSeek={(time) => handleSeek(conversation.conversation_id!, time)}
-                          height={80}
+                          onSegmentChange={(index, newStart, newEnd) => {
+                            // Optimistic update
+                            setConversations(prev => prev.map(c => {
+                                if (c.conversation_id !== conversation.conversation_id) return c;
+                                const newSegments = [...(c.segments || [])];
+                                if (newSegments[index]) {
+                                    newSegments[index] = { ...newSegments[index], start: newStart, end: newEnd };
+                                }
+                                return { ...c, segments: newSegments };
+                            }));
+                            console.log(`Segment ${index} moved: ${newStart.toFixed(2)} - ${newEnd.toFixed(2)}`);
+                          }}
+                          height={160}
                         />
                       )}
 
