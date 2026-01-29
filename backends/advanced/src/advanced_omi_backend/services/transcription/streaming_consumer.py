@@ -125,7 +125,6 @@ class StreamingTranscriptionConsumer:
             self.active_sessions[session_id] = {
                 "last_activity": time.time(),
                 "sample_rate": sample_rate,
-                "audio_offset_seconds": 0.0  # Track cumulative audio duration for timestamp adjustment
             }
 
             logger.info(f"🎙️ Started Deepgram WebSocket stream for session: {session_id}")
@@ -164,10 +163,22 @@ class StreamingTranscriptionConsumer:
                     await self.trigger_plugins(session_id, final_result)
 
             self.active_sessions.pop(session_id, None)
-            logger.info(f"🛑 Ended Deepgram WebSocket stream for session: {session_id}")
+
+            # Signal that streaming transcription is complete for this session
+            # This allows conversation_jobs to wait for all results before reading transcript
+            completion_key = f"transcription:complete:{session_id}"
+            await self.redis_client.set(completion_key, "1", ex=300)  # 5 min TTL
+            logger.info(f"✅ Streaming transcription complete for {session_id} (signal set)")
 
         except Exception as e:
             logger.error(f"Error ending stream for {session_id}: {e}", exc_info=True)
+            # Still signal completion even on error so conversation job doesn't hang
+            try:
+                completion_key = f"transcription:complete:{session_id}"
+                await self.redis_client.set(completion_key, "error", ex=300)
+                logger.warning(f"⚠️ Set error completion signal for {session_id}")
+            except Exception:
+                pass  # Best effort
 
     async def process_audio_chunk(self, session_id: str, audio_chunk: bytes, chunk_id: str):
         """
@@ -250,11 +261,11 @@ class StreamingTranscriptionConsumer:
 
     async def store_final_result(self, session_id: str, result: Dict, chunk_id: str = None):
         """
-        Store final transcription result to Redis Stream with cumulative timestamp adjustment.
+        Store final transcription result to Redis Stream.
 
-        Transcription providers return word timestamps that reset to 0 for each chunk.
-        We maintain a running audio_offset_seconds to make timestamps cumulative across
-        the session, enabling accurate speech duration calculation for speech detection.
+        Note: Deepgram streaming WebSocket maintains state and returns cumulative
+        timestamps from the start of the stream. No offset adjustment is needed.
+        Previous code incorrectly assumed per-chunk timestamps starting at 0.
 
         Args:
             session_id: Session ID
@@ -264,38 +275,9 @@ class StreamingTranscriptionConsumer:
         try:
             stream_name = f"transcription:results:{session_id}"
 
-            # Get cumulative audio offset for this session
-            audio_offset = 0.0
-            chunk_duration = 0.0
-            if session_id in self.active_sessions:
-                audio_offset = self.active_sessions[session_id].get("audio_offset_seconds", 0.0)
-
-            # Adjust word timestamps by cumulative offset
+            # Get words and segments directly - Deepgram returns cumulative timestamps
             words = result.get("words", [])
-            adjusted_words = []
-            if words:
-                for word in words:
-                    adjusted_word = word.copy()
-                    adjusted_word["start"] = word.get("start", 0.0) + audio_offset
-                    adjusted_word["end"] = word.get("end", 0.0) + audio_offset
-                    adjusted_words.append(adjusted_word)
-
-                # Calculate chunk duration from last word's end time
-                if adjusted_words:
-                    last_word_end = words[-1].get("end", 0.0)  # Use unadjusted for duration calc
-                    chunk_duration = last_word_end
-
-                logger.debug(f"➡️ [STREAMING] Adjusted {len(adjusted_words)} words by +{audio_offset:.1f}s (chunk_duration={chunk_duration:.1f}s)")
-
-            # Adjust segment timestamps too
             segments = result.get("segments", [])
-            adjusted_segments = []
-            if segments:
-                for seg in segments:
-                    adjusted_seg = seg.copy()
-                    adjusted_seg["start"] = seg.get("start", 0.0) + audio_offset
-                    adjusted_seg["end"] = seg.get("end", 0.0) + audio_offset
-                    adjusted_segments.append(adjusted_seg)
 
             # Prepare result entry - MUST match aggregator's expected schema
             # All keys and values must be bytes to match consumer.py format
@@ -308,23 +290,17 @@ class StreamingTranscriptionConsumer:
                 b"timestamp": str(time.time()).encode(),
             }
 
-            # Add adjusted JSON fields
-            if adjusted_words:
-                entry[b"words"] = json.dumps(adjusted_words).encode()
+            # Add words and segments directly (already have cumulative timestamps from Deepgram)
+            if words:
+                entry[b"words"] = json.dumps(words).encode()
 
-            if adjusted_segments:
-                entry[b"segments"] = json.dumps(adjusted_segments).encode()
+            if segments:
+                entry[b"segments"] = json.dumps(segments).encode()
 
             # Write to Redis Stream
             await self.redis_client.xadd(stream_name, entry)
 
-            # Update cumulative offset for next chunk
-            if session_id in self.active_sessions and chunk_duration > 0:
-                self.active_sessions[session_id]["audio_offset_seconds"] += chunk_duration
-                new_offset = self.active_sessions[session_id]["audio_offset_seconds"]
-                logger.info(f"💾 Stored final result to {stream_name}: {result.get('text', '')[:50]}... (offset: {audio_offset:.1f}s → {new_offset:.1f}s)")
-            else:
-                logger.info(f"💾 Stored final result to {stream_name}: {result.get('text', '')[:50]}...")
+            logger.info(f"💾 Stored final result to {stream_name}: {result.get('text', '')[:50]}... ({len(words)} words)")
 
         except Exception as e:
             logger.error(f"Error storing final result for {session_id}: {e}", exc_info=True)

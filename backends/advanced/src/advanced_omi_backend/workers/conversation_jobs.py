@@ -593,6 +593,30 @@ async def open_conversation_job(
     # to avoid false negatives from aggregated results lacking proper word-level data
     logger.info("✅ Conversation has meaningful speech (validated during streaming), proceeding with post-processing")
 
+    # Wait for streaming transcription consumer to complete before reading transcript
+    # This fixes the race condition where conversation job reads transcript before
+    # streaming consumer stores all final results (seen as 24+ second delay in logs)
+    completion_key = f"transcription:complete:{session_id}"
+    max_wait_streaming = 30  # seconds
+    waited_streaming = 0.0
+    while waited_streaming < max_wait_streaming:
+        completion_status = await redis_client.get(completion_key)
+        if completion_status:
+            status_str = completion_status.decode() if isinstance(completion_status, bytes) else completion_status
+            if status_str == "error":
+                logger.warning(f"⚠️ Streaming transcription ended with error for {session_id}, proceeding anyway")
+            else:
+                logger.info(f"✅ Streaming transcription confirmed complete for {session_id}")
+            break
+        await asyncio.sleep(0.5)
+        waited_streaming += 0.5
+
+    if waited_streaming >= max_wait_streaming:
+        logger.warning(
+            f"⚠️ Timed out waiting for streaming completion signal for {session_id} "
+            f"(waited {max_wait_streaming}s), proceeding with available transcript"
+        )
+
     # Wait for audio_streaming_persistence_job to complete and write MongoDB chunks
     from advanced_omi_backend.utils.audio_chunk_utils import wait_for_audio_chunks
 
