@@ -155,38 +155,32 @@ models:
         Content-Type: application/json
       response:
         type: json
-- name: stt-parakeet-stream
-  description: Parakeet streaming transcription over WebSocket
+- name: stt-deepgram-stream
+  description: Deepgram Nova 3 streaming transcription over WebSocket
   model_type: stt_stream
-  model_provider: parakeet
+  model_provider: deepgram
   api_family: websocket
-  model_url: ws://localhost:9001/stream
+  model_url: wss://api.deepgram.com/v1/listen
+  api_key: ${oc.env:DEEPGRAM_API_KEY,''}
   operations:
-    start:
-      message:
-        type: transcribe
-        config:
-          vad_enabled: true
-          vad_silence_ms: 1000
-          time_interval_seconds: 30
-          return_interim_results: true
-          min_audio_seconds: 0.5
-    chunk_header:
-      message:
-        type: audio_chunk
-        rate: 16000
-        width: 2
-        channels: 1
+    query:
+      model: nova-3
+      language: multi
+      smart_format: 'true'
+      punctuate: 'true'
+      encoding: linear16
+      sample_rate: 16000
+      channels: '1'
     end:
       message:
-        type: stop
+        type: CloseStream
     expect:
-      interim_type: interim_result
-      final_type: final_result
+      interim_type: Results
+      final_type: Results
       extract:
-        text: text
-        words: words
-        segments: segments
+        text: channel.alternatives[0].transcript
+        words: channel.alternatives[0].words
+        segments: channel.alternatives[0].paragraphs.paragraphs
 memory:
   provider: chronicle
   timeout_seconds: 1200
