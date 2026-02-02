@@ -71,10 +71,14 @@ class Conversation(Document):
             default_factory=list,
             description="Speaker segments (filled by speaker recognition)"
         )
-        provider: Optional[str] = Field(None, description="Transcription provider used (deepgram, parakeet, etc.)")
+        provider: Optional[str] = Field(None, description="Transcription provider used (deepgram, parakeet, vibevoice, etc.)")
         model: Optional[str] = Field(None, description="Model used (e.g., nova-3, parakeet)")
         created_at: datetime = Field(description="When this version was created")
         processing_time_seconds: Optional[float] = Field(None, description="Time taken to process")
+        diarization_source: Optional[str] = Field(
+            None,
+            description="Source of speaker diarization: 'provider' (transcription service), 'pyannote' (speaker recognition), or None"
+        )
         metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional provider-specific metadata")
 
     class MemoryVersion(BaseModel):

@@ -36,7 +36,7 @@ class ModelDef(BaseModel):
     
     name: str = Field(..., min_length=1, description="Unique model identifier")
     model_type: str = Field(..., description="Model type: llm, embedding, stt, tts, etc.")
-    model_provider: str = Field(default="unknown", description="Provider name: openai, ollama, deepgram, parakeet, etc.")
+    model_provider: str = Field(default="unknown", description="Provider name: openai, ollama, deepgram, parakeet, vibevoice, etc.")
     api_family: str = Field(default="openai", description="API family: openai, http, websocket, etc.")
     model_name: str = Field(default="", description="Provider-specific model name")
     model_url: str = Field(default="", description="Base URL for API requests")
@@ -46,6 +46,10 @@ class ModelDef(BaseModel):
     model_output: Optional[str] = Field(default=None, description="Output format: json, text, vector, etc.")
     embedding_dimensions: Optional[int] = Field(default=None, ge=1, description="Embedding vector dimensions")
     operations: Dict[str, Any] = Field(default_factory=dict, description="API operation definitions")
+    capabilities: List[str] = Field(
+        default_factory=list,
+        description="Provider capabilities: word_timestamps, segments, diarization (for STT providers)"
+    )
     
     @field_validator('model_name', mode='before')
     @classmethod

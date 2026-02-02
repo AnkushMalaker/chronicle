@@ -70,10 +70,34 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
             raise RuntimeError("No default STT model defined in config.yml")
         self.model = model
         self._name = model.model_provider or model.name
+        # Load capabilities from config.yml model definition
+        self._capabilities = set(model.capabilities) if model.capabilities else set()
 
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def capabilities(self) -> set:
+        """Return provider capabilities from config.yml.
+
+        Capabilities indicate what the provider can produce:
+        - word_timestamps: Word-level timing data
+        - segments: Speaker segments
+        - diarization: Speaker labels in segments
+
+        Returns:
+            Set of capability strings
+        """
+        return self._capabilities
+
+    def get_capabilities_dict(self) -> dict:
+        """Return capabilities as a dict for metadata storage.
+
+        Returns:
+            Dict mapping capability names to True
+        """
+        return {cap: True for cap in self._capabilities}
 
     async def transcribe(self, audio_data: bytes, sample_rate: int, diarize: bool = False) -> dict:
         # Special handling for mock provider (no HTTP server needed)

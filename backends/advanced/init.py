@@ -198,8 +198,10 @@ class ChronicleSetup:
                 choice = "1"
             elif provider == "parakeet":
                 choice = "2"
-            elif provider == "none":
+            elif provider == "vibevoice":
                 choice = "3"
+            elif provider == "none":
+                choice = "4"
             else:
                 choice = "1"  # Default to Deepgram
         else:
@@ -208,13 +210,16 @@ class ChronicleSetup:
 
             if is_macos:
                 parakeet_desc = "Offline (Parakeet ASR - CPU-based, runs locally)"
+                vibevoice_desc = "Offline (VibeVoice - CPU-based, built-in diarization)"
             else:
                 parakeet_desc = "Offline (Parakeet ASR - GPU recommended, runs locally)"
+                vibevoice_desc = "Offline (VibeVoice - GPU recommended, built-in diarization)"
 
             choices = {
                 "1": "Deepgram (recommended - high quality, cloud-based)",
                 "2": parakeet_desc,
-                "3": "None (skip transcription setup)"
+                "3": vibevoice_desc,
+                "4": "None (skip transcription setup)"
             }
 
             choice = self.prompt_choice("Choose your transcription provider:", choices, "1")
@@ -256,9 +261,24 @@ class ChronicleSetup:
 
             self.console.print("[green][SUCCESS][/green] Parakeet configured in config.yml and .env")
             self.console.print("[blue][INFO][/blue] Set defaults.stt: stt-parakeet-batch")
-            self.console.print("[yellow][WARNING][/yellow] Remember to start Parakeet service: cd ../../extras/asr-services && docker compose up parakeet")
+            self.console.print("[yellow][WARNING][/yellow] Remember to start Parakeet service: cd ../../extras/asr-services && docker compose up nemo-asr")
 
         elif choice == "3":
+            self.console.print("[blue][INFO][/blue] Offline VibeVoice ASR selected (built-in speaker diarization)")
+            vibevoice_url = self.prompt_value("VibeVoice ASR URL", "http://host.docker.internal:8767")
+
+            # Write URL to .env for ${VIBEVOICE_ASR_URL} placeholder in config.yml
+            self.config["VIBEVOICE_ASR_URL"] = vibevoice_url
+
+            # Update config.yml to use VibeVoice
+            self.config_manager.update_config_defaults({"stt": "stt-vibevoice"})
+
+            self.console.print("[green][SUCCESS][/green] VibeVoice configured in config.yml and .env")
+            self.console.print("[blue][INFO][/blue] Set defaults.stt: stt-vibevoice")
+            self.console.print("[blue][INFO][/blue] VibeVoice provides built-in speaker diarization - pyannote will be skipped")
+            self.console.print("[yellow][WARNING][/yellow] Remember to start VibeVoice service: cd ../../extras/asr-services && docker compose up vibevoice-asr")
+
+        elif choice == "4":
             self.console.print("[blue][INFO][/blue] Skipping transcription setup")
 
     def setup_llm(self):
@@ -741,7 +761,7 @@ def main():
     parser.add_argument("--parakeet-asr-url",
                        help="Parakeet ASR service URL (default: prompt user)")
     parser.add_argument("--transcription-provider",
-                       choices=["deepgram", "parakeet", "none"],
+                       choices=["deepgram", "parakeet", "vibevoice", "none"],
                        help="Transcription provider (default: prompt user)")
     parser.add_argument("--enable-https", action="store_true",
                        help="Enable HTTPS configuration (default: prompt user)")
