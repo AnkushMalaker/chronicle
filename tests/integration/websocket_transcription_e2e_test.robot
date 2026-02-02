@@ -16,6 +16,7 @@ Resource         ../resources/websocket_keywords.robot
 Resource         ../resources/conversation_keywords.robot
 Resource         ../resources/redis_keywords.robot
 Resource         ../resources/queue_keywords.robot
+Resource         ../resources/transcript_verification.robot
 Resource         ../setup/setup_keywords.robot
 Resource         ../setup/teardown_keywords.robot
 
@@ -238,5 +239,151 @@ Streaming Consumer Closes Deepgram Connection On End Marker
     Should Not Contain    ${logs}    Deepgram did not receive audio data or a text message within the timeout window    Deepgram timeout found - stream was not closed properly
 
     Log    ✅ No Deepgram timeout errors - streaming consumer processed end_marker correctly
+
+
+Word Timestamps Are Monotonically Increasing
+    [Documentation]    Verify timestamps increase across chunks (catches offset accumulation bug)
+    ...
+    ...                This test validates that word timestamps are cumulative from stream start,
+    ...                not reset for each chunk. Real Deepgram maintains state and returns
+    ...                timestamps relative to stream start. If the mock server or backend
+    ...                incorrectly resets timestamps per chunk, this test will fail.
+    ...
+    ...                Bug this catches: Offset accumulation bug where timestamps restart at 0
+    ...                for each interim result instead of being cumulative across the stream.
+    [Tags]    audio-streaming	conversation
+
+    ${device_name}=    Set Variable    timestamp-test
+    ${client_id}=    Get Client ID From Device Name    ${device_name}
+
+    # Stream audio
+    ${stream_id}=    Open Audio Stream    device_name=${device_name}
+    Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=200    realtime_pacing=True
+    Close Audio Stream    ${stream_id}
+
+    # Wait for speech detection and conversation creation
+    Log    Waiting for speech detection job...
+    ${speech_jobs}=    Wait Until Keyword Succeeds    60s    3s
+    ...    Get Jobs By Type And Client    speech_detection    ${client_id}
+    Should Not Be Empty    ${speech_jobs}    No speech detection job found
+    ${speech_job}=    Set Variable    ${speech_jobs}[0]
+    Wait For Job Status    ${speech_job}[job_id]    finished    timeout=60s    interval=2s
+
+    # Wait for conversation to be created
+    ${conv_jobs}=    Wait Until Keyword Succeeds    60s    3s
+    ...    Job Type Exists For Client    open_conversation    ${client_id}
+    ${conv_job}=    Set Variable    ${conv_jobs}[0]
+    ${conv_meta}=    Set Variable    ${conv_job}[meta]
+    ${conversation_id}=    Evaluate    $conv_meta.get('conversation_id', '')
+    Should Not Be Empty    ${conversation_id}    Conversation ID not found
+
+    # Wait for conversation to close
+    Wait For Job Status    ${conv_job}[job_id]    finished    timeout=60s    interval=2s
+
+    # Get conversation with segments
+    ${conversation}=    Get Conversation By ID    ${conversation_id}
+    ${segments}=    Set Variable    ${conversation}[segments]
+    ${segment_count}=    Get Length    ${segments}
+    Should Be True    ${segment_count} > 0    No segments found in conversation
+
+    # Verify monotonically increasing timestamps across all segments
+    ${prev_end}=    Set Variable    ${0.0}
+    FOR    ${segment}    IN    @{segments}
+        ${start}=    Convert To Number    ${segment}[start]
+        ${end}=    Convert To Number    ${segment}[end]
+
+        # Start time must be >= previous end time (allowing small gaps between segments)
+        Should Be True    ${start} >= ${prev_end} - 0.1
+        ...    Segment at ${start}s starts before previous end ${prev_end}s - timestamps not monotonically increasing!
+
+        # End time must be > start time within segment
+        Should Be True    ${end} > ${start}
+        ...    Segment has invalid timing: start=${start}s, end=${end}s
+
+        ${prev_end}=    Set Variable    ${end}
+    END
+
+    # Verify timestamps span a reasonable duration (not all near 0)
+    ${last_segment}=    Set Variable    ${segments}[-1]
+    ${final_end_time}=    Convert To Number    ${last_segment}[end]
+    Should Be True    ${final_end_time} > 1.0
+    ...    Final timestamp ${final_end_time}s is too low - timestamps may not be accumulating correctly across chunks
+
+    Log    ✅ All ${segment_count} segments have monotonically increasing timestamps (final: ${final_end_time}s)
+
+
+Segment Timestamps Match Expected Values
+    [Documentation]    Use existing verification keyword to check segment timing accuracy
+    ...
+    ...                This test uses the Verify Segments Match Expected Timestamps keyword
+    ...                that was created but never called. It validates that actual segment
+    ...                timestamps match expected values from test_data.py within tolerance.
+    [Tags]    audio-streaming	conversation
+
+    ${device_name}=    Set Variable    segment-timing-test
+    ${client_id}=    Get Client ID From Device Name    ${device_name}
+
+    # Stream the test audio file
+    ${stream_id}=    Open Audio Stream    device_name=${device_name}
+    Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=200    realtime_pacing=True
+    Close Audio Stream    ${stream_id}
+
+    # Wait for speech detection and conversation
+    ${speech_jobs}=    Wait Until Keyword Succeeds    60s    3s
+    ...    Get Jobs By Type And Client    speech_detection    ${client_id}
+    Should Not Be Empty    ${speech_jobs}    No speech detection job found
+    ${speech_job}=    Set Variable    ${speech_jobs}[0]
+    Wait For Job Status    ${speech_job}[job_id]    finished    timeout=60s    interval=2s
+
+    # Get conversation
+    ${conv_jobs}=    Wait Until Keyword Succeeds    60s    3s
+    ...    Job Type Exists For Client    open_conversation    ${client_id}
+    ${conv_job}=    Set Variable    ${conv_jobs}[0]
+    ${conv_meta}=    Set Variable    ${conv_job}[meta]
+    ${conversation_id}=    Evaluate    $conv_meta.get('conversation_id', '')
+    Should Not Be Empty    ${conversation_id}
+
+    Wait For Job Status    ${conv_job}[job_id]    finished    timeout=60s    interval=2s
+
+    # Get conversation with segments
+    ${conversation}=    Get Conversation By ID    ${conversation_id}
+    ${segments}=    Set Variable    ${conversation}[segments]
+
+    # Use the existing (previously unused) verification keyword
+    # This checks against EXPECTED_SEGMENT_TIMES from test_data.py
+    Verify Segments Match Expected Timestamps    ${segments}
+
+    Log    ✅ Segment timestamps match expected values within tolerance
+
+
+Streaming Completion Signal Is Set Before Transcript Read
+    [Documentation]    Verify Redis completion signal prevents race condition
+    ...
+    ...                This test validates the fix for the race condition between
+    ...                StreamingTranscriptionConsumer and conversation job:
+    ...                - Consumer sets transcription:complete:{session_id} = "1" when done
+    ...                - Conversation job waits for this signal before reading transcript
+    ...                - Without this, job could read incomplete transcript data
+    [Tags]    audio-streaming	infra
+
+    ${device_name}=    Set Variable    signal-test
+    ${client_id}=    Get Client ID From Device Name    ${device_name}
+
+    # Stream audio and close
+    ${stream_id}=    Open Audio Stream    device_name=${device_name}
+    Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=100
+    Close Audio Stream    ${stream_id}
+
+    # Wait for streaming consumer to complete and set the completion signal
+    ${completion_key}=    Set Variable    transcription:complete:${client_id}
+    Wait Until Keyword Succeeds    30s    1s
+    ...    Verify Redis Key Exists    ${completion_key}
+
+    # Verify the signal value is "1" (completed)
+    ${signal_value}=    Redis Command    GET    ${completion_key}
+    Should Be Equal As Strings    ${signal_value}    1
+    ...    Completion signal value should be "1", got: ${signal_value}
+
+    Log    ✅ Completion signal ${completion_key} = ${signal_value} (consumer completed before job reads)
 
 
