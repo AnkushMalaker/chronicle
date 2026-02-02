@@ -6,11 +6,12 @@
         containers-start-rebuild containers-clean containers-status containers-logs \
         start stop restart rebuild start-rebuild status logs \
         test test-quick test-slow test-sdk test-no-api test-with-api-keys test-all-with-slow-and-sdk clean-all \
+        test-asr test-asr-gpu \
         results results-path results-detailed
 
 # Default output directory
 OUTPUTDIR ?= results
-TEST_DIR = endpoints integration infrastructure
+TEST_DIR = endpoints integration infrastructure asr
 SERVICE ?= chronicle-backend-test
 
 # Test configuration file (set this to use different configs)
@@ -45,10 +46,14 @@ help:
 	@echo "  make status        - Show container status"
 	@echo ""
 	@echo "Running Tests:"
-	@echo "  make all         - Run all tests (excludes slow/sdk)"
+	@echo "  make all         - Run all tests (excludes slow/sdk/requires-gpu)"
 	@echo "  make endpoints   - Run only endpoint tests"
 	@echo "  make integration - Run only integration tests"
 	@echo "  make infra       - Run only infrastructure tests"
+	@echo ""
+	@echo "ASR Tests:"
+	@echo "  make test-asr      - Run ASR protocol tests (no GPU required)"
+	@echo "  make test-asr-gpu  - Run ASR GPU tests (requires NVIDIA GPU)"
 	@echo ""
 	@echo "Special Test Tags:"
 	@echo "  make test-slow                    - Run ONLY slow tests (backend restarts)"
@@ -94,16 +99,17 @@ help:
 	@echo "  make containers-logs SERVICE=workers-test  # View worker logs"
 	@echo "  make show-config                   # Show current config"
 
-# Run all tests (excludes slow and sdk tests for faster feedback)
+# Run all tests (excludes slow, sdk, and requires-gpu tests for faster feedback)
 # Creates a persistent fixture conversation that won't be deleted between suites
 all:
-	@echo "Running all tests (excluding slow and sdk tests)..."
+	@echo "Running all tests (excluding slow, sdk, and requires-gpu tests)..."
 	CREATE_FIXTURE=true uv run --with-requirements test-requirements.txt robot --outputdir $(OUTPUTDIR) \
 		--name "All Tests" \
 		--console verbose \
 		--loglevel INFO:INFO \
 		--exclude slow \
 		--exclude sdk \
+		--exclude requires-gpu \
 		$(TEST_DIR)
 
 # Run only endpoint tests
@@ -283,6 +289,31 @@ test-all-with-slow-and-sdk:
 		--console verbose \
 		--loglevel INFO:INFO \
 		$(TEST_DIR)
+
+# ============================================================================
+# ASR Tests
+# ============================================================================
+
+# Run ASR protocol tests (no GPU required, uses mock-asr service)
+test-asr:
+	@echo "Running ASR protocol tests (no GPU)..."
+	uv run --with-requirements test-requirements.txt robot --outputdir $(OUTPUTDIR) \
+		--name "ASR Protocol Tests" \
+		--console verbose \
+		--loglevel INFO:INFO \
+		--exclude requires-gpu \
+		asr
+
+# Run ASR GPU tests (requires NVIDIA GPU with actual ASR service)
+test-asr-gpu:
+	@echo "Running ASR GPU tests (requires GPU)..."
+	@echo "NOTE: Ensure GPU ASR service is running on port 8767"
+	uv run --with-requirements test-requirements.txt robot --outputdir $(OUTPUTDIR) \
+		--name "ASR GPU Tests" \
+		--console verbose \
+		--loglevel INFO:INFO \
+		--include requires-gpu \
+		asr
 
 # ============================================================================
 # View Test Results

@@ -1,0 +1,19 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install dependencies (FastAPI + uvicorn + multipart for file uploads)
+RUN pip install --no-cache-dir fastapi uvicorn python-multipart
+
+# Copy mock server script
+COPY tests/libs/mock_asr_server.py .
+
+# Expose HTTP port
+EXPOSE 8765
+
+# Provider mode can be set via environment variable
+# Options: mock, parakeet, vibevoice, deepgram
+ENV MOCK_ASR_PROVIDER=mock
+
+# Run server (provider mode read from env var)
+CMD ["sh", "-c", "python mock_asr_server.py --host 0.0.0.0 --port 8765 --provider $MOCK_ASR_PROVIDER"]

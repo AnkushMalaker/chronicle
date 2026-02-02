@@ -4,7 +4,7 @@ This document defines the standard tags used across the Chronicle test suite.
 
 ## Simplified Tag Set
 
-Chronicle uses a **minimal, focused tag set** for test organization. Only 14 tags are permitted.
+Chronicle uses a **minimal, focused tag set** for test organization. Only 15 tags are permitted.
 
 ## Tag Format
 
@@ -111,6 +111,13 @@ Chronicle uses a **minimal, focused tag set** for test organization. Only 14 tag
 - Excluded from default `make test` runs until SDK is released
 - Run explicitly with `make test-sdk` when developing SDK features
 
+**`requires-gpu`** - Tests requiring GPU hardware and CUDA
+- Actual ASR model loading and inference
+- GPU-accelerated transcription quality validation
+- Tests using real NeMo/Parakeet models
+- Excluded from standard CI runs (no GPU available)
+- Run explicitly with `make test-asr-gpu` on GPU-enabled systems
+
 ## Tag Usage Guidelines
 
 ### Single Tag per Test (Preferred)
@@ -158,6 +165,7 @@ Use 2-3 tags only when testing interactions between components:
 11. **Does it require external API keys?** → Add `requires-api-keys` tag
 12. **Does it take >30s or restart services?** → Add `slow` tag
 13. **Is it for unreleased SDK features?** → Add `sdk` tag
+14. **Does it require GPU hardware?** → Add `requires-gpu` tag
 
 ### Examples
 
@@ -255,10 +263,11 @@ Current distribution (approximate):
 - `slow`: 2 tests (backend restart tests)
 - `sdk`: 2 tests (SDK integration tests)
 - `requires-api-keys`: 1 test (integration_test.robot)
+- `requires-gpu`: 5 tests (ASR GPU integration tests)
 - `audio-batch`: 0 tests (reserved for future use)
 
 ---
 
-**Last Updated:** 2026-01-18
-**Total Approved Tags:** 14
+**Last Updated:** 2026-01-29
+**Total Approved Tags:** 15
 **Enforcement:** Mandatory - no exceptions

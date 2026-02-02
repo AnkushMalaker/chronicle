@@ -454,7 +454,8 @@ def select_transcription_provider():
     choices = {
         "1": "Deepgram (cloud-based, high quality, requires API key)",
         "2": "Parakeet ASR (offline, runs locally, requires GPU)",
-        "3": "None (skip transcription setup)"
+        "3": "VibeVoice ASR (offline, built-in speaker diarization, requires GPU)",
+        "4": "None (skip transcription setup)"
     }
 
     for key, desc in choices.items():
@@ -470,6 +471,8 @@ def select_transcription_provider():
                 elif choice == "2":
                     return "parakeet"
                 elif choice == "3":
+                    return "vibevoice"
+                elif choice == "4":
                     return "none"
             console.print(f"[red]Invalid choice. Please select from {list(choices.keys())}[/red]")
         except EOFError:
@@ -495,9 +498,9 @@ def main():
     # Service Selection
     selected_services = select_services()
 
-    # Auto-add asr-services if Parakeet was chosen
-    if transcription_provider == "parakeet" and 'asr-services' not in selected_services:
-        console.print("[blue][INFO][/blue] Auto-adding ASR services for Parakeet transcription")
+    # Auto-add asr-services if local ASR was chosen (Parakeet or VibeVoice)
+    if transcription_provider in ("parakeet", "vibevoice") and 'asr-services' not in selected_services:
+        console.print(f"[blue][INFO][/blue] Auto-adding ASR services for {transcription_provider.capitalize()} transcription")
         selected_services.append('asr-services')
 
     if not selected_services:
