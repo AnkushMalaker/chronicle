@@ -396,13 +396,12 @@ def detect_cuda_version(default: str = "cu126") -> str:
         if result.returncode == 0:
             match = re.search(r'CUDA Version:\s*(\d+)\.(\d+)', result.stdout)
             if match:
-                major, minor = match.groups()
-                cuda_ver = f"{major}.{minor}"
-                if cuda_ver >= "12.8":
+                major, minor = int(match.group(1)), int(match.group(2))
+                if (major, minor) >= (12, 8):
                     return "cu128"
-                elif cuda_ver >= "12.6":
+                elif (major, minor) >= (12, 6):
                     return "cu126"
-                elif cuda_ver >= "12.1":
+                elif (major, minor) >= (12, 1):
                     return "cu121"
     except (subprocess.SubprocessError, FileNotFoundError):
         pass

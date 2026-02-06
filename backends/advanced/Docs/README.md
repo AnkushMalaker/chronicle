@@ -29,12 +29,6 @@ Welcome to chronicle! This guide provides the optimal reading sequence to unders
 ### 3. **[Memory System](./memories.md)**
 **Memory extraction and semantic search**
 
-### 3a. **[Memory Configuration Guide](./memory-configuration-guide.md)** 🎯 *NEW USER GUIDE*
-**Easy guide for configuring memory extraction**
-- 3-step setup for memory extraction
-- Understanding memory types (general, facts, categories)
-- Customization examples and troubleshooting
-- **Perfect for**: New users wanting to customize memory behavior
 - How conversations become memories
 - Mem0 integration and vector storage
 - Configuration and customization options
