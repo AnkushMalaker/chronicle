@@ -23,6 +23,10 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from rich.text import Text
 
+# Add repo root to path for imports
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from config_manager import ConfigManager
+
 
 # Provider and model definitions
 PROVIDERS = {
@@ -349,6 +353,41 @@ class ASRServicesSetup:
         os.chmod(env_path, 0o600)
         self.console.print("[green][SUCCESS][/green] .env file configured successfully")
 
+    def update_config_yml(self, provider: str):
+        """Update config/config.yml with STT model defaults."""
+        provider_to_stt_model = {
+            "vibevoice": "stt-vibevoice",
+            "faster-whisper": "stt-faster-whisper",
+            "transformers": "stt-transformers",
+            "nemo": "stt-nemo",
+        }
+
+        stt_model = provider_to_stt_model.get(provider)
+        if not stt_model:
+            self.console.print(f"[yellow][WARNING][/yellow] Unknown provider '{provider}', skipping config.yml update")
+            return
+
+        try:
+            config_manager = ConfigManager(service_path="extras/asr-services")
+
+            # Validate the model exists in config.yml
+            config = config_manager.get_full_config()
+            models = config.get("models", [])
+            model_names = [m.get("name") for m in models]
+
+            if stt_model not in model_names:
+                self.console.print(f"[yellow][WARNING][/yellow] Model '{stt_model}' not found in config.yml")
+                self.console.print("[blue][INFO][/blue] Please ensure config/config.yml includes the model definition")
+            else:
+                self.console.print(f"[blue][INFO][/blue] Found STT model '{stt_model}' in config.yml")
+
+            config_manager.update_config_defaults({"stt": stt_model})
+            self.console.print(f"[green][SUCCESS][/green] Updated defaults.stt to '{stt_model}' in config/config.yml")
+
+        except Exception as e:
+            self.console.print(f"[yellow][WARNING][/yellow] Could not update config.yml: {e}")
+            self.console.print("[blue][INFO][/blue] You may need to manually set defaults.stt in config/config.yml")
+
     def show_summary(self, provider: str, model: str):
         """Show configuration summary"""
         self.print_section("Configuration Summary")
@@ -411,6 +450,9 @@ class ASRServicesSetup:
             # Generate files
             self.print_header("Configuration Complete!")
             self.generate_env_file()
+
+            # Update config/config.yml with STT model and defaults
+            self.update_config_yml(provider)
 
             # Show results
             self.show_summary(provider, model)

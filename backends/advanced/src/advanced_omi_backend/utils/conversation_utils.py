@@ -291,7 +291,11 @@ async def generate_summary(text: str) -> str:
     return await generate_short_summary(text)
 
 
-async def generate_detailed_summary(text: str, segments: Optional[list] = None) -> str:
+async def generate_detailed_summary(
+    text: str,
+    segments: Optional[list] = None,
+    memory_context: Optional[str] = None,
+) -> str:
     """
     Generate a comprehensive, detailed summary of the conversation.
 
@@ -305,6 +309,9 @@ async def generate_detailed_summary(text: str, segments: Optional[list] = None) 
         segments: Optional list of speaker segments with structure:
             [{"speaker": str, "text": str, "start": float, "end": float}, ...]
             If provided, includes speaker attribution in detailed summary
+        memory_context: Optional context from prior conversations/memories.
+            When provided, injected into the prompt so the LLM can produce
+            more informed, contextual summaries.
 
     Returns:
         str: Comprehensive detailed summary (multiple paragraphs) or fallback
@@ -343,9 +350,16 @@ async def generate_detailed_summary(text: str, segments: Optional[list] = None) 
             else ""
         )
 
+        memory_section = ""
+        if memory_context:
+            memory_section = f"""CONTEXT ABOUT THE USER (from prior conversations):
+{memory_context}
+
+"""
+
         prompt = f"""Generate a comprehensive, detailed summary of this conversation transcript.
 
-TRANSCRIPT:
+{memory_section}TRANSCRIPT:
 "{conversation_text}"
 
 INSTRUCTIONS:

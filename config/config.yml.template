@@ -179,6 +179,78 @@ models:
         extract:
           text: text
           segments: segments
+- name: stt-faster-whisper
+  description: Faster Whisper ASR (CTranslate2)
+  model_type: stt
+  model_provider: faster-whisper
+  api_family: http
+  model_url: http://${oc.env:FASTER_WHISPER_ASR_URL,host.docker.internal:8767}
+  api_key: ''
+  # Capabilities: what this provider can produce
+  # - word_timestamps: Word-level timing data
+  # - segments: Speaker segments
+  capabilities:
+    - word_timestamps
+    - segments
+  operations:
+    stt_transcribe:
+      method: POST
+      path: /transcribe
+      content_type: multipart/form-data
+      response:
+        type: json
+        extract:
+          text: text
+          words: words
+          segments: segments
+- name: stt-transformers
+  description: HuggingFace Transformers ASR
+  model_type: stt
+  model_provider: transformers
+  api_family: http
+  model_url: http://${oc.env:TRANSFORMERS_ASR_URL,host.docker.internal:8767}
+  api_key: ''
+  # Capabilities: what this provider can produce
+  # - word_timestamps: Word-level timing data
+  # - segments: Speaker segments
+  capabilities:
+    - word_timestamps
+    - segments
+  operations:
+    stt_transcribe:
+      method: POST
+      path: /transcribe
+      content_type: multipart/form-data
+      response:
+        type: json
+        extract:
+          text: text
+          words: words
+          segments: segments
+- name: stt-nemo
+  description: NVIDIA NeMo ASR (Parakeet, Canary)
+  model_type: stt
+  model_provider: nemo
+  api_family: http
+  model_url: http://${oc.env:NEMO_ASR_URL,host.docker.internal:8767}
+  api_key: ''
+  # Capabilities: what this provider can produce
+  # - word_timestamps: Word-level timing data
+  # - segments: Speaker segments
+  capabilities:
+    - word_timestamps
+    - segments
+  operations:
+    stt_transcribe:
+      method: POST
+      path: /transcribe
+      content_type: multipart/form-data
+      response:
+        type: json
+        extract:
+          text: text
+          words: words
+          segments: segments
 - name: tts-http
   description: Generic JSON TTS endpoint
   model_type: tts
@@ -245,7 +317,11 @@ memory:
     timeout: 30
   obsidian:
     enabled: false
-    neo4j_host: neo4j-mem0
+    neo4j_host: neo4j
+    timeout: 30
+  knowledge_graph:
+    enabled: false
+    neo4j_host: neo4j
     timeout: 30
 
 speaker_recognition:

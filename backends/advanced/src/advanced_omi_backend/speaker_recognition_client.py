@@ -241,6 +241,245 @@ class SpeakerRecognitionClient:
             logger.error(f"🎤 Error during speaker recognition: {e}")
             return {"error": "unknown_error", "message": str(e), "segments": []}
 
+    async def identify_segment(
+        self,
+        audio_wav_bytes: bytes,
+        user_id: Optional[str] = None,
+        similarity_threshold: Optional[float] = None,
+    ) -> Dict:
+        """
+        Identify a single speaker from a WAV audio segment via POST /identify.
+
+        Args:
+            audio_wav_bytes: WAV audio bytes for a single segment
+            user_id: Optional user ID to scope identification
+            similarity_threshold: Optional similarity threshold override
+
+        Returns:
+            Dict with keys: found, speaker_id, speaker_name, confidence, status, duration
+        """
+        if hasattr(self, "_mock_client"):
+            return await self._mock_client.identify_segment(
+                audio_wav_bytes, user_id, similarity_threshold
+            )
+
+        if not self.enabled:
+            return {"found": False, "speaker_name": None, "confidence": 0.0, "status": "unknown"}
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                form_data = aiohttp.FormData()
+                form_data.add_field(
+                    "file", audio_wav_bytes, filename="segment.wav", content_type="audio/wav"
+                )
+                if user_id is not None:
+                    form_data.add_field("user_id", str(user_id))
+                if similarity_threshold is not None:
+                    form_data.add_field("similarity_threshold", str(similarity_threshold))
+
+                async with session.post(
+                    f"{self.service_url}/identify",
+                    data=form_data,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as response:
+                    if response.status != 200:
+                        response_text = await response.text()
+                        logger.warning(f"🎤 /identify returned status {response.status}: {response_text}")
+                        return {"found": False, "speaker_name": None, "confidence": 0.0, "status": "error"}
+
+                    return await response.json()
+
+        except ClientConnectorError as e:
+            logger.error(f"🎤 Failed to connect to speaker service /identify: {e}")
+            return {"found": False, "speaker_name": None, "confidence": 0.0, "status": "error"}
+        except asyncio.TimeoutError:
+            logger.error("🎤 Timeout calling speaker service /identify")
+            return {"found": False, "speaker_name": None, "confidence": 0.0, "status": "error"}
+        except aiohttp.ClientError as e:
+            logger.warning(f"🎤 Client error during /identify: {e}")
+            return {"found": False, "speaker_name": None, "confidence": 0.0, "status": "error"}
+        except Exception as e:
+            logger.error(f"🎤 Error during /identify: {e}")
+            return {"found": False, "speaker_name": None, "confidence": 0.0, "status": "error"}
+
+    async def identify_provider_segments(
+        self,
+        conversation_id: str,
+        segments: List[Dict],
+        user_id: Optional[str] = None,
+    ) -> Dict:
+        """
+        Identify speakers in provider-diarized segments using majority-vote per label.
+
+        For each unique speaker label, picks the top 3 longest segments (min 1.5s),
+        extracts audio, calls /identify, and majority-votes to map labels to names.
+
+        Args:
+            conversation_id: Conversation ID for audio extraction from MongoDB
+            segments: List of dicts with keys: start, end, text, speaker
+            user_id: Optional user ID for speaker identification
+
+        Returns:
+            Dict with 'segments' list matching diarize_identify_match() format
+        """
+        if hasattr(self, "_mock_client"):
+            return await self._mock_client.identify_provider_segments(
+                conversation_id, segments, user_id
+            )
+
+        if not self.enabled:
+            return {"segments": []}
+
+        from advanced_omi_backend.config import get_diarization_settings
+        from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segment
+
+        config = get_diarization_settings()
+        similarity_threshold = config.get("similarity_threshold", 0.15)
+
+        MIN_SEGMENT_DURATION = 1.5
+        MAX_SAMPLES_PER_LABEL = 3
+
+        # Detect non-speech segments (e.g. [Music], [Environmental Sounds], [Human Sounds])
+        import re
+        NON_SPEECH_PATTERN = re.compile(r"^\[.*\]$")
+
+        def _is_non_speech(seg: Dict) -> bool:
+            text = seg.get("text", "").strip()
+            if not text:
+                return True
+            if NON_SPEECH_PATTERN.match(text):
+                return True
+            label = str(seg.get("speaker", ""))
+            if label in ("None", "none", ""):
+                return True
+            return False
+
+        # Separate speech and non-speech segments
+        speech_segments = []
+        non_speech_indices = set()
+        for i, seg in enumerate(segments):
+            if _is_non_speech(seg):
+                non_speech_indices.add(i)
+            else:
+                speech_segments.append(seg)
+
+        # Group speech segments by speaker label
+        label_groups: Dict[str, List[Dict]] = {}
+        for seg in speech_segments:
+            label = seg.get("speaker", "Unknown")
+            label_groups.setdefault(label, []).append(seg)
+
+        logger.info(
+            f"🎤 Segment-level identification: {len(segments)} segments "
+            f"({len(non_speech_indices)} non-speech filtered), "
+            f"{len(label_groups)} unique labels: {list(label_groups.keys())}"
+        )
+
+        # For each label, pick top N longest segments >= MIN_SEGMENT_DURATION
+        label_samples: Dict[str, List[Dict]] = {}
+        for label, segs in label_groups.items():
+            eligible = [s for s in segs if (s["end"] - s["start"]) >= MIN_SEGMENT_DURATION]
+            eligible.sort(key=lambda s: s["end"] - s["start"], reverse=True)
+            label_samples[label] = eligible[:MAX_SAMPLES_PER_LABEL]
+            if not label_samples[label]:
+                logger.info(f"🎤 Label '{label}': no segments >= {MIN_SEGMENT_DURATION}s, skipping identification")
+
+        # Extract audio and identify concurrently with semaphore
+        semaphore = asyncio.Semaphore(3)
+
+        async def _identify_one(seg: Dict) -> Optional[Dict]:
+            async with semaphore:
+                try:
+                    wav_bytes = await reconstruct_audio_segment(
+                        conversation_id, seg["start"], seg["end"]
+                    )
+                    result = await self.identify_segment(
+                        wav_bytes, user_id="1", similarity_threshold=similarity_threshold
+                    )
+                    return result
+                except Exception as e:
+                    logger.warning(f"🎤 Failed to identify segment [{seg['start']:.1f}-{seg['end']:.1f}]: {e}")
+                    return None
+
+        # Collect identification tasks
+        label_tasks: Dict[str, List[asyncio.Task]] = {}
+        all_tasks = []
+        for label, samples in label_samples.items():
+            tasks = []
+            for seg in samples:
+                task = asyncio.create_task(_identify_one(seg))
+                tasks.append(task)
+                all_tasks.append(task)
+            label_tasks[label] = tasks
+
+        # Wait for all
+        if all_tasks:
+            await asyncio.gather(*all_tasks, return_exceptions=True)
+
+        # Majority-vote per label
+        label_mapping: Dict[str, tuple] = {}  # label -> (identified_name, confidence)
+        for label, tasks in label_tasks.items():
+            name_votes: Dict[str, List[float]] = {}
+            for task in tasks:
+                try:
+                    result = task.result()
+                except Exception:
+                    continue
+                if result and result.get("found"):
+                    name = result.get("speaker_name", "Unknown")
+                    confidence = result.get("confidence", 0.0)
+                    name_votes.setdefault(name, []).append(confidence)
+
+            if name_votes:
+                # Pick name with most votes, break ties by average confidence
+                best_name = max(
+                    name_votes.keys(),
+                    key=lambda n: (len(name_votes[n]), sum(name_votes[n]) / len(name_votes[n])),
+                )
+                avg_confidence = sum(name_votes[best_name]) / len(name_votes[best_name])
+                label_mapping[label] = (best_name, avg_confidence)
+                logger.info(
+                    f"🎤 Label '{label}' -> '{best_name}' "
+                    f"({len(name_votes[best_name])}/{len(tasks)} votes, conf={avg_confidence:.3f})"
+                )
+            else:
+                logger.info(f"🎤 Label '{label}' -> no identification (keeping original)")
+
+        # Build result segments in same format as diarize_identify_match()
+        # Non-speech segments are kept but not speaker-identified
+        result_segments = []
+        for i, seg in enumerate(segments):
+            label = seg.get("speaker", "Unknown")
+            if i in non_speech_indices:
+                result_segments.append({
+                    "start": seg["start"],
+                    "end": seg["end"],
+                    "text": seg.get("text", ""),
+                    "speaker": label,
+                    "identified_as": label,
+                    "confidence": 0.0,
+                    "status": "non_speech",
+                })
+            else:
+                mapped = label_mapping.get(label)
+                result_segments.append({
+                    "start": seg["start"],
+                    "end": seg["end"],
+                    "text": seg.get("text", ""),
+                    "speaker": label,
+                    "identified_as": mapped[0] if mapped else label,
+                    "confidence": mapped[1] if mapped else 0.0,
+                    "status": "identified" if mapped else "unknown",
+                })
+
+        identified_count = sum(1 for m in label_mapping.values() if m)
+        logger.info(
+            f"🎤 Segment identification complete: {identified_count}/{len(label_groups)} labels identified, "
+            f"{len(result_segments)} total segments ({len(non_speech_indices)} non-speech kept as-is)"
+        )
+
+        return {"segments": result_segments}
+
     async def diarize_and_identify(
         self, audio_data: bytes, words: None, user_id: Optional[str] = None  # NOT IMPLEMENTED
     ) -> Dict:

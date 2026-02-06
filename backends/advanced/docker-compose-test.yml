@@ -191,6 +191,23 @@ services:
       retries: 3
     restart: unless-stopped
 
+  mock-asr:
+    build:
+      context: ../..
+      dockerfile: tests/Dockerfile.mock-asr
+    ports:
+      - "8765:8765"
+    environment:
+      # Provider mode for mock ASR: mock, parakeet, vibevoice, deepgram
+      # vibevoice mode returns diarized segments with speaker labels
+      MOCK_ASR_PROVIDER: ${MOCK_ASR_PROVIDER:-mock}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8765/health').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
   workers-test:
     build:
       context: .

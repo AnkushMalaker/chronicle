@@ -1,7 +1,7 @@
 """Mock speaker recognition client for testing without heavy ML dependencies."""
 
 import logging
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -157,4 +157,44 @@ class MockSpeakerRecognitionClient:
                 "text": transcript_data.get("text", ""),
                 "confidence": 0.85
             }]
+        }
+
+    async def identify_segment(
+        self,
+        audio_wav_bytes: bytes,
+        user_id: Optional[str] = None,
+        similarity_threshold: Optional[float] = None,
+    ) -> Dict:
+        """Mock identify_segment - returns no identification."""
+        logger.info("🎤 Mock identify_segment called")
+        return {
+            "found": False,
+            "speaker_id": None,
+            "speaker_name": None,
+            "confidence": 0.0,
+            "status": "unknown",
+            "duration": 0.0,
+        }
+
+    async def identify_provider_segments(
+        self,
+        conversation_id: str,
+        segments: List[Dict],
+        user_id: Optional[str] = None,
+    ) -> Dict:
+        """Mock identify_provider_segments - returns segments with original labels."""
+        logger.info(f"🎤 Mock identify_provider_segments: {len(segments)} segments")
+        return {
+            "segments": [
+                {
+                    "start": seg.get("start", 0.0),
+                    "end": seg.get("end", 0.0),
+                    "text": seg.get("text", ""),
+                    "speaker": seg.get("speaker", "Unknown"),
+                    "identified_as": seg.get("speaker", "Unknown"),
+                    "confidence": 0.0,
+                    "status": "unknown",
+                }
+                for seg in segments
+            ]
         }

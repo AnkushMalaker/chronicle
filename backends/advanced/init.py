@@ -452,7 +452,7 @@ class ChronicleSetup:
 
         if enable_obsidian:
             # Update .env with credentials only (secrets, not feature flags)
-            self.config["NEO4J_HOST"] = "neo4j-mem0"
+            self.config["NEO4J_HOST"] = "neo4j"
             self.config["NEO4J_USER"] = "neo4j"
             self.config["NEO4J_PASSWORD"] = neo4j_password
 
@@ -460,7 +460,7 @@ class ChronicleSetup:
             self.config_manager.update_memory_config({
                 "obsidian": {
                     "enabled": True,
-                    "neo4j_host": "neo4j-mem0",
+                    "neo4j_host": "neo4j",
                     "timeout": 30
                 }
             })
@@ -472,11 +472,77 @@ class ChronicleSetup:
             self.config_manager.update_memory_config({
                 "obsidian": {
                     "enabled": False,
-                    "neo4j_host": "neo4j-mem0",
+                    "neo4j_host": "neo4j",
                     "timeout": 30
                 }
             })
             self.console.print("[blue][INFO][/blue] Obsidian/Neo4j integration disabled")
+
+    def setup_knowledge_graph(self):
+        """Configure Knowledge Graph (Neo4j-based entity/relationship extraction)"""
+        # Check if enabled via command line
+        if hasattr(self.args, 'enable_knowledge_graph') and self.args.enable_knowledge_graph:
+            enable_kg = True
+            neo4j_password = getattr(self.args, 'neo4j_password', None)
+
+            if not neo4j_password:
+                # Check if already set from obsidian setup
+                neo4j_password = self.config.get("NEO4J_PASSWORD")
+                if not neo4j_password:
+                    self.console.print("[yellow][WARNING][/yellow] --enable-knowledge-graph provided but no password")
+                    neo4j_password = self.prompt_password("Neo4j password (min 8 chars)")
+        else:
+            # Interactive prompt (fallback)
+            self.console.print()
+            self.console.print("[bold cyan]Knowledge Graph (Entity Extraction)[/bold cyan]")
+            self.console.print("Enable graph-based entity and relationship extraction from conversations")
+            self.console.print("Extracts: People, Places, Organizations, Events, Promises/Tasks")
+            self.console.print()
+
+            try:
+                enable_kg = Confirm.ask("Enable Knowledge Graph?", default=False)
+            except EOFError:
+                self.console.print("Using default: No")
+                enable_kg = False
+
+            if enable_kg:
+                # Check if Neo4j password already set from obsidian setup
+                existing_password = self.config.get("NEO4J_PASSWORD")
+                if existing_password:
+                    self.console.print("[blue][INFO][/blue] Using Neo4j password from Obsidian configuration")
+                    neo4j_password = existing_password
+                else:
+                    neo4j_password = self.prompt_password("Neo4j password (min 8 chars)")
+
+        if enable_kg:
+            # Update .env with credentials only (secrets, not feature flags)
+            self.config["NEO4J_HOST"] = "neo4j"
+            self.config["NEO4J_USER"] = "neo4j"
+            if neo4j_password:
+                self.config["NEO4J_PASSWORD"] = neo4j_password
+
+            # Update config.yml with feature flag (source of truth) - auto-saves via ConfigManager
+            self.config_manager.update_memory_config({
+                "knowledge_graph": {
+                    "enabled": True,
+                    "neo4j_host": "neo4j",
+                    "timeout": 30
+                }
+            })
+
+            self.console.print("[green][SUCCESS][/green] Knowledge Graph configured")
+            self.console.print("[blue][INFO][/blue] Neo4j will start automatically with --profile knowledge-graph")
+            self.console.print("[blue][INFO][/blue] Entities and relationships will be extracted from conversations")
+        else:
+            # Explicitly disable Knowledge Graph in config.yml when not enabled
+            self.config_manager.update_memory_config({
+                "knowledge_graph": {
+                    "enabled": False,
+                    "neo4j_host": "neo4j",
+                    "timeout": 30
+                }
+            })
+            self.console.print("[blue][INFO][/blue] Knowledge Graph disabled")
 
     def setup_network(self):
         """Configure network settings"""
@@ -646,6 +712,12 @@ class ChronicleSetup:
             neo4j_host = obsidian_config.get("neo4j_host", "not set")
             self.console.print(f"✅ Obsidian/Neo4j: Enabled ({neo4j_host})")
 
+        # Show Knowledge Graph status (read from config.yml)
+        kg_config = config_yml.get("memory", {}).get("knowledge_graph", {})
+        if kg_config.get("enabled", False):
+            neo4j_host = kg_config.get("neo4j_host", "not set")
+            self.console.print(f"✅ Knowledge Graph: Enabled ({neo4j_host})")
+
         # Auto-determine URLs based on HTTPS configuration
         if self.config.get('HTTPS_ENABLED') == 'true':
             server_ip = self.config.get('SERVER_IP', 'localhost')
@@ -666,11 +738,23 @@ class ChronicleSetup:
         config_yml = self.config_manager.get_full_config()
 
         self.console.print("1. Start the main services:")
-        # Include --profile obsidian if Obsidian is enabled (read from config.yml)
+        # Include --profile obsidian/knowledge-graph if enabled (read from config.yml)
         obsidian_enabled = config_yml.get("memory", {}).get("obsidian", {}).get("enabled", False)
+        kg_enabled = config_yml.get("memory", {}).get("knowledge_graph", {}).get("enabled", False)
+
+        profiles = []
+        profile_notes = []
         if obsidian_enabled:
-            self.console.print("   [cyan]docker compose --profile obsidian up --build -d[/cyan]")
-            self.console.print("   [dim](Includes Neo4j for Obsidian integration)[/dim]")
+            profiles.append("obsidian")
+            profile_notes.append("Obsidian integration")
+        if kg_enabled:
+            profiles.append("knowledge-graph")
+            profile_notes.append("Knowledge Graph")
+
+        if profiles:
+            profile_args = " ".join([f"--profile {p}" for p in profiles])
+            self.console.print(f"   [cyan]docker compose {profile_args} up --build -d[/cyan]")
+            self.console.print(f"   [dim](Includes Neo4j for: {', '.join(profile_notes)})[/dim]")
         else:
             self.console.print("   [cyan]docker compose up --build -d[/cyan]")
         self.console.print()
@@ -720,6 +804,7 @@ class ChronicleSetup:
             self.setup_memory()
             self.setup_optional_services()
             self.setup_obsidian()
+            self.setup_knowledge_graph()
             self.setup_network()
             self.setup_https()
 
@@ -769,6 +854,8 @@ def main():
                        help="Server IP/domain for SSL certificate (default: prompt user)")
     parser.add_argument("--enable-obsidian", action="store_true",
                        help="Enable Obsidian/Neo4j integration (default: prompt user)")
+    parser.add_argument("--enable-knowledge-graph", action="store_true",
+                       help="Enable Knowledge Graph entity extraction (default: prompt user)")
     parser.add_argument("--neo4j-password",
                        help="Neo4j password (default: prompt user)")
     parser.add_argument("--ts-authkey",

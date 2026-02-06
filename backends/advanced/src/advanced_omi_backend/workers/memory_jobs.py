@@ -247,6 +247,34 @@ async def process_memory_job(conversation_id: str, *, redis_client=None) -> Dict
             # This allows users to resume talking immediately after conversation closes,
             # without waiting for memory processing to complete.
 
+            # Extract entities and relationships to knowledge graph (if enabled)
+            try:
+                from advanced_omi_backend.model_registry import get_config
+                config = get_config()
+                kg_enabled = config.get("memory", {}).get("knowledge_graph", {}).get("enabled", False)
+
+                if kg_enabled:
+                    from advanced_omi_backend.services.knowledge_graph import get_knowledge_graph_service
+
+                    kg_service = get_knowledge_graph_service()
+                    kg_result = await kg_service.process_conversation(
+                        conversation_id=conversation_id,
+                        transcript=full_conversation,
+                        user_id=user_id,
+                        conversation_name=conversation_model.title if hasattr(conversation_model, 'title') else None,
+                    )
+                    if kg_result.get("entities", 0) > 0:
+                        logger.info(
+                            f"🔗 Knowledge graph: extracted {kg_result.get('entities', 0)} entities, "
+                            f"{kg_result.get('relationships', 0)} relationships, "
+                            f"{kg_result.get('promises', 0)} promises from {conversation_id}"
+                        )
+                else:
+                    logger.debug("Knowledge graph extraction disabled in config")
+            except Exception as e:
+                # Knowledge graph extraction is optional - don't fail the job
+                logger.warning(f"⚠️ Knowledge graph extraction failed (non-fatal): {e}")
+
             # Trigger memory-level plugins (ALWAYS dispatch when success, even with 0 new memories)
             try:
                 # Get or initialize plugin router (same pattern as conversation_jobs.py)

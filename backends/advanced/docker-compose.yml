@@ -103,11 +103,17 @@ services:
       - HA_TOKEN=${HA_TOKEN}
       - REDIS_URL=redis://redis:6379/0
       - MONGODB_URI=mongodb://mongo:27017
+      # Neo4j configuration (for knowledge graph)
+      - NEO4J_HOST=${NEO4J_HOST}
+      - NEO4J_USER=${NEO4J_USER}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
       # Worker orchestrator configuration (optional - defaults shown)
       - WORKER_CHECK_INTERVAL=${WORKER_CHECK_INTERVAL:-10}
       - MIN_RQ_WORKERS=${MIN_RQ_WORKERS:-6}
       - WORKER_STARTUP_GRACE_PERIOD=${WORKER_STARTUP_GRACE_PERIOD:-30}
       - WORKER_SHUTDOWN_TIMEOUT=${WORKER_SHUTDOWN_TIMEOUT:-30}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Access host services
     depends_on:
       redis:
         condition: service_healthy
@@ -235,9 +241,9 @@ services:
       timeout: 3s
       retries: 5
 
-  neo4j-mem0:
+  neo4j:
     image: neo4j:5.15-community
-    hostname: neo4j-mem0
+    hostname: neo4j
     ports:
       - "7474:7474" # HTTP
       - "7687:7687" # Bolt
@@ -255,8 +261,15 @@ services:
       - ./data/neo4j_data:/data
       - ./data/neo4j_logs:/logs
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:7474"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
     profiles:
       - obsidian
+      - knowledge-graph
 
   # ollama:
   #   image: ollama/ollama:latest

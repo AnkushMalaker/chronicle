@@ -306,56 +306,59 @@ async def recognise_speakers_job(
                 "processing_time_seconds": time.time() - start_time
             }
 
-    transcript_data = {
-        "text": actual_transcript_text,
-        "words": actual_words
-    }
-
-    # Generate backend token for speaker service to fetch audio
-    # Speaker service will check conversation duration and decide
-    # whether to chunk based on its own memory constraints
-
-    # Get user details for token generation
     try:
-        user = await get_user_by_id(user_id)
-        if not user:
-            logger.error(f"User {user_id} not found for token generation")
-            return {
-                "success": False,
-                "conversation_id": conversation_id,
-                "version_id": version_id,
-                "error": "User not found",
-                "processing_time_seconds": time.time() - start_time
+        if provider_has_diarization and transcript_version.segments:
+            # Provider already diarized (e.g. VibeVoice) - use segment-level identification
+            logger.info(f"🎤 Using segment-level speaker identification for provider-diarized segments")
+            segments_data = [
+                {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker}
+                for s in transcript_version.segments
+            ]
+            speaker_result = await speaker_client.identify_provider_segments(
+                conversation_id=conversation_id,
+                segments=segments_data,
+                user_id=user_id,
+            )
+        else:
+            # Standard path: full diarization + identification via speaker service
+            transcript_data = {
+                "text": actual_transcript_text,
+                "words": actual_words
             }
 
-        backend_token = generate_jwt_for_user(user_id, user.email)
-        logger.info(f"🔐 Generated backend token for speaker service")
+            # Generate backend token for speaker service to fetch audio
+            try:
+                user = await get_user_by_id(user_id)
+                if not user:
+                    logger.error(f"User {user_id} not found for token generation")
+                    return {
+                        "success": False,
+                        "conversation_id": conversation_id,
+                        "version_id": version_id,
+                        "error": "User not found",
+                        "processing_time_seconds": time.time() - start_time
+                    }
 
-    except Exception as token_error:
-        logger.error(f"Failed to generate backend token: {token_error}", exc_info=True)
-        return {
-            "success": False,
-            "conversation_id": conversation_id,
-            "version_id": version_id,
-            "error": f"Token generation failed: {token_error}",
-            "processing_time_seconds": time.time() - start_time
-        }
+                backend_token = generate_jwt_for_user(user_id, user.email)
+                logger.info(f"🔐 Generated backend token for speaker service")
 
-    # Call speaker recognition service with conversation_id
-    # Speaker service will:
-    # 1. Fetch conversation metadata to check duration
-    # 2. Decide whether to chunk based on its MAX_DIARIZE_DURATION setting
-    # 3. Request audio segments via backend API as needed
-    # 4. Return merged speaker segments
-    logger.info(f"🎤 Calling speaker recognition service with conversation_id...")
+            except Exception as token_error:
+                logger.error(f"Failed to generate backend token: {token_error}", exc_info=True)
+                return {
+                    "success": False,
+                    "conversation_id": conversation_id,
+                    "version_id": version_id,
+                    "error": f"Token generation failed: {token_error}",
+                    "processing_time_seconds": time.time() - start_time
+                }
 
-    try:
-        speaker_result = await speaker_client.diarize_identify_match(
-            conversation_id=conversation_id,
-            backend_token=backend_token,
-            transcript_data=transcript_data,
-            user_id=user_id
-        )
+            logger.info(f"🎤 Calling speaker recognition service with conversation_id...")
+            speaker_result = await speaker_client.diarize_identify_match(
+                conversation_id=conversation_id,
+                backend_token=backend_token,
+                transcript_data=transcript_data,
+                user_id=user_id
+            )
 
         # Check for errors from speaker service
         if speaker_result.get("error"):

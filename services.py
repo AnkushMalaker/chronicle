@@ -92,12 +92,16 @@ def run_compose_command(service_name, command, build=False):
                 build_cmd.extend(['--profile', 'https'])
 
             obsidian_enabled = False
+            kg_enabled = False
             config_data = load_config_yml()
             if config_data:
                 memory_config = config_data.get('memory', {})
                 obsidian_config = memory_config.get('obsidian', {})
                 if obsidian_config.get('enabled', False):
                     obsidian_enabled = True
+                kg_config = memory_config.get('knowledge_graph', {})
+                if kg_config.get('enabled', False):
+                    kg_enabled = True
 
             if not obsidian_enabled:
                 env_file = service_path / '.env'
@@ -108,6 +112,8 @@ def run_compose_command(service_name, command, build=False):
 
             if obsidian_enabled:
                 build_cmd.extend(['--profile', 'obsidian'])
+            if kg_enabled:
+                build_cmd.extend(['--profile', 'knowledge-graph'])
 
         elif service_name == 'speaker-recognition':
             env_file = service_path / '.env'
@@ -118,7 +124,32 @@ def run_compose_command(service_name, command, build=False):
                 profile = 'gpu' if pytorch_version.startswith('cu') else 'cpu'
                 build_cmd.extend(['--profile', profile])
 
+        # For asr-services, only build the selected provider
+        asr_service_to_build = None
+        if service_name == 'asr-services':
+            env_file = service_path / '.env'
+            if env_file.exists():
+                env_values = dotenv_values(env_file)
+                asr_provider = env_values.get('ASR_PROVIDER', '').strip("'\"")
+
+                # Map provider to docker service name
+                provider_to_service = {
+                    'vibevoice': 'vibevoice-asr',
+                    'faster-whisper': 'faster-whisper-asr',
+                    'transformers': 'transformers-asr',
+                    'nemo': 'nemo-asr',
+                    'parakeet': 'parakeet-asr',
+                }
+                asr_service_to_build = provider_to_service.get(asr_provider)
+
+                if asr_service_to_build:
+                    console.print(f"[blue]ℹ️  Building ASR provider: {asr_provider} ({asr_service_to_build})[/blue]")
+
         build_cmd.append('build')
+
+        # If building ASR, only build the specific service
+        if asr_service_to_build:
+            build_cmd.append(asr_service_to_build)
 
         # Run build with streaming output (no timeout)
         console.print(f"[cyan]🔨 Building {service_name} (this may take several minutes for CUDA/GPU builds)...[/cyan]")
@@ -173,12 +204,16 @@ def run_compose_command(service_name, command, build=False):
             cmd.extend(['--profile', 'https'])
 
         obsidian_enabled = False
+        kg_enabled = False
         config_data = load_config_yml()
         if config_data:
             memory_config = config_data.get('memory', {})
             obsidian_config = memory_config.get('obsidian', {})
             if obsidian_config.get('enabled', False):
                 obsidian_enabled = True
+            kg_config = memory_config.get('knowledge_graph', {})
+            if kg_config.get('enabled', False):
+                kg_enabled = True
 
         if not obsidian_enabled:
             env_file = service_path / '.env'
@@ -190,6 +225,9 @@ def run_compose_command(service_name, command, build=False):
         if obsidian_enabled:
             cmd.extend(['--profile', 'obsidian'])
             console.print("[blue]ℹ️  Starting with Obsidian/Neo4j support[/blue]")
+        if kg_enabled:
+            cmd.extend(['--profile', 'knowledge-graph'])
+            console.print("[blue]ℹ️  Starting with Knowledge Graph (Neo4j)[/blue]")
 
     # Handle speaker-recognition service specially
     if service_name == 'speaker-recognition' and command in ['up', 'down']:
@@ -215,6 +253,43 @@ def run_compose_command(service_name, command, build=False):
                 cmd.extend(['up', '-d'])
             elif command == 'down':
                 cmd.extend(['down'])
+
+    # Handle asr-services - start only the configured provider
+    elif service_name == 'asr-services' and command in ['up', 'down', 'restart']:
+        env_file = service_path / '.env'
+        asr_service_name = None
+
+        if env_file.exists():
+            env_values = dotenv_values(env_file)
+            asr_provider = env_values.get('ASR_PROVIDER', '').strip("'\"")
+
+            # Map provider to docker service name
+            provider_to_service = {
+                'vibevoice': 'vibevoice-asr',
+                'faster-whisper': 'faster-whisper-asr',
+                'transformers': 'transformers-asr',
+                'nemo': 'nemo-asr',
+                'parakeet': 'parakeet-asr',
+            }
+            asr_service_name = provider_to_service.get(asr_provider)
+
+            if asr_service_name:
+                console.print(f"[blue]ℹ️  Using ASR provider: {asr_provider} ({asr_service_name})[/blue]")
+
+        if command == 'up':
+            if asr_service_name:
+                cmd.extend(['up', '-d', asr_service_name])
+            else:
+                console.print("[yellow]⚠️  No ASR_PROVIDER configured, starting default service[/yellow]")
+                cmd.extend(['up', '-d', 'vibevoice-asr'])
+        elif command == 'down':
+            cmd.extend(['down'])
+        elif command == 'restart':
+            if asr_service_name:
+                cmd.extend(['restart', asr_service_name])
+            else:
+                cmd.extend(['restart'])
+
     else:
         # Standard compose commands for other services
         if command == 'up':

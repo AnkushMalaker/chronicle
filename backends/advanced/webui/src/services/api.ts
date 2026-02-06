@@ -414,14 +414,64 @@ export const chatApi = {
 export const speakerApi = {
   // Get current user's speaker configuration
   getSpeakerConfiguration: () => api.get('/api/speaker-configuration'),
-  
+
   // Update current user's speaker configuration
-  updateSpeakerConfiguration: (primarySpeakers: Array<{speaker_id: string, name: string, user_id: number}>) => 
+  updateSpeakerConfiguration: (primarySpeakers: Array<{speaker_id: string, name: string, user_id: number}>) =>
     api.post('/api/speaker-configuration', primarySpeakers),
-    
-  // Get enrolled speakers from speaker recognition service  
+
+  // Get enrolled speakers from speaker recognition service
   getEnrolledSpeakers: () => api.get('/api/enrolled-speakers'),
-  
+
   // Check speaker service status (admin only)
   getSpeakerServiceStatus: () => api.get('/api/speaker-service-status'),
+}
+
+export const knowledgeGraphApi = {
+  // Entity operations
+  getEntities: (entityType?: string, limit: number = 100) =>
+    api.get('/api/knowledge-graph/entities', {
+      params: {
+        ...(entityType && { entity_type: entityType }),
+        limit
+      }
+    }),
+
+  getEntity: (entityId: string) =>
+    api.get(`/api/knowledge-graph/entities/${entityId}`),
+
+  getEntityRelationships: (entityId: string) =>
+    api.get(`/api/knowledge-graph/entities/${entityId}/relationships`),
+
+  deleteEntity: (entityId: string) =>
+    api.delete(`/api/knowledge-graph/entities/${entityId}`),
+
+  // Search
+  searchEntities: (query: string, limit: number = 20) =>
+    api.get('/api/knowledge-graph/search', {
+      params: { query, limit }
+    }),
+
+  // Promise operations
+  getPromises: (status?: string, limit: number = 50) =>
+    api.get('/api/knowledge-graph/promises', {
+      params: {
+        ...(status && { status }),
+        limit
+      }
+    }),
+
+  updatePromiseStatus: (promiseId: string, status: string) =>
+    api.patch(`/api/knowledge-graph/promises/${promiseId}`, { status }),
+
+  deletePromise: (promiseId: string) =>
+    api.delete(`/api/knowledge-graph/promises/${promiseId}`),
+
+  // Timeline
+  getTimeline: (start: string, end: string, limit: number = 100) =>
+    api.get('/api/knowledge-graph/timeline', {
+      params: { start, end, limit }
+    }),
+
+  // Health check
+  getHealth: () => api.get('/api/knowledge-graph/health'),
 }

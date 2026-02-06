@@ -815,13 +815,36 @@ async def generate_title_summary_job(conversation_id: str, *, redis_client=None)
                 for seg in segments
             ]
 
+        # Fetch memory context for richer detailed summaries
+        # Use the entire transcript as the search query for best semantic matching
+        # so all key topics/entities in the conversation can find relevant memories
+        memory_context = None
+        try:
+            from advanced_omi_backend.services.memory import get_memory_service
+
+            memory_service = get_memory_service()
+            memories = await memory_service.search_memories(
+                transcript_text, conversation.user_id, limit=10
+            )
+            if memories:
+                memory_context = "\n".join(m.content for m in memories if m.content)
+                logger.info(
+                    f"📚 Retrieved {len(memories)} memories as context for detailed summary"
+                )
+            else:
+                logger.info(f"📚 No memories found for context enrichment")
+        except Exception as mem_error:
+            logger.warning(f"⚠️ Could not fetch memory context (continuing without): {mem_error}")
+
         # Generate all three summaries in parallel for efficiency
         import asyncio
 
         title, short_summary, detailed_summary = await asyncio.gather(
             generate_title(transcript_text, segments=segment_dicts),
             generate_short_summary(transcript_text, segments=segment_dicts),
-            generate_detailed_summary(transcript_text, segments=segment_dicts),
+            generate_detailed_summary(
+                transcript_text, segments=segment_dicts, memory_context=memory_context
+            ),
         )
 
         conversation.title = title
