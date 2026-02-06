@@ -158,13 +158,17 @@ ASR Capabilities Format Is Valid List
 
 ASR Capabilities Are From Known Set
     [Documentation]    Verify reported capabilities are valid known capabilities
-    ...                Known capabilities: timestamps, word_timestamps, segments, diarization
+    ...                Known capabilities: timestamps, word_timestamps, diarization,
+    ...                speaker_identification, long_form, language_detection, vad_filter,
+    ...                translation, chunked_processing
     [Tags]    infra
 
     ${info}=    Get ASR Service Info    ${ASR_URL}
 
-    # Define known capabilities
-    @{known_caps}=    Create List    timestamps    word_timestamps    segments    diarization
+    # Define known capabilities (union of all provider capabilities + mock server)
+    @{known_caps}=    Create List    timestamps    word_timestamps    diarization
+    ...    segments    speaker_identification    long_form    language_detection
+    ...    vad_filter    translation    chunked_processing
 
     # All reported capabilities should be known
     FOR    ${cap}    IN    @{info}[capabilities]

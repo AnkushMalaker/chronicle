@@ -288,7 +288,7 @@ class VibeVoiceTranscriber:
                     "text": seg.get("Content", ""),
                     "start": float(seg.get("Start", 0.0)),
                     "end": float(seg.get("End", 0.0)),
-                    "speaker": f"Speaker {seg.get('Speaker', 0)}",
+                    "speaker": seg.get("Speaker", 0),
                 })
 
             return {"raw_text": raw_output, "segments": segments}
@@ -317,8 +317,13 @@ class VibeVoiceTranscriber:
             start = seg_data.get("start_time", seg_data.get("start", 0.0))
             end = seg_data.get("end_time", seg_data.get("end", 0.0))
             speaker_raw = seg_data.get("speaker_id", seg_data.get("speaker"))
-            # Convert speaker to string (VibeVoice returns int)
-            speaker_id = f"Speaker {speaker_raw}" if speaker_raw is not None else None
+            # Convert speaker to string, avoiding double-prefix from fallback parser
+            if speaker_raw is None:
+                speaker_id = None
+            elif isinstance(speaker_raw, str) and speaker_raw.startswith("Speaker "):
+                speaker_id = speaker_raw
+            else:
+                speaker_id = f"Speaker {speaker_raw}"
 
             if text:
                 text_parts.append(text)

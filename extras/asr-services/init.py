@@ -37,7 +37,7 @@ PROVIDERS = {
         "default_model": "microsoft/VibeVoice-ASR",
         "service": "vibevoice-asr",
         # Note: VibeVoice provides diarization but NOT word_timestamps
-        "capabilities": ["segments", "diarization", "timestamps"],
+        "capabilities": ["timestamps", "diarization", "speaker_identification", "long_form"],
     },
     "faster-whisper": {
         "name": "Faster-Whisper",
