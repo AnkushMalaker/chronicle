@@ -72,7 +72,7 @@ __all__ = ['{class_name}']
 
     init_file = plugin_dir / '__init__.py'
     print(f"📝 Creating {init_file}")
-    init_file.write_text(init_content)
+    init_file.write_text(init_content, encoding="utf-8")
 
     # Create plugin.py with template
     plugin_content = f'''"""
@@ -273,7 +273,7 @@ class {class_name}(BasePlugin):
 
     plugin_file = plugin_dir / 'plugin.py'
     print(f"📝 Creating {plugin_file}")
-    plugin_file.write_text(plugin_content)
+    plugin_file.write_text(plugin_content,encoding="utf-8")
 
     # Create README.md
     readme_content = f'''# {class_name}
@@ -367,7 +367,7 @@ MIT License - see project LICENSE file for details.
 
     readme_file = plugin_dir / 'README.md'
     print(f"📝 Creating {readme_file}")
-    readme_file.write_text(readme_content)
+    readme_file.write_text(readme_content, encoding="utf-8")
 
     # Print success message and next steps
     print(f"\n✅ Plugin '{plugin_name}' created successfully!\n")
