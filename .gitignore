@@ -14,6 +14,10 @@ config/config.yml
 config/plugins.yml
 !config/plugins.yml.template
 
+# Individual plugin configs (may contain user-specific settings)
+backends/advanced/src/advanced_omi_backend/plugins/*/config.yml
+!backends/advanced/src/advanced_omi_backend/plugins/*/config.yml.template
+
 # Config backups
 config/*.backup.*
 config/*.backup*
@@ -97,3 +101,5 @@ log.html
 output.xml
 report.html
 .secrets
+
+sdk/
