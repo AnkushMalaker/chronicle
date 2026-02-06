@@ -25,6 +25,7 @@ from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import JobPriority
 from advanced_omi_backend.users import User
+from advanced_omi_backend.workers.conversation_jobs import generate_title_summary_job
 from advanced_omi_backend.workers.memory_jobs import (
     enqueue_memory_processing,
     process_memory_job,
@@ -492,12 +493,27 @@ async def reprocess_transcript(conversation_id: str, user: User):
         else:
             logger.info(f"📥 RQ: Enqueued memory job {memory_job.id} (depends on transcript job {transcript_job.id})")
 
+        # Job 4: Regenerate title/summary (depends on memory job to avoid race condition
+        # and to ensure fresh memories are available for context-enriched summaries)
+        title_summary_job = default_queue.enqueue(
+            generate_title_summary_job,
+            conversation_id,
+            job_timeout=300,
+            result_ttl=JOB_RESULT_TTL,
+            depends_on=memory_job,
+            job_id=f"title_summary_{conversation_id[:8]}",
+            description=f"Regenerate title/summary for {conversation_id[:8]}",
+            meta={'conversation_id': conversation_id, 'trigger': 'reprocess_transcript'}
+        )
+        logger.info(f"📥 RQ: Enqueued title/summary job {title_summary_job.id} (depends on memory job {memory_job.id})")
+
         job = transcript_job  # For backward compatibility with return value
         logger.info(f"Created transcript reprocessing job {job.id} (version: {version_id}) for conversation {conversation_id}")
 
         return JSONResponse(content={
             "message": f"Transcript reprocessing started for conversation {conversation_id}",
             "job_id": job.id,
+            "title_summary_job_id": title_summary_job.id,
             "version_id": version_id,
             "status": "queued"
         })
@@ -623,14 +639,20 @@ async def reprocess_speakers(
                 content={"error": f"Transcript version '{source_version_id}' not found"}
             )
 
-        # 4. Validate transcript has content and words
+        # 4. Validate transcript has content and words (or provider-diarized segments)
         if not source_version.transcript:
             return JSONResponse(
                 status_code=400,
                 content={"error": "Cannot re-diarize empty transcript. Transcript version has no text."}
             )
 
-        if not source_version.words:
+        provider_capabilities = source_version.metadata.get("provider_capabilities", {})
+        provider_has_diarization = (
+            provider_capabilities.get("diarization", False)
+            or source_version.diarization_source == "provider"
+        )
+
+        if not source_version.words and not (provider_has_diarization and source_version.segments):
             return JSONResponse(
                 status_code=400,
                 content={"error": "Cannot re-diarize transcript without word timings. Words are required for diarization."}
@@ -647,26 +669,38 @@ async def reprocess_speakers(
                 }
             )
 
-        # 6. Create NEW transcript version (copy text/words, empty segments)
+        # 6. Create NEW transcript version (copy text/words, segments for provider-diarized)
         new_version_id = str(uuid.uuid4())
 
-        # Add new version with copied text/words but empty segments
-        # Speaker job will populate segments with re-identified speakers
-        conversation_model.add_transcript_version(
+        # For provider-diarized transcripts, copy segments so the speaker job can
+        # identify speakers per-segment. For word-based transcripts, leave segments
+        # empty so pyannote can re-diarize.
+        new_metadata = {
+            "reprocessing_type": "speaker_diarization",
+            "source_version_id": source_version_id,
+            "trigger": "manual_reprocess"
+        }
+        if provider_has_diarization:
+            new_segments = source_version.segments  # COPY provider segments
+            new_metadata["provider_capabilities"] = provider_capabilities
+        else:
+            new_segments = []  # Empty - will be populated by speaker job
+
+        new_version = conversation_model.add_transcript_version(
             version_id=new_version_id,
             transcript=source_version.transcript,  # COPY transcript text
             words=source_version.words,  # COPY word timings
-            segments=[],  # Empty - will be populated by speaker job
+            segments=new_segments,
             provider=source_version.provider,
             model=source_version.model,
             processing_time_seconds=None,  # Will be updated by job
-            metadata={
-                "reprocessing_type": "speaker_diarization",
-                "source_version_id": source_version_id,
-                "trigger": "manual_reprocess"
-            },
+            metadata=new_metadata,
             set_as_active=True  # Set new version as active
         )
+
+        # Carry over diarization_source so speaker job knows to use segment identification
+        if provider_has_diarization:
+            new_version.diarization_source = "provider"
 
         # Save conversation with new version
         await conversation_model.save()
@@ -718,10 +752,31 @@ async def reprocess_speakers(
             f"after speaker job {speaker_job.id}"
         )
 
+        # 8b. Chain title/summary regeneration after memory job
+        # Depends on memory_job to avoid race condition (both save conversation document)
+        # and to ensure fresh memories are available for context-enriched summaries
+        title_summary_job = default_queue.enqueue(
+            generate_title_summary_job,
+            conversation_id,
+            job_timeout=300,
+            result_ttl=JOB_RESULT_TTL,
+            depends_on=memory_job,
+            job_id=f"title_summary_{conversation_id[:12]}",
+            description=f"Regenerate title/summary for {conversation_id[:8]}",
+            meta={'conversation_id': conversation_id, 'trigger': 'reprocess_after_speaker'}
+        )
+
+        logger.info(
+            f"Chained title/summary job {title_summary_job.id} "
+            f"after memory job {memory_job.id}"
+        )
+
         # 9. Return job information
         return JSONResponse(content={
             "message": "Speaker reprocessing started",
             "job_id": speaker_job.id,
+            "memory_job_id": memory_job.id,
+            "title_summary_job_id": title_summary_job.id,
             "version_id": new_version_id,  # NEW version ID
             "source_version_id": source_version_id,  # Original version used as source
             "status": "queued"

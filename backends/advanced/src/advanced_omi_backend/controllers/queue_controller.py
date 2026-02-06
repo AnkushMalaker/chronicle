@@ -517,7 +517,9 @@ def start_post_conversation_jobs(
         logger.info(f"⏭️  Memory extraction disabled, skipping memory job for conversation {conversation_id[:8]}")
 
     # Step 3: Title/summary generation job
-    # Depends on speaker job if enabled, otherwise on upstream dependency
+    # Depends on memory job to avoid race condition (both jobs save the conversation document)
+    # and to ensure fresh memories are available for context-enriched summaries
+    title_dependency = memory_job if memory_job else speaker_dependency
     title_job_id = f"title_summary_{conversation_id[:12]}"
     logger.info(f"🔍 DEBUG: Creating title/summary job with job_id={title_job_id}, conversation_id={conversation_id[:12]}")
 
@@ -526,12 +528,14 @@ def start_post_conversation_jobs(
         conversation_id,
         job_timeout=300,  # 5 minutes
         result_ttl=JOB_RESULT_TTL,
-        depends_on=speaker_dependency,  # Depends on speaker job if enabled, NOT memory job
+        depends_on=title_dependency,
         job_id=title_job_id,
         description=f"Generate title and summary for conversation {conversation_id[:8]}",
         meta=job_meta
     )
-    if speaker_job:
+    if memory_job:
+        logger.info(f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (depends on memory job {memory_job.id})")
+    elif speaker_job:
         logger.info(f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (depends on speaker job {speaker_job.id})")
     elif depends_on_job:
         logger.info(f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (depends on {depends_on_job.id})")
