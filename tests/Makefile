@@ -1,7 +1,7 @@
 # Chronicle Test Makefile
 # Shortcuts for running tests and managing test containers
 
-.PHONY: help all clean \
+.PHONY: help all clean configure \
         containers-start containers-stop containers-restart containers-rebuild \
         containers-start-rebuild containers-clean containers-status containers-logs \
         start stop restart rebuild start-rebuild status logs \
@@ -35,6 +35,7 @@ help:
 	@echo "Chronicle Test Targets:"
 	@echo ""
 	@echo "Quick Commands:"
+	@echo "  make configure     - Set up test API keys (Deepgram, OpenAI)"
 	@echo "  make test          - Start containers + run tests (uses real APIs)"
 	@echo "  make test-no-api   - Run tests without API keys (CI mode)"
 	@echo "  make test-quick    - Run tests on existing containers"
@@ -154,6 +155,10 @@ clean:
 	rm -f output.xml log.html report.html
 	rm -rf $(OUTPUTDIR)
 	@echo "Clean complete!"
+
+# Configure test API keys (interactive setup)
+configure:
+	@uv run --with-requirements ../setup-requirements.txt python setup/init.py
 
 # ============================================================================
 # Container Management Targets
