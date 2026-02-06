@@ -16,11 +16,14 @@ from pathlib import Path
 from typing import Any, Dict
 
 from dotenv import set_key
-from rich import print as rprint
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.text import Text
+
+# Add repo root to path for imports
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from setup_utils import detect_cuda_version, mask_value, read_env_value
 
 
 class SpeakerRecognitionSetup:
@@ -67,25 +70,12 @@ class SpeakerRecognitionSetup:
                 sys.exit(1)
 
     def read_existing_env_value(self, key: str) -> str:
-        """Read a value from existing .env file"""
-        env_path = Path(".env")
-        if not env_path.exists():
-            return None
-
-        from dotenv import get_key
-        value = get_key(str(env_path), key)
-        # get_key returns None if key doesn't exist or value is empty
-        return value if value else None
+        """Read a value from existing .env file (delegates to shared utility)"""
+        return read_env_value(".env", key)
 
     def mask_api_key(self, key: str, show_chars: int = 5) -> str:
-        """Mask API key showing only first and last few characters"""
-        if not key or len(key) <= show_chars * 2:
-            return key
-
-        # Remove quotes if present
-        key_clean = key.strip("'\"")
-
-        return f"{key_clean[:show_chars]}{'*' * min(15, len(key_clean) - show_chars * 2)}{key_clean[-show_chars:]}"
+        """Mask API key (delegates to shared utility)"""
+        return mask_value(key, show_chars)
 
     def prompt_choice(self, prompt: str, choices: Dict[str, str], default: str = "1") -> str:
         """Prompt for a choice from options"""
@@ -148,42 +138,8 @@ class SpeakerRecognitionSetup:
                 self.console.print("[green][SUCCESS][/green] HF Token configured")
 
     def detect_cuda_version(self) -> str:
-        """Detect system CUDA version from nvidia-smi"""
-        try:
-            result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                # Try to get CUDA version from nvidia-smi
-                result = subprocess.run(
-                    ["nvidia-smi"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5
-                )
-                if result.returncode == 0:
-                    output = result.stdout
-                    # Parse CUDA Version from nvidia-smi output
-                    # Format: "CUDA Version: 12.6"
-                    import re
-                    match = re.search(r'CUDA Version:\s*(\d+)\.(\d+)', output)
-                    if match:
-                        major, minor = match.groups()
-                        cuda_ver = f"{major}.{minor}"
-
-                        # Map to available PyTorch CUDA versions
-                        if cuda_ver >= "12.8":
-                            return "cu128"
-                        elif cuda_ver >= "12.6":
-                            return "cu126"
-                        elif cuda_ver >= "12.1":
-                            return "cu121"
-        except (subprocess.SubprocessError, FileNotFoundError):
-            pass
-        return "cu121"  # Default fallback
+        """Detect system CUDA version (delegates to shared utility)"""
+        return detect_cuda_version(default="cu121")
 
     def setup_compute_mode(self):
         """Configure compute mode (CPU/GPU)"""
