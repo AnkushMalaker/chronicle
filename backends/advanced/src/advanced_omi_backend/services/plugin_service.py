@@ -48,8 +48,8 @@ def expand_env_vars(value: Any) -> Any:
         def replacer(match):
             var_expr = match.group(1)
             # Support default values: ${VAR:-default}
-            if ':-' in var_expr:
-                var_name, default = var_expr.split(':-', 1)
+            if ":-" in var_expr:
+                var_name, default = var_expr.split(":-", 1)
                 return os.environ.get(var_name.strip(), default.strip())
             else:
                 var_name = var_expr.strip()
@@ -62,7 +62,7 @@ def expand_env_vars(value: Any) -> Any:
                     return match.group(0)  # Keep original placeholder
                 return env_value
 
-        return re.sub(r'\$\{([^}]+)\}', replacer, value)
+        return re.sub(r"\$\{([^}]+)\}", replacer, value)
 
     elif isinstance(value, dict):
         return {k: expand_env_vars(v) for k, v in value.items()}
@@ -106,12 +106,13 @@ def load_plugin_config(plugin_id: str, orchestration_config: Dict[str, Any]) -> 
     # 1. Load plugin-specific config.yml if it exists
     try:
         import advanced_omi_backend.plugins
+
         plugins_dir = Path(advanced_omi_backend.plugins.__file__).parent
         plugin_config_path = plugins_dir / plugin_id / "config.yml"
 
         if plugin_config_path.exists():
             logger.debug(f"Loading plugin config from: {plugin_config_path}")
-            with open(plugin_config_path, 'r') as f:
+            with open(plugin_config_path, "r") as f:
                 plugin_config = yaml.safe_load(f) or {}
                 config.update(plugin_config)
                 logger.debug(f"Loaded {len(plugin_config)} config keys for '{plugin_id}'")
@@ -125,12 +126,12 @@ def load_plugin_config(plugin_id: str, orchestration_config: Dict[str, Any]) -> 
     config = expand_env_vars(config)
 
     # 3. Merge orchestration settings from config/plugins.yml
-    config['enabled'] = orchestration_config.get('enabled', False)
-    config['events'] = orchestration_config.get('events', [])
-    config['condition'] = orchestration_config.get('condition', {'type': 'always'})
+    config["enabled"] = orchestration_config.get("enabled", False)
+    config["events"] = orchestration_config.get("events", [])
+    config["condition"] = orchestration_config.get("condition", {"type": "always"})
 
     # Add plugin ID for reference
-    config['plugin_id'] = plugin_id
+    config["plugin_id"] = plugin_id
 
     logger.debug(
         f"Plugin '{plugin_id}' config merged: enabled={config['enabled']}, "
@@ -183,7 +184,7 @@ def extract_env_var_name(value: str) -> Optional[str]:
     if not isinstance(value, str):
         return None
 
-    match = re.search(r'\$\{([^}:]+)', value)
+    match = re.search(r"\$\{([^}:]+)", value)
     if match:
         return match.group(1).strip()
     return None
@@ -207,66 +208,70 @@ def infer_field_type(key: str, value: Any) -> Dict[str, Any]:
         {'type': 'number', 'label': 'Max Sentences', 'default': 3}
     """
     # Generate human-readable label from key
-    label = key.replace('_', ' ').title()
+    label = key.replace("_", " ").title()
 
     # Check for environment variable reference
-    if isinstance(value, str) and '${' in value:
+    if isinstance(value, str) and "${" in value:
         env_var = extract_env_var_name(value)
         if not env_var:
-            return {'type': 'string', 'label': label, 'default': value}
+            return {"type": "string", "label": label, "default": value}
 
         # Determine if this is a secret based on env var name
-        secret_keywords = ['PASSWORD', 'TOKEN', 'KEY', 'SECRET', 'APIKEY', 'API_KEY']
+        secret_keywords = ["PASSWORD", "TOKEN", "KEY", "SECRET", "APIKEY", "API_KEY"]
         is_secret = any(keyword in env_var.upper() for keyword in secret_keywords)
 
         # Extract default value if present (${VAR:-default})
         default_value = None
-        if ':-' in value:
-            default_match = re.search(r':-([^}]+)', value)
+        if ":-" in value:
+            default_match = re.search(r":-([^}]+)", value)
             if default_match:
                 default_value = default_match.group(1).strip()
                 # Try to parse boolean/number defaults
-                if default_value.lower() in ('true', 'false'):
-                    default_value = default_value.lower() == 'true'
+                if default_value.lower() in ("true", "false"):
+                    default_value = default_value.lower() == "true"
                 elif default_value.isdigit():
                     default_value = int(default_value)
 
         schema = {
-            'type': 'password' if is_secret else 'string',
-            'label': label,
-            'secret': is_secret,
-            'env_var': env_var,
-            'required': is_secret,  # Secrets are required
+            "type": "password" if is_secret else "string",
+            "label": label,
+            "secret": is_secret,
+            "env_var": env_var,
+            "required": is_secret,  # Secrets are required
         }
 
         if default_value is not None:
-            schema['default'] = default_value
-            schema['required'] = False
+            schema["default"] = default_value
+            schema["required"] = False
 
         return schema
 
     # Boolean values
     elif isinstance(value, bool):
-        return {'type': 'boolean', 'label': label, 'default': value}
+        return {"type": "boolean", "label": label, "default": value}
 
     # Numeric values
     elif isinstance(value, int):
-        return {'type': 'number', 'label': label, 'default': value}
+        return {"type": "number", "label": label, "default": value}
 
     elif isinstance(value, float):
-        return {'type': 'number', 'label': label, 'default': value, 'step': 0.1}
+        return {"type": "number", "label": label, "default": value, "step": 0.1}
 
     # List values
     elif isinstance(value, list):
-        return {'type': 'array', 'label': label, 'default': value}
+        return {"type": "array", "label": label, "default": value}
 
     # Object/dict values
     elif isinstance(value, dict):
-        return {'type': 'object', 'label': label, 'default': value}
+        return {"type": "object", "label": label, "default": value}
 
     # String values (fallback)
     else:
-        return {'type': 'string', 'label': label, 'default': str(value) if value is not None else ''}
+        return {
+            "type": "string",
+            "label": label,
+            "default": str(value) if value is not None else "",
+        }
 
 
 def load_schema_yml(plugin_id: str) -> Optional[Dict[str, Any]]:
@@ -280,12 +285,13 @@ def load_schema_yml(plugin_id: str) -> Optional[Dict[str, Any]]:
     """
     try:
         import advanced_omi_backend.plugins
+
         plugins_dir = Path(advanced_omi_backend.plugins.__file__).parent
         schema_path = plugins_dir / plugin_id / "schema.yml"
 
         if schema_path.exists():
             logger.debug(f"Loading schema override from: {schema_path}")
-            with open(schema_path, 'r') as f:
+            with open(schema_path, "r") as f:
                 return yaml.safe_load(f) or {}
     except Exception as e:
         logger.warning(f"Failed to load schema.yml for plugin '{plugin_id}': {e}")
@@ -329,16 +335,13 @@ def infer_schema_from_config(plugin_id: str, config_dict: Dict[str, Any]) -> Dic
         field_schema = infer_field_type(key, value)
 
         # Separate env vars from regular settings
-        if field_schema.get('env_var'):
-            env_var_name = field_schema['env_var']
+        if field_schema.get("env_var"):
+            env_var_name = field_schema["env_var"]
             env_vars_schema[env_var_name] = field_schema
         else:
             settings_schema[key] = field_schema
 
-    return {
-        'settings': settings_schema,
-        'env_vars': env_vars_schema
-    }
+    return {"settings": settings_schema, "env_vars": env_vars_schema}
 
 
 def mask_secrets_in_config(config: Dict[str, Any], schema: Dict[str, Any]) -> Dict[str, Any]:
@@ -362,8 +365,8 @@ def mask_secrets_in_config(config: Dict[str, Any], schema: Dict[str, Any]) -> Di
 
     # Get list of secret environment variable names
     secret_env_vars = set()
-    for env_var, field_schema in schema.get('env_vars', {}).items():
-        if field_schema.get('secret', False):
+    for env_var, field_schema in schema.get("env_vars", {}).items():
+        if field_schema.get("secret", False):
             secret_env_vars.add(env_var)
 
     # Mask values that reference secret environment variables
@@ -373,13 +376,14 @@ def mask_secrets_in_config(config: Dict[str, Any], schema: Dict[str, Any]) -> Di
             if env_var and env_var in secret_env_vars:
                 # Check if env var is actually set
                 is_set = bool(os.environ.get(env_var))
-                masked_config[key] = '••••••••••••' if is_set else ''
+                masked_config[key] = "••••••••••••" if is_set else ""
 
     return masked_config
 
 
-def get_plugin_metadata(plugin_id: str, plugin_class: Type[BasePlugin],
-                       orchestration_config: Dict[str, Any]) -> Dict[str, Any]:
+def get_plugin_metadata(
+    plugin_id: str, plugin_class: Type[BasePlugin], orchestration_config: Dict[str, Any]
+) -> Dict[str, Any]:
     """Get complete metadata for a plugin including schema and current config.
 
     Args:
@@ -393,12 +397,13 @@ def get_plugin_metadata(plugin_id: str, plugin_class: Type[BasePlugin],
     # Load plugin config.yml
     try:
         import advanced_omi_backend.plugins
+
         plugins_dir = Path(advanced_omi_backend.plugins.__file__).parent
         plugin_config_path = plugins_dir / plugin_id / "config.yml"
 
         config_dict = {}
         if plugin_config_path.exists():
-            with open(plugin_config_path, 'r') as f:
+            with open(plugin_config_path, "r") as f:
                 config_dict = yaml.safe_load(f) or {}
     except Exception as e:
         logger.error(f"Failed to load config for plugin '{plugin_id}': {e}")
@@ -408,36 +413,36 @@ def get_plugin_metadata(plugin_id: str, plugin_class: Type[BasePlugin],
     config_schema = infer_schema_from_config(plugin_id, config_dict)
 
     # Get plugin metadata from class
-    plugin_name = getattr(plugin_class, 'name', plugin_id.replace('_', ' ').title())
-    plugin_description = getattr(plugin_class, 'description', '')
-    supports_testing = hasattr(plugin_class, 'test_connection')
+    plugin_name = getattr(plugin_class, "name", plugin_id.replace("_", " ").title())
+    plugin_description = getattr(plugin_class, "description", "")
+    supports_testing = hasattr(plugin_class, "test_connection")
 
     # Mask secrets in current config
     current_config = load_plugin_config(plugin_id, orchestration_config)
     masked_config = mask_secrets_in_config(current_config, config_schema)
 
     # Mark which env vars are set
-    for env_var_name, env_var_schema in config_schema.get('env_vars', {}).items():
-        env_var_schema['is_set'] = bool(os.environ.get(env_var_name))
-        if env_var_schema.get('secret') and env_var_schema['is_set']:
-            env_var_schema['value'] = '••••••••••••'
+    for env_var_name, env_var_schema in config_schema.get("env_vars", {}).items():
+        env_var_schema["is_set"] = bool(os.environ.get(env_var_name))
+        if env_var_schema.get("secret") and env_var_schema["is_set"]:
+            env_var_schema["value"] = "••••••••••••"
         else:
-            env_var_schema['value'] = os.environ.get(env_var_name, '')
+            env_var_schema["value"] = os.environ.get(env_var_name, "")
 
     return {
-        'plugin_id': plugin_id,
-        'name': plugin_name,
-        'description': plugin_description,
-        'enabled': orchestration_config.get('enabled', False),
-        'status': 'active' if orchestration_config.get('enabled', False) else 'disabled',
-        'supports_testing': supports_testing,
-        'config_schema': config_schema,
-        'current_config': masked_config,
-        'orchestration': {
-            'enabled': orchestration_config.get('enabled', False),
-            'events': orchestration_config.get('events', []),
-            'condition': orchestration_config.get('condition', {'type': 'always'})
-        }
+        "plugin_id": plugin_id,
+        "name": plugin_name,
+        "description": plugin_description,
+        "enabled": orchestration_config.get("enabled", False),
+        "status": "active" if orchestration_config.get("enabled", False) else "disabled",
+        "supports_testing": supports_testing,
+        "config_schema": config_schema,
+        "current_config": masked_config,
+        "orchestration": {
+            "enabled": orchestration_config.get("enabled", False),
+            "events": orchestration_config.get("events", []),
+            "condition": orchestration_config.get("condition", {"type": "always"}),
+        },
     }
 
 
@@ -467,6 +472,7 @@ def discover_plugins() -> Dict[str, Type[BasePlugin]]:
     # Get the plugins directory path
     try:
         import advanced_omi_backend.plugins
+
         plugins_dir = Path(advanced_omi_backend.plugins.__file__).parent
     except Exception as e:
         logger.error(f"Failed to locate plugins directory: {e}")
@@ -475,7 +481,7 @@ def discover_plugins() -> Dict[str, Type[BasePlugin]]:
     logger.info(f"🔍 Scanning for plugins in: {plugins_dir}")
 
     # Skip these known system directories/files
-    skip_items = {'__pycache__', '__init__.py', 'base.py', 'router.py'}
+    skip_items = {"__pycache__", "__init__.py", "base.py", "router.py"}
 
     # Scan for plugin directories
     for item in plugins_dir.iterdir():
@@ -483,7 +489,7 @@ def discover_plugins() -> Dict[str, Type[BasePlugin]]:
             continue
 
         plugin_id = item.name
-        plugin_file = item / 'plugin.py'
+        plugin_file = item / "plugin.py"
 
         if not plugin_file.exists():
             logger.debug(f"Skipping '{plugin_id}': no plugin.py found")
@@ -492,10 +498,10 @@ def discover_plugins() -> Dict[str, Type[BasePlugin]]:
         try:
             # Convert snake_case directory name to PascalCase class name
             # e.g., email_summarizer -> EmailSummarizerPlugin
-            class_name = ''.join(word.capitalize() for word in plugin_id.split('_')) + 'Plugin'
+            class_name = "".join(word.capitalize() for word in plugin_id.split("_")) + "Plugin"
 
             # Import the plugin module
-            module_path = f'advanced_omi_backend.plugins.{plugin_id}'
+            module_path = f"advanced_omi_backend.plugins.{plugin_id}"
             logger.debug(f"Attempting to import plugin from: {module_path}")
 
             # Import the plugin package (which should export the class in __init__.py)
@@ -558,24 +564,28 @@ def init_plugin_router() -> Optional[PluginRouter]:
         logger.info(f"🔍 File exists: {plugins_yml.exists()}")
 
         if plugins_yml.exists():
-            with open(plugins_yml, 'r') as f:
+            with open(plugins_yml, "r") as f:
                 plugins_config = yaml.safe_load(f)
                 # Expand environment variables in configuration
                 plugins_config = expand_env_vars(plugins_config)
-                plugins_data = plugins_config.get('plugins', {})
+                plugins_data = plugins_config.get("plugins", {})
 
-            logger.info(f"🔍 Loaded plugins config with {len(plugins_data)} plugin(s): {list(plugins_data.keys())}")
+            logger.info(
+                f"🔍 Loaded plugins config with {len(plugins_data)} plugin(s): {list(plugins_data.keys())}"
+            )
 
             # Discover all plugins via auto-discovery
             discovered_plugins = discover_plugins()
 
             # Core plugin names (for informational logging only)
-            CORE_PLUGIN_NAMES = {'homeassistant', 'test_event'}
+            CORE_PLUGIN_NAMES = {"homeassistant", "test_event"}
 
             # Initialize each plugin listed in config/plugins.yml
             for plugin_id, orchestration_config in plugins_data.items():
-                logger.info(f"🔍 Processing plugin '{plugin_id}', enabled={orchestration_config.get('enabled', False)}")
-                if not orchestration_config.get('enabled', False):
+                logger.info(
+                    f"🔍 Processing plugin '{plugin_id}', enabled={orchestration_config.get('enabled', False)}"
+                )
+                if not orchestration_config.get("enabled", False):
                     continue
 
                 try:
@@ -603,7 +613,9 @@ def init_plugin_router() -> Optional[PluginRouter]:
                 except Exception as e:
                     logger.error(f"Failed to register plugin '{plugin_id}': {e}", exc_info=True)
 
-            logger.info(f"🎉 Plugin registration complete: {len(_plugin_router.plugins)} plugin(s) registered")
+            logger.info(
+                f"🎉 Plugin registration complete: {len(_plugin_router.plugins)} plugin(s) registered"
+            )
         else:
             logger.info("No plugins.yml found, plugins disabled")
 
@@ -613,6 +625,31 @@ def init_plugin_router() -> Optional[PluginRouter]:
         logger.error(f"Failed to initialize plugin router: {e}", exc_info=True)
         _plugin_router = None
         return None
+
+
+async def ensure_plugin_router() -> Optional[PluginRouter]:
+    """Get or initialize the plugin router with all plugins initialized.
+
+    This is the standard pattern for worker processes that need the plugin router.
+    It handles the get-or-init-then-initialize sequence in one call.
+
+    Returns:
+        Initialized plugin router, or None if no plugins configured
+    """
+    plugin_router = get_plugin_router()
+    if plugin_router:
+        return plugin_router
+
+    logger.info("Initializing plugin router in worker process...")
+    plugin_router = init_plugin_router()
+    if plugin_router:
+        for plugin_id, plugin in plugin_router.plugins.items():
+            try:
+                await plugin.initialize()
+                logger.info(f"Plugin '{plugin_id}' initialized")
+            except Exception as e:
+                logger.error(f"Failed to initialize plugin '{plugin_id}': {e}")
+    return plugin_router
 
 
 async def cleanup_plugin_router() -> None:

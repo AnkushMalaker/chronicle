@@ -12,24 +12,27 @@ The service supports:
 - Vector similarity search via Neo4j vector indexes
 """
 
+import hashlib
 import logging
 import os
 import re
-import hashlib
-from typing import TypedDict, List, Optional, Literal
 from pathlib import Path
-from advanced_omi_backend.services.memory.providers.llm_providers import (
-    generate_openai_embeddings,
-    chunk_text_with_spacy,
+from typing import List, Literal, Optional, TypedDict
+
+from advanced_omi_backend.services.memory.config import (
+    load_config_yml as load_root_config,
 )
-from advanced_omi_backend.services.memory.config import load_config_yml as load_root_config
-from advanced_omi_backend.utils.model_utils import get_model_config
-from advanced_omi_backend.utils.config_utils import resolve_value
+from advanced_omi_backend.services.memory.providers.llm_providers import (
+    chunk_text_with_spacy,
+    generate_openai_embeddings,
+)
 from advanced_omi_backend.services.neo4j_client import (
     Neo4jClient,
     Neo4jReadInterface,
     Neo4jWriteInterface,
 )
+from advanced_omi_backend.utils.config_utils import resolve_value
+from advanced_omi_backend.utils.model_utils import get_model_config
 
 logger = logging.getLogger(__name__)
 

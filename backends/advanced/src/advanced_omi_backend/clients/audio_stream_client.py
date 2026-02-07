@@ -48,7 +48,11 @@ from typing import Dict, Optional, Union
 import websockets
 from websockets.client import WebSocketClientProtocol
 
-from advanced_omi_backend.constants import OMI_CHANNELS, OMI_SAMPLE_RATE, OMI_SAMPLE_WIDTH
+from advanced_omi_backend.constants import (
+    OMI_CHANNELS,
+    OMI_SAMPLE_RATE,
+    OMI_SAMPLE_WIDTH,
+)
 
 logger = logging.getLogger(__name__)
 

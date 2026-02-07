@@ -15,7 +15,6 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from ..neo4j_client import Neo4jClient, Neo4jReadInterface, Neo4jWriteInterface
-
 from . import queries
 from .entity_extractor import extract_entities_from_transcript, parse_natural_datetime
 from .models import (

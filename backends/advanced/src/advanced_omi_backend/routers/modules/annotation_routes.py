@@ -80,15 +80,11 @@ async def create_memory_annotation(
                     content=annotation_data.corrected_text,
                     user_id=current_user.user_id,
                 )
-                logger.info(
-                    f"Updated memory {annotation_data.memory_id} with corrected text"
-                )
+                logger.info(f"Updated memory {annotation_data.memory_id} with corrected text")
             except Exception as e:
                 logger.error(f"Error updating memory: {e}")
                 # Annotation is saved, but memory update failed - log but don't fail the request
-                logger.warning(
-                    f"Memory annotation {annotation.id} saved but memory update failed"
-                )
+                logger.warning(f"Memory annotation {annotation.id} saved but memory update failed")
 
         return AnnotationResponse.model_validate(annotation)
 
@@ -127,9 +123,8 @@ async def create_transcript_annotation(
 
         # Validate segment index
         active_transcript = conversation.active_transcript
-        if (
-            not active_transcript
-            or annotation_data.segment_index >= len(active_transcript.segments)
+        if not active_transcript or annotation_data.segment_index >= len(
+            active_transcript.segments
         ):
             raise HTTPException(status_code=400, detail="Invalid segment index")
 
@@ -237,10 +232,7 @@ async def update_annotation_status(
         annotation.updated_at = datetime.now(timezone.utc)
 
         # If accepting a pending suggestion, apply the correction
-        if (
-            status == AnnotationStatus.ACCEPTED
-            and old_status == AnnotationStatus.PENDING
-        ):
+        if status == AnnotationStatus.ACCEPTED and old_status == AnnotationStatus.PENDING:
             if annotation.is_memory_annotation():
                 # Update memory
                 try:
@@ -250,9 +242,7 @@ async def update_annotation_status(
                         content=annotation.corrected_text,
                         user_id=current_user.user_id,
                     )
-                    logger.info(
-                        f"Applied suggestion to memory {annotation.memory_id}"
-                    )
+                    logger.info(f"Applied suggestion to memory {annotation.memory_id}")
                 except Exception as e:
                     logger.error(f"Error applying memory suggestion: {e}")
                     # Don't fail the status update if memory update fails
@@ -261,17 +251,14 @@ async def update_annotation_status(
                 try:
                     conversation = await Conversation.find_one(
                         Conversation.conversation_id == annotation.conversation_id,
-                        Conversation.user_id == annotation.user_id
+                        Conversation.user_id == annotation.user_id,
                     )
                     if conversation:
                         transcript = conversation.active_transcript
-                        if (
-                            transcript
-                            and annotation.segment_index < len(transcript.segments)
-                        ):
-                            transcript.segments[
-                                annotation.segment_index
-                            ].text = annotation.corrected_text
+                        if transcript and annotation.segment_index < len(transcript.segments):
+                            transcript.segments[annotation.segment_index].text = (
+                                annotation.corrected_text
+                            )
                             await conversation.save()
                             logger.info(
                                 f"Applied suggestion to transcript segment {annotation.segment_index}"
@@ -322,9 +309,8 @@ async def create_diarization_annotation(
 
         # Validate segment index
         active_transcript = conversation.active_transcript
-        if (
-            not active_transcript
-            or annotation_data.segment_index >= len(active_transcript.segments)
+        if not active_transcript or annotation_data.segment_index >= len(
+            active_transcript.segments
         ):
             raise HTTPException(status_code=400, detail="Invalid segment index")
 
@@ -425,6 +411,7 @@ async def apply_diarization_annotations(
 
         # Create NEW transcript version with corrected speakers
         import uuid
+
         new_version_id = str(uuid.uuid4())
 
         # Copy segments and apply corrections
@@ -479,19 +466,18 @@ async def apply_diarization_annotations(
         from advanced_omi_backend.workers.memory_jobs import enqueue_memory_processing
 
         enqueue_memory_processing(
-            client_id=conversation.client_id,
-            user_id=current_user.user_id,
-            user_email=current_user.email,
             conversation_id=conversation_id,
             priority=JobPriority.NORMAL,
         )
 
-        return JSONResponse(content={
-            "message": "Diarization annotations applied",
-            "version_id": new_version_id,
-            "applied_count": len(annotations),
-            "status": "success"
-        })
+        return JSONResponse(
+            content={
+                "message": "Diarization annotations applied",
+                "version_id": new_version_id,
+                "applied_count": len(annotations),
+                "status": "success",
+            }
+        )
 
     except HTTPException:
         raise
@@ -533,15 +519,21 @@ async def apply_all_annotations(
         ).to_list()
 
         if not annotations:
-            return JSONResponse(content={
-                "message": "No pending annotations to apply",
-                "diarization_count": 0,
-                "transcript_count": 0,
-            })
+            return JSONResponse(
+                content={
+                    "message": "No pending annotations to apply",
+                    "diarization_count": 0,
+                    "transcript_count": 0,
+                }
+            )
 
         # Separate by type
-        diarization_annotations = [a for a in annotations if a.annotation_type == AnnotationType.DIARIZATION]
-        transcript_annotations = [a for a in annotations if a.annotation_type == AnnotationType.TRANSCRIPT]
+        diarization_annotations = [
+            a for a in annotations if a.annotation_type == AnnotationType.DIARIZATION
+        ]
+        transcript_annotations = [
+            a for a in annotations if a.annotation_type == AnnotationType.TRANSCRIPT
+        ]
 
         # Get active transcript
         active_transcript = conversation.active_transcript
@@ -550,6 +542,7 @@ async def apply_all_annotations(
 
         # Create new version with ALL corrections applied
         import uuid
+
         new_version_id = str(uuid.uuid4())
         corrected_segments = []
 
@@ -558,16 +551,14 @@ async def apply_all_annotations(
 
             # Apply diarization correction (if exists)
             diar_annotation = next(
-                (a for a in diarization_annotations if a.segment_index == segment_idx),
-                None
+                (a for a in diarization_annotations if a.segment_index == segment_idx), None
             )
             if diar_annotation:
                 corrected_segment.speaker = diar_annotation.corrected_speaker
 
             # Apply transcript correction (if exists)
             transcript_annotation = next(
-                (a for a in transcript_annotations if a.segment_index == segment_idx),
-                None
+                (a for a in transcript_annotations if a.segment_index == segment_idx), None
             )
             if transcript_annotation:
                 corrected_segment.text = transcript_annotation.corrected_text
@@ -610,20 +601,19 @@ async def apply_all_annotations(
         from advanced_omi_backend.workers.memory_jobs import enqueue_memory_processing
 
         enqueue_memory_processing(
-            client_id=conversation.client_id,
-            user_id=current_user.user_id,
-            user_email=current_user.email,
             conversation_id=conversation_id,
             priority=JobPriority.NORMAL,
         )
 
-        return JSONResponse(content={
-            "message": f"Applied {len(diarization_annotations)} diarization and {len(transcript_annotations)} transcript annotations",
-            "version_id": new_version_id,
-            "diarization_count": len(diarization_annotations),
-            "transcript_count": len(transcript_annotations),
-            "status": "success",
-        })
+        return JSONResponse(
+            content={
+                "message": f"Applied {len(diarization_annotations)} diarization and {len(transcript_annotations)} transcript annotations",
+                "version_id": new_version_id,
+                "diarization_count": len(diarization_annotations),
+                "transcript_count": len(transcript_annotations),
+                "status": "success",
+            }
+        )
 
     except HTTPException:
         raise

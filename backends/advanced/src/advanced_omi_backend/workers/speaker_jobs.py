@@ -477,6 +477,7 @@ async def recognise_speakers_job(
                     end=seg.get("end", 0),
                     text=text,
                     speaker=speaker_name,
+                    identified_as=seg.get("identified_as"),
                     confidence=seg.get("confidence"),
                     words=segment_words  # Use words from speaker service
                 )

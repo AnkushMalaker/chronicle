@@ -7,20 +7,28 @@ Audio is served from MongoDB chunks with Opus compression.
 
 import io
 from typing import Optional
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, Request
-from fastapi.responses import FileResponse, StreamingResponse, Response
 
-from advanced_omi_backend.auth import current_superuser, current_active_user_optional, get_user_from_token_param
-from advanced_omi_backend.controllers import audio_controller
-from advanced_omi_backend.models.user import User
-from advanced_omi_backend.models.conversation import Conversation
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, Response, StreamingResponse
+
 from advanced_omi_backend.app_config import get_audio_chunk_dir
-from advanced_omi_backend.utils.gdrive_audio_utils import download_audio_files_from_drive, AudioValidationError
+from advanced_omi_backend.auth import (
+    current_active_user_optional,
+    current_superuser,
+    get_user_from_token_param,
+)
+from advanced_omi_backend.controllers import audio_controller
+from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.user import User
 from advanced_omi_backend.utils.audio_chunk_utils import (
+    build_wav_from_pcm,
+    concatenate_chunks_to_pcm,
     reconstruct_wav_from_conversation,
     retrieve_audio_chunks,
-    concatenate_chunks_to_pcm,
-    build_wav_from_pcm,
+)
+from advanced_omi_backend.utils.gdrive_audio_utils import (
+    AudioValidationError,
+    download_audio_files_from_drive,
 )
 
 router = APIRouter(prefix="/audio", tags=["audio"])

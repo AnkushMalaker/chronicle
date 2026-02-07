@@ -1,7 +1,8 @@
 """Shared Neo4j client utilities for the advanced OMI backend."""
 
 from typing import Optional
-from neo4j import GraphDatabase, Driver, READ_ACCESS, WRITE_ACCESS
+
+from neo4j import READ_ACCESS, WRITE_ACCESS, Driver, GraphDatabase
 
 
 class Neo4jClient:

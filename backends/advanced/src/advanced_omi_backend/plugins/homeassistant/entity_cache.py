@@ -4,10 +4,10 @@ Entity cache for Home Assistant integration.
 This module provides caching and lookup functionality for Home Assistant areas and entities.
 """
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional
-import logging
 
 logger = logging.getLogger(__name__)
 

@@ -30,7 +30,7 @@ from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import BaseRQJob, JobPriority, async_job
 from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggregator
-from advanced_omi_backend.services.plugin_service import get_plugin_router
+from advanced_omi_backend.services.plugin_service import ensure_plugin_router
 from advanced_omi_backend.services.transcription import (
     get_transcription_provider,
     is_transcription_available,
@@ -208,20 +208,26 @@ async def transcribe_full_audio_job(
         logger.info(
             f"📦 Reconstructed audio from MongoDB chunks: " f"{len(wav_data) / 1024 / 1024:.2f} MB"
         )
-
-        # Transcribe the audio directly from memory (no disk I/O needed)
-        transcription_result = await provider.transcribe(
-            audio_data=wav_data,  # Pass bytes directly, already in memory
-            sample_rate=16000,
-            diarize=True,
-        )
-
     except ValueError as e:
         # No chunks found for conversation
         raise FileNotFoundError(f"No audio chunks found for conversation {conversation_id}: {e}")
     except Exception as e:
         logger.error(f"Failed to reconstruct audio from MongoDB: {e}", exc_info=True)
         raise RuntimeError(f"Audio reconstruction failed: {e}")
+
+    try:
+        # Transcribe the audio directly from memory (no disk I/O needed)
+        transcription_result = await provider.transcribe(
+            audio_data=wav_data,  # Pass bytes directly, already in memory
+            sample_rate=16000,
+            diarize=True,
+        )
+    except Exception as e:
+        logger.error(
+            f"Transcription failed for conversation {conversation_id}: {type(e).__name__}: {e}",
+            exc_info=True,
+        )
+        raise RuntimeError(f"Transcription failed ({type(e).__name__}): {e}")
 
     # Extract results
     transcript_text = transcription_result.get("text", "")
@@ -239,33 +245,7 @@ async def transcribe_full_audio_job(
     )
     if transcript_text:
         try:
-            from advanced_omi_backend.services.plugin_service import init_plugin_router
-
-            # Initialize plugin router if not already initialized (worker context)
-            plugin_router = get_plugin_router()
-            logger.info(f"🔍 DEBUG: Plugin router from service: {plugin_router is not None}")
-
-            if not plugin_router:
-                logger.info("🔧 Initializing plugin router in worker process...")
-                plugin_router = init_plugin_router()
-                logger.info(
-                    f"🔧 After init, plugin_router: {plugin_router is not None}, plugins count: {len(plugin_router.plugins) if plugin_router else 0}"
-                )
-
-                # Initialize async plugins
-                if plugin_router:
-                    for plugin_id, plugin in plugin_router.plugins.items():
-                        try:
-                            await plugin.initialize()
-                            logger.info(f"✅ Plugin '{plugin_id}' initialized in worker")
-                        except Exception as e:
-                            logger.exception(
-                                f"Failed to initialize plugin '{plugin_id}' in worker: {e}"
-                            )
-
-            logger.info(
-                f"🔍 DEBUG: Plugin router final check: {plugin_router is not None}, has {len(plugin_router.plugins) if plugin_router else 0} plugins"
-            )
+            plugin_router = await ensure_plugin_router()
 
             if plugin_router:
                 logger.info(
@@ -389,7 +369,7 @@ async def transcribe_full_audio_job(
     # Get provider capabilities for downstream processing decisions
     # Capabilities determine whether pyannote diarization is needed or can be skipped
     provider_capabilities = {}
-    if hasattr(provider, 'get_capabilities_dict'):
+    if hasattr(provider, "get_capabilities_dict"):
         provider_capabilities = provider.get_capabilities_dict()
         logger.info(f"📊 Provider capabilities: {list(provider_capabilities.keys())}")
 
@@ -398,6 +378,7 @@ async def transcribe_full_audio_job(
 
     # Check speaker recognition configuration
     from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
+
     speaker_client = SpeakerRecognitionClient()
     speaker_recognition_enabled = speaker_client.enabled
 
@@ -408,15 +389,23 @@ async def transcribe_full_audio_job(
 
     if segments:
         # Provider returned segments - use them
-        speaker_segments = [
-            Conversation.SpeakerSegment(
-                speaker=str(seg.get("speaker", "Speaker 0")),
-                start=seg.get("start", 0.0),
-                end=seg.get("end", 0.0),
-                text=seg.get("text", ""),
+        speaker_segments = []
+        for seg in segments:
+            raw_speaker = seg.get("speaker")
+            if raw_speaker is None:
+                speaker = "Speaker 0"
+            elif isinstance(raw_speaker, int):
+                speaker = f"Speaker {raw_speaker}"
+            else:
+                speaker = str(raw_speaker)
+            speaker_segments.append(
+                Conversation.SpeakerSegment(
+                    speaker=speaker,
+                    start=seg.get("start", 0.0),
+                    end=seg.get("end", 0.0),
+                    text=seg.get("text", ""),
+                )
             )
-            for seg in segments
-        ]
 
         if provider_has_diarization:
             # Provider did diarization (e.g., VibeVoice, Deepgram)

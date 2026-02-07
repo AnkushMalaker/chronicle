@@ -148,6 +148,6 @@ Before committing `config/plugins.yml`, manually verify:
 ## Documentation
 
 For detailed configuration guides, see:
-- `/Docs/memory-configuration-guide.md` - Memory settings
+- `/backends/advanced/Docs/memories.md` - Memory settings
 - `/quickstart.md` - Setup guide
 - `/CLAUDE.md` - Project overview and technical reference

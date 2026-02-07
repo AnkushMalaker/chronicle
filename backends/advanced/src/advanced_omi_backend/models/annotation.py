@@ -5,10 +5,10 @@ Supports annotations for memories, transcripts, and future content types.
 Enables both user edits and AI-powered suggestions.
 """
 
+import uuid
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
-from datetime import datetime, timezone
-import uuid
 
 from beanie import Document, Indexed
 from pydantic import BaseModel, Field

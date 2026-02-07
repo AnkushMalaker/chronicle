@@ -29,6 +29,15 @@ if [ -f "$TESTS_DIR/setup/.env.test" ]; then
     set -a
     source "$TESTS_DIR/setup/.env.test"
     set +a
+
+    # Warn if API keys are still placeholders
+    if echo "$DEEPGRAM_API_KEY" | grep -qi "your-.*-here" || echo "$OPENAI_API_KEY" | grep -qi "your-.*-here"; then
+        echo ""
+        echo "⚠️  WARNING: API keys in .env.test are still placeholder values."
+        echo "   Tests tagged 'requires-api-keys' will fail."
+        echo "   Run 'make configure' from tests/ to set your API keys."
+        echo ""
+    fi
 fi
 
 # Start containers

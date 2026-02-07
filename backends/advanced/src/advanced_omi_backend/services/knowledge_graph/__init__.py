@@ -9,11 +9,11 @@ This module provides:
 from .models import (
     Entity,
     EntityType,
-    Relationship,
-    RelationshipType,
+    ExtractionResult,
     Promise,
     PromiseStatus,
-    ExtractionResult,
+    Relationship,
+    RelationshipType,
 )
 from .service import KnowledgeGraphService, get_knowledge_graph_service
 

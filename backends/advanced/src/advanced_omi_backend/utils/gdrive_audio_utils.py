@@ -1,13 +1,14 @@
 import io
+import logging
 import tempfile
 from typing import List
-import logging
-from starlette.datastructures import UploadFile as StarletteUploadFile
+
 from googleapiclient.http import MediaIoBaseDownload
+from starlette.datastructures import UploadFile as StarletteUploadFile
+
 from advanced_omi_backend.clients.gdrive_audio_client import get_google_drive_client
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.utils.audio_utils import AudioValidationError
-
 
 logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")

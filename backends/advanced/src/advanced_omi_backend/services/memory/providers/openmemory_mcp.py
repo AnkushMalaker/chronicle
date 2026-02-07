@@ -40,6 +40,10 @@ class OpenMemoryMCPService(MemoryServiceBase):
         _initialized: Whether the service has been initialized
     """
 
+    @property
+    def provider_identifier(self) -> str:
+        return "openmemory_mcp"
+
     def __init__(
         self,
         server_url: Optional[str] = None,

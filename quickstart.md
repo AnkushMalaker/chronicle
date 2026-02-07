@@ -126,14 +126,14 @@ git submodule update --init --recursive
 <summary><strong>📦 About the Mycelia Submodule (Optional - Click to expand)</strong></summary>
 
 **What is Mycelia?**
-Mycelia is an optional self-hosted AI memory system that Friend-Lite can use as an alternative memory backend. It provides:
+Mycelia is an optional self-hosted AI memory system that Chronicle can use as an alternative memory backend. It provides:
 - Timeline-based memory visualization
 - Advanced audio processing with speaker diarization
 - MongoDB-based full-text search
 - MCP (Model Context Protocol) integration
 
 **Do I need it?**
-**Most users don't need Mycelia!** The default Friend-Lite memory system works great for most use cases. Only consider Mycelia if you:
+**Most users don't need Mycelia!** The default Chronicle memory system works great for most use cases. Only consider Mycelia if you:
 - Want timeline-based memory visualization
 - Need advanced speaker diarization features
 - Want to use MongoDB for memory storage instead of Qdrant
@@ -322,5 +322,5 @@ Before connecting your phone, make sure everything works:
 ## Need Help?
 
 - **Full Documentation**: [CLAUDE.md](CLAUDE.md) - Complete technical reference
-- **Architecture Details**: [Docs/features.md](Docs/features.md) - How everything works  
+- **Architecture Details**: [Docs/overview.md](Docs/overview.md) - How everything works
 - **Advanced Setup**: [Docs/init-system.md](Docs/init-system.md) - Power user options

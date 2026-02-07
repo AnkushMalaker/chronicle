@@ -5,6 +5,7 @@
 **/memory_config.yaml
 !**/memory_config.yaml.template
 tests/setup/.env.test
+!tests/setup/.env.test.template
 
 # Main config (user-specific)
 config/config.yml

@@ -23,10 +23,7 @@ from rich.prompt import Confirm
 project_root = Path(__file__).resolve().parents[6]
 sys.path.insert(0, str(project_root))
 
-from setup_utils import (
-    prompt_with_existing_masked,
-    prompt_value
-)
+from setup_utils import prompt_value, prompt_with_existing_masked
 
 console = Console()
 

@@ -9,12 +9,19 @@ Environment variable resolution is handled by OmegaConf in the config module.
 
 from __future__ import annotations
 
-import yaml
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import logging
-from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict, ValidationError
+import yaml
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 # Import config merging for defaults.yml + config.yml integration
 # OmegaConf handles environment variable resolution (${VAR:-default} syntax)

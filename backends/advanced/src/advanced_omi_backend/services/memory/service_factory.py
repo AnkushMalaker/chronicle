@@ -11,7 +11,7 @@ import threading
 from typing import Optional
 
 from .base import MemoryServiceBase
-from .config import build_memory_config_from_env, MemoryConfig, MemoryProvider
+from .config import MemoryConfig, MemoryProvider, build_memory_config_from_env
 
 memory_logger = logging.getLogger("memory_service")
 
@@ -23,22 +23,23 @@ _memory_service_lock = threading.Lock()
 
 def create_memory_service(config: MemoryConfig) -> MemoryServiceBase:
     """Create a memory service instance based on configuration.
-    
+
     Args:
         config: Memory service configuration
-        
+
     Returns:
         Configured memory service instance
-        
+
     Raises:
         ValueError: If unsupported memory provider is specified
         RuntimeError: If required dependencies are missing
     """
     memory_logger.info(f"🧠  Creating memory service with provider: {config.memory_provider.value}")
-    
+
     if config.memory_provider == MemoryProvider.CHRONICLE:
         # Use the sophisticated Chronicle implementation
         from .providers.chronicle import MemoryService as ChronicleMemoryService
+
         return ChronicleMemoryService(config)
 
     elif config.memory_provider == MemoryProvider.OPENMEMORY_MCP:
@@ -99,9 +100,13 @@ def get_memory_service() -> MemoryServiceBase:
 
                     # Don't initialize here - let it happen lazily on first use
                     # This prevents orphaned tasks that cause "Task was destroyed but it is pending" errors
-                    memory_logger.debug(f"Memory service created but not initialized: {type(_memory_service).__name__}")
+                    memory_logger.debug(
+                        f"Memory service created but not initialized: {type(_memory_service).__name__}"
+                    )
 
-                    memory_logger.info(f"✅ Global memory service created: {type(_memory_service).__name__}")
+                    memory_logger.info(
+                        f"✅ Global memory service created: {type(_memory_service).__name__}"
+                    )
 
                 except Exception as e:
                     memory_logger.error(f"❌ Failed to create memory service: {e}")
@@ -113,7 +118,7 @@ def get_memory_service() -> MemoryServiceBase:
 def shutdown_memory_service() -> None:
     """Shutdown the global memory service and clean up resources."""
     global _memory_service
-    
+
     if _memory_service is not None:
         try:
             _memory_service.shutdown()
@@ -135,30 +140,24 @@ def reset_memory_service() -> None:
 
 def get_service_info() -> dict:
     """Get information about the current memory service.
-    
+
     Returns:
         Dictionary with service information
     """
     global _memory_service
-    
+
     info = {
         "service_created": _memory_service is not None,
         "service_type": None,
         "service_initialized": False,
-        "memory_provider": None
+        "memory_provider": None,
     }
-    
+
     if _memory_service is not None:
         info["service_type"] = type(_memory_service).__name__
         # All memory services should have _initialized attribute per the base class
         info["service_initialized"] = _memory_service._initialized
 
-        # Try to determine provider from service type
-        if "OpenMemoryMCP" in info["service_type"]:
-            info["memory_provider"] = "openmemory_mcp"
-        elif info["service_type"] == "ChronicleMemoryService":
-            info["memory_provider"] = "chronicle"
-        elif info["service_type"] == "MyceliaMemoryService":
-            info["memory_provider"] = "mycelia"
-    
+        info["memory_provider"] = _memory_service.provider_identifier
+
     return info

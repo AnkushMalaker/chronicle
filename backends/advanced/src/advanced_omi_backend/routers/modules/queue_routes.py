@@ -4,15 +4,22 @@ Provides basic endpoints for viewing job status and statistics.
 """
 
 import logging
-from fastapi import APIRouter, Depends, Query, HTTPException, Request
-from pydantic import BaseModel
 from typing import List, Optional
 
-from advanced_omi_backend.auth import current_active_user
-from advanced_omi_backend.controllers.queue_controller import get_jobs, get_job_stats, redis_conn, QUEUE_NAMES, get_job_status_from_rq
-from advanced_omi_backend.users import User
-from rq.job import Job
 import redis.asyncio as aioredis
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
+from rq.job import Job
+
+from advanced_omi_backend.auth import current_active_user
+from advanced_omi_backend.controllers.queue_controller import (
+    QUEUE_NAMES,
+    get_job_stats,
+    get_job_status_from_rq,
+    get_jobs,
+    redis_conn,
+)
+from advanced_omi_backend.users import User
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/queue", tags=["queue"])
@@ -187,7 +194,15 @@ async def get_jobs_by_client(
 ):
     """Get all jobs associated with a specific client device."""
     try:
-        from rq.registry import FinishedJobRegistry, FailedJobRegistry, StartedJobRegistry, CanceledJobRegistry, DeferredJobRegistry, ScheduledJobRegistry
+        from rq.registry import (
+            CanceledJobRegistry,
+            DeferredJobRegistry,
+            FailedJobRegistry,
+            FinishedJobRegistry,
+            ScheduledJobRegistry,
+            StartedJobRegistry,
+        )
+
         from advanced_omi_backend.controllers.queue_controller import get_queue
         from advanced_omi_backend.models.conversation import Conversation
 
@@ -326,9 +341,9 @@ async def get_queue_worker_details(
 ):
     """Get detailed queue and worker status including task manager health."""
     try:
-        from advanced_omi_backend.controllers.queue_controller import get_queue_health
-        from advanced_omi_backend.task_manager import get_task_manager
         import time
+
+        from advanced_omi_backend.controllers.queue_controller import get_queue_health
 
         # Get queue health directly
         queue_health = get_queue_health()
@@ -488,7 +503,13 @@ async def flush_jobs(
 
     try:
         from datetime import datetime, timedelta, timezone
-        from rq.registry import FinishedJobRegistry, FailedJobRegistry, CanceledJobRegistry
+
+        from rq.registry import (
+            CanceledJobRegistry,
+            FailedJobRegistry,
+            FinishedJobRegistry,
+        )
+
         from advanced_omi_backend.controllers.queue_controller import get_queue
 
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=request.older_than_hours)
@@ -563,13 +584,14 @@ async def flush_all_jobs(
 
     try:
         from rq.registry import (
-            FinishedJobRegistry,
-            FailedJobRegistry,
             CanceledJobRegistry,
-            StartedJobRegistry,
             DeferredJobRegistry,
-            ScheduledJobRegistry
+            FailedJobRegistry,
+            FinishedJobRegistry,
+            ScheduledJobRegistry,
+            StartedJobRegistry,
         )
+
         from advanced_omi_backend.controllers.queue_controller import get_queue
 
         total_removed = 0
@@ -705,6 +727,7 @@ async def get_redis_sessions(
     """Get Redis session tracking information."""
     try:
         import redis.asyncio as aioredis
+
         from advanced_omi_backend.controllers.queue_controller import REDIS_URL
 
         redis_client = aioredis.from_url(REDIS_URL)
@@ -769,8 +792,10 @@ async def clear_old_sessions(
         raise HTTPException(status_code=403, detail="Admin access required")
 
     try:
-        import redis.asyncio as aioredis
         import time
+
+        import redis.asyncio as aioredis
+
         from advanced_omi_backend.controllers.queue_controller import REDIS_URL
 
         redis_client = aioredis.from_url(REDIS_URL)
@@ -827,8 +852,13 @@ async def get_dashboard_data(
     - Client jobs for expanded clients
     """
     try:
+        from rq.registry import (
+            FailedJobRegistry,
+            FinishedJobRegistry,
+            StartedJobRegistry,
+        )
+
         from advanced_omi_backend.controllers import system_controller
-        from rq.registry import FinishedJobRegistry, FailedJobRegistry, StartedJobRegistry
         from advanced_omi_backend.controllers.queue_controller import get_queue
 
         # Parse expanded clients list
@@ -912,6 +942,7 @@ async def get_dashboard_data(
             try:
                 # Import session_controller for streaming status
                 from advanced_omi_backend.controllers import session_controller
+
                 # Use the actual request object from the parent function
                 return await session_controller.get_streaming_status(request)
             except Exception as e:
@@ -943,8 +974,12 @@ async def get_dashboard_data(
 
                     # Check all registries
                     from rq.registry import (
-                        FinishedJobRegistry, FailedJobRegistry, StartedJobRegistry,
-                        CanceledJobRegistry, DeferredJobRegistry, ScheduledJobRegistry
+                        CanceledJobRegistry,
+                        DeferredJobRegistry,
+                        FailedJobRegistry,
+                        FinishedJobRegistry,
+                        ScheduledJobRegistry,
+                        StartedJobRegistry,
                     )
 
                     registries = [
