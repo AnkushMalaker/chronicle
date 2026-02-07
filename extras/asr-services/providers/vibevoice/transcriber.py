@@ -4,6 +4,10 @@ VibeVoice ASR transcriber implementation.
 Uses Microsoft's VibeVoice-ASR model with speaker diarization capabilities.
 VibeVoice is a speech-to-text model with built-in speaker diarization.
 
+For long audio files, automatically batches into overlapping windows and
+stitches results together. Context from each window is passed to the next
+via VibeVoice's native context_info parameter.
+
 Environment variables:
     ASR_MODEL: HuggingFace model ID (default: microsoft/VibeVoice-ASR)
     VIBEVOICE_LLM_MODEL: LLM backbone for processor (default: Qwen/Qwen2.5-7B)
@@ -14,6 +18,9 @@ Environment variables:
     DEVICE: Device to use (default: cuda)
     TORCH_DTYPE: Torch dtype (default: bfloat16, recommended for VibeVoice)
     MAX_NEW_TOKENS: Maximum tokens for generation (default: 8192)
+    BATCH_THRESHOLD_SECONDS: Audio longer than this triggers batching (default: 300)
+    BATCH_DURATION_SECONDS: Non-overlapping window size in seconds (default: 240)
+    BATCH_OVERLAP_SECONDS: Overlap between consecutive windows (default: 30)
 """
 
 import json
@@ -26,7 +33,12 @@ from pathlib import Path
 from typing import Optional
 
 import torch
-
+from common.audio_utils import STANDARD_SAMPLE_RATE, load_audio_file
+from common.batching import (
+    extract_context_tail,
+    split_audio_file,
+    stitch_transcription_results,
+)
 from common.response_models import Segment, Speaker, TranscriptionResult
 
 logger = logging.getLogger(__name__)
@@ -46,6 +58,9 @@ class VibeVoiceTranscriber:
         DEVICE: Device to use (default: cuda)
         TORCH_DTYPE: Torch dtype (default: bfloat16)
         MAX_NEW_TOKENS: Max tokens for generation (default: 8192)
+        BATCH_THRESHOLD_SECONDS: Audio longer than this triggers batching (default: 300)
+        BATCH_DURATION_SECONDS: Non-overlapping window size (default: 240)
+        BATCH_OVERLAP_SECONDS: Overlap between windows (default: 30)
     """
 
     def __init__(self, model_id: Optional[str] = None):
@@ -70,6 +85,11 @@ class VibeVoiceTranscriber:
         }
         self.torch_dtype = dtype_map.get(torch_dtype_str, torch.bfloat16)
 
+        # Batching config for long audio
+        self.batch_threshold = float(os.getenv("BATCH_THRESHOLD_SECONDS", "300"))
+        self.batch_duration = float(os.getenv("BATCH_DURATION_SECONDS", "240"))
+        self.batch_overlap = float(os.getenv("BATCH_OVERLAP_SECONDS", "30"))
+
         # Model components (initialized in load_model)
         self.model = None
         self.processor = None
@@ -79,7 +99,8 @@ class VibeVoiceTranscriber:
         logger.info(
             f"VibeVoiceTranscriber initialized: "
             f"model={self.model_id}, llm={self.llm_model}, "
-            f"device={self.device}, dtype={torch_dtype_str}, attn={self.attn_impl}"
+            f"device={self.device}, dtype={torch_dtype_str}, attn={self.attn_impl}, "
+            f"batch_threshold={self.batch_threshold}s"
         )
 
     def _setup_vibevoice(self) -> None:
@@ -177,6 +198,10 @@ class VibeVoiceTranscriber:
         """
         Transcribe audio file using VibeVoice with speaker diarization.
 
+        For audio longer than batch_threshold, automatically splits into
+        overlapping windows, transcribes each with context from the previous
+        window, and stitches results together.
+
         Args:
             audio_file_path: Path to audio file
 
@@ -186,16 +211,50 @@ class VibeVoiceTranscriber:
         if not self._is_loaded or self.model is None or self.processor is None:
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
+        # Check duration to decide whether to batch
+
+        audio_array, sr = load_audio_file(audio_file_path, target_rate=STANDARD_SAMPLE_RATE)
+        duration = len(audio_array) / sr
+
+        if duration > self.batch_threshold:
+            logger.info(
+                f"Audio is {duration:.1f}s (>{self.batch_threshold}s), using batched transcription"
+            )
+            return self._transcribe_batched(audio_file_path)
+        else:
+            logger.info(f"Audio is {duration:.1f}s, using single-shot transcription")
+            return self._transcribe_single(audio_file_path)
+
+    def _transcribe_single(
+        self, audio_file_path: str, context: Optional[str] = None
+    ) -> TranscriptionResult:
+        """
+        Transcribe a single audio file (or batch window).
+
+        Args:
+            audio_file_path: Path to audio file
+            context: Optional context text from previous batch window,
+                passed to VibeVoice's context_info parameter.
+
+        Returns:
+            TranscriptionResult with text, segments (with speakers), and speaker list
+        """
         logger.info(f"Transcribing: {audio_file_path}")
+        if context:
+            logger.info(f"With context ({len(context)} chars): ...{context[-80:]}")
 
         # Process audio through processor (can take file paths directly)
-        inputs = self.processor(
-            audio=[audio_file_path],
-            sampling_rate=None,
-            return_tensors="pt",
-            padding=True,
-            add_generation_prompt=True,
-        )
+        processor_kwargs = {
+            "audio": [audio_file_path],
+            "sampling_rate": None,
+            "return_tensors": "pt",
+            "padding": True,
+            "add_generation_prompt": True,
+        }
+        if context:
+            processor_kwargs["context_info"] = context
+
+        inputs = self.processor(**processor_kwargs)
 
         # Move inputs to device
         model_device = next(self.model.parameters()).device
@@ -243,6 +302,46 @@ class VibeVoiceTranscriber:
 
         # Map to TranscriptionResult
         return self._map_to_result(processed, raw_output)
+
+    def _transcribe_batched(self, audio_file_path: str) -> TranscriptionResult:
+        """
+        Transcribe a long audio file by splitting into overlapping windows.
+
+        Each window gets context from the previous window's transcript tail,
+        passed via VibeVoice's native context_info parameter.
+
+        Args:
+            audio_file_path: Path to the full audio file
+
+        Returns:
+            Stitched TranscriptionResult from all windows
+        """
+
+        windows = split_audio_file(
+            audio_file_path,
+            batch_duration=self.batch_duration,
+            overlap=self.batch_overlap,
+        )
+
+        batch_results = []
+        prev_context = None
+
+        for i, (temp_path, start_time, end_time) in enumerate(windows):
+            try:
+                logger.info(
+                    f"Batch {i+1}/{len(windows)}: [{start_time:.0f}s - {end_time:.0f}s]"
+                )
+                result = self._transcribe_single(temp_path, context=prev_context)
+                batch_results.append((result, start_time, end_time))
+                prev_context = extract_context_tail(result, max_chars=500)
+                logger.info(
+                    f"Batch {i+1} done: {len(result.segments)} segments, "
+                    f"{len(result.text)} chars"
+                )
+            finally:
+                os.unlink(temp_path)
+
+        return stitch_transcription_results(batch_results, overlap_seconds=self.batch_overlap)
 
     def _parse_vibevoice_output(self, raw_output: str) -> dict:
         """

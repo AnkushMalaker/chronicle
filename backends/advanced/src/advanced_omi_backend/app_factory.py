@@ -161,6 +161,20 @@ async def lifespan(app: FastAPI):
     get_client_manager()
     application_logger.info("ClientManager initialized")
 
+    # Initialize prompt registry with defaults and seed into LangFuse
+    try:
+        from advanced_omi_backend.prompt_defaults import register_all_defaults
+        from advanced_omi_backend.prompt_registry import get_prompt_registry
+
+        prompt_registry = get_prompt_registry()
+        register_all_defaults(prompt_registry)
+        await prompt_registry.seed_prompts()
+        application_logger.info(
+            f"Prompt registry initialized with {len(prompt_registry._defaults)} defaults"
+        )
+    except Exception as e:
+        application_logger.warning(f"Prompt registry initialization failed: {e}")
+
     # Initialize LLM client eagerly (catch config errors at startup, not on first request)
     try:
         from advanced_omi_backend.llm_client import get_llm_client

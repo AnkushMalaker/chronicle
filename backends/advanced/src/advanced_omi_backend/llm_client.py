@@ -7,11 +7,11 @@ OpenAI, Ollama, and other OpenAI-compatible APIs.
 
 import asyncio
 import logging
-import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
 from advanced_omi_backend.model_registry import get_models_registry
+from advanced_omi_backend.openai_factory import create_openai_client
 from advanced_omi_backend.services.memory.config import (
     load_config_yml as _load_root_config,
 )
@@ -66,23 +66,10 @@ class OpenAILLMClient(LLMClient):
 
         # Initialize OpenAI client with optional Langfuse tracing
         try:
-            # Check if Langfuse is configured
-            langfuse_enabled = (
-                os.getenv("LANGFUSE_PUBLIC_KEY")
-                and os.getenv("LANGFUSE_SECRET_KEY")
-                and os.getenv("LANGFUSE_HOST")
+            self.client = create_openai_client(
+                api_key=self.api_key, base_url=self.base_url, is_async=False
             )
-
-            if langfuse_enabled:
-                # Use Langfuse-wrapped OpenAI for tracing
-                import langfuse.openai as openai
-                self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
-                self.logger.info(f"OpenAI client initialized with Langfuse tracing, base_url: {self.base_url}")
-            else:
-                # Use regular OpenAI client without tracing
-                from openai import OpenAI
-                self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
-                self.logger.info(f"OpenAI client initialized (no tracing), base_url: {self.base_url}")
+            self.logger.info(f"OpenAI client initialized, base_url: {self.base_url}")
         except ImportError:
             self.logger.error("OpenAI library not installed. Install with: pip install openai")
             raise

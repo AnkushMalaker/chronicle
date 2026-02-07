@@ -194,7 +194,7 @@ def create_asr_app(service: BaseASRService) -> FastAPI:
         except Exception as e:
             error_time = time.time() - request_start
             logger.exception(f"Error after {error_time:.3f}s: {e}")
-            raise HTTPException(status_code=500, detail="Transcription failed")
+            raise HTTPException(status_code=500, detail=f"Transcription failed: {e}")
 
         finally:
             # Cleanup temporary file

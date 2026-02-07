@@ -18,6 +18,9 @@ from typing import Any, Callable, Dict, Optional
 
 import redis.asyncio as redis_async
 
+from advanced_omi_backend.prompt_defaults import register_all_defaults
+from advanced_omi_backend.prompt_registry import get_prompt_registry
+
 logger = logging.getLogger(__name__)
 
 # Global flag to track if Beanie is initialized in this process
@@ -62,6 +65,11 @@ async def _ensure_beanie_initialized():
 
             _beanie_initialized = True
             logger.info("✅ Beanie initialized in RQ worker process")
+
+            # Register prompt defaults (needed for title/summary generation etc.)
+            prompt_registry = get_prompt_registry()
+            register_all_defaults(prompt_registry)
+            logger.info("✅ Prompt registry initialized in RQ worker process")
 
         except Exception as e:
             logger.error(f"❌ Failed to initialize Beanie in RQ worker: {e}")

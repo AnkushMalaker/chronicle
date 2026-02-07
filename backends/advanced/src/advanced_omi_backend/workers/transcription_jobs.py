@@ -222,11 +222,13 @@ async def transcribe_full_audio_job(
             sample_rate=16000,
             diarize=True,
         )
+    except ConnectionError as e:
+        logger.exception(f"Transcription service unreachable for {conversation_id}")
+        raise RuntimeError(str(e))
+    except RuntimeError:
+        raise
     except Exception as e:
-        logger.error(
-            f"Transcription failed for conversation {conversation_id}: {type(e).__name__}: {e}",
-            exc_info=True,
-        )
+        logger.exception(f"Transcription failed for conversation {conversation_id}")
         raise RuntimeError(f"Transcription failed ({type(e).__name__}): {e}")
 
     # Extract results
@@ -492,16 +494,15 @@ async def transcribe_full_audio_job(
     if transcript_text and len(transcript_text.strip()) > 0:
         try:
             from advanced_omi_backend.llm_client import async_generate
+            from advanced_omi_backend.prompt_registry import get_prompt_registry
 
             # Prepare prompt for LLM
-            prompt = f"""Based on this conversation transcript, generate a concise title and summary.
+            registry = get_prompt_registry()
+            prompt_template = await registry.get_prompt("transcription.title_summary")
+            prompt = f"""{prompt_template}
 
 Transcript:
-{transcript_text[:2000]}
-
-Respond in this exact format:
-Title: <concise title under 50 characters>
-Summary: <brief summary under 150 characters>"""
+{transcript_text[:2000]}"""
 
             logger.info(f"🤖 Generating title/summary using LLM for conversation {conversation_id}")
             llm_response = await async_generate(prompt, temperature=0.7)

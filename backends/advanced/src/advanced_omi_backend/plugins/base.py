@@ -75,6 +75,17 @@ class BasePlugin(ABC):
         if 'access_level' in config:
             logger.warning(f"Plugin '{plugin_name}': 'access_level' is deprecated and ignored")
 
+    def register_prompts(self, registry) -> None:
+        """Register plugin prompts with the prompt registry.
+
+        Override to register prompts. Called during plugin discovery,
+        before initialize(). Default: no-op (backward-compatible).
+
+        Args:
+            registry: PromptRegistry instance
+        """
+        pass
+
     @abstractmethod
     async def initialize(self):
         """

@@ -371,3 +371,7 @@ async def set_memory_provider(
 ):
     """Set memory provider and restart backend services. Admin only."""
     return await system_controller.set_memory_provider(provider)
+
+
+# ── Prompt Management ──────────────────────────────────────────────────────
+# Prompt editing is now handled via the LangFuse web UI at http://localhost:3002/prompts

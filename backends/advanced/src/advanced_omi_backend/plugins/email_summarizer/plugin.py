@@ -70,6 +70,23 @@ class EmailSummarizerPlugin(BasePlugin):
         # MongoDB database handle
         self.db = None
 
+    def register_prompts(self, registry) -> None:
+        """Register email summarizer prompts with the prompt registry."""
+        registry.register_default(
+            "plugin.email_summarizer.summary",
+            template=(
+                "Summarize this conversation in {{summary_max_sentences}} sentences or less. "
+                "Focus on key points, main topics discussed, and any action items or decisions. "
+                "Be concise and clear."
+            ),
+            name="Email Summary",
+            description="Generates a concise email summary of a completed conversation.",
+            category="plugin",
+            plugin_id="email_summarizer",
+            variables=["summary_max_sentences"],
+            is_dynamic=True,
+        )
+
     async def initialize(self):
         """
         Initialize plugin resources.
@@ -253,12 +270,14 @@ class EmailSummarizerPlugin(BasePlugin):
             Generated summary (2-3 sentences)
         """
         try:
-            prompt = (
-                f"Summarize this conversation in {self.summary_max_sentences} sentences or less. "
-                f"Focus on key points, main topics discussed, and any action items or decisions. "
-                f"Be concise and clear.\n\n"
-                f"Conversation:\n{transcript}"
+            from advanced_omi_backend.prompt_registry import get_prompt_registry
+
+            registry = get_prompt_registry()
+            instruction = await registry.get_prompt(
+                "plugin.email_summarizer.summary",
+                summary_max_sentences=self.summary_max_sentences,
             )
+            prompt = f"{instruction}\n\nConversation:\n{transcript}"
 
             logger.debug("Generating LLM summary...")
             summary = await async_generate(prompt)

@@ -149,19 +149,33 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
             query["diarize"] = "true" if diarize else "false"
 
         timeout = op.get("timeout", 300)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            if method == "POST":
-                if use_multipart:
-                    # Send as multipart file upload (for Parakeet)
-                    files = {"file": ("audio.wav", audio_data, "audio/wav")}
-                    resp = await client.post(url, headers=headers, params=query, files=files)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                if method == "POST":
+                    if use_multipart:
+                        # Send as multipart file upload (for Parakeet)
+                        files = {"file": ("audio.wav", audio_data, "audio/wav")}
+                        resp = await client.post(url, headers=headers, params=query, files=files)
+                    else:
+                        # Send as raw audio data (for Deepgram)
+                        resp = await client.post(url, headers=headers, params=query, content=audio_data)
                 else:
-                    # Send as raw audio data (for Deepgram)
-                    resp = await client.post(url, headers=headers, params=query, content=audio_data)
-            else:
-                resp = await client.get(url, headers=headers, params=query)
-            resp.raise_for_status()
-            data = resp.json()
+                    resp = await client.get(url, headers=headers, params=query)
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.ConnectError as e:
+            raise ConnectionError(
+                f"Cannot reach transcription service '{self._name}' at {url}. "
+                f"Is the service running? Check that the URL in config.yml "
+                f"is correct and the service is accessible from inside Docker "
+                f"(use 'host.docker.internal' instead of 'localhost')."
+            ) from e
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            raise RuntimeError(
+                f"Transcription service '{self._name}' at {url} returned HTTP {status}. "
+                f"{'Check your API key.' if status in (401, 403) else ''}"
+            ) from e
 
             # DEBUG: Log Deepgram response structure
             if "results" in data and "channels" in data.get("results", {}):

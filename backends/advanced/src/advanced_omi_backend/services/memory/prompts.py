@@ -6,10 +6,15 @@ This module contains the prompts used by the LLM providers for:
 3. Answering questions from memory (MEMORY_ANSWER_PROMPT)
 4. Procedural memory for task tracking (PROCEDURAL_MEMORY_SYSTEM_PROMPT)
 5. Temporal and entity extraction (get_temporal_entity_extraction_prompt())
+
+NOTE: The canonical default text for each prompt is registered in
+``prompt_defaults.py``.  The constants below are kept for backward
+compatibility in callers that do not yet use the registry.
 """
 
 import json
 from datetime import datetime, timedelta
+from string import Template
 from typing import List, Optional
 
 from pydantic import BaseModel, Field

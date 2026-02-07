@@ -22,7 +22,7 @@ dependencies = [
     "fastapi-users[beanie]>=14.0.1",
     "PyYAML>=6.0.1",
     "omegaconf>=2.3.0",
-    "langfuse>=3.3.0",
+    "langfuse>=3.13.0,<4.0",
     "spacy>=3.8.2",
     "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
     "redis>=5.0.0",

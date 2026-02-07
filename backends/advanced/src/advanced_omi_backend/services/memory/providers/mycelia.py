@@ -14,6 +14,7 @@ import httpx
 
 from advanced_omi_backend.auth import generate_jwt_for_user
 from advanced_omi_backend.model_registry import get_models_registry
+from advanced_omi_backend.prompt_registry import get_prompt_registry
 from advanced_omi_backend.users import User
 
 from ..base import MemoryEntry, MemoryServiceBase
@@ -260,10 +261,15 @@ class MyceliaMemoryService(MemoryServiceBase):
             client = _get_openai_client(
                 api_key=llm_def.api_key or "", base_url=llm_def.model_url, is_async=True
             )
+            registry = get_prompt_registry()
+            fact_prompt = await registry.get_prompt(
+                "memory.fact_retrieval",
+                current_date=datetime.now().strftime("%Y-%m-%d"),
+            )
             response = await client.chat.completions.create(
                 model=llm_def.model_name,
                 messages=[
-                    {"role": "system", "content": FACT_RETRIEVAL_PROMPT},
+                    {"role": "system", "content": fact_prompt},
                     {"role": "user", "content": transcript},
                 ],
                 response_format={"type": "json_object"},
@@ -321,10 +327,18 @@ class MyceliaMemoryService(MemoryServiceBase):
             client = _get_openai_client(
                 api_key=llm_def.api_key or "", base_url=llm_def.model_url, is_async=True
             )
+            now = datetime.now()
+            registry = get_prompt_registry()
+            temporal_prompt = await registry.get_prompt(
+                "memory.temporal_extraction",
+                current_date=now.strftime("%Y-%m-%d"),
+                current_time=now.strftime("%H:%M:%S"),
+                day_of_week=now.strftime("%A"),
+            )
             response = await client.chat.completions.create(
                 model=llm_def.model_name,
                 messages=[
-                    {"role": "system", "content": get_temporal_entity_extraction_prompt()},
+                    {"role": "system", "content": temporal_prompt},
                     {
                         "role": "user",
                         "content": f"Extract temporal and entity information from this memory fact:\n\n{fact}",

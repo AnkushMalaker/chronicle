@@ -112,6 +112,10 @@ services:
       - DEVICE=${DEVICE:-cuda}
       - TORCH_DTYPE=${TORCH_DTYPE:-bfloat16}
       - MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-8192}
+      # Batching config for long audio
+      - BATCH_THRESHOLD_SECONDS=${BATCH_THRESHOLD_SECONDS:-300}
+      - BATCH_DURATION_SECONDS=${BATCH_DURATION_SECONDS:-240}
+      - BATCH_OVERLAP_SECONDS=${BATCH_OVERLAP_SECONDS:-30}
     restart: unless-stopped
 
   # ============================================================================

@@ -1,7 +1,6 @@
 """Memory service configuration utilities."""
 
 import logging
-import os
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -13,15 +12,6 @@ from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.utils.config_utils import resolve_value
 
 memory_logger = logging.getLogger("memory_service")
-
-
-def _is_langfuse_enabled() -> bool:
-    """Check if Langfuse is properly configured."""
-    return bool(
-        os.getenv("LANGFUSE_PUBLIC_KEY")
-        and os.getenv("LANGFUSE_SECRET_KEY")
-        and os.getenv("LANGFUSE_HOST")
-    )
 
 
 class LLMProvider(Enum):

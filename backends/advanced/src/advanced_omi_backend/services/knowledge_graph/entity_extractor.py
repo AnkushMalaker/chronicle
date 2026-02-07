@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.model_registry import get_models_registry
+from advanced_omi_backend.openai_factory import create_openai_client
 
 from .models import (
     EntityType,
@@ -83,10 +84,6 @@ Only return valid JSON, no additional text."""
 
 def _get_llm_client():
     """Get async OpenAI client from model registry."""
-    from advanced_omi_backend.services.memory.providers.llm_providers import (
-        _get_openai_client,
-    )
-
     registry = get_models_registry()
     if not registry:
         raise RuntimeError("Model registry not configured")
@@ -95,10 +92,10 @@ def _get_llm_client():
     if not llm_def:
         raise RuntimeError("No default LLM defined in config.yml")
 
-    return _get_openai_client(
+    return create_openai_client(
         api_key=llm_def.api_key or "",
         base_url=llm_def.model_url,
-        is_async=True
+        is_async=True,
     ), llm_def
 
 
@@ -122,8 +119,14 @@ async def extract_entities_from_transcript(
         return ExtractionResult()
 
     try:
+        from advanced_omi_backend.prompt_registry import get_prompt_registry
+
         client, llm_def = _get_llm_client()
-        prompt = custom_prompt or ENTITY_EXTRACTION_PROMPT
+        if custom_prompt:
+            prompt = custom_prompt
+        else:
+            registry = get_prompt_registry()
+            prompt = await registry.get_prompt("knowledge_graph.entity_extraction")
 
         response = await client.chat.completions.create(
             model=llm_def.model_name,

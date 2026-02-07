@@ -606,6 +606,14 @@ def init_plugin_router() -> Optional[PluginRouter]:
 
                     # Instantiate and register the plugin
                     plugin = plugin_class(plugin_config)
+
+                    # Let plugin register its prompts with the prompt registry
+                    try:
+                        from advanced_omi_backend.prompt_registry import get_prompt_registry
+                        plugin.register_prompts(get_prompt_registry())
+                    except Exception as e:
+                        logger.debug(f"Plugin '{plugin_id}' prompt registration skipped: {e}")
+
                     # Note: async initialization happens in app_factory lifespan
                     _plugin_router.register_plugin(plugin_id, plugin)
                     logger.info(f"✅ Plugin '{plugin_id}' registered successfully ({plugin_type})")

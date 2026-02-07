@@ -85,7 +85,7 @@ requires-dist = [
     { name = "google-auth-oauthlib", specifier = ">=1.0.0" },
     { name = "httpx", specifier = ">=0.28.0,<1.0.0" },
     { name = "langchain-neo4j" },
-    { name = "langfuse", specifier = ">=3.3.0" },
+    { name = "langfuse", specifier = ">=3.13.0,<4.0" },
     { name = "mem0ai", git = "https://github.com/AnkushMalaker/mem0.git?rev=main" },
     { name = "motor", specifier = ">=3.7.1" },
     { name = "neo4j", specifier = ">=5.0.0,<6.0.0" },
@@ -1908,7 +1908,7 @@ wheels = [
 
 [[package]]
 name = "langfuse"
-version = "3.11.1"
+version = "3.13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "backoff" },
@@ -1922,9 +1922,9 @@ dependencies = [
     { name = "requests" },
     { name = "wrapt" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/70/a4/f7c5919a1e7c26904dd0caa52dc90b75e616d94bece157429169ffce264a/langfuse-3.11.1.tar.gz", hash = "sha256:52bdb5bae2bb7c2add22777a0f88a1a5c96f90ec994935b773992153e57e94f8", size = 230854, upload-time = "2025-12-19T14:31:11.372Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/24/d0/744e5613c728427330ac2049da0f54fc313e8bf84622f71b025bfba65496/langfuse-3.13.0.tar.gz", hash = "sha256:dacea8111ca4442e97dbfec4f8d676cf9709b35357a26e468f8887b95de0012f", size = 233420, upload-time = "2026-02-06T19:54:14.415Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3a/ff/256e5814227373179e6c70c05ecead72b19dcda3cd2e0004bd643f64c70e/langfuse-3.11.1-py3-none-any.whl", hash = "sha256:f489c97fb2231b14e75383100158cdd6a158b87c1e9c9f96b2cdcbc015c48319", size = 413776, upload-time = "2025-12-19T14:31:10.166Z" },
+    { url = "https://files.pythonhosted.org/packages/3d/63/148382e8e79948f7e5c9c137288e504bb88117574eb7e7c886b4fb470b4b/langfuse-3.13.0-py3-none-any.whl", hash = "sha256:71912ddac1cc831a65df895eae538a556f564c094ae51473e747426e9ded1a9d", size = 417626, upload-time = "2026-02-06T19:54:12.547Z" },
 ]
 
 [[package]]

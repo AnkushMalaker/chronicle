@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.config import get_speech_detection_settings
 from advanced_omi_backend.llm_client import async_generate
+from advanced_omi_backend.prompt_registry import get_prompt_registry
 
 logger = logging.getLogger(__name__)
 
@@ -187,18 +188,12 @@ async def generate_title(text: str, segments: Optional[list] = None) -> str:
         return "Conversation"
 
     try:
-        prompt = f"""Generate a concise, descriptive title (3-6 words) for this conversation transcript:
+        registry = get_prompt_registry()
+        prompt_template = await registry.get_prompt("conversation.title")
+        prompt = f"""{prompt_template}
 
 "{text[:500]}"
-
-Rules:
-- Maximum 6 words
-- Capture the main topic or theme
-- Do NOT include speaker names or participants
-- No quotes or special characters
-- Examples: "Planning Weekend Trip", "Work Project Discussion", "Medical Appointment"
-
-Title:"""
+"""
 
         title = await async_generate(prompt, temperature=0.3)
         return title.strip().strip('"').strip("'") or "Conversation"
@@ -255,18 +250,16 @@ async def generate_short_summary(text: str, segments: Optional[list] = None) -> 
             else ""
         )
 
-        prompt = f"""Generate a brief, informative summary (1-2 sentences, max 120 characters) for this conversation:
+        registry = get_prompt_registry()
+        prompt_text = await registry.get_prompt(
+            "conversation.short_summary",
+            speaker_instruction=speaker_instruction,
+        )
+
+        prompt = f"""{prompt_text}
 
 "{conversation_text[:1000]}"
-
-Rules:
-- Maximum 120 characters
-- 1-2 complete sentences
-{speaker_instruction}- Capture key topics and outcomes
-- Use present tense
-- Be specific and informative
-
-Summary:"""
+"""
 
         summary = await async_generate(prompt, temperature=0.3)
         return summary.strip().strip('"').strip("'") or "No content"
@@ -348,29 +341,18 @@ async def generate_detailed_summary(
 
 """
 
-        prompt = f"""Generate a comprehensive, detailed summary of this conversation transcript.
+        registry = get_prompt_registry()
+        prompt_text = await registry.get_prompt(
+            "conversation.detailed_summary",
+            speaker_instruction=speaker_instruction,
+            memory_section=memory_section,
+        )
 
-{memory_section}TRANSCRIPT:
+        prompt = f"""{prompt_text}
+
+TRANSCRIPT:
 "{conversation_text}"
-
-INSTRUCTIONS:
-Your task is to create a high-quality, detailed summary of a conversation transcription that captures the full information and context of what was discussed. This is NOT a brief summary - provide comprehensive coverage.
-
-Rules:
-- We know it's a conversation, so no need to say "This conversation involved..."
-- Provide complete coverage of all topics, points, and important details discussed
-- Correct obvious transcription errors and remove filler words (um, uh, like, you know)
-- Organize information logically by topic or chronologically as appropriate
-- Use clear, well-structured paragraphs or bullet points, but make the length relative to the amound of content.
-- Maintain the meaning and intent of what was said, but improve clarity and coherence
-- Include relevant context, decisions made, action items mentioned, and conclusions reached
-{speaker_instruction}- Write in a natural, flowing narrative style
-- Only include word-for-word quotes if it's more efficiency than rephrasing
-- Focus on substantive content - what was actually discussed and decided
-
-Think of this as creating a high-quality information set that someone could use to understand everything important that happened in this conversation without reading the full transcript.
-
-DETAILED SUMMARY:"""
+"""
 
         summary = await async_generate(prompt, temperature=0.3)
         return summary.strip().strip('"').strip("'") or "No meaningful content to summarize"

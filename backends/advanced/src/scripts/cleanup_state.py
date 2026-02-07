@@ -5,6 +5,7 @@ Backend State Cleanup Script for Chronicle
 This script provides comprehensive cleanup of Chronicle backend data including:
 - MongoDB collections (conversations, audio_chunks)
 - Qdrant vector store (memories)
+- Neo4j knowledge graph (entities, relationships, promises)
 - Redis job queues and registries
 - Legacy WAV files (backward compatibility)
 
@@ -34,6 +35,7 @@ try:
     import redis
     from beanie import init_beanie
     from motor.motor_asyncio import AsyncIOMotorClient
+    from neo4j import GraphDatabase
     from qdrant_client import AsyncQdrantClient
     from qdrant_client.models import Distance, VectorParams
     from rq import Queue
@@ -81,6 +83,9 @@ class CleanupStats:
         self.chat_sessions_count = 0
         self.chat_messages_count = 0
         self.memories_count = 0
+        self.neo4j_nodes_count = 0
+        self.neo4j_relationships_count = 0
+        self.neo4j_promises_count = 0
         self.redis_jobs_count = 0
         self.legacy_wav_count = 0
         self.users_count = 0
@@ -91,10 +96,11 @@ class CleanupStats:
 class BackupManager:
     """Handle backup operations"""
 
-    def __init__(self, backup_dir: str, export_audio: bool, mongo_db: Any):
+    def __init__(self, backup_dir: str, export_audio: bool, mongo_db: Any, neo4j_driver: Any = None):
         self.backup_dir = Path(backup_dir)
         self.export_audio = export_audio
         self.mongo_db = mongo_db
+        self.neo4j_driver = neo4j_driver
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.backup_path = self.backup_dir / f"backup_{self.timestamp}"
 
@@ -123,6 +129,10 @@ class BackupManager:
             # Export Qdrant vectors
             if qdrant_client:
                 await self._export_memories(qdrant_client, stats)
+
+            # Export Neo4j knowledge graph
+            if self.neo4j_driver:
+                self._export_neo4j(stats)
 
             # Generate summary
             await self._generate_summary(stats)
@@ -421,6 +431,47 @@ class BackupManager:
         except Exception as e:
             logger.warning(f"Failed to export memories: {e}")
 
+    def _export_neo4j(self, stats: CleanupStats):
+        """Export Neo4j knowledge graph data to JSON"""
+        logger.info("Exporting Neo4j knowledge graph...")
+
+        try:
+            with self.neo4j_driver.session() as session:
+                # Export nodes
+                nodes_result = session.run(
+                    "MATCH (n) RETURN n, labels(n) AS labels, elementId(n) AS eid"
+                )
+                nodes_data = []
+                for record in nodes_result:
+                    node = dict(record["n"])
+                    node["_labels"] = record["labels"]
+                    node["_element_id"] = record["eid"]
+                    nodes_data.append(node)
+
+                # Export relationships
+                rels_result = session.run(
+                    "MATCH (a)-[r]->(b) "
+                    "RETURN elementId(a) AS src, type(r) AS rel_type, "
+                    "properties(r) AS props, elementId(b) AS dst"
+                )
+                rels_data = []
+                for record in rels_result:
+                    rels_data.append({
+                        "source": record["src"],
+                        "type": record["rel_type"],
+                        "properties": dict(record["props"]) if record["props"] else {},
+                        "target": record["dst"],
+                    })
+
+            output_path = self.backup_path / "neo4j_graph.json"
+            with open(output_path, "w") as f:
+                json.dump({"nodes": nodes_data, "relationships": rels_data}, f, indent=2, default=str)
+
+            logger.info(f"Exported {len(nodes_data)} nodes, {len(rels_data)} relationships from Neo4j")
+
+        except Exception as e:
+            logger.warning(f"Failed to export Neo4j data: {e}")
+
     async def _generate_summary(self, stats: CleanupStats):
         """Generate backup summary"""
         summary = {
@@ -432,6 +483,9 @@ class BackupManager:
             'total_chat_sessions': stats.chat_sessions_count,
             'total_chat_messages': stats.chat_messages_count,
             'total_memories': stats.memories_count,
+            'total_neo4j_nodes': stats.neo4j_nodes_count,
+            'total_neo4j_relationships': stats.neo4j_relationships_count,
+            'total_neo4j_promises': stats.neo4j_promises_count,
             'audio_exported': self.export_audio,
             'backup_size_bytes': 0  # Will be calculated after all files written
         }
@@ -450,13 +504,15 @@ class CleanupManager:
         redis_conn: Any,
         qdrant_client: Optional[AsyncQdrantClient],
         include_wav: bool,
-        delete_users: bool
+        delete_users: bool,
+        neo4j_driver: Any = None,
     ):
         self.mongo_db = mongo_db
         self.redis_conn = redis_conn
         self.qdrant_client = qdrant_client
         self.include_wav = include_wav
         self.delete_users = delete_users
+        self.neo4j_driver = neo4j_driver
 
     async def perform_cleanup(self, stats: CleanupStats) -> bool:
         """Perform all cleanup operations"""
@@ -469,6 +525,10 @@ class CleanupManager:
             # Qdrant cleanup
             if self.qdrant_client:
                 await self._cleanup_qdrant(stats)
+
+            # Neo4j cleanup
+            if self.neo4j_driver:
+                self._cleanup_neo4j(stats)
 
             # Redis cleanup
             self._cleanup_redis(stats)
@@ -560,6 +620,34 @@ class CleanupManager:
         except Exception as e:
             logger.warning(f"Failed to clean Qdrant: {e}")
 
+    def _cleanup_neo4j(self, stats: CleanupStats):
+        """Clean Neo4j knowledge graph"""
+        logger.info("Cleaning Neo4j knowledge graph...")
+
+        try:
+            with self.neo4j_driver.session() as session:
+                # Count before deletion
+                nodes = session.run("MATCH (n) RETURN count(n) AS count").single()
+                stats.neo4j_nodes_count = nodes["count"] if nodes else 0
+
+                rels = session.run("MATCH ()-[r]->() RETURN count(r) AS count").single()
+                stats.neo4j_relationships_count = rels["count"] if rels else 0
+
+                promises = session.run("MATCH (p:Promise) RETURN count(p) AS count").single()
+                stats.neo4j_promises_count = promises["count"] if promises else 0
+
+                # Delete all nodes and relationships
+                session.run("MATCH (n) DETACH DELETE n")
+
+            logger.info(
+                f"Deleted {stats.neo4j_nodes_count} nodes, "
+                f"{stats.neo4j_relationships_count} relationships, "
+                f"{stats.neo4j_promises_count} promises from Neo4j"
+            )
+
+        except Exception as e:
+            logger.warning(f"Failed to clean Neo4j: {e}")
+
     def _cleanup_redis(self, stats: CleanupStats):
         """Clean Redis job queues"""
         logger.info("Cleaning Redis job queues...")
@@ -648,7 +736,8 @@ class CleanupManager:
 async def get_current_stats(
     mongo_db: Any,
     redis_conn: Any,
-    qdrant_client: Optional[AsyncQdrantClient]
+    qdrant_client: Optional[AsyncQdrantClient],
+    neo4j_driver: Any = None,
 ) -> CleanupStats:
     """Get current statistics before cleanup"""
     stats = CleanupStats()
@@ -670,6 +759,21 @@ async def get_current_stats(
             stats.memories_count = collection_info.points_count
         except Exception:
             stats.memories_count = 0
+
+    # Neo4j count
+    if neo4j_driver:
+        try:
+            with neo4j_driver.session() as session:
+                nodes = session.run("MATCH (n) RETURN count(n) AS count").single()
+                stats.neo4j_nodes_count = nodes["count"] if nodes else 0
+
+                rels = session.run("MATCH ()-[r]->() RETURN count(r) AS count").single()
+                stats.neo4j_relationships_count = rels["count"] if rels else 0
+
+                promises = session.run("MATCH (p:Promise) RETURN count(p) AS count").single()
+                stats.neo4j_promises_count = promises["count"] if promises else 0
+        except Exception:
+            pass
 
     # Redis count
     try:
@@ -709,6 +813,9 @@ def print_stats(stats: CleanupStats, title: str = "Current State"):
     print(f"Chat Sessions:        {stats.chat_sessions_count:>10}")
     print(f"Chat Messages:        {stats.chat_messages_count:>10}")
     print(f"Memories (Qdrant):    {stats.memories_count:>10}")
+    print(f"Neo4j Nodes:          {stats.neo4j_nodes_count:>10}")
+    print(f"Neo4j Relationships:  {stats.neo4j_relationships_count:>10}")
+    print(f"Neo4j Promises:       {stats.neo4j_promises_count:>10}")
     print(f"Redis Jobs:           {stats.redis_jobs_count:>10}")
     print(f"Legacy WAV Files:     {stats.legacy_wav_count:>10}")
     print(f"Users:                {stats.users_count:>10}")
@@ -818,9 +925,24 @@ Examples:
     except Exception as e:
         logger.warning(f"Qdrant not available: {e}")
 
+    # Neo4j (optional - knowledge graph)
+    neo4j_driver = None
+    try:
+        neo4j_host = os.getenv("NEO4J_HOST")
+        if neo4j_host:
+            neo4j_user = os.getenv("NEO4J_USER", "neo4j")
+            neo4j_password = os.getenv("NEO4J_PASSWORD", "password")
+            neo4j_uri = f"bolt://{neo4j_host}:7687"
+            neo4j_driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+            neo4j_driver.verify_connectivity()
+            logger.info(f"Connected to Neo4j at {neo4j_uri}")
+    except Exception as e:
+        logger.warning(f"Neo4j not available: {e}")
+        neo4j_driver = None
+
     # Get current statistics
     logger.info("Gathering current statistics...")
-    stats = await get_current_stats(mongo_db, redis_conn, qdrant_client)
+    stats = await get_current_stats(mongo_db, redis_conn, qdrant_client, neo4j_driver)
 
     # Print current state
     print_stats(stats, "Current Backend State")
@@ -839,6 +961,10 @@ Examples:
         print(f"  - {stats.chat_sessions_count} chat sessions")
         print(f"  - {stats.chat_messages_count} chat messages")
         print(f"  - {stats.memories_count} memories")
+        if neo4j_driver:
+            print(f"  - {stats.neo4j_nodes_count} Neo4j nodes")
+            print(f"  - {stats.neo4j_relationships_count} Neo4j relationships")
+            print(f"  - {stats.neo4j_promises_count} Neo4j promises")
         print(f"  - {stats.redis_jobs_count} Redis jobs")
         if args.include_wav:
             print(f"  - {stats.legacy_wav_count} legacy WAV files")
@@ -858,6 +984,10 @@ Examples:
         print(f"  - {stats.chat_sessions_count} chat sessions")
         print(f"  - {stats.chat_messages_count} chat messages")
         print(f"  - {stats.memories_count} memories")
+        if neo4j_driver:
+            print(f"  - {stats.neo4j_nodes_count} Neo4j nodes")
+            print(f"  - {stats.neo4j_relationships_count} Neo4j relationships")
+            print(f"  - {stats.neo4j_promises_count} Neo4j promises")
         print(f"  - {stats.redis_jobs_count} Redis jobs")
         if args.include_wav:
             print(f"  - {stats.legacy_wav_count} legacy WAV files")
@@ -880,7 +1010,7 @@ Examples:
 
     # Create backup if requested
     if args.backup:
-        backup_manager = BackupManager(args.backup_dir, args.export_audio, mongo_db)
+        backup_manager = BackupManager(args.backup_dir, args.export_audio, mongo_db, neo4j_driver)
         success = await backup_manager.create_backup(qdrant_client, stats)
 
         if not success:
@@ -895,7 +1025,8 @@ Examples:
         redis_conn,
         qdrant_client,
         args.include_wav,
-        args.delete_users
+        args.delete_users,
+        neo4j_driver,
     )
 
     success = await cleanup_manager.perform_cleanup(stats)
@@ -906,13 +1037,17 @@ Examples:
 
     # Verify cleanup
     logger.info("Verifying cleanup...")
-    final_stats = await get_current_stats(mongo_db, redis_conn, qdrant_client)
+    final_stats = await get_current_stats(mongo_db, redis_conn, qdrant_client, neo4j_driver)
     print_stats(final_stats, "Backend State After Cleanup")
 
     logger.info("✓ Cleanup completed successfully!")
 
     if args.backup:
         logger.info(f"✓ Backup saved to: {stats.backup_path}")
+
+    # Close Neo4j driver
+    if neo4j_driver:
+        neo4j_driver.close()
 
 
 if __name__ == "__main__":

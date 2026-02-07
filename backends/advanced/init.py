@@ -566,6 +566,72 @@ class ChronicleSetup:
             })
             self.console.print("[blue][INFO][/blue] Knowledge Graph disabled")
 
+    def setup_langfuse(self):
+        """Configure LangFuse observability and prompt management"""
+        self.console.print()
+        self.console.print("[bold cyan]LangFuse Observability & Prompt Management[/bold cyan]")
+
+        # Check if keys were passed from wizard (langfuse init already ran)
+        langfuse_pub = getattr(self.args, 'langfuse_public_key', None)
+        langfuse_sec = getattr(self.args, 'langfuse_secret_key', None)
+
+        if langfuse_pub and langfuse_sec:
+            # Auto-configure from wizard — no prompts needed
+            self.config["LANGFUSE_HOST"] = "http://langfuse-web:3000"
+            self.config["LANGFUSE_PUBLIC_KEY"] = langfuse_pub
+            self.config["LANGFUSE_SECRET_KEY"] = langfuse_sec
+            self.config["LANGFUSE_BASE_URL"] = "http://langfuse-web:3000"
+            self.console.print("[green][SUCCESS][/green] LangFuse auto-configured from wizard")
+            self.console.print(f"[blue][INFO][/blue] Host: http://langfuse-web:3000")
+            self.console.print(f"[blue][INFO][/blue] Public key: {self.mask_api_key(langfuse_pub)}")
+            return
+
+        # Manual configuration (standalone init.py run)
+        self.console.print("Enable LLM tracing, observability, and prompt management with LangFuse")
+        self.console.print("Self-host: cd ../../extras/langfuse && docker compose up -d")
+        self.console.print()
+
+        try:
+            enable_langfuse = Confirm.ask("Enable LangFuse?", default=False)
+        except EOFError:
+            self.console.print("Using default: No")
+            enable_langfuse = False
+
+        if enable_langfuse:
+            host = self.prompt_with_existing_masked(
+                prompt_text="LangFuse host URL",
+                env_key="LANGFUSE_HOST",
+                placeholders=[""],
+                is_password=False,
+                default="http://langfuse-web:3000",
+            )
+            public_key = self.prompt_with_existing_masked(
+                prompt_text="LangFuse public key",
+                env_key="LANGFUSE_PUBLIC_KEY",
+                placeholders=[""],
+                is_password=False,
+                default="",
+            )
+            secret_key = self.prompt_with_existing_masked(
+                prompt_text="LangFuse secret key",
+                env_key="LANGFUSE_SECRET_KEY",
+                placeholders=[""],
+                is_password=True,
+                default="",
+            )
+
+            if host:
+                self.config["LANGFUSE_HOST"] = host
+                self.config["LANGFUSE_BASE_URL"] = host
+            if public_key:
+                self.config["LANGFUSE_PUBLIC_KEY"] = public_key
+            if secret_key:
+                self.config["LANGFUSE_SECRET_KEY"] = secret_key
+
+            self.console.print("[green][SUCCESS][/green] LangFuse configured")
+        else:
+            self.console.print("[blue][INFO][/blue] LangFuse disabled")
+
     def setup_network(self):
         """Configure network settings"""
         self.print_section("Network Configuration")
@@ -844,6 +910,7 @@ class ChronicleSetup:
             self.setup_optional_services()
             self.setup_obsidian()
             self.setup_knowledge_graph()
+            self.setup_langfuse()
             self.setup_network()
             self.setup_https()
 
@@ -899,6 +966,10 @@ def main():
                        help="Neo4j password (default: prompt user)")
     parser.add_argument("--ts-authkey",
                        help="Tailscale auth key for Docker integration (default: prompt user)")
+    parser.add_argument("--langfuse-public-key",
+                       help="LangFuse project public key (from langfuse init)")
+    parser.add_argument("--langfuse-secret-key",
+                       help="LangFuse project secret key (from langfuse init)")
 
     args = parser.parse_args()
     

@@ -61,6 +61,19 @@ class HomeAssistantPlugin(BasePlugin):
         self.wake_word = config.get("wake_word", "vivi")
         self.timeout = config.get("timeout", 30)
 
+    def register_prompts(self, registry) -> None:
+        """Register Home Assistant prompts with the prompt registry."""
+        from .command_parser import COMMAND_PARSER_SYSTEM_PROMPT
+
+        registry.register_default(
+            "plugin.homeassistant.command_parser",
+            template=COMMAND_PARSER_SYSTEM_PROMPT,
+            name="Home Assistant Command Parser",
+            description="Parses natural language into structured Home Assistant commands.",
+            category="plugin",
+            plugin_id="homeassistant",
+        )
+
     async def initialize(self):
         """
         Initialize the Home Assistant plugin.
@@ -321,10 +334,13 @@ class HomeAssistantPlugin(BasePlugin):
         """
         try:
             from advanced_omi_backend.llm_client import get_llm_client
+            from advanced_omi_backend.prompt_registry import get_prompt_registry
 
-            from .command_parser import COMMAND_PARSER_SYSTEM_PROMPT, ParsedCommand
+            from .command_parser import ParsedCommand
 
             llm_client = get_llm_client()
+            registry = get_prompt_registry()
+            system_prompt = await registry.get_prompt("plugin.homeassistant.command_parser")
 
             logger.debug(f"Parsing command with LLM: '{command}'")
 
@@ -332,7 +348,7 @@ class HomeAssistantPlugin(BasePlugin):
             response = llm_client.client.chat.completions.create(
                 model=llm_client.model,
                 messages=[
-                    {"role": "system", "content": COMMAND_PARSER_SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f'Command: "{command}"\n\nReturn JSON only.'},
                 ],
                 temperature=0.1,
