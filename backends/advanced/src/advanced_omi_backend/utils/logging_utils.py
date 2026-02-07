@@ -7,7 +7,6 @@ accidental exposure of credentials, tokens, and other secrets.
 import re
 from typing import Any, Dict, List, Optional, Set, Union
 
-
 # Common patterns for identifying secret field names
 SECRET_KEYWORDS = [
     'PASSWORD', 'PASSWD', 'PWD',

@@ -11,10 +11,10 @@ Components:
 - health_monitor: Health checks and self-healing
 """
 
-from .config import WorkerDefinition, OrchestratorConfig, WorkerType
-from .worker_registry import build_worker_definitions
-from .process_manager import ManagedWorker, ProcessManager, WorkerState
+from .config import OrchestratorConfig, WorkerDefinition, WorkerType
 from .health_monitor import HealthMonitor
+from .process_manager import ManagedWorker, ProcessManager, WorkerState
+from .worker_registry import build_worker_definitions
 
 __all__ = [
     "WorkerDefinition",

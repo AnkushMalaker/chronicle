@@ -17,9 +17,11 @@ import sys
 
 import redis.asyncio as redis
 
-from advanced_omi_backend.services.plugin_service import init_plugin_router
-from advanced_omi_backend.services.transcription.streaming_consumer import StreamingTranscriptionConsumer
 from advanced_omi_backend.client_manager import initialize_redis_for_client_manager
+from advanced_omi_backend.services.plugin_service import init_plugin_router
+from advanced_omi_backend.services.transcription.streaming_consumer import (
+    StreamingTranscriptionConsumer,
+)
 
 logging.basicConfig(
     level=logging.INFO,

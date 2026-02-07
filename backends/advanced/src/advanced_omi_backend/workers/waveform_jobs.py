@@ -9,7 +9,7 @@ and cached for subsequent requests.
 import logging
 import struct
 import time
-from typing import Dict, Any, List
+from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +43,8 @@ async def generate_waveform_data(
     """
     from advanced_omi_backend.models.waveform import WaveformData
     from advanced_omi_backend.utils.audio_chunk_utils import (
-        retrieve_audio_chunks,
         decode_opus_to_pcm,
+        retrieve_audio_chunks,
     )
 
     start_time = time.time()

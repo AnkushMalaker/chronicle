@@ -7,16 +7,13 @@ Interactive configuration for provider-based ASR services
 import argparse
 import os
 import platform
-import re
 import shutil
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from dotenv import set_key
-from rich import print as rprint
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
@@ -26,7 +23,8 @@ from rich.text import Text
 # Add repo root to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from config_manager import ConfigManager
-
+from setup_utils import detect_cuda_version as _detect_cuda_version
+from setup_utils import read_env_value
 
 # Provider and model definitions
 PROVIDERS = {
@@ -39,7 +37,7 @@ PROVIDERS = {
         "default_model": "microsoft/VibeVoice-ASR",
         "service": "vibevoice-asr",
         # Note: VibeVoice provides diarization but NOT word_timestamps
-        "capabilities": ["segments", "diarization", "timestamps"],
+        "capabilities": ["timestamps", "diarization", "speaker_identification", "long_form"],
     },
     "faster-whisper": {
         "name": "Faster-Whisper",
@@ -127,14 +125,8 @@ class ASRServicesSetup:
                 return default
 
     def read_existing_env_value(self, key: str) -> Optional[str]:
-        """Read a value from existing .env file"""
-        env_path = Path(".env")
-        if not env_path.exists():
-            return None
-
-        from dotenv import get_key
-        value = get_key(str(env_path), key)
-        return value if value else None
+        """Read a value from existing .env file (delegates to shared utility)"""
+        return read_env_value(".env", key)
 
     def backup_existing_env(self):
         """Backup existing .env file"""
@@ -146,32 +138,18 @@ class ASRServicesSetup:
             self.console.print(f"[blue][INFO][/blue] Backed up existing .env file to {backup_path}")
 
     def detect_cuda_version(self) -> str:
-        """Detect system CUDA version from nvidia-smi"""
-        try:
-            result = subprocess.run(
-                ["nvidia-smi"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                output = result.stdout
-                match = re.search(r'CUDA Version:\s*(\d+)\.(\d+)', output)
-                if match:
-                    major, minor = match.groups()
-                    cuda_ver = f"{major}.{minor}"
-                    if cuda_ver >= "12.8":
-                        return "cu128"
-                    elif cuda_ver >= "12.6":
-                        return "cu126"
-                    elif cuda_ver >= "12.1":
-                        return "cu121"
-        except (subprocess.SubprocessError, FileNotFoundError):
-            pass
-        return "cu126"
+        """Detect system CUDA version (delegates to shared utility)"""
+        return _detect_cuda_version(default="cu126")
 
     def select_provider(self) -> str:
         """Select ASR provider"""
+        # Check for command-line provider first (skip interactive UI)
+        if hasattr(self.args, 'provider') and self.args.provider:
+            provider = self.args.provider
+            provider_name = PROVIDERS.get(provider, {}).get('name', provider)
+            self.console.print(f"[green]✅[/green] ASR Provider: {provider_name} (configured via wizard)")
+            return provider
+
         self.print_section("Provider Selection")
 
         # Show provider comparison table
@@ -203,12 +181,6 @@ class ASRServicesSetup:
         self.console.print(table)
         self.console.print()
 
-        # Check for command-line provider
-        if hasattr(self.args, 'provider') and self.args.provider:
-            provider = self.args.provider
-            self.console.print(f"[green][SUCCESS][/green] Provider set from command line: {provider}")
-            return provider
-
         provider_choices = {
             "1": "vibevoice - Microsoft VibeVoice-ASR (Built-in diarization)",
             "2": "faster-whisper - Fast Whisper inference (Recommended for general use)",
@@ -222,8 +194,6 @@ class ASRServicesSetup:
 
     def select_model(self, provider: str) -> str:
         """Select model for the chosen provider"""
-        self.print_section(f"Model Selection ({PROVIDERS[provider]['name']})")
-
         provider_info = PROVIDERS[provider]
         models = provider_info["models"]
         default_model = provider_info["default_model"]
@@ -231,8 +201,10 @@ class ASRServicesSetup:
         # Check for command-line model
         if hasattr(self.args, 'model') and self.args.model:
             model = self.args.model
-            self.console.print(f"[green][SUCCESS][/green] Model set from command line: {model}")
+            self.console.print(f"[green]✅[/green] ASR Model: {model} (configured via wizard)")
             return model
+
+        self.print_section(f"Model Selection ({PROVIDERS[provider]['name']})")
 
         # Show available models
         self.console.print(f"[blue]Available models for {provider_info['name']}:[/blue]")

@@ -13,10 +13,10 @@ from advanced_omi_backend.model_registry import get_models_registry
 
 from .models import (
     EntityType,
-    ExtractionResult,
     ExtractedEntity,
     ExtractedPromise,
     ExtractedRelationship,
+    ExtractionResult,
     RelationshipType,
 )
 
@@ -83,7 +83,9 @@ Only return valid JSON, no additional text."""
 
 def _get_llm_client():
     """Get async OpenAI client from model registry."""
-    from advanced_omi_backend.services.memory.providers.llm_providers import _get_openai_client
+    from advanced_omi_backend.services.memory.providers.llm_providers import (
+        _get_openai_client,
+    )
 
     registry = get_models_registry()
     if not registry:

@@ -9,7 +9,7 @@ This module manages Redis-based audio streaming sessions, including:
 
 import logging
 import time
-from typing import Dict, List, Optional, Literal
+from typing import Dict, List, Literal, Optional
 
 from fastapi.responses import JSONResponse
 
@@ -197,10 +197,10 @@ async def increment_session_conversation_count(redis_client, session_id: str) ->
 async def get_streaming_status(request):
     """Get status of active streaming sessions and Redis Streams health."""
     from advanced_omi_backend.controllers.queue_controller import (
-        transcription_queue,
-        memory_queue,
+        all_jobs_complete_for_client,
         default_queue,
-        all_jobs_complete_for_client
+        memory_queue,
+        transcription_queue,
     )
 
     try:
@@ -497,6 +497,7 @@ async def get_streaming_status(request):
 async def cleanup_old_sessions(request, max_age_seconds: int = 3600):
     """Clean up old session tracking metadata and old audio streams from Redis."""
     import time
+
     from fastapi.responses import JSONResponse
 
     try:

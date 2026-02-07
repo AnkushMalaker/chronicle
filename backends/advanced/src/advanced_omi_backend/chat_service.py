@@ -26,8 +26,8 @@ from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.services.memory.base import MemoryEntry
 from advanced_omi_backend.services.obsidian_service import (
-    get_obsidian_service,
     ObsidianSearchError,
+    get_obsidian_service,
 )
 from advanced_omi_backend.users import User
 

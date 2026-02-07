@@ -1,6 +1,8 @@
-import os 
+import os
+
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+
 from advanced_omi_backend.app_config import get_app_config
 
 _drive_client_cache = None

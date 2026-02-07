@@ -8,9 +8,10 @@ from a conversation.
 
 from datetime import datetime
 from typing import Optional
-from pydantic import ConfigDict, Field, field_serializer
+
 from beanie import Document, Indexed
 from bson import Binary
+from pydantic import ConfigDict, Field, field_serializer
 
 
 class AudioChunkDocument(Document):

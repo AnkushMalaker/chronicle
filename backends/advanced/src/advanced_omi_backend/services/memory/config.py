@@ -2,11 +2,12 @@
 
 import logging
 import os
-import yaml
-from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, Optional, Union
+
+import yaml
 
 from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.utils.config_utils import resolve_value

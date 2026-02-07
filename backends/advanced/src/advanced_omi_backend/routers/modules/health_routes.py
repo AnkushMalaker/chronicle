@@ -8,19 +8,19 @@ import asyncio
 import logging
 import os
 import time
-from typing import Dict, Any
+from typing import Any, Dict
 
 import aiohttp
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 
-from advanced_omi_backend.controllers.queue_controller import redis_conn
 from advanced_omi_backend.client_manager import get_client_manager
+from advanced_omi_backend.controllers.queue_controller import redis_conn
 from advanced_omi_backend.llm_client import async_health_check
+from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.services.transcription import get_transcription_provider
-from advanced_omi_backend.model_registry import get_models_registry
 
 # Create router
 router = APIRouter(tags=["health"])

@@ -266,9 +266,9 @@ chronicle/
 
 1. **Clone Repository**
    ```bash
-   # Clone Friend-Lite repository with submodules
+   # Clone Chronicle repository with submodules
    git clone --recursive https://github.com/chronicle-ai/chronicle.git
-   cd friend-lite
+   cd chronicle
 
    # If you already cloned without --recursive, initialize submodules:
    # git submodule update --init --recursive
@@ -278,7 +278,7 @@ chronicle/
    ls -la backends/advanced/.env.template
    ```
 
-   > **Note:** The `--recursive` flag downloads the optional Mycelia submodule (an alternative memory backend with timeline visualization). Most deployments use the default Friend-Lite memory system and don't need Mycelia.
+   > **Note:** The `--recursive` flag downloads the optional Mycelia submodule (an alternative memory backend with timeline visualization). Most deployments use the default Chronicle memory system and don't need Mycelia.
 
 2. **Install Required Tools**
    

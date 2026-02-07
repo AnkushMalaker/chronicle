@@ -33,6 +33,14 @@ docker compose -f docker-compose-test.yml stop
 echo "🏗️  Rebuilding images..."
 docker compose -f docker-compose-test.yml up -d --build
 
+# Flush Redis to clear stale keys from previous test runs.
+# Redis uses appendonly persistence with a bind mount, so data survives
+# stop/rebuild cycles. Stale conversation:current:* keys can cause test
+# failures when the audio persistence job finds a Redis key pointing to
+# a MongoDB document that no longer exists.
+echo "🗑️  Flushing Redis for clean test state..."
+docker compose -f docker-compose-test.yml exec -T redis-test redis-cli FLUSHALL > /dev/null 2>&1 || true
+
 # Wait for services
 echo "⏳ Waiting for services to be ready..."
 sleep 5

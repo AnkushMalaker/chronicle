@@ -1,13 +1,13 @@
-# Friend-Lite Advanced Backend
+# Chronicle Advanced Backend
 
 A FastAPI backend with pluggable memory providers, real-time audio processing, and comprehensive conversation management.
 
-[QuickStart](https://github.com/AnkushMalaker/friend-lite/blob/main/backends/advanced-backend/Docs/quickstart.md) | [Memory Providers](./MEMORY_PROVIDERS.md) | [Configuration Guide](./Docs/memory-configuration-guide.md)
+[QuickStart](../../quickstart.md) | [Memory Providers](./MEMORY_PROVIDERS.md) | [Configuration Guide](./Docs/memories.md)
 
 ## Key Features
 
 ### Memory System
-- **Pluggable Memory Providers**: Choose between Friend-Lite native or OpenMemory MCP
+- **Pluggable Memory Providers**: Choose between Chronicle native or OpenMemory MCP
 - **Enhanced Memory Extraction**: Individual facts instead of generic transcripts
 - **Smart Memory Updates**: LLM-driven ADD/UPDATE/DELETE actions
 - **Cross-client Compatibility**: Use OpenMemory with Claude Desktop, Cursor, etc.
@@ -33,7 +33,7 @@ Modern React-based web dashboard located in `./webui/` with:
 - **Authentication**: Admin email/password setup with secure keys
 - **Transcription Provider**: Choose between Deepgram or Offline (Parakeet)
 - **LLM Provider**: Choose between OpenAI (recommended) or Ollama for memory extraction
-- **Memory Provider**: Choose between Friend-Lite Native or OpenMemory MCP
+- **Memory Provider**: Choose between Chronicle Native or OpenMemory MCP
 - **HTTPS Configuration**: Optional SSL setup for microphone access (uses Caddy)
 - **Optional Services**: Speaker Recognition, network configuration
 - **API Keys**: Prompts for all required keys with helpful links
@@ -58,7 +58,7 @@ docker compose --profile https up --build -d
 
 #### 3. Access URLs
 
-**Friend-Lite Advanced Backend (Primary - ports 80/443):**
+**Chronicle Advanced Backend (Primary - ports 80/443):**
 - **HTTPS Dashboard**: https://localhost/ or https://your-ip/
 - **HTTP**: http://localhost/ (redirects to HTTPS)
 - **Live Recording**: Available at `/live-record` page

@@ -13,8 +13,8 @@ import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, Optional, Callable
 from functools import wraps
+from typing import Any, Callable, Dict, Optional
 
 import redis.asyncio as redis_async
 
@@ -32,13 +32,15 @@ async def _ensure_beanie_initialized():
             return
         try:
             import os
-            from motor.motor_asyncio import AsyncIOMotorClient
+
             from beanie import init_beanie
-            from advanced_omi_backend.models.conversation import Conversation
+            from motor.motor_asyncio import AsyncIOMotorClient
+            from pymongo.errors import ConfigurationError
+
             from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
+            from advanced_omi_backend.models.conversation import Conversation
             from advanced_omi_backend.models.user import User
             from advanced_omi_backend.models.waveform import WaveformData
-            from pymongo.errors import ConfigurationError
 
             # Get MongoDB URI from environment
             mongodb_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
@@ -254,7 +256,9 @@ def async_job(redis: bool = True, beanie: bool = True, timeout: int = 300, resul
 
                         # Create Redis client if requested
                         if redis:
-                            from advanced_omi_backend.controllers.queue_controller import REDIS_URL
+                            from advanced_omi_backend.controllers.queue_controller import (
+                                REDIS_URL,
+                            )
                             redis_client = redis_async.from_url(REDIS_URL)
                             kwargs['redis_client'] = redis_client
                             logger.debug(f"Redis client created")

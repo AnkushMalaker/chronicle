@@ -4,7 +4,7 @@
 
 - **👉 [Start Here: Quick Start Guide](../quickstart.md)** - Main setup path for new users
 - **📚 [Full Documentation](../CLAUDE.md)** - Comprehensive reference  
-- **🏗️ [Architecture Details](features.md)** - Technical deep dive
+- **🏗️ [Architecture Details](overview.md)** - Technical deep dive
 
 ---
 
@@ -118,20 +118,36 @@ Note (Linux): If `host.docker.internal` is unavailable, add `extra_hosts: - "hos
 ✅ **Unified Control** - Single command to start/stop all services  
 ✅ **Selective Starting** - Choose which services to run based on your current needs
 
-## Service URLs
+## Ports & Access
 
-### Default Service Endpoints
-- **Backend API**: http://localhost:8000
-- **Backend WebUI**: http://localhost:5173  
-- **Speaker Recognition**: http://localhost:8085
-- **Speaker Recognition WebUI**: http://localhost:5173
-- **Parakeet ASR**: http://localhost:8767
-- **OpenMemory MCP**: http://localhost:8765
+### HTTP Mode (Default - No SSL Required)
+
+| Service | API Port | Web UI Port | Access URL |
+|---------|----------|-------------|------------|
+| **Advanced Backend** | 8000 | 5173 | http://localhost:8000 (API), http://localhost:5173 (Dashboard) |
+| **Speaker Recognition** | 8085 | 5175* | http://localhost:8085 (API), http://localhost:5175 (WebUI) |
+| **Parakeet ASR** | 8767 | - | http://localhost:8767 (API) |
+| **OpenMemory MCP** | 8765 | 8765 | http://localhost:8765 (API + WebUI) |
+
+*Speaker Recognition WebUI port is configurable via REACT_UI_PORT
+
+Note: Browsers require HTTPS for microphone access over network.
+
+### HTTPS Mode (For Microphone Access)
+
+| Service | HTTP Port | HTTPS Port | Access URL |
+|---------|-----------|------------|------------|
+| **Advanced Backend** | 80->443 | 443 | https://localhost/ (Main), https://localhost/api/ (API) |
+| **Speaker Recognition** | 8081->8444 | 8444 | https://localhost:8444/ (Main), https://localhost:8444/api/ (API) |
+
+nginx services start automatically with the standard docker compose command.
+
+See [ssl-certificates.md](ssl-certificates.md) for HTTPS/SSL setup details.
 
 ### Container-to-Container Communication
 Services use `host.docker.internal` for inter-container communication:
 - `http://127.0.0.1:8085` - Speaker Recognition
-- `http://host.docker.internal:8767` - Parakeet ASR  
+- `http://host.docker.internal:8767` - Parakeet ASR
 - `http://host.docker.internal:8765` - OpenMemory MCP
 
 ## Service Management

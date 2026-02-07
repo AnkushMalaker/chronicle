@@ -148,7 +148,7 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
         if "diarize" in query:
             query["diarize"] = "true" if diarize else "false"
 
-        timeout = op.get("timeout", 120)
+        timeout = op.get("timeout", 300)
         async with httpx.AsyncClient(timeout=timeout) as client:
             if method == "POST":
                 if use_multipart:

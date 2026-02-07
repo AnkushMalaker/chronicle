@@ -9,20 +9,20 @@ This module provides:
 """
 
 import asyncio
-import os
 import logging
+import os
 import uuid
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 import redis
 from rq import Queue, Worker
 from rq.job import Job, JobStatus
-from rq.registry import ScheduledJobRegistry, DeferredJobRegistry
+from rq.registry import DeferredJobRegistry, ScheduledJobRegistry
 
-from advanced_omi_backend.models.job import JobPriority
-from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.config_loader import get_service_config
+from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.job import JobPriority
 
 logger = logging.getLogger(__name__)
 
@@ -346,8 +346,10 @@ def start_streaming_jobs(
         - user_email is fetched from the database when needed.
         - always_persist setting is read from global config by the audio persistence job.
     """
-    from advanced_omi_backend.workers.transcription_jobs import stream_speech_detection_job
     from advanced_omi_backend.workers.audio_jobs import audio_streaming_persistence_job
+    from advanced_omi_backend.workers.transcription_jobs import (
+        stream_speech_detection_job,
+    )
 
     # Enqueue speech detection job
     speech_job = transcription_queue.enqueue(
@@ -444,9 +446,12 @@ def start_post_conversation_jobs(
     Returns:
         Dict with job IDs for speaker_recognition, memory, title_summary, event_dispatch
     """
-    from advanced_omi_backend.workers.speaker_jobs import recognise_speakers_job
+    from advanced_omi_backend.workers.conversation_jobs import (
+        dispatch_conversation_complete_event_job,
+        generate_title_summary_job,
+    )
     from advanced_omi_backend.workers.memory_jobs import process_memory_job
-    from advanced_omi_backend.workers.conversation_jobs import generate_title_summary_job, dispatch_conversation_complete_event_job
+    from advanced_omi_backend.workers.speaker_jobs import recognise_speakers_job
 
     version_id = transcript_version_id or str(uuid.uuid4())
 
@@ -643,6 +648,7 @@ def get_queue_health() -> Dict[str, Any]:
 async def cleanup_stuck_stream_workers(request):
     """Clean up stuck Redis Stream consumers and pending messages from all active streams."""
     import time
+
     from fastapi.responses import JSONResponse
 
     try:

@@ -15,30 +15,31 @@ Features:
 - Confirmation prompts with detailed warnings
 """
 
-import asyncio
 import argparse
+import asyncio
 import json
 import logging
 import os
 import shutil
+import struct
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
-import struct
+from typing import Any, Dict, List, Optional, Tuple
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 try:
     import redis
-    from rq import Queue
+    from beanie import init_beanie
     from motor.motor_asyncio import AsyncIOMotorClient
     from qdrant_client import AsyncQdrantClient
     from qdrant_client.models import Distance, VectorParams
-    from beanie import init_beanie
-    from advanced_omi_backend.models.conversation import Conversation
+    from rq import Queue
+
     from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
+    from advanced_omi_backend.models.conversation import Conversation
     from advanced_omi_backend.models.user import User
     from advanced_omi_backend.models.waveform import WaveformData
     from advanced_omi_backend.services.memory.config import build_memory_config_from_env

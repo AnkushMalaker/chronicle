@@ -7,7 +7,7 @@ Defines data structures for worker definitions and orchestrator configuration.
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Callable, List
+from typing import Callable, List, Optional
 
 
 class WorkerType(Enum):
