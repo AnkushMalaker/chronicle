@@ -42,7 +42,7 @@ SERVICES = {
         'asr-services': {
             'path': 'extras/asr-services',
             'cmd': ['uv', 'run', '--with-requirements', '../../setup-requirements.txt', 'python', 'init.py'],
-            'description': 'Offline speech-to-text (Parakeet)'
+            'description': 'Offline speech-to-text'
         },
         'openmemory-mcp': {
             'path': 'extras/openmemory-mcp',
@@ -131,7 +131,8 @@ def select_services(transcription_provider=None):
     for service_name, service_config in SERVICES['extras'].items():
         # Skip services that will be auto-added based on earlier choices
         if service_name in auto_added:
-            console.print(f"  ✅ {service_config['description']} [dim](auto-selected for {transcription_provider})[/dim]")
+            provider_label = {"vibevoice": "VibeVoice", "parakeet": "Parakeet"}.get(transcription_provider, transcription_provider)
+            console.print(f"  ✅ {service_config['description']} ({provider_label}) [dim](auto-selected)[/dim]")
             continue
 
         # Check if service exists
