@@ -48,6 +48,12 @@ SERVICES = {
             'path': 'extras/openmemory-mcp',
             'cmd': ['./setup.sh'],
             'description': 'OpenMemory MCP server'
+        },
+        'langfuse': {
+            'path': 'extras/langfuse',
+            'cmd': ['uv', 'run', '--with-requirements', '../../setup-requirements.txt', 'python', 'init.py'],
+            'description': 'LLM observability and prompt management (local)',
+            'auto_enable': True
         }
     }
 }
@@ -97,7 +103,7 @@ def check_service_exists(service_name, service_config):
         return False, f"Directory {service_path} does not exist"
 
     # For services with Python init scripts, check if init.py exists
-    if service_name in ['advanced', 'speaker-recognition', 'asr-services']:
+    if service_name in ['advanced', 'speaker-recognition', 'asr-services', 'langfuse']:
         script_path = service_path / 'init.py'
         if not script_path.exists():
             return False, f"Script {script_path} does not exist"
@@ -133,6 +139,16 @@ def select_services(transcription_provider=None):
         if service_name in auto_added:
             provider_label = {"vibevoice": "VibeVoice", "parakeet": "Parakeet"}.get(transcription_provider, transcription_provider)
             console.print(f"  ✅ {service_config['description']} ({provider_label}) [dim](auto-selected)[/dim]")
+            continue
+
+        # Auto-enable services marked as such (e.g., langfuse)
+        if service_config.get('auto_enable'):
+            exists, msg = check_service_exists(service_name, service_config)
+            if exists:
+                console.print(f"  ✅ {service_config['description']} [dim](auto-selected)[/dim]")
+                selected.append(service_name)
+            else:
+                console.print(f"  ⏸️  {service_config['description']} - [dim]{msg}[/dim]")
             continue
 
         # Check if service exists
@@ -174,7 +190,8 @@ def cleanup_unselected_services(selected_services):
 
 def run_service_setup(service_name, selected_services, https_enabled=False, server_ip=None,
                      obsidian_enabled=False, neo4j_password=None, hf_token=None,
-                     transcription_provider='deepgram'):
+                     transcription_provider='deepgram', admin_email=None, admin_password=None,
+                     langfuse_public_key=None, langfuse_secret_key=None):
     """Execute individual service setup script"""
     if service_name == 'advanced':
         service = SERVICES['backend'][service_name]
@@ -197,6 +214,11 @@ def run_service_setup(service_name, selected_services, https_enabled=False, serv
         # Add Obsidian configuration
         if obsidian_enabled and neo4j_password:
             cmd.extend(['--enable-obsidian', '--neo4j-password', neo4j_password])
+
+        # Pass LangFuse keys from langfuse init (if langfuse was set up first)
+        if langfuse_public_key and langfuse_secret_key:
+            cmd.extend(['--langfuse-public-key', langfuse_public_key])
+            cmd.extend(['--langfuse-secret-key', langfuse_secret_key])
 
     else:
         service = SERVICES['extras'][service_name]
@@ -247,6 +269,13 @@ def run_service_setup(service_name, selected_services, https_enabled=False, serv
             if cuda_version and cuda_version in ['cu121', 'cu126', 'cu128']:
                 cmd.extend(['--pytorch-cuda-version', cuda_version])
                 console.print(f"[blue][INFO][/blue] Found existing PYTORCH_CUDA_VERSION ({cuda_version}) from speaker-recognition, reusing")
+
+        # For langfuse, pass admin credentials from backend
+        if service_name == 'langfuse':
+            if admin_email:
+                cmd.extend(['--admin-email', admin_email])
+            if admin_password:
+                cmd.extend(['--admin-password', admin_password])
 
         # For openmemory-mcp, try to pass OpenAI API key from backend if available
         if service_name == 'openmemory-mcp':
@@ -632,17 +661,44 @@ def main():
 
     # Pure Delegation - Run Each Service Setup
     console.print(f"\n📋 [bold]Setting up {len(selected_services)} services...[/bold]")
-    
+
     # Clean up .env files from unselected services (creates backups)
     cleanup_unselected_services(selected_services)
-    
+
     success_count = 0
     failed_services = []
+    langfuse_public_key = None
+    langfuse_secret_key = None
 
+    # Determine setup order: langfuse first (to get API keys), then backend (with langfuse keys), then others
+    setup_order = []
+    if 'langfuse' in selected_services:
+        setup_order.append('langfuse')
+    if 'advanced' in selected_services:
+        setup_order.append('advanced')
     for service in selected_services:
+        if service not in setup_order:
+            setup_order.append(service)
+
+    # Read admin credentials from existing backend .env (for langfuse init reuse)
+    backend_env_path = 'backends/advanced/.env'
+    wizard_admin_email = read_env_value(backend_env_path, 'ADMIN_EMAIL')
+    wizard_admin_password = read_env_value(backend_env_path, 'ADMIN_PASSWORD')
+
+    for service in setup_order:
         if run_service_setup(service, selected_services, https_enabled, server_ip,
-                            obsidian_enabled, neo4j_password, hf_token, transcription_provider):
+                            obsidian_enabled, neo4j_password, hf_token, transcription_provider,
+                            admin_email=wizard_admin_email, admin_password=wizard_admin_password,
+                            langfuse_public_key=langfuse_public_key, langfuse_secret_key=langfuse_secret_key):
             success_count += 1
+
+            # After langfuse setup, read generated API keys for backend
+            if service == 'langfuse':
+                langfuse_env_path = 'extras/langfuse/.env'
+                langfuse_public_key = read_env_value(langfuse_env_path, 'LANGFUSE_INIT_PROJECT_PUBLIC_KEY')
+                langfuse_secret_key = read_env_value(langfuse_env_path, 'LANGFUSE_INIT_PROJECT_SECRET_KEY')
+                if langfuse_public_key and langfuse_secret_key:
+                    console.print("[blue][INFO][/blue] LangFuse API keys will be passed to backend configuration")
         else:
             failed_services.append(service)
 
@@ -708,7 +764,15 @@ def main():
         configured_services.append("asr-services")
     if 'openmemory-mcp' in selected_services and 'openmemory-mcp' not in failed_services:
         configured_services.append("openmemory-mcp")
-        
+    if 'langfuse' in selected_services and 'langfuse' not in failed_services:
+        configured_services.append("langfuse")
+
+    # LangFuse prompt management info
+    if 'langfuse' in selected_services and 'langfuse' not in failed_services:
+        console.print("")
+        console.print("[bold cyan]Prompt Management:[/bold cyan] Once services are running, edit AI prompts at:")
+        console.print("   [link=http://localhost:3002/project/chronicle/prompts]http://localhost:3002/project/chronicle/prompts[/link]")
+
     if configured_services:
         service_list = " ".join(configured_services)
         console.print(f"   [cyan]uv run --with-requirements setup-requirements.txt python services.py start {service_list}[/cyan]")

@@ -50,8 +50,14 @@ SERVICES = {
     'openmemory-mcp': {
         'path': 'extras/openmemory-mcp',
         'compose_file': 'docker-compose.yml',
-        'description': 'OpenMemory MCP Server', 
+        'description': 'OpenMemory MCP Server',
         'ports': ['8765']
+    },
+    'langfuse': {
+        'path': 'extras/langfuse',
+        'compose_file': 'docker-compose.yml',
+        'description': 'LangFuse Observability & Prompt Management',
+        'ports': ['3002']
     }
 }
 
@@ -385,6 +391,12 @@ def start_services(services, build=False):
             console.print(f"[red]❌ Failed to start {service_name}[/red]")
     
     console.print(f"\n[green]🎉 {success_count}/{len(services)} services started successfully[/green]")
+
+    # Show LangFuse prompt management tip if langfuse was started
+    if 'langfuse' in services and check_service_configured('langfuse'):
+        console.print("")
+        console.print("[bold cyan]Prompt Management:[/bold cyan] Edit AI prompts in the LangFuse UI")
+        console.print("   http://localhost:3002/project/chronicle/prompts")
 
 def stop_services(services):
     """Stop specified services"""
