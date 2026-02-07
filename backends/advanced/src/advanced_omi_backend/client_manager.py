@@ -9,6 +9,7 @@ this information without tight coupling to the main.py module.
 import logging
 import uuid
 from typing import TYPE_CHECKING, Dict, Optional
+
 import redis.asyncio as redis
 
 if TYPE_CHECKING:
@@ -38,17 +39,6 @@ class ClientManager:
         self._active_clients: Dict[str, "ClientState"] = {}
         self._initialized = True  # Self-initializing, no external dict needed
         logger.info("ClientManager initialized as single source of truth")
-
-    def initialize(self, active_clients_dict: Optional[Dict[str, "ClientState"]] = None):
-        """
-        Legacy initialization method for backward compatibility.
-
-        New design: ClientManager is self-initializing and doesn't need external dict.
-        This method is kept for compatibility but does nothing.
-        """
-        if active_clients_dict is not None:
-            logger.warning("ClientManager no longer uses external dictionaries - ignoring active_clients_dict")
-        logger.info("ClientManager initialization (legacy compatibility mode)")
 
     def is_initialized(self) -> bool:
         """Check if the client manager has been initialized."""
@@ -312,40 +302,6 @@ def get_client_manager() -> ClientManager:
     if _client_manager is None:
         _client_manager = ClientManager()
     return _client_manager
-
-
-def init_client_manager(active_clients_dict: Dict[str, "ClientState"]):
-    """
-    Initialize the global client manager with active_clients reference.
-
-    This should be called from main.py during startup.
-
-    Args:
-        active_clients_dict: Reference to the global active_clients dictionary
-    """
-    client_manager = get_client_manager()
-    client_manager.initialize(active_clients_dict)
-    return client_manager
-
-
-# Client-user relationship initialization and utility functions
-def init_client_user_mapping(
-    active_mapping_dict: Dict[str, str], all_mapping_dict: Optional[Dict[str, str]] = None
-):
-    """
-    Initialize the client-user mapping with references to the global mappings.
-
-    This should be called from main.py during startup.
-
-    Args:
-        active_mapping_dict: Reference to the active client_to_user_mapping dictionary
-        all_mapping_dict: Reference to the all_client_user_mappings dictionary (optional)
-    """
-    global _client_to_user_mapping, _all_client_user_mappings
-    _client_to_user_mapping = active_mapping_dict
-    if all_mapping_dict is not None:
-        _all_client_user_mappings = all_mapping_dict
-    logger.info("Client-user mapping initialized")
 
 
 def register_client_user_mapping(client_id: str, user_id: str):

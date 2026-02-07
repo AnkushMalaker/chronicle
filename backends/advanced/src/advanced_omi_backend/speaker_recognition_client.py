@@ -40,7 +40,9 @@ class SpeakerRecognitionClient:
         if os.getenv("USE_MOCK_SPEAKER_CLIENT") == "true":
             try:
                 # Import mock client from testing module
-                from advanced_omi_backend.testing.mock_speaker_client import MockSpeakerRecognitionClient
+                from advanced_omi_backend.testing.mock_speaker_client import (
+                    MockSpeakerRecognitionClient,
+                )
 
                 self._mock_client = MockSpeakerRecognitionClient()
                 self.enabled = True
@@ -331,7 +333,9 @@ class SpeakerRecognitionClient:
             return {"segments": []}
 
         from advanced_omi_backend.config import get_diarization_settings
-        from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segment
+        from advanced_omi_backend.utils.audio_chunk_utils import (
+            reconstruct_audio_segment,
+        )
 
         config = get_diarization_settings()
         similarity_threshold = config.get("similarity_threshold", 0.15)
@@ -852,7 +856,7 @@ class SpeakerRecognitionClient:
 
         try:
             import uuid
-            
+
             # Generate speaker ID: user_{user_id}_speaker_{random_hex}
             speaker_id = f"user_{user_id}_speaker_{uuid.uuid4().hex[:12]}"
             
@@ -963,7 +967,9 @@ class SpeakerRecognitionClient:
             - enrolled_present: True if enrolled speaker detected, False otherwise
             - speaker_result: Full speaker recognition result dict with segments
         """
-        from advanced_omi_backend.utils.audio_extraction import extract_audio_for_results
+        from advanced_omi_backend.utils.audio_extraction import (
+            extract_audio_for_results,
+        )
 
         logger.info(f"🎤 [SPEAKER CHECK] Starting speaker check for session {session_id}")
         logger.info(f"🎤 [SPEAKER CHECK] Client: {client_id}, User: {user_id}")

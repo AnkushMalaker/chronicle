@@ -7,7 +7,7 @@ Provides admin-only endpoints for system management and cleanup operations.
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from advanced_omi_backend.auth import current_active_user
@@ -50,8 +50,10 @@ async def trigger_cleanup(
 ):
     """Manually trigger cleanup of soft-deleted conversations (admin only)."""
     try:
-        from advanced_omi_backend.workers.cleanup_jobs import purge_old_deleted_conversations
         from advanced_omi_backend.controllers.queue_controller import get_queue
+        from advanced_omi_backend.workers.cleanup_jobs import (
+            purge_old_deleted_conversations,
+        )
 
         # Enqueue cleanup job
         queue = get_queue("default")
@@ -90,9 +92,10 @@ async def preview_cleanup(
 ):
     """Preview what would be deleted by cleanup (admin only)."""
     try:
+        from datetime import datetime, timedelta
+
         from advanced_omi_backend.config import get_cleanup_settings
         from advanced_omi_backend.models.conversation import Conversation
-        from datetime import datetime, timedelta
 
         # Use provided retention or default from config
         if retention_days is None:

@@ -11,16 +11,29 @@ This package provides modular RQ job functions organized by domain:
 Queue configuration and utilities are in controllers/queue_controller.py
 """
 
-# Import from transcription_jobs
-from .transcription_jobs import (
-    transcribe_full_audio_job,
-    stream_speech_detection_job,
+# Import from queue_controller
+from advanced_omi_backend.controllers.queue_controller import (
+    DEFAULT_QUEUE,
+    JOB_RESULT_TTL,
+    MEMORY_QUEUE,
+    REDIS_URL,
+    TRANSCRIPTION_QUEUE,
+    default_queue,
+    get_job_stats,
+    get_jobs,
+    get_queue,
+    get_queue_health,
+    memory_queue,
+    redis_conn,
+    transcription_queue,
 )
 
-# Import from speaker_jobs
-from .speaker_jobs import (
-    check_enrolled_speakers_job,
-    recognise_speakers_job,
+# Import from job models
+from advanced_omi_backend.models.job import _ensure_beanie_initialized
+
+# Import from audio_jobs
+from .audio_jobs import (
+    audio_streaming_persistence_job,
 )
 
 # Import from conversation_jobs
@@ -30,34 +43,21 @@ from .conversation_jobs import (
 
 # Import from memory_jobs
 from .memory_jobs import (
-    process_memory_job,
     enqueue_memory_processing,
+    process_memory_job,
 )
 
-# Import from audio_jobs
-from .audio_jobs import (
-    audio_streaming_persistence_job,
+# Import from speaker_jobs
+from .speaker_jobs import (
+    check_enrolled_speakers_job,
+    recognise_speakers_job,
 )
 
-# Import from queue_controller
-from advanced_omi_backend.controllers.queue_controller import (
-    get_queue,
-    get_job_stats,
-    get_jobs,
-    get_queue_health,
-    transcription_queue,
-    memory_queue,
-    default_queue,
-    redis_conn,
-    REDIS_URL,
-    JOB_RESULT_TTL,
-    TRANSCRIPTION_QUEUE,
-    MEMORY_QUEUE,
-    DEFAULT_QUEUE,
+# Import from transcription_jobs
+from .transcription_jobs import (
+    stream_speech_detection_job,
+    transcribe_full_audio_job,
 )
-
-# Import from job models
-from advanced_omi_backend.models.job import _ensure_beanie_initialized
 
 __all__ = [
     # Transcription jobs

@@ -465,6 +465,7 @@ def get_audio_stream_producer() -> AudioStreamProducer:
 
     if _producer_instance is None:
         import os
+
         import redis.asyncio as redis_async
 
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")

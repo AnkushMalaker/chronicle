@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 def main():
     """Start RQ worker with proper logging configuration."""
-    from rq import Worker
     from redis import Redis
+    from rq import Worker
 
     # Get Redis URL from environment
     redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')

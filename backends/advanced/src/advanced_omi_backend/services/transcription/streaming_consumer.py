@@ -19,9 +19,9 @@ from typing import Dict, Optional
 import redis.asyncio as redis
 from redis import exceptions as redis_exceptions
 
+from advanced_omi_backend.client_manager import get_client_owner_async
 from advanced_omi_backend.plugins.router import PluginRouter
 from advanced_omi_backend.services.transcription import get_transcription_provider
-from advanced_omi_backend.client_manager import get_client_owner_async
 
 logger = logging.getLogger(__name__)
 

@@ -15,18 +15,24 @@ import uuid
 from functools import partial
 from typing import Optional
 
-from fastapi import WebSocket, WebSocketDisconnect, Query
-from starlette.websockets import WebSocketState
-from friend_lite.decoder import OmiOpusDecoder
 import redis.asyncio as redis
+from fastapi import Query, WebSocket, WebSocketDisconnect
+from friend_lite.decoder import OmiOpusDecoder
+from starlette.websockets import WebSocketState
 
 from advanced_omi_backend.auth import websocket_auth
 from advanced_omi_backend.client_manager import generate_client_id, get_client_manager
-from advanced_omi_backend.constants import OMI_CHANNELS, OMI_SAMPLE_RATE, OMI_SAMPLE_WIDTH
+from advanced_omi_backend.constants import (
+    OMI_CHANNELS,
+    OMI_SAMPLE_RATE,
+    OMI_SAMPLE_WIDTH,
+)
 from advanced_omi_backend.controllers.session_controller import mark_session_complete
-from advanced_omi_backend.utils.audio_utils import process_audio_chunk
 from advanced_omi_backend.services.audio_stream import AudioStreamProducer
-from advanced_omi_backend.services.audio_stream.producer import get_audio_stream_producer
+from advanced_omi_backend.services.audio_stream.producer import (
+    get_audio_stream_producer,
+)
+from advanced_omi_backend.utils.audio_utils import process_audio_chunk
 
 # Thread pool executors for audio decoding
 _DEC_IO_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
@@ -227,7 +233,9 @@ async def cleanup_client_state(client_id: str):
         async_redis = redis.from_url(redis_url, decode_responses=False)
 
         # Get audio stream producer for finalization
-        from advanced_omi_backend.services.audio_stream.producer import get_audio_stream_producer
+        from advanced_omi_backend.services.audio_stream.producer import (
+            get_audio_stream_producer,
+        )
         audio_stream_producer = get_audio_stream_producer()
 
         # Find all session keys for this client and mark them complete
@@ -442,8 +450,11 @@ async def _initialize_streaming_session(
     )
 
     # Store audio format in Redis session (not in ClientState)
-    from advanced_omi_backend.services.audio_stream.producer import get_audio_stream_producer
     import json
+
+    from advanced_omi_backend.services.audio_stream.producer import (
+        get_audio_stream_producer,
+    )
     session_key = f"audio:session:{client_state.stream_session_id}"
     redis_client = audio_stream_producer.redis_client
     await redis_client.hset(session_key, "audio_format", json.dumps(audio_format))
@@ -995,10 +1006,12 @@ async def _process_rolling_batch(
 
         # Enqueue transcription job
         from advanced_omi_backend.controllers.queue_controller import (
+            JOB_RESULT_TTL,
             transcription_queue,
-            JOB_RESULT_TTL
         )
-        from advanced_omi_backend.workers.transcription_jobs import transcribe_full_audio_job
+        from advanced_omi_backend.workers.transcription_jobs import (
+            transcribe_full_audio_job,
+        )
 
         version_id = str(uuid.uuid4())
         transcribe_job_id = f"transcribe_rolling_{conversation_id[:12]}_{batch_number}"
@@ -1108,11 +1121,13 @@ async def _process_batch_audio_complete(
 
         # Enqueue batch transcription job first (file uploads need transcription)
         from advanced_omi_backend.controllers.queue_controller import (
+            JOB_RESULT_TTL,
             start_post_conversation_jobs,
             transcription_queue,
-            JOB_RESULT_TTL
         )
-        from advanced_omi_backend.workers.transcription_jobs import transcribe_full_audio_job
+        from advanced_omi_backend.workers.transcription_jobs import (
+            transcribe_full_audio_job,
+        )
 
         version_id = str(uuid.uuid4())
         transcribe_job_id = f"transcribe_{conversation_id[:12]}"

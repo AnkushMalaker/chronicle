@@ -4,11 +4,12 @@ This module defines the data structures used throughout the knowledge graph
 service for storing and retrieving entities, relationships, and promises.
 """
 
+import uuid
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field
-import uuid
 
 
 class EntityType(str, Enum):

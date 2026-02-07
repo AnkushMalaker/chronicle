@@ -6,6 +6,7 @@ tests to run without Deepgram or other external transcription APIs.
 """
 
 from typing import Optional
+
 from .base import BatchTranscriptionProvider
 
 

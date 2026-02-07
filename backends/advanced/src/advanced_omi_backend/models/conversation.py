@@ -5,13 +5,13 @@ This module contains Beanie Document and Pydantic models for conversations,
 transcript versions, and memory versions.
 """
 
-from datetime import datetime
-from typing import Dict, List, Optional, Any, Union
-from pydantic import BaseModel, Field, model_validator, computed_field, field_validator
-from enum import Enum
 import uuid
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional, Union
 
 from beanie import Document, Indexed
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 from pymongo import IndexModel
 
 
@@ -56,6 +56,7 @@ class Conversation(Document):
         end: float = Field(description="End time in seconds")
         text: str = Field(description="Transcript text for this segment")
         speaker: str = Field(description="Speaker identifier")
+        identified_as: Optional[str] = Field(None, description="Speaker name from speaker recognition (None if not identified)")
         confidence: Optional[float] = Field(None, description="Confidence score (0-1)")
         words: List["Conversation.Word"] = Field(default_factory=list, description="Word-level timestamps for this segment")
 

@@ -234,6 +234,7 @@ async def write_audio_file(
         AudioValidationError: If validation fails (when validate=True)
     """
     from easy_audio_interfaces.filesystem.filesystem_interfaces import LocalFileSink
+
     from advanced_omi_backend.config import CHUNK_DIR
 
     # Validate and prepare audio if needed
@@ -374,8 +375,8 @@ def pcm_to_wav_bytes(
     Returns:
         WAV file data as bytes
     """
-    import wave
     import io
+    import wave
 
     logger.debug(
         f"Converting PCM to WAV in memory: {len(pcm_data)} bytes "

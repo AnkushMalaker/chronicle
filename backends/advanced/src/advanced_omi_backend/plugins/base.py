@@ -7,8 +7,8 @@ Provides:
 - BasePlugin: Abstract base class for all plugins
 """
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 
 @dataclass

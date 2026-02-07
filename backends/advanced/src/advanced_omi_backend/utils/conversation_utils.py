@@ -9,7 +9,7 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.config import get_speech_detection_settings
 from advanced_omi_backend.llm_client import async_generate
@@ -178,7 +178,7 @@ async def generate_title(text: str, segments: Optional[list] = None) -> str:
     if segments:
         conversation_text = ""
         for segment in segments[:10]:  # Use first 10 segments for title generation
-            segment_text = segment.get("text", "").strip()
+            segment_text = segment.text.strip() if segment.text else ""
             if segment_text:
                 conversation_text += f"{segment_text}\n"
         text = conversation_text if conversation_text.strip() else text
@@ -232,8 +232,8 @@ async def generate_short_summary(text: str, segments: Optional[list] = None) -> 
         formatted_text = ""
         speakers_in_conv = set()
         for segment in segments:
-            speaker = segment.get("speaker", "")
-            segment_text = segment.get("text", "").strip()
+            speaker = segment.speaker or ""
+            segment_text = segment.text.strip() if segment.text else ""
             if segment_text:
                 if speaker:
                     formatted_text += f"{speaker}: {segment_text}\n"
@@ -281,15 +281,6 @@ Summary:"""
         )
 
 
-# Backward compatibility alias
-async def generate_summary(text: str) -> str:
-    """
-    Backward compatibility wrapper for generate_short_summary.
-
-    Deprecated: Use generate_short_summary instead.
-    """
-    return await generate_short_summary(text)
-
 
 async def generate_detailed_summary(
     text: str,
@@ -324,8 +315,8 @@ async def generate_detailed_summary(
         formatted_text = ""
         speakers_in_conv = set()
         for segment in segments:
-            speaker = segment.get("speaker", "")
-            segment_text = segment.get("text", "").strip()
+            speaker = segment.speaker or ""
+            segment_text = segment.text.strip() if segment.text else ""
             if segment_text:
                 if speaker:
                     formatted_text += f"{speaker}: {segment_text}\n"
@@ -396,45 +387,18 @@ DETAILED SUMMARY:"""
         )
 
 
-# Backward compatibility aliases for deprecated speaker-specific methods
-async def generate_title_with_speakers(segments: list) -> str:
-    """
-    Deprecated: Use generate_title(text, segments=segments) instead.
-
-    Backward compatibility wrapper.
-    """
-    if not segments:
-        return "Conversation"
-    # Extract text from segments for compatibility
-    text = "\n".join(s.get("text", "") for s in segments if s.get("text"))
-    return await generate_title(text, segments=segments)
-
-
-async def generate_summary_with_speakers(segments: list) -> str:
-    """
-    Deprecated: Use generate_short_summary(text, segments=segments) instead.
-
-    Backward compatibility wrapper.
-    """
-    if not segments:
-        return "No content"
-    # Extract text from segments for compatibility
-    text = "\n".join(s.get("text", "") for s in segments if s.get("text"))
-    return await generate_short_summary(text, segments=segments)
-
-
 # ============================================================================
 # Conversation Job Helpers
 # ============================================================================
 
 
 
-def extract_speakers_from_segments(segments: List[Dict[str, Any]]) -> List[str]:
+def extract_speakers_from_segments(segments: list) -> List[str]:
     """
     Extract unique speaker names from segments.
 
     Args:
-        segments: List of segments with speaker information
+        segments: List of segments (dict or SpeakerSegment objects)
 
     Returns:
         List of unique speaker names (excluding "Unknown")
@@ -442,7 +406,7 @@ def extract_speakers_from_segments(segments: List[Dict[str, Any]]) -> List[str]:
     speakers = []
     if segments:
         for seg in segments:
-            speaker = seg.get("speaker", "Unknown")
+            speaker = seg.get("speaker", "Unknown") if isinstance(seg, dict) else (seg.speaker or "Unknown")
             if speaker and speaker != "Unknown" and speaker not in speakers:
                 speakers.append(speaker)
     return speakers

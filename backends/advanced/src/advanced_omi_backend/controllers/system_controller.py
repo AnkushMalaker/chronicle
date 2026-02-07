@@ -15,11 +15,11 @@ from fastapi import HTTPException
 
 from advanced_omi_backend.config import (
     get_diarization_settings as load_diarization_settings,
-    get_misc_settings as load_misc_settings,
-    save_misc_settings,
 )
+from advanced_omi_backend.config import get_misc_settings as load_misc_settings
 from advanced_omi_backend.config import (
     save_diarization_settings,
+    save_misc_settings,
 )
 from advanced_omi_backend.config_loader import get_plugins_yml_path
 from advanced_omi_backend.model_registry import _find_config_path, load_models_config
@@ -47,7 +47,7 @@ async def get_config_diagnostics():
     # Test OmegaConf configuration loading
     try:
         from advanced_omi_backend.config_loader import load_config
-        
+
         # Capture warnings during config load
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
@@ -1102,8 +1102,8 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
         Success message with list of updated files
     """
     try:
-        from advanced_omi_backend.services.plugin_service import discover_plugins
         import advanced_omi_backend.plugins
+        from advanced_omi_backend.services.plugin_service import discover_plugins
 
         # Validate plugin exists
         discovered_plugins = discover_plugins()
@@ -1254,7 +1254,10 @@ async def test_plugin_connection(plugin_id: str, config: dict) -> dict:
         Test result with success status and details
     """
     try:
-        from advanced_omi_backend.services.plugin_service import discover_plugins, expand_env_vars
+        from advanced_omi_backend.services.plugin_service import (
+            discover_plugins,
+            expand_env_vars,
+        )
 
         # Validate plugin exists
         discovered_plugins = discover_plugins()
