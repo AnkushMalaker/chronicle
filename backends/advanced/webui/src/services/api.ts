@@ -213,6 +213,21 @@ export const finetuningApi = {
 
   // Get fine-tuning status
   getStatus: () => api.get('/api/finetuning/status'),
+
+  // Orphaned annotation management
+  deleteOrphanedAnnotations: (annotationType?: string) =>
+    api.delete('/api/finetuning/orphaned-annotations', {
+      params: annotationType ? { annotation_type: annotationType } : {}
+    }),
+  reattachOrphanedAnnotations: () =>
+    api.post('/api/finetuning/orphaned-annotations/reattach'),
+
+  // Cron job management
+  getCronJobs: () => api.get('/api/finetuning/cron-jobs'),
+  updateCronJob: (jobId: string, data: { enabled?: boolean; schedule?: string }) =>
+    api.put(`/api/finetuning/cron-jobs/${jobId}`, data),
+  runCronJob: (jobId: string) =>
+    api.post(`/api/finetuning/cron-jobs/${jobId}/run`),
 }
 
 export const usersApi = {
@@ -441,6 +456,9 @@ export const knowledgeGraphApi = {
 
   getEntityRelationships: (entityId: string) =>
     api.get(`/api/knowledge-graph/entities/${entityId}/relationships`),
+
+  updateEntity: (entityId: string, data: { name?: string; details?: string; icon?: string }) =>
+    api.patch(`/api/knowledge-graph/entities/${entityId}`, data),
 
   deleteEntity: (entityId: string) =>
     api.delete(`/api/knowledge-graph/entities/${entityId}`),

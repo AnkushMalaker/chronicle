@@ -215,13 +215,25 @@ async def transcribe_full_audio_job(
         logger.error(f"Failed to reconstruct audio from MongoDB: {e}", exc_info=True)
         raise RuntimeError(f"Audio reconstruction failed: {e}")
 
+    # Build ASR context (static hot words + per-user cached jargon)
+    try:
+        from advanced_omi_backend.services.transcription.context import get_asr_context
+
+        context_info = await get_asr_context(user_id=user_id)
+    except Exception as e:
+        logger.warning(f"Failed to build ASR context: {e}")
+        context_info = None
+
     try:
         # Transcribe the audio directly from memory (no disk I/O needed)
-        transcription_result = await provider.transcribe(
-            audio_data=wav_data,  # Pass bytes directly, already in memory
-            sample_rate=16000,
-            diarize=True,
-        )
+        transcribe_kwargs: Dict[str, Any] = {
+            "audio_data": wav_data,
+            "sample_rate": 16000,
+            "diarize": True,
+        }
+        if context_info:
+            transcribe_kwargs["context_info"] = context_info
+        transcription_result = await provider.transcribe(**transcribe_kwargs)
     except ConnectionError as e:
         logger.exception(f"Transcription service unreachable for {conversation_id}")
         raise RuntimeError(str(e))

@@ -11,7 +11,6 @@ import os
 from typing import Optional
 
 import uvicorn
-
 from common.base_service import BaseASRService, create_asr_app
 from common.response_models import TranscriptionResult
 from providers.vibevoice.transcriber import VibeVoiceTranscriber
@@ -56,7 +55,11 @@ class VibeVoiceService(BaseASRService):
         # and initial inference can be slow
         logger.info("VibeVoice model loaded and ready")
 
-    async def transcribe(self, audio_file_path: str) -> TranscriptionResult:
+    async def transcribe(
+        self,
+        audio_file_path: str,
+        context_info: Optional[str] = None,
+    ) -> TranscriptionResult:
         """Transcribe audio file."""
         if self.transcriber is None:
             raise RuntimeError("Service not initialized")
@@ -64,7 +67,10 @@ class VibeVoiceService(BaseASRService):
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             None,
-            lambda: self.transcriber.transcribe(audio_file_path),
+            lambda: self.transcriber.transcribe(
+                audio_file_path,
+                context_info=context_info,
+            ),
         )
         return result
 

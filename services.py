@@ -97,30 +97,6 @@ def run_compose_command(service_name, command, build=False):
             if caddyfile_path.exists() and caddyfile_path.is_file():
                 build_cmd.extend(['--profile', 'https'])
 
-            obsidian_enabled = False
-            kg_enabled = False
-            config_data = load_config_yml()
-            if config_data:
-                memory_config = config_data.get('memory', {})
-                obsidian_config = memory_config.get('obsidian', {})
-                if obsidian_config.get('enabled', False):
-                    obsidian_enabled = True
-                kg_config = memory_config.get('knowledge_graph', {})
-                if kg_config.get('enabled', False):
-                    kg_enabled = True
-
-            if not obsidian_enabled:
-                env_file = service_path / '.env'
-                if env_file.exists():
-                    env_values = dotenv_values(env_file)
-                    if env_values.get('OBSIDIAN_ENABLED', 'false').lower() == 'true':
-                        obsidian_enabled = True
-
-            if obsidian_enabled:
-                build_cmd.extend(['--profile', 'obsidian'])
-            if kg_enabled:
-                build_cmd.extend(['--profile', 'knowledge-graph'])
-
         elif service_name == 'speaker-recognition':
             env_file = service_path / '.env'
             if env_file.exists():
@@ -208,32 +184,6 @@ def run_compose_command(service_name, command, build=False):
         caddyfile_path = service_path / 'Caddyfile'
         if caddyfile_path.exists() and caddyfile_path.is_file():
             cmd.extend(['--profile', 'https'])
-
-        obsidian_enabled = False
-        kg_enabled = False
-        config_data = load_config_yml()
-        if config_data:
-            memory_config = config_data.get('memory', {})
-            obsidian_config = memory_config.get('obsidian', {})
-            if obsidian_config.get('enabled', False):
-                obsidian_enabled = True
-            kg_config = memory_config.get('knowledge_graph', {})
-            if kg_config.get('enabled', False):
-                kg_enabled = True
-
-        if not obsidian_enabled:
-            env_file = service_path / '.env'
-            if env_file.exists():
-                env_values = dotenv_values(env_file)
-                if env_values.get('OBSIDIAN_ENABLED', 'false').lower() == 'true':
-                    obsidian_enabled = True
-
-        if obsidian_enabled:
-            cmd.extend(['--profile', 'obsidian'])
-            console.print("[blue]ℹ️  Starting with Obsidian/Neo4j support[/blue]")
-        if kg_enabled:
-            cmd.extend(['--profile', 'knowledge-graph'])
-            console.print("[blue]ℹ️  Starting with Knowledge Graph (Neo4j)[/blue]")
 
     # Handle speaker-recognition service specially
     if service_name == 'speaker-recognition' and command in ['up', 'down']:

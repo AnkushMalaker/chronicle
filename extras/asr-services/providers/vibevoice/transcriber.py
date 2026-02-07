@@ -194,7 +194,11 @@ class VibeVoiceTranscriber:
         self._is_loaded = True
         logger.info("VibeVoice model loaded successfully")
 
-    def transcribe(self, audio_file_path: str) -> TranscriptionResult:
+    def transcribe(
+        self,
+        audio_file_path: str,
+        context_info: Optional[str] = None,
+    ) -> TranscriptionResult:
         """
         Transcribe audio file using VibeVoice with speaker diarization.
 
@@ -204,6 +208,8 @@ class VibeVoiceTranscriber:
 
         Args:
             audio_file_path: Path to audio file
+            context_info: Optional hot words / context string passed to the
+                processor's context_info parameter to guide recognition.
 
         Returns:
             TranscriptionResult with text, segments (with speakers), and speaker list
@@ -220,28 +226,45 @@ class VibeVoiceTranscriber:
             logger.info(
                 f"Audio is {duration:.1f}s (>{self.batch_threshold}s), using batched transcription"
             )
-            return self._transcribe_batched(audio_file_path)
+            return self._transcribe_batched(
+                audio_file_path,
+                hotwords=context_info,
+            )
         else:
             logger.info(f"Audio is {duration:.1f}s, using single-shot transcription")
-            return self._transcribe_single(audio_file_path)
+            return self._transcribe_single(audio_file_path, context_info=context_info)
 
     def _transcribe_single(
-        self, audio_file_path: str, context: Optional[str] = None
+        self, audio_file_path: str, context: Optional[str] = None, context_info: Optional[str] = None
     ) -> TranscriptionResult:
         """
         Transcribe a single audio file (or batch window).
 
         Args:
             audio_file_path: Path to audio file
-            context: Optional context text from previous batch window,
-                passed to VibeVoice's context_info parameter.
+            context: Optional context text from previous batch window
+                (continuity context for batched transcription).
+            context_info: Optional hot words / context string from the caller
+                (e.g. LangFuse asr.hot_words prompt).
 
         Returns:
             TranscriptionResult with text, segments (with speakers), and speaker list
         """
         logger.info(f"Transcribing: {audio_file_path}")
         if context:
-            logger.info(f"With context ({len(context)} chars): ...{context[-80:]}")
+            logger.info(f"With batch context ({len(context)} chars): ...{context[-80:]}")
+        if context_info:
+            logger.info(f"With hot words context: {context_info[:120]}")
+
+        # Build combined context_info: hot words + batch continuity context
+        combined_context = None
+        parts = []
+        if context_info:
+            parts.append(context_info.strip())
+        if context:
+            parts.append(context.strip())
+        if parts:
+            combined_context = "\n".join(parts)
 
         # Process audio through processor (can take file paths directly)
         processor_kwargs = {
@@ -251,8 +274,8 @@ class VibeVoiceTranscriber:
             "padding": True,
             "add_generation_prompt": True,
         }
-        if context:
-            processor_kwargs["context_info"] = context
+        if combined_context:
+            processor_kwargs["context_info"] = combined_context
 
         inputs = self.processor(**processor_kwargs)
 
@@ -303,7 +326,11 @@ class VibeVoiceTranscriber:
         # Map to TranscriptionResult
         return self._map_to_result(processed, raw_output)
 
-    def _transcribe_batched(self, audio_file_path: str) -> TranscriptionResult:
+    def _transcribe_batched(
+        self,
+        audio_file_path: str,
+        hotwords: Optional[str] = None,
+    ) -> TranscriptionResult:
         """
         Transcribe a long audio file by splitting into overlapping windows.
 
@@ -312,11 +339,11 @@ class VibeVoiceTranscriber:
 
         Args:
             audio_file_path: Path to the full audio file
+            hotwords: Optional hot words string passed through to each window
 
         Returns:
             Stitched TranscriptionResult from all windows
         """
-
         windows = split_audio_file(
             audio_file_path,
             batch_duration=self.batch_duration,
@@ -331,13 +358,15 @@ class VibeVoiceTranscriber:
                 logger.info(
                     f"Batch {i+1}/{len(windows)}: [{start_time:.0f}s - {end_time:.0f}s]"
                 )
-                result = self._transcribe_single(temp_path, context=prev_context)
+
+                result = self._transcribe_single(temp_path, context=prev_context, context_info=hotwords)
                 batch_results.append((result, start_time, end_time))
                 prev_context = extract_context_tail(result, max_chars=500)
                 logger.info(
                     f"Batch {i+1} done: {len(result.segments)} segments, "
                     f"{len(result.text)} chars"
                 )
+
             finally:
                 os.unlink(temp_path)
 

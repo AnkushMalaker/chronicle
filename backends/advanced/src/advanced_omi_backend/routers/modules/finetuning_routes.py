@@ -1,7 +1,8 @@
 """
 Fine-tuning routes for Chronicle API.
 
-Handles sending annotation corrections to speaker recognition service for training.
+Handles sending annotation corrections to speaker recognition service for training
+and cron job management for automated tasks.
 """
 
 import logging
@@ -10,6 +11,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from advanced_omi_backend.auth import current_active_user
 from advanced_omi_backend.models.annotation import Annotation, AnnotationType
@@ -56,7 +58,7 @@ async def process_annotations_for_training(
         # Filter out already trained annotations (processed_by contains "training")
         ready_for_training = [
             a for a in annotations
-            if a.processed_by and "training" not in a.processed_by
+            if not a.processed_by or "training" not in a.processed_by
         ]
 
         if not ready_for_training:
@@ -96,16 +98,14 @@ async def process_annotations_for_training(
                 conversation = await Conversation.find_one(
                     Conversation.conversation_id == annotation.conversation_id
                 )
-                
+
                 if not conversation or not conversation.active_transcript:
-                    logger.warning(f"Conversation {annotation.conversation_id} not found or has no transcript")
                     failed_count += 1
                     errors.append(f"Conversation {annotation.conversation_id[:8]} not found")
                     continue
 
                 # Validate segment index
                 if annotation.segment_index >= len(conversation.active_transcript.segments):
-                    logger.warning(f"Invalid segment index {annotation.segment_index} for conversation {annotation.conversation_id}")
                     failed_count += 1
                     errors.append(f"Invalid segment index {annotation.segment_index}")
                     continue
@@ -198,7 +198,7 @@ async def process_annotations_for_training(
             "appended_to_existing": appended_count,
             "total_processed": total_processed,
             "failed_count": failed_count,
-            "errors": errors[:10] if errors else [],  # Limit error list
+            "errors": errors[:10] if errors else [],
             "status": "success" if total_processed > 0 else "partial_failure"
         })
 
@@ -227,48 +227,111 @@ async def get_finetuning_status(
         - cron_status: Cron job schedule and last run info
     """
     try:
-        # Count annotations by status
-        pending_count = await Annotation.find(
-            Annotation.annotation_type == AnnotationType.DIARIZATION,
-            Annotation.processed == False,
-        ).count()
+        # ------------------------------------------------------------------
+        # Per-type annotation counts (with orphan detection)
+        # ------------------------------------------------------------------
+        from advanced_omi_backend.models.conversation import Conversation
 
-        # Get all processed annotations
-        all_processed = await Annotation.find(
-            Annotation.annotation_type == AnnotationType.DIARIZATION,
-            Annotation.processed == True,
-        ).to_list()
+        annotation_counts: dict[str, dict] = {}
+        trained_diarization_list: list = []
 
-        # Split into trained vs not-yet-trained
-        trained_annotations = [
-            a for a in all_processed
-            if a.processed_by and "training" in a.processed_by
-        ]
-        applied_not_trained = [
-            a for a in all_processed
-            if not a.processed_by or "training" not in a.processed_by
-        ]
+        # Collect all annotations to batch-check for orphans
+        all_annotations_by_type: dict[AnnotationType, list] = {}
+        for ann_type in AnnotationType:
+            all_annotations_by_type[ann_type] = await Annotation.find(
+                Annotation.annotation_type == ann_type,
+            ).to_list()
 
-        applied_count = len(applied_not_trained)
-        trained_count = len(trained_annotations)
+        # Batch-check which conversation_ids still exist
+        conv_annotation_types = {AnnotationType.DIARIZATION, AnnotationType.TRANSCRIPT}
+        all_conv_ids: set[str] = set()
+        for ann_type in conv_annotation_types:
+            for a in all_annotations_by_type.get(ann_type, []):
+                if a.conversation_id:
+                    all_conv_ids.add(a.conversation_id)
 
-        # Get last training run timestamp
+        existing_conv_ids: set[str] = set()
+        if all_conv_ids:
+            existing_convs = await Conversation.find(
+                {"conversation_id": {"$in": list(all_conv_ids)}},
+            ).to_list()
+            existing_conv_ids = {c.conversation_id for c in existing_convs}
+
+        orphaned_conv_ids = all_conv_ids - existing_conv_ids
+
+        total_orphaned = 0
+        for ann_type in AnnotationType:
+            annotations = all_annotations_by_type[ann_type]
+
+            # Identify orphaned annotations for conversation-based types
+            if ann_type in conv_annotation_types:
+                orphaned = [a for a in annotations if a.conversation_id in orphaned_conv_ids]
+                non_orphaned = [a for a in annotations if a.conversation_id not in orphaned_conv_ids]
+            else:
+                # Memory/entity orphan detection is placeholder for now
+                orphaned = []
+                non_orphaned = annotations
+
+            pending = [a for a in non_orphaned if not a.processed]
+            processed = [a for a in non_orphaned if a.processed]
+            trained = [a for a in processed if a.processed_by and "training" in a.processed_by]
+            applied_not_trained = [
+                a for a in processed
+                if not a.processed_by or "training" not in a.processed_by
+            ]
+
+            orphan_count = len(orphaned)
+            total_orphaned += orphan_count
+
+            annotation_counts[ann_type.value] = {
+                "total": len(non_orphaned),
+                "pending": len(pending),
+                "applied": len(applied_not_trained),
+                "trained": len(trained),
+                "orphaned": orphan_count,
+            }
+
+            if ann_type == AnnotationType.DIARIZATION:
+                trained_diarization_list = trained
+
+        # ------------------------------------------------------------------
+        # Diarization-specific fields (backward compat)
+        # ------------------------------------------------------------------
+        diarization = annotation_counts.get("diarization", {})
+        pending_count = diarization.get("pending", 0)
+        applied_count = diarization.get("applied", 0)
+        trained_count = diarization.get("trained", 0)
+
+        # Get last training run timestamp from diarization annotations
         last_training_run = None
-        if trained_annotations:
-            # Find most recent trained annotation
+        if trained_diarization_list:
             latest_trained = max(
-                trained_annotations,
+                trained_diarization_list,
                 key=lambda a: a.updated_at if a.updated_at else datetime.min.replace(tzinfo=timezone.utc)
             )
             last_training_run = latest_trained.updated_at.isoformat() if latest_trained.updated_at else None
 
-        # TODO: Get cron job status from scheduler
-        cron_status = {
-            "enabled": False,  # Placeholder
-            "schedule": "0 2 * * *",  # Example: daily at 2 AM
-            "last_run": None,
-            "next_run": None,
-        }
+        # Get cron job status from scheduler
+        try:
+            from advanced_omi_backend.cron_scheduler import get_scheduler
+
+            scheduler = get_scheduler()
+            all_jobs = await scheduler.get_all_jobs_status()
+            # Find speaker finetuning job for backward compat
+            speaker_job = next((j for j in all_jobs if j["job_id"] == "speaker_finetuning"), None)
+            cron_status = {
+                "enabled": speaker_job["enabled"] if speaker_job else False,
+                "schedule": speaker_job["schedule"] if speaker_job else "0 2 * * *",
+                "last_run": speaker_job["last_run"] if speaker_job else None,
+                "next_run": speaker_job["next_run"] if speaker_job else None,
+            }
+        except Exception:
+            cron_status = {
+                "enabled": False,
+                "schedule": "0 2 * * *",
+                "last_run": None,
+                "next_run": None,
+            }
 
         return JSONResponse(content={
             "pending_annotation_count": pending_count,
@@ -276,6 +339,8 @@ async def get_finetuning_status(
             "trained_annotation_count": trained_count,
             "last_training_run": last_training_run,
             "cron_status": cron_status,
+            "annotation_counts": annotation_counts,
+            "orphaned_annotation_count": total_orphaned,
         })
 
     except Exception as e:
@@ -284,3 +349,154 @@ async def get_finetuning_status(
             status_code=500,
             detail=f"Failed to fetch fine-tuning status: {str(e)}",
         )
+
+
+# ---------------------------------------------------------------------------
+# Orphaned Annotation Management Endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.delete("/orphaned-annotations")
+async def delete_orphaned_annotations(
+    current_user: User = Depends(current_active_user),
+    annotation_type: Optional[str] = Query(None, description="Filter by annotation type (e.g. 'diarization')"),
+):
+    """
+    Find and delete orphaned annotations whose referenced conversation no longer exists.
+
+    Only handles conversation-based annotation types (diarization, transcript).
+    """
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from advanced_omi_backend.models.conversation import Conversation
+
+    conv_annotation_types = {AnnotationType.DIARIZATION, AnnotationType.TRANSCRIPT}
+
+    # Filter to requested type if specified
+    if annotation_type:
+        try:
+            requested_type = AnnotationType(annotation_type)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Unknown annotation type: {annotation_type}")
+        if requested_type not in conv_annotation_types:
+            return JSONResponse(content={"deleted_count": 0, "by_type": {}, "message": "Orphan detection not supported for this type"})
+        types_to_check = {requested_type}
+    else:
+        types_to_check = conv_annotation_types
+
+    # Collect all conversation_ids referenced by these annotation types
+    all_conv_ids: set[str] = set()
+    annotations_by_type: dict[AnnotationType, list] = {}
+    for ann_type in types_to_check:
+        annotations = await Annotation.find(
+            Annotation.annotation_type == ann_type,
+        ).to_list()
+        annotations_by_type[ann_type] = annotations
+        for a in annotations:
+            if a.conversation_id:
+                all_conv_ids.add(a.conversation_id)
+
+    if not all_conv_ids:
+        return JSONResponse(content={"deleted_count": 0, "by_type": {}})
+
+    # Batch-check which conversations still exist
+    existing_convs = await Conversation.find(
+        {"conversation_id": {"$in": list(all_conv_ids)}},
+    ).to_list()
+    existing_conv_ids = {c.conversation_id for c in existing_convs}
+    orphaned_conv_ids = all_conv_ids - existing_conv_ids
+
+    if not orphaned_conv_ids:
+        return JSONResponse(content={"deleted_count": 0, "by_type": {}})
+
+    # Delete orphaned annotations
+    deleted_by_type: dict[str, int] = {}
+    total_deleted = 0
+    for ann_type, annotations in annotations_by_type.items():
+        orphaned = [a for a in annotations if a.conversation_id in orphaned_conv_ids]
+        for a in orphaned:
+            await a.delete()
+        if orphaned:
+            deleted_by_type[ann_type.value] = len(orphaned)
+            total_deleted += len(orphaned)
+
+    logger.info(f"Deleted {total_deleted} orphaned annotations: {deleted_by_type}")
+    return JSONResponse(content={
+        "deleted_count": total_deleted,
+        "by_type": deleted_by_type,
+    })
+
+
+@router.post("/orphaned-annotations/reattach")
+async def reattach_orphaned_annotations(
+    current_user: User = Depends(current_active_user),
+):
+    """Placeholder for reattaching orphaned annotations to a different conversation."""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    raise HTTPException(status_code=501, detail="Reattach functionality coming soon")
+
+
+# ---------------------------------------------------------------------------
+# Cron Job Management Endpoints
+# ---------------------------------------------------------------------------
+
+
+class CronJobUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    schedule: Optional[str] = None
+
+
+@router.get("/cron-jobs")
+async def get_cron_jobs(current_user: User = Depends(current_active_user)):
+    """List all cron jobs with status, schedule, last/next run."""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from advanced_omi_backend.cron_scheduler import get_scheduler
+
+    scheduler = get_scheduler()
+    return await scheduler.get_all_jobs_status()
+
+
+@router.put("/cron-jobs/{job_id}")
+async def update_cron_job(
+    job_id: str,
+    body: CronJobUpdate,
+    current_user: User = Depends(current_active_user),
+):
+    """Update a cron job's schedule or enabled state."""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from advanced_omi_backend.cron_scheduler import get_scheduler
+
+    scheduler = get_scheduler()
+    try:
+        await scheduler.update_job(job_id, enabled=body.enabled, schedule=body.schedule)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {"message": f"Job '{job_id}' updated", "job_id": job_id}
+
+
+@router.post("/cron-jobs/{job_id}/run")
+async def run_cron_job_now(
+    job_id: str,
+    current_user: User = Depends(current_active_user),
+):
+    """Manually trigger a cron job."""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    from advanced_omi_backend.cron_scheduler import get_scheduler
+
+    scheduler = get_scheduler()
+    try:
+        result = await scheduler.run_job_now(job_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return result

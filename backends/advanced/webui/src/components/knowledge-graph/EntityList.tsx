@@ -63,6 +63,15 @@ export default function EntityList({ onEntityClick }: EntityListProps) {
     setSearchResults(null)
   }
 
+  const handleEntityUpdated = (updated: Entity) => {
+    setEntities((prev) => prev.map((e) => (e.id === updated.id ? updated : e)))
+    if (searchResults) {
+      setSearchResults((prev) =>
+        prev ? prev.map((e) => (e.id === updated.id ? updated : e)) : prev
+      )
+    }
+  }
+
   const handleTypeChange = (type: string) => {
     setSelectedType(type)
     loadEntities(type)
@@ -190,6 +199,7 @@ export default function EntityList({ onEntityClick }: EntityListProps) {
                   key={entity.id}
                   entity={entity}
                   onClick={onEntityClick}
+                  onEntityUpdated={handleEntityUpdated}
                 />
               ))}
             </div>
@@ -210,6 +220,7 @@ export default function EntityList({ onEntityClick }: EntityListProps) {
                       key={entity.id}
                       entity={entity}
                       onClick={onEntityClick}
+                      onEntityUpdated={handleEntityUpdated}
                     />
                   ))}
                 </div>

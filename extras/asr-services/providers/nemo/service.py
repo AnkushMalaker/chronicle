@@ -72,8 +72,12 @@ class NemoService(BaseASRService):
         except Exception as e:
             logger.warning(f"Warmup failed (non-critical): {e}")
 
-    async def transcribe(self, audio_file_path: str) -> TranscriptionResult:
-        """Transcribe audio file."""
+    async def transcribe(
+        self,
+        audio_file_path: str,
+        context_info: Optional[str] = None,
+    ) -> TranscriptionResult:
+        """Transcribe audio file. context_info is not used by this provider."""
         if self.transcriber is None:
             raise RuntimeError("Service not initialized")
 

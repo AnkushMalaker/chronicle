@@ -267,9 +267,6 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    profiles:
-      - obsidian
-      - knowledge-graph
 
   # ollama:
   #   image: ollama/ollama:latest

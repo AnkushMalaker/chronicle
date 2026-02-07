@@ -487,6 +487,42 @@ Only return valid JSON, no additional text.""",
     )
 
     # ------------------------------------------------------------------
+    # asr.hot_words
+    # ------------------------------------------------------------------
+    registry.register_default(
+        "asr.hot_words",
+        template="hey vivi, chronicle, omi",
+        name="ASR Hot Words",
+        description="Comma-separated hot words for speech recognition. "
+        "For Deepgram: boosts keyword recognition via keyterm. "
+        "For VibeVoice: passed as context_info to guide the LLM backbone. "
+        "Supports names, technical terms, and domain-specific vocabulary.",
+        category="asr",
+    )
+
+    # ------------------------------------------------------------------
+    # asr.jargon_extraction
+    # ------------------------------------------------------------------
+    registry.register_default(
+        "asr.jargon_extraction",
+        template="""\
+Extract up to 20 key jargon terms, names, and technical vocabulary from these memory facts.
+Return ONLY a comma-separated list of words or short phrases (1-3 words each).
+Focus on: proper nouns, technical terms, domain-specific vocabulary, names of people/places/products.
+Skip generic everyday words.
+
+Memory facts:
+{{memories}}
+
+Jargon:""",
+        name="ASR Jargon Extraction",
+        description="Extracts key jargon terms from user memories for ASR context boosting.",
+        category="asr",
+        variables=["memories"],
+        is_dynamic=True,
+    )
+
+    # ------------------------------------------------------------------
     # transcription.title_summary
     # ------------------------------------------------------------------
     registry.register_default(

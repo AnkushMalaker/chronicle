@@ -115,6 +115,7 @@ vibevoice = [
     "torch>=2.3",
     "torchaudio>=2.3",
     "librosa>=0.10.0",
+    "langfuse>=3.13.0,<4.0",
 ]
 
 # Legacy groups (kept for backward compatibility)

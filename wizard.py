@@ -157,11 +157,14 @@ def select_services(transcription_provider=None):
             console.print(f"  ⏸️  {service_config['description']} - [dim]{msg}[/dim]")
             continue
 
+        # Speaker recognition is recommended by default
+        default_enable = service_name == 'speaker-recognition'
+
         try:
-            enable_service = Confirm.ask(f"  Setup {service_config['description']}?", default=False)
+            enable_service = Confirm.ask(f"  Setup {service_config['description']}?", default=default_enable)
         except EOFError:
-            console.print("Using default: No")
-            enable_service = False
+            console.print(f"Using default: {'Yes' if default_enable else 'No'}")
+            enable_service = default_enable
 
         if enable_service:
             selected.append(service_name)
@@ -211,9 +214,13 @@ def run_service_setup(service_name, selected_services, https_enabled=False, serv
         if https_enabled and server_ip:
             cmd.extend(['--enable-https', '--server-ip', server_ip])
 
+        # Always pass Neo4j password (neo4j is a required service)
+        if neo4j_password:
+            cmd.extend(['--neo4j-password', neo4j_password])
+
         # Add Obsidian configuration
-        if obsidian_enabled and neo4j_password:
-            cmd.extend(['--enable-obsidian', '--neo4j-password', neo4j_password])
+        if obsidian_enabled:
+            cmd.extend(['--enable-obsidian'])
 
         # Pass LangFuse keys from langfuse init (if langfuse was set up first)
         if langfuse_public_key and langfuse_secret_key:
@@ -461,7 +468,21 @@ def setup_hf_token_if_needed(selected_services):
 
     console.print("\n🤗 [bold cyan]Hugging Face Token Configuration[/bold cyan]")
     console.print("Required for speaker recognition (PyAnnote models)")
-    console.print("\n[blue][INFO][/blue] Get yours from: https://huggingface.co/settings/tokens\n")
+    console.print("\n[blue][INFO][/blue] Get your token from: https://huggingface.co/settings/tokens")
+    console.print()
+    console.print("[yellow]⚠️  You must also accept the model agreements for these gated models:[/yellow]")
+    console.print("   1. [cyan]Speaker Diarization[/cyan]")
+    console.print("      https://huggingface.co/pyannote/speaker-diarization-community-1")
+    console.print("   2. [cyan]Segmentation Model[/cyan]")
+    console.print("      https://huggingface.co/pyannote/segmentation-3.0")
+    console.print("   3. [cyan]Segmentation Model[/cyan]")
+    console.print("      https://huggingface.co/pyannote/segmentation-3.1")
+    console.print("   4. [cyan]Embedding Model[/cyan]")
+    console.print("      https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM")
+    console.print()
+    console.print("[yellow]→[/yellow] Open each link and click 'Agree and access repository'")
+    console.print("[yellow]→[/yellow] Use the same Hugging Face account as your token")
+    console.print()
 
     # Check for existing token from speaker-recognition service
     speaker_env_path = 'extras/speaker-recognition/.env'
@@ -623,41 +644,44 @@ def main():
 
             console.print(f"[green]✅[/green] HTTPS configured for: {server_ip}")
 
-    # Obsidian/Neo4j Integration
-    obsidian_enabled = False
+    # Neo4j Configuration (always required - used by Knowledge Graph)
     neo4j_password = None
+    obsidian_enabled = False
 
-    # Check if advanced backend is selected
     if 'advanced' in selected_services:
-        console.print("\n🗂️ [bold cyan]Obsidian/Neo4j Integration[/bold cyan]")
+        console.print("\n🗄️ [bold cyan]Neo4j Configuration[/bold cyan]")
+        console.print("Neo4j is used for Knowledge Graph (entity/relationship extraction from conversations)")
+        console.print()
+
+        # Always prompt for Neo4j password
+        while True:
+            try:
+                neo4j_password = console.input("Neo4j password (min 8 chars) [default: neo4jpassword]: ").strip()
+                if not neo4j_password:
+                    neo4j_password = "neo4jpassword"
+                if len(neo4j_password) >= 8:
+                    break
+                console.print("[yellow][WARNING][/yellow] Password must be at least 8 characters")
+            except EOFError:
+                neo4j_password = "neo4jpassword"
+                console.print(f"Using default password")
+                break
+
+        console.print("[green]✅[/green] Neo4j configured")
+
+        # Obsidian is optional (graph-based knowledge management for vault notes)
+        console.print("\n🗂️ [bold cyan]Obsidian Integration (Optional)[/bold cyan]")
         console.print("Enable graph-based knowledge management for Obsidian vault notes")
         console.print()
 
         try:
-            obsidian_enabled = Confirm.ask("Enable Obsidian/Neo4j integration?", default=False)
+            obsidian_enabled = Confirm.ask("Enable Obsidian integration?", default=False)
         except EOFError:
             console.print("Using default: No")
             obsidian_enabled = False
 
         if obsidian_enabled:
-            console.print("[blue][INFO][/blue] Neo4j will be configured for graph-based memory storage")
-            console.print()
-
-            # Prompt for Neo4j password
-            while True:
-                try:
-                    neo4j_password = console.input("Neo4j password (min 8 chars) [default: neo4jpassword]: ").strip()
-                    if not neo4j_password:
-                        neo4j_password = "neo4jpassword"
-                    if len(neo4j_password) >= 8:
-                        break
-                    console.print("[yellow][WARNING][/yellow] Password must be at least 8 characters")
-                except EOFError:
-                    neo4j_password = "neo4jpassword"
-                    console.print(f"Using default password")
-                    break
-
-            console.print("[green]✅[/green] Obsidian/Neo4j integration will be configured")
+            console.print("[green]✅[/green] Obsidian integration will be configured")
 
     # Pure Delegation - Run Each Service Setup
     console.print(f"\n📋 [bold]Setting up {len(selected_services)} services...[/bold]")
@@ -707,31 +731,12 @@ def main():
     # without the backend init overwriting them
     setup_plugins()
 
-    # Check for Obsidian/Neo4j configuration (read from config.yml)
-    obsidian_enabled = False
-    if 'advanced' in selected_services and 'advanced' not in failed_services:
-        config_yml_path = Path('config/config.yml')
-        if config_yml_path.exists():
-            try:
-                with open(config_yml_path, 'r') as f:
-                    config_data = yaml.safe_load(f)
-                    obsidian_config = config_data.get('memory', {}).get('obsidian', {})
-                    obsidian_enabled = obsidian_config.get('enabled', False)
-            except Exception as e:
-                console.print(f"[yellow]Warning: Could not read config.yml: {e}[/yellow]")
-
     # Final Summary
     console.print(f"\n🎊 [bold green]Setup Complete![/bold green]")
     console.print(f"✅ {success_count}/{len(selected_services)} services configured successfully")
 
     if failed_services:
         console.print(f"❌ Failed services: {', '.join(failed_services)}")
-
-    # Inform about Obsidian/Neo4j if configured
-    if obsidian_enabled:
-        console.print(f"\n📚 [bold cyan]Obsidian Integration Detected[/bold cyan]")
-        console.print("   Neo4j will be automatically started with the 'obsidian' profile")
-        console.print("   when you start the backend service.")
     
     # Next Steps
     console.print("\n📖 [bold]Next Steps:[/bold]")
