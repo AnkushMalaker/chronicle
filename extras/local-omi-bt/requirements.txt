@@ -2,7 +2,7 @@ bleak==0.22.3
 numpy>=1.26.4
 scipy>=1.12.0
 opuslib>=3.0.1
-friend-lite-sdk
+friend-lite-sdk @ file:../friend-lite-sdk
 easy_audio_interfaces
 python-dotenv
 asyncstdlib

@@ -9,7 +9,7 @@ import asyncstdlib as asyncstd
 from bleak import BleakClient, BleakScanner
 from dotenv import load_dotenv, set_key
 from easy_audio_interfaces.filesystem import RollingFileSink
-from friend_lite.bluetooth import listen_to_omi
+from friend_lite import ButtonState, OmiConnection, parse_button_event
 from friend_lite.decoder import OmiOpusDecoder
 from wyoming.audio import AudioChunk
 
@@ -24,15 +24,12 @@ env_path = ".env"
 load_dotenv(env_path)
 
 sys.path.append(os.path.dirname(__file__))
-from send_to_adv import stream_to_backend
+from send_to_adv import send_button_event, stream_to_backend
 
 OMI_MAC = os.getenv("OMI_MAC")
 if not OMI_MAC:
     logger.info("OMI_MAC not found in .env. Will try to find and set.")
     
-# Standard Omi audio characteristic UUID
-OMI_CHAR_UUID = "19B10001-E8F2-537E-4F6C-D104768A1214"
-
 async def source_bytes(audio_queue: Queue[bytes]) -> AsyncGenerator[bytes, None]:
     """Single source iterator from the queue."""
     while True:
@@ -65,6 +62,20 @@ def main() -> None:
                 audio_queue.put_nowait(decoded_pcm)
             except Exception as e:
                 logger.error("Queue Error: %s", e)
+
+    def handle_button_event(sender: Any, data: bytes) -> None:
+        try:
+            state = parse_button_event(data)
+        except Exception as e:
+            logger.error("Button event parse error: %s", e)
+            return
+        if state != ButtonState.IDLE:
+            logger.info("Button event: %s", state.name)
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(send_button_event(state.name))
+            except RuntimeError:
+                logger.debug("No running event loop, cannot send button event")
                 
 
     def prompt_user_to_pick_device(all_devices) -> str | None:
@@ -198,11 +209,14 @@ def main() -> None:
 
         async with file_sink:
             try:
-                await asyncio.gather(
-                    listen_to_omi(mac_address, OMI_CHAR_UUID, handle_ble_data),
-                    process_audio(),
-                    backend_stream_wrapper(),
-                )
+                async with OmiConnection(mac_address) as conn:
+                    await conn.subscribe_audio(handle_ble_data)
+                    await conn.subscribe_button(handle_button_event)
+                    await asyncio.gather(
+                        conn.wait_until_disconnected(),
+                        process_audio(),
+                        backend_stream_wrapper(),
+                    )
             except Exception as e:
                 logger.error(f"Error in audio processing: {e}", exc_info=True)
             finally:

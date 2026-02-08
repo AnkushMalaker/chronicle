@@ -528,6 +528,14 @@ async def _finalize_streaming_session(
         # Mark session as finalizing with user_stopped reason (audio-stop event)
         await audio_stream_producer.finalize_session(session_id, completion_reason="user_stopped")
 
+        # Store markers in Redis so open_conversation_job can persist them
+        if client_state.markers:
+            session_key = f"audio:session:{session_id}"
+            await audio_stream_producer.redis_client.hset(
+                session_key, "markers", json.dumps(client_state.markers)
+            )
+            client_state.markers.clear()
+
         # NOTE: Finalize job disabled - open_conversation_job now handles everything
         # The open_conversation_job will:
         # 1. Detect the "finalizing" status
@@ -945,6 +953,56 @@ async def _handle_audio_session_stop(
     return False  # Switch back to control mode
 
 
+async def _handle_button_event(
+    client_state,
+    button_state: str,
+    user_id: str,
+    client_id: str,
+) -> None:
+    """Handle a button event from the device.
+
+    Stores a marker on the client state and dispatches to the plugin system.
+
+    Args:
+        client_state: Client state object
+        button_state: Button state string (e.g., "SINGLE_TAP", "DOUBLE_TAP")
+        user_id: User ID
+        client_id: Client ID
+    """
+    from advanced_omi_backend.services.plugin_service import get_plugin_router
+
+    timestamp = time.time()
+    audio_uuid = client_state.current_audio_uuid
+
+    application_logger.info(
+        f"🔘 Button event from {client_id}: {button_state} "
+        f"(audio_uuid={audio_uuid})"
+    )
+
+    # Store marker on client state for later persistence to conversation
+    marker = {
+        "type": "button_event",
+        "state": button_state,
+        "timestamp": timestamp,
+        "audio_uuid": audio_uuid,
+        "client_id": client_id,
+    }
+    client_state.add_marker(marker)
+
+    # Dispatch to plugin system
+    router = get_plugin_router()
+    if router:
+        await router.dispatch_event(
+            event="button.event",
+            user_id=user_id,
+            data={
+                "state": button_state,
+                "timestamp": timestamp,
+                "audio_uuid": audio_uuid,
+            },
+        )
+
+
 async def _process_rolling_batch(
     client_state,
     user_id: str,
@@ -1094,6 +1152,10 @@ async def _process_batch_audio_complete(
             title="Batch Recording",
             summary="Processing batch audio..."
         )
+        # Attach any markers (e.g., button events) captured during the session
+        if client_state.markers:
+            conversation.markers = list(client_state.markers)
+            client_state.markers.clear()
         await conversation.insert()
         conversation_id = conversation.conversation_id  # Get the auto-generated ID
 
@@ -1385,7 +1447,15 @@ async def handle_pcm_websocket(
                         # Handle keepalive ping from frontend
                         application_logger.debug(f"🏓 Received ping from {client_id}")
                         continue
-                    
+
+                    elif header["type"] == "button-event":
+                        button_data = header.get("data", {})
+                        button_state = button_data.get("state", "unknown")
+                        await _handle_button_event(
+                            client_state, button_state, user.user_id, client_id
+                        )
+                        continue
+
                     else:
                         # Unknown control message type
                         application_logger.debug(
@@ -1466,10 +1536,17 @@ async def handle_pcm_websocket(
                                     else:
                                         application_logger.warning(f"audio-chunk missing payload_length: {payload_length}")
                                     continue
+                                elif control_header.get("type") == "button-event":
+                                    button_data = control_header.get("data", {})
+                                    button_state = button_data.get("state", "unknown")
+                                    await _handle_button_event(
+                                        client_state, button_state, user.user_id, client_id
+                                    )
+                                    continue
                                 else:
                                     application_logger.warning(f"Unknown control message during streaming: {control_header.get('type')}")
                                     continue
-                                            
+
                             except json.JSONDecodeError:
                                 application_logger.warning(f"Invalid control message during streaming for {client_id}")
                                 continue
