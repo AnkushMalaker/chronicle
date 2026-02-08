@@ -1,0 +1,7 @@
+This package is derived from the OMI Python SDK:
+  https://github.com/BasedHardware/omi/tree/main/sdks/python
+
+Original work: Copyright (c) 2024 Based Hardware Contributors
+Licensed under the MIT License.
+
+Fork: https://github.com/AnkushMalaker/Friend

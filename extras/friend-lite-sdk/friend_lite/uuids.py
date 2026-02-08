@@ -1,0 +1,8 @@
+"""UUID constants for OMI BLE services and characteristics."""
+
+# Standard Omi audio characteristic UUID
+OMI_AUDIO_CHAR_UUID = "19B10001-E8F2-537E-4F6C-D104768A1214"
+
+# Omi button service + characteristic UUIDs
+OMI_BUTTON_SERVICE_UUID = "23BA7924-0000-1000-7450-346EAC492E92"
+OMI_BUTTON_CHAR_UUID = "23BA7925-0000-1000-7450-346EAC492E92"

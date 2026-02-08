@@ -51,6 +51,9 @@ class ClientState:
         # NOTE: Removed in-memory transcript storage for single source of truth
         # Transcripts are stored only in MongoDB via TranscriptionManager
 
+        # Markers (e.g., button events) collected during the session
+        self.markers: List[dict] = []
+
         # Track if conversation has been closed
         self.conversation_closed: bool = False
 
@@ -101,6 +104,10 @@ class ClientState:
     def update_transcript_received(self):
         """Update timestamp when transcript is received (for timeout detection)."""
         self.last_transcript_time = time.time()
+
+    def add_marker(self, marker: dict) -> None:
+        """Add a marker (e.g., button event) to the current session."""
+        self.markers.append(marker)
 
     def should_start_new_conversation(self) -> bool:
         """Check if we should start a new conversation based on timeout."""

@@ -243,6 +243,8 @@ class PluginRouter:
             return await plugin.on_conversation_complete(context)
         elif event.startswith('memory.'):
             return await plugin.on_memory_processed(context)
+        elif event.startswith('button.'):
+            return await plugin.on_button_event(context)
 
         return None
 
