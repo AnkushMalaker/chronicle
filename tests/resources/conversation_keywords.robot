@@ -16,10 +16,41 @@ Get User Conversations
     ${response}=    GET On Session    api    /api/conversations    expected_status=200
     RETURN    ${response.json()}[conversations]
 
+Get Conversations By Client ID
+    [Documentation]    Get conversations filtered by client_id
+    ...                Returns only conversations matching the specified client_id
+    [Arguments]    ${client_id}
+
+    ${all_conversations}=    Get User Conversations
+    ${filtered}=    Create List
+
+    FOR    ${conv}    IN    @{all_conversations}
+        ${conv_client_id}=    Set Variable    ${conv}[client_id]
+        IF    '${conv_client_id}' == '${client_id}'
+            Append To List    ${filtered}    ${conv}
+        END
+    END
+
+    RETURN    ${filtered}
+
+Wait For Conversation By Client ID
+    [Documentation]    Wait for at least one conversation to exist for the given client_id.
+    ...                Polls until a conversation is found or timeout is reached.
+    ...                Returns the list of conversations for that client.
+    [Arguments]    ${client_id}    ${expected_count}=1
+
+    ${conversations}=    Get Conversations By Client ID    ${client_id}
+    ${count}=    Get Length    ${conversations}
+
+    Should Be True    ${count} >= ${expected_count}
+    ...    Expected at least ${expected_count} conversation(s) for client ${client_id}, found ${count}
+
+    RETURN    ${conversations}
+
 Get Conversation By ID
     [Documentation]    Get a specific conversation by ID
     [Arguments]       ${conversation_id}
-    ${response}=    GET On Session    api    /api/conversations/${conversation_id} 
+    ${response}=    GET On Session    api    /api/conversations/${conversation_id}
     RETURN    ${response.json()}[conversation]
 
 Get Conversation Versions
@@ -48,7 +79,7 @@ Reprocess Transcript
     ${initial_status}=    Set Variable    ${reprocess_data}[status]
 
     Log    Reprocess job created: ${job_id} with status: ${initial_status}    INFO
-    Should Be True    '${initial_status}' in ['queued', 'processing']    Status should be 'queued' or 'processing', got: ${initial_status}
+    Should Be True    '${initial_status}' in ['queued', 'started']    Status should be 'queued' or 'started', got: ${initial_status}
 
     RETURN    ${response.json()}
 
@@ -76,9 +107,9 @@ Activate Memory Version
 
 Delete Conversation
     [Documentation]    Delete a conversation
-    [Arguments]     ${audio_uuid}
+    [Arguments]     ${conversation_id}
 
-    ${response}=    DELETE On Session    api    /api/conversations/${audio_uuid}    headers=${headers}
+    ${response}=    DELETE On Session    api    /api/conversations/${conversation_id}    headers=${headers}
     RETURN    ${response.json()}
 
 Delete Conversation Version
@@ -95,24 +126,17 @@ Close Current Conversation
     ${response}=    POST On Session    api    /api/conversations/${client_id}/close    headers=${headers}
     RETURN    ${response.json()}
 
-Get Cropped Audio Info
-    [Documentation]    Get cropped audio information for a conversation
-    [Arguments]     ${audio_uuid}
-
-    ${response}=    GET On Session    api    /api/conversations/${audio_uuid}/cropped    headers=${headers}
-    RETURN    ${response.json()}[cropped_audios]    
-
 Add Speaker To Conversation
     [Documentation]    Add a speaker to the speakers_identified list
-    [Arguments]    ${audio_uuid}    ${speaker_id}
+    [Arguments]    ${conversation_id}    ${speaker_id}
     &{params}=     Create Dictionary    speaker_id=${speaker_id}
 
-    ${response}=    POST On Session    api    /api/conversations/${audio_uuid}/speakers    headers=${headers}    params=${params}
+    ${response}=    POST On Session    api    /api/conversations/${conversation_id}/speakers    headers=${headers}    params=${params}
     RETURN    ${response.json()}
 
 Update Transcript Segment
     [Documentation]    Update a specific transcript segment
-    [Arguments]    ${audio_uuid}    ${segment_index}    ${speaker_id}=${None}    ${start_time}=${None}    ${end_time}=${None}
+    [Arguments]    ${conversation_id}    ${segment_index}    ${speaker_id}=${None}    ${start_time}=${None}    ${end_time}=${None}
     &{params}=     Create Dictionary
 
     IF    '${speaker_id}' != '${None}'
@@ -125,12 +149,12 @@ Update Transcript Segment
         Set To Dictionary    ${params}    end_time=${end_time}
     END
 
-    ${response}=    PUT On Session    api    /api/conversations/${audio_uuid}/transcript/${segment_index}    headers=${headers}    params=${params}
+    ${response}=    PUT On Session    api    /api/conversations/${conversation_id}/transcript/${segment_index}    headers=${headers}    params=${params}
     RETURN    ${response.json()}
 
 
 Create Test Conversation
-    [Documentation]    Create a test conversation by processing a test audio file
+    [Documentation]    Create a test conversation by started a test audio file
     [Arguments]     ${device_name}=test-device
 
     # Upload test audio file to create a conversation
@@ -161,7 +185,7 @@ Find Test Conversation
     Log    No conversations found, creating one by uploading test audio
     ${conversation}=    Upload Audio File    ${TEST_AUDIO_FILE}    ${TEST_DEVICE_NAME}
 
-    # Wait for initial processing to complete
+    # Wait for initial started to complete
     Sleep    5s
 
     RETURN    ${conversation}
@@ -174,3 +198,56 @@ Check Conversation Has End Reason
     ${end_reason}=    Set Variable    ${conversation}[end_reason]
     Should Not Be Equal As Strings    ${end_reason}    None    msg=End reason not set yet
     RETURN    ${conversation}
+
+Conversation Should Have End Reason
+    [Documentation]    Verify conversation has specific end_reason value
+    ...
+    ...    This keyword checks if the conversation's end_reason field matches the expected value.
+    [Arguments]    ${conversation_id}    ${expected_end_reason}
+
+    ${conversation}=    Get Conversation By ID    ${conversation_id}
+    ${actual_end_reason}=    Set Variable    ${conversation}[end_reason]
+    Should Be Equal As Strings    ${actual_end_reason}    ${expected_end_reason}
+    ...    msg=Expected end_reason '${expected_end_reason}', got '${actual_end_reason}'
+
+Verify Conversation Processing Status
+    [Documentation]    Verify conversation has expected processing_status value
+    [Arguments]    ${conversation_id}    ${expected_status}
+
+    ${conversation}=    Get Conversation By ID    ${conversation_id}
+
+    Should Contain    ${conversation}    processing_status
+    Should Be Equal As Strings    ${conversation}[processing_status]    ${expected_status}
+    ...    Expected processing_status='${expected_status}', got '${conversation}[processing_status]'
+
+    Log    ✅ Conversation ${conversation_id} has processing_status='${expected_status}'
+
+Verify Conversation Always Persist Flag
+    [Documentation]    Verify conversation has always_persist=True
+    [Arguments]    ${conversation_id}
+
+    ${conversation}=    Get Conversation By ID    ${conversation_id}
+
+    Should Contain    ${conversation}    always_persist
+    Should Be True    ${conversation}[always_persist]
+    ...    Expected always_persist=True, got ${conversation}[always_persist]
+
+    Log    ✅ Conversation ${conversation_id} has always_persist=True
+
+Verify Placeholder Conversation Title
+    [Documentation]    Verify conversation has placeholder title
+    [Arguments]    ${conversation_id}
+
+    ${conversation}=    Get Conversation By ID    ${conversation_id}
+
+    # Placeholder title can be either "Processing..." or "Transcription Failed"
+    ${title}=    Set Variable    ${conversation}[title]
+    ${has_processing}=    Run Keyword And Return Status    Should Contain    ${title}    Processing
+    ${has_failed}=    Run Keyword And Return Status    Should Contain    ${title}    Transcription Failed
+
+    ${is_placeholder}=    Evaluate    ${has_processing} or ${has_failed}
+
+    Should Be True    ${is_placeholder}
+    ...    Expected placeholder title, got: ${title}
+
+    Log    ✅ Conversation has placeholder title: ${title}

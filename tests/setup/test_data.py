@@ -51,7 +51,7 @@ EXPECTED_MEMORIES = [
 ]
 
 # Expected segment timestamps for DIY Glass Blowing audio (4-minute version, 500 chunks)
-# These are the cropped audio timestamps after silence removal
+# These are the audio segment timestamps with speech detection
 # Updated 2025-01-22 based on actual test output with streaming websocket processing
 EXPECTED_SEGMENT_TIMES = [
     {"start": 0.0, "end": 10.08},

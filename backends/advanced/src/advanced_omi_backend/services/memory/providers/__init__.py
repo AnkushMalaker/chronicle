@@ -10,11 +10,11 @@ This package contains all memory service provider implementations:
 """
 
 from .chronicle import MemoryService as ChronicleMemoryService
-from .openmemory_mcp import OpenMemoryMCPService
-from .mycelia import MyceliaMemoryService
 from .llm_providers import OpenAIProvider
-from .vector_stores import QdrantVectorStore
 from .mcp_client import MCPClient, MCPError
+from .mycelia import MyceliaMemoryService
+from .openmemory_mcp import OpenMemoryMCPService
+from .vector_stores import QdrantVectorStore
 
 __all__ = [
     "ChronicleMemoryService",

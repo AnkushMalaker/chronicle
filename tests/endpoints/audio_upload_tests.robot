@@ -21,7 +21,7 @@ Suite Teardown      Suite Teardown
 
 Test Setup       Test Cleanup
 
-Test Tags           audio-upload
+Test Tags           audio-upload	requires-api-keys
 
 
 *** Test Cases ***
@@ -40,15 +40,8 @@ Single Audio File Upload Test
 
     # Verify conversation structure
     Dictionary Should Contain Key    ${conversation}    conversation_id
-    Dictionary Should Contain Key    ${conversation}    audio_uuid
-    Dictionary Should Contain Key    ${conversation}    audio_path
     Dictionary Should Contain Key    ${conversation}    transcript
     Dictionary Should Contain Key    ${conversation}    segments
-
-    # Verify audio_path is set (should be just filename, no folder prefix)
-    Should Not Be Empty    ${conversation}[audio_path]
-    Should Not Contain    ${conversation}[audio_path]    /    msg=audio_path should be relative, not absolute
-    Should Contain    ${conversation}[audio_path]    .wav    msg=audio_path should contain .wav extension
 
     # Verify transcript was generated
     ${transcript}=    Set Variable    ${conversation}[transcript]
@@ -56,7 +49,7 @@ Single Audio File Upload Test
     Should Be True    ${transcript_length} > 100    msg=Transcript too short: ${transcript_length} chars
 
     Log To Console    ✅ Uploaded audio file
-    Log To Console    📁 Audio path: ${conversation}[audio_path]
+    Log To Console    💾 Storage: MongoDB chunks
     Log To Console    📝 Transcript: ${transcript_length} characters
     Log To Console    🆔 Conversation ID: ${conversation}[conversation_id]
 
@@ -65,24 +58,21 @@ Audio File Upload With Fixtures Folder Test
     [Documentation]    Test uploading audio file to fixtures subfolder
     ...
     ...                Verifies:
-    ...                - File is stored in fixtures/ subfolder
-    ...                - audio_path includes folder prefix
+    ...                - Folder parameter is accepted (for backward compatibility)
+    ...                - Audio is stored in MongoDB chunks
     ...                - Conversation is created correctly
     [Tags]    audio-upload
 
     # Upload audio file to fixtures folder
     ${conversation}=    Upload Audio File    ${TEST_AUDIO_FILE}    device_name=fixture-upload    folder=fixtures
 
-    # Verify audio_path includes fixtures/ prefix
-    Should Start With    ${conversation}[audio_path]    fixtures/    msg=audio_path should start with 'fixtures/'
-    Should Contain    ${conversation}[audio_path]    .wav    msg=audio_path should contain .wav extension
-
+    # audio_path is legacy field (None for MongoDB storage)
     # Verify conversation was created
     Dictionary Should Contain Key    ${conversation}    conversation_id
     Dictionary Should Contain Key    ${conversation}    transcript
 
-    Log To Console    ✅ Uploaded audio file to fixtures folder
-    Log To Console    📁 Audio path: ${conversation}[audio_path]
+    Log To Console    ✅ Uploaded audio file with folder parameter
+    Log To Console    💾 Storage: MongoDB chunks (folder param backward compatible)
     Log To Console    🆔 Conversation ID: ${conversation}[conversation_id]
 
 
@@ -120,7 +110,7 @@ Multiple Audio Files Upload Test
     # Verify summary
     Dictionary Should Contain Key    ${upload_response}    summary
     Should Be Equal As Integers    ${upload_response}[summary][total]    2    msg=Expected 2 files uploaded
-    Should Be Equal As Integers    ${upload_response}[summary][processing]    2    msg=Expected 2 files processing
+    Should Be Equal As Integers    ${upload_response}[summary][started]    2    msg=Expected 2 files started
 
     # Verify both files are in response
     ${files}=    Set Variable    ${upload_response}[files]
@@ -130,8 +120,8 @@ Multiple Audio Files Upload Test
     # Wait for both transcriptions to complete
     FOR    ${file}    IN    @{files}
         ${transcript_job_id}=    Set Variable    ${file}[transcript_job_id]
-        Wait Until Keyword Succeeds    60s    5s    Check Job Status    ${transcript_job_id}    completed
-        Log To Console    ✅ File ${file}[filename] transcription completed
+        Wait Until Keyword Succeeds    60s    5s    Check Job Status    ${transcript_job_id}    finished
+        Log To Console    ✅ File ${file}[filename] transcription finished
     END
 
     Log To Console    ✅ Uploaded and processed ${file_count} audio files
@@ -167,7 +157,7 @@ Invalid File Upload Test
 
     # Verify file was rejected
     Should Be Equal As Integers    ${upload_response}[summary][failed]    1    msg=Expected 1 file to fail
-    Should Be Equal As Integers    ${upload_response}[summary][processing]    0    msg=Expected 0 files processing
+    Should Be Equal As Integers    ${upload_response}[summary][started]    0    msg=Expected 0 files started
 
     # Verify error message mentions WAV files
     ${error_msg}=    Set Variable    ${upload_response}[files][0][error]
@@ -198,17 +188,27 @@ Audio Upload Client ID Generation Test
     Should Contain    ${client_id1}    ${device_name}    msg=Client ID should contain device name
     Should Match Regexp    ${client_id1}    ^[a-f0-9]{6}-${device_name}$    msg=Client ID should match format
 
-    # Verify conversation_id is in all job metadata (transcription, speaker, memory jobs)
+    # Verify conversation_id is in job metadata for all created jobs
+    # Note: Speaker job is only created if speaker recognition is enabled in config
+
+    # 1. Transcription job (always created)
     ${transcribe_job}=    Get Job Details    transcribe_${conversation_id1[:12]}
     ${transcribe_meta}=    Set Variable    ${transcribe_job}[meta]
     Dictionary Should Contain Key    ${transcribe_meta}    conversation_id    msg=Transcription job should have conversation_id in meta
     Should Be Equal    ${transcribe_meta}[conversation_id]    ${conversation_id1}    msg=Transcription job meta conversation_id should match
 
+    # 2. Speaker job (conditional - only if speaker recognition enabled)
     ${speaker_job}=    Get Job Details    speaker_${conversation_id1[:12]}
-    ${speaker_meta}=    Set Variable    ${speaker_job}[meta]
-    Dictionary Should Contain Key    ${speaker_meta}    conversation_id    msg=Speaker job should have conversation_id in meta
-    Should Be Equal    ${speaker_meta}[conversation_id]    ${conversation_id1}    msg=Speaker job meta conversation_id should match
+    IF    ${speaker_job} != ${None}
+        ${speaker_meta}=    Set Variable    ${speaker_job}[meta]
+        Dictionary Should Contain Key    ${speaker_meta}    conversation_id    msg=Speaker job should have conversation_id in meta
+        Should Be Equal    ${speaker_meta}[conversation_id]    ${conversation_id1}    msg=Speaker job meta conversation_id should match
+        Log To Console    ✅ Speaker job metadata verified
+    ELSE
+        Log To Console    Speaker recognition disabled - skipping speaker job check
+    END
 
+    # 3. Memory job (always created if memory extraction enabled)
     ${memory_job}=    Get Job Details    memory_${conversation_id1[:12]}
     ${memory_meta}=    Set Variable    ${memory_job}[meta]
     Dictionary Should Contain Key    ${memory_meta}    conversation_id    msg=Memory job should have conversation_id in meta
@@ -223,7 +223,7 @@ Audio Upload Client ID Generation Test
 
     Log To Console    ✅ Client ID generation verified
     Log To Console    🆔 Client ID: ${client_id1}
-    Log To Console    ✅ conversation_id in job metadata verified
+    Log To Console    ✅ conversation_id in job metadata verified (transcription + memory jobs)
 
 
 Audio Upload Job Tracking Test
@@ -253,5 +253,5 @@ Audio Upload Job Tracking Test
     Should Be True    ${segment_count} > 0    msg=Should have at least one segment
 
     Log To Console    ✅ Job chain verified
-    Log To Console    📝 Transcription: completed
+    Log To Console    📝 Transcription: finished
     Log To Console    💬 Segments: ${segment_count}

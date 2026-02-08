@@ -1,0 +1,13 @@
+# Home Assistant Plugin Configuration
+#
+# This file contains non-secret configuration for the Home Assistant plugin.
+# Secrets (HA_TOKEN) are stored in backends/advanced/.env
+# Plugin orchestration (enabled, events, condition) is in config/plugins.yml
+
+# Home Assistant server configuration
+ha_url: ${HA_URL}
+ha_token: ${HA_TOKEN}
+
+# Command configuration
+wake_word: ${HA_WAKE_WORD:-vivi}
+timeout: ${HA_TIMEOUT:-30}

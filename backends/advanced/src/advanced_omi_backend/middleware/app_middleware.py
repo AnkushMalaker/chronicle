@@ -56,12 +56,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         "/auth/jwt/logout",
         "/auth/cookie/logout",
         "/ws",
-        "/ws_omi",
-        "/ws_pcm",
         "/mcp",
         "/health",
         "/auth/health",
         "/readiness",
+        "/api/queue/dashboard",  # Auto-refresh endpoint, too noisy
     }
 
     # Binary content types to exclude

@@ -1,0 +1,359 @@
+# Chronicle Default Configuration
+# This file provides sensible defaults for all configuration options.
+# User overrides in config.yml take precedence over these defaults.
+
+defaults:
+  llm: openai-llm
+  embedding: openai-embed
+  stt: stt-deepgram
+  stt_stream: stt-deepgram-stream
+  tts: tts-http
+  vector_store: vs-qdrant
+
+models:
+  # ===========================
+  # LLM Models
+  # ===========================
+  - name: openai-llm
+    description: OpenAI GPT-4o-mini
+    model_type: llm
+    model_provider: openai
+    api_family: openai
+    model_name: gpt-4o-mini
+    model_url: https://api.openai.com/v1
+    api_key: ${oc.env:OPENAI_API_KEY,''}
+    model_params:
+      temperature: 0.2
+      max_tokens: 2000
+    model_output: json
+
+  - name: local-llm
+    description: Local Ollama LLM
+    model_type: llm
+    model_provider: ollama
+    api_family: openai
+    model_name: llama3.1:latest
+    model_url: http://localhost:11434/v1
+    api_key: ${oc.env:OPENAI_API_KEY,ollama}
+    model_params:
+      temperature: 0.2
+      max_tokens: 2000
+    model_output: json
+
+  - name: groq-llm
+    description: Groq LLM via OpenAI-compatible API
+    model_type: llm
+    model_provider: groq
+    api_family: openai
+    model_name: llama-3.1-70b-versatile
+    model_url: https://api.groq.com/openai/v1
+    api_key: ${oc.env:GROQ_API_KEY,''}
+    model_params:
+      temperature: 0.2
+      max_tokens: 2000
+    model_output: json
+
+  # ===========================
+  # Embedding Models
+  # ===========================
+  - name: openai-embed
+    description: OpenAI text-embedding-3-small
+    model_type: embedding
+    model_provider: openai
+    api_family: openai
+    model_name: text-embedding-3-small
+    model_url: https://api.openai.com/v1
+    api_key: ${oc.env:OPENAI_API_KEY,''}
+    embedding_dimensions: 1536
+    model_output: vector
+
+  - name: local-embed
+    description: Local embeddings via Ollama nomic-embed-text
+    model_type: embedding
+    model_provider: ollama
+    api_family: openai
+    model_name: nomic-embed-text:latest
+    model_url: http://localhost:11434/v1
+    api_key: ${oc.env:OPENAI_API_KEY,ollama}
+    embedding_dimensions: 768
+    model_output: vector
+
+  # ===========================
+  # Speech-to-Text Models
+  # ===========================
+  - name: stt-deepgram
+    description: Deepgram Nova 3 (batch)
+    model_type: stt
+    model_provider: deepgram
+    api_family: http
+    model_url: https://api.deepgram.com/v1
+    api_key: ${oc.env:DEEPGRAM_API_KEY,''}
+    operations:
+      stt_transcribe:
+        method: POST
+        path: /listen
+        headers:
+          Authorization: Token ${oc.env:DEEPGRAM_API_KEY,''}
+          Content-Type: audio/raw
+        query:
+          model: nova-3
+          language: multi
+          smart_format: 'true'
+          punctuate: 'true'
+          diarize: 'true'
+          encoding: linear16
+          sample_rate: 16000
+          channels: '1'
+        response:
+          type: json
+          extract:
+            text: results.channels[0].alternatives[0].transcript
+            words: results.channels[0].alternatives[0].words
+            segments: results.channels[0].alternatives[0].paragraphs.paragraphs
+
+  - name: stt-parakeet-batch
+    description: Parakeet NeMo ASR (batch)
+    model_type: stt
+    model_provider: parakeet
+    api_family: http
+    model_url: http://${oc.env:PARAKEET_ASR_URL,172.17.0.1:8767}
+    api_key: ''
+    operations:
+      stt_transcribe:
+        method: POST
+        path: /transcribe
+        content_type: multipart/form-data
+        response:
+          type: json
+          extract:
+            text: text
+            words: words
+            segments: segments
+
+  # ===========================
+  # Text-to-Speech Models
+  # ===========================
+  - name: tts-http
+    description: Generic JSON TTS endpoint
+    model_type: tts
+    model_provider: custom
+    api_family: http
+    model_url: http://localhost:9000
+    operations:
+      tts_synthesize:
+        method: POST
+        path: /synthesize
+        headers:
+          Content-Type: application/json
+        response:
+          type: json
+
+  # ===========================
+  # Streaming STT Models
+  # ===========================
+  - name: stt-deepgram-stream
+    description: Deepgram Nova 3 streaming transcription over WebSocket
+    model_type: stt_stream
+    model_provider: deepgram
+    api_family: websocket
+    model_url: wss://api.deepgram.com/v1/listen
+    api_key: ${oc.env:DEEPGRAM_API_KEY,''}
+    operations:
+      query:
+        model: nova-3
+        language: multi
+        smart_format: 'true'
+        punctuate: 'true'
+        encoding: linear16
+        sample_rate: 16000
+        channels: '1'
+      end:
+        message:
+          type: CloseStream
+      expect:
+        interim_type: Results
+        final_type: Results
+        extract:
+          text: channel.alternatives[0].transcript
+          words: channel.alternatives[0].words
+          segments: channel.alternatives[0].paragraphs.paragraphs
+
+  - name: stt-parakeet-stream
+    description: Parakeet streaming transcription over WebSocket
+    model_type: stt_stream
+    model_provider: parakeet
+    api_family: websocket
+    model_url: ws://localhost:9001/stream
+    operations:
+      start:
+        message:
+          type: transcribe
+          config:
+            vad_enabled: true
+            vad_silence_ms: 1000
+            time_interval_seconds: 30
+            return_interim_results: true
+            min_audio_seconds: 0.5
+      chunk_header:
+        message:
+          type: audio_chunk
+          rate: 16000
+          width: 2
+          channels: 1
+      end:
+        message:
+          type: stop
+      expect:
+        interim_type: interim_result
+        final_type: final_result
+        extract:
+          text: text
+          words: words
+          segments: segments
+
+  # ===========================
+  # Vector Store
+  # ===========================
+  - name: vs-qdrant
+    description: Qdrant vector database
+    model_type: vector_store
+    model_provider: qdrant
+    api_family: qdrant
+    model_url: http://${oc.env:QDRANT_BASE_URL,qdrant}:${oc.env:QDRANT_PORT,6333}
+    model_params:
+      host: ${oc.env:QDRANT_BASE_URL,qdrant}
+      port: ${oc.env:QDRANT_PORT,6333}
+      collection_name: omi_memories
+
+# ===========================
+# Memory Configuration
+# ===========================
+memory:
+  provider: chronicle
+  timeout_seconds: 1200
+  extraction:
+    enabled: true
+    prompt: |
+      Extract important information from this conversation and return a JSON object with an array named "facts".
+      Include personal preferences, plans, names, dates, locations, numbers, and key details.
+      Keep items concise and useful.
+
+  # OpenMemory MCP provider settings (used when provider: openmemory_mcp)
+  openmemory_mcp:
+    server_url: http://localhost:8765
+    client_name: chronicle
+    user_id: default
+    timeout: 30
+
+  # Mycelia provider settings (used when provider: mycelia)
+  mycelia:
+    api_url: http://localhost:5173
+    timeout: 30
+
+  # Obsidian Neo4j provider settings (legacy)
+  obsidian:
+    enabled: false
+    neo4j_host: neo4j-mem0
+    timeout: 30
+
+# ===========================
+# Speaker Recognition
+# ===========================
+speaker_recognition:
+  # Enable/disable speaker recognition (overrides DISABLE_SPEAKER_RECOGNITION env var)
+  enabled: true
+  # Service URL (defaults to SPEAKER_SERVICE_URL env var if not specified)
+  service_url: null
+  # Request timeout in seconds
+  timeout: 60
+
+  # Hugging Face token for PyAnnote models (secret loaded from .env)
+  hf_token: ${oc.env:HF_TOKEN,''}
+
+  # Speaker identification threshold
+  similarity_threshold: 0.15
+
+  # Diarization chunking configuration (speaker service self-managed chunking)
+  # Maximum audio duration (seconds) for single PyAnnote call
+  # Files longer than this will be chunked automatically by the speaker service
+  max_diarize_duration: 60
+  # Overlap (seconds) between chunks for speaker continuity
+  diarize_chunk_overlap: 5.0
+  # Backend API URL for fetching audio segments (used by speaker service)
+  backend_api_url: http://host.docker.internal:8000
+
+  # Optional: Deepgram API key for wrapper service
+  deepgram_api_key: ${oc.env:DEEPGRAM_API_KEY,''}
+
+# ===========================
+# Chat Configuration
+# ===========================
+chat:
+  system_prompt: |
+    You are a helpful AI assistant with access to the user's conversation history and memories.
+    Provide clear, concise, and accurate responses based on the context available to you.
+
+# ===========================
+# Backend Configuration
+# ===========================
+backend:
+  # Authentication settings (secrets loaded from .env)
+  auth:
+    secret_key: ${oc.env:AUTH_SECRET_KEY,''}
+    admin_email: ${oc.env:ADMIN_EMAIL,''}
+    admin_password: ${oc.env:ADMIN_PASSWORD,''}
+
+  # LLM provider configuration
+  llm:
+    provider: openai  # or ollama
+    api_key: ${oc.env:OPENAI_API_KEY,''}
+    base_url: https://api.openai.com/v1
+    model: gpt-4o-mini
+    timeout: 60
+
+  # Audio processing settings
+  audio:
+    # When enabled, always persist audio even if no speech is detected
+    # This creates conversations for all audio sessions regardless of speech content
+    always_persist_enabled: false
+
+  # Transcription provider configuration
+  transcription:
+    provider: deepgram  # or parakeet
+    api_key: ${oc.env:DEEPGRAM_API_KEY,''}
+    base_url: https://api.deepgram.com
+    # Fallback to provider segments when speaker service unavailable
+    # When true: Use segments from transcription provider (e.g., mock provider in tests)
+    # When false: Expect speaker service to create segments via diarization (default production behavior)
+    use_provider_segments: false
+
+  # Diarization settings
+  diarization:
+    diarization_source: pyannote
+    similarity_threshold: 0.15
+    min_duration: 0.5
+    collar: 2.0
+    min_duration_off: 1.5
+    min_speakers: 2
+    max_speakers: 6
+
+  # Cleanup settings for soft-deleted conversations
+  cleanup:
+    auto_cleanup_enabled: false
+    retention_days: 30
+
+  # Speech detection thresholds
+  speech_detection:
+    min_words: ${oc.decode:${oc.env:SPEECH_DETECTION_MIN_WORDS,10}}              # Minimum words to create conversation
+    min_confidence: ${oc.decode:${oc.env:SPEECH_DETECTION_MIN_CONFIDENCE,0.7}}        # Word confidence threshold
+    min_duration: ${oc.decode:${oc.env:SPEECH_DETECTION_MIN_DURATION,10.0}}         # Minimum speech duration in seconds
+
+  # Conversation stop conditions
+  conversation_stop:
+    transcription_buffer_seconds: 120    # Periodic transcription interval (2 minutes)
+    speech_inactivity_threshold: 60      # Speech gap threshold for closure (1 minute)
+
+  # Audio storage paths
+  audio_storage:
+    audio_base_path: /app/data
+    audio_chunks_path: /app/data/audio_chunks

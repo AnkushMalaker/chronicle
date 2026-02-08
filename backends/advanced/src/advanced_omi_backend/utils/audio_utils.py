@@ -3,15 +3,18 @@
 ###############################################################################
 
 import asyncio
+import io
 import logging
 import os
 import time
 import uuid as uuid_lib
+import wave
 from pathlib import Path
 
 # Type import to avoid circular imports
 from typing import TYPE_CHECKING, Optional
 
+import numpy as np
 from wyoming.audio import AudioChunk
 
 if TYPE_CHECKING:
@@ -30,10 +33,85 @@ class AudioValidationError(Exception):
     pass
 
 
+async def resample_audio_with_ffmpeg(
+    audio_data: bytes,
+    input_sample_rate: int,
+    input_channels: int,
+    input_sample_width: int,
+    target_sample_rate: int,
+    target_channels: int = 1
+) -> bytes:
+    """
+    Resample audio using FFmpeg with stdin/stdout pipes (no disk I/O).
+
+    Args:
+        audio_data: Raw PCM audio bytes
+        input_sample_rate: Input sample rate in Hz
+        input_channels: Number of input channels
+        input_sample_width: Input sample width in bytes (2 for 16-bit, 4 for 32-bit)
+        target_sample_rate: Target sample rate in Hz
+        target_channels: Target number of channels (default: 1 for mono)
+
+    Returns:
+        Resampled PCM audio bytes (16-bit signed little-endian)
+
+    Raises:
+        RuntimeError: If FFmpeg resampling fails
+    """
+    # Determine FFmpeg format based on sample width
+    if input_sample_width == 2:
+        input_format = "s16le"  # 16-bit signed little-endian
+    elif input_sample_width == 4:
+        input_format = "s32le"  # 32-bit signed little-endian
+    else:
+        raise AudioValidationError(
+            f"Unsupported sample width: {input_sample_width} bytes (only 2 or 4 supported)"
+        )
+
+    # FFmpeg command for resampling via pipes
+    # pipe:0 = stdin, pipe:1 = stdout
+    cmd = [
+        "ffmpeg",
+        "-f", input_format,
+        "-ar", str(input_sample_rate),
+        "-ac", str(input_channels),
+        "-i", "pipe:0",  # Read from stdin
+        "-ar", str(target_sample_rate),
+        "-ac", str(target_channels),
+        "-f", "s16le",  # Always output 16-bit
+        "pipe:1",  # Write to stdout
+    ]
+
+    # Run FFmpeg with piped I/O
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    # Send input data and get output
+    stdout, stderr = await process.communicate(input=audio_data)
+
+    if process.returncode != 0:
+        error_msg = stderr.decode() if stderr else "Unknown error"
+        audio_logger.error(f"FFmpeg resampling failed: {error_msg}")
+        raise RuntimeError(f"Audio resampling failed: {error_msg}")
+
+    audio_logger.info(
+        f"Resampled audio: {input_sample_rate}Hz/{input_channels}ch → "
+        f"{target_sample_rate}Hz/{target_channels}ch "
+        f"({len(audio_data)} → {len(stdout)} bytes)"
+    )
+
+    return stdout
+
+
 async def validate_and_prepare_audio(
     audio_data: bytes,
     expected_sample_rate: int = 16000,
-    convert_to_mono: bool = True
+    convert_to_mono: bool = True,
+    auto_resample: bool = False
 ) -> tuple[bytes, int, int, int, float]:
     """
     Validate WAV audio data and prepare it for processing.
@@ -42,6 +120,7 @@ async def validate_and_prepare_audio(
         audio_data: Raw WAV file bytes
         expected_sample_rate: Expected sample rate (default: 16000 Hz)
         convert_to_mono: Whether to convert stereo to mono (default: True)
+        auto_resample: Whether to automatically resample audio if sample rate doesn't match (default: False)
 
     Returns:
         Tuple of (processed_audio_data, sample_rate, sample_width, channels, duration)
@@ -49,10 +128,6 @@ async def validate_and_prepare_audio(
     Raises:
         AudioValidationError: If audio validation fails
     """
-    import io
-    import wave
-    import numpy as np
-
     try:
         # Parse WAV file
         with wave.open(io.BytesIO(audio_data), "rb") as wav_file:
@@ -68,13 +143,36 @@ async def validate_and_prepare_audio(
     except Exception as e:
         raise AudioValidationError(f"Invalid WAV file: {str(e)}")
 
-    # Validate sample rate
+    # Handle sample rate mismatch
     if sample_rate != expected_sample_rate:
-        raise AudioValidationError(
-            f"Sample rate must be {expected_sample_rate}Hz, got {sample_rate}Hz"
-        )
+        if auto_resample:
+            audio_logger.info(
+                f"Auto-resampling audio from {sample_rate}Hz to {expected_sample_rate}Hz"
+            )
+            # Resample audio using FFmpeg (with pipes, no disk I/O)
+            processed_audio = await resample_audio_with_ffmpeg(
+                audio_data=processed_audio,
+                input_sample_rate=sample_rate,
+                input_channels=channels,
+                input_sample_width=sample_width,
+                target_sample_rate=expected_sample_rate,
+                target_channels=1 if convert_to_mono else channels
+            )
+            # Update metadata after resampling
+            sample_rate = expected_sample_rate
+            sample_width = 2  # FFmpeg outputs 16-bit
+            if convert_to_mono:
+                channels = 1
+            # Recalculate duration
+            duration = len(processed_audio) / (sample_rate * sample_width * channels)
+            # Skip stereo-to-mono conversion since resampling already handled it
+            convert_to_mono = False
+        else:
+            raise AudioValidationError(
+                f"Sample rate must be {expected_sample_rate}Hz, got {sample_rate}Hz"
+            )
 
-    # Convert stereo to mono if requested
+    # Convert stereo to mono if requested and not already done
     if convert_to_mono and channels == 2:
         audio_logger.info(f"Converting stereo audio to mono")
 
@@ -136,8 +234,8 @@ async def write_audio_file(
         AudioValidationError: If validation fails (when validate=True)
     """
     from easy_audio_interfaces.filesystem.filesystem_interfaces import LocalFileSink
+
     from advanced_omi_backend.config import CHUNK_DIR
-    from advanced_omi_backend.models.audio_file import AudioFile
 
     # Validate and prepare audio if needed
     if validate:
@@ -194,22 +292,6 @@ async def write_audio_file(
     audio_logger.info(
         f"✅ Wrote audio file: {wav_filename} ({len(audio_data)} bytes, {duration:.1f}s)"
     )
-
-    # Create AudioFile database entry using Beanie model
-    audio_file = AudioFile(
-        audio_uuid=audio_uuid,
-        source=source,
-        audio_path=wav_filename,
-        client_id=client_id,
-        timestamp=timestamp,
-        user_id=user_id,
-        user_email=user_email,
-        has_speech=False,  # Will be updated by transcription
-        speech_analysis={}, 
-    )
-    await audio_file.insert()
-
-    audio_logger.info(f"✅ Created AudioFile entry for {audio_uuid}")
 
     return relative_audio_path, str(file_path), duration
 
@@ -275,71 +357,47 @@ async def process_audio_chunk(
         client_state.update_audio_received(chunk)
 
 
-async def _process_audio_cropping_with_relative_timestamps(
-    original_path: str,
-    speech_segments: list[tuple[float, float]],
-    output_path: str,
-    audio_uuid: str,
-    _deprecated_chunk_repo=None,  # Deprecated - kept for backward compatibility
-) -> tuple[bool, list[dict]]:
+def pcm_to_wav_bytes(
+    pcm_data: bytes,
+    sample_rate: int = 16000,
+    channels: int = 1,
+    sample_width: int = 2
+) -> bytes:
     """
-    Process audio cropping with speech segments already in relative format.
+    Convert raw PCM audio data to WAV format in memory.
 
-    The segments are expected to be in relative format (seconds from audio start),
-    as provided by Deepgram transcription. No timestamp conversion is needed.
-
-    Note: Database updates are now handled by the caller (audio_jobs.py).
+    Args:
+        pcm_data: Raw PCM audio bytes
+        sample_rate: Sample rate in Hz (default: 16000)
+        channels: Number of audio channels (default: 1 for mono)
+        sample_width: Sample width in bytes (default: 2 for 16-bit)
 
     Returns:
-        Tuple of (success: bool, segment_mapping: list[dict])
+        WAV file data as bytes
     """
-    try:
-        # Validate input segments
-        validated_segments = []
-        for start_rel, end_rel in speech_segments:
-            # Validate input timestamps
-            if start_rel >= end_rel:
-                logger.warning(
-                    f"⚠️ Invalid speech segment: start={start_rel} >= end={end_rel}, skipping"
-                )
-                continue
+    import io
+    import wave
 
-            # Ensure timestamps are positive (sanity check)
-            if start_rel < 0:
-                logger.warning(
-                    f"⚠️ Negative start timestamp: {start_rel}, clamping to 0.0"
-                )
-                start_rel = 0.0
-            if end_rel < 0:
-                logger.warning(
-                    f"⚠️ Negative end timestamp: {end_rel}, skipping segment"
-                )
-                continue
+    logger.debug(
+        f"Converting PCM to WAV in memory: {len(pcm_data)} bytes "
+        f"(rate={sample_rate}, channels={channels}, width={sample_width})"
+    )
 
-            validated_segments.append((start_rel, end_rel))
+    # Use BytesIO to create WAV in memory
+    wav_buffer = io.BytesIO()
 
-        logger.info(f"🕐 Processing cropping for {audio_uuid}")
-        logger.info(f"🕐 Input segments (relative timestamps): {speech_segments}")
-        logger.info(f"🕐 Validated segments: {validated_segments}")
+    with wave.open(wav_buffer, 'wb') as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(sample_width)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm_data)
 
-        # Validate that we have valid segments
-        if not validated_segments:
-            logger.warning(
-                f"No valid segments for cropping {audio_uuid}"
-            )
-            return False, []
+    # Get the WAV bytes
+    wav_bytes = wav_buffer.getvalue()
 
-        success, segment_mapping = await _crop_audio_with_ffmpeg(original_path, validated_segments, output_path)
-        if success:
-            cropped_filename = output_path.split("/")[-1]
-            logger.info(f"Successfully processed cropped audio: {cropped_filename}")
-            return True, segment_mapping
-        else:
-            logger.error(f"Failed to crop audio for {audio_uuid}")
-            return False, segment_mapping
-    except Exception as e:
-        logger.error(f"Error in audio cropping task for {audio_uuid}: {e}", exc_info=True)
-        return False, []
+    logger.debug(f"Created WAV in memory: {len(wav_bytes)} bytes")
+
+    return wav_bytes
 
 
 def write_pcm_to_wav(
@@ -383,142 +441,3 @@ def write_pcm_to_wav(
     except Exception as e:
         logger.error(f"❌ Failed to write PCM to WAV: {e}")
         raise
-
-
-async def _crop_audio_with_ffmpeg(
-    original_path: str, speech_segments: list[tuple[float, float]], output_path: str
-) -> tuple[bool, list[dict]]:
-    """
-    Use ffmpeg to crop audio - runs as async subprocess, no GIL issues.
-
-    Returns:
-        Tuple of (success: bool, segment_mapping: list[dict])
-
-        segment_mapping contains one entry per input segment with:
-        - original_index: Index in input speech_segments
-        - original_start/end: Original timestamps in source audio
-        - cropped_start/end: Where the speech starts/ends in cropped file (None if filtered)
-        - kept: Whether segment was kept (True) or filtered out (False)
-    """
-    logger.info(f"Cropping audio {original_path} with {len(speech_segments)} speech segments")
-
-    if not speech_segments:
-        logger.warning(f"No speech segments to crop for {original_path}")
-        return False, []
-
-    # Check if the original file exists
-    if not os.path.exists(original_path):
-        logger.error(f"Original audio file does not exist: {original_path}")
-        return False, []
-
-    # Filter out segments that are too short and build mapping
-    filtered_segments = []
-    segment_mapping = []
-    current_cropped_offset = 0.0
-
-    for idx, (start, end) in enumerate(speech_segments):
-        duration = end - start
-        if duration >= MIN_SPEECH_SEGMENT_DURATION:
-            # Add padding around speech segments
-            padded_start = max(0, start - CROPPING_CONTEXT_PADDING)
-            padded_end = end + CROPPING_CONTEXT_PADDING
-            padded_duration = padded_end - padded_start
-
-            filtered_segments.append((padded_start, padded_end))
-
-            # Calculate where the speech (not padding) appears in cropped file
-            # The cropped file will have: [padding_before][speech][padding_after]
-            padding_before = start - padded_start
-            speech_start_in_cropped = current_cropped_offset + padding_before
-            speech_end_in_cropped = speech_start_in_cropped + duration
-
-            segment_mapping.append({
-                "original_index": idx,
-                "original_start": start,
-                "original_end": end,
-                "cropped_start": speech_start_in_cropped,
-                "cropped_end": speech_end_in_cropped,
-                "kept": True
-            })
-
-            # Move offset by the full padded duration
-            current_cropped_offset += padded_duration
-        else:
-            # Segment filtered out
-            segment_mapping.append({
-                "original_index": idx,
-                "original_start": start,
-                "original_end": end,
-                "cropped_start": None,
-                "cropped_end": None,
-                "kept": False
-            })
-            logger.debug(
-                f"Skipping short segment: {start}-{end} ({duration:.2f}s < {MIN_SPEECH_SEGMENT_DURATION}s)"
-            )
-
-    if not filtered_segments:
-        logger.warning(
-            f"No segments meet minimum duration ({MIN_SPEECH_SEGMENT_DURATION}s) for {original_path}"
-        )
-        return False, segment_mapping
-
-    logger.info(
-        f"Cropping audio {original_path} with {len(filtered_segments)} speech segments (filtered from {len(speech_segments)})"
-    )
-
-    try:
-        # Build ffmpeg filter for concatenating speech segments
-        filter_parts = []
-        for i, (start, end) in enumerate(filtered_segments):
-            duration = end - start
-            filter_parts.append(
-                f"[0:a]atrim=start={start}:duration={duration},asetpts=PTS-STARTPTS[seg{i}]"
-            )
-
-        # Concatenate all segments
-        inputs = "".join(f"[seg{i}]" for i in range(len(filtered_segments)))
-        concat_filter = f"{inputs}concat=n={len(filtered_segments)}:v=0:a=1[out]"
-
-        full_filter = ";".join(filter_parts + [concat_filter])
-
-        # Run ffmpeg as async subprocess
-        cmd = [
-            "ffmpeg",
-            "-y",  # -y = overwrite output
-            "-i",
-            original_path,
-            "-filter_complex",
-            full_filter,
-            "-map",
-            "[out]",
-            "-c:a",
-            "pcm_s16le",  # Keep same format as original
-            output_path,
-        ]
-
-        logger.info(f"Running ffmpeg command: {' '.join(cmd)}")
-
-        process = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-
-        stdout, stderr = await process.communicate()
-        if stdout:
-            logger.debug(f"FFMPEG stdout: {stdout.decode()}")
-
-        if process.returncode == 0:
-            # Calculate cropped duration
-            cropped_duration = sum(end - start for start, end in filtered_segments)
-            logger.info(
-                f"Successfully cropped {original_path} -> {output_path} ({cropped_duration:.1f}s from {len(filtered_segments)} segments)"
-            )
-            return True, segment_mapping
-        else:
-            error_msg = stderr.decode() if stderr else "Unknown ffmpeg error"
-            logger.error(f"ffmpeg failed for {original_path}: {error_msg}")
-            return False, segment_mapping
-
-    except Exception as e:
-        logger.error(f"Error running ffmpeg on {original_path}: {e}", exc_info=True)
-        return False, segment_mapping

@@ -1,13 +1,14 @@
 import io
+import logging
 import tempfile
 from typing import List
-import logging
-from starlette.datastructures import UploadFile as StarletteUploadFile
-from googleapiclient.http import MediaIoBaseDownload
-from advanced_omi_backend.clients.gdrive_audio_client import get_google_drive_client
-from advanced_omi_backend.models.audio_file import AudioFile
-from advanced_omi_backend.utils.audio_utils import AudioValidationError
 
+from googleapiclient.http import MediaIoBaseDownload
+from starlette.datastructures import UploadFile as StarletteUploadFile
+
+from advanced_omi_backend.clients.gdrive_audio_client import get_google_drive_client
+from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.utils.audio_utils import AudioValidationError
 
 logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
@@ -56,7 +57,7 @@ async def download_and_wrap_drive_file(service, file_item):
 # -------------------------------------------------------------
 # LIST + DOWNLOAD FILES IN FOLDER (OAUTH)
 # -------------------------------------------------------------
-async def download_audio_files_from_drive(folder_id: str) -> List[StarletteUploadFile]:
+async def download_audio_files_from_drive(folder_id: str, user_id: str) -> List[StarletteUploadFile]:
     if not folder_id:
         raise AudioValidationError("Google Drive folder ID is required.")
 
@@ -88,12 +89,13 @@ async def download_audio_files_from_drive(folder_id: str) -> List[StarletteUploa
         
         for item in audio_files_metadata:
             file_id = item["id"] # Get the Google Drive File ID
-            
-            #  Check if the file is already processed
-            existing = await AudioFile.find_one({
-                "audio_uuid": file_id,
-                "source": "gdrive"
-            })
+
+            # Check if the file is already processed (check Conversation by external_source_id and user_id)
+            existing = await Conversation.find_one(
+                Conversation.external_source_id == file_id,
+                Conversation.external_source_type == "gdrive",
+                Conversation.user_id == user_id
+            )
 
             if existing:
                 audio_logger.info(f"Skipping already processed file: {item['name']}")
@@ -102,8 +104,8 @@ async def download_audio_files_from_drive(folder_id: str) -> List[StarletteUploa
 
             # synchronous call now (but make the parent function async)
             wrapped_file = await download_and_wrap_drive_file(service, item)
-            #  Attach the file_id to the UploadFile object for later use
-            wrapped_file.audio_uuid = file_id
+            #  Attach the file_id to the UploadFile object for later use (for external_source_id)
+            wrapped_file.file_id = file_id
             wrapped_files.append(wrapped_file)
             
         if not wrapped_files and skipped_count > 0:

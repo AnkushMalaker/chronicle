@@ -1,0 +1,39 @@
+#!/bin/bash
+# tests/bin/status-containers.sh
+# Show container health and status
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/../setup/.env.test"
+
+# Get project name (from docker-compose-test.yml)
+# The project name is set in the compose file as 'backend-test'
+PROJECT_NAME="backend-test"
+
+echo "📊 Test Container Status"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# Show container status
+docker ps -a --filter "name=$PROJECT_NAME" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# Check if backend is responsive
+echo ""
+echo "🏥 Health Checks:"
+if curl -s http://localhost:8001/health > /dev/null 2>&1; then
+    echo "   ✅ Backend (http://localhost:8001/health)"
+else
+    echo "   ❌ Backend (http://localhost:8001/health)"
+fi
+
+if curl -s http://localhost:8001/readiness > /dev/null 2>&1; then
+    echo "   ✅ Services Ready (http://localhost:8001/readiness)"
+else
+    echo "   ❌ Services Not Ready (http://localhost:8001/readiness)"
+fi
+
+echo ""

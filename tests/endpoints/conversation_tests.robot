@@ -29,7 +29,6 @@ Get User Conversations Test
             FOR    ${conversation}    IN    @{client_conversations}
                 # Verify conversation structure
                 Dictionary Should Contain Key    ${conversation}    conversation_id
-                Dictionary Should Contain Key    ${conversation}    audio_uuid
                 Dictionary Should Contain Key    ${conversation}    created_at
             END
         END
@@ -46,7 +45,6 @@ Get Conversation By ID Test
 
     # Verify conversation structure
     Dictionary Should Contain Key    ${conversation}    conversation_id
-    Dictionary Should Contain Key    ${conversation}    audio_uuid
     Dictionary Should Contain Key    ${conversation}    created_at
     Should Be Equal    ${conversation}[conversation_id]    ${conversation_id}
 
@@ -61,7 +59,7 @@ Reprocess test and get Conversation Versions Test
 
     # Wait for the reprocess job to complete before getting versions
     ${job_id}=    Set Variable    ${reprocess}[job_id]
-    Wait For Job Status    ${job_id}    completed    timeout=120s    interval=5s
+    Wait For Job Status    ${job_id}    finished    timeout=120s    interval=5s
 
     ${conversation}=           Get Conversation By ID       ${conversation_id}
     ${updated_versions}=           Get Conversation Versions     ${conversation_id}
@@ -113,7 +111,7 @@ Reprocess Memory Test
 
     # Wait for job to complete
     ${job_id}=    Set Variable    ${response}[job_id]
-    Wait For Job Status    ${job_id}    completed    timeout=60s    interval=5s
+    Wait For Job Status    ${job_id}    finished    timeout=60s    interval=5s
 
     # Verify new memory version was created
     ${updated_conversation}=    Get Conversation By ID    ${conversation_id}
@@ -173,7 +171,7 @@ Transcript Version activate Test
         ${reprocess}=    Reprocess Transcript     ${conversation_id}
         # Wait for the reprocess job to complete before getting versions
         ${job_id}=    Set Variable    ${reprocess}[job_id]
-        Wait For Job Status    ${job_id}    completed    timeout=120s    interval=5s
+        Wait For Job Status    ${job_id}    finished    timeout=120s    interval=5s
     END
 
     # Get fresh version list after reprocessing

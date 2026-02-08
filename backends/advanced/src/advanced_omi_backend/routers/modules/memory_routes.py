@@ -7,7 +7,7 @@ Handles memory CRUD operations, search, and debug functionality.
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, Body
+from fastapi import APIRouter, Body, Depends, Query
 from pydantic import BaseModel
 
 from advanced_omi_backend.auth import current_active_user, current_superuser
@@ -70,16 +70,6 @@ async def add_memory(
 async def delete_memory(memory_id: str, current_user: User = Depends(current_active_user)):
     """Delete a memory by ID. Users can only delete their own memories, admins can delete any."""
     return await memory_controller.delete_memory(memory_id, current_user)
-
-
-@router.get("/unfiltered")
-async def get_memories_unfiltered(
-    current_user: User = Depends(current_active_user),
-    limit: int = Query(default=50, ge=1, le=1000),
-    user_id: Optional[str] = Query(default=None, description="User ID filter (admin only)"),
-):
-    """Get all memories including fallback transcript memories (for debugging). Users see only their own memories, admins can see all or filter by user."""
-    return await memory_controller.get_memories_unfiltered(current_user, limit, user_id)
 
 
 @router.get("/admin")

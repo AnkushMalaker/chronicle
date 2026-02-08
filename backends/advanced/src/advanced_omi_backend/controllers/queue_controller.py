@@ -9,25 +9,72 @@ This module provides:
 """
 
 import asyncio
-import os
 import logging
+import os
 import uuid
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 import redis
 from rq import Queue, Worker
-from rq.job import Job
-from rq.registry import ScheduledJobRegistry, DeferredJobRegistry
+from rq.job import Job, JobStatus
+from rq.registry import DeferredJobRegistry, ScheduledJobRegistry
 
-from advanced_omi_backend.models.job import JobPriority
+from advanced_omi_backend.config_loader import get_service_config
 from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.job import JobPriority
 
 logger = logging.getLogger(__name__)
 
 # Redis connection configuration
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 redis_conn = redis.from_url(REDIS_URL)
+
+
+def get_job_status_from_rq(job: Job) -> str:
+    """
+    Get job status using RQ's native method.
+
+    Uses job.get_status() which is the Redis Queue standard approach.
+    Returns RQ's standard status names.
+
+    Returns one of: queued, started, finished, failed, deferred, scheduled, canceled, stopped
+
+    Raises:
+        RuntimeError: If job status is unexpected (should never happen with RQ's method)
+    """
+    rq_status = job.get_status()
+
+    # RQ returns status as JobStatus enum or string
+    # Convert to string if it's an enum
+    if isinstance(rq_status, JobStatus):
+        status_str = rq_status.value
+    else:
+        status_str = str(rq_status)
+
+    # Validate it's a known RQ status
+    valid_statuses = {
+        JobStatus.QUEUED.value,
+        JobStatus.STARTED.value,
+        JobStatus.FINISHED.value,
+        JobStatus.FAILED.value,
+        JobStatus.DEFERRED.value,
+        JobStatus.SCHEDULED.value,
+        JobStatus.CANCELED.value,
+        JobStatus.STOPPED.value,
+    }
+
+    if status_str not in valid_statuses:
+        logger.error(
+            f"Job {job.id} has unexpected RQ status: {status_str}. "
+            f"This indicates RQ library added a new status we don't know about."
+        )
+        raise RuntimeError(
+            f"Job {job.id} has unknown RQ status: {status_str}. "
+            f"Please update get_job_status_from_rq() to handle this new status."
+        )
+
+    return status_str
 
 # Queue name constants
 TRANSCRIPTION_QUEUE = "transcription"
@@ -60,34 +107,34 @@ def get_queue(queue_name: str = DEFAULT_QUEUE) -> Queue:
 
 
 def get_job_stats() -> Dict[str, Any]:
-    """Get statistics about jobs in all queues matching frontend expectations."""
+    """Get statistics about jobs in all queues using RQ standard status names."""
     total_jobs = 0
     queued_jobs = 0
-    processing_jobs = 0
-    completed_jobs = 0
+    started_jobs = 0  # RQ standard: "started" not "processing"
+    finished_jobs = 0  # RQ standard: "finished" not "completed"
     failed_jobs = 0
-    cancelled_jobs = 0
+    canceled_jobs = 0  # RQ standard: "canceled" not "cancelled"
     deferred_jobs = 0  # Jobs waiting for dependencies (depends_on)
 
     for queue_name in QUEUE_NAMES:
         queue = get_queue(queue_name)
 
         queued_jobs += len(queue)
-        processing_jobs += len(queue.started_job_registry)
-        completed_jobs += len(queue.finished_job_registry)
+        started_jobs += len(queue.started_job_registry)
+        finished_jobs += len(queue.finished_job_registry)
         failed_jobs += len(queue.failed_job_registry)
-        cancelled_jobs += len(queue.canceled_job_registry)
+        canceled_jobs += len(queue.canceled_job_registry)
         deferred_jobs += len(queue.deferred_job_registry)
 
-    total_jobs = queued_jobs + processing_jobs + completed_jobs + failed_jobs + cancelled_jobs + deferred_jobs
+    total_jobs = queued_jobs + started_jobs + finished_jobs + failed_jobs + canceled_jobs + deferred_jobs
 
     return {
         "total_jobs": total_jobs,
         "queued_jobs": queued_jobs,
-        "processing_jobs": processing_jobs,
-        "completed_jobs": completed_jobs,
+        "started_jobs": started_jobs,
+        "finished_jobs": finished_jobs,
         "failed_jobs": failed_jobs,
-        "cancelled_jobs": cancelled_jobs,
+        "canceled_jobs": canceled_jobs,
         "deferred_jobs": deferred_jobs,
         "timestamp": datetime.utcnow().isoformat()
     }
@@ -113,24 +160,32 @@ def get_jobs(
     Returns:
         Dict with jobs list and pagination metadata matching frontend expectations
     """
+    logger.info(f"🔍 DEBUG get_jobs: Filtering - queue_name={queue_name}, job_type={job_type}, client_id={client_id}")
     all_jobs = []
+    seen_job_ids = set()  # Track which job IDs we've already processed to avoid duplicates
 
     queues_to_check = [queue_name] if queue_name else QUEUE_NAMES
+    logger.info(f"🔍 DEBUG get_jobs: Checking queues: {queues_to_check}")
 
     for qname in queues_to_check:
         queue = get_queue(qname)
 
-        # Collect jobs from all registries
+        # Collect jobs from all registries (using RQ standard status names)
         registries = [
             (queue.job_ids, "queued"),
-            (queue.started_job_registry.get_job_ids(), "processing"),
-            (queue.finished_job_registry.get_job_ids(), "completed"),
+            (queue.started_job_registry.get_job_ids(), "started"),  # RQ standard, not "processing"
+            (queue.finished_job_registry.get_job_ids(), "finished"),  # RQ standard, not "completed"
             (queue.failed_job_registry.get_job_ids(), "failed"),
             (queue.deferred_job_registry.get_job_ids(), "deferred"),  # Jobs waiting for dependencies
         ]
 
         for job_ids, status in registries:
             for job_id in job_ids:
+                # Skip if we've already processed this job_id (prevents duplicates across registries)
+                if job_id in seen_job_ids:
+                    continue
+                seen_job_ids.add(job_id)
+
                 try:
                     job = Job.fetch(job_id, connection=redis_conn)
 
@@ -140,15 +195,22 @@ def get_jobs(
                     # Extract just the function name (e.g., "listen_for_speech_job" from "module.listen_for_speech_job")
                     func_name = job.func_name.split('.')[-1] if job.func_name else "unknown"
 
+                    # Debug: Log job details before filtering
+                    logger.debug(f"🔍 DEBUG get_jobs: Job {job_id} - func_name={func_name}, full_func_name={job.func_name}, meta_client_id={job.meta.get('client_id', '') if job.meta else ''}, status={status}")
+
                     # Apply job_type filter
                     if job_type and job_type not in func_name:
+                        logger.debug(f"🔍 DEBUG get_jobs: Filtered out {job_id} - job_type '{job_type}' not in func_name '{func_name}'")
                         continue
 
                     # Apply client_id filter (partial match in meta)
                     if client_id:
                         job_client_id = job.meta.get("client_id", "") if job.meta else ""
                         if client_id not in job_client_id:
+                            logger.debug(f"🔍 DEBUG get_jobs: Filtered out {job_id} - client_id '{client_id}' not in job_client_id '{job_client_id}'")
                             continue
+
+                    logger.debug(f"🔍 DEBUG get_jobs: Including job {job_id} in results")
 
                     all_jobs.append({
                         "job_id": job.id,
@@ -182,6 +244,8 @@ def get_jobs(
     paginated_jobs = all_jobs[offset:offset + limit]
     has_more = (offset + limit) < total_jobs
 
+    logger.info(f"🔍 DEBUG get_jobs: Found {total_jobs} matching jobs (returning {len(paginated_jobs)} after pagination)")
+
     return {
         "jobs": paginated_jobs,
         "pagination": {
@@ -193,15 +257,15 @@ def get_jobs(
     }
 
 
-def all_jobs_complete_for_session(session_id: str) -> bool:
+def all_jobs_complete_for_client(client_id: str) -> bool:
     """
-    Check if all jobs associated with a session are in terminal states.
+    Check if all jobs associated with a client are in terminal states.
 
-    Only checks jobs with audio_uuid in job.meta (no backward compatibility).
+    Checks jobs with client_id in job.meta.
     Traverses dependency chains to include dependent jobs.
 
     Args:
-        session_id: The audio_uuid (session ID) to check jobs for
+        client_id: The client device identifier to check jobs for
 
     Returns:
         True if all jobs are complete (or no jobs found), False if any job is still processing
@@ -230,7 +294,7 @@ def all_jobs_complete_for_session(session_id: str) -> bool:
 
         return True
 
-    # Find all jobs for this session
+    # Find all jobs for this client
     all_queues = [transcription_queue, memory_queue, audio_queue, default_queue]
     for queue in all_queues:
         registries = [
@@ -248,8 +312,8 @@ def all_jobs_complete_for_session(session_id: str) -> bool:
                 try:
                     job = Job.fetch(job_id, connection=redis_conn)
 
-                    # Only check jobs with audio_uuid in meta
-                    if job.meta and job.meta.get('audio_uuid') == session_id:
+                    # Only check jobs with client_id in meta
+                    if job.meta and job.meta.get('client_id') == client_id:
                         if not is_job_complete(job):
                             return False
                 except Exception as e:
@@ -271,17 +335,21 @@ def start_streaming_jobs(
     2. Audio persistence job - writes audio chunks to WAV file (file rotation per conversation)
 
     Args:
-        session_id: Stream session ID (audio_uuid)
+        session_id: Stream session ID (equals client_id for streaming)
         user_id: User identifier
         client_id: Client identifier
 
     Returns:
         Dict with job IDs: {'speech_detection': job_id, 'audio_persistence': job_id}
 
-    Note: user_email is fetched from the database when needed.
+    Note:
+        - user_email is fetched from the database when needed.
+        - always_persist setting is read from global config by the audio persistence job.
     """
-    from advanced_omi_backend.workers.transcription_jobs import stream_speech_detection_job
     from advanced_omi_backend.workers.audio_jobs import audio_streaming_persistence_job
+    from advanced_omi_backend.workers.transcription_jobs import (
+        stream_speech_detection_job,
+    )
 
     # Enqueue speech detection job
     speech_job = transcription_queue.enqueue(
@@ -290,12 +358,22 @@ def start_streaming_jobs(
         user_id,
         client_id,
         job_timeout=86400,  # 24 hours for all-day sessions
-        result_ttl=JOB_RESULT_TTL,
+        ttl=None,  # No pre-run expiry (job can wait indefinitely in queue)
+        result_ttl=JOB_RESULT_TTL,  # Cleanup AFTER completion
+        failure_ttl=86400,  # Cleanup failed jobs after 24h
         job_id=f"speech-detect_{session_id[:12]}",
         description=f"Listening for speech...",
-        meta={'audio_uuid': session_id, 'client_id': client_id, 'session_level': True}
+        meta={'client_id': client_id, 'session_level': True}
     )
+    # Log job enqueue with TTL information for debugging
+    actual_ttl = redis_conn.ttl(f"rq:job:{speech_job.id}")
     logger.info(f"📥 RQ: Enqueued speech detection job {speech_job.id}")
+    logger.info(
+        f"🔍 Job enqueue details: ID={speech_job.id}, "
+        f"job_timeout={speech_job.timeout}, result_ttl={speech_job.result_ttl}, "
+        f"failure_ttl={speech_job.failure_ttl}, redis_key_ttl={actual_ttl}, "
+        f"queue_length={transcription_queue.count}, client_id={client_id}"
+    )
 
     # Store job ID for cleanup (keyed by client_id for easy WebSocket cleanup)
     try:
@@ -307,18 +385,29 @@ def start_streaming_jobs(
     # Enqueue audio persistence job on dedicated audio queue
     # NOTE: This job handles file rotation for multiple conversations automatically
     # Runs for entire session, not tied to individual conversations
+    # The job reads always_persist_enabled from global config internally
     audio_job = audio_queue.enqueue(
         audio_streaming_persistence_job,
         session_id,
         user_id,
         client_id,
         job_timeout=86400,  # 24 hours for all-day sessions
-        result_ttl=JOB_RESULT_TTL,
+        ttl=None,  # No pre-run expiry (job can wait indefinitely in queue)
+        result_ttl=JOB_RESULT_TTL,  # Cleanup AFTER completion
+        failure_ttl=86400,  # Cleanup failed jobs after 24h
         job_id=f"audio-persist_{session_id[:12]}",
         description=f"Audio persistence for session {session_id[:12]}",
-        meta={'audio_uuid': session_id, 'session_level': True}  # Mark as session-level job
+        meta={'client_id': client_id, 'session_level': True}  # Mark as session-level job
     )
+    # Log job enqueue with TTL information for debugging
+    actual_ttl = redis_conn.ttl(f"rq:job:{audio_job.id}")
     logger.info(f"📥 RQ: Enqueued audio persistence job {audio_job.id} on audio queue")
+    logger.info(
+        f"🔍 Job enqueue details: ID={audio_job.id}, "
+        f"job_timeout={audio_job.timeout}, result_ttl={audio_job.result_ttl}, "
+        f"failure_ttl={audio_job.failure_ttl}, redis_key_ttl={actual_ttl}, "
+        f"queue_length={audio_queue.count}, client_id={client_id}"
+    )
 
     return {
         'speech_detection': speech_job.id,
@@ -328,151 +417,176 @@ def start_streaming_jobs(
 
 def start_post_conversation_jobs(
     conversation_id: str,
-    audio_uuid: str,
-    audio_file_path: str,
     user_id: str,
-    post_transcription: bool = True,
     transcript_version_id: Optional[str] = None,
     depends_on_job = None,
-    client_id: Optional[str] = None
+    client_id: Optional[str] = None,
+    end_reason: str = "file_upload"
 ) -> Dict[str, str]:
     """
     Start post-conversation processing jobs after conversation is created.
 
     This creates the standard processing chain after a conversation is created:
-    1. [Optional] Transcription job - Batch transcription (if post_transcription=True)
-    2. Audio cropping job - Removes silence from audio
-    3. Speaker recognition job - Identifies speakers in audio
-    4. Memory extraction job - Extracts memories from conversation (parallel)
-    5. Title/summary generation job - Generates title and summary (parallel)
+    1. Speaker recognition job - Identifies speakers in audio segments
+    2. Memory extraction job - Extracts memories from conversation
+    3. Title/summary generation job - Generates title and summary
+    4. Event dispatch job - Triggers conversation.complete plugins
+
+    Note: Batch transcription removed - streaming conversations use streaming transcript.
+    For file uploads, batch transcription must be enqueued separately before calling this function.
 
     Args:
         conversation_id: Conversation identifier
-        audio_uuid: Audio UUID for job tracking
-        audio_file_path: Path to audio file
         user_id: User identifier
-        post_transcription: If True, run batch transcription step (for uploads)
-                           If False, skip transcription (streaming already has it)
         transcript_version_id: Transcript version ID (auto-generated if None)
-        depends_on_job: Optional job dependency for cropping job
+        depends_on_job: Optional job dependency for first job (e.g., transcription for file uploads)
+        client_id: Client ID for UI tracking
+        end_reason: Reason conversation ended (e.g., 'file_upload', 'websocket_disconnect', 'user_stopped')
 
     Returns:
-        Dict with job IDs (transcription will be None if post_transcription=False)
+        Dict with job IDs for speaker_recognition, memory, title_summary, event_dispatch
     """
-    from advanced_omi_backend.workers.transcription_jobs import transcribe_full_audio_job
-    from advanced_omi_backend.workers.speaker_jobs import recognise_speakers_job
-    from advanced_omi_backend.workers.audio_jobs import process_cropping_job
+    from advanced_omi_backend.workers.conversation_jobs import (
+        dispatch_conversation_complete_event_job,
+        generate_title_summary_job,
+    )
     from advanced_omi_backend.workers.memory_jobs import process_memory_job
-    from advanced_omi_backend.workers.conversation_jobs import generate_title_summary_job
+    from advanced_omi_backend.workers.speaker_jobs import recognise_speakers_job
 
     version_id = transcript_version_id or str(uuid.uuid4())
 
     # Build job metadata (include client_id if provided for UI tracking)
-    job_meta = {'audio_uuid': audio_uuid, 'conversation_id': conversation_id}
+    job_meta = {'conversation_id': conversation_id}
     if client_id:
         job_meta['client_id'] = client_id
 
-    # Step 1: Batch transcription job (ALWAYS run to get correct conversation-relative timestamps)
-    # Even for streaming, we need batch transcription before cropping to fix cumulative timestamps
-    transcribe_job_id = f"transcribe_{conversation_id[:12]}"
-    logger.info(f"🔍 DEBUG: Creating transcribe job with job_id={transcribe_job_id}, conversation_id={conversation_id[:12]}, audio_uuid={audio_uuid[:12]}")
+    # Check if speaker recognition is enabled
+    speaker_config = get_service_config('speaker_recognition')
+    speaker_enabled = speaker_config.get('enabled', True)  # Default to True for backward compatibility
 
-    transcription_job = transcription_queue.enqueue(
-        transcribe_full_audio_job,
-        conversation_id,
-        audio_uuid,
-        audio_file_path,
-        version_id,
-        "batch",  # trigger
-        job_timeout=1800,  # 30 minutes
-        result_ttl=JOB_RESULT_TTL,
-        depends_on=depends_on_job,
-        job_id=transcribe_job_id,
-        description=f"Transcribe conversation {conversation_id[:8]}",
-        meta=job_meta
-    )
-    logger.info(f"📥 RQ: Enqueued transcription job {transcription_job.id}, meta={transcription_job.meta}")
-    crop_depends_on = transcription_job
+    # Step 1: Speaker recognition job (conditional - only if enabled)
+    speaker_dependency = depends_on_job  # Start with upstream dependency (transcription if file upload)
+    speaker_job = None
 
-    # Step 2: Audio cropping job (depends on transcription if it ran, otherwise depends_on_job)
-    crop_job_id = f"crop_{conversation_id[:12]}"
-    logger.info(f"🔍 DEBUG: Creating crop job with job_id={crop_job_id}, conversation_id={conversation_id[:12]}, audio_uuid={audio_uuid[:12]}")
+    if speaker_enabled:
+        speaker_job_id = f"speaker_{conversation_id[:12]}"
+        logger.info(f"🔍 DEBUG: Creating speaker job with job_id={speaker_job_id}, conversation_id={conversation_id[:12]}")
 
-    cropping_job = default_queue.enqueue(
-        process_cropping_job,
-        conversation_id,
-        audio_file_path,
-        job_timeout=300,  # 5 minutes
-        result_ttl=JOB_RESULT_TTL,
-        depends_on=crop_depends_on,
-        job_id=crop_job_id,
-        description=f"Crop audio for conversation {conversation_id[:8]}",
-        meta=job_meta
-    )
-    logger.info(f"📥 RQ: Enqueued cropping job {cropping_job.id}, meta={cropping_job.meta}")
+        speaker_job = transcription_queue.enqueue(
+            recognise_speakers_job,
+            conversation_id,
+            version_id,
+            job_timeout=1200,  # 20 minutes
+            result_ttl=JOB_RESULT_TTL,
+            depends_on=speaker_dependency,
+            job_id=speaker_job_id,
+            description=f"Speaker recognition for conversation {conversation_id[:8]}",
+            meta=job_meta
+        )
+        speaker_dependency = speaker_job  # Chain for next jobs
+        if depends_on_job:
+            logger.info(f"📥 RQ: Enqueued speaker recognition job {speaker_job.id}, meta={speaker_job.meta} (depends on {depends_on_job.id})")
+        else:
+            logger.info(f"📥 RQ: Enqueued speaker recognition job {speaker_job.id}, meta={speaker_job.meta} (no dependencies, starts immediately)")
+    else:
+        logger.info(f"⏭️  Speaker recognition disabled, skipping speaker job for conversation {conversation_id[:8]}")
 
-    # Speaker recognition depends on cropping
-    speaker_depends_on = cropping_job
+    # Step 2: Memory extraction job (conditional - only if enabled)
+    # Check if memory extraction is enabled
+    memory_config = get_service_config('memory.extraction')
+    memory_enabled = memory_config.get('enabled', True)  # Default to True for backward compatibility
 
-    # Step 3: Speaker recognition job
-    speaker_job_id = f"speaker_{conversation_id[:12]}"
-    logger.info(f"🔍 DEBUG: Creating speaker job with job_id={speaker_job_id}, conversation_id={conversation_id[:12]}, audio_uuid={audio_uuid[:12]}")
+    memory_job = None
+    if memory_enabled:
+        # Depends on speaker job if it was created, otherwise depends on upstream (transcription or nothing)
+        memory_job_id = f"memory_{conversation_id[:12]}"
+        logger.info(f"🔍 DEBUG: Creating memory job with job_id={memory_job_id}, conversation_id={conversation_id[:12]}")
 
-    speaker_job = transcription_queue.enqueue(
-        recognise_speakers_job,
-        conversation_id,
-        version_id,
-        audio_file_path,
-        "",  # transcript_text - will be read from DB
-        [],  # words - will be read from DB
-        job_timeout=1200,  # 20 minutes
-        result_ttl=JOB_RESULT_TTL,
-        depends_on=speaker_depends_on,
-        job_id=speaker_job_id,
-        description=f"Speaker recognition for conversation {conversation_id[:8]}",
-        meta=job_meta
-    )
-    logger.info(f"📥 RQ: Enqueued speaker recognition job {speaker_job.id}, meta={speaker_job.meta} (depends on {speaker_depends_on.id})")
+        memory_job = memory_queue.enqueue(
+            process_memory_job,
+            conversation_id,
+            job_timeout=900,  # 15 minutes
+            result_ttl=JOB_RESULT_TTL,
+            depends_on=speaker_dependency,  # Either speaker_job or upstream dependency
+            job_id=memory_job_id,
+            description=f"Memory extraction for conversation {conversation_id[:8]}",
+            meta=job_meta
+        )
+        if speaker_job:
+            logger.info(f"📥 RQ: Enqueued memory extraction job {memory_job.id}, meta={memory_job.meta} (depends on speaker job {speaker_job.id})")
+        elif depends_on_job:
+            logger.info(f"📥 RQ: Enqueued memory extraction job {memory_job.id}, meta={memory_job.meta} (depends on {depends_on_job.id})")
+        else:
+            logger.info(f"📥 RQ: Enqueued memory extraction job {memory_job.id}, meta={memory_job.meta} (no dependencies, starts immediately)")
+    else:
+        logger.info(f"⏭️  Memory extraction disabled, skipping memory job for conversation {conversation_id[:8]}")
 
-    # Step 4: Memory extraction job (parallel with title/summary)
-    memory_job_id = f"memory_{conversation_id[:12]}"
-    logger.info(f"🔍 DEBUG: Creating memory job with job_id={memory_job_id}, conversation_id={conversation_id[:12]}, audio_uuid={audio_uuid[:12]}")
-
-    memory_job = memory_queue.enqueue(
-        process_memory_job,
-        conversation_id,
-        job_timeout=900,  # 15 minutes
-        result_ttl=JOB_RESULT_TTL,
-        depends_on=speaker_job,
-        job_id=memory_job_id,
-        description=f"Memory extraction for conversation {conversation_id[:8]}",
-        meta=job_meta
-    )
-    logger.info(f"📥 RQ: Enqueued memory extraction job {memory_job.id}, meta={memory_job.meta} (depends on {speaker_job.id})")
-
-    # Step 5: Title/summary generation job (parallel with memory, independent)
-    # This ensures conversations always get titles/summaries even if memory job fails
+    # Step 3: Title/summary generation job
+    # Depends on memory job to avoid race condition (both jobs save the conversation document)
+    # and to ensure fresh memories are available for context-enriched summaries
+    title_dependency = memory_job if memory_job else speaker_dependency
     title_job_id = f"title_summary_{conversation_id[:12]}"
-    logger.info(f"🔍 DEBUG: Creating title/summary job with job_id={title_job_id}, conversation_id={conversation_id[:12]}, audio_uuid={audio_uuid[:12]}")
+    logger.info(f"🔍 DEBUG: Creating title/summary job with job_id={title_job_id}, conversation_id={conversation_id[:12]}")
 
     title_summary_job = default_queue.enqueue(
         generate_title_summary_job,
         conversation_id,
         job_timeout=300,  # 5 minutes
         result_ttl=JOB_RESULT_TTL,
-        depends_on=speaker_job,  # Depends on speaker job, NOT memory job
+        depends_on=title_dependency,
         job_id=title_job_id,
         description=f"Generate title and summary for conversation {conversation_id[:8]}",
         meta=job_meta
     )
-    logger.info(f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (depends on {speaker_job.id})")
+    if memory_job:
+        logger.info(f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (depends on memory job {memory_job.id})")
+    elif speaker_job:
+        logger.info(f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (depends on speaker job {speaker_job.id})")
+    elif depends_on_job:
+        logger.info(f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (depends on {depends_on_job.id})")
+    else:
+        logger.info(f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (no dependencies, starts immediately)")
+
+    # Step 5: Dispatch conversation.complete event (runs after both memory and title/summary complete)
+    # This ensures plugins receive the event after all processing is done
+    event_job_id = f"event_complete_{conversation_id[:12]}"
+    logger.info(f"🔍 DEBUG: Creating conversation complete event job with job_id={event_job_id}, conversation_id={conversation_id[:12]}")
+
+    # Event job depends on memory and title/summary jobs that were actually enqueued
+    # Build dependency list excluding None values
+    event_dependencies = []
+    if memory_job:
+        event_dependencies.append(memory_job)
+    if title_summary_job:
+        event_dependencies.append(title_summary_job)
+
+    # Enqueue event dispatch job (may have no dependencies if all jobs were skipped)
+    event_dispatch_job = default_queue.enqueue(
+        dispatch_conversation_complete_event_job,
+        conversation_id,
+        client_id or "",
+        user_id,
+        end_reason,  # Use the end_reason parameter (defaults to 'file_upload' for backward compatibility)
+        job_timeout=120,  # 2 minutes
+        result_ttl=JOB_RESULT_TTL,
+        depends_on=event_dependencies if event_dependencies else None,  # Wait for jobs that were enqueued
+        job_id=event_job_id,
+        description=f"Dispatch conversation complete event ({end_reason}) for {conversation_id[:8]}",
+        meta=job_meta
+    )
+
+    # Log event dispatch dependencies
+    if event_dependencies:
+        dep_ids = [job.id for job in event_dependencies]
+        logger.info(f"📥 RQ: Enqueued conversation complete event job {event_dispatch_job.id}, meta={event_dispatch_job.meta} (depends on {', '.join(dep_ids)})")
+    else:
+        logger.info(f"📥 RQ: Enqueued conversation complete event job {event_dispatch_job.id}, meta={event_dispatch_job.meta} (no dependencies, starts immediately)")
 
     return {
-        'cropping': cropping_job.id,
-        'transcription': transcription_job.id if transcription_job else None,
-        'speaker_recognition': speaker_job.id,
-        'memory': memory_job.id,
-        'title_summary': title_summary_job.id
+        'speaker_recognition': speaker_job.id if speaker_job else None,
+        'memory': memory_job.id if memory_job else None,
+        'title_summary': title_summary_job.id,
+        'event_dispatch': event_dispatch_job.id
     }
 
 
@@ -534,6 +648,7 @@ def get_queue_health() -> Dict[str, Any]:
 async def cleanup_stuck_stream_workers(request):
     """Clean up stuck Redis Stream consumers and pending messages from all active streams."""
     import time
+
     from fastapi.responses import JSONResponse
 
     try:

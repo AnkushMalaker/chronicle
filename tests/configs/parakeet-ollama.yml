@@ -15,7 +15,7 @@ models:
     api_family: openai
     model_name: llama3.1:latest
     model_url: http://localhost:11434/v1
-    api_key: ${OPENAI_API_KEY:-ollama}
+    api_key: ${oc.env:OPENAI_API_KEY,ollama}
     model_params:
       temperature: 0.2
       max_tokens: 2000
@@ -28,7 +28,7 @@ models:
     api_family: openai
     model_name: nomic-embed-text:latest
     model_url: http://localhost:11434/v1
-    api_key: ${OPENAI_API_KEY:-ollama}
+    api_key: ${oc.env:OPENAI_API_KEY,ollama}
     embedding_dimensions: 768
     model_output: vector
 
@@ -37,10 +37,10 @@ models:
     model_type: vector_store
     model_provider: qdrant
     api_family: qdrant
-    model_url: http://${QDRANT_BASE_URL:-qdrant}:${QDRANT_PORT:-6333}
+    model_url: http://${oc.env:QDRANT_BASE_URL,qdrant}:${oc.env:QDRANT_PORT,6333}
     model_params:
-      host: ${QDRANT_BASE_URL:-qdrant}
-      port: ${QDRANT_PORT:-6333}
+      host: ${oc.env:QDRANT_BASE_URL,qdrant}
+      port: ${oc.env:QDRANT_PORT,6333}
       collection_name: omi_memories
 
   - name: stt-parakeet-batch
@@ -48,7 +48,7 @@ models:
     model_type: stt
     model_provider: parakeet
     api_family: http
-    model_url: ${PARAKEET_ASR_URL:-http://localhost:8767}
+    model_url: ${oc.env:PARAKEET_ASR_URL,http://localhost:8767}
     api_key: ''
     operations:
       stt_transcribe:

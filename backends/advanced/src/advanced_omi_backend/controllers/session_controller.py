@@ -9,11 +9,60 @@ This module manages Redis-based audio streaming sessions, including:
 
 import logging
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
+
+
+async def mark_session_complete(
+    redis_client,
+    session_id: str,
+    reason: Literal[
+        "websocket_disconnect",
+        "user_stopped",
+        "inactivity_timeout",
+        "max_duration",
+        "all_jobs_complete"
+    ],
+) -> None:
+    """
+    Single source of truth for marking sessions as complete.
+
+    This function ensures that both 'status' and 'completion_reason' are ALWAYS
+    set together atomically, preventing race conditions where workers check status
+    before completion_reason is set.
+
+    Args:
+        redis_client: Redis async client
+        session_id: Session UUID
+        reason: Why the session is completing (enforced by type system)
+
+    Usage:
+        # WebSocket disconnect
+        await mark_session_complete(redis, session_id, "websocket_disconnect")
+
+        # User manually stopped
+        await mark_session_complete(redis, session_id, "user_stopped")
+
+        # Inactivity timeout
+        await mark_session_complete(redis, session_id, "inactivity_timeout")
+
+        # Max duration reached
+        await mark_session_complete(redis, session_id, "max_duration")
+
+        # All jobs finished
+        await mark_session_complete(redis, session_id, "all_jobs_complete")
+    """
+    session_key = f"audio:session:{session_id}"
+    mark_time = time.time()
+    await redis_client.hset(session_key, mapping={
+        "status": "finished",
+        "completed_at": str(mark_time),
+        "completion_reason": reason
+    })
+    logger.info(f"✅ Session {session_id[:12]} marked finished: {reason} [TIME: {mark_time:.3f}]")
 
 
 async def get_session_info(redis_client, session_id: str) -> Optional[Dict]:
@@ -148,10 +197,10 @@ async def increment_session_conversation_count(redis_client, session_id: str) ->
 async def get_streaming_status(request):
     """Get status of active streaming sessions and Redis Streams health."""
     from advanced_omi_backend.controllers.queue_controller import (
-        transcription_queue,
-        memory_queue,
+        all_jobs_complete_for_client,
         default_queue,
-        all_jobs_complete_for_session
+        memory_queue,
+        transcription_queue,
     )
 
     try:
@@ -181,19 +230,19 @@ async def get_streaming_status(request):
 
             # Separate active and completed sessions
             # Check if all jobs are complete (including failed jobs)
-            all_jobs_done = all_jobs_complete_for_session(session_id)
+            # Note: session_id == client_id in streaming context, but using client_id explicitly
+            all_jobs_done = all_jobs_complete_for_client(session_obj.get("client_id"))
 
-            # Session is completed if:
-            # 1. Redis status says complete/finalized AND all jobs done, OR
-            # 2. All jobs are done (even if status isn't complete yet)
-            # This ensures sessions with failed jobs move to completed
-            if status in ["complete", "completed", "finalized"] or all_jobs_done:
+            # Session is finished if:
+            # 1. Redis status says finished AND all jobs done, OR
+            # 2. All jobs are done (even if status isn't finished yet)
+            # This ensures sessions with failed jobs move to finished
+            if status == "finished" or all_jobs_done:
                 if all_jobs_done:
-                    # All jobs complete - this is truly a completed session
-                    # Update Redis status if it wasn't already marked complete
-                    if status not in ["complete", "completed", "finalized"]:
-                        await redis_client.hset(key, "status", "complete")
-                        logger.info(f"✅ Marked session {session_id} as complete (all jobs terminal)")
+                    # All jobs finished - this is truly a finished session
+                    # Update Redis status if it wasn't already marked finished
+                    if status != "finished":
+                        await mark_session_complete(redis_client, session_id, "all_jobs_complete")
 
                     # Get additional session data for completed sessions
                     session_key = f"audio:session:{session_id}"
@@ -204,7 +253,7 @@ async def get_streaming_status(request):
                         "client_id": session_obj.get("client_id", ""),
                         "conversation_id": session_data.get(b"conversation_id", b"").decode() if session_data and b"conversation_id" in session_data else None,
                         "has_conversation": bool(session_data and session_data.get(b"conversation_id", b"")),
-                        "action": session_data.get(b"action", b"complete").decode() if session_data and b"action" in session_data else "complete",
+                        "action": session_data.get(b"action", b"finished").decode() if session_data and b"action" in session_data else "finished",
                         "reason": session_data.get(b"reason", b"").decode() if session_data and b"reason" in session_data else "",
                         "completed_at": session_obj.get("last_chunk_at", 0),
                         "audio_file": session_data.get(b"audio_file", b"").decode() if session_data and b"audio_file" in session_data else "",
@@ -403,26 +452,26 @@ async def get_streaming_status(request):
         rq_stats = {
             "transcription_queue": {
                 "queued": transcription_queue.count,
-                "processing": len(transcription_queue.started_job_registry),
-                "completed": len(transcription_queue.finished_job_registry),
+                "started": len(transcription_queue.started_job_registry),
+                "finished": len(transcription_queue.finished_job_registry),
                 "failed": len(transcription_queue.failed_job_registry),
-                "cancelled": len(transcription_queue.canceled_job_registry),
+                "canceled": len(transcription_queue.canceled_job_registry),
                 "deferred": len(transcription_queue.deferred_job_registry)
             },
             "memory_queue": {
                 "queued": memory_queue.count,
-                "processing": len(memory_queue.started_job_registry),
-                "completed": len(memory_queue.finished_job_registry),
+                "started": len(memory_queue.started_job_registry),
+                "finished": len(memory_queue.finished_job_registry),
                 "failed": len(memory_queue.failed_job_registry),
-                "cancelled": len(memory_queue.canceled_job_registry),
+                "canceled": len(memory_queue.canceled_job_registry),
                 "deferred": len(memory_queue.deferred_job_registry)
             },
             "default_queue": {
                 "queued": default_queue.count,
-                "processing": len(default_queue.started_job_registry),
-                "completed": len(default_queue.finished_job_registry),
+                "started": len(default_queue.started_job_registry),
+                "finished": len(default_queue.finished_job_registry),
                 "failed": len(default_queue.failed_job_registry),
-                "cancelled": len(default_queue.canceled_job_registry),
+                "canceled": len(default_queue.canceled_job_registry),
                 "deferred": len(default_queue.deferred_job_registry)
             }
         }
@@ -448,6 +497,7 @@ async def get_streaming_status(request):
 async def cleanup_old_sessions(request, max_age_seconds: int = 3600):
     """Clean up old session tracking metadata and old audio streams from Redis."""
     import time
+
     from fastapi.responses import JSONResponse
 
     try:

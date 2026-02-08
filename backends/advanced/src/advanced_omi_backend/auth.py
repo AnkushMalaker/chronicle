@@ -224,6 +224,9 @@ async def create_admin_user_if_needed():
         existing_admin = await user_db.get_by_email(ADMIN_EMAIL)
 
         if existing_admin:
+            logger.debug(f"existing_admin.id = {existing_admin.id}, type = {type(existing_admin.id)}")
+            logger.debug(f"str(existing_admin.id) = {str(existing_admin.id)}")
+            logger.debug(f"existing_admin.user_id = {existing_admin.user_id}")
             logger.info(
                 f"✅ Admin user already exists: {existing_admin.user_id} ({existing_admin.email})"
             )

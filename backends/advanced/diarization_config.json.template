@@ -1,9 +1,0 @@
-{
-  "diarization_source": "pyannote",
-  "similarity_threshold": 0.15,
-  "min_duration": 0.5,
-  "collar": 2.0,
-  "min_duration_off": 1.5,
-  "min_speakers": 2,
-  "max_speakers": 6
-}

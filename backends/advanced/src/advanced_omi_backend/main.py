@@ -2,7 +2,7 @@
 """
 Unified Omi-audio service
 
- * Accepts Opus packets over a WebSocket (`/ws`) or PCM over a WebSocket (`/ws_pcm`).
+ * Accepts audio over a unified WebSocket endpoint (`/ws`) with codec parameter (pcm or opus).
  * Uses a central queue to decouple audio ingestion from processing.
  * A saver consumer buffers PCM and writes 30-second WAV chunks to `./data/audio_chunks/`.
  * A transcription consumer sends each chunk to a Wyoming ASR service.
@@ -16,6 +16,7 @@ Refactored to use a modular architecture with proper separation of concerns:
 """
 
 import logging
+
 import uvicorn
 
 from advanced_omi_backend.app_factory import create_app

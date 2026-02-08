@@ -48,7 +48,11 @@ from typing import Dict, Optional, Union
 import websockets
 from websockets.client import WebSocketClientProtocol
 
-from advanced_omi_backend.constants import OMI_CHANNELS, OMI_SAMPLE_RATE, OMI_SAMPLE_WIDTH
+from advanced_omi_backend.constants import (
+    OMI_CHANNELS,
+    OMI_SAMPLE_RATE,
+    OMI_SAMPLE_WIDTH,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +69,7 @@ class AudioStreamClient:
         base_url: str,
         token: str,
         device_name: str = "python-client",
-        endpoint: str = "ws_pcm",
+        endpoint: str = "ws?codec=pcm",
     ):
         """Initialize the audio stream client.
 
@@ -73,7 +77,7 @@ class AudioStreamClient:
             base_url: Base URL of the backend (e.g., "http://localhost:8000")
             token: JWT authentication token
             device_name: Device name for client identification
-            endpoint: WebSocket endpoint ("ws_pcm" or "ws_omi")
+            endpoint: WebSocket endpoint ("ws?codec=pcm" or "ws?codec=opus")
         """
         self.base_url = base_url
         self.token = token
@@ -87,7 +91,9 @@ class AudioStreamClient:
     def ws_url(self) -> str:
         """Build WebSocket URL from base URL."""
         url = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
-        return f"{url}/{self.endpoint}?token={self.token}&device_name={self.device_name}"
+        # Check if endpoint already has query params
+        separator = "&" if "?" in self.endpoint else "?"
+        return f"{url}/{self.endpoint}{separator}token={self.token}&device_name={self.device_name}"
 
     async def connect(self, wait_for_ready: bool = True) -> WebSocketClientProtocol:
         """Connect to the WebSocket endpoint.
@@ -105,8 +111,8 @@ class AudioStreamClient:
         self.ws = await websockets.connect(self.ws_url)
         logger.info("WebSocket connected")
 
-        if wait_for_ready and self.endpoint == "ws_pcm":
-            # PCM endpoint sends "ready" message after auth (line 261-268 in websocket_controller.py)
+        if wait_for_ready and "codec=pcm" in self.endpoint:
+            # PCM codec sends "ready" message after auth (line 261-268 in websocket_controller.py)
             ready_msg = await self.ws.recv()
             ready = json.loads(ready_msg.strip() if isinstance(ready_msg, str) else ready_msg.decode().strip())
             if ready.get("type") != "ready":
@@ -121,6 +127,7 @@ class AudioStreamClient:
         sample_rate: int = OMI_SAMPLE_RATE,
         sample_width: int = OMI_SAMPLE_WIDTH,
         channels: int = OMI_CHANNELS,
+        always_persist: bool = False,
     ) -> None:
         """Send Wyoming audio-start event.
 
@@ -129,6 +136,7 @@ class AudioStreamClient:
             sample_rate: Audio sample rate in Hz (default: 16000)
             sample_width: Bytes per sample (default: 2 for 16-bit)
             channels: Number of audio channels (default: 1)
+            always_persist: Save audio even if transcription fails (default: False)
 
         Note:
             The mode is inside the "data" dict, matching _handle_audio_session_start
@@ -144,11 +152,15 @@ class AudioStreamClient:
                 "width": sample_width,
                 "channels": channels,
                 "mode": recording_mode,
+                "always_persist": always_persist,
             },
             "payload_length": None,
         }
+        print(f"🔵 CLIENT: Sending audio-start message: {header}")
+        logger.info(f"🔵 CLIENT: Sending audio-start message: {header}")
         await self.ws.send(json.dumps(header) + "\n")
-        logger.info(f"Sent audio-start with mode={recording_mode}")
+        print(f"✅ CLIENT: Sent audio-start with mode={recording_mode}, always_persist={always_persist}")
+        logger.info(f"✅ CLIENT: Sent audio-start with mode={recording_mode}, always_persist={always_persist}")
 
     async def send_audio_chunk_wyoming(
         self,
@@ -230,6 +242,7 @@ class AudioStreamClient:
         use_wyoming: bool = True,
         recording_mode: str = "streaming",
         realtime_factor: float = 0.1,
+        always_persist: bool = False,
     ) -> int:
         """Stream a WAV file in chunks, simulating real-time audio.
 
@@ -239,6 +252,7 @@ class AudioStreamClient:
             use_wyoming: If True, use Wyoming protocol; if False, send raw binary
             recording_mode: "streaming" or "batch"
             realtime_factor: Fraction of real-time to simulate (0.1 = 10x speed)
+            always_persist: Save audio even if transcription fails (default: False)
 
         Returns:
             Number of chunks sent
@@ -266,6 +280,7 @@ class AudioStreamClient:
                 sample_rate=sample_rate,
                 sample_width=sample_width,
                 channels=channels,
+                always_persist=always_persist,
             )
 
             # Reset counters
@@ -301,9 +316,19 @@ class AudioStreamClient:
     async def close(self) -> None:
         """Close the WebSocket connection."""
         if self.ws:
-            await self.ws.close()
-            self.ws = None
-            logger.info("WebSocket connection closed")
+            try:
+                # Add timeout to WebSocket close to prevent hanging
+                await asyncio.wait_for(self.ws.close(), timeout=2.0)
+                logger.info("WebSocket connection closed cleanly")
+            except asyncio.TimeoutError:
+                logger.warning("WebSocket close timed out after 2s, forcing close")
+                # Force close without waiting for handshake
+                if hasattr(self.ws, 'transport') and self.ws.transport:
+                    self.ws.transport.close()
+            except Exception as e:
+                logger.error(f"Error during WebSocket close: {e}")
+            finally:
+                self.ws = None
 
     async def __aenter__(self) -> "AudioStreamClient":
         """Async context manager entry."""
@@ -323,6 +348,7 @@ def stream_audio_file(
     device_name: str = "robot-test",
     recording_mode: str = "streaming",
     use_wyoming: bool = True,
+    always_persist: bool = False,
 ) -> int:
     """Synchronous wrapper for streaming audio file.
 
@@ -336,6 +362,7 @@ def stream_audio_file(
         device_name: Device name for client identification
         recording_mode: "streaming" or "batch"
         use_wyoming: If True, use Wyoming protocol
+        always_persist: Save audio even if transcription fails (default: False)
 
     Returns:
         Number of chunks sent
@@ -347,6 +374,7 @@ def stream_audio_file(
                 wav_path,
                 use_wyoming=use_wyoming,
                 recording_mode=recording_mode,
+                always_persist=always_persist,
             )
 
     return asyncio.run(_run())
@@ -395,6 +423,7 @@ class StreamManager:
         token: str,
         device_name: str = "robot-test",
         recording_mode: str = "streaming",
+        always_persist: bool = False,
     ) -> str:
         """Start a new audio stream (non-blocking).
 
@@ -403,6 +432,7 @@ class StreamManager:
             token: JWT token
             device_name: Device name for client ID
             recording_mode: "streaming" or "batch"
+            always_persist: Save audio even if transcription fails (default: False)
 
         Returns:
             stream_id: Unique ID for this stream session
@@ -428,14 +458,16 @@ class StreamManager:
         # Connect and send audio-start
         async def _connect_and_start():
             try:
+                logger.info(f"🔵 CLIENT: Stream {stream_id} connecting for {device_name}...")
                 await client.connect()
                 session.connected = True
-                await client.send_audio_start(recording_mode=recording_mode)
+                logger.info(f"✅ CLIENT: Stream {stream_id} connected, sending audio-start...")
+                await client.send_audio_start(recording_mode=recording_mode, always_persist=always_persist)
                 session.audio_started = True
-                logger.info(f"Stream {stream_id} started for {device_name}")
+                logger.info(f"✅ CLIENT: Stream {stream_id} started for {device_name}")
             except Exception as e:
                 session.error = str(e)
-                logger.error(f"Stream {stream_id} failed to start: {e}")
+                logger.error(f"❌ CLIENT: Stream {stream_id} failed to start: {e}")
 
         future = asyncio.run_coroutine_threadsafe(_connect_and_start(), loop)
         future.result(timeout=10)  # Wait for connection
@@ -541,6 +573,39 @@ class StreamManager:
         del self._sessions[stream_id]
 
         logger.info(f"Stream {stream_id} stopped, sent {total_chunks} chunks")
+        return total_chunks
+
+    def close_stream_without_stop(self, stream_id: str) -> int:
+        """Close WebSocket connection without sending audio-stop event.
+
+        This simulates abrupt disconnection (network failure, client crash)
+        and should trigger websocket_disconnect end_reason.
+
+        Args:
+            stream_id: Stream session ID
+
+        Returns:
+            Total chunks sent during this session
+        """
+        session = self._sessions.get(stream_id)
+        if not session:
+            raise ValueError(f"Unknown stream_id: {stream_id}")
+
+        async def _close_abruptly():
+            # Just close the connection without audio-stop
+            await session.client.close()
+
+        future = asyncio.run_coroutine_threadsafe(_close_abruptly(), session.loop)
+        future.result(timeout=10)
+
+        # Stop the event loop
+        session.loop.call_soon_threadsafe(session.loop.stop)
+        session.thread.join(timeout=5)
+
+        total_chunks = session.chunk_count
+        del self._sessions[stream_id]
+
+        logger.info(f"Stream {stream_id} closed abruptly (no audio-stop), sent {total_chunks} chunks")
         return total_chunks
 
     def get_session(self, stream_id: str) -> Optional[StreamSession]:

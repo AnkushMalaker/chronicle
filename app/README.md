@@ -120,14 +120,14 @@ The app connects to any backend that accepts OPUS audio streams:
 2. **Advanced Backend** (`backends/advanced/`)
    - Full transcription and memory features
    - Real-time processing with speaker recognition
-   - WebSocket endpoint: `/ws_pcm`
+   - WebSocket endpoint: `/ws?codec=pcm`
 
 ### Connection Setup
 
 #### Local Development
 ```
-Backend URL: ws://[machine-ip]:8000/ws_pcm
-Example: ws://192.168.1.100:8000/ws_pcm
+Backend URL: ws://[machine-ip]:8000/ws?codec=pcm
+Example: ws://192.168.1.100:8000/ws?codec=pcm
 ```
 
 #### Public Access (Production)
@@ -138,7 +138,7 @@ Use ngrok or similar tunneling service:
 ngrok http 8000
 
 # Use provided URL in app
-Backend URL: wss://[ngrok-subdomain].ngrok.io/ws_pcm
+Backend URL: wss://[ngrok-subdomain].ngrok.io/ws?codec=pcm
 ```
 
 ### Configuration Steps
@@ -147,8 +147,8 @@ Backend URL: wss://[ngrok-subdomain].ngrok.io/ws_pcm
 2. **Open the mobile app**
 3. **Navigate to Settings**
 4. **Enter Backend URL**:
-   - Local: `ws://[your-ip]:8000/ws_pcm`
-   - Public: `wss://[your-domain]/ws_pcm`
+   - Local: `ws://[your-ip]:8000/ws?codec=pcm`
+   - Public: `wss://[your-domain]/ws?codec=pcm`
 5. **Save configuration**
 
 ## Phone Audio Streaming (NEW)
@@ -176,7 +176,7 @@ Stream audio directly from your phone's microphone to Chronicle backend, bypassi
 - **iOS**: iOS 13+ with microphone permissions
 - **Android**: Android API 21+ with microphone permissions  
 - **Network**: Stable connection to Chronicle backend
-- **Backend**: Advanced backend running with `/ws_pcm` endpoint
+- **Backend**: Advanced backend running with `/ws?codec=pcm` endpoint
 
 #### Switching Audio Sources
 - **Mutual Exclusion**: Cannot use Bluetooth and phone audio simultaneously
@@ -187,7 +187,7 @@ Stream audio directly from your phone's microphone to Chronicle backend, bypassi
 
 #### Audio Not Streaming
 - **Check Permissions**: Ensure microphone access granted
-- **Verify Backend URL**: Confirm `ws://[ip]:8000/ws_pcm` format
+- **Verify Backend URL**: Confirm `ws://[ip]:8000/ws?codec=pcm` format
 - **Network Connection**: Test backend connectivity
 - **Authentication**: Verify JWT token is valid
 
@@ -292,7 +292,7 @@ curl -i -N -H "Connection: Upgrade" \
      -H "Upgrade: websocket" \
      -H "Sec-WebSocket-Key: test" \
      -H "Sec-WebSocket-Version: 13" \
-     http://[backend-ip]:8000/ws_pcm
+     http://[backend-ip]:8000/ws?codec=pcm
 ```
 
 ## Development
@@ -338,7 +338,7 @@ npx expo build:android
 ### WebSocket Communication
 ```javascript
 // Connect to backend
-const ws = new WebSocket('ws://backend-url:8000/ws_pcm');
+const ws = new WebSocket('ws://backend-url:8000/ws?codec=pcm');
 
 // Send audio data
 ws.send(audioBuffer);

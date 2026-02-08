@@ -2,11 +2,12 @@
 
 import logging
 import os
-import yaml
-from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, Optional, Union
+
+import yaml
 
 from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.utils.config_utils import resolve_value
@@ -65,22 +66,27 @@ class MemoryConfig:
 
 
 def load_config_yml() -> Dict[str, Any]:
-    """Load config.yml from standard locations."""
-    # Check /app/config.yml (Docker) or root relative to file
-    current_dir = Path(__file__).parent.resolve()
-    # Path inside Docker: /app/config.yml (if mounted) or ../../../config.yml relative to src
-    paths = [
-        Path("/app/config.yml"),
-        current_dir.parent.parent.parent.parent.parent / "config.yml",  # Relative to src/
-        Path("./config.yml"),
-    ]
+    """
+    Load config.yml using canonical path from config module.
 
-    for path in paths:
-        if path.exists():
-            with open(path, "r") as f:
-                return yaml.safe_load(f) or {}
+    Returns:
+        Loaded config.yml as dictionary
 
-    raise FileNotFoundError(f"config.yml not found in any of: {[str(p) for p in paths]}")
+    Raises:
+        FileNotFoundError: If config.yml does not exist
+    """
+    from advanced_omi_backend.config import get_config_yml_path
+
+    config_path = get_config_yml_path()
+
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"config.yml not found at {config_path}. "
+            "Ensure config directory is mounted correctly."
+        )
+
+    with open(config_path, "r") as f:
+        return yaml.safe_load(f) or {}
 
 
 def create_openmemory_config(
@@ -135,7 +141,7 @@ def create_openai_config(
 def create_qdrant_config(
     host: str = "localhost",
     port: int = 6333,
-    collection_name: str = "omi_memories",
+    collection_name: str = "chronicle_memories",
     embedding_dims: int = 1536,
 ) -> Dict[str, Any]:
     """Create Qdrant vector store configuration."""
@@ -258,7 +264,7 @@ def build_memory_config_from_env() -> MemoryConfig:
 
         host = str(vs_def.model_params.get("host", "qdrant"))
         port = int(vs_def.model_params.get("port", 6333))
-        collection_name = str(vs_def.model_params.get("collection_name", "omi_memories"))
+        collection_name = str(vs_def.model_params.get("collection_name", "chronicle_memories"))
         vector_store_config = create_qdrant_config(
             host=host,
             port=port,

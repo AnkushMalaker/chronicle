@@ -26,8 +26,7 @@ Suite Setup      Suite Setup
 Suite Teardown   Suite Teardown
 Test Setup       Test Cleanup
 *** Variables ***
-# Container names are now dynamically loaded from test_env.py based on COMPOSE_PROJECT_NAME
-# This allows tests to work with different docker-compose project names
+# Container names are loaded from test_env.py (hardcoded to match docker-compose-test.yml project name)
 
 *** Keywords ***
 
@@ -88,21 +87,64 @@ Verify Workers Still Running In Container
 
 Restart Workers Container
     [Documentation]    Restart the workers container to restore registration
+    ...                Uses docker compose for more reliable restart
     Log To Console    \n🔄 Restarting workers container...
 
-    ${result}=    Run Process    docker    restart    ${WORKERS_CONTAINER}    shell=False
-    Should Be Equal As Integers    ${result.rc}    0
+    # Use docker compose restart for more reliable restart
+    ${result}=    Run Process    docker    compose    -f    docker-compose-test.yml    restart    workers-test
+    ...    cwd=${BACKEND_DIR}    shell=False
 
-    # Wait for workers to start
-    Sleep    5s    reason=Wait for workers to initialize
+    IF    ${result.rc} != 0
+        Log To Console    ⚠️ Docker compose restart failed, attempting docker restart...
+        Log To Console    stderr: ${result.stderr}
+        # Fallback to direct docker restart
+        ${result}=    Run Process    docker    restart    ${WORKERS_CONTAINER}    shell=False
+    END
+
+    Should Be Equal As Integers    ${result.rc}    0    msg=Failed to restart workers: ${result.stderr}
+
+    # Wait for workers to start and register
+    Sleep    10s    reason=Wait for workers to initialize and register
     Log To Console    ✅ Workers container restarted
+
+Verify Workers Healthy Or Restart
+    [Documentation]    Check if workers are healthy, restart if needed
+    ...                This ensures subsequent tests have a working environment
+    Log To Console    \n🧹 Cleanup: Verifying worker health...
+
+    TRY
+        ${worker_count}=    Get Worker Count From Health Endpoint
+        Log To Console    Current worker count: ${worker_count}
+
+        IF    ${worker_count} < 6
+            Log To Console    ⚠️ Only ${worker_count} workers detected, restarting to restore health...
+            Restart Workers Container
+
+            # Verify workers recovered after restart
+            Sleep    10s    reason=Wait for workers to fully initialize
+            ${new_count}=    Get Worker Count From Health Endpoint
+            Log To Console    Worker count after restart: ${new_count}
+
+            IF    ${new_count} < 6
+                Log To Console    ⚠️ WARNING: Only ${new_count} workers after restart (expected 6+)
+            ELSE
+                Log To Console    ✅ Workers healthy: ${new_count} workers registered
+            END
+        ELSE
+            Log To Console    ✅ Workers healthy: ${worker_count} workers registered (no restart needed)
+        END
+    EXCEPT    AS    ${error}
+        Log To Console    ⚠️ Failed to verify worker health: ${error}
+        Log To Console    Attempting emergency restart...
+        Restart Workers Container
+    END
 
 *** Test Cases ***
 Worker Registration Loss Detection Test
     [Documentation]    Test that the system can automatically recover when workers lose Redis registration
     ...
     ...                This test simulates the exact failure scenario experienced:
-    ...                1. Workers are running and processing jobs
+    ...                1. Workers are running and started jobs
     ...                2. Workers lose Redis registration (Redis restart, network issue, etc.)
     ...                3. Health endpoint should detect 0 workers
     ...                4. Workers should still be running in container
@@ -117,7 +159,7 @@ Worker Registration Loss Detection Test
     ...                - Health endpoint reports 0 workers when registration is lost
     ...                - Self-healing mechanism detects the issue
     ...                - Workers automatically re-register within monitoring interval
-    [Tags]    infra	queue
+    [Tags]    infra	queue	slow
 
     # Step 1: Verify workers are initially registered
     Log To Console    \n📊 Step 1: Check initial worker registration
@@ -170,17 +212,14 @@ Worker Registration Loss Detection Test
         Fail    Self-healing mechanism not working: Workers did not re-register after 90 seconds
     END
 
-    # Cleanup: Always restart workers after this test to ensure subsequent tests work
-    [Teardown]    Run Keywords
-    ...    Log To Console    \n🧹 Cleanup: Restarting workers for subsequent tests
-    ...    AND    Restart Workers Container
+    [Teardown]    Verify Workers Healthy Or Restart
 
 Worker Count Validation Test
     [Documentation]    Verify the health endpoint accurately reports worker counts
     ...
     ...                This test validates that:
     ...                - Health endpoint includes worker_count field
-    ...                - Worker count matches expected number (7 workers: 6 RQ + 1 audio)
+    ...                - Worker count matches expected number (9 workers: 6 RQ + 3 audio)
     ...                - Worker state information is accurate
     [Tags]    health	queue
 
@@ -217,10 +256,10 @@ Worker Count Validation Test
     Log To Console    Idle workers: ${idle_workers}
 
     # Verify exact worker count
-    # Expected: 7 RQ workers (6 general workers + 1 audio persistence worker)
+    # Expected: 9 RQ workers (6 general workers + 3 audio persistence workers)
     # Note: Audio stream workers (Deepgram/Parakeet) are NOT RQ workers - they don't register
     # We wait up to 20s for registration, so all workers should be present
-    Should Be Equal As Integers    ${worker_count}    7    msg=Expected exactly 7 RQ workers (6 general + 1 audio persistence)
+    Should Be Equal As Integers    ${worker_count}    9    msg=Expected exactly 9 RQ workers (6 general + 3 audio persistence)
 
     # Verify active + idle = total
     ${sum}=    Evaluate    ${active_workers} + ${idle_workers}
@@ -265,34 +304,57 @@ WebSocket Disconnect Conversation End Reason Test
     ...
     ...                This test simulates a Bluetooth/network dropout scenario:
     ...                1. Start streaming audio and create conversation
-    ...                2. Abruptly close WebSocket (simulating disconnect)
-    ...                3. Verify job exits gracefully (no 3600s timeout)
-    ...                4. Verify conversation has end_reason='websocket_disconnect'
+    ...                2. Keep sending audio to prevent inactivity timeout
+    ...                3. Abruptly close WebSocket (simulating disconnect)
+    ...                4. Verify job exits gracefully (no 3600s timeout)
+    ...                5. Verify conversation has end_reason='websocket_disconnect'
     [Tags]    infra	audio-streaming
 
     # Start audio stream and send chunks to trigger conversation
     ${device_name}=    Set Variable    disconnect
+    ${client_id}=    Get Client ID From Device Name    ${device_name}
     ${stream_id}=    Open Audio Stream    device_name=${device_name}
 
-    # Send audio fast (no realtime pacing) to simulate disconnect before END signal
-    Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=200 
+    # Send audio fast (no realtime pacing) to trigger conversation creation
+    Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=200
 
-    # Wait for conversation job to be created and conversation_id to be populated
-    # Transcription + speech analysis takes time (30-60s with queue)
-    ${conv_jobs}=    Wait Until Keyword Succeeds    60s    3s
-    ...    Job Type Exists For Client    open_conversation    ${device_name}
+    # Initialize conversation_id to None (will be set when found)
+    ${conversation_id}=    Set Variable    ${None}
 
-    # Wait for conversation_id in job meta (created asynchronously)
-    ${conversation_id}=    Wait Until Keyword Succeeds    10s    0.5s
-    ...    Get Conversation ID From Job Meta    open_conversation    ${device_name}
+    # Keep sending audio in a loop to prevent inactivity timeout while waiting for conversation
+    # We need to continuously send audio because SPEECH_INACTIVITY_THRESHOLD_SECONDS=2
+    FOR    ${i}    IN RANGE    20    # Send 20 batches while waiting
+        # Try to get conversation job
+        ${conv_jobs}=    Get Jobs By Type And Client    open_conversation    ${client_id}
+        ${has_job}=    Evaluate    len($conv_jobs) > 0
 
-    # Simulate WebSocket disconnect (Bluetooth dropout)
-    Close Audio Stream    ${stream_id}
+        IF    ${has_job}
+            # Conversation job exists, try to get conversation_id
+            TRY
+                ${conversation_id}=    Get Conversation ID From Job Meta    open_conversation    ${client_id}
+                # Got conversation_id! Close websocket immediately to trigger disconnect
+                Log To Console    Conversation created (${conversation_id}), closing websocket NOW
+                Close Audio Stream    ${stream_id}
+                BREAK
+            EXCEPT
+                # conversation_id not set yet, keep sending audio
+                Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=50
+                Sleep    1s
+            END
+        ELSE
+            # No conversation job yet, keep sending audio
+            Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=50
+            Sleep    1s
+        END
+    END
+
+    # Verify we got the conversation_id before loop ended
+    Should Not Be Equal    ${conversation_id}    ${None}    Failed to get conversation_id within timeout
 
     # Wait for job to complete (should be fast, not 3600s timeout)
     ${conv_jobs}=    Get Jobs By Type And Client    open_conversation    ${device_name}
     ${conv_job}=    Get Most Recent Job    ${conv_jobs}
-    Wait For Job Status    ${conv_job}[job_id]    completed    timeout=60s    interval=2s
+    Wait For Job Status    ${conv_job}[job_id]    finished    timeout=60s    interval=2s
 
     # Wait for end_reason to be saved to database (retry with timeout)
     ${conversation}=    Wait Until Keyword Succeeds    10s    0.5s

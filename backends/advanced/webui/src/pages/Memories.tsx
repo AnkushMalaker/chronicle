@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { Brain, Search, RefreshCw, Trash2, Calendar, Tag, X, Target } from 'lucide-react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import { Brain, Search, RefreshCw, Trash2, Calendar, Tag, X, Target, Users, CheckSquare } from 'lucide-react'
 import { memoriesApi, systemApi } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
+import { EntityList, PromisesList } from '../components/knowledge-graph'
 import '../styles/slider.css'
 
 interface Memory {
@@ -18,13 +19,16 @@ interface Memory {
   role?: string
 }
 
+type Tab = 'memories' | 'entities' | 'promises'
+
 export default function Memories() {
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [activeTab, setActiveTab] = useState<Tab>((searchParams.get('tab') as Tab) || 'memories')
   const [memories, setMemories] = useState<Memory[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
-  const [showUnfiltered, setShowUnfiltered] = useState(false)
   const [totalCount, setTotalCount] = useState<number | null>(null)
 
   // Semantic search state
@@ -39,6 +43,11 @@ export default function Memories() {
   const [memoryProvider, setMemoryProvider] = useState<string>('')
 
   const { user } = useAuth()
+
+  const handleTabChange = (tab: Tab) => {
+    setActiveTab(tab)
+    setSearchParams({ tab })
+  }
 
   const loadSystemConfig = async () => {
     try {
@@ -61,9 +70,7 @@ export default function Memories() {
 
     try {
       setLoading(true)
-      const response = showUnfiltered
-        ? await memoriesApi.getUnfiltered(user.id)
-        : await memoriesApi.getAll(user.id)
+      const response = await memoriesApi.getAll(user.id)
 
       console.log('🧠 Memories API response:', response.data)
 
@@ -97,7 +104,7 @@ export default function Memories() {
 
   useEffect(() => {
     loadMemories()
-  }, [user?.id, showUnfiltered])
+  }, [user?.id])
 
   // Semantic search handlers
   const handleSemanticSearch = async () => {
@@ -174,7 +181,12 @@ export default function Memories() {
     (memory.category?.toLowerCase() || '').includes(searchQuery.toLowerCase())
   )
 
-  const formatDate = (dateInput: string | number) => {
+  const formatDate = (dateInput: string | number | undefined | null) => {
+    // Handle missing/undefined dates
+    if (dateInput === undefined || dateInput === null || dateInput === '') {
+      return 'N/A'
+    }
+
     // Handle both timestamp numbers and date strings
     let date: Date
 
@@ -198,7 +210,7 @@ export default function Memories() {
     // Check if date is valid
     if (isNaN(date.getTime())) {
       console.warn('Invalid date:', dateInput)
-      return 'Invalid Date'
+      return 'N/A'
     }
 
     return date.toLocaleString()
@@ -254,9 +266,9 @@ export default function Memories() {
           <Brain className="h-6 w-6 text-blue-600" />
           <div>
             <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-              Memory Management
+              Knowledge & Memory
             </h1>
-            {memoryProvider && (
+            {memoryProvider && activeTab === 'memories' && (
               <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
                 Provider: {memoryProvider === 'chronicle' ? 'Chronicle' : memoryProvider === 'openmemory_mcp' ? 'OpenMemory MCP' : memoryProvider}
               </p>
@@ -265,20 +277,71 @@ export default function Memories() {
         </div>
       </div>
 
+      {/* Tab Navigation */}
+      <div className="flex space-x-1 mb-6 border-b border-gray-200 dark:border-gray-700">
+        <button
+          onClick={() => handleTabChange('memories')}
+          className={`flex items-center space-x-2 px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+            activeTab === 'memories'
+              ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border-b-2 border-blue-600'
+              : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800'
+          }`}
+        >
+          <Brain className="h-4 w-4" />
+          <span>Memories</span>
+        </button>
+        <button
+          onClick={() => handleTabChange('entities')}
+          className={`flex items-center space-x-2 px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+            activeTab === 'entities'
+              ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border-b-2 border-blue-600'
+              : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800'
+          }`}
+        >
+          <Users className="h-4 w-4" />
+          <span>Entities</span>
+        </button>
+        <button
+          onClick={() => handleTabChange('promises')}
+          className={`flex items-center space-x-2 px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+            activeTab === 'promises'
+              ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border-b-2 border-blue-600'
+              : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800'
+          }`}
+        >
+          <CheckSquare className="h-4 w-4" />
+          <span>Promises</span>
+        </button>
+      </div>
+
+      {/* Tab Content */}
+      {activeTab === 'entities' && (
+        <EntityList
+          onEntityClick={(entity) => {
+            console.log('Entity clicked:', entity)
+            // Could navigate to entity detail page in the future
+          }}
+        />
+      )}
+
+      {activeTab === 'promises' && (
+        <PromisesList
+          onPromiseClick={(promise) => {
+            console.log('Promise clicked:', promise)
+            // Could navigate to conversation source
+            if (promise.source_conversation_id) {
+              navigate(`/conversations/${promise.source_conversation_id}`)
+            }
+          }}
+        />
+      )}
+
+      {activeTab === 'memories' && (
+        <>
+
       {/* Controls */}
       <div className="space-y-4 mb-6">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-4">
-            <label className="flex items-center space-x-2 text-sm">
-              <input
-                type="checkbox"
-                checked={showUnfiltered}
-                onChange={(e) => setShowUnfiltered(e.target.checked)}
-                className="rounded border-gray-300"
-              />
-              <span className="text-gray-700 dark:text-gray-300">Show unfiltered</span>
-            </label>
-          </div>
+        <div className="flex items-center justify-end">
           <button
             onClick={loadMemories}
             disabled={loading || !user}
@@ -410,9 +473,9 @@ export default function Memories() {
                 )
               ) : (
                 totalCount !== null ? (
-                  `Showing ${memories.length} of ${totalCount} ${showUnfiltered ? 'unfiltered' : 'filtered'} memories`
+                  `Showing ${memories.length} of ${totalCount} memories`
                 ) : (
-                  `Showing ${showUnfiltered ? 'unfiltered' : 'filtered'} memories (${memories.length} found)`
+                  `Showing ${memories.length} memories`
                 )
               )}
             </p>
@@ -588,6 +651,8 @@ export default function Memories() {
             </button>
           )}
         </div>
+      )}
+      </>
       )}
     </div>
   )

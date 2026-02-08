@@ -42,6 +42,18 @@ Get Anonymous Session
 
     Create Session    ${session_name}    ${base_url}    verify=True
 
+Get Admin API Session
+    [Documentation]    Get an authenticated admin API session (creates if doesn't exist)
+    [Arguments]    ${session_name}=api
+
+    # Try to use existing session, create if needed
+    ${session_exists}=    Run Keyword And Return Status    GET On Session    ${session_name}    /health    expected_status=any
+    IF    not ${session_exists}
+        Create API Session    ${session_name}
+    END
+
+    RETURN    ${session_name}
+
 
 # Core Authentication
 Get Authentication Token

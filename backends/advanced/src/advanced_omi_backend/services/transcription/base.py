@@ -36,7 +36,6 @@ class TranscriptionProvider(Enum):
     """Available transcription providers for audio stream routing."""
     DEEPGRAM = "deepgram"
     PARAKEET = "parakeet"
-    MISTRAL = "mistral"
 
 
 class BaseTranscriptionProvider(abc.ABC):

@@ -6,7 +6,7 @@ TCP-to-WebSocket relay for ESPHome Voice-PE that connects to the Omi advanced ba
 
 - **TCP Server**: Listens on port 8989 for ESP32 Voice-PE connections
 - **Audio Format Conversion**: Converts 32-bit PCM to 16-bit PCM using easy-audio-interfaces
-- **WebSocket Client**: Forwards converted audio to backend at `/ws_pcm` endpoint
+- **WebSocket Client**: Forwards converted audio to backend at `/ws?codec=pcm` endpoint
 - **Graceful Handling**: Supports reconnections and proper cleanup
 - **Configurable**: Command-line options for ports and endpoints
 
@@ -42,7 +42,7 @@ uv run main.py
 
 This will:
 - Listen for TCP connections on port 8989
-- Forward to WebSocket at `ws://127.0.0.1:8000/ws_pcm`
+- Forward to WebSocket at `ws://127.0.0.1:8000/ws?codec=pcm`
 
 ### Advanced Usage
 
@@ -51,14 +51,14 @@ This will:
 uv run main.py --tcp-port 9090
 
 # Custom WebSocket URL
-uv run main.py --ws-url "ws://192.168.1.100:8000/ws_pcm"
+uv run main.py --ws-url "ws://192.168.1.100:8000/ws?codec=pcm"
 
 # Verbose logging
 uv run main.py -v    # INFO level
 uv run main.py -vv   # DEBUG level
 
 # Full configuration example
-uv run main.py --tcp-port 8989 --ws-url "ws://localhost:8000/ws_pcm" -v
+uv run main.py --tcp-port 8989 --ws-url "ws://localhost:8000/ws?codec=pcm" -v
 ```
 
 ### Command Line Options
@@ -66,13 +66,13 @@ uv run main.py --tcp-port 8989 --ws-url "ws://localhost:8000/ws_pcm" -v
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--tcp-port` | 8989 | TCP port to listen on for ESP32 connections |
-| `--ws-url` | `ws://127.0.0.1:8000/ws_pcm` | WebSocket URL to forward audio to |
+| `--ws-url` | `ws://127.0.0.1:8000/ws?codec=pcm` | WebSocket URL to forward audio to |
 | `-v` / `--verbose` | WARNING | Increase verbosity (-v: INFO, -vv: DEBUG) |
 
 ## Architecture
 
 ```
-ESP32 Voice-PE → TCP:8989 → HAVPE Relay → WebSocket:/ws_pcm → Omi Backend
+ESP32 Voice-PE → TCP:8989 → HAVPE Relay → WebSocket:/ws?codec=pcm → Omi Backend
      (32-bit PCM)                    (16-bit PCM)
 ```
 
@@ -88,7 +88,7 @@ The relay automatically includes the following WebSocket parameters when connect
 
 Example WebSocket URL sent to backend:
 ```
-ws://127.0.0.1:8000/ws_pcm?user_id=esp32_voice_pe&rate=16000&width=2&channels=2&src=voice_pe
+ws://127.0.0.1:8000/ws?codec=pcm?user_id=esp32_voice_pe&rate=16000&width=2&channels=2&src=voice_pe
 ```
 
 ## Development

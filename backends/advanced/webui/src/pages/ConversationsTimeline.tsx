@@ -5,8 +5,7 @@ import 'react-vertical-timeline-component/style.min.css'
 import { conversationsApi } from '../services/api'
 
 interface Conversation {
-  conversation_id?: string
-  audio_uuid: string
+  conversation_id: string
   title?: string
   summary?: string
   detailed_summary?: string
@@ -14,8 +13,6 @@ interface Conversation {
   client_id: string
   segment_count?: number
   memory_count?: number
-  audio_path?: string
-  cropped_audio_path?: string
   duration_seconds?: number
   has_memory?: boolean
   transcript?: string
@@ -88,11 +85,6 @@ function ConversationCard({ conversation, formatDuration }: ConversationCardProp
               {formatDuration(conversation.duration_seconds)}
             </span>
           )}
-          {conversation.deleted && (
-            <span className="px-2 py-1 bg-red-100 text-red-700 rounded">
-              Failed: {conversation.deletion_reason || 'Unknown'}
-            </span>
-          )}
         </div>
       </div>
 
@@ -150,12 +142,6 @@ function ConversationCard({ conversation, formatDuration }: ConversationCardProp
                 <span className="text-gray-600 font-mono">{conversation.conversation_id.slice(0, 8)}...</span>
               </div>
             )}
-            {conversation.audio_uuid && (
-              <div>
-                <span className="font-medium text-gray-700">Audio UUID:</span>{' '}
-                <span className="text-gray-600 font-mono">{conversation.audio_uuid.slice(0, 8)}...</span>
-              </div>
-            )}
             {conversation.active_transcript_version && (
               <div>
                 <span className="font-medium text-gray-700">Transcript Version:</span>{' '}
@@ -169,24 +155,6 @@ function ConversationCard({ conversation, formatDuration }: ConversationCardProp
               </div>
             )}
           </div>
-
-          {/* Audio Paths */}
-          {(conversation.audio_path || conversation.cropped_audio_path) && (
-            <div className="text-xs space-y-1">
-              {conversation.audio_path && (
-                <div>
-                  <span className="font-medium text-gray-700">Audio:</span>{' '}
-                  <span className="text-gray-600 font-mono">{conversation.audio_path}</span>
-                </div>
-              )}
-              {conversation.cropped_audio_path && (
-                <div>
-                  <span className="font-medium text-gray-700">Cropped:</span>{' '}
-                  <span className="text-gray-600 font-mono">{conversation.cropped_audio_path}</span>
-                </div>
-              )}
-            </div>
-          )}
         </div>
       )}
     </div>
@@ -201,7 +169,8 @@ export default function ConversationsTimeline() {
   const loadConversations = async () => {
     try {
       setLoading(true)
-      const response = await conversationsApi.getAll()
+      // Exclude deleted conversations from timeline view
+      const response = await conversationsApi.getAll(false)
       const conversationsList = response.data.conversations || []
       setConversations(conversationsList)
       setError(null)
@@ -290,7 +259,7 @@ export default function ConversationsTimeline() {
 
             return (
               <VerticalTimelineElement
-                key={conv.conversation_id || conv.audio_uuid}
+                key={conv.conversation_id}
                 date={date.toLocaleString('en-US', {
                   month: 'short',
                   day: 'numeric',

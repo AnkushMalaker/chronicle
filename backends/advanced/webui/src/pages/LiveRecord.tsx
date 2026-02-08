@@ -1,12 +1,12 @@
 import { Radio, Zap, Archive } from 'lucide-react'
-import { useSimpleAudioRecording } from '../hooks/useSimpleAudioRecording'
+import { useRecording } from '../contexts/RecordingContext'
 import SimplifiedControls from '../components/audio/SimplifiedControls'
 import StatusDisplay from '../components/audio/StatusDisplay'
 import AudioVisualizer from '../components/audio/AudioVisualizer'
 import SimpleDebugPanel from '../components/audio/SimpleDebugPanel'
 
 export default function LiveRecord() {
-  const recording = useSimpleAudioRecording()
+  const recording = useRecording()
 
   return (
     <div>

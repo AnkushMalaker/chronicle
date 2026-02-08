@@ -43,40 +43,8 @@ def get_container_status(service_name: str) -> Dict[str, Any]:
 
     try:
         # Get container status using docker compose ps
+        # Only check containers from active profiles (excludes inactive profile services)
         cmd = ['docker', 'compose', 'ps', '--format', 'json']
-
-        # Handle special profiles for backend (HTTPS and Obsidian)
-        if service_name == 'backend':
-            profiles = []
-            
-            # Check for HTTPS profile
-            caddyfile_path = service_path / 'Caddyfile'
-            if caddyfile_path.exists():
-                profiles.append('https')
-            
-            # Check for Obsidian/Neo4j profile
-            env_file = service_path / '.env'
-            if env_file.exists():
-                env_values = dotenv_values(env_file)
-                neo4j_host = env_values.get('NEO4J_HOST', '')
-                if neo4j_host and neo4j_host not in ['', 'your-neo4j-host-here', 'your_neo4j_host_here']:
-                    profiles.append('obsidian')
-            
-            # Apply profiles if any are needed
-            if profiles:
-                cmd = ['docker', 'compose'] + [item for profile in profiles for item in ['--profile', profile]] + ['ps', '--format', 'json']
-
-        # Handle speaker-recognition profiles
-        if service_name == 'speaker-recognition':
-            from dotenv import dotenv_values
-            env_file = service_path / '.env'
-            if env_file.exists():
-                env_values = dotenv_values(env_file)
-                compute_mode = env_values.get('COMPUTE_MODE', 'cpu')
-                if compute_mode == 'gpu':
-                    cmd = ['docker', 'compose', '--profile', 'gpu', 'ps', '--format', 'json']
-                else:
-                    cmd = ['docker', 'compose', '--profile', 'cpu', 'ps', '--format', 'json']
 
         result = subprocess.run(
             cmd,
@@ -95,8 +63,14 @@ def get_container_status(service_name: str) -> Dict[str, Any]:
             if line:
                 try:
                     container = json.loads(line)
+                    container_name = container.get('Name', 'unknown')
+
+                    # Skip test containers - they're not part of production services
+                    if '-test-' in container_name.lower():
+                        continue
+
                     containers.append({
-                        'name': container.get('Name', 'unknown'),
+                        'name': container_name,
                         'state': container.get('State', 'unknown'),
                         'status': container.get('Status', 'unknown'),
                         'health': container.get('Health', 'none')
@@ -202,7 +176,12 @@ def show_quick_status():
             container_icon = "🟡"
         elif status['container_status'] == 'stopped':
             container_icon = "🔴"
+        elif status['container_status'] == 'not_found':
+            container_icon = "⚪"
+        elif status['container_status'] in ['error', 'timeout']:
+            container_icon = "⚫"
         else:
+            # Unknown status - log it for debugging
             container_icon = "⚫"
 
         # Health status

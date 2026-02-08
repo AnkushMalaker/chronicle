@@ -23,23 +23,77 @@ from advanced_omi_backend.auth import (
     fastapi_users,
     websocket_auth,
 )
+from advanced_omi_backend.client_manager import get_client_manager
+from advanced_omi_backend.middleware.app_middleware import setup_middleware
+from advanced_omi_backend.routers.api_router import router as api_router
+from advanced_omi_backend.routers.modules.health_routes import router as health_router
+from advanced_omi_backend.routers.modules.websocket_routes import (
+    router as websocket_router,
+)
+from advanced_omi_backend.services.audio_service import get_audio_stream_service
+from advanced_omi_backend.services.memory import (
+    get_memory_service,
+    shutdown_memory_service,
+)
+from advanced_omi_backend.task_manager import get_task_manager, init_task_manager
 from advanced_omi_backend.users import (
     User,
     UserRead,
     UserUpdate,
     register_client_to_user,
 )
-from advanced_omi_backend.client_manager import get_client_manager
-from advanced_omi_backend.services.memory import get_memory_service, shutdown_memory_service
-from advanced_omi_backend.middleware.app_middleware import setup_middleware
-from advanced_omi_backend.routers.api_router import router as api_router
-from advanced_omi_backend.routers.modules.health_routes import router as health_router
-from advanced_omi_backend.routers.modules.websocket_routes import router as websocket_router
-from advanced_omi_backend.services.audio_service import get_audio_stream_service
-from advanced_omi_backend.task_manager import init_task_manager, get_task_manager
 
 logger = logging.getLogger(__name__)
 application_logger = logging.getLogger("audio_processing")
+
+
+async def initialize_openmemory_user() -> None:
+    """Initialize and register OpenMemory user if using OpenMemory MCP provider.
+
+    This function:
+    - Checks if OpenMemory MCP is configured as the memory provider
+    - Registers the configured user with OpenMemory server
+    - Creates a test memory and deletes it to trigger user creation
+    - Logs success or warning if OpenMemory is not reachable
+    """
+    from advanced_omi_backend.services.memory.config import (
+        MemoryProvider,
+        build_memory_config_from_env,
+    )
+
+    memory_provider_config = build_memory_config_from_env()
+
+    if memory_provider_config.memory_provider != MemoryProvider.OPENMEMORY_MCP:
+        return
+
+    try:
+        from advanced_omi_backend.services.memory.providers.mcp_client import MCPClient
+
+        # Get configured user_id and server_url
+        openmemory_config = memory_provider_config.openmemory_config
+        user_id = openmemory_config.get("user_id", "openmemory") if openmemory_config else "openmemory"
+        server_url = openmemory_config.get("server_url", "http://host.docker.internal:8765") if openmemory_config else "http://host.docker.internal:8765"
+        client_name = openmemory_config.get("client_name", "chronicle") if openmemory_config else "chronicle"
+
+        application_logger.info(f"Registering OpenMemory user: {user_id} at {server_url}")
+
+        # Make a lightweight registration call (create and delete dummy memory)
+        async with MCPClient(server_url=server_url, client_name=client_name, user_id=user_id) as client:
+            # Test connection first
+            is_connected = await client.test_connection()
+            if is_connected:
+                # Create and immediately delete a dummy memory to trigger user creation
+                memory_ids = await client.add_memories("Chronicle initialization - user registration test")
+                if memory_ids:
+                    # Delete the test memory
+                    await client.delete_memory(memory_ids[0])
+                application_logger.info(f"✅ Registered OpenMemory user: {user_id}")
+            else:
+                application_logger.warning(f"⚠️  OpenMemory MCP not reachable at {server_url}")
+                application_logger.info("User will be auto-created on first memory operation")
+    except Exception as e:
+        application_logger.warning(f"⚠️  Could not register OpenMemory user: {e}")
+        application_logger.info("User will be auto-created on first memory operation")
 
 
 @asynccontextmanager
@@ -53,13 +107,16 @@ async def lifespan(app: FastAPI):
     # Initialize Beanie for all document models
     try:
         from beanie import init_beanie
+
+        from advanced_omi_backend.models.annotation import Annotation
+        from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
         from advanced_omi_backend.models.conversation import Conversation
-        from advanced_omi_backend.models.audio_file import AudioFile
         from advanced_omi_backend.models.user import User
+        from advanced_omi_backend.models.waveform import WaveformData
 
         await init_beanie(
             database=config.db,
-            document_models=[User, Conversation, AudioFile],
+            document_models=[User, Conversation, AudioChunkDocument, WaveformData, Annotation],
         )
         application_logger.info("Beanie initialized for all document models")
     except Exception as e:
@@ -91,6 +148,27 @@ async def lifespan(app: FastAPI):
         application_logger.error(f"Failed to connect to Redis for RQ: {e}")
         application_logger.warning("RQ queue system will not be available - check Redis connection")
 
+    # Initialize BackgroundTaskManager (must happen before any code path uses it)
+    try:
+        task_manager = init_task_manager()
+        await task_manager.start()
+        application_logger.info("BackgroundTaskManager initialized and started")
+    except Exception as e:
+        application_logger.error(f"Failed to initialize task manager: {e}")
+        raise  # Task manager is essential
+
+    # Initialize ClientManager eagerly (prevents lazy race on first WebSocket connect)
+    get_client_manager()
+    application_logger.info("ClientManager initialized")
+
+    # Initialize LLM client eagerly (catch config errors at startup, not on first request)
+    try:
+        from advanced_omi_backend.llm_client import get_llm_client
+        get_llm_client()
+        application_logger.info("LLM client initialized from config.yml")
+    except Exception as e:
+        application_logger.warning(f"LLM client initialization deferred: {e}")
+
     # Initialize audio stream service for Redis Streams
     try:
         audio_service = get_audio_stream_service()
@@ -111,6 +189,13 @@ async def lifespan(app: FastAPI):
         from advanced_omi_backend.services.audio_stream import AudioStreamProducer
         app.state.audio_stream_producer = AudioStreamProducer(app.state.redis_audio_stream)
         application_logger.info("✅ Redis client for audio streaming producer initialized")
+
+        # Initialize ClientManager Redis for cross-container client→user mapping
+        from advanced_omi_backend.client_manager import (
+            initialize_redis_for_client_manager,
+        )
+        initialize_redis_for_client_manager(config.redis_url)
+
     except Exception as e:
         application_logger.error(f"Failed to initialize Redis client for audio streaming: {e}", exc_info=True)
         application_logger.warning("Audio streaming producer will not be available")
@@ -119,8 +204,44 @@ async def lifespan(app: FastAPI):
     # Memory service will be lazily initialized when first used
     application_logger.info("Memory service will be initialized on first use (lazy loading)")
 
+    # Register OpenMemory user if using openmemory_mcp provider
+    await initialize_openmemory_user()
+
     # SystemTracker is used for monitoring and debugging
     application_logger.info("Using SystemTracker for monitoring and debugging")
+
+    # Initialize plugins using plugin service
+    try:
+        from advanced_omi_backend.services.plugin_service import (
+            init_plugin_router,
+            set_plugin_router,
+        )
+
+        plugin_router = init_plugin_router()
+
+        if plugin_router:
+            # Initialize async resources for each enabled plugin
+            for plugin_id, plugin in plugin_router.plugins.items():
+                if plugin.enabled:
+                    try:
+                        await plugin.initialize()
+                        application_logger.info(f"✅ Plugin '{plugin_id}' initialized")
+                    except Exception as e:
+                        application_logger.error(f"Failed to initialize plugin '{plugin_id}': {e}", exc_info=True)
+
+            application_logger.info(f"Plugins initialized: {len(plugin_router.plugins)} active")
+
+            # Store in app state for API access
+            app.state.plugin_router = plugin_router
+            # Register with plugin service for worker access
+            set_plugin_router(plugin_router)
+        else:
+            application_logger.info("No plugins configured")
+            app.state.plugin_router = None
+
+    except Exception as e:
+        application_logger.error(f"Failed to initialize plugin system: {e}", exc_info=True)
+        app.state.plugin_router = None
 
     application_logger.info("Application ready - using application-level processing architecture.")
 
@@ -135,10 +256,22 @@ async def lifespan(app: FastAPI):
         client_manager = get_client_manager()
         for client_id in client_manager.get_all_client_ids():
             try:
-                from advanced_omi_backend.controllers.websocket_controller import cleanup_client_state
+                from advanced_omi_backend.controllers.websocket_controller import (
+                    cleanup_client_state,
+                )
                 await cleanup_client_state(client_id)
             except Exception as e:
                 application_logger.error(f"Error cleaning up client {client_id}: {e}")
+
+        # Shutdown BackgroundTaskManager
+        try:
+            task_mgr = get_task_manager()
+            await task_mgr.shutdown()
+            application_logger.info("BackgroundTaskManager shut down")
+        except RuntimeError:
+            pass  # Never initialized
+        except Exception as e:
+            application_logger.error(f"Error shutting down task manager: {e}")
 
         # RQ workers shut down automatically when process ends
         # No special cleanup needed for Redis connections
@@ -161,6 +294,16 @@ async def lifespan(app: FastAPI):
 
         # Stop metrics collection and save final report
         application_logger.info("Metrics collection stopped")
+
+        # Shutdown plugins
+        try:
+            from advanced_omi_backend.services.plugin_service import (
+                cleanup_plugin_router,
+            )
+            await cleanup_plugin_router()
+            application_logger.info("Plugins shut down")
+        except Exception as e:
+            application_logger.error(f"Error shutting down plugins: {e}")
 
         # Shutdown memory service and speaker service
         shutdown_memory_service()

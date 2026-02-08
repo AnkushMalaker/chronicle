@@ -100,13 +100,13 @@ curl -X POST "http://localhost:8000/auth/jwt/login" \
 
 #### Token-based (Recommended)
 ```javascript
-const ws = new WebSocket('ws://localhost:8000/ws_pcm?token=JWT_TOKEN&device_name=phone');
+const ws = new WebSocket('ws://localhost:8000/ws?codec=pcm?token=JWT_TOKEN&device_name=phone');
 ```
 
 #### Cookie-based
 ```javascript
 // Requires existing cookie from web login
-const ws = new WebSocket('ws://localhost:8000/ws_pcm?device_name=phone');
+const ws = new WebSocket('ws://localhost:8000/ws?codec=pcm?device_name=phone');
 ```
 
 ## Client ID Management
@@ -183,8 +183,8 @@ COOKIE_SECURE=false
 - `PATCH /api/users/me` - Update user profile
 
 ### WebSocket Endpoints
-- `ws://host/ws` - Opus audio stream with auth
-- `ws://host/ws_pcm` - PCM audio stream with auth
+- `ws://host/ws?codec=opus` - Opus audio stream with auth
+- `ws://host/ws?codec=pcm` - PCM audio stream with auth (default)
 
 ## Error Handling
 

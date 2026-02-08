@@ -39,6 +39,14 @@ Clear Test Databases
     # Clear conversations except those tagged as fixtures
     Run Process    docker exec ${MONGO_CONTAINER} mongosh test_db --eval "db.conversations.deleteMany({\\$or: [{'is_fixture': {\\$exists: false}}, {'is_fixture': false}]})"    shell=True
 
+    # Delete old fixture conversations that don't have audio chunks (from pre-MongoDB-migration)
+    ${delete_fixtures_script}=    Set Variable    const fixturesWithoutChunks = db.conversations.find({'is_fixture': true}).toArray().filter(c => db.audio_chunks.countDocuments({conversation_id: c.conversation_id}) === 0).map(c => c.conversation_id); if (fixturesWithoutChunks.length > 0) { db.conversations.deleteMany({conversation_id: {$in: fixturesWithoutChunks}}); print('Deleted ' + fixturesWithoutChunks.length + ' old fixture(s)'); }
+    Run Process    docker    exec    ${MONGO_CONTAINER}    mongosh    test_db    --eval    ${delete_fixtures_script}    shell=True
+
+    # Clear audio chunks except those belonging to remaining fixture conversations
+    ${clear_chunks_script}=    Set Variable    const fixtureIds = db.conversations.find({'is_fixture': true}, {conversation_id: 1}).map(c => c.conversation_id); db.audio_chunks.deleteMany({conversation_id: {$nin: fixtureIds}})
+    Run Process    docker    exec    ${MONGO_CONTAINER}    mongosh    test_db    --eval    ${clear_chunks_script}    shell=True
+
     # Clear job references from remaining conversations to prevent "No such job" errors
     Run Process    docker exec ${MONGO_CONTAINER} mongosh test_db --eval "db.conversations.updateMany({}, {\\$unset: {'transcription_job_id': '', 'speaker_job_id': '', 'memory_job_id': ''}})"    shell=True
 
@@ -63,16 +71,18 @@ Clear Test Databases
 
     # Clear audio files (except fixtures subfolder)
     Run Process    bash    -c    find ${BACKEND_DIR}/data/test_audio_chunks -maxdepth 1 -name "*.wav" -delete || true    shell=True
-    Run Process    bash    -c    rm -rf ${BACKEND_DIR}/data/test_debug_dir/* || true    shell=True
+    # Don't delete plugin database - just clear its contents later via Clear Plugin Events keyword
+    # Run Process    bash    -c    rm -rf ${BACKEND_DIR}/data/test_debug_dir/* || true    shell=True
     Log To Console    Audio files cleared (fixtures/ subfolder preserved)
 
     # Clear container audio files (except fixtures subfolder)
     Run Process    bash    -c    docker exec ${BACKEND_CONTAINER} find /app/audio_chunks -maxdepth 1 -name "*.wav" -delete || true    shell=True
-    Run Process    bash    -c    docker exec ${BACKEND_CONTAINER} find /app/debug_dir -name "*" -type f -delete || true    shell=True
+    # Don't delete plugin database files - database is cleared via Clear Plugin Events keyword
+    # Run Process    bash    -c    docker exec ${BACKEND_CONTAINER} find /app/debug_dir -name "*" -type f -delete || true    shell=True
 
-    # Clear Redis queues and job registries (preserve worker registrations, failed and completed jobs)
-    # Delete all rq:* keys except worker registrations (rq:worker:*), failed jobs (rq:failed:*), and completed jobs (rq:finished:*)
-    ${redis_clear_script}=    Set Variable    redis-cli --scan --pattern "rq:*" | grep -Ev "^rq:(worker|failed|finished)" | xargs -r redis-cli DEL; redis-cli --scan --pattern "audio:*" | xargs -r redis-cli DEL; redis-cli --scan --pattern "consumer:*" | xargs -r redis-cli DEL
+    # Clear Redis queues and job registries (preserve worker registrations, failed and finished jobs)
+    # Delete all rq:* keys except worker registrations (rq:worker:*), failed jobs (rq:failed:*), and finished jobs (rq:finished:*)
+    ${redis_clear_script}=    Set Variable    redis-cli --scan --pattern "rq:*" | grep -Ev "^rq:(worker|failed|finished)" | xargs -r redis-cli DEL; redis-cli --scan --pattern "audio:*" | xargs -r redis-cli DEL; redis-cli --scan --pattern "consumer:*" | xargs -r redis-cli DEL; redis-cli --scan --pattern "transcription:*" | xargs -r redis-cli DEL
     Run Process    docker    exec    ${REDIS_CONTAINER}    sh    -c    ${redis_clear_script}    shell=True
     Log To Console    Redis queues and job registries cleared (worker registrations preserved)
 
@@ -83,6 +93,7 @@ Clear All Test Data
     # Wipe all MongoDB collections
     Run Process    docker exec ${MONGO_CONTAINER} mongosh test_db --eval "db.users.deleteMany({})"    shell=True
     Run Process    docker exec ${MONGO_CONTAINER} mongosh test_db --eval "db.conversations.deleteMany({})"    shell=True
+    Run Process    docker exec ${MONGO_CONTAINER} mongosh test_db --eval "db.audio_chunks.deleteMany({})"    shell=True
     Log To Console    MongoDB completely cleared
 
     # Clear Qdrant
@@ -111,6 +122,30 @@ Create Fixture Conversation
     ...                Returns the conversation ID
     [Arguments]    ${device_name}=fixture-device
 
+    # Check if a fixture already exists via API
+    ${conversations}=    Get User Conversations
+    ${fixtures}=    Evaluate    [c for c in $conversations if c.get('is_fixture', False)]
+    ${fixture_count}=    Get Length    ${fixtures}
+
+    # If fixture exists, reuse it
+    IF    ${fixture_count} > 0
+        ${conversation_id}=    Set Variable    ${fixtures}[0][conversation_id]
+        Log To Console    \n✓ Reusing existing fixture conversation: ${conversation_id}
+
+        # Verify it still has transcript (sanity check)
+        Dictionary Should Contain Key    ${fixtures}[0]    transcript
+        ${transcript}=    Set Variable    ${fixtures}[0][transcript]
+        Should Not Be Empty    ${transcript}    Fixture conversation has no transcript
+        ${transcript_len}=    Get Length    ${transcript}
+        Log To Console    ✓ Fixture transcript length: ${transcript_len} chars
+
+        # Set global variable for other tests to use
+        Set Global Variable    ${FIXTURE_CONVERSATION_ID}    ${conversation_id}
+
+        RETURN    ${conversation_id}
+    END
+
+    # No fixture exists, create new one
     Log To Console    \nCreating fixture conversation...
 
     # Upload test audio to fixtures folder

@@ -1,0 +1,14 @@
+# Test plugin configuration for integration testing
+# This file is loaded during tests to verify event dispatch system
+
+plugins:
+  test_event:
+    enabled: true
+    events:
+      - transcript.streaming
+      - transcript.batch
+      - conversation.complete
+      - memory.processed
+    condition:
+      type: always  # Capture all events without filtering
+    db_path: /app/debug/test_plugin_events.db

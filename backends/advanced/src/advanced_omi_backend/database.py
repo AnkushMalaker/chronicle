@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # MongoDB Configuration
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://mongo:27017")
-MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "friend-lite")
+MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "chronicle")
 
 mongo_client = AsyncIOMotorClient(
     MONGODB_URI,

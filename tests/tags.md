@@ -4,7 +4,7 @@ This document defines the standard tags used across the Chronicle test suite.
 
 ## Simplified Tag Set
 
-Chronicle uses a **minimal, focused tag set** for test organization. Only 11 tags are permitted.
+Chronicle uses a **minimal, focused tag set** for test organization. Only 15 tags are permitted.
 
 ## Tag Format
 
@@ -88,6 +88,36 @@ Chronicle uses a **minimal, focused tag set** for test organization. Only 11 tag
 - Full pipeline testing
 - Cross-service integration
 
+### Special Tags
+
+**`requires-api-keys`** - Tests requiring external API services (cloud providers)
+- Full E2E integration tests with transcription and LLM processing
+- Memory extraction verification tests
+- Transcript similarity verification tests
+- Requires: DEEPGRAM_API_KEY and/or OPENAI_API_KEY environment variables
+- These tests are excluded from PR runs by default (run only on dev/main branches)
+
+**`slow`** - Tests requiring long timeouts (>30s) or infrastructure operations
+- Backend restart tests (service stop/start cycles)
+- Connection resilience tests
+- Heavy integration tests with multiple service restarts
+- Excluded from default `make test` runs for faster feedback
+- Run explicitly with `make test-slow` or `make test-all-with-slow`
+
+**`sdk`** - Tests for unreleased SDK functionality
+- SDK integration tests
+- SDK authentication tests
+- SDK API endpoint tests
+- Excluded from default `make test` runs until SDK is released
+- Run explicitly with `make test-sdk` when developing SDK features
+
+**`requires-gpu`** - Tests requiring GPU hardware and CUDA
+- Actual ASR model loading and inference
+- GPU-accelerated transcription quality validation
+- Tests using real NeMo/Parakeet models
+- Excluded from standard CI runs (no GPU available)
+- Run explicitly with `make test-asr-gpu` on GPU-enabled systems
+
 ## Tag Usage Guidelines
 
 ### Single Tag per Test (Preferred)
@@ -132,6 +162,10 @@ Use 2-3 tags only when testing interactions between components:
 8. **Is it about health checks?** → `health`
 9. **Is it end-to-end?** → `e2e`
 10. **Is it infrastructure/config?** → `infra`
+11. **Does it require external API keys?** → Add `requires-api-keys` tag
+12. **Does it take >30s or restart services?** → Add `slow` tag
+13. **Is it for unreleased SDK features?** → Add `sdk` tag
+14. **Does it require GPU hardware?** → Add `requires-gpu` tag
 
 ### Examples
 
@@ -163,7 +197,7 @@ Use 2-3 tags only when testing interactions between components:
 
 ## Prohibited Tags
 
-**DO NOT create or use any tags other than the 11 approved tags above.**
+**DO NOT create or use any tags other than the 14 approved tags above.**
 
 Commonly misused tags that should NOT be used:
 - ❌ `positive`, `negative` - Test outcome is in the results, not tags
@@ -226,10 +260,14 @@ Current distribution (approximate):
 - `health`: 9 tests
 - `audio-streaming`: 4 tests
 - `audio-upload`: 3 tests
+- `slow`: 2 tests (backend restart tests)
+- `sdk`: 2 tests (SDK integration tests)
+- `requires-api-keys`: 1 test (integration_test.robot)
+- `requires-gpu`: 5 tests (ASR GPU integration tests)
 - `audio-batch`: 0 tests (reserved for future use)
 
 ---
 
-**Last Updated:** 2025-01-23
-**Total Approved Tags:** 11
+**Last Updated:** 2026-01-29
+**Total Approved Tags:** 15
 **Enforcement:** Mandatory - no exceptions

@@ -1,0 +1,15 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install dependencies
+RUN pip install --no-cache-dir aiohttp numpy
+
+# Copy mock server script
+COPY tests/libs/mock_llm_server.py .
+
+# Expose HTTP port
+EXPOSE 11435
+
+# Run server
+CMD ["python", "mock_llm_server.py", "--host", "0.0.0.0", "--port", "11435"]

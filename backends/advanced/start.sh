@@ -2,8 +2,16 @@
 
 # Chronicle Backend Startup Script
 # Starts both the FastAPI backend and RQ workers
+# Usage: ./start.sh [--test]
 
 set -e
+
+# Check for test mode flag
+TEST_MODE=false
+if [[ "$1" == "--test" ]]; then
+    TEST_MODE=true
+    echo "🧪 Running in TEST mode (with test dependencies)"
+fi
 
 echo "🚀 Starting Chronicle Backend..."
 
@@ -53,7 +61,12 @@ sleep 2
 
 # Start the main FastAPI application
 echo "🌐 Starting FastAPI backend..."
-uv run --extra deepgram python3 src/advanced_omi_backend/main.py &
+# Use --group test in test mode
+if [ "$TEST_MODE" = true ]; then
+    uv run --extra deepgram --group test python3 src/advanced_omi_backend/main.py &
+else
+    uv run --extra deepgram python3 src/advanced_omi_backend/main.py &
+fi
 BACKEND_PID=$!
 
 # Wait for any process to exit

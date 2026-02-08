@@ -10,19 +10,26 @@ Also includes audio cropping operations that work with the Conversation model.
 import logging
 import time
 import uuid
-from pathlib import Path
 
 from fastapi import UploadFile
 from fastapi.responses import JSONResponse
 
+from advanced_omi_backend.controllers.queue_controller import (
+    JOB_RESULT_TTL,
+    start_post_conversation_jobs,
+    transcription_queue,
+)
+from advanced_omi_backend.models.conversation import create_conversation
+from advanced_omi_backend.models.user import User
+from advanced_omi_backend.services.transcription import is_transcription_available
+from advanced_omi_backend.utils.audio_chunk_utils import convert_audio_to_chunks
 from advanced_omi_backend.utils.audio_utils import (
     AudioValidationError,
-    write_audio_file,
+    validate_and_prepare_audio,
 )
-from advanced_omi_backend.models.job import JobPriority
-from advanced_omi_backend.models.user import User
-from advanced_omi_backend.models.conversation import create_conversation
-from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.workers.transcription_jobs import (
+    transcribe_full_audio_job,
+)
 
 logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
@@ -30,6 +37,7 @@ audio_logger = logging.getLogger("audio_processing")
 
 def generate_client_id(user: User, device_name: str) -> str:
     """Generate client ID for uploaded files."""
+    logger.debug(f"Generating client ID - user.id={user.id}, type={type(user.id)}")
     user_id_suffix = str(user.id)[-6:]
     return f"{user_id_suffix}-{device_name}"
 
@@ -38,8 +46,6 @@ async def upload_and_process_audio_files(
     user: User,
     files: list[UploadFile],
     device_name: str = "upload",
-    auto_generate_client: bool = True,
-    folder: str = None,
     source: str = "upload"
 ) -> dict:
     """
@@ -54,8 +60,7 @@ async def upload_and_process_audio_files(
         user: Authenticated user
         files: List of uploaded audio files
         device_name: Device identifier
-        auto_generate_client: Whether to auto-generate client ID
-        folder: Optional subfolder for audio storage (e.g., 'fixtures')
+        source: Source of the upload (e.g., 'upload', 'gdrive')
     """
     try:
         if not files:
@@ -83,36 +88,23 @@ async def upload_and_process_audio_files(
                 content = await file.read()
 
 
-                # Generate audio UUID and timestamp
+                # Track external source for deduplication (Google Drive, etc.)
+                external_source_id = None
+                external_source_type = None
                 if source == "gdrive":
-                    audio_uuid = getattr(file, "audio_uuid", None)
-                    if not audio_uuid: 
-                        audio_logger.error(f"Missing audio_uuid for gdrive file: {file.filename}")
-                        audio_uuid = str(uuid.uuid4()) 
-                else: 
-                    audio_uuid = str(uuid.uuid4())
+                    external_source_id = getattr(file, "file_id", None) or getattr(file, "audio_uuid", None)
+                    external_source_type = "gdrive"
+                    if not external_source_id:
+                        audio_logger.warning(f"Missing file_id for gdrive file: {file.filename}")
                 timestamp = int(time.time() * 1000)
 
-                # Determine output directory (with optional subfolder)
-                from advanced_omi_backend.config import CHUNK_DIR
-                if folder:
-                    chunk_dir = CHUNK_DIR / folder
-                    chunk_dir.mkdir(parents=True, exist_ok=True)
-                else:
-                    chunk_dir = CHUNK_DIR
-
-                # Validate, write audio file and create AudioSession (all in one)
+                # Validate and prepare audio (read format from WAV file)
                 try:
-                    relative_audio_path, file_path, duration = await write_audio_file(
-                        raw_audio_data=content,
-                        audio_uuid=audio_uuid,
-                        source=source,
-                        client_id=client_id,
-                        user_id=user.user_id,
-                        user_email=user.email,
-                        timestamp=timestamp,
-                        chunk_dir=chunk_dir,
-                        validate=True,  # Validate WAV format, convert stereo→mono
+                    audio_data, sample_rate, sample_width, channels, duration = await validate_and_prepare_audio(
+                        audio_data=content,
+                        expected_sample_rate=16000,  # Expecting 16kHz
+                        convert_to_mono=True,  # Convert stereo to mono
+                        auto_resample=True  # Auto-resample if sample rate doesn't match
                     )
                 except AudioValidationError as e:
                     processed_files.append({
@@ -123,7 +115,7 @@ async def upload_and_process_audio_files(
                     continue
 
                 audio_logger.info(
-                    f"📊 {file.filename}: {duration:.1f}s → {relative_audio_path}"
+                    f"📊 {file.filename}: {duration:.1f}s ({sample_rate}Hz, {channels}ch, {sample_width} bytes/sample)"
                 )
 
                 # Create conversation immediately for uploaded files (conversation_id auto-generated)
@@ -133,45 +125,112 @@ async def upload_and_process_audio_files(
                 title = file.filename.rsplit('.', 1)[0][:50] if file.filename else "Uploaded Audio"
 
                 conversation = create_conversation(
-                    audio_uuid=audio_uuid,
                     user_id=user.user_id,
                     client_id=client_id,
                     title=title,
-                    summary="Processing uploaded audio file..."
+                    summary="Processing uploaded audio file...",
+                    external_source_id=external_source_id,
+                    external_source_type=external_source_type,
                 )
-                # Use the relative path returned by write_audio_file (already includes folder prefix if applicable)
-                conversation.audio_path = relative_audio_path
                 await conversation.insert()
                 conversation_id = conversation.conversation_id  # Get the auto-generated ID
 
                 audio_logger.info(f"📝 Created conversation {conversation_id} for uploaded file")
 
-                # Enqueue post-conversation processing job chain
-                from advanced_omi_backend.controllers.queue_controller import start_post_conversation_jobs
+                # Convert audio directly to MongoDB chunks
+                try:
+                    num_chunks = await convert_audio_to_chunks(
+                        conversation_id=conversation_id,
+                        audio_data=audio_data,
+                        sample_rate=sample_rate,
+                        channels=channels,
+                        sample_width=sample_width,
+                    )
+                    audio_logger.info(
+                        f"📦 Converted uploaded file to {num_chunks} MongoDB chunks "
+                        f"(conversation {conversation_id[:12]})"
+                    )
+                except ValueError as val_error:
+                    # Handle validation errors (e.g., file too long)
+                    audio_logger.error(f"Audio validation failed: {val_error}")
+                    processed_files.append({
+                        "filename": file.filename,
+                        "status": "error",
+                        "error": str(val_error),
+                    })
+                    # Delete the conversation since it won't have audio chunks
+                    await conversation.delete()
+                    continue
+                except Exception as chunk_error:
+                    audio_logger.error(
+                        f"Failed to convert uploaded file to chunks: {chunk_error}",
+                        exc_info=True
+                    )
+                    processed_files.append({
+                        "filename": file.filename,
+                        "status": "error",
+                        "error": f"Audio conversion failed: {str(chunk_error)}",
+                    })
+                    # Delete the conversation since it won't have audio chunks
+                    await conversation.delete()
+                    continue
 
+                # Enqueue batch transcription job first (file uploads need transcription)
+                version_id = str(uuid.uuid4())
+                transcribe_job_id = f"transcribe_{conversation_id[:12]}"
+
+                # Check if transcription provider is available before enqueueing
+                transcription_job = None
+                if is_transcription_available(mode="batch"):
+                    transcription_job = transcription_queue.enqueue(
+                        transcribe_full_audio_job,
+                        conversation_id,
+                        version_id,
+                        "batch",  # trigger
+                        job_timeout=1800,  # 30 minutes
+                        result_ttl=JOB_RESULT_TTL,
+                        job_id=transcribe_job_id,
+                        description=f"Transcribe uploaded file {conversation_id[:8]}",
+                        meta={'conversation_id': conversation_id, 'client_id': client_id}
+                    )
+                    audio_logger.info(f"📥 Enqueued transcription job {transcription_job.id} for uploaded file")
+                else:
+                    audio_logger.warning(
+                        f"⚠️ Skipping transcription for conversation {conversation_id}: "
+                        "No transcription provider configured"
+                    )
+
+                # Enqueue post-conversation processing job chain (depends on transcription)
                 job_ids = start_post_conversation_jobs(
                     conversation_id=conversation_id,
-                    audio_uuid=audio_uuid,
-                    audio_file_path=file_path,
                     user_id=user.user_id,
-                    post_transcription=True,  # Run batch transcription for uploads
+                    transcript_version_id=version_id,  # Pass the version_id from transcription job
+                    depends_on_job=transcription_job,  # Wait for transcription to complete (or None)
                     client_id=client_id  # Pass client_id for UI tracking
                 )
 
                 processed_files.append({
                     "filename": file.filename,
-                    "status": "processing",
-                    "audio_uuid": audio_uuid,
+                    "status": "started",  # RQ standard: job has been enqueued
                     "conversation_id": conversation_id,
-                    "transcript_job_id": job_ids['transcription'],
+                    "transcript_job_id": transcription_job.id if transcription_job else None,
                     "speaker_job_id": job_ids['speaker_recognition'],
                     "memory_job_id": job_ids['memory'],
                     "duration_seconds": round(duration, 2),
                 })
 
+                # Build job chain description
+                job_chain = []
+                if transcription_job:
+                    job_chain.append(transcription_job.id)
+                if job_ids['speaker_recognition']:
+                    job_chain.append(job_ids['speaker_recognition'])
+                if job_ids['memory']:
+                    job_chain.append(job_ids['memory'])
+
                 audio_logger.info(
                     f"✅ Processed {file.filename} → conversation {conversation_id}, "
-                    f"jobs: {job_ids['transcription']} → {job_ids['speaker_recognition']} → {job_ids['memory']}"
+                    f"jobs: {' → '.join(job_chain) if job_chain else 'none'}"
                 )
 
             except (OSError, IOError) as e:
@@ -191,19 +250,32 @@ async def upload_and_process_audio_files(
                     "error": str(e),
                 })
 
-        successful_files = [f for f in processed_files if f.get("status") == "processing"]
+        successful_files = [f for f in processed_files if f.get("status") == "started"]
         failed_files = [f for f in processed_files if f.get("status") == "error"]
 
-        return {
+        response_body = {
             "message": f"Uploaded and processing {len(successful_files)} file(s)",
             "client_id": client_id,
             "files": processed_files,
             "summary": {
                 "total": len(files),
-                "processing": len(successful_files),
+                "started": len(successful_files),  # RQ standard
                 "failed": len(failed_files),
             },
         }
+
+        # Return appropriate HTTP status code based on results
+        if len(failed_files) == len(files):
+            # ALL files failed - return 400 Bad Request
+            audio_logger.error(f"All {len(files)} file(s) failed to upload")
+            return JSONResponse(status_code=400, content=response_body)
+        elif len(failed_files) > 0:
+            # SOME files failed (partial success) - return 207 Multi-Status
+            audio_logger.warning(f"Partial upload: {len(successful_files)} succeeded, {len(failed_files)} failed")
+            return JSONResponse(status_code=207, content=response_body)
+        else:
+            # All files succeeded - return 200 OK
+            return response_body
 
     except (OSError, IOError) as e:
         # File system errors during upload handling
@@ -217,83 +289,3 @@ async def upload_and_process_audio_files(
         return JSONResponse(
             status_code=500, content={"error": f"File upload failed: {str(e)}"}
         )
-
-
-async def get_conversation_audio_path(conversation_id: str, user: User, cropped: bool = False) -> Path:
-    """
-    Get the file path for a conversation's audio file.
-
-    Args:
-        conversation_id: The conversation ID
-        user: The authenticated user
-        cropped: If True, return cropped audio path; if False, return original audio path
-
-    Returns:
-        Path object for the audio file
-
-    Raises:
-        ValueError: If conversation not found, access denied, or audio file not available
-    """
-    # Get conversation by conversation_id (UUID field, not _id)
-    conversation = await Conversation.find_one(Conversation.conversation_id == conversation_id)
-
-    if not conversation:
-        raise ValueError("Conversation not found")
-
-    # Check ownership (admins can access all files)
-    if not user.is_superuser and conversation.user_id != str(user.user_id):
-        raise ValueError("Access denied")
-
-    # Get the appropriate audio path
-    audio_path = conversation.cropped_audio_path if cropped else conversation.audio_path
-
-    if not audio_path:
-        audio_type = "cropped" if cropped else "original"
-        raise ValueError(f"No {audio_type} audio file available for this conversation")
-
-    # Build full file path
-    from advanced_omi_backend.app_config import get_audio_chunk_dir
-    audio_dir = get_audio_chunk_dir()
-    file_path = audio_dir / audio_path
-
-    # Check if file exists
-    if not file_path.exists() or not file_path.is_file():
-        raise ValueError("Audio file not found on disk")
-
-    return file_path
-
-
-async def get_cropped_audio_info(audio_uuid: str, user: User):
-    """
-    Get audio cropping metadata from the conversation.
-
-    This is an audio service operation that retrieves cropping-related metadata
-    such as speech segments, cropped audio path, and cropping timestamps.
-
-    Used for: Checking cropping status and retrieving audio processing details.
-    Works with: Conversation model.
-    """
-    try:
-        # Find the conversation
-        conversation = await Conversation.find_one(Conversation.audio_uuid == audio_uuid)
-        if not conversation:
-            return JSONResponse(status_code=404, content={"error": "Conversation not found"})
-
-        # Check ownership for non-admin users
-        if not user.is_superuser:
-            if conversation.user_id != str(user.user_id):
-                return JSONResponse(status_code=404, content={"error": "Conversation not found"})
-
-        return {
-            "audio_uuid": audio_uuid,
-            "cropped_audio_path": conversation.cropped_audio_path,
-            "speech_segments": conversation.speech_segments if hasattr(conversation, 'speech_segments') else [],
-            "cropped_duration": conversation.cropped_duration if hasattr(conversation, 'cropped_duration') else None,
-            "cropped_at": conversation.cropped_at if hasattr(conversation, 'cropped_at') else None,
-            "original_audio_path": conversation.audio_path,
-        }
-
-    except Exception as e:
-        # Database or unexpected errors when fetching audio metadata
-        audio_logger.exception("Error fetching cropped audio info")
-        return JSONResponse(status_code=500, content={"error": "Error fetching cropped audio info"})

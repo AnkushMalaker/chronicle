@@ -1,0 +1,23 @@
+# Email Summarizer Plugin Configuration
+#
+# This file contains non-secret configuration for the email summarizer plugin.
+# Secrets (SMTP credentials) are stored in backends/advanced/.env
+# Plugin orchestration (enabled, events) is in config/plugins.yml
+
+# Email content settings
+subject_prefix: "Conversation Summary"
+summary_max_sentences: 3
+include_conversation_id: true
+include_duration: true
+
+# SMTP Configuration (reads from .env)
+# These use environment variable references ${VAR_NAME}
+smtp_host: ${SMTP_HOST}
+smtp_port: ${SMTP_PORT:-587}
+smtp_username: ${SMTP_USERNAME}
+smtp_password: ${SMTP_PASSWORD}
+smtp_use_tls: ${SMTP_USE_TLS:-true}
+
+# Email sender configuration
+from_email: ${FROM_EMAIL}
+from_name: ${FROM_NAME:-Chronicle AI}

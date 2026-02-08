@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -107,33 +108,132 @@ class AudioBackend:
         return segments
 
     async def async_diarize(self, path: Path, min_speakers: Optional[int] = None, max_speakers: Optional[int] = None,
-                           collar: float = 2.0, min_duration_off: float = 1.5) -> List[Dict]:
-        """Async wrapper for diarization.
-        
+                           collar: float = 2.0, min_duration_off: float = 1.5, max_duration: float = 60.0,
+                           chunk_overlap: float = 5.0) -> List[Dict]:
+        """
+        Async wrapper for diarization with automatic chunking for large files.
+
         Args:
             path: Path to the audio file
             min_speakers: Minimum number of speakers to detect
             max_speakers: Maximum number of speakers to detect
             collar: Gap duration (seconds) to merge between speaker segments
             min_duration_off: Minimum silence duration (seconds) before treating as segment boundary
+            max_duration: Maximum duration (seconds) per PyAnnote call - files longer than this are chunked
+            chunk_overlap: Overlap (seconds) between chunks for continuity
+
+        Returns:
+            List of speaker segments (automatically merged if chunked)
         """
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self.diarize, path, min_speakers, max_speakers, collar, min_duration_off)
+        # Get file duration
+        file_duration = float(self.loader.get_duration(str(path)))
+
+        # If file is short enough, process in one go
+        if file_duration <= max_duration:
+            logger.info(f"Processing audio without chunking (duration={file_duration:.1f}s ≤ {max_duration}s)")
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, self.diarize, path, min_speakers, max_speakers, collar, min_duration_off)
+
+        # File is too large - chunk it
+        logger.info(f"Processing audio with chunking (duration={file_duration:.1f}s > {max_duration}s)")
+        logger.info(f"Using {int(file_duration / max_duration) + 1} chunks with {chunk_overlap}s overlap")
+
+        all_segments = []
+        current_start = 0.0
+        chunk_num = 0
+
+        while current_start < file_duration:
+            chunk_num += 1
+            chunk_duration = min(max_duration, file_duration - current_start)
+
+            # Add overlap for continuity (except for last chunk)
+            fetch_duration = chunk_duration + chunk_overlap if current_start + chunk_duration < file_duration else chunk_duration
+
+            logger.debug(f"Processing chunk {chunk_num}: start={current_start:.1f}s, duration={chunk_duration:.1f}s")
+
+            # Load audio segment
+            chunk_audio = self.load_wave(path, start=current_start, end=current_start + fetch_duration)
+
+            # Write chunk to temp file for PyAnnote
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+                import soundfile as sf
+                # Extract tensor data and write as WAV
+                audio_tensor = chunk_audio.squeeze().cpu().numpy()
+                sf.write(tmp.name, audio_tensor, 16000)
+                chunk_path = Path(tmp.name)
+
+            try:
+                # Diarize this chunk
+                loop = asyncio.get_running_loop()
+                chunk_segments = await loop.run_in_executor(
+                    None, self.diarize, chunk_path, min_speakers, max_speakers, collar, min_duration_off
+                )
+
+                # Adjust timestamps to absolute time
+                for seg in chunk_segments:
+                    seg['start'] += current_start
+                    seg['end'] += current_start
+                    seg['duration'] = seg['end'] - seg['start']
+
+                # Only keep segments that start before the overlap cutoff
+                cutoff = current_start + chunk_duration
+                chunk_segments = [seg for seg in chunk_segments if seg['start'] < cutoff]
+
+                logger.debug(f"Chunk {chunk_num}: found {len(chunk_segments)} segments")
+                all_segments.extend(chunk_segments)
+
+            finally:
+                chunk_path.unlink(missing_ok=True)
+
+            # Move to next chunk
+            current_start += chunk_duration
+
+        logger.info(f"Chunked diarization complete: {len(all_segments)} segments before merging")
+
+        # Merge adjacent segments from same speaker
+        merged = self._merge_segments(all_segments, max_gap=2.0)
+        logger.info(f"After merging: {len(merged)} final segments")
+
+        return merged
+
+    def _merge_segments(self, segments: List[Dict], max_gap: float = 2.0) -> List[Dict]:
+        """Merge adjacent segments from same speaker."""
+        if not segments:
+            return []
+
+        segments = sorted(segments, key=lambda s: s['start'])
+        merged = []
+        current = segments[0].copy()
+
+        for next_seg in segments[1:]:
+            # Same speaker and close enough?
+            if (current['speaker'] == next_seg['speaker'] and
+                next_seg['start'] - current['end'] <= max_gap):
+                # Merge
+                current['end'] = next_seg['end']
+                current['duration'] = current['end'] - current['start']
+            else:
+                # Save current, start new
+                merged.append(current)
+                current = next_seg.copy()
+
+        merged.append(current)
+        return merged
 
     def load_wave(self, path: Path, start: Optional[float] = None, end: Optional[float] = None) -> torch.Tensor:
         if start is not None and end is not None:
             # Get audio file duration to validate segment bounds
             file_info = self.loader.get_duration(str(path))
             file_duration = float(file_info)
-            
+
             # Clamp segment bounds to file duration
             start_clamped = max(0.0, min(start, file_duration))
             end_clamped = max(start_clamped, min(end, file_duration))
-            
+
             # Log if we had to clamp the segment
             if start != start_clamped or end != end_clamped:
                 logger.warning(f"Segment [{start:.6f}s, {end:.6f}s] clamped to [{start_clamped:.6f}s, {end_clamped:.6f}s] for file duration {file_duration:.6f}s")
-            
+
             seg = Segment(start_clamped, end_clamped)
             wav, _ = self.loader.crop(str(path), seg)
         else:

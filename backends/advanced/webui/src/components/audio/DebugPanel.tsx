@@ -65,7 +65,7 @@ export default function DebugPanel({ recording }: DebugPanelProps) {
       )}
 
       <div className="mt-3 text-xs text-gray-500 dark:text-gray-500">
-        <p>• WebSocket URL: {recording.hasValidWebSocket ? 'ws_pcm endpoint' : 'Not connected'}</p>
+        <p>• WebSocket URL: {recording.hasValidWebSocket ? '/ws?codec=pcm endpoint' : 'Not connected'}</p>
         <p>• Audio Format: 16kHz, Mono, PCM Int16</p>
         <p>• Protocol: Wyoming (JSON headers + binary payloads)</p>
         <p>• Direct Checks: WS={recording.hasValidWebSocket ? '✅' : '❌'} Mic={recording.hasValidMicrophone ? '✅' : '❌'} Ctx={recording.hasValidAudioContext ? '✅' : '❌'}</p>

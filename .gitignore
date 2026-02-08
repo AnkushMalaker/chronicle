@@ -5,10 +5,19 @@
 **/memory_config.yaml
 !**/memory_config.yaml.template
 tests/setup/.env.test
+!tests/setup/.env.test.template
 
 # Main config (user-specific)
 config/config.yml
 !config/config.yml.template
+
+# Plugins config (contains secrets)
+config/plugins.yml
+!config/plugins.yml.template
+
+# Individual plugin configs (may contain user-specific settings)
+backends/advanced/src/advanced_omi_backend/plugins/*/config.yml
+!backends/advanced/src/advanced_omi_backend/plugins/*/config.yml.template
 
 # Config backups
 config/*.backup.*
@@ -93,3 +102,5 @@ log.html
 output.xml
 report.html
 .secrets
+
+sdk/

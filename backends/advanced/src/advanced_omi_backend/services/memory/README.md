@@ -448,11 +448,11 @@ OPENAI_API_KEY=your_openai_key
 OPENAI_BASE_URL=https://api.openai.com/v1
 OLLAMA_BASE_URL=http://localhost:11434
 
-# Vector Store Configuration  
+# Vector Store Configuration
 VECTOR_STORE_PROVIDER=qdrant
 QDRANT_BASE_URL=localhost
 QDRANT_PORT=6333
-QDRANT_COLLECTION_NAME=omi_memories
+QDRANT_COLLECTION_NAME=chronicle_memories
 
 # Memory Service Settings
 MEMORY_EXTRACTION_ENABLED=true

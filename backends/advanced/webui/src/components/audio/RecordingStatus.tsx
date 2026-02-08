@@ -57,7 +57,7 @@ export default function RecordingStatus({ recording }: RecordingStatusProps) {
               User: {user?.name || user?.email}
             </p>
             <p className="text-sm text-gray-600 dark:text-gray-400">
-              Endpoint: /ws_pcm
+              Endpoint: /ws?codec=pcm
             </p>
           </div>
         </div>

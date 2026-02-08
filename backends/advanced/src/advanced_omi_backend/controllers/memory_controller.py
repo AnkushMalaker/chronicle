@@ -139,33 +139,6 @@ async def delete_memory(memory_id: str, user: User):
         )
 
 
-async def get_memories_unfiltered(user: User, limit: int, user_id: Optional[str] = None):
-    """Get all memories including fallback transcript memories (for debugging). Users see only their own memories, admins can see all or filter by user."""
-    try:
-        memory_service = get_memory_service()
-
-        # Determine which user's memories to fetch
-        target_user_id = user.user_id
-        if user.is_superuser and user_id:
-            target_user_id = user_id
-
-        # Execute memory retrieval directly (now async)
-        memories = await memory_service.get_all_memories_unfiltered(target_user_id, limit)
-
-        return {
-            "memories": memories,
-            "count": len(memories),
-            "user_id": target_user_id,
-            "includes_fallback": True,
-        }
-
-    except Exception as e:
-        audio_logger.error(f"Error fetching unfiltered memories: {e}", exc_info=True)
-        return JSONResponse(
-            status_code=500, content={"message": f"Error fetching unfiltered memories: {str(e)}"}
-        )
-
-
 async def add_memory(content: str, user: User, source_id: Optional[str] = None):
     """Add a memory directly from content text. Extracts structured memories from the provided content."""
     try:

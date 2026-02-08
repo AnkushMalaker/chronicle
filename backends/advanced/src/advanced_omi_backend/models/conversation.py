@@ -5,26 +5,20 @@ This module contains Beanie Document and Pydantic models for conversations,
 transcript versions, and memory versions.
 """
 
-from datetime import datetime
-from typing import Dict, List, Optional, Any, Union
-from pydantic import BaseModel, Field, model_validator, computed_field
-from enum import Enum
 import uuid
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional, Union
 
 from beanie import Document, Indexed
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
+from pymongo import IndexModel
 
 
 class Conversation(Document):
     """Complete conversation model with versioned processing."""
 
-    # Nested Enums
-    class TranscriptProvider(str, Enum):
-        """Supported transcription providers."""
-        DEEPGRAM = "deepgram"
-        MISTRAL = "mistral"
-        PARAKEET = "parakeet"
-        SPEECH_DETECTION = "speech_detection"  # Legacy value
-        UNKNOWN = "unknown"  # Fallback value
+    # Nested Enums - Note: TranscriptProvider accepts any string value for flexibility
 
     class MemoryProvider(str, Enum):
         """Supported memory providers."""
@@ -49,23 +43,43 @@ class Conversation(Document):
         UNKNOWN = "unknown"  # Unknown or legacy reason
 
     # Nested Models
+    class Word(BaseModel):
+        """Individual word with timestamp in a transcript."""
+        word: str = Field(description="Word text")
+        start: float = Field(description="Start time in seconds")
+        end: float = Field(description="End time in seconds")
+        confidence: Optional[float] = Field(None, description="Confidence score (0-1)")
+
     class SpeakerSegment(BaseModel):
         """Individual speaker segment in a transcript."""
         start: float = Field(description="Start time in seconds")
         end: float = Field(description="End time in seconds")
         text: str = Field(description="Transcript text for this segment")
         speaker: str = Field(description="Speaker identifier")
+        identified_as: Optional[str] = Field(None, description="Speaker name from speaker recognition (None if not identified)")
         confidence: Optional[float] = Field(None, description="Confidence score (0-1)")
+        words: List["Conversation.Word"] = Field(default_factory=list, description="Word-level timestamps for this segment")
 
     class TranscriptVersion(BaseModel):
         """Version of a transcript with processing metadata."""
         version_id: str = Field(description="Unique version identifier")
         transcript: Optional[str] = Field(None, description="Full transcript text")
-        segments: List["Conversation.SpeakerSegment"] = Field(default_factory=list, description="Speaker segments")
-        provider: Optional["Conversation.TranscriptProvider"] = Field(None, description="Transcription provider used")
-        model: Optional[str] = Field(None, description="Model used (e.g., nova-3, voxtral-mini-2507)")
+        words: List["Conversation.Word"] = Field(
+            default_factory=list,
+            description="Word-level timestamps for entire transcript"
+        )
+        segments: List["Conversation.SpeakerSegment"] = Field(
+            default_factory=list,
+            description="Speaker segments (filled by speaker recognition)"
+        )
+        provider: Optional[str] = Field(None, description="Transcription provider used (deepgram, parakeet, vibevoice, etc.)")
+        model: Optional[str] = Field(None, description="Model used (e.g., nova-3, parakeet)")
         created_at: datetime = Field(description="When this version was created")
         processing_time_seconds: Optional[float] = Field(None, description="Time taken to process")
+        diarization_source: Optional[str] = Field(
+            None,
+            description="Source of speaker diarization: 'provider' (transcription service), 'pyannote' (speaker recognition), or None"
+        )
         metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional provider-specific metadata")
 
     class MemoryVersion(BaseModel):
@@ -81,13 +95,32 @@ class Conversation(Document):
 
     # Core identifiers
     conversation_id: Indexed(str, unique=True) = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique conversation identifier")
-    audio_uuid: Indexed(str) = Field(description="Session/audio identifier (for tracking audio files)")
     user_id: Indexed(str) = Field(description="User who owns this conversation")
     client_id: Indexed(str) = Field(description="Client device identifier")
 
-    # Audio file reference
-    audio_path: Optional[str] = Field(None, description="Path to audio file (relative to CHUNK_DIR)")
-    cropped_audio_path: Optional[str] = Field(None, description="Path to cropped audio file (relative to CHUNK_DIR)")
+    # External file tracking (for deduplication of imported files)
+    external_source_id: Optional[str] = Field(
+        None,
+        description="External file identifier (e.g., Google Drive file_id) for deduplication"
+    )
+    external_source_type: Optional[str] = Field(
+        None,
+        description="Type of external source (gdrive, dropbox, s3, etc.)"
+    )
+
+    # MongoDB chunk-based audio storage (new system)
+    audio_chunks_count: Optional[int] = Field(
+        None,
+        description="Total number of 10-second audio chunks stored in MongoDB"
+    )
+    audio_total_duration: Optional[float] = Field(
+        None,
+        description="Total audio duration in seconds (sum of all chunks)"
+    )
+    audio_compression_ratio: Optional[float] = Field(
+        None,
+        description="Compression ratio (compressed_size / original_size), typically ~0.047 for Opus"
+    )
 
     # Creation metadata
     created_at: Indexed(datetime) = Field(default_factory=datetime.utcnow, description="When the conversation was created")
@@ -96,6 +129,16 @@ class Conversation(Document):
     deleted: bool = Field(False, description="Whether this conversation was deleted due to processing failure")
     deletion_reason: Optional[str] = Field(None, description="Reason for deletion (no_meaningful_speech, audio_file_not_ready, etc.)")
     deleted_at: Optional[datetime] = Field(None, description="When the conversation was marked as deleted")
+
+    # Always persist audio flag and processing status
+    processing_status: Optional[str] = Field(
+        None,
+        description="Processing status: pending_transcription, transcription_failed, completed"
+    )
+    always_persist: bool = Field(
+        default=False,
+        description="Flag indicating conversation was created for audio persistence"
+    )
 
     # Conversation completion tracking
     end_reason: Optional["Conversation.EndReason"] = Field(None, description="Reason why the conversation ended")
@@ -228,12 +271,35 @@ class Conversation(Document):
         """Get count of memory versions."""
         return len(self.memory_versions)
 
+    @computed_field
+    @property
+    def active_transcript_version_number(self) -> Optional[int]:
+        """Get 1-based version number of the active transcript version."""
+        if not self.active_transcript_version:
+            return None
+        for i, version in enumerate(self.transcript_versions):
+            if version.version_id == self.active_transcript_version:
+                return i + 1
+        return None
+
+    @computed_field
+    @property
+    def active_memory_version_number(self) -> Optional[int]:
+        """Get 1-based version number of the active memory version."""
+        if not self.active_memory_version:
+            return None
+        for i, version in enumerate(self.memory_versions):
+            if version.version_id == self.active_memory_version:
+                return i + 1
+        return None
+
     def add_transcript_version(
         self,
         version_id: str,
         transcript: str,
-        segments: List["Conversation.SpeakerSegment"],
-        provider: "Conversation.TranscriptProvider",
+        words: Optional[List["Conversation.Word"]] = None,
+        segments: Optional[List["Conversation.SpeakerSegment"]] = None,
+        provider: str = None,  # Provider name from config.yml (deepgram, parakeet, etc.)
         model: Optional[str] = None,
         processing_time_seconds: Optional[float] = None,
         metadata: Optional[Dict[str, Any]] = None,
@@ -243,7 +309,8 @@ class Conversation(Document):
         new_version = Conversation.TranscriptVersion(
             version_id=version_id,
             transcript=transcript,
-            segments=segments,
+            words=words or [],
+            segments=segments or [],
             provider=provider,
             model=model,
             created_at=datetime.now(),
@@ -310,13 +377,13 @@ class Conversation(Document):
             "conversation_id",
             "user_id",
             "created_at",
-            [("user_id", 1), ("created_at", -1)]  # Compound index for user queries
+            [("user_id", 1), ("created_at", -1)],  # Compound index for user queries
+            IndexModel([("external_source_id", 1)], sparse=True)  # Sparse index for deduplication
         ]
 
 
 # Factory function for creating conversations
 def create_conversation(
-    audio_uuid: str,
     user_id: str,
     client_id: str,
     conversation_id: Optional[str] = None,
@@ -324,12 +391,13 @@ def create_conversation(
     summary: Optional[str] = None,
     transcript: Optional[str] = None,
     segments: Optional[List["Conversation.SpeakerSegment"]] = None,
+    external_source_id: Optional[str] = None,
+    external_source_type: Optional[str] = None,
 ) -> Conversation:
     """
     Factory function to create a new conversation.
 
     Args:
-        audio_uuid: Unique identifier for the audio session
         user_id: User who owns this conversation
         client_id: Client device identifier
         conversation_id: Optional unique conversation identifier (auto-generated if not provided)
@@ -337,26 +405,25 @@ def create_conversation(
         summary: Optional conversation summary
         transcript: Optional transcript text
         segments: Optional speaker segments
+        external_source_id: Optional external file ID for deduplication (e.g., Google Drive file_id)
+        external_source_type: Optional external source type (gdrive, dropbox, etc.)
 
     Returns:
         Conversation instance
     """
     # Build the conversation data
     conv_data = {
-        "audio_uuid": audio_uuid,
         "user_id": user_id,
         "client_id": client_id,
         "created_at": datetime.now(),
         "title": title,
         "summary": summary,
-        "transcript": transcript or "",
-        "segments": segments or [],
         "transcript_versions": [],
         "active_transcript_version": None,
         "memory_versions": [],
         "active_memory_version": None,
-        "memories": [],
-        "memory_count": 0
+        "external_source_id": external_source_id,
+        "external_source_type": external_source_type,
     }
 
     # Only set conversation_id if provided, otherwise let the model auto-generate it

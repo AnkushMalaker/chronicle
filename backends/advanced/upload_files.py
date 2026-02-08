@@ -321,14 +321,14 @@ def poll_job_status(job_id: str, token: str, base_url: str, total_files: int) ->
                 last_progress = progress
                 last_current_file = current_file
             
-            # Check completion status
-            if status == "completed":
+            # Check completion status (RQ standard: "finished")
+            if status == "finished":
                 elapsed = time.time() - start_time
                 logger.info(f"🎉 Job completed successfully in {elapsed:.0f}s!")
-                
+
                 # Show final file status summary
                 files = job_status.get("files", [])
-                completed = len([f for f in files if f.get("status") == "completed"])
+                completed = len([f for f in files if f.get("status") == "finished"])
                 failed = len([f for f in files if f.get("status") == "failed"])
                 skipped = len([f for f in files if f.get("status") == "skipped"])
                 

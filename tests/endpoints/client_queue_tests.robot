@@ -88,8 +88,8 @@ Get Queue Statistics Test
 
     ${stats}=      Set Variable    ${response.json()}
     Dictionary Should Contain Key    ${stats}    queued_jobs
-    Dictionary Should Contain Key    ${stats}    processing_jobs
-    Dictionary Should Contain Key    ${stats}    completed_jobs
+    Dictionary Should Contain Key    ${stats}    started_jobs
+    Dictionary Should Contain Key    ${stats}    finished_jobs
     Dictionary Should Contain Key    ${stats}    failed_jobs
 
 

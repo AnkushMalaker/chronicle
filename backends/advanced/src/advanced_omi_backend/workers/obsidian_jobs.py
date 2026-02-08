@@ -34,7 +34,7 @@ async def ingest_obsidian_vault_job(job_id: str, vault_path: str, redis_client=N
     logger.info("Starting Obsidian ingestion job %s", job.id)
 
     # Initialize job meta
-    job.meta["status"] = "processing"
+    job.meta["status"] = "started"
     job.meta["processed"] = 0
     job.meta["total_files"] = 0
     job.meta["errors"] = []
@@ -74,10 +74,10 @@ async def ingest_obsidian_vault_job(job_id: str, vault_path: str, redis_client=N
             # Check for cancellation
             job.refresh()
             if job.get_status() == "canceled":
-                logger.info("Obsidian ingestion job %s cancelled by user", job.id)
-                job.meta["status"] = "cancelled"
+                logger.info("Obsidian ingestion job %s canceled by user", job.id)
+                job.meta["status"] = "canceled"
                 job.save_meta()
-                return {"status": "cancelled"}
+                return {"status": "canceled"}
 
             try:
                 note_data = obsidian_service.parse_obsidian_note(root, filename, vault_path)
@@ -96,12 +96,12 @@ async def ingest_obsidian_vault_job(job_id: str, vault_path: str, redis_client=N
                 job.meta["errors"] = errors
                 job.save_meta()
 
-    job.meta["status"] = "completed"
+    job.meta["status"] = "finished"
     job.save_meta()
-    
+
     return {
-        "status": "completed", 
-        "processed": processed, 
-        "total": total, 
+        "status": "finished",
+        "processed": processed,
+        "total": total,
         "errors": errors
     }

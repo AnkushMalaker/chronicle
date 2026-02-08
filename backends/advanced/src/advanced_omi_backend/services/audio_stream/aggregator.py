@@ -49,8 +49,8 @@ class TranscriptionResultsAggregator:
                     "text": fields[b"text"].decode(),
                     "confidence": float(fields[b"confidence"].decode()),
                     "provider": fields[b"provider"].decode(),
-                    "chunk_id": fields[b"chunk_id"].decode(),
-                    "processing_time": float(fields[b"processing_time"].decode()),
+                    "chunk_id": fields.get(b"chunk_id", b"unknown").decode(),  # Handle missing chunk_id gracefully
+                    "processing_time": float(fields.get(b"processing_time", b"0.0").decode()),
                     "timestamp": float(fields[b"timestamp"].decode()),
                 }
 
@@ -82,8 +82,6 @@ class TranscriptionResultsAggregator:
         """
         Get all transcription results combined into a single aggregated result.
 
-        This is what an aggregator should do - combine multiple chunks into one.
-
         Args:
             session_id: Session identifier
 
@@ -109,33 +107,45 @@ class TranscriptionResultsAggregator:
                 "provider": None
             }
 
-        # Combine text
-        full_text = " ".join([r.get("text", "") for r in results if r.get("text")])
-
-        # Combine words
+        # Combine ALL final results for cumulative speech detection
+        # Each result represents a sequential segment of speech
+        all_text = []
         all_words = []
-        for r in results:
-            if "words" in r and r["words"]:
-                all_words.extend(r["words"])
-
-        # Combine segments
         all_segments = []
-        for r in results:
-            if "segments" in r and r["segments"]:
-                all_segments.extend(r["segments"])
+        total_confidence = 0.0
+        provider = None
 
-        # Sort segments by start time
-        all_segments.sort(key=lambda s: s.get("start", 0.0))
+        for result in results:
+            # Accumulate text
+            text = result.get("text", "").strip()
+            if text:
+                all_text.append(text)
+
+            # Accumulate words with timing data
+            words = result.get("words", [])
+            if words:
+                all_words.extend(words)
+
+            # Accumulate segments
+            segments = result.get("segments", [])
+            if segments:
+                all_segments.extend(segments)
+
+            # Sum confidence for averaging
+            total_confidence += result.get("confidence", 0.0)
+
+            # Get provider from first result
+            if provider is None:
+                provider = result.get("provider")
 
         # Calculate average confidence
-        confidences = [r.get("confidence", 0.0) for r in results]
-        avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+        avg_confidence = total_confidence / len(results) if results else 0.0
 
-        # Get provider (assume all chunks from same provider)
-        provider = results[0].get("provider") if results else None
+        # Join all text segments with spaces
+        combined_text = " ".join(all_text)
 
         combined = {
-            "text": full_text,
+            "text": combined_text,
             "words": all_words,
             "segments": all_segments,
             "chunk_count": len(results),
@@ -143,9 +153,10 @@ class TranscriptionResultsAggregator:
             "provider": provider
         }
 
-        logger.debug(
-            f"📦 Combined {len(results)} chunks for session {session_id}: "
-            f"{len(full_text)} chars, {len(all_words)} words, {len(all_segments)} segments"
+        logger.info(
+            f"🔤 TRANSCRIPT [AGGREGATOR] session={session_id}, "
+            f"total_results={len(results)}, words={len(combined['words'])}, "
+            f"text_length={len(combined_text)} chars"
         )
 
         return combined
@@ -188,7 +199,7 @@ class TranscriptionResultsAggregator:
                             "text": fields[b"text"].decode(),
                             "confidence": float(fields[b"confidence"].decode()),
                             "provider": fields[b"provider"].decode(),
-                            "chunk_id": fields[b"chunk_id"].decode(),
+                            "chunk_id": fields.get(b"chunk_id", b"unknown").decode(),  # Handle missing chunk_id gracefully
                         }
 
                         # Optional fields

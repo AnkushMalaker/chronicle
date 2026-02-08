@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Calendar, Tag, Trash2, RefreshCw } from 'lucide-react'
-import { memoriesApi } from '../services/api'
+import { ArrowLeft, Calendar, Tag, Trash2, RefreshCw, Edit3, Save, X } from 'lucide-react'
+import { memoriesApi, annotationsApi } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
 
 interface Memory {
@@ -40,6 +40,12 @@ export default function MemoryDetail() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
+  // Inline editing state
+  const [isEditing, setIsEditing] = useState(false)
+  const [editedContent, setEditedContent] = useState('')
+  const [isSaving, setIsSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
   const loadMemory = async () => {
     if (!user?.id || !id) {
       console.log('⏭️ MemoryDetail: Missing user or id', { userId: user?.id, memoryId: id })
@@ -68,6 +74,67 @@ export default function MemoryDetail() {
       }
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleStartEdit = () => {
+    if (memory) {
+      setEditedContent(memory.memory)
+      setIsEditing(true)
+      setSaveError(null)
+    }
+  }
+
+  const handleCancelEdit = () => {
+    setIsEditing(false)
+    setEditedContent('')
+    setSaveError(null)
+  }
+
+  const handleSaveEdit = async () => {
+    if (!memory || !id || !user?.id) return
+
+    // Don't save if content hasn't changed
+    if (editedContent === memory.memory) {
+      setIsEditing(false)
+      return
+    }
+
+    setIsSaving(true)
+    setSaveError(null)
+
+    try {
+      // Create annotation to update memory
+      await annotationsApi.createMemoryAnnotation({
+        memory_id: id,
+        original_text: memory.memory,
+        corrected_text: editedContent
+      })
+
+      // Update local state
+      setMemory({
+        ...memory,
+        memory: editedContent,
+        updated_at: new Date().toISOString()
+      })
+
+      setIsEditing(false)
+      console.log('✅ Memory updated successfully')
+    } catch (err: any) {
+      console.error('❌ Failed to save memory:', err)
+      setSaveError(err.response?.data?.detail || err.message || 'Failed to save changes')
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault()
+      handleSaveEdit()
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      handleCancelEdit()
     }
   }
 
@@ -204,9 +271,67 @@ export default function MemoryDetail() {
                     {memory.metadata.name}
                   </h1>
                 )}
-                <p className="text-gray-700 dark:text-gray-300 leading-relaxed whitespace-pre-wrap">
-                  {memory.memory}
-                </p>
+
+                {/* Editable Memory Content */}
+                <div className="relative">
+                  {isEditing ? (
+                    // Edit mode
+                    <div className="space-y-3">
+                      <textarea
+                        value={editedContent}
+                        onChange={(e) => setEditedContent(e.target.value)}
+                        onKeyDown={handleKeyDown}
+                        className="w-full min-h-[150px] px-4 py-3 text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-900 border-2 border-blue-500 dark:border-blue-400 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 resize-y leading-relaxed"
+                        placeholder="Enter memory content..."
+                        autoFocus
+                        disabled={isSaving}
+                      />
+
+                      {saveError && (
+                        <div className="text-sm text-red-600 dark:text-red-400">
+                          {saveError}
+                        </div>
+                      )}
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={handleSaveEdit}
+                          disabled={isSaving || editedContent === memory.memory}
+                          className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <Save className="w-4 h-4" />
+                          {isSaving ? 'Saving...' : 'Save'}
+                        </button>
+                        <button
+                          onClick={handleCancelEdit}
+                          disabled={isSaving}
+                          className="flex items-center gap-2 px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <X className="w-4 h-4" />
+                          Cancel
+                        </button>
+                        <span className="text-xs text-gray-500 dark:text-gray-400 ml-2">
+                          Ctrl+Enter to save, Esc to cancel
+                        </span>
+                      </div>
+                    </div>
+                  ) : (
+                    // View mode with hover to edit
+                    <div
+                      onClick={handleStartEdit}
+                      className="group cursor-pointer rounded-lg p-3 -mx-3 transition-colors hover:bg-yellow-50 dark:hover:bg-yellow-900/10"
+                      title="Click to edit"
+                    >
+                      <p className="text-gray-700 dark:text-gray-300 leading-relaxed whitespace-pre-wrap">
+                        {memory.memory}
+                      </p>
+                      <div className="opacity-0 group-hover:opacity-100 transition-opacity mt-2 flex items-center gap-1 text-sm text-gray-500 dark:text-gray-400">
+                        <Edit3 className="w-4 h-4" />
+                        <span>Click to edit</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>

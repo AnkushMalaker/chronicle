@@ -49,7 +49,6 @@ export default function Upload() {
       await uploadApi.uploadFromGDriveFolder({
         gdrive_folder_id: gdriveFolderId,
         device_name: 'upload',
-        auto_generate_client: true,
       })
 
       setGdriveUploadStatus({
@@ -194,9 +193,9 @@ export default function Upload() {
         try {
           const res = await obsidianApi.status(obsidianJobId)
           setObsidianStatus(res.data)
-          if (res.data.status === 'completed' || res.data.status === 'failed') {
+          if (res.data.status === 'finished' || res.data.status === 'failed') {
             setObsidianPolling(false)
-            setObsidianMessage(res.data.status === 'completed' ? '✅ Ingestion completed' : `❌ Failed: ${res.data.error || 'unknown error'}`)
+            setObsidianMessage(res.data.status === 'finished' ? '✅ Ingestion completed' : `❌ Failed: ${res.data.error || 'unknown error'}`)
           }
         } catch (err) {
           setObsidianPolling(false)

@@ -57,7 +57,6 @@ Health Check Test
     Dictionary Should Contain Key    ${config}    chunk_dir
     Dictionary Should Contain Key    ${config}    active_clients
     Dictionary Should Contain Key    ${config}    new_conversation_timeout_minutes
-    Dictionary Should Contain Key    ${config}    audio_cropping_enabled
     Dictionary Should Contain Key    ${config}    llm_provider
     Dictionary Should Contain Key    ${config}    llm_model
     Dictionary Should Contain Key    ${config}    llm_base_url
@@ -71,7 +70,6 @@ Health Check Test
     Should Not Be Empty    ${config}[chunk_dir]
     Should Be True        isinstance(${config}[active_clients], int)
     Should Be True        ${config}[new_conversation_timeout_minutes] > 0
-    Should Be True        isinstance(${config}[audio_cropping_enabled], bool)
     Should Not Be Empty    ${config}[llm_provider]
     Should Not Be Empty    ${config}[llm_model]
     Should Not Be Empty    ${config}[llm_base_url]
@@ -153,8 +151,8 @@ Queue Stats Test
     ${stats}=          Set Variable    ${response.json()}
     Dictionary Should Contain Key    ${stats}    total_jobs
     Dictionary Should Contain Key    ${stats}    queued_jobs
-    Dictionary Should Contain Key    ${stats}    processing_jobs
-    Dictionary Should Contain Key    ${stats}    completed_jobs
+    Dictionary Should Contain Key    ${stats}    started_jobs
+    Dictionary Should Contain Key    ${stats}    finished_jobs
     Dictionary Should Contain Key    ${stats}    failed_jobs
     Dictionary Should Contain Key    ${stats}    timestamp
 

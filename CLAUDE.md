@@ -18,7 +18,7 @@ This supports a comprehensive web dashboard for management.
 Chronicle includes an **interactive setup wizard** for easy configuration. The wizard guides you through:
 - Service selection (backend + optional services)
 - Authentication setup (admin account, JWT secrets)
-- Transcription provider configuration (Deepgram, Mistral, or offline ASR)
+- Transcription provider configuration (Deepgram or offline ASR)
 - LLM provider setup (OpenAI or Ollama)
 - Memory provider selection (Chronicle Native with Qdrant or OpenMemory MCP)
 - Network configuration and HTTPS setup
@@ -86,72 +86,54 @@ cp .env.template .env  # Configure environment variables
 sudo rm -rf backends/advanced/data/
 ```
 
-### Testing Infrastructure
+### Running Tests
 
-#### Local Test Scripts
-The project includes simplified test scripts that mirror CI workflows:
+#### Quick Commands
+All test operations are managed through a simple Makefile interface:
 
 ```bash
-# Run all tests from project root
-./run-test.sh [advanced-backend|speaker-recognition|all]
+cd tests
 
-# Advanced backend tests only
-./run-test.sh advanced-backend
+# Full test workflow (recommended)
+make test              # Start containers + run all tests
 
-# Speaker recognition tests only
-./run-test.sh speaker-recognition
+# Or step by step
+make start             # Start test containers (with health checks)
+make test-all          # Run all test suites
+make stop              # Stop containers (preserves volumes)
 
-# Run all test suites (default)
-./run-test.sh all
+# Run specific test suites
+make test-endpoints    # API endpoint tests (~40 tests, fast)
+make test-integration  # End-to-end workflows (~15 tests, slower)
+make test-infra        # Infrastructure resilience (~5 tests)
+
+# Quick iteration (reuse existing containers)
+make test-quick        # Run tests without restarting containers
 ```
 
-#### Advanced Backend Integration Tests
+#### Container Management
+All container operations automatically preserve logs before cleanup:
+
 ```bash
-cd backends/advanced
-
-# Requires .env file with DEEPGRAM_API_KEY and OPENAI_API_KEY
-cp .env.template .env  # Configure API keys
-
-# Run full integration test suite
-./run-test.sh
-
-# Manual test execution (for debugging)
-source .env && export DEEPGRAM_API_KEY && export OPENAI_API_KEY
-uv run robot --outputdir test-results --loglevel INFO ../../tests/integration/integration_test.robot
-
-# Leave test containers running for debugging (don't auto-cleanup)
-CLEANUP_CONTAINERS=false source .env && export DEEPGRAM_API_KEY && export OPENAI_API_KEY
-uv run robot --outputdir test-results --loglevel INFO ../../tests/integration/integration_test.robot
-
-# Manual cleanup when needed
-docker compose -f docker-compose-test.yml down -v
+make start             # Start test containers
+make stop              # Stop containers (keep volumes)
+make restart           # Restart without rebuild
+make rebuild           # Rebuild images + restart (for code changes)
+make containers-clean  # SAVES LOGS → removes everything
+make status            # Show container health
+make logs SERVICE=<name>  # View specific service logs
 ```
 
-#### Test Configuration Flags
-- **CLEANUP_CONTAINERS** (default: true): Automatically stop and remove test containers after test completion
-  - Set to `false` for debugging: `CLEANUP_CONTAINERS=false ./run-test.sh`
-- **REBUILD** (default: true): Force rebuild containers with latest code changes
-- **FRESH_RUN** (default: true): Start with clean database and fresh containers
-- **TRANSCRIPTION_PROVIDER** (default: deepgram): Choose transcription provider (deepgram or parakeet)
+**Log Preservation:** All cleanup operations save container logs to `tests/logs/YYYY-MM-DD_HH-MM-SS/`
 
-#### Test Environment Variables
-Tests use isolated test environment with overridden credentials:
-- **Test Database**: `test_db` (MongoDB on port 27018, separate from production)
-- **Test Ports**: Backend (8001), Qdrant (6337/6338), WebUI (3001)
-- **Test Credentials**:
-  - `AUTH_SECRET_KEY`: test-jwt-signing-key-for-integration-tests
-  - `ADMIN_EMAIL`: test-admin@example.com
-  - `ADMIN_PASSWORD`: test-admin-password-123
-- **API Keys**: Loaded from `.env` file (DEEPGRAM_API_KEY, OPENAI_API_KEY)
-- **Test Settings**: `DISABLE_SPEAKER_RECOGNITION=true` to prevent segment duplication
+#### Test Environment
 
-#### Test Script Features
-- **Environment Compatibility**: Works with both local .env files and CI environment variables
-- **Isolated Test Environment**: Separate ports and database prevent conflicts with running services
-- **Automatic Cleanup**: Configurable via CLEANUP_CONTAINERS flag (default: true)
-- **Colored Output**: Clear progress indicators and error reporting
-- **Timeout Protection**: 15-minute timeout for advanced backend, 30-minute for speaker recognition
-- **Fresh Testing**: Clean database and containers for each test run
+Test services use isolated ports and database:
+- **Ports:** Backend (8001), MongoDB (27018), Redis (6380), Qdrant (6337/6338)
+- **Database:** `test_db` (separate from production)
+- **Credentials:** `test-admin@example.com` / `test-admin-password-123`
+
+**For complete test documentation, see `tests/README.md`**
 
 ### Mobile App Development
 ```bash
@@ -185,12 +167,12 @@ docker compose up --build
 ## Architecture Overview
 
 ### Key Components
-- **Audio Pipeline**: Real-time Opus/PCM → Application-level processing → Deepgram/Mistral transcription → memory extraction
+- **Audio Pipeline**: Real-time Opus/PCM → Application-level processing → Deepgram transcription → memory extraction
 - **Wyoming Protocol**: WebSocket communication uses Wyoming protocol (JSONL + binary) for structured audio sessions
 - **Unified Pipeline**: Job-based tracking system for all audio processing (WebSocket and file uploads)
 - **Job Tracker**: Tracks pipeline jobs with stage events (audio → transcription → memory) and completion status
 - **Task Management**: BackgroundTaskManager tracks all async tasks to prevent orphaned processes
-- **Unified Transcription**: Deepgram/Mistral transcription with fallback to offline ASR services
+- **Unified Transcription**: Deepgram transcription with fallback to offline ASR services
 - **Memory System**: Pluggable providers (Chronicle native or OpenMemory MCP)
 - **Authentication**: Email-based login with MongoDB ObjectId user system
 - **Client Management**: Auto-generated client IDs as `{user_id_suffix}-{device_name}`, centralized ClientManager
@@ -206,7 +188,7 @@ Required:
 
 Recommended:
   - Vector Storage: Qdrant (Chronicle provider) or OpenMemory MCP server
-  - Transcription: Deepgram, Mistral, or offline ASR services
+  - Transcription: Deepgram or offline ASR services
 
 Optional:
   - Parakeet ASR: Offline transcription service
@@ -330,12 +312,7 @@ Chronicle supports multiple transcription services:
 TRANSCRIPTION_PROVIDER=deepgram
 DEEPGRAM_API_KEY=your-deepgram-key-here
 
-# Option 2: Mistral (Voxtral models)
-TRANSCRIPTION_PROVIDER=mistral
-MISTRAL_API_KEY=your-mistral-key-here
-MISTRAL_MODEL=voxtral-mini-2507
-
-# Option 3: Local ASR (Parakeet)
+# Option 2: Local ASR (Parakeet)
 PARAKEET_ASR_URL=http://host.docker.internal:8767
 ```
 
@@ -348,12 +325,37 @@ OLLAMA_BASE_URL=http://ollama:11434
 SPEAKER_SERVICE_URL=http://speaker-recognition:8085
 ```
 
+### Plugin Security Architecture
+
+**Three-File Separation**:
+
+1. **backends/advanced/.env** - Secrets (gitignored)
+   ```bash
+   SMTP_PASSWORD=abcdefghijklmnop
+   OPENAI_API_KEY=sk-proj-...
+   ```
+
+2. **config/plugins.yml** - Orchestration (uses env var references)
+   ```yaml
+   plugins:
+     email_summarizer:
+       enabled: true
+       smtp_password: ${SMTP_PASSWORD}  # Reference, not actual value!
+   ```
+
+3. **plugins/{plugin_id}/config.yml** - Non-secret defaults
+   ```yaml
+   subject_prefix: "Conversation Summary"
+   ```
+
+**CRITICAL**: Never hardcode secrets in `config/plugins.yml`. Always use `${ENV_VAR}` syntax.
+
 ## Quick API Reference
 
 ### Common Endpoints
 - **GET /health**: Basic application health check
 - **GET /readiness**: Service dependency validation
-- **WS /ws_pcm**: Primary audio streaming endpoint (Wyoming protocol + raw PCM fallback)
+- **WS /ws**: Audio streaming endpoint with codec parameter (Wyoming protocol, supports pcm and opus codecs)
 - **GET /api/conversations**: User's conversations with transcripts
 - **GET /api/memories/search**: Semantic memory search with relevance scoring
 - **POST /auth/jwt/login**: Email-based login (returns JWT token)
@@ -370,6 +372,11 @@ curl -s -X POST \
 curl -s -H "Authorization: Bearer YOUR_TOKEN" \
   http://localhost:8000/api/conversations
 ```
+
+### Backend API Interaction Rules
+- **Get token first**: Always authenticate in a separate Bash call, store the token, then use it in subsequent calls. Never chain login + API call in one command.
+- **Read .env with Read tool**: Use the Read tool to get values from `.env` files. Don't use `grep | sed | cut` in Bash to extract env values.
+- **Keep Bash simple**: Each Bash call should do one thing. Don't string together complex piped commands for backend queries.
 
 ### Development Reset Commands
 ```bash
@@ -518,12 +525,11 @@ tailscale ip -4
 - **Docker**: Primary deployment method with docker-compose
 
 ### Testing Strategy
-- **Local Test Scripts**: Simplified scripts (`./run-test.sh`) mirror CI workflows for local development
-- **End-to-End Integration**: Robot Framework tests (`tests/integration/integration_test.robot`) validate complete audio processing pipeline
-- **Speaker Recognition Tests**: `test_speaker_service_integration.py` validates speaker identification
+- **Makefile-Based**: All test operations through simple `make` commands (`make test`, `make start`, `make stop`)
+- **Log Preservation**: Container logs always saved before cleanup (never lose debugging info)
+- **End-to-End Integration**: Robot Framework validates complete audio processing pipeline
 - **Environment Flexibility**: Tests work with both local .env files and CI environment variables
-- **Automated Cleanup**: Test containers are automatically removed after execution
-- **CI/CD Integration**: GitHub Actions use the same local test scripts for consistency
+- **CI/CD Integration**: Same test logic locally and in GitHub Actions
 
 ### Code Style
 - **Python**: Black formatter with 100-character line length, isort for imports
@@ -550,14 +556,10 @@ The system includes comprehensive health checks:
 - Memory debug system for transcript processing monitoring
 
 ### Integration Test Infrastructure
-- **Unified Test Scripts**: Local `./run-test.sh` scripts mirror GitHub Actions workflows
-- **Test Environment**: `docker-compose-test.yml` provides isolated services on separate ports
-- **Test Database**: Uses `test_db` database with isolated collections
-- **Service Ports**: Backend (8001), MongoDB (27018), Qdrant (6335/6336), WebUI (5174)
-- **Test Credentials**: Auto-generated `.env.test` files with secure test configurations
-- **Ground Truth**: Expected transcript established via `scripts/test_deepgram_direct.py`
-- **AI Validation**: OpenAI-powered transcript similarity comparison
-- **Test Audio**: 4-minute glass blowing tutorial (`extras/test-audios/DIY*mono*.wav`)
+- **Makefile Interface**: Simple `make` commands for all operations (see `tests/README.md`)
+- **Test Environment**: `docker-compose-test.yml` with isolated services on separate ports
+- **Test Database**: Uses `test_db` database (separate from production)
+- **Log Preservation**: All cleanup operations save logs to `tests/logs/` automatically
 - **CI Compatibility**: Same test logic runs locally and in GitHub Actions
 
 ### Cursor Rule Integration

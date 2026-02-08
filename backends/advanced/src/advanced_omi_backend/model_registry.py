@@ -4,87 +4,28 @@ Loads a single source of truth from config.yml and exposes model
 definitions (LLM, embeddings, etc.) in a provider-agnostic way.
 
 Now using Pydantic for robust validation and type safety.
+Environment variable resolution is handled by OmegaConf in the config module.
 """
 
 from __future__ import annotations
 
-import os
-import re
-import yaml
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import logging
-from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict, ValidationError
+import yaml
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
-def _resolve_env(value: Any) -> Any:
-    """Resolve ``${VAR:-default}`` patterns inside a single value.
-    
-    This helper is intentionally minimal: it only operates on strings and leaves
-    all other types unchanged. Patterns of the form ``${VAR}`` or
-    ``${VAR:-default}`` are expanded using ``os.getenv``:
-    
-    - If the environment variable **VAR** is set, its value is used.
-    - Otherwise the optional ``default`` is used (or ``\"\"`` if omitted).
-    
-    Examples:
-        >>> os.environ.get("OLLAMA_MODEL")
-        >>> _resolve_env("${OLLAMA_MODEL:-llama3.1:latest}")
-        'llama3.1:latest'
-        
-        >>> os.environ["OLLAMA_MODEL"] = "llama3.2:latest"
-        >>> _resolve_env("${OLLAMA_MODEL:-llama3.1:latest}")
-        'llama3.2:latest'
-        
-        >>> _resolve_env("Bearer ${OPENAI_API_KEY:-}")
-        'Bearer '  # when OPENAI_API_KEY is not set
-    
-    Note:
-        Use :func:`_deep_resolve_env` to apply this logic to an entire
-        nested config structure (dicts/lists) loaded from YAML.
-    """
-    if not isinstance(value, str):
-        return value
-
-    pattern = re.compile(r"\$\{([^}:]+)(?::-(.*?))?\}")
-
-    def repl(match: re.Match[str]) -> str:
-        var, default = match.group(1), match.group(2)
-        return os.getenv(var, default or "")
-
-    return pattern.sub(repl, value)
-
-
-def _deep_resolve_env(data: Any) -> Any:
-    """Recursively resolve environment variables in nested structures.
-    
-    This walks arbitrary Python structures produced by ``yaml.safe_load`` and
-    applies :func:`_resolve_env` to every string it finds. Dictionaries and
-    lists are traversed deeply; scalars are passed through unchanged.
-    
-    Examples:
-        >>> os.environ["OPENAI_MODEL"] = "gpt-4o-mini"
-        >>> cfg = {
-        ...     "models": [
-        ...         {"model_name": "${OPENAI_MODEL:-gpt-4o-mini}"},
-        ...         {"model_url": "${OPENAI_BASE_URL:-https://api.openai.com/v1}"}
-        ...     ]
-        ... }
-        >>> resolved = _deep_resolve_env(cfg)
-        >>> resolved["models"][0]["model_name"]
-        'gpt-4o-mini'
-        >>> resolved["models"][1]["model_url"]
-        'https://api.openai.com/v1'
-    
-    This is what :func:`load_models_config` uses immediately after loading
-    ``config.yml`` so that all ``${VAR:-default}`` placeholders are resolved
-    before Pydantic validation and model registry construction.
-    """
-    if isinstance(data, dict):
-        return {k: _deep_resolve_env(v) for k, v in data.items()}
-    if isinstance(data, list):
-        return [_deep_resolve_env(v) for v in data]
-    return _resolve_env(data)
+# Import config merging for defaults.yml + config.yml integration
+# OmegaConf handles environment variable resolution (${VAR:-default} syntax)
+from advanced_omi_backend.config import get_config
 
 
 class ModelDef(BaseModel):
@@ -102,7 +43,7 @@ class ModelDef(BaseModel):
     
     name: str = Field(..., min_length=1, description="Unique model identifier")
     model_type: str = Field(..., description="Model type: llm, embedding, stt, tts, etc.")
-    model_provider: str = Field(default="unknown", description="Provider name: openai, ollama, deepgram, parakeet, etc.")
+    model_provider: str = Field(default="unknown", description="Provider name: openai, ollama, deepgram, parakeet, vibevoice, etc.")
     api_family: str = Field(default="openai", description="API family: openai, http, websocket, etc.")
     model_name: str = Field(default="", description="Provider-specific model name")
     model_url: str = Field(default="", description="Base URL for API requests")
@@ -112,6 +53,10 @@ class ModelDef(BaseModel):
     model_output: Optional[str] = Field(default=None, description="Output format: json, text, vector, etc.")
     embedding_dimensions: Optional[int] = Field(default=None, ge=1, description="Embedding vector dimensions")
     operations: Dict[str, Any] = Field(default_factory=dict, description="API operation definitions")
+    capabilities: List[str] = Field(
+        default_factory=list,
+        description="Provider capabilities: word_timestamps, segments, diarization (for STT providers)"
+    )
     
     @field_validator('model_name', mode='before')
     @classmethod
@@ -250,72 +195,46 @@ _REGISTRY: Optional[AppModels] = None
 
 
 def _find_config_path() -> Path:
-    """Find config.yml in expected locations.
-    
-    Search order:
-    1. CONFIG_FILE environment variable
-    2. Current working directory
-    3. /app/config.yml (Docker container)
-    4. Walk up from module directory
-    
-    Returns:
-        Path to config.yml (may not exist)
     """
-    # ENV override
-    cfg_env = os.getenv("CONFIG_FILE")
-    if cfg_env and Path(cfg_env).exists():
-        return Path(cfg_env)
+    Find config.yml using canonical path from config module.
 
-    # Common locations (container vs repo root)
-    candidates = [Path("config.yml"), Path("/app/config.yml")]
+    DEPRECATED: Use advanced_omi_backend.config.get_config_yml_path() directly.
+    Kept for backward compatibility.
 
-    # Also walk up from current file's parents defensively
-    try:
-        for parent in Path(__file__).resolve().parents:
-            c = parent / "config.yml"
-            if c.exists():
-                return c
-    except Exception:
-        pass
-
-    for c in candidates:
-        if c.exists():
-            return c
-    
-    # Last resort: return /app/config.yml path (may not exist yet)
-    return Path("/app/config.yml")
+    Returns:
+        Path to config.yml
+    """
+    from advanced_omi_backend.config import get_config_yml_path
+    return get_config_yml_path()
 
 
 def load_models_config(force_reload: bool = False) -> Optional[AppModels]:
-    """Load model configuration from config.yml.
-    
-    This function loads and parses the config.yml file, resolves environment
-    variables, validates model definitions using Pydantic, and caches the result.
-    
+    """Load model configuration from merged defaults.yml + config.yml.
+
+    This function loads defaults.yml and config.yml, merges them with user overrides,
+    validates model definitions using Pydantic, and caches the result.
+    Environment variables are resolved by OmegaConf during config loading.
+
     Args:
         force_reload: If True, reload from disk even if already cached
-        
+
     Returns:
         AppModels instance with validated configuration, or None if config not found
-        
+
     Raises:
         ValidationError: If config.yml has invalid model definitions
-        yaml.YAMLError: If config.yml has invalid YAML syntax
     """
     global _REGISTRY
     if _REGISTRY is not None and not force_reload:
         return _REGISTRY
 
-    cfg_path = _find_config_path()
-    if not cfg_path.exists():
+    # Get merged configuration (defaults + user config)
+    # OmegaConf resolves environment variables automatically
+    try:
+        raw = get_config(force_reload=force_reload)
+    except Exception as e:
+        logging.error(f"Failed to load merged configuration: {e}")
         return None
-
-    # Load and parse YAML
-    with cfg_path.open("r") as f:
-        raw = yaml.safe_load(f) or {}
-    
-    # Resolve environment variables
-    raw = _deep_resolve_env(raw)
 
     # Extract sections
     defaults = raw.get("defaults", {}) or {}

@@ -20,6 +20,7 @@ services:
       - ./audio_chunks:/app/audio_chunks
       - ./debug:/app/debug
       - ./speaker_data:/app/data
+      - ../../config:/app/config:ro
     environment:
       - HF_HOME=/models
       - HF_TOKEN=${HF_TOKEN}
@@ -33,15 +34,15 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    networks:
+      default:
+        aliases:
+          - speaker-service
 
   # GPU Profile Configuration
   speaker-service-gpu:
     <<: *base-speaker-service
     profiles: ["gpu"]
-    networks:
-      default:
-        aliases:
-          - speaker-service
     build:
       context: .
       dockerfile: Dockerfile
@@ -54,6 +55,10 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    networks:
+      default:
+        aliases:
+          - speaker-service
   
   # React Web UI
   web-ui:

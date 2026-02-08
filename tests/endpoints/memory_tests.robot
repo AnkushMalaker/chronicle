@@ -15,7 +15,7 @@ Test Setup       Test Cleanup
 
 Get User Memories Test
     [Documentation]    Test getting memories for authenticated user and verify trumpet flower memory exists if memories are present
-    [Tags]    memory	permissions
+    [Tags]    memory	permissions	requires-api-keys
 
     ${response}=       GET On Session    api    /api/memories
 
@@ -36,11 +36,24 @@ Get User Memories Test
             Dictionary Should Contain Key    ${memory}    id
             Dictionary Should Contain Key    ${memory}    memory
             Dictionary Should Contain Key    ${memory}    created_at
+            Dictionary Should Contain Key    ${memory}    updated_at
             Dictionary Should Contain Key    ${metadata}    source
             Dictionary Should Contain Key    ${metadata}    client_id
             Dictionary Should Contain Key    ${metadata}    source_id
             Dictionary Should Contain Key    ${metadata}    user_id
             Dictionary Should Contain Key    ${metadata}    user_email
+
+            # Verify timestamps are valid (not "Invalid Date", not empty)
+            Should Not Be Equal    ${memory}[created_at]    ${EMPTY}    created_at should not be empty
+            Should Not Be Equal    ${memory}[updated_at]    ${EMPTY}    updated_at should not be empty
+            Should Not Be Equal    ${memory}[created_at]    Invalid Date    created_at should not be "Invalid Date"
+            Should Not Be Equal    ${memory}[updated_at]    Invalid Date    updated_at should not be "Invalid Date"
+
+            # Verify timestamps are numeric strings (Unix timestamps)
+            ${created_timestamp}=    Convert To Integer    ${memory}[created_at]
+            ${updated_timestamp}=    Convert To Integer    ${memory}[updated_at]
+            Should Be True    ${created_timestamp} > 0    created_at should be a positive timestamp
+            Should Be True    ${updated_timestamp} > 0    updated_at should be a positive timestamp
 
             # Check if memory contains "trumpet flower"
             ${memory_text}=    Convert To String    ${memory}[memory]
@@ -59,7 +72,7 @@ Get User Memories Test
 
 Search Memories Test
     [Documentation]    Test searching memories by query and verify trumpet flower memory exists
-    [Tags]    memory
+    [Tags]    memory	requires-api-keys
 
     &{params}=         Create Dictionary    query=trumpet flower    limit=20    score_threshold=0.4
     ${response}=       GET On Session    api    /api/memories/search    params=${params}
@@ -92,7 +105,7 @@ Search Memories Test
 
 Memory Pagination Test
     [Documentation]    Test memory pagination with different limits
-    [Tags]    memory
+    [Tags]    memory	requires-api-keys
 
     # Test with small limit
     &{params1}=    Create Dictionary    limit=5

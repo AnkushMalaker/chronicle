@@ -44,6 +44,7 @@ def stream_audio_file(
     device_name: str = "robot-test",
     recording_mode: str = "streaming",
     use_wyoming: bool = True,
+    always_persist: bool = False,
 ) -> int:
     """Stream a WAV file via WebSocket (blocking)."""
     return _stream_audio_file(
@@ -53,6 +54,7 @@ def stream_audio_file(
         device_name=device_name,
         recording_mode=recording_mode,
         use_wyoming=use_wyoming,
+        always_persist=always_persist,
     )
 
 
@@ -65,6 +67,7 @@ def start_audio_stream(
     token: str,
     device_name: str = "robot-test",
     recording_mode: str = "streaming",
+    always_persist: bool = False,
 ) -> str:
     """Start a new audio stream (non-blocking)."""
     return _manager.start_stream(
@@ -72,6 +75,7 @@ def start_audio_stream(
         token=token,
         device_name=device_name,
         recording_mode=recording_mode,
+        always_persist=always_persist,
     )
 
 
@@ -134,6 +138,15 @@ def send_audio_stop_event(stream_id: str) -> None:
 def stop_audio_stream(stream_id: str) -> int:
     """Stop an audio stream and close the connection."""
     return _manager.stop_stream(stream_id)
+
+
+def close_audio_stream_without_stop(stream_id: str) -> int:
+    """Close WebSocket connection without sending audio-stop event.
+
+    This simulates abrupt disconnection (network failure, client crash)
+    and should trigger websocket_disconnect end_reason.
+    """
+    return _manager.close_stream_without_stop(stream_id)
 
 
 def cleanup_all_streams():

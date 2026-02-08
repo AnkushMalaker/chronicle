@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Settings, RefreshCw, CheckCircle, XCircle, AlertCircle, Activity, Users, Database, Server, Volume2, Mic, Brain } from 'lucide-react'
+import { Settings, RefreshCw, CheckCircle, XCircle, AlertCircle, Activity, Users, Database, Server, Volume2, Mic, Brain, Sliders } from 'lucide-react'
 import { systemApi, speakerApi } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
 import MemorySettings from '../components/MemorySettings'
@@ -46,10 +46,31 @@ interface DiarizationSettings {
   max_speakers: number
 }
 
+interface DiagnosticIssue {
+  component: string
+  severity: 'error' | 'warning' | 'info'
+  message: string
+  resolution?: string
+}
+
+interface ConfigDiagnostics {
+  timestamp: string
+  overall_status: 'healthy' | 'partial' | 'unhealthy'
+  issues: DiagnosticIssue[]
+  warnings: DiagnosticIssue[]
+  info: DiagnosticIssue[]
+  components: Record<string, {
+    status: string
+    message: string
+    details?: any
+  }>
+}
+
 export default function System() {
   const [healthData, setHealthData] = useState<HealthData | null>(null)
   const [readinessData, setReadinessData] = useState<any>(null)
   const [metricsData, setMetricsData] = useState<MetricsData | null>(null)
+  const [configDiagnostics, setConfigDiagnostics] = useState<ConfigDiagnostics | null>(null)
   const [processorStatus, setProcessorStatus] = useState<ProcessorStatus | null>(null)
   const [activeClients, setActiveClients] = useState<ActiveClient[]>([])
   const [loading, setLoading] = useState(false)
@@ -71,6 +92,14 @@ export default function System() {
   const [providerLoading, setProviderLoading] = useState(false)
   const [providerMessage, setProviderMessage] = useState('')
 
+  // Miscellaneous settings state
+  const [miscSettings, setMiscSettings] = useState({
+    always_persist_enabled: false,
+    use_provider_segments: false
+  })
+  const [miscLoading, setMiscLoading] = useState(false)
+  const [miscMessage, setMiscMessage] = useState('')
+
   const { isAdmin } = useAuth()
 
   const loadSystemData = async () => {
@@ -80,10 +109,11 @@ export default function System() {
       setLoading(true)
       setError(null)
 
-      const [health, readiness, metrics, processor, clients] = await Promise.allSettled([
+      const [health, readiness, metrics, diagnostics, processor, clients] = await Promise.allSettled([
         systemApi.getHealth(),
         systemApi.getReadiness(),
         systemApi.getMetrics().catch(() => ({ data: null })), // Optional endpoint
+        systemApi.getConfigDiagnostics().catch(() => ({ data: null })), // Optional endpoint
         systemApi.getProcessorStatus().catch(() => ({ data: null })), // Optional endpoint
         systemApi.getActiveClients().catch(() => ({ data: [] })), // Optional endpoint
       ])
@@ -96,6 +126,9 @@ export default function System() {
       }
       if (metrics.status === 'fulfilled' && metrics.value.data) {
         setMetricsData(metrics.value.data)
+      }
+      if (diagnostics.status === 'fulfilled' && diagnostics.value.data) {
+        setConfigDiagnostics(diagnostics.value.data)
       }
       if (processor.status === 'fulfilled' && processor.value.data) {
         setProcessorStatus(processor.value.data)
@@ -139,6 +172,38 @@ export default function System() {
       console.error('Failed to load memory provider:', err)
     } finally {
       setProviderLoading(false)
+    }
+  }
+
+  const loadMiscSettings = async () => {
+    try {
+      setMiscLoading(true)
+      const response = await systemApi.getMiscSettings()
+      if (response.data.status === 'success') {
+        setMiscSettings(response.data.settings)
+      }
+    } catch (err: any) {
+      console.error('Failed to load misc settings:', err)
+    } finally {
+      setMiscLoading(false)
+    }
+  }
+
+  const saveMiscSettings = async () => {
+    try {
+      setMiscLoading(true)
+      setMiscMessage('')
+      const response = await systemApi.saveMiscSettings(miscSettings)
+      if (response.data.status === 'success') {
+        setMiscMessage('Settings saved successfully')
+        setTimeout(() => setMiscMessage(''), 3000)
+      } else {
+        setMiscMessage('Failed to save settings')
+      }
+    } catch (err: any) {
+      setMiscMessage('Error: ' + (err.response?.data?.detail || err.message))
+    } finally {
+      setMiscLoading(false)
     }
   }
 
@@ -186,6 +251,7 @@ export default function System() {
     loadSystemData()
     loadDiarizationSettings()
     loadMemoryProvider()
+    loadMiscSettings()
   }, [isAdmin])
 
   const getStatusIcon = (healthy: boolean) => {
@@ -286,6 +352,104 @@ export default function System() {
                 {healthData.status.toUpperCase()}
               </span>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Configuration Diagnostics */}
+      {configDiagnostics && (configDiagnostics.issues.length > 0 || configDiagnostics.warnings.length > 0 || configDiagnostics.info.length > 0) && (
+        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 flex items-center">
+              <AlertCircle className="h-5 w-5 mr-2 text-blue-600" />
+              Configuration Diagnostics
+            </h3>
+            <div className="flex items-center space-x-2">
+              {configDiagnostics.overall_status === 'healthy' && <CheckCircle className="h-5 w-5 text-green-500" />}
+              {configDiagnostics.overall_status === 'partial' && <AlertCircle className="h-5 w-5 text-yellow-500" />}
+              {configDiagnostics.overall_status === 'unhealthy' && <XCircle className="h-5 w-5 text-red-500" />}
+              <span className={`text-sm font-semibold ${getStatusColor(configDiagnostics.overall_status)}`}>
+                {configDiagnostics.overall_status.toUpperCase()}
+              </span>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            {/* Errors */}
+            {configDiagnostics.issues.map((issue, idx) => (
+              <div key={`error-${idx}`} className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md p-3">
+                <div className="flex items-start space-x-2">
+                  <XCircle className="h-5 w-5 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    <div className="flex items-center space-x-2 mb-1">
+                      <span className="text-xs font-semibold text-red-700 dark:text-red-300 uppercase">
+                        {issue.component}
+                      </span>
+                      <span className="text-xs px-2 py-0.5 bg-red-200 dark:bg-red-800 text-red-800 dark:text-red-200 rounded">
+                        ERROR
+                      </span>
+                    </div>
+                    <p className="text-sm text-red-700 dark:text-red-300 mb-1">
+                      {issue.message}
+                    </p>
+                    {issue.resolution && (
+                      <p className="text-xs text-red-600 dark:text-red-400">
+                        💡 {issue.resolution}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+
+            {/* Warnings */}
+            {configDiagnostics.warnings.map((warning, idx) => (
+              <div key={`warning-${idx}`} className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-md p-3">
+                <div className="flex items-start space-x-2">
+                  <AlertCircle className="h-5 w-5 text-yellow-600 dark:text-yellow-400 flex-shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    <div className="flex items-center space-x-2 mb-1">
+                      <span className="text-xs font-semibold text-yellow-700 dark:text-yellow-300 uppercase">
+                        {warning.component}
+                      </span>
+                      <span className="text-xs px-2 py-0.5 bg-yellow-200 dark:bg-yellow-800 text-yellow-800 dark:text-yellow-200 rounded">
+                        WARNING
+                      </span>
+                    </div>
+                    <p className="text-sm text-yellow-700 dark:text-yellow-300 mb-1">
+                      {warning.message}
+                    </p>
+                    {warning.resolution && (
+                      <p className="text-xs text-yellow-600 dark:text-yellow-400">
+                        💡 {warning.resolution}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+
+            {/* Info */}
+            {configDiagnostics.info.map((info, idx) => (
+              <div key={`info-${idx}`} className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md p-3">
+                <div className="flex items-start space-x-2">
+                  <CheckCircle className="h-5 w-5 text-blue-600 dark:text-blue-400 flex-shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    <div className="flex items-center space-x-2 mb-1">
+                      <span className="text-xs font-semibold text-blue-700 dark:text-blue-300 uppercase">
+                        {info.component}
+                      </span>
+                      <span className="text-xs px-2 py-0.5 bg-blue-200 dark:bg-blue-800 text-blue-800 dark:text-blue-200 rounded">
+                        INFO
+                      </span>
+                    </div>
+                    <p className="text-sm text-blue-700 dark:text-blue-300">
+                      {info.message}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       )}
@@ -676,6 +840,86 @@ export default function System() {
                 className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {diarizationLoading ? 'Saving...' : 'Save Diarization Settings'}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Miscellaneous Configuration */}
+        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center">
+            <Sliders className="h-5 w-5 mr-2 text-blue-600" />
+            Miscellaneous Configuration
+          </h3>
+
+          <div className="space-y-4">
+            {/* Always Persist Audio Toggle */}
+            <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-md">
+              <div className="flex-1">
+                <div className="font-medium text-gray-900 dark:text-gray-100">
+                  Always Persist Audio
+                </div>
+                <div className="text-sm text-gray-600 dark:text-gray-400">
+                  Create conversations for all audio sessions, even when no speech is detected
+                </div>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer ml-4">
+                <input
+                  type="checkbox"
+                  checked={miscSettings.always_persist_enabled}
+                  onChange={(e) => setMiscSettings(prev => ({
+                    ...prev,
+                    always_persist_enabled: e.target.checked
+                  }))}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
+              </label>
+            </div>
+
+            {/* Use Provider Segments Toggle */}
+            <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-md">
+              <div className="flex-1">
+                <div className="font-medium text-gray-900 dark:text-gray-100">
+                  Use Provider Segments
+                </div>
+                <div className="text-sm text-gray-600 dark:text-gray-400">
+                  Use speech segments from transcription provider instead of speaker service diarization
+                </div>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer ml-4">
+                <input
+                  type="checkbox"
+                  checked={miscSettings.use_provider_segments}
+                  onChange={(e) => setMiscSettings(prev => ({
+                    ...prev,
+                    use_provider_segments: e.target.checked
+                  }))}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
+              </label>
+            </div>
+
+            {/* Status Message */}
+            {miscMessage && (
+              <div className={`p-2 rounded-md text-sm ${
+                miscMessage.includes('Error') || miscMessage.includes('Failed')
+                  ? 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300'
+                  : 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300'
+              }`}>
+                {miscMessage}
+              </div>
+            )}
+
+            {/* Save Button */}
+            <div className="pt-4 border-t border-gray-200 dark:border-gray-600">
+              <button
+                onClick={saveMiscSettings}
+                disabled={miscLoading}
+                className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {miscLoading ? 'Saving...' : 'Save Miscellaneous Settings'}
               </button>
             </div>
           </div>

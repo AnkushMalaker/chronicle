@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO)
 # Default WebSocket settings
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 8000
-DEFAULT_ENDPOINT = "/ws_pcm"
+DEFAULT_ENDPOINT = "/ws?codec=pcm"
 
 # Audio format will be determined from the InputMicStream instance
 

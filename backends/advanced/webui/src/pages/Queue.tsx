@@ -27,10 +27,10 @@ import { queueApi } from '../services/api';
 interface QueueStats {
   total_jobs: number;
   queued_jobs: number;
-  processing_jobs: number;
-  completed_jobs: number;
+  started_jobs: number;  // RQ standard, not "processing_jobs"
+  finished_jobs: number;  // RQ standard, not "completed_jobs"
   failed_jobs: number;
-  cancelled_jobs: number;
+  canceled_jobs: number;  // RQ standard (US spelling), not "cancelled_jobs"
   deferred_jobs: number;
   timestamp: string;
 }
@@ -131,15 +131,15 @@ const Queue: React.FC = () => {
   const [showFlushModal, setShowFlushModal] = useState(false);
   const [flushSettings, setFlushSettings] = useState({
     older_than_hours: 24,
-    statuses: ['completed', 'failed'],
+    statuses: ['finished', 'failed'],  // RQ standard status names
     flush_all: false,
     include_failed: false,  // For flush_all mode
-    include_completed: false  // For flush_all mode
+    include_completed: false  // For flush_all mode (note: API expects include_completed for backward compat)
   });
   const [flushing, setFlushing] = useState(false);
-  const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set());
+  const [expandedConversations, setExpandedConversations] = useState<Set<string>>(new Set());
   const [expandedJobs, setExpandedJobs] = useState<Set<string>>(new Set());
-  const [sessionJobs, setSessionJobs] = useState<{[sessionId: string]: any[]}>({});
+  const [conversationJobs, setConversationJobs] = useState<{[conversationId: string]: any[]}>({});
   const [lastUpdate, setLastUpdate] = useState<number>(Date.now());
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState<boolean>(() => {
     // Load from localStorage, default to true
@@ -153,14 +153,14 @@ const Queue: React.FC = () => {
   const [completedConvTimeRange, setCompletedConvTimeRange] = useState(24); // hours
 
   // Use refs to track current state in interval
-  const expandedSessionsRef = useRef<Set<string>>(new Set());
+  const expandedConversationsRef = useRef<Set<string>>(new Set());
   const streamingStatusRef = useRef<StreamingStatus | null>(null);
   const refreshingRef = useRef<boolean>(false);
 
   // Update refs when state changes
   useEffect(() => {
-    expandedSessionsRef.current = expandedSessions;
-  }, [expandedSessions]);
+    expandedConversationsRef.current = expandedConversations;
+  }, [expandedConversations]);
 
   useEffect(() => {
     streamingStatusRef.current = streamingStatus;
@@ -179,26 +179,26 @@ const Queue: React.FC = () => {
     setRefreshing(true);
 
     try {
-      const currentExpanded = expandedSessionsRef.current;
-      const expandedSessionIds = Array.from(currentExpanded);
+      const currentExpanded = expandedConversationsRef.current;
+      const expandedConversationIds = Array.from(currentExpanded);
 
       // Single API call to get all dashboard data
-      const response = await queueApi.getDashboard(expandedSessionIds);
+      const response = await queueApi.getDashboard(expandedConversationIds);
       const dashboardData = response.data;
 
-      // Extract jobs from response
+      // Extract jobs from response (using RQ standard status names)
       const queuedJobs = dashboardData.jobs.queued || [];
-      const processingJobs = dashboardData.jobs.processing || [];
-      const completedJobs = dashboardData.jobs.completed || [];
+      const startedJobs = dashboardData.jobs.started || [];  // RQ standard, not "processing"
+      const finishedJobs = dashboardData.jobs.finished || [];  // RQ standard, not "completed"
       const failedJobs = dashboardData.jobs.failed || [];
 
       // Combine all jobs
-      const allFetchedJobs = [...queuedJobs, ...processingJobs, ...completedJobs, ...failedJobs];
+      const allFetchedJobs = [...queuedJobs, ...startedJobs, ...finishedJobs, ...failedJobs];
 
       console.log(`📊 Fetched ${allFetchedJobs.length} total jobs via consolidated endpoint`);
       console.log(`  - Queued: ${queuedJobs.length}`);
-      console.log(`  - Processing: ${processingJobs.length}`);
-      console.log(`  - Completed: ${completedJobs.length}`);
+      console.log(`  - Started: ${startedJobs.length}`);  // RQ standard
+      console.log(`  - Finished: ${finishedJobs.length}`);  // RQ standard
       console.log(`  - Failed: ${failedJobs.length}`);
 
       // Debug: Log open_conversation_job details
@@ -211,60 +211,64 @@ const Queue: React.FC = () => {
         console.log(`  meta.conversation_id: ${job.meta?.conversation_id}`);
       });
 
-      // Group jobs by session_id (use audio_uuid from metadata)
-      const jobsBySession: {[sessionId: string]: any[]} = {};
+      // Group jobs by conversation_id (primary identifier for conversations)
+      const jobsByConversation: {[conversationId: string]: any[]} = {};
 
       allFetchedJobs.forEach(job => {
         if (!job || !job.job_id) return; // Skip invalid jobs
 
-        // Extract session_id from meta.audio_uuid
-        const sessionId = job.meta?.audio_uuid;
-        if (sessionId) {
-          if (!jobsBySession[sessionId]) {
-            jobsBySession[sessionId] = [];
+        // Extract conversation_id from metadata
+        const conversationId = job.meta?.conversation_id;
+        if (conversationId) {
+          if (!jobsByConversation[conversationId]) {
+            jobsByConversation[conversationId] = [];
           }
-          jobsBySession[sessionId].push(job);
+          jobsByConversation[conversationId].push(job);
 
           // Debug logging for grouping
           if (job.job_type === 'open_conversation_job') {
-            console.log(`✅ Grouped open_conversation_job ${job.job_id} under session ${sessionId}`);
+            console.log(`✅ Grouped open_conversation_job ${job.job_id} under conversation ${conversationId}`);
           }
         } else {
-          // Log jobs that couldn't be grouped
-          console.log(`⚠️ Job ${job.job_id} (${job.job_type}) has no session_id - cannot group`);
+          // Only log warning for non-session-level jobs
+          // Audio persistence jobs are expected to not have conversation_id
+          if (job.meta?.session_level !== true && job.job_type !== 'audio_streaming_persistence_job') {
+            console.log(`⚠️ Job ${job.job_id} (${job.job_type}) has no conversation_id - cannot group`);
+          }
         }
       });
 
-      // Merge session jobs from dashboard response
-      if (dashboardData.session_jobs) {
-        Object.entries(dashboardData.session_jobs).forEach(([sessionId, jobs]: [string, any]) => {
+      // Merge conversation jobs from dashboard response (for backward compatibility, check both session_jobs and conversation_jobs)
+      const dashboardConvJobs = dashboardData.conversation_jobs || dashboardData.session_jobs;
+      if (dashboardConvJobs) {
+        Object.entries(dashboardConvJobs).forEach(([conversationId, jobs]: [string, any]) => {
           // Merge with existing jobs and deduplicate by job_id
-          const existingJobs = jobsBySession[sessionId] || [];
+          const existingJobs = jobsByConversation[conversationId] || [];
           const existingJobIds = new Set(existingJobs.map((j: any) => j.job_id));
           const newJobs = jobs.filter((j: any) => !existingJobIds.has(j.job_id));
-          jobsBySession[sessionId] = [...existingJobs, ...newJobs];
+          jobsByConversation[conversationId] = [...existingJobs, ...newJobs];
         });
       }
 
       // Update state
       setJobs(allFetchedJobs);
-      setSessionJobs(jobsBySession);
+      setConversationJobs(jobsByConversation);
       setStats(dashboardData.stats);
       setStreamingStatus(dashboardData.streaming_status);
       setLastUpdate(Date.now());
 
       // Auto-expand active conversations (those with open_conversation_job in progress)
-      const newExpanded = new Set(expandedSessions);
+      const newExpanded = new Set(expandedConversations);
       const newExpandedJobs = new Set(expandedJobs);
       let expandedCount = 0;
       let expandedJobsCount = 0;
 
       // Find all conversations with active open_conversation_job
-      Object.entries(jobsBySession).forEach(([_sessionId, jobs]) => {
+      Object.entries(jobsByConversation).forEach(([_conversationId, jobs]) => {
         const openConvJob = jobs.find((j: any) => j.job_type === 'open_conversation_job');
         if (openConvJob && openConvJob.status === 'started') {
           const conversationId = openConvJob.meta?.conversation_id;
-          if (conversationId && !expandedSessions.has(conversationId)) {
+          if (conversationId && !expandedConversations.has(conversationId)) {
             newExpanded.add(conversationId);
             expandedCount++;
             console.log(`🔓 Auto-expanding active conversation: ${conversationId}`);
@@ -280,10 +284,10 @@ const Queue: React.FC = () => {
         }
       });
 
-      // Update expanded sessions if any new active conversations found
+      // Update expanded conversations if any new active conversations found
       if (expandedCount > 0) {
         console.log(`📂 Auto-expanded ${expandedCount} active conversation(s)`);
-        setExpandedSessions(newExpanded);
+        setExpandedConversations(newExpanded);
       }
 
       // Update expanded jobs if any new jobs found
@@ -437,12 +441,12 @@ const Queue: React.FC = () => {
   const getStatusIcon = (status: string) => {
     switch (status) {
       case 'queued': return <Clock className="w-4 h-4" />;
-      case 'processing': return <Play className="w-4 h-4 animate-pulse" />;
-      case 'completed': return <CheckCircle className="w-4 h-4" />;
+      case 'started': return <Play className="w-4 h-4 animate-pulse" />;  // RQ standard
+      case 'finished': return <CheckCircle className="w-4 h-4" />;  // RQ standard
       case 'failed': return <XCircle className="w-4 h-4" />;
-      case 'cancelled': return <StopCircle className="w-4 h-4" />;
+      case 'canceled': return <StopCircle className="w-4 h-4" />;  // RQ standard (US spelling)
       case 'deferred': return <Pause className="w-4 h-4" />;
-      case 'waiting': return <Pause className="w-4 h-4" />;
+      case 'scheduled': return <Pause className="w-4 h-4" />;  // RQ standard, not "waiting"
       default: return <Clock className="w-4 h-4" />;
     }
   };
@@ -450,12 +454,12 @@ const Queue: React.FC = () => {
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'queued': return 'text-yellow-600 bg-yellow-100';
-      case 'processing': return 'text-blue-600 bg-blue-100';
-      case 'completed': return 'text-green-600 bg-green-100';
+      case 'started': return 'text-blue-600 bg-blue-100';  // RQ standard
+      case 'finished': return 'text-green-600 bg-green-100';  // RQ standard
       case 'failed': return 'text-red-600 bg-red-100';
-      case 'cancelled': return 'text-gray-600 bg-gray-100';
+      case 'canceled': return 'text-gray-600 bg-gray-100';  // RQ standard (US spelling)
       case 'deferred': return 'text-blue-600 bg-blue-100';
-      case 'waiting': return 'text-blue-600 bg-blue-100';
+      case 'scheduled': return 'text-blue-600 bg-blue-100';  // RQ standard, not "waiting"
       default: return 'text-gray-600 bg-gray-100';
     }
   };
@@ -516,7 +520,7 @@ const Queue: React.FC = () => {
       borderColor = 'border-green-600';
     }
     // Audio processing - orange shades
-    else if (type.includes('audio') || type.includes('persist') || type.includes('cropping')) {
+    else if (type.includes('audio') || type.includes('persist')) {
       bgColor = 'bg-orange-500';
       borderColor = 'border-orange-600';
     }
@@ -532,7 +536,7 @@ const Queue: React.FC = () => {
       borderColor = 'border-red-600';
     }
     // Processing jobs - add pulse animation
-    else if (status === 'processing') {
+    else if (status === 'started') {
       bgColor = bgColor + ' animate-pulse';
     }
 
@@ -630,7 +634,7 @@ const Queue: React.FC = () => {
     // For failed/finished jobs, use completed_at or ended_at. For running jobs, use current time.
     const end = job.completed_at || job.ended_at
       ? new Date((job.completed_at || job.ended_at)!).getTime()
-      : (job.status === 'processing' ? Date.now() : start); // Don't show increasing time for failed jobs
+      : (job.status === 'started' ? Date.now() : start); // Don't show increasing time for failed jobs
     const durationMs = end - start;
 
     if (durationMs < 1000) return `${durationMs}ms`;
@@ -639,36 +643,20 @@ const Queue: React.FC = () => {
     return `${Math.floor(durationMs / 3600000)}h ${Math.floor((durationMs % 3600000) / 60000)}m`;
   };
 
-  // Format seconds to readable time format (e.g., 3m34s or 1h22m32s)
-  const formatSeconds = (seconds: number): string => {
-    if (seconds < 60) {
-      return `${Math.floor(seconds)}s`;
-    } else if (seconds < 3600) {
-      const mins = Math.floor(seconds / 60);
-      const secs = Math.floor(seconds % 60);
-      return `${mins}m${secs}s`;
-    } else {
-      const hours = Math.floor(seconds / 3600);
-      const mins = Math.floor((seconds % 3600) / 60);
-      const secs = Math.floor(seconds % 60);
-      return `${hours}h${mins}m${secs}s`;
-    }
-  };
+  const toggleConversationExpansion = (conversationId: string) => {
+    const newExpanded = new Set(expandedConversations);
 
-  const toggleSessionExpansion = (sessionId: string) => {
-    const newExpanded = new Set(expandedSessions);
-
-    if (newExpanded.has(sessionId)) {
+    if (newExpanded.has(conversationId)) {
       // Collapse
-      newExpanded.delete(sessionId);
-      setExpandedSessions(newExpanded);
+      newExpanded.delete(conversationId);
+      setExpandedConversations(newExpanded);
     } else {
       // Expand and trigger refresh to fetch jobs via dashboard endpoint
-      newExpanded.add(sessionId);
-      setExpandedSessions(newExpanded);
+      newExpanded.add(conversationId);
+      setExpandedConversations(newExpanded);
 
       // Trigger a refresh if jobs not already loaded
-      if (!sessionJobs[sessionId]) {
+      if (!conversationJobs[conversationId]) {
         fetchData();
       }
     }
@@ -770,10 +758,10 @@ const Queue: React.FC = () => {
 
           <div className="bg-white rounded-lg border p-4">
             <div className="flex items-center space-x-2">
-              <Play className={`w-5 h-5 text-blue-600 ${stats.processing_jobs > 0 ? 'animate-pulse' : ''}`} />
+              <Play className={`w-5 h-5 text-blue-600 ${stats.started_jobs > 0 ? 'animate-pulse' : ''}`} />
               <div>
-                <p className="text-sm text-gray-600">Processing</p>
-                <p className="text-xl font-semibold text-blue-600">{stats.processing_jobs}</p>
+                <p className="text-sm text-gray-600">Started</p>
+                <p className="text-xl font-semibold text-blue-600">{stats.started_jobs}</p>
               </div>
             </div>
           </div>
@@ -782,8 +770,8 @@ const Queue: React.FC = () => {
             <div className="flex items-center space-x-2">
               <CheckCircle className="w-5 h-5 text-green-600" />
               <div>
-                <p className="text-sm text-gray-600">Completed</p>
-                <p className="text-xl font-semibold text-green-600">{stats.completed_jobs}</p>
+                <p className="text-sm text-gray-600">Finished</p>
+                <p className="text-xl font-semibold text-green-600">{stats.finished_jobs}</p>
               </div>
             </div>
           </div>
@@ -802,8 +790,8 @@ const Queue: React.FC = () => {
             <div className="flex items-center space-x-2">
               <StopCircle className="w-5 h-5 text-gray-600" />
               <div>
-                <p className="text-sm text-gray-600">Cancelled</p>
-                <p className="text-xl font-semibold text-gray-600">{stats.cancelled_jobs}</p>
+                <p className="text-sm text-gray-600">Canceled</p>
+                <p className="text-xl font-semibold text-gray-600">{stats.canceled_jobs}</p>
               </div>
             </div>
           </div>
@@ -880,7 +868,7 @@ const Queue: React.FC = () => {
                   const clientId = streamKey.replace('audio:stream:', '');
 
                   // Find all listen jobs for this client with deduplication
-                  const allJobsRaw = Object.values(sessionJobs).flat().filter(job => job != null);
+                  const allJobsRaw = Object.values(conversationJobs).flat().filter(job => job != null);
 
                   // Deduplicate by job_id
                   const jobMap = new Map();
@@ -902,7 +890,7 @@ const Queue: React.FC = () => {
                   const allListenJobs = allJobs.filter((job: any) =>
                     job && job.job_type === 'stream_speech_detection_job' &&
                     job.meta?.client_id === clientId &&
-                    job.status !== 'completed' &&
+                    job.status !== 'finished' &&
                     job.status !== 'failed'
                   );
 
@@ -1067,7 +1055,7 @@ const Queue: React.FC = () => {
                 <h4 className="text-sm font-medium text-gray-700 mb-3">Active Conversations</h4>
                 {(() => {
                   // Group all jobs by conversation_id with deduplication
-                  const allJobsRaw = Object.values(sessionJobs).flat().filter(job => job != null);
+                  const allJobsRaw = Object.values(conversationJobs).flat().filter(job => job != null);
 
                   // Deduplicate by job_id
                   const jobMap = new Map();
@@ -1079,54 +1067,32 @@ const Queue: React.FC = () => {
                   const allJobs = Array.from(jobMap.values());
 
                   // Group ALL jobs by conversation_id (regardless of status)
-                  // Also link jobs by audio_uuid so persistence jobs get grouped with conversation
                   const allConversationJobs = new Map<string, any[]>();
-                  const audioUuidToConversationId = new Map<string, string>();
 
-                  // First pass: collect conversation_id to audio_uuid mappings
-                  allJobs.forEach(job => {
-                    if (!job) return;
-                    const conversationId = job.meta?.conversation_id;
-                    const audioUuid = job.meta?.audio_uuid;
-
-                    if (conversationId && audioUuid) {
-                      audioUuidToConversationId.set(audioUuid, conversationId);
-                    }
-                  });
-
-                  // Second pass: group jobs by conversation_id or audio_uuid
+                  // Group jobs by conversation_id only
                   // EXCLUDE session-level jobs (like audio persistence)
                   allJobs.forEach(job => {
                     if (!job) return;
 
                     // Skip session-level jobs (they run for entire session, not per conversation)
-                    // Also skip audio persistence jobs by job_type (for backward compatibility with old jobs)
+                    // Also skip audio persistence jobs by job_type
                     if (job.meta?.session_level === true || job.job_type === 'audio_streaming_persistence_job') {
                       return;
                     }
 
                     const conversationId = job.meta?.conversation_id;
-                    const audioUuid = job.meta?.audio_uuid;
-
-                    // Determine the grouping key
-                    let groupKey = conversationId;
-                    if (!groupKey && audioUuid) {
-                      // Try to find conversation_id via audio_uuid mapping
-                      groupKey = audioUuidToConversationId.get(audioUuid);
-                    }
-
-                    if (groupKey) {
-                      if (!allConversationJobs.has(groupKey)) {
-                        allConversationJobs.set(groupKey, []);
+                    if (conversationId) {
+                      if (!allConversationJobs.has(conversationId)) {
+                        allConversationJobs.set(conversationId, []);
                       }
-                      allConversationJobs.get(groupKey)!.push(job);
+                      allConversationJobs.get(conversationId)!.push(job);
                     }
                   });
 
                   // Filter to only show conversations where at least one job is NOT completed
                   const conversationMap = new Map<string, any[]>();
                   allConversationJobs.forEach((jobs, conversationId) => {
-                    const hasActiveJob = jobs.some(j => j.status !== 'completed' && j.status !== 'failed');
+                    const hasActiveJob = jobs.some(j => j.status !== 'finished' && j.status !== 'failed');
                     if (hasActiveJob) {
                       conversationMap.set(conversationId, jobs);
                     }
@@ -1143,7 +1109,7 @@ const Queue: React.FC = () => {
                   return (
                     <div className="space-y-2">
                       {Array.from(conversationMap.entries()).map(([conversationId, jobs]) => {
-                        const isExpanded = expandedSessions.has(conversationId);
+                        const isExpanded = expandedConversations.has(conversationId);
 
                         // Find the open_conversation_job for metadata, or fallback to any job with metadata
                         const openConvJob = jobs.find(j => j.job_type === 'open_conversation_job');
@@ -1166,7 +1132,7 @@ const Queue: React.FC = () => {
                           <div key={conversationId} className={`rounded-lg border overflow-hidden ${hasFailedJob ? 'bg-red-50 border-red-300' : 'bg-cyan-50 border-cyan-200'}`}>
                             <div
                               className={`flex items-center justify-between p-3 cursor-pointer transition-colors ${hasFailedJob ? 'hover:bg-red-100' : 'hover:bg-cyan-100'}`}
-                              onClick={() => toggleSessionExpansion(conversationId)}
+                              onClick={() => toggleConversationExpansion(conversationId)}
                             >
                               <div className="flex-1">
                                 <div className="flex items-center space-x-2">
@@ -1245,7 +1211,7 @@ const Queue: React.FC = () => {
                                       const startTime = new Date(job.started_at!).getTime();
                                       const endTime = job.completed_at || job.ended_at
                                         ? new Date((job.completed_at || job.ended_at)!).getTime()
-                                        : (job.status === 'processing' ? Date.now() : startTime);
+                                        : (job.status === 'started' ? Date.now() : startTime);
 
                                       return {
                                         job,
@@ -1333,7 +1299,7 @@ const Queue: React.FC = () => {
                                               <div className="flex-1 relative h-6 bg-gray-100 rounded">
                                                 {/* Job Bar */}
                                                 <div
-                                                  className={`absolute h-6 rounded ${barColor} ${job.status === 'processing' ? 'animate-pulse' : ''} flex items-center justify-center`}
+                                                  className={`absolute h-6 rounded ${barColor} ${job.status === 'started' ? 'animate-pulse' : ''} flex items-center justify-center`}
                                                   style={{
                                                     left: `${startPercent}%`,
                                                     width: `${widthPercent}%`
@@ -1530,7 +1496,7 @@ const Queue: React.FC = () => {
                 </div>
                 {(() => {
                   // Group all jobs by conversation_id for completed conversations with deduplication
-                  const allJobsRaw = Object.values(sessionJobs).flat().filter(job => job != null);
+                  const allJobsRaw = Object.values(conversationJobs).flat().filter(job => job != null);
 
                   // Deduplicate by job_id
                   const jobMap = new Map();
@@ -1542,54 +1508,32 @@ const Queue: React.FC = () => {
                   const allJobs = Array.from(jobMap.values());
 
                   // Group ALL jobs by conversation_id (regardless of status)
-                  // Also link jobs by audio_uuid so persistence jobs get grouped with conversation
                   const allConversationJobs = new Map<string, any[]>();
-                  const audioUuidToConversationId = new Map<string, string>();
 
-                  // First pass: collect conversation_id to audio_uuid mappings
-                  allJobs.forEach(job => {
-                    if (!job) return;
-                    const conversationId = job.meta?.conversation_id;
-                    const audioUuid = job.meta?.audio_uuid;
-
-                    if (conversationId && audioUuid) {
-                      audioUuidToConversationId.set(audioUuid, conversationId);
-                    }
-                  });
-
-                  // Second pass: group jobs by conversation_id or audio_uuid
+                  // Group jobs by conversation_id only
                   // EXCLUDE session-level jobs (like audio persistence)
                   allJobs.forEach(job => {
                     if (!job) return;
 
                     // Skip session-level jobs (they run for entire session, not per conversation)
-                    // Also skip audio persistence jobs by job_type (for backward compatibility with old jobs)
+                    // Also skip audio persistence jobs by job_type
                     if (job.meta?.session_level === true || job.job_type === 'audio_streaming_persistence_job') {
                       return;
                     }
 
                     const conversationId = job.meta?.conversation_id;
-                    const audioUuid = job.meta?.audio_uuid;
-
-                    // Determine the grouping key
-                    let groupKey = conversationId;
-                    if (!groupKey && audioUuid) {
-                      // Try to find conversation_id via audio_uuid mapping
-                      groupKey = audioUuidToConversationId.get(audioUuid);
-                    }
-
-                    if (groupKey) {
-                      if (!allConversationJobs.has(groupKey)) {
-                        allConversationJobs.set(groupKey, []);
+                    if (conversationId) {
+                      if (!allConversationJobs.has(conversationId)) {
+                        allConversationJobs.set(conversationId, []);
                       }
-                      allConversationJobs.get(groupKey)!.push(job);
+                      allConversationJobs.get(conversationId)!.push(job);
                     }
                   });
 
                   // Filter to only show conversations where ALL jobs are completed or failed
                   const conversationMap = new Map<string, any[]>();
                   allConversationJobs.forEach((jobs, conversationId) => {
-                    const allJobsComplete = jobs.every(j => j.status === 'completed' || j.status === 'failed');
+                    const allJobsComplete = jobs.every(j => j.status === 'finished' || j.status === 'failed');
                     if (allJobsComplete) {
                       conversationMap.set(conversationId, jobs);
                     }
@@ -1639,7 +1583,7 @@ const Queue: React.FC = () => {
                     <>
                       <div className="space-y-2">
                         {paginatedConversations.map(({ conversationId, jobs }) => {
-                        const isExpanded = expandedSessions.has(conversationId);
+                        const isExpanded = expandedConversations.has(conversationId);
 
                         // Find the open_conversation_job for metadata, or fallback to any job with metadata
                         const openConvJob = jobs.find(j => j.job_type === 'open_conversation_job');
@@ -1660,7 +1604,7 @@ const Queue: React.FC = () => {
                         const summary = transcriptionMeta.summary || null;
 
                         // Check job statuses
-                        const allComplete = jobs.every(j => j.status === 'completed');
+                        const allComplete = jobs.every(j => j.status === 'finished');
                         const hasFailedJob = jobs.some(j => j.status === 'failed');
                         const failedJobCount = jobs.filter(j => j.status === 'failed').length;
 
@@ -1692,7 +1636,7 @@ const Queue: React.FC = () => {
                           <div key={conversationId} className={`rounded-lg border overflow-hidden ${bgColor}`}>
                             <div
                               className={`flex items-center justify-between p-3 cursor-pointer transition-colors ${hoverColor}`}
-                              onClick={() => toggleSessionExpansion(conversationId)}
+                              onClick={() => toggleConversationExpansion(conversationId)}
                             >
                               <div className="flex-1">
                                 <div className="flex items-center space-x-2">
@@ -1786,7 +1730,7 @@ const Queue: React.FC = () => {
                                         const startTime = new Date(job.started_at!).getTime();
                                         const endTime = job.completed_at || job.ended_at
                                           ? new Date((job.completed_at || job.ended_at)!).getTime()
-                                          : (job.status === 'processing' ? Date.now() : startTime);
+                                          : (job.status === 'started' ? Date.now() : startTime);
 
                                         return {
                                           job,
@@ -1874,7 +1818,7 @@ const Queue: React.FC = () => {
                                                 <div className="flex-1 relative h-6 bg-gray-100 rounded">
                                                   {/* Job Bar */}
                                                   <div
-                                                    className={`absolute h-6 rounded ${barColor} ${job.status === 'processing' ? 'animate-pulse' : ''} flex items-center justify-center`}
+                                                    className={`absolute h-6 rounded ${barColor} ${job.status === 'started' ? 'animate-pulse' : ''} flex items-center justify-center`}
                                                     style={{
                                                       left: `${startPercent}%`,
                                                       width: `${widthPercent}%`
@@ -2090,10 +2034,10 @@ const Queue: React.FC = () => {
             >
               <option value="">All Statuses</option>
               <option value="queued">Queued</option>
-              <option value="processing">Processing</option>
-              <option value="completed">Completed</option>
+              <option value="started">Started</option>
+              <option value="finished">Finished</option>
               <option value="failed">Failed</option>
-              <option value="cancelled">Cancelled</option>
+              <option value="canceled">Canceled</option>
               <option value="deferred">Deferred</option>
             </select>
           </div>
@@ -2214,7 +2158,7 @@ const Queue: React.FC = () => {
                       >
                         <Eye className="w-4 h-4" />
                       </button>
-                      {(job.status === 'queued' || job.status === 'processing') && (
+                      {(job.status === 'queued' || job.status === 'started') && (
                         <button
                           onClick={() => cancelJob(job.job_id)}
                           className="text-red-600 hover:text-red-900"
@@ -2223,7 +2167,7 @@ const Queue: React.FC = () => {
                           <StopCircle className="w-4 h-4" />
                         </button>
                       )}
-                      {job.status === 'completed' && (
+                      {job.status === 'finished' && (
                         <button
                           onClick={() => cancelJob(job.job_id)}
                           className="text-gray-400 hover:text-gray-600"
@@ -2483,22 +2427,6 @@ const Queue: React.FC = () => {
                       </div>
                     )}
 
-                    {/* process_cropping_job formatted metadata */}
-                    {selectedJob.func_name?.includes('process_cropping_job') && (
-                      <div className="bg-green-50 p-3 rounded mb-3 space-y-2">
-                        {selectedJob.meta.cropped_duration_seconds !== undefined && (
-                          <div className="text-sm">
-                            <span className="font-medium">Cropped Duration:</span> {formatSeconds(selectedJob.meta.cropped_duration_seconds)}
-                          </div>
-                        )}
-                        {selectedJob.meta.segments_cropped !== undefined && (
-                          <div className="text-sm">
-                            <span className="font-medium">Segments Cropped:</span> {selectedJob.meta.segments_cropped}
-                          </div>
-                        )}
-                      </div>
-                    )}
-
                     {/* Raw JSON metadata (collapsible) */}
                     <details className="mt-2">
                       <summary className="text-sm font-medium text-gray-700 cursor-pointer hover:text-gray-900">
@@ -2572,7 +2500,7 @@ const Queue: React.FC = () => {
                       <div>
                         <label className="block text-xs text-gray-600 mb-1">Job statuses to remove:</label>
                         <div className="space-y-1">
-                          {['completed', 'failed', 'cancelled'].map(status => (
+                          {['finished', 'failed', 'canceled'].map(status => (
                             <label key={status} className="flex items-center space-x-2">
                               <input
                                 type="checkbox"

@@ -115,7 +115,7 @@ Wait For Memory Extraction
     ...                {
     ...                  'success': True/False,
     ...                  'error_message': 'Error description' (only if success=False),
-    ...                  'status': 'completed'/'failed'/'timeout'/'not_found',
+    ...                  'status': 'finished'/'failed'/'timeout'/'not_found',
     ...                  'job': {job object} (if available),
     ...                  'memories': [list of memories] (if successful),
     ...                  'memory_count': int (if successful)
@@ -170,9 +170,9 @@ Wait For Memory Extraction
         ${final_job}=    Set Variable    ${job}
         ${final_status}=    Set Variable    ${status}
 
-        # Success case - job completed
-        IF    '${status}' == 'completed' or '${status}' == 'finished'
-            Log    Memory job completed successfully
+        # Success case - job finished
+        IF    '${status}' == 'finished' or '${status}' == 'finished'
+            Log    Memory job finished successfully
             BREAK
         END
 
@@ -181,7 +181,7 @@ Wait For Memory Extraction
             ${error_info}=    Evaluate    $job.get('exc_info', 'Unknown error')
             ${result}=    Create Dictionary
             ...    success=${False}
-            ...    error_message=Memory job failed during processing: ${error_info}
+            ...    error_message=Memory job failed during started: ${error_info}
             ...    status=failed
             ...    job=${job}
             RETURN    ${result}
@@ -215,7 +215,7 @@ Wait For Memory Extraction
         # Return success result
         ${result}=    Create Dictionary
         ...    success=${True}
-        ...    status=completed
+        ...    status=finished
         ...    job=${final_job}
         ...    memories=${memories}
         ...    memory_count=${memory_count}

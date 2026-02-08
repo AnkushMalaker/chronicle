@@ -1,15 +1,33 @@
+# ASR Services Docker Compose
+# Provider-based architecture: Run ONE provider at a time with configurable models
+#
+# Usage:
+#   # Start NeMo provider (Parakeet, Canary)
+#   ASR_MODEL=nvidia/parakeet-tdt-0.6b-v3 docker compose up nemo-asr -d
+#
+#   # Start Faster-Whisper provider
+#   ASR_MODEL=Systran/faster-whisper-large-v3 docker compose up faster-whisper-asr -d
+#
+#   # Start Transformers provider (Hindi Whisper, HuggingFace models)
+#   ASR_MODEL=openai/whisper-large-v3 docker compose up transformers-asr -d
+#
+#   # Start VibeVoice provider (speaker diarization)
+#   docker compose up vibevoice-asr -d
+
 services:
-  parakeet-asr:
+  # ============================================================================
+  # NeMo Provider (Parakeet, Canary, etc.)
+  # ============================================================================
+  nemo-asr:
     build:
       context: .
-      dockerfile: Dockerfile_Parakeet
+      dockerfile: providers/nemo/Dockerfile
       args:
         PYTORCH_CUDA_VERSION: ${PYTORCH_CUDA_VERSION:-cu126}
-    image: parakeet-asr:latest
+    image: chronicle-asr-nemo:latest
     ports:
-      - "${PARAKEET_HOST_PORT:-8767}:${PARAKEET_CONTAINER_PORT:-8765}"
+      - "${ASR_PORT:-8767}:8765"
     volumes:
-      # Persist Hugging Face cache (models + tokenizer) between restarts
       - ./model_cache:/models
       - ./debug:/app/debug
       - ./results:/app/results
@@ -22,7 +40,9 @@ services:
               capabilities: [gpu]
     environment:
       - HF_HOME=/models
-      - PARAKEET_MODEL=$PARAKEET_MODEL
+      - ASR_MODEL=${ASR_MODEL:-nvidia/parakeet-tdt-0.6b-v3}
+      # Legacy support
+      - PARAKEET_MODEL=${PARAKEET_MODEL:-${ASR_MODEL:-nvidia/parakeet-tdt-0.6b-v3}}
       # Enhanced chunking configuration
       - CHUNKING_ENABLED=${CHUNKING_ENABLED:-true}
       - CHUNK_DURATION_SECONDS=${CHUNK_DURATION_SECONDS:-30.0}
@@ -31,26 +51,129 @@ services:
       - CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD:-0.8}
     restart: unless-stopped
 
-  # moonshine-asr:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile_Moonshine
-  #   image: moonshine-asr:latest
-  #   ports:
-  #     - "8765:8765"  # Keep Moonshine on 8765 
-  #   volumes:
-  #     # Persist Hugging Face cache (models + tokenizer) between restarts
-  #     - ./model_cache:/models
-  #     - ./audio_chunks:/app/audio_chunks
-  #     - ./debug:/app/debug
-  #     - ./results:/app/results
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             count: all
-  #             capabilities: [gpu]
-  #   environment:
-  #     - HF_HOME=/models
-  #   restart: unless-stopped
+  # ============================================================================
+  # Faster-Whisper Provider (4-6x faster Whisper inference)
+  # ============================================================================
+  faster-whisper-asr:
+    build:
+      context: .
+      dockerfile: providers/faster_whisper/Dockerfile
+    image: chronicle-asr-faster-whisper:latest
+    ports:
+      - "${ASR_PORT:-8767}:8765"
+    volumes:
+      - ./model_cache:/models
+      - ./debug:/app/debug
+      - ./results:/app/results
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - HF_HOME=/models
+      - ASR_MODEL=${ASR_MODEL:-Systran/faster-whisper-large-v3}
+      - COMPUTE_TYPE=${COMPUTE_TYPE:-float16}
+      - DEVICE=${DEVICE:-cuda}
+      - DEVICE_INDEX=${DEVICE_INDEX:-0}
+      - VAD_FILTER=${VAD_FILTER:-true}
+      - LANGUAGE=${LANGUAGE:-}
+    restart: unless-stopped
+
+  # ============================================================================
+  # VibeVoice Provider (Microsoft VibeVoice-ASR with speaker diarization)
+  # Transformers-based approach with speaker diarization support
+  # ============================================================================
+  vibevoice-asr:
+    build:
+      context: .
+      dockerfile: providers/vibevoice/Dockerfile
+    image: chronicle-asr-vibevoice:latest
+    ports:
+      - "${ASR_PORT:-8767}:8765"
+    volumes:
+      - ./model_cache:/models
+      - ./debug:/app/debug
+      - ./results:/app/results
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - HF_HOME=/models
+      - ASR_MODEL=${ASR_MODEL:-microsoft/VibeVoice-ASR}
+      - VIBEVOICE_LLM_MODEL=${VIBEVOICE_LLM_MODEL:-Qwen/Qwen2.5-7B}
+      - VIBEVOICE_ATTN_IMPL=${VIBEVOICE_ATTN_IMPL:-sdpa}
+      - DEVICE=${DEVICE:-cuda}
+      - TORCH_DTYPE=${TORCH_DTYPE:-bfloat16}
+      - MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-8192}
+    restart: unless-stopped
+
+  # ============================================================================
+  # Transformers Provider (Hindi Whisper, HuggingFace models)
+  # ============================================================================
+  transformers-asr:
+    build:
+      context: .
+      dockerfile: providers/transformers/Dockerfile
+    image: chronicle-asr-transformers:latest
+    ports:
+      - "${ASR_PORT:-8767}:8765"
+    volumes:
+      - ./model_cache:/models
+      - ./debug:/app/debug
+      - ./results:/app/results
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - HF_HOME=/models
+      - ASR_MODEL=${ASR_MODEL:-openai/whisper-large-v3}
+      - USE_FLASH_ATTENTION=${USE_FLASH_ATTENTION:-false}
+      - DEVICE=${DEVICE:-cuda}
+      - TORCH_DTYPE=${TORCH_DTYPE:-float16}
+      - LANGUAGE=${LANGUAGE:-}
+    restart: unless-stopped
+
+  # ============================================================================
+  # Legacy Parakeet Service (backward compatibility)
+  # ============================================================================
+  parakeet-asr:
+    build:
+      context: .
+      dockerfile: Dockerfile_Parakeet
+      args:
+        PYTORCH_CUDA_VERSION: ${PYTORCH_CUDA_VERSION:-cu126}
+    image: parakeet-asr:latest
+    ports:
+      - "${PARAKEET_HOST_PORT:-8767}:${PARAKEET_CONTAINER_PORT:-8765}"
+    volumes:
+      - ./model_cache:/models
+      - ./debug:/app/debug
+      - ./results:/app/results
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - HF_HOME=/models
+      - PARAKEET_MODEL=${PARAKEET_MODEL:-nvidia/parakeet-tdt-0.6b-v3}
+      # Enhanced chunking configuration
+      - CHUNKING_ENABLED=${CHUNKING_ENABLED:-true}
+      - CHUNK_DURATION_SECONDS=${CHUNK_DURATION_SECONDS:-30.0}
+      - OVERLAP_DURATION_SECONDS=${OVERLAP_DURATION_SECONDS:-5.0}
+      - MIN_AUDIO_FOR_CHUNKING=${MIN_AUDIO_FOR_CHUNKING:-60.0}
+      - CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD:-0.8}
+    restart: unless-stopped

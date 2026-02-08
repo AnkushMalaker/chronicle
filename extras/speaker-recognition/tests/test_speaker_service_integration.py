@@ -276,7 +276,7 @@ def test_speaker_recognition_pipeline(speaker_service):
     # Phase 6: Conversation Processing (Basic API Functionality)
     print("🗣️ Phase 6: Conversation processing...")
     print("  Note: Testing API functionality, not requiring perfect speaker identification")
-    
+
     with open(conversation_file, "rb") as f:
         files = {"file": (conversation_file.name, f, "audio/wav")}
         params = {
@@ -286,26 +286,26 @@ def test_speaker_recognition_pipeline(speaker_service):
             "min_speakers": "1",
             "max_speakers": "4",
         }
-        
+
         print(f"  Processing conversation audio (file size: {conversation_file.stat().st_size / (1024*1024):.1f}MB)...")
         r = requests.post(f"{SPEAKER_SERVICE_URL}/diarize-and-identify", files=files, params=params, timeout=300)
-    
+
     assert r.status_code == 200, f"Conversation processing failed: {r.status_code} {r.text[:500]}"
     result = r.json()
-    
+
     # Basic structure validation
     assert "segments" in result, "No segments field in response"
     assert isinstance(result["segments"], list), "Segments is not a list"
     assert len(result["segments"]) > 0, "No segments found in conversation"
-    
+
     # Count identified vs unknown segments
     identified_segments = 0
     total_segments = len(result["segments"])
     identified_speakers = set()
-    
+
     for seg in result["segments"]:
         assert "start" in seg and "end" in seg and "speaker" in seg, "Invalid segment structure"
-        
+
         # Check if speaker was identified (correct field names)
         if seg.get("status") == "identified" and seg.get("identified_id"):
             identified_segments += 1
@@ -314,15 +314,105 @@ def test_speaker_recognition_pipeline(speaker_service):
             confidence = seg.get("confidence", 0.0)
             identified_speakers.add(speaker_id)
             print(f"    Segment identified: {speaker_name} ({speaker_id}) confidence={confidence:.3f}")
-    
+
     print(f"  ✅ Found {total_segments} segments, {identified_segments} with speaker identification")
     print(f"  ✅ Identified speakers: {identified_speakers}")
-    
+
     # Success criteria: API works and produces valid output
     # We don't require perfect speaker identification since that depends on audio quality
     assert total_segments > 0, "No segments produced"
     print("✅ Conversation processing API works correctly")
-    
+
+    # Phase 7: Word-Level Data Validation
+    print("📝 Phase 7: Validating word-level timestamp data in segments...")
+    segments_with_words = 0
+    total_words_found = 0
+
+    for seg in result["segments"]:
+        # Each segment should have a words array (empty segments might have empty array)
+        assert "words" in seg, f"Segment missing 'words' field: {seg}"
+        words = seg.get("words", [])
+
+        if len(words) > 0:
+            segments_with_words += 1
+            total_words_found += len(words)
+
+            # Validate word structure
+            for word in words[:3]:  # Check first 3 words of each segment
+                assert "word" in word, f"Word missing 'word' field: {word}"
+                assert "start" in word, f"Word missing 'start' field: {word}"
+                assert "end" in word, f"Word missing 'end' field: {word}"
+                # confidence is optional
+                assert isinstance(word["start"], (int, float)), f"Word 'start' should be numeric: {word}"
+                assert isinstance(word["end"], (int, float)), f"Word 'end' should be numeric: {word}"
+
+    print(f"  ✅ Word-level data: {segments_with_words}/{total_segments} segments have words ({total_words_found} total words)")
+    assert segments_with_words > 0, "No segments contain word-level timestamp data"
+    assert total_words_found > 0, "No words found across all segments"
+    print("✅ Word-level timestamp data validated successfully")
+
+    # Phase 8: Diarize-Identify-Match Endpoint (Backend Integration Mode)
+    print("🔗 Phase 8: Testing /v1/diarize-identify-match endpoint (backend integration mode)...")
+    print("  This endpoint matches transcript words to diarization segments")
+
+    # Create sample transcript_data with word-level timestamps
+    sample_transcript_data = {
+        "text": "Hello everyone. This is a test conversation.",
+        "words": [
+            {"word": "Hello", "start": 0.5, "end": 0.8, "confidence": 0.95},
+            {"word": "everyone", "start": 0.9, "end": 1.3, "confidence": 0.92},
+            {"word": "This", "start": 2.0, "end": 2.2, "confidence": 0.96},
+            {"word": "is", "start": 2.3, "end": 2.4, "confidence": 0.98},
+            {"word": "a", "start": 2.5, "end": 2.6, "confidence": 0.97},
+            {"word": "test", "start": 2.7, "end": 3.0, "confidence": 0.94},
+            {"word": "conversation", "start": 3.1, "end": 3.8, "confidence": 0.93},
+        ]
+    }
+
+    with open(conversation_file, "rb") as f:
+        files = {"file": (conversation_file.name, f, "audio/wav")}
+        data = {
+            "transcript_data": json.dumps(sample_transcript_data),
+            "user_id": "1",
+            "min_duration": "1.0",
+            "similarity_threshold": "0.10",
+            "min_speakers": "1",
+            "max_speakers": "4",
+        }
+
+        r = requests.post(f"{SPEAKER_SERVICE_URL}/v1/diarize-identify-match", files=files, data=data, timeout=300)
+
+    assert r.status_code == 200, f"/v1/diarize-identify-match failed: {r.status_code} {r.text[:500]}"
+    match_result = r.json()
+
+    # Validate response structure
+    assert "segments" in match_result, "No segments in diarize-identify-match response"
+    match_segments = match_result["segments"]
+    assert len(match_segments) > 0, "No segments returned from diarize-identify-match"
+
+    # Validate that segments contain matched words
+    match_segments_with_words = 0
+    match_total_words = 0
+
+    for seg in match_segments:
+        assert "text" in seg, "Segment missing 'text' field"
+        assert "words" in seg, "Segment missing 'words' field (should include matched transcript words)"
+        words = seg.get("words", [])
+
+        if len(words) > 0:
+            match_segments_with_words += 1
+            match_total_words += len(words)
+
+            # Validate word structure matches input transcript_data
+            for word in words[:2]:  # Check first 2 words
+                assert "word" in word, f"Word missing 'word' field: {word}"
+                assert "start" in word, f"Word missing 'start' field: {word}"
+                assert "end" in word, f"Word missing 'end' field: {word}"
+
+    print(f"  ✅ Diarize-identify-match: {match_segments_with_words}/{len(match_segments)} segments have matched words ({match_total_words} total)")
+    assert match_segments_with_words > 0, "No segments contain matched transcript words"
+    print("✅ /v1/diarize-identify-match endpoint validated successfully")
+
     # Final Summary
     print("=" * 80)
     print("🎉 SPEAKER RECOGNITION INTEGRATION TEST COMPLETED SUCCESSFULLY")
@@ -333,6 +423,8 @@ def test_speaker_recognition_pipeline(speaker_service):
     print(f"✅ Database persistence: PASS (2 speakers)")
     print(f"✅ Individual identification: PASS (both speakers)")
     print(f"✅ Conversation processing: PASS ({total_segments} segments, {identified_segments} identified)")
+    print(f"✅ Word-level timestamps: PASS ({total_words_found} words in {segments_with_words} segments)")
+    print(f"✅ Diarize-identify-match: PASS ({match_total_words} matched words in {match_segments_with_words} segments)")
     print("=" * 80)
 
 

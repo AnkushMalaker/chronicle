@@ -60,7 +60,7 @@ done
 
 When creating a new test configuration:
 
-1. **Name it descriptively**: `{stt}-{llm}.yml` (e.g., `mistral-openai.yml`)
+1. **Name it descriptively**: `{stt}-{llm}.yml` (e.g., `deepgram-openai.yml`)
 2. **Use environment variables**: Always use `${VAR:-default}` pattern for secrets
 3. **Set appropriate defaults**: Update the `defaults:` section to match your provider combo
 4. **Include only required models**: Don't include models that aren't used
@@ -124,7 +124,7 @@ Test configs use environment variable substitution to avoid hardcoding secrets:
 
 As you add support for new providers, create corresponding test configs:
 
-- `mistral-openai.yml` - Mistral Voxtral STT + OpenAI LLM
+- `deepgram-openai.yml` - Deepgram STT + OpenAI LLM
 - `deepgram-ollama.yml` - Deepgram STT + Local Ollama LLM
 - `parakeet-openai.yml` - Local Parakeet STT + OpenAI LLM
 - etc.

@@ -6,52 +6,23 @@ Handles service selection and delegation only - no configuration duplication
 
 import shutil
 import subprocess
-import sys
 from datetime import datetime
 from pathlib import Path
-import yaml
 
-from dotenv import get_key
-from rich import print as rprint
+import yaml
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
+# Import shared setup utilities
+from setup_utils import (
+    detect_tailscale_info,
+    is_placeholder,
+    mask_value,
+    prompt_with_existing_masked,
+    read_env_value,
+)
+
 console = Console()
-
-def read_env_value(env_file_path, key):
-    """Read a value from an .env file using python-dotenv"""
-    env_path = Path(env_file_path)
-    if not env_path.exists():
-        return None
-
-    value = get_key(str(env_path), key)
-    # get_key returns None if key doesn't exist or value is empty
-    return value if value else None
-
-def is_placeholder(value, *placeholder_variants):
-    """
-    Check if a value is a placeholder by normalizing both the value and placeholders.
-    Treats 'your-key-here' and 'your_key_here' as equivalent.
-
-    Args:
-        value: The value to check
-        placeholder_variants: One or more placeholder strings to check against
-
-    Returns:
-        True if value matches any placeholder variant (after normalization)
-    """
-    if not value:
-        return True
-
-    # Normalize by replacing hyphens with underscores
-    normalized_value = value.replace('-', '_').lower()
-
-    for placeholder in placeholder_variants:
-        normalized_placeholder = placeholder.replace('-', '_').lower()
-        if normalized_value == normalized_placeholder:
-            return True
-
-    return False
 
 SERVICES = {
     'backend': {
@@ -71,7 +42,7 @@ SERVICES = {
         'asr-services': {
             'path': 'extras/asr-services',
             'cmd': ['uv', 'run', '--with-requirements', '../../setup-requirements.txt', 'python', 'init.py'],
-            'description': 'Offline speech-to-text (Parakeet)'
+            'description': 'Offline speech-to-text'
         },
         'openmemory-mcp': {
             'path': 'extras/openmemory-mcp',
@@ -80,6 +51,44 @@ SERVICES = {
         }
     }
 }
+
+def discover_available_plugins():
+    """
+    Discover plugins by scanning plugins directory.
+
+    Returns:
+        Dictionary mapping plugin_id to plugin metadata:
+        {
+            'plugin_id': {
+                'has_setup': bool,
+                'setup_path': Path or None,
+                'dir': Path
+            }
+        }
+    """
+    plugins_dir = Path("backends/advanced/src/advanced_omi_backend/plugins")
+
+    if not plugins_dir.exists():
+        console.print(f"[yellow]Warning: Plugins directory not found: {plugins_dir}[/yellow]")
+        return {}
+
+    discovered = {}
+    skip_dirs = {'__pycache__', '__init__.py', 'base.py', 'router.py'}
+
+    for plugin_dir in plugins_dir.iterdir():
+        if not plugin_dir.is_dir() or plugin_dir.name in skip_dirs:
+            continue
+
+        plugin_id = plugin_dir.name
+        setup_script = plugin_dir / "setup.py"
+
+        discovered[plugin_id] = {
+            'has_setup': setup_script.exists(),
+            'setup_path': setup_script if setup_script.exists() else None,
+            'dir': plugin_dir
+        }
+
+    return discovered
 
 def check_service_exists(service_name, service_config):
     """Check if service directory and script exist"""
@@ -100,36 +109,47 @@ def check_service_exists(service_name, service_config):
 
     return True, "OK"
 
-def select_services():
+def select_services(transcription_provider=None):
     """Let user select which services to setup"""
     console.print("🚀 [bold cyan]Chronicle Service Setup[/bold cyan]")
     console.print("Select which services to configure:\n")
-    
+
     selected = []
-    
+
     # Backend is required
     console.print("📱 [bold]Backend (Required):[/bold]")
     console.print("  ✅ Advanced Backend - Full AI features")
     selected.append('advanced')
-    
+
+    # Services that will be auto-added based on transcription provider choice
+    auto_added = set()
+    if transcription_provider in ("parakeet", "vibevoice"):
+        auto_added.add('asr-services')
+
     # Optional extras
     console.print("\n🔧 [bold]Optional Services:[/bold]")
     for service_name, service_config in SERVICES['extras'].items():
+        # Skip services that will be auto-added based on earlier choices
+        if service_name in auto_added:
+            provider_label = {"vibevoice": "VibeVoice", "parakeet": "Parakeet"}.get(transcription_provider, transcription_provider)
+            console.print(f"  ✅ {service_config['description']} ({provider_label}) [dim](auto-selected)[/dim]")
+            continue
+
         # Check if service exists
         exists, msg = check_service_exists(service_name, service_config)
         if not exists:
             console.print(f"  ⏸️  {service_config['description']} - [dim]{msg}[/dim]")
             continue
-        
+
         try:
             enable_service = Confirm.ask(f"  Setup {service_config['description']}?", default=False)
         except EOFError:
             console.print("Using default: No")
             enable_service = False
-            
+
         if enable_service:
             selected.append(service_name)
-    
+
     return selected
 
 def cleanup_unselected_services(selected_services):
@@ -153,7 +173,8 @@ def cleanup_unselected_services(selected_services):
                 console.print(f"🧹 [dim]Backed up {service_name} configuration to {backup_file.name} (service not selected)[/dim]")
 
 def run_service_setup(service_name, selected_services, https_enabled=False, server_ip=None,
-                     obsidian_enabled=False, neo4j_password=None, transcription_provider='deepgram'):
+                     obsidian_enabled=False, neo4j_password=None, hf_token=None,
+                     transcription_provider='deepgram'):
     """Execute individual service setup script"""
     if service_name == 'advanced':
         service = SERVICES['backend'][service_name]
@@ -184,35 +205,18 @@ def run_service_setup(service_name, selected_services, https_enabled=False, serv
         # Add HTTPS configuration for services that support it
         if service_name == 'speaker-recognition' and https_enabled and server_ip:
             cmd.extend(['--enable-https', '--server-ip', server_ip])
-        
-        # For speaker-recognition, validate HF_TOKEN is required
+
+        # For speaker-recognition, pass HF_TOKEN from centralized configuration
         if service_name == 'speaker-recognition':
-            # HF_TOKEN is required for speaker-recognition
+            # Define the speaker env path
             speaker_env_path = 'extras/speaker-recognition/.env'
-            hf_token = read_env_value(speaker_env_path, 'HF_TOKEN')
-            
-            # Check if HF_TOKEN is missing or is a placeholder
-            if not hf_token or is_placeholder(hf_token, 'your_huggingface_token_here', 'your-huggingface-token-here', 'hf_xxxxx'):
-                console.print("\n[red][ERROR][/red] HF_TOKEN is required for speaker-recognition service")
-                console.print("[yellow]Speaker recognition requires a Hugging Face token to download models[/yellow]")
-                console.print("Get your token from: https://huggingface.co/settings/tokens")
-                console.print()
-                
-                # Prompt for HF_TOKEN
-                try:
-                    hf_token_input = console.input("[cyan]Enter your HF_TOKEN[/cyan]: ").strip()
-                    if not hf_token_input or is_placeholder(hf_token_input, 'your_huggingface_token_here', 'your-huggingface-token-here', 'hf_xxxxx'):
-                        console.print("[red][ERROR][/red] Invalid HF_TOKEN provided. Speaker-recognition setup cancelled.")
-                        return False
-                    hf_token = hf_token_input
-                except EOFError:
-                    console.print("[red][ERROR][/red] HF_TOKEN is required. Speaker-recognition setup cancelled.")
-                    return False
-            
-            # Pass HF Token to init script
-            cmd.extend(['--hf-token', hf_token])
-            console.print("[green][SUCCESS][/green] HF_TOKEN configured")
-            
+
+            # HF Token should have been provided via setup_hf_token_if_needed()
+            if hf_token:
+                cmd.extend(['--hf-token', hf_token])
+            else:
+                console.print("[yellow][WARNING][/yellow] No HF_TOKEN provided - speaker recognition may fail to download models")
+
             # Pass Deepgram API key from backend if available
             backend_env_path = 'backends/advanced/.env'
             deepgram_key = read_env_value(backend_env_path, 'DEEPGRAM_API_KEY')
@@ -226,8 +230,18 @@ def run_service_setup(service_name, selected_services, https_enabled=False, serv
                 cmd.extend(['--compute-mode', compute_mode])
                 console.print(f"[blue][INFO][/blue] Found existing COMPUTE_MODE ({compute_mode}), reusing")
         
-        # For asr-services, try to reuse PYTORCH_CUDA_VERSION from speaker-recognition
+        # For asr-services, pass provider from wizard's transcription choice and reuse CUDA version
         if service_name == 'asr-services':
+            # Map wizard transcription provider to asr-services provider name
+            wizard_to_asr_provider = {
+                'vibevoice': 'vibevoice',
+                'parakeet': 'nemo',
+            }
+            asr_provider = wizard_to_asr_provider.get(transcription_provider)
+            if asr_provider:
+                cmd.extend(['--provider', asr_provider])
+                console.print(f"[blue][INFO][/blue] Pre-selecting ASR provider: {asr_provider} (from wizard choice: {transcription_provider})")
+
             speaker_env_path = 'extras/speaker-recognition/.env'
             cuda_version = read_env_value(speaker_env_path, 'PYTORCH_CUDA_VERSION')
             if cuda_version and cuda_version in ['cu121', 'cu126', 'cu128']:
@@ -263,12 +277,20 @@ def run_service_setup(service_name, selected_services, https_enabled=False, serv
             
     except FileNotFoundError as e:
         console.print(f"❌ {service_name} setup failed: {e}")
+        console.print(f"[yellow]   Check that the service directory exists: {service['path']}[/yellow]")
+        console.print(f"[yellow]   And that 'uv' is installed and on your PATH[/yellow]")
         return False
     except subprocess.TimeoutExpired as e:
-        console.print(f"❌ {service_name} setup timed out after {e.timeout} seconds")
+        console.print(f"❌ {service_name} setup timed out after {e.timeout}s")
+        console.print(f"[yellow]   Configuration may be partially written.[/yellow]")
+        console.print(f"[yellow]   To retry just this service:[/yellow]")
+        console.print(f"[yellow]   cd {service['path']} && {' '.join(service['cmd'])}[/yellow]")
         return False
     except subprocess.CalledProcessError as e:
         console.print(f"❌ {service_name} setup failed with exit code {e.returncode}")
+        console.print(f"[yellow]   Check the error output above for details.[/yellow]")
+        console.print(f"[yellow]   To retry just this service:[/yellow]")
+        console.print(f"[yellow]   cd {service['path']} && {' '.join(service['cmd'])}[/yellow]")
         return False
     except Exception as e:
         console.print(f"❌ {service_name} setup failed: {e}")
@@ -288,6 +310,80 @@ def show_service_status():
         exists, msg = check_service_exists(service_name, service_config)
         status = "✅" if exists else "⏸️"
         console.print(f"  {status} {service_config['description']} - {msg}")
+
+def run_plugin_setup(plugin_id, plugin_info):
+    """Run a plugin's setup.py script"""
+    setup_path = plugin_info['setup_path']
+
+    try:
+        # Run plugin setup script interactively (don't capture output)
+        # This allows the plugin to prompt for user input
+        result = subprocess.run(
+            ['uv', 'run', '--with-requirements', 'setup-requirements.txt', 'python', str(setup_path)],
+            cwd=str(Path.cwd())
+        )
+
+        if result.returncode == 0:
+            console.print(f"\n[green]✅ {plugin_id} configured successfully[/green]")
+            return True
+        else:
+            console.print(f"\n[red]❌ {plugin_id} setup failed with exit code {result.returncode}[/red]")
+            return False
+
+    except Exception as e:
+        console.print(f"[red]❌ Error running {plugin_id} setup: {e}[/red]")
+        return False
+
+def setup_plugins():
+    """Discover and setup plugins via delegation"""
+    console.print("\n🔌 [bold cyan]Plugin Configuration[/bold cyan]")
+    console.print("Chronicle supports community plugins for extended functionality.\n")
+
+    # Discover available plugins
+    available_plugins = discover_available_plugins()
+
+    if not available_plugins:
+        console.print("[dim]No plugins found[/dim]")
+        return
+
+    # Ask about enabling community plugins
+    try:
+        enable_plugins = Confirm.ask(
+            "Enable community plugins?",
+            default=True
+        )
+    except EOFError:
+        console.print("Using default: Yes")
+        enable_plugins = True
+
+    if not enable_plugins:
+        console.print("[dim]Skipping plugin configuration[/dim]")
+        return
+
+    # For each plugin with setup script
+    configured_count = 0
+    for plugin_id, plugin_info in available_plugins.items():
+        if not plugin_info['has_setup']:
+            console.print(f"[dim]  {plugin_id}: No setup wizard available (configure manually)[/dim]")
+            continue
+
+        # Ask if user wants to configure this plugin
+        try:
+            configure = Confirm.ask(
+                f"  Configure {plugin_id} plugin?",
+                default=False
+            )
+        except EOFError:
+            configure = False
+
+        if configure:
+            # Delegate to plugin's setup script
+            console.print(f"\n[cyan]Running {plugin_id} setup wizard...[/cyan]")
+            success = run_plugin_setup(plugin_id, plugin_info)
+            if success:
+                configured_count += 1
+
+    console.print(f"\n[green]✅ Configured {configured_count} plugin(s)[/green]")
 
 def setup_git_hooks():
     """Setup pre-commit hooks for development"""
@@ -319,6 +415,46 @@ def setup_git_hooks():
     except Exception as e:
         console.print(f"⚠️  [yellow]Could not setup git hooks: {e} (optional)[/yellow]")
 
+def setup_hf_token_if_needed(selected_services):
+    """Prompt for Hugging Face token if needed by selected services.
+
+    Args:
+        selected_services: List of service names selected by user
+
+    Returns:
+        HF_TOKEN string if provided, None otherwise
+    """
+    # Check if any selected services need HF_TOKEN
+    needs_hf_token = 'speaker-recognition' in selected_services
+
+    if not needs_hf_token:
+        return None
+
+    console.print("\n🤗 [bold cyan]Hugging Face Token Configuration[/bold cyan]")
+    console.print("Required for speaker recognition (PyAnnote models)")
+    console.print("\n[blue][INFO][/blue] Get yours from: https://huggingface.co/settings/tokens\n")
+
+    # Check for existing token from speaker-recognition service
+    speaker_env_path = 'extras/speaker-recognition/.env'
+    existing_token = read_env_value(speaker_env_path, 'HF_TOKEN')
+
+    # Use the masked prompt function
+    hf_token = prompt_with_existing_masked(
+        prompt_text="Hugging Face Token",
+        existing_value=existing_token,
+        placeholders=['your_huggingface_token_here', 'your-huggingface-token-here', 'hf_xxxxx'],
+        is_password=True,
+        default=""
+    )
+
+    if hf_token:
+        masked = mask_value(hf_token)
+        console.print(f"[green]✅ HF_TOKEN configured: {masked}[/green]\n")
+        return hf_token
+    else:
+        console.print("[yellow]⚠️  No HF_TOKEN provided - speaker recognition may fail[/yellow]\n")
+        return None
+
 def setup_config_file():
     """Setup config/config.yml from template if it doesn't exist"""
     config_file = Path("config/config.yml")
@@ -344,7 +480,8 @@ def select_transcription_provider():
     choices = {
         "1": "Deepgram (cloud-based, high quality, requires API key)",
         "2": "Parakeet ASR (offline, runs locally, requires GPU)",
-        "3": "None (skip transcription setup)"
+        "3": "VibeVoice ASR (offline, built-in speaker diarization, requires GPU)",
+        "4": "None (skip transcription setup)"
     }
 
     for key, desc in choices.items():
@@ -360,6 +497,8 @@ def select_transcription_provider():
                 elif choice == "2":
                     return "parakeet"
                 elif choice == "3":
+                    return "vibevoice"
+                elif choice == "4":
                     return "none"
             console.print(f"[red]Invalid choice. Please select from {list(choices.keys())}[/red]")
         except EOFError:
@@ -369,6 +508,9 @@ def select_transcription_provider():
 def main():
     """Main orchestration logic"""
     console.print("🎉 [bold green]Welcome to Chronicle![/bold green]\n")
+    console.print("[dim]This wizard is safe to run as many times as you like.[/dim]")
+    console.print("[dim]It backs up your existing config and preserves previously entered values.[/dim]")
+    console.print("[dim]When unsure, just press Enter — the defaults will work.[/dim]\n")
 
     # Setup config file from template
     setup_config_file()
@@ -382,18 +524,21 @@ def main():
     # Ask about transcription provider FIRST (determines which services are needed)
     transcription_provider = select_transcription_provider()
 
-    # Service Selection
-    selected_services = select_services()
+    # Service Selection (pass transcription_provider so we skip asking about ASR when already chosen)
+    selected_services = select_services(transcription_provider)
 
-    # Auto-add asr-services if Parakeet was chosen
-    if transcription_provider == "parakeet" and 'asr-services' not in selected_services:
-        console.print("[blue][INFO][/blue] Auto-adding ASR services for Parakeet transcription")
+    # Auto-add asr-services if local ASR was chosen (Parakeet or VibeVoice)
+    if transcription_provider in ("parakeet", "vibevoice") and 'asr-services' not in selected_services:
+        console.print(f"[blue][INFO][/blue] Auto-adding ASR services for {transcription_provider.capitalize()} transcription")
         selected_services.append('asr-services')
 
     if not selected_services:
         console.print("\n[yellow]No services selected. Exiting.[/yellow]")
         return
-    
+
+    # HF Token Configuration (if services require it)
+    hf_token = setup_hf_token_if_needed(selected_services)
+
     # HTTPS Configuration (for services that need it)
     https_enabled = False
     server_ip = None
@@ -413,31 +558,39 @@ def main():
             https_enabled = False
 
         if https_enabled:
-            console.print("\n[blue][INFO][/blue] For distributed deployments, use your Tailscale IP")
-            console.print("[blue][INFO][/blue] For local-only access, use 'localhost'")
-            console.print("Examples: localhost, 100.64.1.2, your-domain.com")
+            # Try to auto-detect Tailscale address
+            ts_dns, ts_ip = detect_tailscale_info()
 
-            # Check for existing SERVER_IP
+            if ts_dns:
+                console.print(f"\n[green][AUTO-DETECTED][/green] Tailscale DNS: {ts_dns}")
+                if ts_ip:
+                    console.print(f"[green][AUTO-DETECTED][/green] Tailscale IP:  {ts_ip}")
+                default_address = ts_dns
+            elif ts_ip:
+                console.print(f"\n[green][AUTO-DETECTED][/green] Tailscale IP: {ts_ip}")
+                default_address = ts_ip
+            else:
+                console.print("\n[blue][INFO][/blue] Tailscale not detected")
+                console.print("[blue][INFO][/blue] To find your Tailscale address: tailscale status --json | jq -r '.Self.DNSName'")
+                default_address = None
+
+            console.print("[blue][INFO][/blue] For local-only access, use 'localhost'")
+            console.print("Examples: localhost, myhost.tail1234.ts.net, 100.64.1.2")
+
+            # Check for existing SERVER_IP from backend .env
             backend_env_path = 'backends/advanced/.env'
             existing_ip = read_env_value(backend_env_path, 'SERVER_IP')
 
-            if existing_ip and existing_ip not in ['localhost', 'your-server-ip-here']:
-                # Show existing IP with option to reuse
-                prompt_text = f"Server IP/Domain for SSL certificates ({existing_ip}) [press Enter to reuse, or enter new]"
-                default_value = existing_ip
-            else:
-                prompt_text = "Server IP/Domain for SSL certificates [localhost]"
-                default_value = "localhost"
+            # Use existing value, or auto-detected address, or localhost as default
+            effective_default = default_address or "localhost"
 
-            while True:
-                try:
-                    server_ip = console.input(f"{prompt_text}: ").strip()
-                    if not server_ip:
-                        server_ip = default_value
-                    break
-                except EOFError:
-                    server_ip = default_value
-                    break
+            server_ip = prompt_with_existing_masked(
+                prompt_text="Server IP/Domain for SSL certificates",
+                existing_value=existing_ip,
+                placeholders=['localhost', 'your-server-ip-here'],
+                is_password=False,
+                default=effective_default
+            )
 
             console.print(f"[green]✅[/green] HTTPS configured for: {server_ip}")
 
@@ -488,10 +641,15 @@ def main():
 
     for service in selected_services:
         if run_service_setup(service, selected_services, https_enabled, server_ip,
-                            obsidian_enabled, neo4j_password, transcription_provider):
+                            obsidian_enabled, neo4j_password, hf_token, transcription_provider):
             success_count += 1
         else:
             failed_services.append(service)
+
+    # Plugin Configuration (AFTER backend .env is created)
+    # This ensures plugins can add their secrets to the existing .env file
+    # without the backend init overwriting them
+    setup_plugins()
 
     # Check for Obsidian/Neo4j configuration (read from config.yml)
     obsidian_enabled = False

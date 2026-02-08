@@ -104,15 +104,26 @@ Start Docker Services
         RETURN
     END
 
+    # Get HF_TOKEN from environment if available
+    ${hf_token}=    Get Environment Variable    HF_TOKEN    default=${EMPTY}
+
     # Clean up any stopped/stuck containers first
     Run Process    docker    compose    -f    ${compose_file}    down    -v    cwd=${working_dir}    shell=True
     Run Process    docker    rm    -f    ${MONGO_CONTAINER}    ${REDIS_CONTAINER}    ${QDRANT_CONTAINER}    ${BACKEND_CONTAINER}    ${WORKERS_CONTAINER}    ${WEBUI_CONTAINER}    shell=True
 
-    # Start containers
+    # Start containers with HF_TOKEN passed through if available
     IF    ${build}
-        Run Process    docker    compose    -f    ${compose_file}    up    -d    --build    cwd=${working_dir}    shell=True
+        IF    '${hf_token}' != '${EMPTY}'
+            Run Process    docker    compose    -f    ${compose_file}    up    -d    --build    cwd=${working_dir}    shell=True    env:HF_TOKEN=${hf_token}
+        ELSE
+            Run Process    docker    compose    -f    ${compose_file}    up    -d    --build    cwd=${working_dir}    shell=True
+        END
     ELSE
-        Run Process    docker    compose    -f    ${compose_file}    up    -d    cwd=${working_dir}    shell=True
+        IF    '${hf_token}' != '${EMPTY}'
+            Run Process    docker    compose    -f    ${compose_file}    up    -d    cwd=${working_dir}    shell=True    env:HF_TOKEN=${hf_token}
+        ELSE
+            Run Process    docker    compose    -f    ${compose_file}    up    -d    cwd=${working_dir}    shell=True
+        END
     END
 
     Log    Waiting for services to be ready...
@@ -132,8 +143,15 @@ Rebuild Docker Services
     [Documentation]    Rebuild and restart Docker services
     [Arguments]    ${compose_file}=docker-compose-test.yml    ${working_dir}=${BACKEND_DIR}
 
+    # Get HF_TOKEN from environment if available
+    ${hf_token}=    Get Environment Variable    HF_TOKEN    default=${EMPTY}
+
     Log To Console    Rebuilding containers with latest code...
-    Run Process    docker    compose    -f    ${compose_file}    up    -d    --build    cwd=${working_dir}    shell=True
+    IF    '${hf_token}' != '${EMPTY}'
+        Run Process    docker    compose    -f    ${compose_file}    up    -d    --build    cwd=${working_dir}    shell=True    env:HF_TOKEN=${hf_token}
+    ELSE
+        Run Process    docker    compose    -f    ${compose_file}    up    -d    --build    cwd=${working_dir}    shell=True
+    END
 
     Log To Console    Waiting for services to be ready...
     Wait Until Keyword Succeeds    60s    5s    Check Services Ready    ${API_URL}
@@ -154,8 +172,15 @@ Start Speaker Recognition Service
         RETURN
     END
 
+    # Get HF_TOKEN from environment if available
+    ${hf_token}=    Get Environment Variable    HF_TOKEN    default=${EMPTY}
+
     Log    Starting speaker-recognition-service
-    Run Process    docker    compose    -f    docker-compose-test.yml    up    -d    --build    cwd=${SPEAKER_RECOGNITION_DIR}    shell=True
+    IF    '${hf_token}' != '${EMPTY}'
+        Run Process    docker    compose    -f    docker-compose-test.yml    up    -d    --build    cwd=${SPEAKER_RECOGNITION_DIR}    shell=True    env:HF_TOKEN=${hf_token}
+    ELSE
+        Run Process    docker    compose    -f    docker-compose-test.yml    up    -d    --build    cwd=${SPEAKER_RECOGNITION_DIR}    shell=True
+    END
 
     Log    Waiting for speaker recognition service to start...
     Wait Until Keyword Succeeds    60s    5s    Check Services Ready    ${SPEAKER_RECOGNITION_URL}

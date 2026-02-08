@@ -1,0 +1,264 @@
+name: Robot Framework Tests (Full - With API Keys)
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+    paths:
+      - 'tests/**/*.robot'
+      - 'tests/**/*.py'
+      - 'backends/advanced/src/**'
+      - '.github/workflows/full-tests-with-api.yml'
+  workflow_dispatch:  # Allow manual triggering
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  pages: write
+  id-token: write
+
+jobs:
+  full-robot-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Verify required secrets
+      env:
+        DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        echo "Verifying required secrets..."
+        if [ -z "$DEEPGRAM_API_KEY" ]; then
+          echo "❌ ERROR: DEEPGRAM_API_KEY secret is not set"
+          exit 1
+        fi
+        if [ -z "$OPENAI_API_KEY" ]; then
+          echo "❌ ERROR: OPENAI_API_KEY secret is not set"
+          exit 1
+        fi
+        if [ -z "$HF_TOKEN" ]; then
+          echo "⚠️ WARNING: HF_TOKEN secret is not set (speaker recognition will be disabled)"
+        else
+          echo "✓ HF_TOKEN is set (length: ${#HF_TOKEN})"
+        fi
+        echo "✓ DEEPGRAM_API_KEY is set (length: ${#DEEPGRAM_API_KEY})"
+        echo "✓ OPENAI_API_KEY is set (length: ${#OPENAI_API_KEY})"
+        echo "✓ Required secrets verified"
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      with:
+        driver-opts: |
+          image=moby/buildkit:latest
+          network=host
+
+    - name: Cache Docker layers
+      uses: actions/cache@v4
+      with:
+        path: /tmp/.buildx-cache
+        key: ${{ runner.os }}-buildx-${{ hashFiles('backends/advanced/Dockerfile', 'backends/advanced/pyproject.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-buildx-
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+      with:
+        version: "latest"
+
+    - name: Install Robot Framework and dependencies
+      run: |
+        uv pip install --system robotframework robotframework-requests python-dotenv websockets
+
+    - name: Create test config.yml
+      run: |
+        echo "Copying test configuration file..."
+        mkdir -p config
+        cp tests/configs/deepgram-openai.yml config/config.yml
+        echo "✓ Test config.yml created from tests/configs/deepgram-openai.yml"
+        ls -lh config/config.yml
+
+    - name: Create plugins.yml from template
+      run: |
+        echo "Creating plugins.yml from template..."
+        if [ -f "config/plugins.yml.template" ]; then
+          cp config/plugins.yml.template config/plugins.yml
+          echo "✓ plugins.yml created from template"
+          ls -lh config/plugins.yml
+        else
+          echo "❌ ERROR: config/plugins.yml.template not found"
+          exit 1
+        fi
+
+    - name: Run Full Robot Framework tests
+      working-directory: tests
+      env:
+        # Required for test runner script
+        DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        CLEANUP_CONTAINERS: "false"  # Don't cleanup in CI - handled by workflow
+      run: |
+        # Use the full test script (includes all tests with API keys)
+        ./run-robot-tests.sh
+        TEST_EXIT_CODE=$?
+        echo "test_exit_code=$TEST_EXIT_CODE" >> $GITHUB_ENV
+        exit 0  # Don't fail here, we'll fail at the end after uploading artifacts
+
+    - name: Save service logs to files
+      if: always()
+      working-directory: backends/advanced
+      run: |
+        echo "Checking running containers..."
+        docker compose -f docker-compose-test.yml ps -a
+        echo ""
+        echo "Saving service logs to files..."
+        mkdir -p logs
+        docker compose -f docker-compose-test.yml logs chronicle-backend-test > logs/backend.log 2>&1 || true
+        docker compose -f docker-compose-test.yml logs workers-test > logs/workers.log 2>&1 || true
+        docker compose -f docker-compose-test.yml logs mongo-test > logs/mongo.log 2>&1 || true
+        docker compose -f docker-compose-test.yml logs redis-test > logs/redis.log 2>&1 || true
+        docker compose -f docker-compose-test.yml logs qdrant-test > logs/qdrant.log 2>&1 || true
+        docker compose -f docker-compose-test.yml logs speaker-service-test > logs/speaker.log 2>&1 || true
+        echo "✓ Logs saved to backends/advanced/logs/"
+        ls -lh logs/
+
+    - name: Check if test results exist
+      if: always()
+      id: check_results
+      run: |
+        if [ -f tests/results/output.xml ]; then
+          echo "results_exist=true" >> $GITHUB_OUTPUT
+        else
+          echo "results_exist=false" >> $GITHUB_OUTPUT
+          echo "⚠️ No test results found in tests/results/"
+          ls -la tests/results/ || echo "Results directory doesn't exist"
+        fi
+
+    - name: Upload Robot Framework HTML reports
+      if: always() && steps.check_results.outputs.results_exist == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: robot-test-reports-html-full
+        path: |
+          tests/results/report.html
+          tests/results/log.html
+        retention-days: 30
+
+    - name: Publish HTML Report as GitHub Pages artifact
+      if: always() && steps.check_results.outputs.results_exist == 'true'
+      uses: actions/upload-pages-artifact@v3
+      with:
+        path: tests/results
+
+    - name: Deploy to GitHub Pages
+      if: always() && steps.check_results.outputs.results_exist == 'true'
+      uses: actions/deploy-pages@v4
+      id: deployment
+
+    - name: Generate test summary
+      if: always() && steps.check_results.outputs.results_exist == 'true'
+      id: test_summary
+      run: |
+        # Parse test results
+        python3 << 'PYTHON_SCRIPT' > test_summary.txt
+        import xml.etree.ElementTree as ET
+        tree = ET.parse('tests/results/output.xml')
+        root = tree.getroot()
+        stats = root.find('.//total/stat')
+        if stats is not None:
+            passed = stats.get("pass", "0")
+            failed = stats.get("fail", "0")
+            total = int(passed) + int(failed)
+            print(f"PASSED={passed}")
+            print(f"FAILED={failed}")
+            print(f"TOTAL={total}")
+        PYTHON_SCRIPT
+
+        # Source the variables
+        source test_summary.txt
+
+        # Set outputs
+        echo "passed=$PASSED" >> $GITHUB_OUTPUT
+        echo "failed=$FAILED" >> $GITHUB_OUTPUT
+        echo "total=$TOTAL" >> $GITHUB_OUTPUT
+
+    - name: Upload Robot Framework XML output
+      if: always() && steps.check_results.outputs.results_exist == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: robot-test-results-xml-full
+        path: tests/results/output.xml
+        retention-days: 30
+
+    - name: Upload logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: robot-test-logs-full
+        path: |
+          backends/advanced/logs/*.log
+          backends/advanced/.env
+          tests/setup/.env.test
+        retention-days: 7
+
+    - name: Display test results summary
+      if: always()
+      run: |
+        if [ -f tests/results/output.xml ]; then
+          echo "Full test results generated successfully (With API Keys)"
+          echo "========================================"
+          python3 << 'PYTHON_SCRIPT'
+        import xml.etree.ElementTree as ET
+        tree = ET.parse('tests/results/output.xml')
+        root = tree.getroot()
+        stats = root.find('.//total/stat')
+        if stats is not None:
+            passed = stats.get("pass", "0")
+            failed = stats.get("fail", "0")
+            print(f'✅ Passed: {passed}')
+            print(f'❌ Failed: {failed}')
+            print(f'📊 Total: {int(passed) + int(failed)}')
+        PYTHON_SCRIPT
+          echo "========================================"
+          echo ""
+          echo "ℹ️  Full test suite including API-dependent tests"
+          echo ""
+          echo "📊 FULL TEST REPORTS AVAILABLE:"
+          echo "  1. Go to the 'Summary' tab at the top of this page"
+          echo "  2. Scroll down to 'Artifacts' section"
+          echo "  3. Download 'robot-test-reports-html-full'"
+          echo "  4. Extract and open report.html or log.html in your browser"
+          echo ""
+          echo "The HTML reports provide:"
+          echo "  - report.html: Executive summary with statistics"
+          echo "  - log.html: Detailed step-by-step execution log"
+          echo ""
+        fi
+
+    - name: Cleanup
+      if: always()
+      working-directory: backends/advanced
+      run: |
+        docker compose -f docker-compose-test.yml down -v
+
+    - name: Fail workflow if tests failed
+      if: always()
+      run: |
+        if [ "${{ env.test_exit_code }}" != "0" ]; then
+          echo "❌ Tests failed with exit code ${{ env.test_exit_code }}"
+          exit 1
+        else
+          echo "✅ All tests passed"
+        fi

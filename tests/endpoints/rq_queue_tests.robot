@@ -24,19 +24,17 @@ ${COMPOSE_FILE}             docker-compose-test.yml
 *** Keywords ***
 
 Restart Backend Service
+    [Arguments]    ${wait_timeout}=20s
     [Documentation]    Restart the backend service to test persistence
     Log    Restarting backend service to test job persistence
 
-    # Stop backend container
-    Run Process    docker    compose    -f    ${COMPOSE_FILE}    stop    chronicle-backend-test
-    ...    cwd=${BACKEND_DIR}    timeout=30s
+    # Restart backend container (handles dependencies properly)
+    # Project name 'backend-test' is set in docker-compose-test.yml
+    Run Process    docker    compose    -f    ${COMPOSE_FILE}    restart    chronicle-backend-test
+    ...    cwd=${BACKEND_DIR}    timeout=60s    shell=True
 
-    # Start backend container again
-    Run Process    docker    compose    -f    ${COMPOSE_FILE}    start    chronicle-backend-test
-    ...    cwd=${BACKEND_DIR}    timeout=60s
-
-    # Wait for backend to be ready again
-    Wait Until Keyword Succeeds    ${TEST_TIMEOUT}    5s
+    # Wait for backend to be ready again (configurable timeout for slow tests)
+    Wait Until Keyword Succeeds    ${wait_timeout}    5s
     ...    Health Check    ${API_URL}
 
     Log    Backend service restarted successfully
@@ -67,7 +65,8 @@ Test RQ Job Enqueuing
 
 Test Job Persistence Through Backend Restart
     [Documentation]    Test that RQ jobs persist when backend service restarts
-    [Tags]    queue
+    [Tags]    queue	slow
+    [Timeout]    120s
 
     # Find test conversation
     ${conversation}=    Find Test Conversation
@@ -80,8 +79,8 @@ Test Job Persistence Through Backend Restart
         ${jobs_before}=    Get job queue
         ${jobs_count_before}=    Get Length    ${jobs_before}
 
-        # Restart backend service
-        Restart Backend Service
+        # Restart backend service with longer timeout for slow test
+        Restart Backend Service    wait_timeout=90s
 
         # Verify queue is still accessible and jobs persist
         ${jobs_after}=    Get job queue
@@ -97,7 +96,8 @@ Test Job Persistence Through Backend Restart
 
 Test Multiple Jobs Persistence
     [Documentation]    Test that specific jobs persist through backend restart
-    [Tags]    queue
+    [Tags]    queue	slow
+    [Timeout]    120s
 
     # Find Test Conversation now returns the oldest conversation (most stable)
     ${conversation}=    Find Test Conversation
@@ -121,8 +121,8 @@ Test Multiple Jobs Persistence
         Log    Job ${job_id} status before restart: ${job_status}
     END
 
-    # Restart backend
-    Restart Backend Service
+    # Restart backend with longer timeout for slow test
+    Restart Backend Service    wait_timeout=90s
 
     # Verify our specific jobs still exist after restart
     ${persisted_count}=    Set Variable    ${0}
@@ -134,7 +134,7 @@ Test Multiple Jobs Persistence
         END
     END
 
-    # At least some jobs should persist (they may have completed during restart)
+    # At least some jobs should persist (they may have finished during restart)
     Should Be True    ${persisted_count} >= 0
     Log    ${persisted_count} out of ${job_count} jobs persisted through restart
 
@@ -159,25 +159,25 @@ Test Queue Stats Accuracy
 
     # Verify stats API returns valid structure
     ${stats}=    Get Queue Stats
-    Dictionary Should Contain Key    ${stats}    processing_jobs
+    Dictionary Should Contain Key    ${stats}    started_jobs
     Dictionary Should Contain Key    ${stats}    queued_jobs
-    Dictionary Should Contain Key    ${stats}    completed_jobs
+    Dictionary Should Contain Key    ${stats}    finished_jobs
     Dictionary Should Contain Key    ${stats}    failed_jobs
 
     # Verify all stats are non-negative integers
-    Should Be True    ${stats}[processing_jobs] >= 0
+    Should Be True    ${stats}[started_jobs] >= 0
     Should Be True    ${stats}[queued_jobs] >= 0
-    Should Be True    ${stats}[completed_jobs] >= 0
+    Should Be True    ${stats}[finished_jobs] >= 0
     Should Be True    ${stats}[failed_jobs] >= 0
 
     Log    Queue stats API is working correctly: ${stats}
 
     # Wait for OUR specific jobs to complete (don't rely on global counts)
     FOR    ${job_id}    IN    @{created_jobs}
-        Wait For Job Status    ${job_id}    completed    timeout=60s    interval=2s
+        Wait For Job Status    ${job_id}    finished    timeout=60s    interval=2s
     END
 
-    Log    All ${job_count} created jobs completed successfully
+    Log    All ${job_count} created jobs finished successfully
 
 Test Queue API Authentication
     [Documentation]    Test that queue endpoints properly enforce authentication

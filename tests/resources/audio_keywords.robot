@@ -43,25 +43,51 @@ Upload Audio File
       ${upload_response}=    Set Variable    ${response.json()}
       Log    Parsed upload response: ${upload_response}
 
-      # Validate upload was successful
-      Should Be Equal As Strings    ${upload_response['summary']['processing']}    1    Upload failed: No files enqueued
-      Should Be Equal As Strings    ${upload_response['files'][0]['status']}    processing    Upload failed: ${response.text}
+      # Check HTTP status code first - fail immediately with clear error message
+      IF    ${response.status_code} == 400
+          ${error_msg}=    Set Variable    ${upload_response['files'][0]['error']}
+          Fail    Upload failed (HTTP 400): All files failed - ${error_msg}
+      END
+
+      IF    ${response.status_code} == 207
+          ${error_msg}=    Set Variable    Partial upload failure - check logs
+          Log    WARN: Partial upload (HTTP 207): ${upload_response['summary']['failed']} of ${upload_response['summary']['total']} files failed
+          # Continue anyway since some files succeeded
+      END
+
+      # Validate upload was successful (should be 200 or 207 at this point)
+      Should Be Equal As Strings    ${upload_response['summary']['started']}    1    Upload failed: No files enqueued
+      Should Be Equal As Strings    ${upload_response['files'][0]['status']}    started    Upload failed: ${upload_response['files'][0].get('error', 'Unknown error')}
 
       # Extract important values
-      ${audio_uuid}=    Set Variable    ${upload_response['files'][0]['audio_uuid']}
       ${job_id}=        Set Variable    ${upload_response['files'][0]['conversation_id']}
       ${transcript_job_id}=    Set Variable    ${upload_response['files'][0]['transcript_job_id']}
-      Log    Audio UUID: ${audio_uuid}
       Log    Conversation ID: ${job_id}
       Log    Transcript Job ID: ${transcript_job_id}
 
-      # Wait for conversation to be created and transcribed
-      Log    Waiting for transcription to complete...
+      # Check if transcript_job_id is None (job not created)
+      ${is_none}=    Evaluate    $transcript_job_id is None or str($transcript_job_id) == 'None'
 
-      Wait Until Keyword Succeeds    60s    5s       Check job status   ${transcript_job_id}    completed
+      IF    ${is_none}
+          # Transcript job not created - skip job waiting and poll for conversation directly
+          Log    Transcript job ID is None - transcription job not created. Polling for conversation directly...
+
+          # Poll for conversation to appear (max 60s)
+          Wait Until Keyword Succeeds    60s    5s
+          ...    Get Conversation By ID    ${job_id}
+
+          ${conversation}=    Get Conversation By ID    ${job_id}
+          Log    Found conversation (without job tracking): ${conversation}
+          RETURN    ${conversation}
+      END
+
+      # Normal path: Wait for transcription job to complete
+      Log    Waiting for transcription job ${transcript_job_id} to complete...
+
+      Wait Until Keyword Succeeds    60s    5s       Check job status   ${transcript_job_id}    finished
       ${job}=    Get Job Details    ${transcript_job_id}
 
-     # Get the completed conversation
+     # Get the finished conversation
       ${conversation}=     Get Conversation By ID    ${job}[result][conversation_id]
       Should Not Be Equal    ${conversation}    ${None}    Conversation not found after upload and processing
 
@@ -70,7 +96,7 @@ Upload Audio File
 
 
 Upload Audio File And Wait For Memory
-    [Documentation]    Upload audio file and wait for complete processing including memory extraction.
+    [Documentation]    Upload audio file and wait for complete started including memory extraction.
     ...                This is for E2E testing - use Upload Audio File for upload-only tests.
     ...                Performs assertions inline to verify successful memory extraction.
     [Arguments]    ${audio_file_path}    ${device_name}=robot-test    ${folder}=.    ${min_memories}=1
@@ -98,9 +124,9 @@ Upload Audio File And Wait For Memory
     Should Be True    ${result}[success]
     ...    Memory extraction failed: ${result.get('error_message', 'Unknown error')}
 
-    # Verify job completed successfully
-    Should Be Equal As Strings    ${result}[status]    completed
-    ...    Expected job status 'completed', got '${result}[status]'
+    # Verify job finished successfully
+    Should Be Equal As Strings    ${result}[status]    finished
+    ...    Expected job status 'finished', got '${result}[status]'
 
     # Verify minimum memories were extracted
     ${memory_count}=    Set Variable    ${result}[memory_count]
@@ -111,11 +137,3 @@ Upload Audio File And Wait For Memory
     Log    Successfully extracted ${memory_count} memories
 
     RETURN    ${conversation}    ${memories}
-
-
-Get Cropped Audio Info
-    [Documentation]    Get cropped audio information for a conversation
-    [Arguments]     ${audio_uuid}
-
-    ${response}=    GET On Session    api    /api/conversations/${audio_uuid}/cropped    headers=${headers}
-    RETURN    ${response.json()}[cropped_audios]    

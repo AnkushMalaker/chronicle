@@ -322,10 +322,16 @@ export default function App() {
       // Convert HTTP/HTTPS to WS/WSS protocol
       finalWebSocketUrl = finalWebSocketUrl.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
       
-      // Ensure /ws_pcm endpoint is included
-      if (!finalWebSocketUrl.includes('/ws_pcm')) {
-        // Remove trailing slash if present, then add /ws_pcm
-        finalWebSocketUrl = finalWebSocketUrl.replace(/\/$/, '') + '/ws_pcm';
+      // Ensure /ws endpoint is included
+      if (!finalWebSocketUrl.includes('/ws')) {
+        // Remove trailing slash if present, then add /ws
+        finalWebSocketUrl = finalWebSocketUrl.replace(/\/$/, '') + '/ws';
+      }
+
+      // Add codec parameter if not present
+      if (!finalWebSocketUrl.includes('codec=')) {
+        const separator = finalWebSocketUrl.includes('?') ? '&' : '?';
+        finalWebSocketUrl = finalWebSocketUrl + separator + 'codec=pcm';
       }
       
       // Check if this is the advanced backend (requires authentication) or simple backend

@@ -36,9 +36,9 @@ COPY . .
 # Copy memory config (created by init.sh from template)
 
 
-# Copy and make K8s startup scripts executable
-COPY start-k8s.sh start-workers.sh ./
-RUN chmod +x start-k8s.sh start-workers.sh
+# Copy and make K8s startup script executable
+COPY start-k8s.sh ./
+RUN chmod +x start-k8s.sh
 
 # Activate virtual environment in PATH
 ENV PATH="/app/.venv/bin:$PATH"

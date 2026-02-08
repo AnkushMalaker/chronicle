@@ -79,19 +79,20 @@ sleep 1
 
 # Function to start all workers
 start_workers() {
-    # NEW WORKERS - Redis Streams multi-provider architecture
-    # Single worker ensures sequential processing of audio chunks (matching start-workers.sh)
-    echo "🎵 Starting audio stream Deepgram worker (1 worker for sequential processing)..."
-    if python3 -m advanced_omi_backend.workers.audio_stream_deepgram_worker &
+    # NEW WORKERS - Registry-driven streaming transcription architecture
+    # Single worker ensures sequential processing of audio chunks (matching worker_orchestrator.py)
+    # Uses config.yml for provider selection (Deepgram, Parakeet, etc.)
+    echo "🎵 Starting streaming transcription worker (registry-driven provider from config.yml)..."
+    if python3 -m advanced_omi_backend.workers.audio_stream_worker &
     then
         AUDIO_WORKER_1_PID=$!
-        echo "  ✅ Deepgram stream worker started with PID: $AUDIO_WORKER_1_PID"
+        echo "  ✅ Streaming transcription worker started with PID: $AUDIO_WORKER_1_PID"
     else
-        echo "  ❌ Failed to start Deepgram stream worker"
+        echo "  ❌ Failed to start streaming transcription worker"
         exit 1
     fi
 
-    # Start 3 RQ workers listening to ALL queues (matching start-workers.sh)
+    # Start 3 RQ workers listening to ALL queues (matching worker_orchestrator.py)
     echo "🔧 Starting RQ workers (3 workers, all queues: transcription, memory, default)..."
     if python3 -m advanced_omi_backend.workers.rq_worker_entry transcription memory default &
     then
@@ -123,7 +124,7 @@ start_workers() {
         exit 1
     fi
 
-    # Start 1 dedicated audio persistence worker (matching start-workers.sh)
+    # Start 1 dedicated audio persistence worker (matching worker_orchestrator.py)
     echo "💾 Starting audio persistence worker (1 worker for audio queue)..."
     if python3 -m advanced_omi_backend.workers.rq_worker_entry audio &
     then

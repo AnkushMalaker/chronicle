@@ -14,6 +14,7 @@ Suite Setup      Suite Setup
 Suite Teardown   Suite Teardown
 Test Setup       Clear Test Databases
 
+Test Tags        queue	requires-api-keys
 
 *** Test Cases ***
 
@@ -76,9 +77,9 @@ Test Reprocess Conversation Job Queue
 
     Log    Created conversation: ${conversation_id}    INFO
 
-    # Wait for initial upload processing to complete (transcription job chain)
-    Log    Waiting for initial conversation processing to complete...    INFO
-    Sleep    10s    # Give time for initial job chain (transcription -> speaker -> cropping -> memory)
+    # Wait for initial upload started to complete (transcription job chain)
+    Log    Waiting for initial conversation started to complete...    INFO
+    Sleep    10s    # Give time for initial job chain (transcription -> speaker -> memory)
 
     # Get conversation to verify initial state
     ${initial_conversation}=    Get Conversation By ID    ${conversation_id}
@@ -95,9 +96,9 @@ Test Reprocess Conversation Job Queue
     ${version_id}=    Set Variable    ${reprocess_data}[version_id]
 
 
-    # Wait for transcription job to complete (Deepgram API + processing takes time in CI)
+    # Wait for transcription job to complete (Deepgram API + started takes time in CI)
     Log    Waiting for transcription job ${job_id} to complete...    INFO
-    Wait For Job Status    ${job_id}    completed    timeout=60s    interval=3s
+    Wait For Job Status    ${job_id}    finished    timeout=60s    interval=3s
 
     # Verify conversation was updated with new transcript version
     ${updated_conversation}=    Get Conversation By ID    ${conversation_id}

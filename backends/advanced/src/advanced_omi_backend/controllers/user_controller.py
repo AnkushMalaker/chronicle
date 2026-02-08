@@ -11,13 +11,13 @@ from fastapi.responses import JSONResponse
 
 from advanced_omi_backend.auth import (
     ADMIN_EMAIL,
-    get_user_db,
     UserManager,
+    get_user_db,
 )
 from advanced_omi_backend.client_manager import get_user_clients_all
 from advanced_omi_backend.database import db, users_col
-from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.users import User, UserCreate, UserUpdate
 
 logger = logging.getLogger(__name__)

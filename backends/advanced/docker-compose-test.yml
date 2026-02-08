@@ -2,26 +2,34 @@
 # Isolated test environment for integration tests
 # Uses different ports to avoid conflicts with development environment
 
+name: backend-test
+
 services:
   chronicle-backend-test:
     build:
       context: .
       dockerfile: Dockerfile
+      target: dev  # Use dev stage with test dependencies
+    command: ["./start.sh", "--test"]
     ports:
       - "8001:8000"  # Avoid conflict with dev on 8000
     volumes:
       - ./src:/app/src  # Mount source code for easier development
       - ./data/test_audio_chunks:/app/audio_chunks
-      - ./data/test_debug_dir:/app/debug_dir
+      - ./data/test_debug_dir:/app/debug  # Fixed: mount to /app/debug for plugin database
       - ./data/test_data:/app/data
-      - ${CONFIG_FILE:-../../config/config.yml}:/app/config.yml  # Mount config.yml for model registry and memory settings (writable for admin config updates)
+      - ../../config:/app/config  # Mount config directory with defaults.yml
+      - ../../tests/configs:/app/test-configs:ro  # Mount test-specific configs
+      - ${PLUGINS_CONFIG:-../../tests/config/plugins.test.yml}:/app/config/plugins.yml  # Mount test plugins config to correct location
     environment:
       # Override with test-specific settings
       - MONGODB_URI=mongodb://mongo-test:27017/test_db
       - QDRANT_BASE_URL=qdrant-test
       - QDRANT_PORT=6333
       - REDIS_URL=redis://redis-test:6379/0
-      - DEBUG_DIR=/app/debug_dir
+      - DEBUG_DIR=/app/debug  # Fixed: match plugin database mount path
+      # Test configuration file
+      - CONFIG_FILE=${TEST_CONFIG_FILE:-/app/test-configs/deepgram-openai.yml}
       # Import API keys from environment
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -42,10 +50,17 @@ services:
       # Speaker recognition controlled by config.yml (disabled in test config for CI performance)
       - SPEAKER_SERVICE_URL=http://speaker-service-test:8085
       - CORS_ORIGINS=http://localhost:3001,http://localhost:8001,https://localhost:3001,https://localhost:8001
-      # Set low inactivity timeout for tests (2 seconds instead of 60)
-      - SPEECH_INACTIVITY_THRESHOLD_SECONDS=2
+      # Set inactivity timeout for tests (20 seconds of audio time)
+      # This is audio duration, not wall-clock time
+      - SPEECH_INACTIVITY_THRESHOLD_SECONDS=20
+      # Set low speech detection thresholds for tests
+      - SPEECH_DETECTION_MIN_DURATION=2.0  # 2 seconds instead of 10
+      - SPEECH_DETECTION_MIN_WORDS=5  # 5 words instead of 10
       # Wait for audio queue to drain before timing out (test mode)
       - WAIT_FOR_AUDIO_QUEUE_DRAIN=true
+      # Mock speaker recognition for tests (avoids resource-intensive ML service)
+      # To test with REAL speaker recognition: set to 'false' and start extras/speaker-recognition service
+      - USE_MOCK_SPEAKER_CLIENT=true
     depends_on:
       qdrant-test:
         condition: service_started
@@ -53,8 +68,6 @@ services:
         condition: service_healthy
       redis-test:
         condition: service_started
-      speaker-service-test:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/readiness"]
       interval: 10s
@@ -125,7 +138,7 @@ services:
       context: ../../extras/speaker-recognition
       dockerfile: Dockerfile
       args:
-        PYTORCH_CUDA_VERSION: cpu
+        PYTORCH_CUDA_VERSION: cu12.6
     image: speaker-recognition-test:latest
     ports:
       - "8086:8085"  # Avoid conflict with dev speaker service on 8085
@@ -149,25 +162,76 @@ services:
       retries: 5
       start_period: 60s
     restart: unless-stopped
+    profiles:
+      - speaker  # Optional service - only start when explicitly enabled
+
+  mock-streaming-stt:
+    build:
+      context: ../..
+      dockerfile: tests/Dockerfile.mock-streaming-stt
+    ports:
+      - "9999:9999"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.connect(('localhost',9999)); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  mock-llm:
+    build:
+      context: ../..
+      dockerfile: tests/Dockerfile.mock-llm
+    ports:
+      - "11435:11435"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:11435/health').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  mock-asr:
+    build:
+      context: ../..
+      dockerfile: tests/Dockerfile.mock-asr
+    ports:
+      - "8765:8765"
+    environment:
+      # Provider mode for mock ASR: mock, parakeet, vibevoice, deepgram
+      # vibevoice mode returns diarized segments with speaker labels
+      MOCK_ASR_PROVIDER: ${MOCK_ASR_PROVIDER:-mock}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8765/health').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
 
   workers-test:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ./start-workers.sh
+      target: dev  # Use dev stage with test dependencies
+    command: ["uv", "run", "--group", "test", "python", "worker_orchestrator.py"]
     volumes:
       - ./src:/app/src
+      - ./worker_orchestrator.py:/app/worker_orchestrator.py
       - ./data/test_audio_chunks:/app/audio_chunks
-      - ./data/test_debug_dir:/app/debug_dir
+      - ./data/test_debug_dir:/app/debug  # Fixed: mount to /app/debug for plugin database
       - ./data/test_data:/app/data
-      - ${CONFIG_FILE:-../../config/config.yml}:/app/config.yml  # Mount config.yml for model registry and memory settings (writable for admin config updates)
+      - ../../config:/app/config  # Mount config directory with defaults.yml
+      - ../../tests/configs:/app/test-configs:ro  # Mount test-specific configs
+      - ${PLUGINS_CONFIG:-../../tests/config/plugins.test.yml}:/app/config/plugins.yml  # Mount test plugins config to correct location
     environment:
       # Same environment as backend
       - MONGODB_URI=mongodb://mongo-test:27017/test_db
       - QDRANT_BASE_URL=qdrant-test
       - QDRANT_PORT=6333
       - REDIS_URL=redis://redis-test:6379/0
-      - DEBUG_DIR=/app/debug_dir
+      - DEBUG_DIR=/app/debug  # Fixed: match plugin database mount path
+      # Test configuration file
+      - CONFIG_FILE=${TEST_CONFIG_FILE:-/app/test-configs/deepgram-openai.yml}
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GROQ_API_KEY=${GROQ_API_KEY}
@@ -183,10 +247,17 @@ services:
       - MYCELIA_DB=mycelia_test
       # Speaker recognition controlled by config.yml (disabled in test config for CI performance)
       - SPEAKER_SERVICE_URL=http://speaker-service-test:8085
-      # Set low inactivity timeout for tests (2 seconds instead of 60)
-      - SPEECH_INACTIVITY_THRESHOLD_SECONDS=2
+      # Set inactivity timeout for tests (20 seconds of audio time)
+      # This is audio duration, not wall-clock time
+      - SPEECH_INACTIVITY_THRESHOLD_SECONDS=20
+      # Set low speech detection thresholds for tests
+      - SPEECH_DETECTION_MIN_DURATION=2.0  # 2 seconds instead of 10
+      - SPEECH_DETECTION_MIN_WORDS=5  # 5 words instead of 10
       # Wait for audio queue to drain before timing out (test mode)
       - WAIT_FOR_AUDIO_QUEUE_DRAIN=true
+      # Mock speaker recognition for tests (avoids resource-intensive ML service)
+      # To test with REAL speaker recognition: set to 'false' and start extras/speaker-recognition service
+      - USE_MOCK_SPEAKER_CLIENT=true
     depends_on:
       chronicle-backend-test:
         condition: service_healthy
@@ -196,8 +267,6 @@ services:
         condition: service_started
       qdrant-test:
         condition: service_started
-      speaker-service-test:
-        condition: service_healthy
     restart: unless-stopped
 
   # Mycelia - AI memory and timeline service (test environment)

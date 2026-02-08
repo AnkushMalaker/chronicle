@@ -7,10 +7,6 @@ ingress:
       pathType: Prefix
     - path: /users
       pathType: Prefix
-    - path: /ws_pcm
-      pathType: Prefix
-    - path: /ws_omi
-      pathType: Prefix
     - path: /ws
       pathType: Prefix
     - path: /health

@@ -98,7 +98,7 @@ MEM0_CONFIG = {
     "vector_store": {
         "provider": "qdrant",
         "config": {
-            "collection_name": "omi_memories",
+            "collection_name": "chronicle_memories",
             "embedding_model_dims": 768,
             "host": QDRANT_BASE_URL,
             "port": 6333,
@@ -499,7 +499,7 @@ This will:
 3. **Search Not Working**
    - Ensure embedding model is available in Ollama
    - Check vector dimensions match between embedder and Qdrant
-   - Verify collection has vectors: `curl http://localhost:6333/collections/omi_memories`
+   - Verify collection has vectors: `curl http://localhost:6333/collections/chronicle_memories`
 
 ### Required Ollama Models
 

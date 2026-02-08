@@ -80,27 +80,141 @@ def run_compose_command(service_name, command, build=False):
         console.print(f"[red]❌ Docker compose file not found: {compose_file}[/red]")
         return False
 
+    # Step 1: If build is requested, run build separately first (no timeout for CUDA builds)
+    if build and command == 'up':
+        # Build command - need to specify profiles for build too
+        build_cmd = ['docker', 'compose']
+
+        # Add profiles to build command (needed for profile-specific services)
+        if service_name == 'backend':
+            caddyfile_path = service_path / 'Caddyfile'
+            if caddyfile_path.exists() and caddyfile_path.is_file():
+                build_cmd.extend(['--profile', 'https'])
+
+            obsidian_enabled = False
+            kg_enabled = False
+            config_data = load_config_yml()
+            if config_data:
+                memory_config = config_data.get('memory', {})
+                obsidian_config = memory_config.get('obsidian', {})
+                if obsidian_config.get('enabled', False):
+                    obsidian_enabled = True
+                kg_config = memory_config.get('knowledge_graph', {})
+                if kg_config.get('enabled', False):
+                    kg_enabled = True
+
+            if not obsidian_enabled:
+                env_file = service_path / '.env'
+                if env_file.exists():
+                    env_values = dotenv_values(env_file)
+                    if env_values.get('OBSIDIAN_ENABLED', 'false').lower() == 'true':
+                        obsidian_enabled = True
+
+            if obsidian_enabled:
+                build_cmd.extend(['--profile', 'obsidian'])
+            if kg_enabled:
+                build_cmd.extend(['--profile', 'knowledge-graph'])
+
+        elif service_name == 'speaker-recognition':
+            env_file = service_path / '.env'
+            if env_file.exists():
+                env_values = dotenv_values(env_file)
+                # Derive profile from PYTORCH_CUDA_VERSION (cu126/cu121/etc = gpu, cpu = cpu)
+                pytorch_version = env_values.get('PYTORCH_CUDA_VERSION', 'cpu')
+                profile = 'gpu' if pytorch_version.startswith('cu') else 'cpu'
+                build_cmd.extend(['--profile', profile])
+
+        # For asr-services, only build the selected provider
+        asr_service_to_build = None
+        if service_name == 'asr-services':
+            env_file = service_path / '.env'
+            if env_file.exists():
+                env_values = dotenv_values(env_file)
+                asr_provider = env_values.get('ASR_PROVIDER', '').strip("'\"")
+
+                # Map provider to docker service name
+                provider_to_service = {
+                    'vibevoice': 'vibevoice-asr',
+                    'faster-whisper': 'faster-whisper-asr',
+                    'transformers': 'transformers-asr',
+                    'nemo': 'nemo-asr',
+                    'parakeet': 'parakeet-asr',
+                }
+                asr_service_to_build = provider_to_service.get(asr_provider)
+
+                if asr_service_to_build:
+                    console.print(f"[blue]ℹ️  Building ASR provider: {asr_provider} ({asr_service_to_build})[/blue]")
+
+        build_cmd.append('build')
+
+        # If building ASR, only build the specific service
+        if asr_service_to_build:
+            build_cmd.append(asr_service_to_build)
+
+        # Run build with streaming output (no timeout)
+        console.print(f"[cyan]🔨 Building {service_name} (this may take several minutes for CUDA/GPU builds)...[/cyan]")
+        try:
+            process = subprocess.Popen(
+                build_cmd,
+                cwd=service_path,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+
+            if process.stdout is None:
+                raise RuntimeError("Process stdout is None - unable to read command output")
+
+            for line in process.stdout:
+                line = line.rstrip()
+                if not line:
+                    continue
+
+                if 'error' in line.lower() or 'failed' in line.lower():
+                    console.print(f"  [red]{line}[/red]")
+                elif 'Successfully' in line or 'built' in line.lower():
+                    console.print(f"  [green]{line}[/green]")
+                elif 'Building' in line or 'Step' in line:
+                    console.print(f"  [cyan]{line}[/cyan]")
+                elif 'warning' in line.lower():
+                    console.print(f"  [yellow]{line}[/yellow]")
+                else:
+                    console.print(f"  [dim]{line}[/dim]")
+
+            process.wait()
+
+            if process.returncode != 0:
+                console.print(f"\n[red]❌ Build failed for {service_name}[/red]")
+                return False
+
+            console.print(f"[green]✅ Build completed for {service_name}[/green]")
+
+        except Exception as e:
+            console.print(f"[red]❌ Error building {service_name}: {e}[/red]")
+            return False
+
+    # Step 2: Run the actual command (up/down/restart/status)
     cmd = ['docker', 'compose']
 
-    # For backend service, check if HTTPS is configured (Caddyfile exists)
+    # Add profiles for backend service
     if service_name == 'backend':
         caddyfile_path = service_path / 'Caddyfile'
         if caddyfile_path.exists() and caddyfile_path.is_file():
-            # Enable HTTPS profile to start Caddy service
             cmd.extend(['--profile', 'https'])
 
-        # Check if Obsidian/Neo4j is enabled
         obsidian_enabled = False
-
-        # Method 1: Check config.yml (preferred)
+        kg_enabled = False
         config_data = load_config_yml()
         if config_data:
             memory_config = config_data.get('memory', {})
             obsidian_config = memory_config.get('obsidian', {})
             if obsidian_config.get('enabled', False):
                 obsidian_enabled = True
+            kg_config = memory_config.get('knowledge_graph', {})
+            if kg_config.get('enabled', False):
+                kg_enabled = True
 
-        # Method 2: Fallback to .env for backward compatibility
         if not obsidian_enabled:
             env_file = service_path / '.env'
             if env_file.exists():
@@ -111,37 +225,71 @@ def run_compose_command(service_name, command, build=False):
         if obsidian_enabled:
             cmd.extend(['--profile', 'obsidian'])
             console.print("[blue]ℹ️  Starting with Obsidian/Neo4j support[/blue]")
+        if kg_enabled:
+            cmd.extend(['--profile', 'knowledge-graph'])
+            console.print("[blue]ℹ️  Starting with Knowledge Graph (Neo4j)[/blue]")
 
     # Handle speaker-recognition service specially
     if service_name == 'speaker-recognition' and command in ['up', 'down']:
-        # Read configuration to determine profile
         env_file = service_path / '.env'
         if env_file.exists():
             env_values = dotenv_values(env_file)
-            compute_mode = env_values.get('COMPUTE_MODE', 'cpu')
+            # Derive profile from PYTORCH_CUDA_VERSION (cu126/cu121/etc = gpu, cpu = cpu)
+            pytorch_version = env_values.get('PYTORCH_CUDA_VERSION', 'cpu')
+            profile = 'gpu' if pytorch_version.startswith('cu') else 'cpu'
 
-            # Add profile flag for both up and down commands
-            if compute_mode == 'gpu':
-                cmd.extend(['--profile', 'gpu'])
-            else:
-                cmd.extend(['--profile', 'cpu'])
+            cmd.extend(['--profile', profile])
 
             if command == 'up':
                 https_enabled = env_values.get('REACT_UI_HTTPS', 'false')
                 if https_enabled.lower() == 'true':
-                    # HTTPS mode: start with profile for all services (includes nginx)
                     cmd.extend(['up', '-d'])
                 else:
-                    # HTTP mode: start specific services with profile (no nginx)
-                    cmd.extend(['up', '-d', 'speaker-service-gpu' if compute_mode == 'gpu' else 'speaker-service-cpu', 'web-ui'])
+                    cmd.extend(['up', '-d', 'speaker-service-gpu' if profile == 'gpu' else 'speaker-service-cpu', 'web-ui'])
             elif command == 'down':
                 cmd.extend(['down'])
         else:
-            # Fallback: no profile
             if command == 'up':
                 cmd.extend(['up', '-d'])
             elif command == 'down':
                 cmd.extend(['down'])
+
+    # Handle asr-services - start only the configured provider
+    elif service_name == 'asr-services' and command in ['up', 'down', 'restart']:
+        env_file = service_path / '.env'
+        asr_service_name = None
+
+        if env_file.exists():
+            env_values = dotenv_values(env_file)
+            asr_provider = env_values.get('ASR_PROVIDER', '').strip("'\"")
+
+            # Map provider to docker service name
+            provider_to_service = {
+                'vibevoice': 'vibevoice-asr',
+                'faster-whisper': 'faster-whisper-asr',
+                'transformers': 'transformers-asr',
+                'nemo': 'nemo-asr',
+                'parakeet': 'parakeet-asr',
+            }
+            asr_service_name = provider_to_service.get(asr_provider)
+
+            if asr_service_name:
+                console.print(f"[blue]ℹ️  Using ASR provider: {asr_provider} ({asr_service_name})[/blue]")
+
+        if command == 'up':
+            if asr_service_name:
+                cmd.extend(['up', '-d', asr_service_name])
+            else:
+                console.print("[yellow]⚠️  No ASR_PROVIDER configured, starting default service[/yellow]")
+                cmd.extend(['up', '-d', 'vibevoice-asr'])
+        elif command == 'down':
+            cmd.extend(['down'])
+        elif command == 'restart':
+            if asr_service_name:
+                cmd.extend(['restart', asr_service_name])
+            else:
+                cmd.extend(['restart'])
+
     else:
         # Standard compose commands for other services
         if command == 'up':
@@ -152,79 +300,28 @@ def run_compose_command(service_name, command, build=False):
             cmd.extend(['restart'])
         elif command == 'status':
             cmd.extend(['ps'])
-    
-    if command == 'up' and build:
-        cmd.append('--build')
-    
+
     try:
-        # For commands that need real-time output (build), stream to console
-        if build and command == 'up':
-            console.print(f"[dim]Building {service_name} containers...[/dim]")
-            process = subprocess.Popen(
-                cmd,
-                cwd=service_path,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
-            )
-            
-            # Simply stream all output with coloring
-            all_output = []
-            
-            if process.stdout is None:
-                raise RuntimeError("Process stdout is None - unable to read command output")
-            for line in process.stdout:
-                line = line.rstrip()
-                if not line:
-                    continue
-                
-                # Store for error context
-                all_output.append(line)
-                
-                # Print with appropriate coloring
-                if 'error' in line.lower() or 'failed' in line.lower():
-                    console.print(f"  [red]{line}[/red]")
-                elif 'Successfully' in line or 'Started' in line or 'Created' in line:
-                    console.print(f"  [green]{line}[/green]")
-                elif 'Building' in line or 'Creating' in line:
-                    console.print(f"  [cyan]{line}[/cyan]")
-                elif 'warning' in line.lower():
-                    console.print(f"  [yellow]{line}[/yellow]")
-                else:
-                    console.print(f"  [dim]{line}[/dim]")
-            
-            # Wait for process to complete
-            process.wait()
-            
-            # If build failed, show error summary
-            if process.returncode != 0:
-                console.print(f"\n[red]❌ Build failed for {service_name}[/red]")
-                return False
-            
+        # Run the command with timeout (build already done if needed)
+        result = subprocess.run(
+            cmd,
+            cwd=service_path,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120  # 2 minute timeout
+        )
+
+        if result.returncode == 0:
             return True
         else:
-            # For non-build commands, run silently unless there's an error
-            result = subprocess.run(
-                cmd,
-                cwd=service_path,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=120  # 2 minute timeout for service status checks
-            )
-            
-            if result.returncode == 0:
-                return True
-            else:
-                console.print(f"[red]❌ Command failed[/red]")
-                if result.stderr:
-                    console.print("[red]Error output:[/red]")
-                    # Show all error output
-                    for line in result.stderr.splitlines():
-                        console.print(f"  [dim]{line}[/dim]")
-                return False
-            
+            console.print(f"[red]❌ Command failed[/red]")
+            if result.stderr:
+                console.print("[red]Error output:[/red]")
+                for line in result.stderr.splitlines():
+                    console.print(f"  [dim]{line}[/dim]")
+            return False
+
     except subprocess.TimeoutExpired:
         console.print(f"[red]❌ Command timed out after 2 minutes for {service_name}[/red]")
         return False
@@ -232,10 +329,44 @@ def run_compose_command(service_name, command, build=False):
         console.print(f"[red]❌ Error running command: {e}[/red]")
         return False
 
+def ensure_docker_network():
+    """Ensure chronicle-network exists"""
+    try:
+        # Check if network already exists
+        result = subprocess.run(
+            ['docker', 'network', 'inspect', 'chronicle-network'],
+            capture_output=True,
+            check=False
+        )
+
+        if result.returncode != 0:
+            # Network doesn't exist, create it
+            console.print("[blue]📡 Creating chronicle-network...[/blue]")
+            subprocess.run(
+                ['docker', 'network', 'create', 'chronicle-network'],
+                check=True,
+                capture_output=True
+            )
+            console.print("[green]✅ chronicle-network created[/green]")
+        else:
+            console.print("[dim]📡 chronicle-network already exists[/dim]")
+        return True
+    except subprocess.CalledProcessError as e:
+        console.print(f"[red]❌ Failed to create network: {e}[/red]")
+        return False
+    except Exception as e:
+        console.print(f"[red]❌ Error checking/creating network: {e}[/red]")
+        return False
+
 def start_services(services, build=False):
     """Start specified services"""
     console.print(f"🚀 [bold]Starting {len(services)} services...[/bold]")
-    
+
+    # Ensure Docker network exists before starting services
+    if not ensure_docker_network():
+        console.print("[red]❌ Cannot start services without Docker network[/red]")
+        return
+
     success_count = 0
     for service_name in services:
         if service_name not in SERVICES:

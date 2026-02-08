@@ -67,7 +67,7 @@ spec:
         - name: {{ .Chart.Name }}-workers
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["./start-workers.sh"]
+          command: ["uv", "run", "python", "worker_orchestrator.py"]
           envFrom:
             - configMapRef:
                 name: chronicle-config

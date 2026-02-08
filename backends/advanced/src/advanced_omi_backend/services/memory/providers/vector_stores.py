@@ -123,26 +123,28 @@ class QdrantVectorStore(VectorStoreBase):
             points = []
             for memory in memories:
                 if memory.embedding:
+                    current_time = str(int(time.time()))
                     point = PointStruct(
                         id=memory.id,
                         vector=memory.embedding,
                         payload={
                             "content": memory.content,
                             "metadata": memory.metadata,
-                            "created_at": memory.created_at or str(int(time.time()))
+                            "created_at": memory.created_at or current_time,
+                            "updated_at": memory.updated_at or current_time
                         }
                     )
                     points.append(point)
-            
+
             if points:
                 await self.client.upsert(
                     collection_name=self.collection_name,
                     points=points
                 )
                 return [str(point.id) for point in points]
-            
+
             return []
-            
+
         except Exception as e:
             memory_logger.error(f"Qdrant add memories failed: {e}")
             return []
@@ -190,7 +192,8 @@ class QdrantVectorStore(VectorStoreBase):
                     metadata=result.payload.get("metadata", {}),
                     # Qdrant returns similarity scores directly (higher = more similar)
                     score=result.score if result.score is not None else None,
-                    created_at=result.payload.get("created_at")
+                    created_at=result.payload.get("created_at"),
+                    updated_at=result.payload.get("updated_at")
                 )
                 memories.append(memory)
                 # Log similarity scores for debugging
@@ -230,10 +233,11 @@ class QdrantVectorStore(VectorStoreBase):
                     id=str(point.id),
                     content=point.payload.get("content", ""),
                     metadata=point.payload.get("metadata", {}),
-                    created_at=point.payload.get("created_at")
+                    created_at=point.payload.get("created_at"),
+                    updated_at=point.payload.get("updated_at")
                 )
                 memories.append(memory)
-            
+
             return memories
             
         except Exception as e:
@@ -356,28 +360,90 @@ class QdrantVectorStore(VectorStoreBase):
     async def count_memories(self, user_id: str) -> int:
         """Count total number of memories for a user in Qdrant using native count API."""
         try:
-            
+
             search_filter = Filter(
                 must=[
                     FieldCondition(
-                        key="metadata.user_id", 
+                        key="metadata.user_id",
                         match=MatchValue(value=user_id)
                     )
                 ]
             )
-            
+
             # Use Qdrant's native count API (documented in qdrant/qdrant/docs)
             # Count operation: CountPoints -> CountResponse with count result
             result = await self.client.count(
                 collection_name=self.collection_name,
                 count_filter=search_filter
             )
-            
+
             return result.count
-            
+
         except Exception as e:
             memory_logger.error(f"Qdrant count memories failed: {e}")
             return 0
+
+    async def get_memory(self, memory_id: str, user_id: Optional[str] = None) -> Optional[MemoryEntry]:
+        """Get a specific memory by ID from Qdrant.
+
+        Args:
+            memory_id: Unique identifier of the memory to retrieve
+            user_id: Optional user ID for validation (not used in Qdrant filtering)
+
+        Returns:
+            MemoryEntry object if found, None otherwise
+        """
+        try:
+            # Convert memory_id to proper format for Qdrant
+            import uuid
+            try:
+                # Try to parse as UUID first
+                uuid.UUID(memory_id)
+                point_id = memory_id
+            except ValueError:
+                # If not a UUID, try as integer
+                try:
+                    point_id = int(memory_id)
+                except ValueError:
+                    # If neither UUID nor integer, use it as-is
+                    point_id = memory_id
+
+            # Retrieve the point by ID
+            points = await self.client.retrieve(
+                collection_name=self.collection_name,
+                ids=[point_id],
+                with_payload=True,
+                with_vectors=False
+            )
+
+            if not points:
+                memory_logger.debug(f"Memory not found: {memory_id}")
+                return None
+
+            point = points[0]
+
+            # If user_id is provided, validate ownership
+            if user_id:
+                point_user_id = point.payload.get("metadata", {}).get("user_id")
+                if point_user_id != user_id:
+                    memory_logger.warning(f"Memory {memory_id} does not belong to user {user_id}")
+                    return None
+
+            # Convert to MemoryEntry
+            memory = MemoryEntry(
+                id=str(point.id),
+                content=point.payload.get("content", ""),
+                metadata=point.payload.get("metadata", {}),
+                created_at=point.payload.get("created_at"),
+                updated_at=point.payload.get("updated_at")
+            )
+
+            memory_logger.debug(f"Retrieved memory {memory_id}")
+            return memory
+
+        except Exception as e:
+            memory_logger.error(f"Qdrant get memory failed for {memory_id}: {e}")
+            return None
 
 
 

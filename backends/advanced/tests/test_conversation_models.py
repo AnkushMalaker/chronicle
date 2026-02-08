@@ -134,7 +134,7 @@ class TestConversationModel:
             version_id="v2",
             transcript="Updated transcript",
             segments=segments,
-            provider=TranscriptProvider.MISTRAL,
+            provider=TranscriptProvider.PARAKEET,
             set_as_active=False
         )
 
@@ -170,7 +170,7 @@ class TestConversationModel:
         segments2 = [SpeakerSegment(start=0.0, end=5.0, text="Version 2", speaker="Speaker A")]
 
         conversation.add_transcript_version("v1", "Transcript 1", segments1, TranscriptProvider.DEEPGRAM)
-        conversation.add_transcript_version("v2", "Transcript 2", segments2, TranscriptProvider.MISTRAL, set_as_active=False)
+        conversation.add_transcript_version("v2", "Transcript 2", segments2, TranscriptProvider.PARAKEET, set_as_active=False)
 
         # Should be v1 active
         assert conversation.active_transcript_version == "v1"
@@ -213,7 +213,6 @@ class TestConversationModel:
         """Test that provider enums work correctly."""
         # Test TranscriptProvider enum
         assert TranscriptProvider.DEEPGRAM == "deepgram"
-        assert TranscriptProvider.MISTRAL == "mistral"
         assert TranscriptProvider.PARAKEET == "parakeet"
 
         # Test MemoryProvider enum

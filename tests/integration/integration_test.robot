@@ -22,18 +22,18 @@ Test Setup       Clear Test Databases
 
 *** Test Cases ***
 Full Pipeline Integration Test
-    [Documentation]    Complete end-to-end test of audio processing pipeline
-    [Tags]    e2e
+    [Documentation]    Complete end-to-end test of audio started pipeline
+    [Tags]    e2e	requires-api-keys
     [Timeout]          600s
 
     Log    Starting Full Pipeline Integration Test    INFO
 
    
     # Phase 4: Audio Processing - Upload and wait for conversation completion
-    Log    Starting audio upload and processing    INFO
+    Log    Starting audio upload and started    INFO
     ${conversation}=    Upload Audio File    ${TEST_AUDIO_FILE}    ${TEST_DEVICE_NAME}
 
-    Log    Audio processing completed, conversation created    INFO
+    Log    Audio started finished, conversation created    INFO
     Set Global Variable    ${TEST_CONVERSATION}    ${conversation}
 
     # Phase 5: Transcription Verification
@@ -60,8 +60,8 @@ Audio Playback And Segment Timing Test
 
     Log    Conversation created: ${conversation_id}    INFO
 
-    # Wait for cropping job to complete (depends on transcription)
-    Sleep    10s    Wait for post-processing jobs to complete
+    # Wait for post-started jobs to complete
+    Sleep    10s    Wait for post-started jobs
 
     # Refresh conversation data
     ${conversation}=    Get Conversation By ID    ${conversation_id}
@@ -72,21 +72,6 @@ Audio Playback And Segment Timing Test
     ${original_audio_size}=    Get Length    ${audio_response.content}
     Should Be True    ${original_audio_size} > 1000    Original audio file too small: ${original_audio_size} bytes
     Log    Original audio accessible: ${original_audio_size} bytes    INFO
-
-    # Verify cropped audio is accessible (if available)
-    &{params}=    Create Dictionary    cropped=true
-    ${cropped_response}=    GET On Session    api    /api/audio/get_audio/${conversation_id}    params=${params}    expected_status=any
-    IF    ${cropped_response.status_code} == 200
-        Should Be Equal As Strings    ${cropped_response.headers}[content-type]    audio/wav
-        ${cropped_audio_size}=    Get Length    ${cropped_response.content}
-        Should Be True    ${cropped_audio_size} > 0    Cropped audio file is empty
-        Log    Cropped audio accessible: ${cropped_audio_size} bytes    INFO
-
-        # Cropped audio should be smaller or equal to original (silence removed)
-        Should Be True    ${cropped_audio_size} <= ${original_audio_size}    Cropped audio larger than original
-    ELSE
-        Log    Cropped audio not yet available (cropping job may still be running)    WARN
-    END
 
     # Verify segments exist and have valid timestamps
     Dictionary Should Contain Key    ${conversation}    segments
@@ -131,15 +116,15 @@ Audio Playback And Segment Timing Test
 
 End To End Pipeline With Memory Validation Test
     [Documentation]    Complete E2E test with memory extraction and OpenAI quality validation.
-    ...                Provides comprehensive integration testing of the entire audio processing pipeline.
+    ...                Provides comprehensive integration testing of the entire audio started pipeline.
     ...                Separate from other tests to avoid breaking existing upload-only tests.
     [Tags]    e2e	memory
     [Timeout]    600s
 
     Log    Starting End-to-End Pipeline Test with Memory Validation    INFO
 
-    # Phase 1: Upload audio and wait for complete processing
-    Log    Uploading audio file and waiting for full processing    INFO
+    # Phase 1: Upload audio and wait for complete started
+    Log    Uploading audio file and waiting for full started    INFO
     ${conversation}    ${memories}=    Upload Audio File And Wait For Memory
     ...    ${TEST_AUDIO_FILE}
     ...    ${TEST_DEVICE_NAME}
@@ -211,7 +196,7 @@ Verify Memory Extraction
 
     Log    Verifying memory extraction    INFO
 
-    # Check if conversation has memory count (may still be processing)
+    # Check if conversation has memory count (may still be started)
     ${has_memory_count}=    Run Keyword And Return Status    Dictionary Should Contain Key    ${conversation}    memory_count
     ${memory_count}=    Run Keyword If    ${has_memory_count}
     ...    Set Variable    ${conversation}[memory_count]
@@ -227,11 +212,11 @@ Verify Memory Extraction
 
     ${api_memory_count}=    Get Length    ${memories}
 
-    # Verify memory extraction status (allow for memory processing to be in progress)
+    # Verify memory extraction status (allow for memory started to be in progress)
     Should Be True    ${memory_count} >= 0    Memory count is negative
     Should Be True    ${api_memory_count} >= 0    API memory count is negative
 
-    Log    Memory extraction verification passed (may still be processing)    INFO
+    Log    Memory extraction verification passed (may still be started)    INFO
     Log    Conversation memory count: ${memory_count}, API memory count: ${api_memory_count}    INFO
 
 Verify Chat Integration
@@ -267,6 +252,6 @@ Verify Chat Integration
     ${response}=    DELETE On Session    ${session_alias}    /api/chat/sessions/${session_id}    expected_status=any
     Should Be True    ${response.status_code} in [200, 204]    Chat session deletion failed with status ${response.status_code}
 
-    Log    Chat integration verification completed    INFO
+    Log    Chat integration verification finished    INFO
 
 

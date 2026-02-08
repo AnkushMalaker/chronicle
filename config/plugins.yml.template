@@ -1,0 +1,78 @@
+# Chronicle Plugin Orchestration Configuration
+#
+# This file controls which plugins are enabled and what events they respond to.
+# Secrets should NEVER be hardcoded here - always use ${ENV_VAR} references.
+#
+# Configuration Architecture:
+# - Secrets:      backends/advanced/.env (gitignored)
+# - Orchestration: config/plugins.yml (this file - safe to commit with env var refs)
+# - Settings:     plugins/{plugin_id}/config.yml (committed defaults)
+#
+# Environment Variable Syntax:
+#   ${ENV_VAR}           - Required variable from .env
+#   ${ENV_VAR:-default}  - Optional with fallback value
+#
+# Example:
+#   smtp_password: ${SMTP_PASSWORD}           # ✅ CORRECT (reference)
+#   smtp_password: xnetcqctkkfgzllh          # ❌ WRONG (hardcoded secret)
+
+plugins:
+  # ========================================
+  # Home Assistant Voice Control Plugin
+  # ========================================
+  homeassistant:
+    enabled: false  # Set to true to enable
+    events:  # Events that trigger this plugin (event-based architecture)
+      - transcript.streaming  # Execute on each streaming transcript chunk
+      # - transcript.batch    # Uncomment to also handle batch transcription
+      # - conversation.complete  # Uncomment to handle completed conversations
+    condition:
+      type: wake_word
+      wake_words:  # Support multiple wake words
+        - hey vivi      # Example: "hey vivi, turn off the lights"
+        - hey jarvis    # Example: "hey jarvis, what's the temperature"
+    ha_url: http://host.docker.internal:8123  # Your Home Assistant URL
+    ha_token: ${HA_TOKEN}  # ALWAYS use env var - never paste actual token here!
+    # To get a long-lived token:
+    # 1. Go to Home Assistant → Profile → Security tab
+    # 2. Scroll to "Long-lived access tokens"
+    # 3. Click "Create Token"
+    # 4. Copy the token and add to backends/advanced/.env:
+    #    HA_TOKEN=your-long-lived-token-here
+
+  # ========================================
+  # Email Summarizer Plugin (Community)
+  # ========================================
+  # Automatically sends email summaries when conversations complete
+  # Requires: SMTP credentials (Gmail App Password recommended)
+  #
+  # Gmail Setup:
+  # 1. Enable 2-Factor Authentication on Google account
+  # 2. Go to: Google Account → Security → 2-Step Verification
+  # 3. Scroll to "App passwords" → Generate password for "Mail"
+  # 4. Copy 16-character password and set as SMTP_PASSWORD
+  # 5. Set SMTP_USERNAME to your Gmail address
+  #
+  # See: plugins/email_summarizer/README.md for full documentation
+
+  email_summarizer:
+    enabled: false  # Set to true to enable email summaries
+    events:
+      - conversation.complete  # Send email when conversation finishes
+    condition:
+      type: always  # Send for all conversations
+
+    # SMTP Configuration (use environment variables for secrets)
+    smtp_host: ${SMTP_HOST:-smtp.gmail.com}
+    smtp_port: ${SMTP_PORT:-587}
+    smtp_username: ${SMTP_USERNAME}  # Your email address
+    smtp_password: ${SMTP_PASSWORD}  # Gmail App Password (16 chars)
+    smtp_use_tls: ${SMTP_USE_TLS:-true}
+    from_email: ${FROM_EMAIL:-noreply@chronicle.ai}
+    from_name: ${FROM_NAME:-Chronicle AI}
+
+    # Email Content Options
+    subject_prefix: "Conversation Summary"
+    summary_max_sentences: 3  # LLM summary length
+    include_conversation_id: true
+    include_duration: true

@@ -11,7 +11,6 @@ from abc import ABC, abstractmethod
 
 import redis.asyncio as redis
 from redis import exceptions as redis_exceptions
-from redis.asyncio.lock import Lock
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +27,8 @@ class BaseAudioStreamConsumer(ABC):
         """
         Initialize consumer.
 
-        Dynamically discovers all audio:stream:* streams and claims them using Redis locks
-        to ensure exclusive processing (one consumer per stream).
+        Dynamically discovers all audio:stream:* streams and uses Redis consumer groups
+        for fan-out processing (multiple worker types can process the same stream).
 
         Args:
             provider_name: Provider name (e.g., "deepgram", "parakeet")
@@ -47,9 +46,8 @@ class BaseAudioStreamConsumer(ABC):
 
         self.running = False
 
-        # Dynamic stream discovery with exclusive locks
+        # Dynamic stream discovery - consumer groups handle fan-out
         self.active_streams = {}  # {stream_name: True}
-        self.stream_locks = {}  # {stream_name: Lock object}
 
         # Buffering: accumulate chunks per session
         self.session_buffers = {}  # {session_id: {"chunks": [], "chunk_ids": [], "sample_rate": int}}
@@ -72,59 +70,6 @@ class BaseAudioStreamConsumer(ABC):
                 streams.extend([k.decode() if isinstance(k, bytes) else k for k in keys])
 
         return streams
-
-    async def try_claim_stream(self, stream_name: str) -> bool:
-        """
-        Try to claim exclusive ownership of a stream using Redis lock.
-
-        Args:
-            stream_name: Stream to claim
-
-        Returns:
-            True if lock acquired, False otherwise
-        """
-        lock_key = f"consumer:lock:{stream_name}"
-
-        # Create lock with 30 second timeout (will be renewed)
-        lock = Lock(
-            self.redis_client,
-            lock_key,
-            timeout=30,
-            blocking=False  # Non-blocking
-        )
-
-        acquired = await lock.acquire(blocking=False)
-
-        if acquired:
-            self.stream_locks[stream_name] = lock
-            logger.info(f"🔒 Claimed stream: {stream_name}")
-            return True
-        else:
-            logger.debug(f"⏭️ Stream already claimed by another consumer: {stream_name}")
-            return False
-
-    async def release_stream(self, stream_name: str):
-        """Release lock on a stream."""
-        if stream_name in self.stream_locks:
-            try:
-                await self.stream_locks[stream_name].release()
-                logger.info(f"🔓 Released stream: {stream_name}")
-            except Exception as e:
-                logger.warning(f"Failed to release lock for {stream_name}: {e}")
-            finally:
-                del self.stream_locks[stream_name]
-
-    async def renew_stream_locks(self):
-        """Renew locks on all claimed streams."""
-        for stream_name, lock in list(self.stream_locks.items()):
-            try:
-                await lock.reacquire()
-            except Exception as e:
-                logger.warning(f"Failed to renew lock for {stream_name}: {e}")
-                # Lock expired, remove from our list
-                del self.stream_locks[stream_name]
-                if stream_name in self.active_streams:
-                    del self.active_streams[stream_name]
 
     async def setup_consumer_group(self, stream_name: str):
         """Create consumer group if it doesn't exist."""
@@ -257,14 +202,12 @@ class BaseAudioStreamConsumer(ABC):
         pass
 
     async def start_consuming(self):
-        """Discover and consume from multiple streams with exclusive locking."""
+        """Discover and consume from multiple streams using Redis consumer groups."""
         self.running = True
-        logger.info(f"➡️ Starting dynamic stream consumer: {self.consumer_name}")
+        logger.info(f"➡️ Starting dynamic stream consumer: {self.consumer_name} (group: {self.group_name})")
 
         last_discovery = 0
-        last_lock_renewal = 0
         discovery_interval = 10  # Discover new streams every 10 seconds
-        lock_renewal_interval = 15  # Renew locks every 15 seconds
 
         while self.running:
             try:
@@ -277,19 +220,12 @@ class BaseAudioStreamConsumer(ABC):
 
                     for stream_name in discovered:
                         if stream_name not in self.active_streams:
-                            # Try to claim this stream
-                            if await self.try_claim_stream(stream_name):
-                                # Setup consumer group for this stream
-                                await self.setup_consumer_group(stream_name)
-                                self.active_streams[stream_name] = True
-                                logger.info(f"✅ Now consuming from {stream_name}")
+                            # Setup consumer group for this stream (no manual lock needed)
+                            await self.setup_consumer_group(stream_name)
+                            self.active_streams[stream_name] = True
+                            logger.info(f"✅ Now consuming from {stream_name} (group: {self.group_name})")
 
                     last_discovery = current_time
-
-                # Periodically renew locks
-                if current_time - last_lock_renewal > lock_renewal_interval:
-                    await self.renew_stream_locks()
-                    last_lock_renewal = current_time
 
                 # Read from all active streams
                 if not self.active_streams:
@@ -325,14 +261,6 @@ class BaseAudioStreamConsumer(ABC):
                     for stream_name in list(self.active_streams.keys()):
                         if stream_name in error_msg:
                             logger.warning(f"➡️ [{self.consumer_name}] Stream {stream_name} was deleted, removing from active streams")
-
-                            # Release the lock
-                            lock_key = f"consumer:lock:{stream_name}"
-                            try:
-                                await self.redis_client.delete(lock_key)
-                                logger.info(f"🔓 Released lock for deleted stream: {stream_name}")
-                            except:
-                                pass
 
                             # Remove from active streams
                             del self.active_streams[stream_name]
@@ -418,9 +346,6 @@ class BaseAudioStreamConsumer(ABC):
 
                     # Clean up session buffer
                     del self.session_buffers[session_id]
-
-                # Release the consumer lock for this stream
-                await self.release_stream(stream_name)
 
                 # ACK the END message
                 await self.redis_client.xack(stream_name, self.group_name, message_id)

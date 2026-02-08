@@ -21,6 +21,7 @@ dependencies = [
     "httpx>=0.28.0,<1.0.0",
     "fastapi-users[beanie]>=14.0.1",
     "PyYAML>=6.0.1",
+    "omegaconf>=2.3.0",
     "langfuse>=3.3.0",
     "spacy>=3.8.2",
     "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
@@ -114,4 +115,5 @@ test = [
     "requests-mock>=1.12.1",
     "pytest-json-report>=1.5.0",
     "pytest-html>=4.0.0",
+    "aiosqlite>=0.20.0",  # For test plugin event storage
 ]

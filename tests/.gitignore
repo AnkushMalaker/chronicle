@@ -1,0 +1,14 @@
+# Test output files
+output.xml
+log.html
+report.html
+results/
+results-no-api/
+
+# Saved container logs (automatically generated)
+logs/*
+!logs/.gitkeep
+
+# Python cache directories for mocks
+mocks/__pycache__/
+mocks/*.pyc

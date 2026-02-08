@@ -140,7 +140,7 @@ Reload Memory Config Test
 
 Delete All User Memories Test
     [Documentation]    Test deleting all memories for current user
-    [Tags]    infra	memory	permissions
+    [Tags]    infra	memory	permissions	requires-api-keys
 
     ${response}=       DELETE On Session    api   /api/admin/memory/delete-all
     Should Be Equal As Integers    ${response.status_code}    200
@@ -153,6 +153,15 @@ Get Chat Configuration Test
     [Documentation]    Test getting chat system prompt (admin only)
     [Tags]    infra	permissions
 
+    # First ensure default prompt is set (cleanup from previous test runs)
+    ${default_prompt}=    Set Variable    You are a helpful AI assistant with access to the user's personal memories and conversation history.
+    &{headers}=        Create Dictionary    Content-Type=text/plain
+    ${response}=       POST On Session    api    /api/admin/chat/config
+    ...                data=${default_prompt}
+    ...                headers=${headers}
+    Should Be Equal As Integers    ${response.status_code}    200
+
+    # Now test getting the default prompt
     ${response}=       GET On Session    api    /api/admin/chat/config
     Should Be Equal As Integers    ${response.status_code}    200
 
@@ -190,6 +199,9 @@ Save And Retrieve Chat Configuration Test
     [Documentation]    Test saving and retrieving chat configuration
     [Tags]    infra	permissions
 
+    # Define known default prompt for restoration (from system_controller.py and chat_service.py)
+    ${default_prompt}=    Set Variable    You are a helpful AI assistant with access to the user's personal memories and conversation history.
+
     # Save custom prompt
     ${custom_prompt}=  Set Variable    You are a specialized AI assistant for technical support and troubleshooting.
     &{headers}=        Create Dictionary    Content-Type=text/plain
@@ -205,6 +217,12 @@ Save And Retrieve Chat Configuration Test
     Should Be Equal As Integers    ${response.status_code}    200
     ${retrieved}=      Set Variable    ${response.text}
     Should Be Equal    ${retrieved}    ${custom_prompt}    msg=Retrieved prompt should match saved prompt
+
+    # Restore default prompt to avoid test interference
+    ${response}=       POST On Session    api    /api/admin/chat/config
+    ...                data=${default_prompt}
+    ...                headers=${headers}
+    Should Be Equal As Integers    ${response.status_code}    200
 
 
 Non-Admin Cannot Access Admin Endpoints Test

@@ -1,4 +1,4 @@
-name: Robot Framework Tests
+name: Robot Framework Tests (No API Keys)
 
 on:
   pull_request:
@@ -23,30 +23,6 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-
-    - name: Verify required secrets
-      env:
-        DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
-        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      run: |
-        echo "Verifying required secrets..."
-        if [ -z "$DEEPGRAM_API_KEY" ]; then
-          echo "❌ ERROR: DEEPGRAM_API_KEY secret is not set"
-          exit 1
-        fi
-        if [ -z "$OPENAI_API_KEY" ]; then
-          echo "❌ ERROR: OPENAI_API_KEY secret is not set"
-          exit 1
-        fi
-        if [ -z "$HF_TOKEN" ]; then
-          echo "❌ ERROR: HF_TOKEN secret is not set"
-          exit 1
-        fi
-        echo "✓ DEEPGRAM_API_KEY is set (length: ${#DEEPGRAM_API_KEY})"
-        echo "✓ OPENAI_API_KEY is set (length: ${#OPENAI_API_KEY})"
-        echo "✓ HF_TOKEN is set (length: ${#HF_TOKEN})"
-        echo "✓ All required secrets verified"
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -79,64 +55,81 @@ jobs:
 
     - name: Create test config.yml
       run: |
-        echo "Copying test configuration file..."
+        echo "Copying mock services configuration file..."
         mkdir -p config
-        cp tests/configs/deepgram-openai.yml config/config.yml
-        echo "✓ Test config.yml created from tests/configs/deepgram-openai.yml"
+        cp tests/configs/mock-services.yml config/config.yml
+        echo "✓ Test config.yml created from tests/configs/mock-services.yml"
+        echo "ℹ️  This config disables external API dependencies (transcription, LLM)"
         ls -lh config/config.yml
 
-    - name: Run Robot Framework tests
+    - name: Create plugins.yml from template
+      run: |
+        echo "Creating plugins.yml from template..."
+        if [ -f "config/plugins.yml.template" ]; then
+          cp config/plugins.yml.template config/plugins.yml
+          echo "✓ plugins.yml created from template"
+          ls -lh config/plugins.yml
+        else
+          echo "❌ ERROR: config/plugins.yml.template not found"
+          exit 1
+        fi
+
+    - name: Run Robot Framework tests (No API Keys)
       working-directory: tests
       env:
-        # Required for test runner script
-        DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
-        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
         CLEANUP_CONTAINERS: "false"  # Don't cleanup in CI - handled by workflow
       run: |
-        # Use the unified test script that mirrors local development
-        ./run-robot-tests.sh
+        # Use the no-API test script (excludes tests tagged with requires-api-keys)
+        ./run-no-api-tests.sh
         TEST_EXIT_CODE=$?
         echo "test_exit_code=$TEST_EXIT_CODE" >> $GITHUB_ENV
         exit 0  # Don't fail here, we'll fail at the end after uploading artifacts
 
-    - name: Show service logs
+    - name: Save service logs to files
       if: always()
       working-directory: backends/advanced
       run: |
-        echo "=== Backend Logs (last 50 lines) ==="
-        docker compose -f docker-compose-test.yml logs --tail=50 chronicle-backend-test
+        echo "Checking running containers..."
+        docker compose -f docker-compose-test.yml ps -a
         echo ""
-        echo "=== Worker Logs (last 50 lines) ==="
-        docker compose -f docker-compose-test.yml logs --tail=50 workers-test
+        echo "Saving service logs to files..."
+        mkdir -p logs
+        docker compose -f docker-compose-test.yml logs chronicle-backend-test > logs/backend.log 2>&1 || true
+        docker compose -f docker-compose-test.yml logs workers-test > logs/workers.log 2>&1 || true
+        docker compose -f docker-compose-test.yml logs mongo-test > logs/mongo.log 2>&1 || true
+        docker compose -f docker-compose-test.yml logs redis-test > logs/redis.log 2>&1 || true
+        docker compose -f docker-compose-test.yml logs qdrant-test > logs/qdrant.log 2>&1 || true
+        docker compose -f docker-compose-test.yml logs speaker-service-test > logs/speaker.log 2>&1 || true
+        echo "✓ Logs saved to backends/advanced/logs/"
+        ls -lh logs/
 
     - name: Check if test results exist
       if: always()
       id: check_results
       run: |
-        if [ -f tests/results/output.xml ]; then
+        if [ -f tests/results-no-api/output.xml ]; then
           echo "results_exist=true" >> $GITHUB_OUTPUT
         else
           echo "results_exist=false" >> $GITHUB_OUTPUT
-          echo "⚠️ No test results found in tests/results/"
-          ls -la tests/results/ || echo "Results directory doesn't exist"
+          echo "⚠️ No test results found in tests/results-no-api/"
+          ls -la tests/results-no-api/ || echo "Results directory doesn't exist"
         fi
 
     - name: Upload Robot Framework HTML reports
       if: always() && steps.check_results.outputs.results_exist == 'true'
       uses: actions/upload-artifact@v4
       with:
-        name: robot-test-reports-html
+        name: robot-test-reports-html-no-api
         path: |
-          tests/results/report.html
-          tests/results/log.html
+          tests/results-no-api/report.html
+          tests/results-no-api/log.html
         retention-days: 30
 
     - name: Publish HTML Report as GitHub Pages artifact
       if: always() && steps.check_results.outputs.results_exist == 'true'
       uses: actions/upload-pages-artifact@v3
       with:
-        path: tests/results
+        path: tests/results-no-api
 
     - name: Deploy to GitHub Pages
       if: always() && steps.check_results.outputs.results_exist == 'true'
@@ -150,7 +143,7 @@ jobs:
         # Parse test results
         python3 << 'PYTHON_SCRIPT' > test_summary.txt
         import xml.etree.ElementTree as ET
-        tree = ET.parse('tests/results/output.xml')
+        tree = ET.parse('tests/results-no-api/output.xml')
         root = tree.getroot()
         stats = root.find('.//total/stat')
         if stats is not None:
@@ -185,9 +178,12 @@ jobs:
           const status = failed === '0' ? '✅ All tests passed!' : '❌ Some tests failed';
           const emoji = failed === '0' ? '🎉' : '⚠️';
 
-          const comment = `## ${emoji} Robot Framework Test Results
+          const comment = `## ${emoji} Robot Framework Test Results (No API Keys)
 
           **Status**: ${status}
+
+          ℹ️ **Note**: This run excludes tests requiring external API keys (Deepgram, OpenAI).
+          Tests tagged with \`requires-api-keys\` will run on dev/main branches.
 
           | Metric | Count |
           |--------|-------|
@@ -202,8 +198,8 @@ jobs:
           - [📝 Detailed Log](${pagesUrl}log.html)
 
           **Download Artifacts:**
-          - [robot-test-reports-html](${runUrl}) - HTML reports
-          - [robot-test-results-xml](${runUrl}) - XML output
+          - [robot-test-reports-html-no-api](${runUrl}) - HTML reports
+          - [robot-test-results-xml-no-api](${runUrl}) - XML output
 
           ---
           *[View full workflow run](${runUrl})*`;
@@ -219,16 +215,17 @@ jobs:
       if: always() && steps.check_results.outputs.results_exist == 'true'
       uses: actions/upload-artifact@v4
       with:
-        name: robot-test-results-xml
-        path: tests/results/output.xml
+        name: robot-test-results-xml-no-api
+        path: tests/results-no-api/output.xml
         retention-days: 30
 
     - name: Upload logs on failure
       if: failure()
       uses: actions/upload-artifact@v4
       with:
-        name: robot-test-logs
+        name: robot-test-logs-no-api
         path: |
+          backends/advanced/logs/*.log
           backends/advanced/.env
           tests/setup/.env.test
         retention-days: 7
@@ -236,12 +233,12 @@ jobs:
     - name: Display test results summary
       if: always()
       run: |
-        if [ -f tests/results/output.xml ]; then
-          echo "Test results generated successfully"
+        if [ -f tests/results-no-api/output.xml ]; then
+          echo "Test results generated successfully (No API Keys mode)"
           echo "========================================"
           python3 << 'PYTHON_SCRIPT'
         import xml.etree.ElementTree as ET
-        tree = ET.parse('tests/results/output.xml')
+        tree = ET.parse('tests/results-no-api/output.xml')
         root = tree.getroot()
         stats = root.find('.//total/stat')
         if stats is not None:
@@ -253,10 +250,12 @@ jobs:
         PYTHON_SCRIPT
           echo "========================================"
           echo ""
+          echo "ℹ️  Tests excluded: requires-api-keys (run on dev/main branches)"
+          echo ""
           echo "📊 FULL TEST REPORTS AVAILABLE:"
           echo "  1. Go to the 'Summary' tab at the top of this page"
           echo "  2. Scroll down to 'Artifacts' section"
-          echo "  3. Download 'robot-test-reports-html'"
+          echo "  3. Download 'robot-test-reports-html-no-api'"
           echo "  4. Extract and open report.html or log.html in your browser"
           echo ""
           echo "The HTML reports provide:"

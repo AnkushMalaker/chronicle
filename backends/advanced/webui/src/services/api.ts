@@ -107,15 +107,30 @@ export const authApi = {
 }
 
 export const conversationsApi = {
-  getAll: () => api.get('/api/conversations'),
+  getAll: (includeDeleted?: boolean) => api.get('/api/conversations', {
+    params: includeDeleted !== undefined ? { include_deleted: includeDeleted } : {}
+  }),
   getById: (id: string) => api.get(`/api/conversations/${id}`),
   delete: (id: string) => api.delete(`/api/conversations/${id}`),
+  restore: (id: string) => api.post(`/api/conversations/${id}/restore`),
+  permanentDelete: (id: string) => api.delete(`/api/conversations/${id}`, {
+    params: { permanent: true }
+  }),
 
   // Reprocessing endpoints
   reprocessTranscript: (conversationId: string) => api.post(`/api/conversations/${conversationId}/reprocess-transcript`),
   reprocessMemory: (conversationId: string, transcriptVersionId: string = 'active') => api.post(`/api/conversations/${conversationId}/reprocess-memory`, null, {
     params: { transcript_version_id: transcriptVersionId }
   }),
+  reprocessSpeakers: (
+    conversationId: string,
+    transcriptVersionId: string = 'active'
+  ) =>
+    api.post(`/api/conversations/${conversationId}/reprocess-speakers`, null, {
+      params: {
+        transcript_version_id: transcriptVersionId
+      }
+    }),
 
   // Version management
   activateTranscriptVersion: (conversationId: string, versionId: string) => api.post(`/api/conversations/${conversationId}/activate-transcript/${versionId}`),
@@ -126,7 +141,6 @@ export const conversationsApi = {
 export const memoriesApi = {
   getAll: (userId?: string) => api.get('/api/memories', { params: userId ? { user_id: userId } : {} }),
   getById: (id: string, userId?: string) => api.get(`/api/memories/${id}`, { params: userId ? { user_id: userId } : {} }),
-  getUnfiltered: (userId?: string) => api.get('/api/memories/unfiltered', { params: userId ? { user_id: userId } : {} }),
   search: (query: string, userId?: string, limit: number = 20, scoreThreshold?: number) =>
     api.get('/api/memories/search', {
       params: {
@@ -140,6 +154,67 @@ export const memoriesApi = {
   deleteAll: () => api.delete('/api/admin/memory/delete-all'),
 }
 
+export const annotationsApi = {
+  // Create annotations
+  createMemoryAnnotation: (data: {
+    memory_id: string
+    original_text: string
+    corrected_text: string
+  }) => api.post('/api/annotations/memory', data),
+
+  createTranscriptAnnotation: (data: {
+    conversation_id: string
+    segment_index: number
+    original_text: string
+    corrected_text: string
+  }) => api.post('/api/annotations/transcript', data),
+
+  // Retrieve annotations
+  getMemoryAnnotations: (memory_id: string) =>
+    api.get(`/api/annotations/memory/${memory_id}`),
+
+  getTranscriptAnnotations: (conversation_id: string) =>
+    api.get(`/api/annotations/transcript/${conversation_id}`),
+
+  // Handle suggestions
+  acceptSuggestion: (annotation_id: string) =>
+    api.patch(`/api/annotations/${annotation_id}/status`, { status: 'accepted' }),
+
+  rejectSuggestion: (annotation_id: string) =>
+    api.patch(`/api/annotations/${annotation_id}/status`, { status: 'rejected' }),
+
+  // Diarization annotations
+  createDiarizationAnnotation: (data: {
+    conversation_id: string
+    segment_index: number
+    original_speaker: string
+    corrected_speaker: string
+    segment_start_time?: number
+  }) => api.post('/api/annotations/diarization', data),
+
+  getDiarizationAnnotations: (conversation_id: string) =>
+    api.get(`/api/annotations/diarization/${conversation_id}`),
+
+  // Apply diarization annotations (creates new version)
+  applyDiarizationAnnotations: (conversation_id: string) =>
+    api.post(`/api/annotations/diarization/${conversation_id}/apply`),
+
+  // Apply ALL pending annotations (diarization + transcript) - creates single new version
+  applyAllAnnotations: (conversation_id: string) =>
+    api.post(`/api/annotations/${conversation_id}/apply`),
+}
+
+export const finetuningApi = {
+  // Process annotations for training
+  processAnnotations: (annotationType: string = 'diarization') =>
+    api.post('/api/finetuning/process-annotations', null, {
+      params: { annotation_type: annotationType }
+    }),
+
+  // Get fine-tuning status
+  getStatus: () => api.get('/api/finetuning/status'),
+}
+
 export const usersApi = {
   getAll: () => api.get('/api/users'),
   create: (userData: any) => api.post('/api/users', userData),
@@ -151,11 +226,17 @@ export const systemApi = {
   getHealth: () => api.get('/health'),
   getReadiness: () => api.get('/readiness'),
   getMetrics: () => api.get('/api/metrics'),
+  getConfigDiagnostics: () => api.get('/api/config/diagnostics'),
   getProcessorStatus: () => api.get('/api/processor/status'),
   getProcessorTasks: () => api.get('/api/processor/tasks'),
   getActiveClients: () => api.get('/api/clients/active'),
   getDiarizationSettings: () => api.get('/api/diarization-settings'),
   saveDiarizationSettings: (settings: any) => api.post('/api/diarization-settings', settings),
+
+  // Miscellaneous Configuration Settings
+  getMiscSettings: () => api.get('/api/misc-settings'),
+  saveMiscSettings: (settings: { always_persist_enabled?: boolean; use_provider_segments?: boolean }) =>
+    api.post('/api/misc-settings', settings),
   
   // Memory Configuration Management
   getMemoryConfigRaw: () => api.get('/api/admin/memory/config/raw'),
@@ -179,6 +260,38 @@ export const systemApi = {
     api.post('/api/admin/chat/config/validate', configYaml, {
       headers: { 'Content-Type': 'text/plain' }
     }),
+
+  // Plugin Configuration Management (YAML-based)
+  getPluginsConfigRaw: () => api.get('/api/admin/plugins/config'),
+  updatePluginsConfigRaw: (configYaml: string) =>
+    api.post('/api/admin/plugins/config', configYaml, {
+      headers: { 'Content-Type': 'text/plain' }
+    }),
+  validatePluginsConfig: (configYaml: string) =>
+    api.post('/api/admin/plugins/config/validate', configYaml, {
+      headers: { 'Content-Type': 'text/plain' }
+    }),
+
+  // Plugin Configuration Management (Structured/Form-based)
+  getPluginsMetadata: () => api.get('/api/admin/plugins/metadata'),
+  updatePluginConfigStructured: (pluginId: string, config: {
+    orchestration?: {
+      enabled: boolean
+      events: string[]
+      condition: { type: string; wake_words?: string[] }
+    }
+    settings?: Record<string, any>
+    env_vars?: Record<string, string>
+  }) => api.post(`/api/admin/plugins/config/structured/${pluginId}`, config),
+  testPluginConnection: (pluginId: string, config: {
+    orchestration?: {
+      enabled: boolean
+      events: string[]
+      condition: { type: string; wake_words?: string[] }
+    }
+    settings?: Record<string, any>
+    env_vars?: Record<string, string>
+  }) => api.post(`/api/admin/plugins/test-connection/${pluginId}`, config),
 
   // Memory Provider Management
   getMemoryProvider: () => api.get('/api/admin/memory/provider'),
@@ -227,12 +340,11 @@ export const uploadApi = {
       },
     }),
 
-  uploadFromGDriveFolder: (payload: { gdrive_folder_id: string; device_name?: string; auto_generate_client?: boolean }) =>
+  uploadFromGDriveFolder: (payload: { gdrive_folder_id: string; device_name?: string }) =>
     api.post('/api/audio/upload_audio_from_gdrive', null, {
       params: {
         gdrive_folder_id: payload.gdrive_folder_id,
         device_name: payload.device_name,
-        auto_generate_client: payload.auto_generate_client,
       },
       timeout: 300000,
     }),
@@ -302,14 +414,64 @@ export const chatApi = {
 export const speakerApi = {
   // Get current user's speaker configuration
   getSpeakerConfiguration: () => api.get('/api/speaker-configuration'),
-  
+
   // Update current user's speaker configuration
-  updateSpeakerConfiguration: (primarySpeakers: Array<{speaker_id: string, name: string, user_id: number}>) => 
+  updateSpeakerConfiguration: (primarySpeakers: Array<{speaker_id: string, name: string, user_id: number}>) =>
     api.post('/api/speaker-configuration', primarySpeakers),
-    
-  // Get enrolled speakers from speaker recognition service  
+
+  // Get enrolled speakers from speaker recognition service
   getEnrolledSpeakers: () => api.get('/api/enrolled-speakers'),
-  
+
   // Check speaker service status (admin only)
   getSpeakerServiceStatus: () => api.get('/api/speaker-service-status'),
+}
+
+export const knowledgeGraphApi = {
+  // Entity operations
+  getEntities: (entityType?: string, limit: number = 100) =>
+    api.get('/api/knowledge-graph/entities', {
+      params: {
+        ...(entityType && { entity_type: entityType }),
+        limit
+      }
+    }),
+
+  getEntity: (entityId: string) =>
+    api.get(`/api/knowledge-graph/entities/${entityId}`),
+
+  getEntityRelationships: (entityId: string) =>
+    api.get(`/api/knowledge-graph/entities/${entityId}/relationships`),
+
+  deleteEntity: (entityId: string) =>
+    api.delete(`/api/knowledge-graph/entities/${entityId}`),
+
+  // Search
+  searchEntities: (query: string, limit: number = 20) =>
+    api.get('/api/knowledge-graph/search', {
+      params: { query, limit }
+    }),
+
+  // Promise operations
+  getPromises: (status?: string, limit: number = 50) =>
+    api.get('/api/knowledge-graph/promises', {
+      params: {
+        ...(status && { status }),
+        limit
+      }
+    }),
+
+  updatePromiseStatus: (promiseId: string, status: string) =>
+    api.patch(`/api/knowledge-graph/promises/${promiseId}`, { status }),
+
+  deletePromise: (promiseId: string) =>
+    api.delete(`/api/knowledge-graph/promises/${promiseId}`),
+
+  // Timeline
+  getTimeline: (start: string, end: string, limit: number = 100) =>
+    api.get('/api/knowledge-graph/timeline', {
+      params: { start, end, limit }
+    }),
+
+  // Health check
+  getHealth: () => api.get('/api/knowledge-graph/health'),
 }
