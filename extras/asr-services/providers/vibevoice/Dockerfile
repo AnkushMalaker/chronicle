@@ -27,7 +27,7 @@ WORKDIR /app
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ffmpeg git libsndfile1 \
+        curl ffmpeg git libsndfile1 gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy virtual environment from builder
@@ -50,6 +50,7 @@ ENV VIBEVOICE_ATTN_IMPL="sdpa"
 ENV DEVICE="cuda"
 ENV TORCH_DTYPE="bfloat16"
 ENV MAX_NEW_TOKENS="8192"
+ENV QUANTIZATION="4bit"
 
 EXPOSE 8765
 

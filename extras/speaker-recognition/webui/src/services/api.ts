@@ -200,22 +200,6 @@ class ApiService {
     return response.data
   }
 
-  async hybridTranscribeAndDiarize(
-    audioFile: File | Blob,
-    params?: Record<string, any>
-  ): Promise<any> {
-    const formData = new FormData()
-    formData.append('file', audioFile)
-
-    const response = await api.post('/v1/transcribe-and-diarize', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-      params,
-      timeout: 300000, // 5 minutes for hybrid processing
-    })
-    return response.data
-  }
 }
 
 export const apiService = new ApiService()

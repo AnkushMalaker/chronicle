@@ -67,6 +67,7 @@ services:
       - 3002:3000
     environment:
       <<: *langfuse-worker-env
+      HOSTNAME: "0.0.0.0"
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
       LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-}
       LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-}
