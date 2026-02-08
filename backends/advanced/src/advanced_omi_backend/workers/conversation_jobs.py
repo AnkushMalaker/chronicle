@@ -840,8 +840,7 @@ async def generate_title_summary_job(conversation_id: str, *, redis_client=None)
     from advanced_omi_backend.models.conversation import Conversation
     from advanced_omi_backend.utils.conversation_utils import (
         generate_detailed_summary,
-        generate_short_summary,
-        generate_title,
+        generate_title_and_summary,
     )
 
     logger.info(f"📝 Starting title/summary generation for conversation {conversation_id}")
@@ -893,12 +892,11 @@ async def generate_title_summary_job(conversation_id: str, *, redis_client=None)
         except Exception as mem_error:
             logger.warning(f"⚠️ Could not fetch memory context (continuing without): {mem_error}")
 
-        # Generate all three summaries in parallel for efficiency
+        # Generate title+summary (one call) and detailed summary in parallel
         import asyncio
 
-        title, short_summary, detailed_summary = await asyncio.gather(
-            generate_title(transcript_text, segments=segments),
-            generate_short_summary(transcript_text, segments=segments),
+        (title, short_summary), detailed_summary = await asyncio.gather(
+            generate_title_and_summary(transcript_text, segments=segments),
             generate_detailed_summary(
                 transcript_text, segments=segments, memory_context=memory_context
             ),

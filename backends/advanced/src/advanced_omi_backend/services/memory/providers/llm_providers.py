@@ -20,9 +20,9 @@ from advanced_omi_backend.prompt_registry import get_prompt_registry
 
 from ..base import LLMProviderBase
 from ..prompts import (
-    FACT_RETRIEVAL_PROMPT,
+    REPROCESS_SPEAKER_UPDATE_PROMPT,
+    build_reprocess_speaker_messages,
     build_update_memory_messages,
-    get_update_memory_messages,
 )
 from ..update_memory_utils import (
     extract_assistant_xml_from_openai_response,
@@ -354,6 +354,97 @@ class OpenAIProvider(LLMProviderBase):
 
         except Exception as e:
             memory_logger.error(f"OpenAI propose_memory_actions failed: {e}")
+            return {}
+
+
+    async def propose_reprocess_actions(
+        self,
+        existing_memories: List[Dict[str, str]],
+        diff_context: str,
+        new_transcript: str,
+        custom_prompt: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Propose memory updates after speaker re-identification.
+
+        Sends the existing conversation memories, the speaker change diff,
+        and the corrected transcript to the LLM. Returns JSON with
+        ADD/UPDATE/DELETE/NONE actions.
+
+        The system prompt is resolved in priority order:
+        1. ``custom_prompt`` argument (if provided)
+        2. Langfuse override via the prompt registry
+           (prompt id ``memory.reprocess_speaker_update``)
+        3. Registered default from ``prompt_defaults.py``
+
+        Args:
+            existing_memories: List of {id, text} dicts for this conversation
+            diff_context: Formatted string of speaker changes
+            new_transcript: Full updated transcript with corrected speakers
+            custom_prompt: Optional custom system prompt
+
+        Returns:
+            Dictionary with ``memory`` key containing action list
+        """
+        try:
+            # Resolve prompt: explicit arg → Langfuse/registry → hardcoded fallback
+            if custom_prompt and custom_prompt.strip():
+                system_prompt = custom_prompt
+            else:
+                try:
+                    registry = get_prompt_registry()
+                    system_prompt = await registry.get_prompt(
+                        "memory.reprocess_speaker_update"
+                    )
+                except Exception as e:
+                    memory_logger.debug(
+                        f"Registry prompt fetch failed for "
+                        f"memory.reprocess_speaker_update: {e}, "
+                        f"using hardcoded fallback"
+                    )
+                    system_prompt = REPROCESS_SPEAKER_UPDATE_PROMPT
+
+            user_content = build_reprocess_speaker_messages(
+                existing_memories, diff_context, new_transcript
+            )
+
+            messages = [
+                {"role": "system", "content": system_prompt.strip()},
+                {"role": "user", "content": user_content},
+            ]
+
+            memory_logger.info(
+                f"🔄 Reprocess: asking LLM with {len(existing_memories)} existing memories "
+                f"and speaker diff"
+            )
+            memory_logger.debug(
+                f"🔄 Reprocess user content (first 300 chars): {user_content[:300]}..."
+            )
+
+            client = _get_openai_client(
+                api_key=self.api_key, base_url=self.base_url, is_async=True
+            )
+            response = await client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                response_format={"type": "json_object"},
+            )
+            content = (response.choices[0].message.content or "").strip()
+
+            if not content:
+                memory_logger.warning("Reprocess LLM returned empty content")
+                return {}
+
+            result = json.loads(content)
+            memory_logger.info(f"🔄 Reprocess LLM returned: {result}")
+            return result
+
+        except json.JSONDecodeError as e:
+            memory_logger.error(f"Reprocess LLM returned invalid JSON: {e}")
+            return {}
+        except Exception as e:
+            memory_logger.error(f"propose_reprocess_actions failed: {e}")
             return {}
 
 

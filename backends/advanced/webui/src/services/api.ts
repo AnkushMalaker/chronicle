@@ -250,7 +250,7 @@ export const systemApi = {
 
   // Miscellaneous Configuration Settings
   getMiscSettings: () => api.get('/api/misc-settings'),
-  saveMiscSettings: (settings: { always_persist_enabled?: boolean; use_provider_segments?: boolean }) =>
+  saveMiscSettings: (settings: { always_persist_enabled?: boolean; use_provider_segments?: boolean; per_segment_speaker_id?: boolean }) =>
     api.post('/api/misc-settings', settings),
   
   // Memory Configuration Management

@@ -52,8 +52,7 @@ SERVICES = {
         'langfuse': {
             'path': 'extras/langfuse',
             'cmd': ['uv', 'run', '--with-requirements', '../../setup-requirements.txt', 'python', 'init.py'],
-            'description': 'LLM observability and prompt management (local)',
-            'auto_enable': True
+            'description': 'LLM observability and prompt management (local)'
         }
     }
 }
@@ -141,14 +140,8 @@ def select_services(transcription_provider=None):
             console.print(f"  ✅ {service_config['description']} ({provider_label}) [dim](auto-selected)[/dim]")
             continue
 
-        # Auto-enable services marked as such (e.g., langfuse)
-        if service_config.get('auto_enable'):
-            exists, msg = check_service_exists(service_name, service_config)
-            if exists:
-                console.print(f"  ✅ {service_config['description']} [dim](auto-selected)[/dim]")
-                selected.append(service_name)
-            else:
-                console.print(f"  ⏸️  {service_config['description']} - [dim]{msg}[/dim]")
+        # LangFuse is handled separately via setup_langfuse_choice()
+        if service_name == 'langfuse':
             continue
 
         # Check if service exists
@@ -194,7 +187,7 @@ def cleanup_unselected_services(selected_services):
 def run_service_setup(service_name, selected_services, https_enabled=False, server_ip=None,
                      obsidian_enabled=False, neo4j_password=None, hf_token=None,
                      transcription_provider='deepgram', admin_email=None, admin_password=None,
-                     langfuse_public_key=None, langfuse_secret_key=None):
+                     langfuse_public_key=None, langfuse_secret_key=None, langfuse_host=None):
     """Execute individual service setup script"""
     if service_name == 'advanced':
         service = SERVICES['backend'][service_name]
@@ -222,10 +215,12 @@ def run_service_setup(service_name, selected_services, https_enabled=False, serv
         if obsidian_enabled:
             cmd.extend(['--enable-obsidian'])
 
-        # Pass LangFuse keys from langfuse init (if langfuse was set up first)
+        # Pass LangFuse keys from langfuse init or external config
         if langfuse_public_key and langfuse_secret_key:
             cmd.extend(['--langfuse-public-key', langfuse_public_key])
             cmd.extend(['--langfuse-secret-key', langfuse_secret_key])
+            if langfuse_host:
+                cmd.extend(['--langfuse-host', langfuse_host])
 
     else:
         service = SERVICES['extras'][service_name]
@@ -555,6 +550,94 @@ def select_transcription_provider():
             console.print("Using default: Deepgram")
             return "deepgram"
 
+def setup_langfuse_choice():
+    """Ask user about LangFuse configuration: local, external, or disabled.
+
+    Returns:
+        Tuple of (mode, config) where:
+        - mode: 'local', 'external', or None (disabled)
+        - config: dict with keys {host, public_key, secret_key} for external, empty for local/None
+    """
+    console.print("\n📊 [bold cyan]LangFuse Configuration[/bold cyan]")
+    console.print("LangFuse provides LLM observability, tracing, and prompt management")
+    console.print()
+
+    try:
+        enable = Confirm.ask("Enable LangFuse?", default=True)
+    except EOFError:
+        console.print("Using default: Yes")
+        enable = True
+
+    if not enable:
+        console.print("[blue][INFO][/blue] LangFuse disabled")
+        return None, {}
+
+    try:
+        has_existing = Confirm.ask("Do you have an existing LangFuse installation?", default=False)
+    except EOFError:
+        console.print("Using default: No (will set up locally)")
+        has_existing = False
+
+    if not has_existing:
+        # Check if the local langfuse directory exists
+        exists, msg = check_service_exists('langfuse', SERVICES['extras']['langfuse'])
+        if exists:
+            console.print("[green]✅[/green] Will set up local LangFuse instance")
+            return 'local', {}
+        else:
+            console.print(f"[yellow]⚠️  Local LangFuse not available: {msg}[/yellow]")
+            console.print("[yellow]   Skipping LangFuse setup[/yellow]")
+            return None, {}
+
+    # External LangFuse — collect connection details
+    console.print()
+    console.print("[bold]Enter your external LangFuse connection details:[/bold]")
+
+    backend_env_path = 'backends/advanced/.env'
+
+    existing_host = read_env_value(backend_env_path, 'LANGFUSE_HOST')
+    # Don't treat the local docker host as an existing external value
+    if existing_host and 'langfuse-web' in existing_host:
+        existing_host = None
+
+    host = prompt_with_existing_masked(
+        prompt_text="LangFuse host URL",
+        existing_value=existing_host,
+        placeholders=[""],
+        is_password=False,
+        default="https://cloud.langfuse.com"
+    )
+
+    existing_pub = read_env_value(backend_env_path, 'LANGFUSE_PUBLIC_KEY')
+    public_key = prompt_with_existing_masked(
+        prompt_text="LangFuse public key",
+        existing_value=existing_pub,
+        placeholders=[""],
+        is_password=False,
+        default=""
+    )
+
+    existing_sec = read_env_value(backend_env_path, 'LANGFUSE_SECRET_KEY')
+    secret_key = prompt_with_existing_masked(
+        prompt_text="LangFuse secret key",
+        existing_value=existing_sec,
+        placeholders=[""],
+        is_password=True,
+        default=""
+    )
+
+    if not (host and public_key and secret_key):
+        console.print("[yellow]⚠️  Incomplete LangFuse configuration — skipping[/yellow]")
+        return None, {}
+
+    console.print(f"[green]✅[/green] External LangFuse configured: {host}")
+    return 'external', {
+        'host': host,
+        'public_key': public_key,
+        'secret_key': secret_key,
+    }
+
+
 def main():
     """Main orchestration logic"""
     console.print("🎉 [bold green]Welcome to Chronicle![/bold green]\n")
@@ -585,6 +668,11 @@ def main():
     if not selected_services:
         console.print("\n[yellow]No services selected. Exiting.[/yellow]")
         return
+
+    # LangFuse Configuration (before service setup so keys can be passed to backend)
+    langfuse_mode, langfuse_external = setup_langfuse_choice()
+    if langfuse_mode == 'local' and 'langfuse' not in selected_services:
+        selected_services.append('langfuse')
 
     # HF Token Configuration (if services require it)
     hf_token = setup_hf_token_if_needed(selected_services)
@@ -691,8 +779,11 @@ def main():
 
     success_count = 0
     failed_services = []
-    langfuse_public_key = None
-    langfuse_secret_key = None
+
+    # Pre-populate langfuse keys from external config (if user chose external mode)
+    langfuse_public_key = langfuse_external.get('public_key')
+    langfuse_secret_key = langfuse_external.get('secret_key')
+    langfuse_host = langfuse_external.get('host')  # None for local (backend defaults to langfuse-web)
 
     # Determine setup order: langfuse first (to get API keys), then backend (with langfuse keys), then others
     setup_order = []
@@ -713,10 +804,11 @@ def main():
         if run_service_setup(service, selected_services, https_enabled, server_ip,
                             obsidian_enabled, neo4j_password, hf_token, transcription_provider,
                             admin_email=wizard_admin_email, admin_password=wizard_admin_password,
-                            langfuse_public_key=langfuse_public_key, langfuse_secret_key=langfuse_secret_key):
+                            langfuse_public_key=langfuse_public_key, langfuse_secret_key=langfuse_secret_key,
+                            langfuse_host=langfuse_host):
             success_count += 1
 
-            # After langfuse setup, read generated API keys for backend
+            # After local langfuse setup, read generated API keys for backend
             if service == 'langfuse':
                 langfuse_env_path = 'extras/langfuse/.env'
                 langfuse_public_key = read_env_value(langfuse_env_path, 'LANGFUSE_INIT_PROJECT_PUBLIC_KEY')
@@ -773,10 +865,14 @@ def main():
         configured_services.append("langfuse")
 
     # LangFuse prompt management info
-    if 'langfuse' in selected_services and 'langfuse' not in failed_services:
+    if langfuse_mode == 'local' and 'langfuse' not in failed_services:
         console.print("")
         console.print("[bold cyan]Prompt Management:[/bold cyan] Once services are running, edit AI prompts at:")
         console.print("   [link=http://localhost:3002/project/chronicle/prompts]http://localhost:3002/project/chronicle/prompts[/link]")
+    elif langfuse_mode == 'external' and langfuse_host:
+        console.print("")
+        console.print(f"[bold cyan]Prompt Management:[/bold cyan] Edit AI prompts at your LangFuse instance:")
+        console.print(f"   {langfuse_host}")
 
     if configured_services:
         service_list = " ".join(configured_services)

@@ -1021,7 +1021,7 @@ async def _process_rolling_batch(
             conversation_id,
             version_id,
             f"rolling_batch_{batch_number}",  # trigger
-            job_timeout=1800,  # 30 minutes
+            job_timeout=900,  # 15 minutes
             result_ttl=JOB_RESULT_TTL,
             job_id=transcribe_job_id,
             description=f"Transcribe rolling batch #{batch_number} {conversation_id[:8]}",
@@ -1137,7 +1137,7 @@ async def _process_batch_audio_complete(
             conversation_id,
             version_id,
             "batch",  # trigger
-            job_timeout=1800,  # 30 minutes
+            job_timeout=900,  # 15 minutes
             result_ttl=JOB_RESULT_TTL,
             job_id=transcribe_job_id,
             description=f"Transcribe batch audio {conversation_id[:8]}",

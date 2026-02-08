@@ -13,6 +13,8 @@ from rich.console import Console
 from rich.table import Table
 from dotenv import dotenv_values
 
+from setup_utils import read_env_value
+
 console = Console()
 
 def load_config_yml():
@@ -61,11 +63,87 @@ SERVICES = {
     }
 }
 
+def _get_backend_env_path() -> Path:
+    return Path(__file__).parent / "backends" / "advanced" / ".env"
+
+
+def _langfuse_enabled_in_backend() -> bool:
+    """Check if backend is configured to send traces to LangFuse."""
+    backend_env_path = _get_backend_env_path()
+    return all(
+        read_env_value(backend_env_path, key)
+        for key in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST")
+    )
+
+
+def _langfuse_is_external() -> bool:
+    """Check if backend is configured for an external LangFuse (not local docker)."""
+    backend_env_path = _get_backend_env_path()
+    host = read_env_value(backend_env_path, "LANGFUSE_HOST")
+    return bool(host) and "langfuse-web" not in host
+
+
+def _ensure_langfuse_env() -> bool:
+    """Ensure extras/langfuse/.env exists when backend enables LangFuse."""
+    service = SERVICES["langfuse"]
+    service_path = Path(service["path"])
+    env_path = service_path / ".env"
+
+    if env_path.exists():
+        return True
+
+    backend_env_path = _get_backend_env_path()
+    if not _langfuse_enabled_in_backend():
+        console.print(
+            "[yellow]⚠️  LangFuse is enabled in services list but backend is not "
+            "configured for LangFuse. Skipping.[/yellow]"
+        )
+        return False
+
+    if _langfuse_is_external():
+        console.print(
+            "[blue]ℹ️  Backend is configured for an external LangFuse instance. "
+            "Local LangFuse service not needed.[/blue]"
+        )
+        return False
+
+    console.print(
+        "[blue]ℹ️  LangFuse enabled in backend but extras/langfuse/.env is missing. "
+        "Running LangFuse init...[/blue]"
+    )
+
+    cmd = ["uv", "run", "python3", "init.py"]
+    admin_email = read_env_value(backend_env_path, "ADMIN_EMAIL") or ""
+    admin_password = read_env_value(backend_env_path, "ADMIN_PASSWORD") or ""
+    if admin_email:
+        cmd.extend(["--admin-email", admin_email])
+    if admin_password:
+        cmd.extend(["--admin-password", admin_password])
+
+    try:
+        result = subprocess.run(cmd, cwd=service_path)
+        if result.returncode != 0:
+            console.print("[red]❌ LangFuse init failed[/red]")
+            return False
+    except Exception as e:
+        console.print(f"[red]❌ LangFuse init error: {e}[/red]")
+        return False
+
+    if not env_path.exists():
+        console.print("[red]❌ LangFuse .env not created; cannot start service[/red]")
+        return False
+
+    return True
+
+
 def check_service_configured(service_name):
     """Check if service is configured (has .env file)"""
     service = SERVICES[service_name]
     service_path = Path(service['path'])
-    
+
+    if service_name == 'langfuse':
+        return (service_path / '.env').exists()
+
     # Backend uses advanced init, others use .env
     if service_name == 'backend':
         return (service_path / '.env').exists()
@@ -329,6 +407,10 @@ def start_services(services, build=False):
             console.print(f"[red]❌ Unknown service: {service_name}[/red]")
             continue
             
+        if service_name == "langfuse" and not _ensure_langfuse_env():
+            console.print("[yellow]⚠️  LangFuse not configured, skipping[/yellow]")
+            continue
+
         if not check_service_configured(service_name):
             console.print(f"[yellow]⚠️  {service_name} not configured, skipping[/yellow]")
             continue

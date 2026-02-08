@@ -665,7 +665,7 @@ async def create_audio_only_conversation(
 
 @async_job(redis=True, beanie=True)
 async def transcription_fallback_check_job(
-    session_id: str, user_id: str, client_id: str, timeout_seconds: int = 1800, *, redis_client=None
+    session_id: str, user_id: str, client_id: str, timeout_seconds: int = 900, *, redis_client=None
 ) -> Dict[str, Any]:
     """
     Check if streaming transcription succeeded, fallback to batch if needed.
@@ -678,7 +678,7 @@ async def transcription_fallback_check_job(
         session_id: Stream session ID
         user_id: User ID
         client_id: Client ID
-        timeout_seconds: Max wait time for batch transcription (default 30 minutes)
+        timeout_seconds: Max wait time for batch transcription (default 15 minutes)
         redis_client: Redis client (injected by decorator)
 
     Returns:
@@ -834,7 +834,7 @@ async def transcription_fallback_check_job(
         conversation.conversation_id,
         version_id,
         "batch_fallback",
-        job_timeout=1800,
+        job_timeout=900,  # 15 minutes
         job_id=f"transcribe_{conversation.conversation_id[:12]}",
         description=f"Batch transcription fallback for {session_id[:8]}",
         meta={"session_id": session_id, "client_id": client_id},
@@ -1260,8 +1260,8 @@ async def stream_speech_detection_job(
         session_id,
         user_id,
         client_id,
-        timeout_seconds=1800,  # 30 minutes for batch transcription
-        job_timeout=2400,  # 40 minutes job timeout
+        timeout_seconds=900,  # 15 minutes for batch transcription
+        job_timeout=1200,  # 20 minutes job timeout (includes overhead for fallback check)
         job_id=f"fallback_check_{session_id[:12]}",
         description=f"Transcription fallback check for {session_id[:8]} (no speech)",
         meta={"session_id": session_id, "client_id": client_id, "no_speech": True},

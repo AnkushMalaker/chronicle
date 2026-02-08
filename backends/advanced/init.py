@@ -547,12 +547,14 @@ class ChronicleSetup:
 
         if langfuse_pub and langfuse_sec:
             # Auto-configure from wizard — no prompts needed
-            self.config["LANGFUSE_HOST"] = "http://langfuse-web:3000"
+            langfuse_host = getattr(self.args, 'langfuse_host', None) or "http://langfuse-web:3000"
+            self.config["LANGFUSE_HOST"] = langfuse_host
             self.config["LANGFUSE_PUBLIC_KEY"] = langfuse_pub
             self.config["LANGFUSE_SECRET_KEY"] = langfuse_sec
-            self.config["LANGFUSE_BASE_URL"] = "http://langfuse-web:3000"
-            self.console.print("[green][SUCCESS][/green] LangFuse auto-configured from wizard")
-            self.console.print(f"[blue][INFO][/blue] Host: http://langfuse-web:3000")
+            self.config["LANGFUSE_BASE_URL"] = langfuse_host
+            source = "external" if "langfuse-web" not in langfuse_host else "local"
+            self.console.print(f"[green][SUCCESS][/green] LangFuse auto-configured ({source})")
+            self.console.print(f"[blue][INFO][/blue] Host: {langfuse_host}")
             self.console.print(f"[blue][INFO][/blue] Public key: {self.mask_api_key(langfuse_pub)}")
             return
 
@@ -920,9 +922,11 @@ def main():
     parser.add_argument("--ts-authkey",
                        help="Tailscale auth key for Docker integration (default: prompt user)")
     parser.add_argument("--langfuse-public-key",
-                       help="LangFuse project public key (from langfuse init)")
+                       help="LangFuse project public key (from langfuse init or external)")
     parser.add_argument("--langfuse-secret-key",
-                       help="LangFuse project secret key (from langfuse init)")
+                       help="LangFuse project secret key (from langfuse init or external)")
+    parser.add_argument("--langfuse-host",
+                       help="LangFuse host URL (default: http://langfuse-web:3000 for local)")
 
     args = parser.parse_args()
     

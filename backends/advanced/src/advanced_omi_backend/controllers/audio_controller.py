@@ -187,7 +187,7 @@ async def upload_and_process_audio_files(
                         conversation_id,
                         version_id,
                         "batch",  # trigger
-                        job_timeout=1800,  # 30 minutes
+                        job_timeout=900,  # 15 minutes
                         result_ttl=JOB_RESULT_TTL,
                         job_id=transcribe_job_id,
                         description=f"Transcribe uploaded file {conversation_id[:8]}",

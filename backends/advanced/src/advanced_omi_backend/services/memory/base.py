@@ -205,6 +205,45 @@ class MemoryServiceBase(ABC):
         """
         return False
 
+    async def reprocess_memory(
+        self,
+        transcript: str,
+        client_id: str,
+        source_id: str,
+        user_id: str,
+        user_email: str,
+        transcript_diff: Optional[List[Dict[str, Any]]] = None,
+        previous_transcript: Optional[str] = None,
+    ) -> Tuple[bool, List[str]]:
+        """Reprocess memories after transcript or speaker changes.
+
+        This method is called when a conversation's transcript has been
+        reprocessed (e.g., speaker re-identification) and memories need
+        to be updated to reflect the changes.
+
+        The default implementation falls back to normal ``add_memory``
+        with ``allow_update=True``. Providers that support diff-aware
+        reprocessing should override this method.
+
+        Args:
+            transcript: Updated full transcript text (with corrected speakers)
+            client_id: Client identifier
+            source_id: Conversation/source identifier
+            user_id: User identifier
+            user_email: User email address
+            transcript_diff: List of dicts describing what changed between
+                the old and new transcript (speaker changes, text changes).
+                Each dict has keys like ``type``, ``old_speaker``,
+                ``new_speaker``, ``text``, ``start``, ``end``.
+            previous_transcript: The previous transcript text (before changes)
+
+        Returns:
+            Tuple of (success: bool, affected_memory_ids: List[str])
+        """
+        return await self.add_memory(
+            transcript, client_id, source_id, user_id, user_email, allow_update=True
+        )
+
     @abstractmethod
     async def delete_memory(
         self, memory_id: str, user_id: Optional[str] = None, user_email: Optional[str] = None
@@ -331,6 +370,37 @@ class LLMProviderBase(ABC):
         """
         pass
 
+    async def propose_reprocess_actions(
+        self,
+        existing_memories: List[Dict[str, str]],
+        diff_context: str,
+        new_transcript: str,
+        custom_prompt: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Propose memory updates after transcript reprocessing (e.g., speaker changes).
+
+        Uses the LLM to review existing conversation memories in light of
+        specific transcript changes (speaker re-identification, text corrections)
+        and propose targeted ADD/UPDATE/DELETE/NONE actions.
+
+        Default implementation raises NotImplementedError. Providers that
+        support diff-aware reprocessing should override this method.
+
+        Args:
+            existing_memories: List of existing memories for the conversation
+                (each dict has ``id`` and ``text`` keys)
+            diff_context: Formatted string describing what changed in the
+                transcript (e.g., speaker relabelling details)
+            new_transcript: The updated full transcript text
+            custom_prompt: Optional custom system prompt
+
+        Returns:
+            Dictionary containing proposed actions in ``{"memory": [...]}`` format
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support propose_reprocess_actions"
+        )
+
     @abstractmethod
     async def test_connection(self) -> bool:
         """Test connection to the LLM provider.
@@ -414,6 +484,24 @@ class VectorStoreBase(ABC):
             Total count of memories for the user, or None if counting is not supported by this store
         """
         return None
+
+    async def get_memories_by_source(
+        self, user_id: str, source_id: str, limit: int = 100
+    ) -> List["MemoryEntry"]:
+        """Get all memories for a specific source (conversation) for a user.
+
+        Default implementation returns empty list. Vector stores should
+        override to filter by metadata.source_id.
+
+        Args:
+            user_id: User identifier
+            source_id: Source/conversation identifier
+            limit: Maximum number of memories to return
+
+        Returns:
+            List of MemoryEntry objects for the specified source
+        """
+        return []
 
     @abstractmethod
     async def update_memory(

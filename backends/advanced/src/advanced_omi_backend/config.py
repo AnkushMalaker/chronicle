@@ -198,9 +198,14 @@ def get_misc_settings() -> dict:
     transcription_cfg = get_backend_config('transcription')
     transcription_settings = OmegaConf.to_container(transcription_cfg, resolve=True) if transcription_cfg else {}
 
+    # Get speaker recognition settings for per_segment_speaker_id
+    speaker_cfg = get_backend_config('speaker_recognition')
+    speaker_settings = OmegaConf.to_container(speaker_cfg, resolve=True) if speaker_cfg else {}
+
     return {
         'always_persist_enabled': audio_settings.get('always_persist_enabled', False),
-        'use_provider_segments': transcription_settings.get('use_provider_segments', False)
+        'use_provider_segments': transcription_settings.get('use_provider_segments', False),
+        'per_segment_speaker_id': speaker_settings.get('per_segment_speaker_id', False),
     }
 
 
@@ -226,6 +231,12 @@ def save_misc_settings(settings: dict) -> bool:
     if 'use_provider_segments' in settings:
         transcription_settings = {'use_provider_segments': settings['use_provider_segments']}
         if not save_config_section('backend.transcription', transcription_settings):
+            success = False
+
+    # Save speaker recognition settings if per_segment_speaker_id is provided
+    if 'per_segment_speaker_id' in settings:
+        speaker_settings = {'per_segment_speaker_id': settings['per_segment_speaker_id']}
+        if not save_config_section('backend.speaker_recognition', speaker_settings):
             success = False
 
     return success

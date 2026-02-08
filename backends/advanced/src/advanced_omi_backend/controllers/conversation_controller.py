@@ -488,7 +488,7 @@ async def reprocess_transcript(conversation_id: str, user: User):
             conversation_id,
             version_id,
             "reprocess",
-            job_timeout=600,
+            job_timeout=900,  # 15 minutes
             result_ttl=JOB_RESULT_TTL,
             job_id=f"reprocess_{conversation_id[:8]}",
             description=f"Transcribe audio for {conversation_id[:8]}",
@@ -722,13 +722,23 @@ async def reprocess_speakers(conversation_id: str, transcript_version_id: str, u
             provider_capabilities.get("diarization", False)
             or source_version.diarization_source == "provider"
         )
+        has_words = bool(source_version.words)
+        has_segments = bool(source_version.segments)
 
-        if not source_version.words and not (provider_has_diarization and source_version.segments):
+        if not has_words and not has_segments:
             return JSONResponse(
                 status_code=400,
                 content={
-                    "error": "Cannot re-diarize transcript without word timings. Words are required for diarization."
+                    "error": (
+                        "Cannot re-diarize transcript without word timings or segments. "
+                        "Word timestamps or provider segments are required."
+                    )
                 },
+            )
+        if not has_words and has_segments and not provider_has_diarization:
+            logger.warning(
+                "Reprocessing speakers without word timings; "
+                "falling back to segment-based identification only."
             )
 
         # 5. Check if speaker recognition is enabled
@@ -752,10 +762,13 @@ async def reprocess_speakers(conversation_id: str, transcript_version_id: str, u
             "reprocessing_type": "speaker_diarization",
             "source_version_id": source_version_id,
             "trigger": "manual_reprocess",
+            "provider_capabilities": provider_capabilities,
         }
-        if provider_has_diarization:
+        use_segments = provider_has_diarization or not has_words
+        if use_segments:
             new_segments = source_version.segments  # COPY provider segments
-            new_metadata["provider_capabilities"] = provider_capabilities
+            if not has_words and not provider_has_diarization:
+                new_metadata["segments_only"] = True
         else:
             new_segments = []  # Empty - will be populated by speaker job
 
@@ -772,7 +785,7 @@ async def reprocess_speakers(conversation_id: str, transcript_version_id: str, u
         )
 
         # Carry over diarization_source so speaker job knows to use segment identification
-        if provider_has_diarization:
+        if provider_has_diarization or (not has_words and has_segments):
             new_version.diarization_source = "provider"
 
         # Save conversation with new version
