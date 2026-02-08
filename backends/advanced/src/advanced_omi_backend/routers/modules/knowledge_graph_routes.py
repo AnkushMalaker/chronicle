@@ -168,7 +168,7 @@ async def update_entity(
     These annotations feed the jargon and entity extraction pipelines.
     """
     try:
-        if not request.name and not request.details and not request.icon:
+        if request.name is None and request.details is None and request.icon is None:
             raise HTTPException(
                 status_code=400,
                 detail="At least one field (name, details, icon) must be provided",

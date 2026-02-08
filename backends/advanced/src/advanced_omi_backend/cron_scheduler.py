@@ -72,6 +72,7 @@ class CronScheduler:
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._redis: Optional[aioredis.Redis] = None
+        self._active_tasks: set[asyncio.Task] = set()
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -107,6 +108,8 @@ class CronScheduler:
         """Manually trigger a job regardless of schedule."""
         if job_id not in self.jobs:
             raise ValueError(f"Unknown cron job: {job_id}")
+        if self.jobs[job_id].running:
+            return {"error": f"Job '{job_id}' is already running"}
         return await self._execute_job(job_id)
 
     async def update_job(
@@ -171,6 +174,9 @@ class CronScheduler:
 
         for job_id, job_cfg in cron_section.items():
             schedule = str(job_cfg.get("schedule", "0 * * * *"))
+            if not croniter.is_valid(schedule):
+                logger.warning(f"Invalid cron expression for job '{job_id}': {schedule} — skipping")
+                continue
             now = datetime.now(timezone.utc)
             self.jobs[job_id] = CronJobConfig(
                 job_id=job_id,
@@ -256,7 +262,9 @@ class CronScheduler:
                     if not cfg.enabled or cfg.running:
                         continue
                     if cfg.next_run and now >= cfg.next_run:
-                        asyncio.create_task(self._execute_job(job_id))
+                        task = asyncio.create_task(self._execute_job(job_id))
+                        self._active_tasks.add(task)
+                        task.add_done_callback(self._active_tasks.discard)
             except Exception as e:
                 logger.error(f"Error in cron scheduler loop: {e}", exc_info=True)
             await asyncio.sleep(30)

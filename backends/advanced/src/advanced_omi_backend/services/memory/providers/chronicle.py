@@ -598,7 +598,7 @@ class MemoryService(MemoryServiceBase):
                         timeout=self.config.timeout_seconds,
                     )
                     text_to_embedding = dict(
-                        zip(texts_needing_embeddings, embeddings)
+                        zip(texts_needing_embeddings, embeddings, strict=True)
                     )
                 except Exception as e:
                     memory_logger.warning(

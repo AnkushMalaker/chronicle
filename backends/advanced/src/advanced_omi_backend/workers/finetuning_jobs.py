@@ -105,6 +105,7 @@ async def run_speaker_finetuning_job() -> dict:
                 failed += 1
                 continue
 
+            # Intentional: only single admin user (user_id=1) is supported currently
             existing_speaker = await speaker_client.get_speaker_by_name(
                 speaker_name=annotation.corrected_speaker,
                 user_id=1,

@@ -5,6 +5,10 @@ This module provides an optional integration with the speaker recognition servic
 to enhance transcripts with actual speaker names instead of generic labels.
 
 Configuration is managed via config.yml (speaker_recognition section).
+
+NOTE: user_id is currently hardcoded to "1" throughout this client because only
+a single admin user is supported at this time. Update when multi-user support
+is implemented.
 """
 
 import asyncio

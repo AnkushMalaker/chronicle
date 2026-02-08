@@ -415,7 +415,7 @@ export class SpeakerIdentificationService {
       const speakers: SpeakerSegment[] = backendSegments.map((segment: any) => ({
         start: segment.start,
         end: segment.end,
-        speaker_id: segment.identified_id || segment.speaker,
+        speaker_id: segment.speaker_id || segment.speaker,
         speaker_name: segment.identified_as || `Unknown (${segment.speaker})`,
         confidence: segment.confidence || 0
         // No text in diarization-only mode
@@ -502,7 +502,7 @@ export class SpeakerIdentificationService {
       const speakers: SpeakerSegment[] = backendSegments.map((segment: any) => ({
         start: segment.start,
         end: segment.end,
-        speaker_id: segment.identified_id || segment.speaker,
+        speaker_id: segment.speaker_id || segment.speaker,
         speaker_name: segment.identified_as || `Unknown (${segment.speaker})`,
         confidence: segment.confidence || 0,
         text: segment.text // This mode includes matched transcript text

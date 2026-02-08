@@ -57,7 +57,11 @@ async def gather_transcription_context(user_id: Optional[str] = None) -> Transcr
     from advanced_omi_backend.prompt_registry import get_prompt_registry
 
     registry = get_prompt_registry()
-    hot_words = await registry.get_prompt("asr.hot_words")
+    try:
+        hot_words = await registry.get_prompt("asr.hot_words")
+    except Exception:
+        logger.debug("Failed to fetch asr.hot_words prompt, using empty default")
+        hot_words = ""
 
     user_jargon = ""
     if user_id:

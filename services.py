@@ -554,7 +554,11 @@ def main():
         
     elif args.command == 'start':
         if args.all:
-            services = [s for s in SERVICES.keys() if check_service_configured(s)]
+            services = [
+                s for s in SERVICES.keys()
+                if check_service_configured(s)
+                or (s == "langfuse" and _langfuse_enabled_in_backend())
+            ]
         elif args.services:
             # Validate service names
             invalid_services = [s for s in args.services if s not in SERVICES]

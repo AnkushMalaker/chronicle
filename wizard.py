@@ -18,6 +18,7 @@ from setup_utils import (
     detect_tailscale_info,
     is_placeholder,
     mask_value,
+    prompt_password,
     prompt_with_existing_masked,
     read_env_value,
 )
@@ -741,19 +742,15 @@ def main():
         console.print("Neo4j is used for Knowledge Graph (entity/relationship extraction from conversations)")
         console.print()
 
-        # Always prompt for Neo4j password
-        while True:
-            try:
-                neo4j_password = console.input("Neo4j password (min 8 chars) [default: neo4jpassword]: ").strip()
-                if not neo4j_password:
-                    neo4j_password = "neo4jpassword"
-                if len(neo4j_password) >= 8:
-                    break
-                console.print("[yellow][WARNING][/yellow] Password must be at least 8 characters")
-            except EOFError:
-                neo4j_password = "neo4jpassword"
-                console.print(f"Using default password")
-                break
+        # Always prompt for Neo4j password (masked input)
+        try:
+            console.print("Neo4j password (min 8 chars) [leave empty for default: neo4jpassword]")
+            neo4j_password = prompt_password("Neo4j password", min_length=8)
+        except (EOFError, KeyboardInterrupt):
+            neo4j_password = "neo4jpassword"
+            console.print("Using default password")
+        if not neo4j_password:
+            neo4j_password = "neo4jpassword"
 
         console.print("[green]✅[/green] Neo4j configured")
 
