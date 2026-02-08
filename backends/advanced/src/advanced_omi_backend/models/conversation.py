@@ -5,13 +5,13 @@ This module contains Beanie Document and Pydantic models for conversations,
 transcript versions, and memory versions.
 """
 
-from datetime import datetime
-from typing import Dict, List, Optional, Any, Union
-from pydantic import BaseModel, Field, model_validator, computed_field, field_validator
-from enum import Enum
 import uuid
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional, Union
 
 from beanie import Document, Indexed
+from pydantic import BaseModel, Field, computed_field, model_validator
 from pymongo import IndexModel
 
 
@@ -56,6 +56,7 @@ class Conversation(Document):
         end: float = Field(description="End time in seconds")
         text: str = Field(description="Transcript text for this segment")
         speaker: str = Field(description="Speaker identifier")
+        identified_as: Optional[str] = Field(None, description="Speaker name from speaker recognition (None if not identified)")
         confidence: Optional[float] = Field(None, description="Confidence score (0-1)")
         words: List["Conversation.Word"] = Field(default_factory=list, description="Word-level timestamps for this segment")
 
@@ -71,10 +72,14 @@ class Conversation(Document):
             default_factory=list,
             description="Speaker segments (filled by speaker recognition)"
         )
-        provider: Optional[str] = Field(None, description="Transcription provider used (deepgram, parakeet, etc.)")
+        provider: Optional[str] = Field(None, description="Transcription provider used (deepgram, parakeet, vibevoice, etc.)")
         model: Optional[str] = Field(None, description="Model used (e.g., nova-3, parakeet)")
         created_at: datetime = Field(description="When this version was created")
         processing_time_seconds: Optional[float] = Field(None, description="Time taken to process")
+        diarization_source: Optional[str] = Field(
+            None,
+            description="Source of speaker diarization: 'provider' (transcription service), 'pyannote' (speaker recognition), or None"
+        )
         metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional provider-specific metadata")
         maybe_anomaly: Optional[Union[bool, str]] = Field(
             None,
@@ -131,6 +136,16 @@ class Conversation(Document):
     deleted: bool = Field(False, description="Whether this conversation was deleted due to processing failure")
     deletion_reason: Optional[str] = Field(None, description="Reason for deletion (no_meaningful_speech, audio_file_not_ready, etc.)")
     deleted_at: Optional[datetime] = Field(None, description="When the conversation was marked as deleted")
+
+    # Always persist audio flag and processing status
+    processing_status: Optional[str] = Field(
+        None,
+        description="Processing status: pending_transcription, transcription_failed, completed"
+    )
+    always_persist: bool = Field(
+        default=False,
+        description="Flag indicating conversation was created for audio persistence"
+    )
 
     # Conversation completion tracking
     end_reason: Optional["Conversation.EndReason"] = Field(None, description="Reason why the conversation ended")
@@ -262,6 +277,28 @@ class Conversation(Document):
     def memory_version_count(self) -> int:
         """Get count of memory versions."""
         return len(self.memory_versions)
+
+    @computed_field
+    @property
+    def active_transcript_version_number(self) -> Optional[int]:
+        """Get 1-based version number of the active transcript version."""
+        if not self.active_transcript_version:
+            return None
+        for i, version in enumerate(self.transcript_versions):
+            if version.version_id == self.active_transcript_version:
+                return i + 1
+        return None
+
+    @computed_field
+    @property
+    def active_memory_version_number(self) -> Optional[int]:
+        """Get 1-based version number of the active memory version."""
+        if not self.active_memory_version:
+            return None
+        for i, version in enumerate(self.memory_versions):
+            if version.version_id == self.active_memory_version:
+                return i + 1
+        return None
 
     def add_transcript_version(
         self,

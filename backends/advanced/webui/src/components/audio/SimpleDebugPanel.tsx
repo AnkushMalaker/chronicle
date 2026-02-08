@@ -1,7 +1,7 @@
-import { SimpleAudioRecordingReturn } from '../../hooks/useSimpleAudioRecording'
+import { RecordingContextType } from '../../contexts/RecordingContext'
 
 interface SimpleDebugPanelProps {
-  recording: SimpleAudioRecordingReturn
+  recording: RecordingContextType
 }
 
 export default function SimpleDebugPanel({ recording }: SimpleDebugPanelProps) {

@@ -1,6 +1,7 @@
 """Client for fetching audio from Chronicle backend."""
 
 import logging
+import time
 from typing import Optional
 
 import httpx
@@ -17,11 +18,26 @@ class BackendClient:
 
         Args:
             base_url: Backend API base URL (e.g., http://host.docker.internal:8000)
-            timeout: Request timeout in seconds (default: 30.0)
+            timeout: Request timeout in seconds (default: 30.0, used for metadata)
         """
         self.base_url = base_url.rstrip('/')
         self.timeout = timeout
-        self.client = httpx.AsyncClient(timeout=self.timeout)
+        
+        # Default timeout for metadata and other quick operations
+        self.default_timeout = httpx.Timeout(timeout, read=timeout)
+        
+        # Extended timeout for audio fetching (large files can take time)
+        # Connect: 10s, Read: 60s, Write: 30s, Pool: 10s
+        # TODO: Adjust read timeout based on actual measured decode times
+        self.audio_timeout = httpx.Timeout(
+            connect=10.0,
+            read=60.0,
+            write=30.0,
+            pool=10.0
+        )
+        
+        # Use default timeout for the client (will override per-request)
+        self.client = httpx.AsyncClient(timeout=self.default_timeout)
 
     async def get_conversation_metadata(self, conversation_id: str, token: str) -> dict:
         """
@@ -87,12 +103,24 @@ class BackendClient:
             f"start={start:.1f}s, duration={duration or 'all'}s"
         )
 
-        response = await self.client.get(url, params=params, headers=headers)
+        fetch_start = time.time()
+        
+        # Use extended timeout for audio fetching (large files can take time)
+        response = await self.client.get(
+            url, 
+            params=params, 
+            headers=headers,
+            timeout=self.audio_timeout
+        )
         response.raise_for_status()
 
         wav_bytes = response.content
+        fetch_time = time.time() - fetch_start
+        
         logger.info(
-            f"Fetched audio segment: {len(wav_bytes) / 1024 / 1024:.2f} MB"
+            f"Fetched audio segment: {len(wav_bytes) / 1024 / 1024:.2f} MB "
+            f"in {fetch_time:.2f}s (conversation={conversation_id[:12]}, "
+            f"start={start:.1f}s, duration={duration or 'all'}s)"
         )
 
         return wav_bytes

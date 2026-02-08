@@ -59,6 +59,7 @@ services:
       # Wait for audio queue to drain before timing out (test mode)
       - WAIT_FOR_AUDIO_QUEUE_DRAIN=true
       # Mock speaker recognition for tests (avoids resource-intensive ML service)
+      # To test with REAL speaker recognition: set to 'false' and start extras/speaker-recognition service
       - USE_MOCK_SPEAKER_CLIENT=true
     depends_on:
       qdrant-test:
@@ -137,7 +138,7 @@ services:
       context: ../../extras/speaker-recognition
       dockerfile: Dockerfile
       args:
-        PYTORCH_CUDA_VERSION: cpu
+        PYTORCH_CUDA_VERSION: cu12.6
     image: speaker-recognition-test:latest
     ports:
       - "8086:8085"  # Avoid conflict with dev speaker service on 8085
@@ -163,6 +164,49 @@ services:
     restart: unless-stopped
     profiles:
       - speaker  # Optional service - only start when explicitly enabled
+
+  mock-streaming-stt:
+    build:
+      context: ../..
+      dockerfile: tests/Dockerfile.mock-streaming-stt
+    ports:
+      - "9999:9999"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.connect(('localhost',9999)); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  mock-llm:
+    build:
+      context: ../..
+      dockerfile: tests/Dockerfile.mock-llm
+    ports:
+      - "11435:11435"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:11435/health').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  mock-asr:
+    build:
+      context: ../..
+      dockerfile: tests/Dockerfile.mock-asr
+    ports:
+      - "8765:8765"
+    environment:
+      # Provider mode for mock ASR: mock, parakeet, vibevoice, deepgram
+      # vibevoice mode returns diarized segments with speaker labels
+      MOCK_ASR_PROVIDER: ${MOCK_ASR_PROVIDER:-mock}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8765/health').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
 
   workers-test:
     build:
@@ -212,6 +256,7 @@ services:
       # Wait for audio queue to drain before timing out (test mode)
       - WAIT_FOR_AUDIO_QUEUE_DRAIN=true
       # Mock speaker recognition for tests (avoids resource-intensive ML service)
+      # To test with REAL speaker recognition: set to 'false' and start extras/speaker-recognition service
       - USE_MOCK_SPEAKER_CLIENT=true
     depends_on:
       chronicle-backend-test:

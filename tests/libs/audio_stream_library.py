@@ -44,6 +44,7 @@ def stream_audio_file(
     device_name: str = "robot-test",
     recording_mode: str = "streaming",
     use_wyoming: bool = True,
+    always_persist: bool = False,
 ) -> int:
     """Stream a WAV file via WebSocket (blocking)."""
     return _stream_audio_file(
@@ -53,6 +54,7 @@ def stream_audio_file(
         device_name=device_name,
         recording_mode=recording_mode,
         use_wyoming=use_wyoming,
+        always_persist=always_persist,
     )
 
 
@@ -65,6 +67,7 @@ def start_audio_stream(
     token: str,
     device_name: str = "robot-test",
     recording_mode: str = "streaming",
+    always_persist: bool = False,
 ) -> str:
     """Start a new audio stream (non-blocking)."""
     return _manager.start_stream(
@@ -72,6 +75,7 @@ def start_audio_stream(
         token=token,
         device_name=device_name,
         recording_mode=recording_mode,
+        always_persist=always_persist,
     )
 
 

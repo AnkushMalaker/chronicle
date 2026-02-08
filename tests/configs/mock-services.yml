@@ -4,17 +4,19 @@ chat:
 defaults:
   embedding: mock-embed
   llm: mock-llm
+  stt: mock-stt
+  stt_stream: mock-stt-stream
   vector_store: vs-qdrant
 memory:
   extraction:
-    enabled: false
+    enabled: true
     prompt: ''
   provider: chronicle
   timeout_seconds: 1200
 models:
 - api_family: openai
   api_key: dummy-key-not-used
-  description: Dummy LLM for testing (not called)
+  description: Mock LLM server for testing (local)
   model_name: gpt-4o-mini
   model_output: json
   model_params:
@@ -22,17 +24,17 @@ models:
     temperature: 0.2
   model_provider: openai
   model_type: llm
-  model_url: https://api.openai.com/v1
+  model_url: http://host.docker.internal:11435
   name: mock-llm
 - api_family: openai
   api_key: dummy-key-not-used
-  description: Dummy embeddings for testing (not called)
-  embedding_dimensions: 384
+  description: Mock embedding server for testing (local)
+  embedding_dimensions: 1536
   model_name: text-embedding-3-small
   model_output: vector
   model_provider: openai
   model_type: embedding
-  model_url: https://api.openai.com/v1
+  model_url: http://host.docker.internal:11435
   name: mock-embed
 - api_family: qdrant
   description: Qdrant vector database (local)
@@ -44,6 +46,53 @@ models:
   model_type: vector_store
   model_url: http://${oc.env:QDRANT_BASE_URL,qdrant}:${oc.env:QDRANT_PORT,6333}
   name: vs-qdrant
+- api_family: mock
+  api_key: mock-key-not-used
+  description: Mock STT for testing (batch)
+  model_provider: mock
+  model_type: stt
+  model_url: http://host.docker.internal:9999
+  name: mock-stt
+  operations:
+    stt_transcribe:
+      headers:
+        Content-Type: audio/raw
+      method: POST
+      path: /transcribe
+      response:
+        extract:
+          text: text
+          words: words
+          segments: segments
+        type: json
+- api_family: mock
+  api_key: mock-key-not-used
+  description: Mock STT for testing (streaming)
+  model_provider: mock
+  model_type: stt_stream
+  model_url: ws://host.docker.internal:9999
+  name: mock-stt-stream
+  operations:
+    chunk_header:
+      message: {}
+    end:
+      message:
+        type: CloseStream
+    expect:
+      extract:
+        text: channel.alternatives[0].transcript
+        words: channel.alternatives[0].words
+        segments: []
+      final_type: Results
+      interim_type: Results
+    start:
+      message: {}
+backend:
+  audio:
+    # Enable always_persist for testing - creates placeholder conversations immediately
+    always_persist_enabled: true
+  transcription:
+    use_provider_segments: true
 speaker_recognition:
   enabled: false
   timeout: 60

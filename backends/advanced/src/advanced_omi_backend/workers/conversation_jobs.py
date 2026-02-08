@@ -6,30 +6,32 @@ This module contains jobs related to conversation management and updates.
 
 import asyncio
 import logging
-import time, os
+import os
+import time
 from datetime import datetime
-from typing import Dict, Any, Optional
-from rq.job import Job
+from typing import Any, Dict, Optional
+
 from rq.exceptions import NoSuchJobError
+from rq.job import Job
 
-from advanced_omi_backend.models.job import async_job
-from advanced_omi_backend.controllers.queue_controller import redis_conn
+from advanced_omi_backend.controllers.queue_controller import (
+    redis_conn,
+    start_post_conversation_jobs,
+)
 from advanced_omi_backend.controllers.session_controller import mark_session_complete
-from advanced_omi_backend.services.plugin_service import get_plugin_router, init_plugin_router
-from datetime import datetime
-
+from advanced_omi_backend.models.job import async_job
+from advanced_omi_backend.services.plugin_service import (
+    ensure_plugin_router,
+    get_plugin_router,
+)
 from advanced_omi_backend.utils.conversation_utils import (
     analyze_speech,
     extract_speakers_from_segments,
+    is_meaningful_speech,
+    mark_conversation_deleted,
     track_speech_activity,
     update_job_progress_metadata,
 )
-from advanced_omi_backend.utils.conversation_utils import (
-    is_meaningful_speech,
-    mark_conversation_deleted,
-)
-
-from advanced_omi_backend.controllers.queue_controller import start_post_conversation_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -98,8 +100,9 @@ async def handle_end_of_conversation(
     logger.info(f"🧹 Deleted conversation:current signal for session {session_id[:12]}")
 
     # Update conversation in database with end reason and completion time
-    from advanced_omi_backend.models.conversation import Conversation
     from datetime import datetime
+
+    from advanced_omi_backend.models.conversation import Conversation
 
     conversation = await Conversation.find_one(Conversation.conversation_id == conversation_id)
     if conversation:
@@ -112,7 +115,9 @@ async def handle_end_of_conversation(
 
         conversation.completed_at = datetime.utcnow()
         await conversation.save()
-        logger.info(f"💾 Saved conversation {conversation_id[:12]} end_reason: {conversation.end_reason}")
+        logger.info(
+            f"💾 Saved conversation {conversation_id[:12]} end_reason: {conversation.end_reason}"
+        )
     else:
         logger.warning(f"⚠️ Conversation {conversation_id} not found for end reason tracking")
 
@@ -137,11 +142,13 @@ async def handle_end_of_conversation(
             )
 
             from advanced_omi_backend.controllers.queue_controller import (
-                transcription_queue,
-                redis_conn,
                 JOB_RESULT_TTL,
+                redis_conn,
+                transcription_queue,
             )
-            from advanced_omi_backend.workers.transcription_jobs import stream_speech_detection_job
+            from advanced_omi_backend.workers.transcription_jobs import (
+                stream_speech_detection_job,
+            )
 
             # Enqueue speech detection job for next conversation (audio persistence keeps running)
             speech_job = transcription_queue.enqueue(
@@ -158,7 +165,9 @@ async def handle_end_of_conversation(
 
             # Store job ID for cleanup (keyed by client_id for WebSocket cleanup)
             try:
-                redis_conn.set(f"speech_detection_job:{client_id}", speech_job.id, ex=86400)  # 24 hours
+                redis_conn.set(
+                    f"speech_detection_job:{client_id}", speech_job.id, ex=86400
+                )  # 24 hours
                 logger.info(f"📌 Stored speech detection job ID for client {client_id}")
             except Exception as e:
                 logger.warning(f"⚠️ Failed to store job ID for {client_id}: {e}")
@@ -210,9 +219,15 @@ async def open_conversation_job(
 
     Note: user_email is fetched from the database when needed.
     """
-    from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggregator
-    from advanced_omi_backend.models.conversation import Conversation, create_conversation
     from rq import get_current_job
+
+    from advanced_omi_backend.models.conversation import (
+        Conversation,
+        create_conversation,
+    )
+    from advanced_omi_backend.services.audio_stream import (
+        TranscriptionResultsAggregator,
+    )
 
     logger.info(
         f"📝 Creating and opening conversation for session {session_id} (speech detected at {speech_detected_at})"
@@ -222,19 +237,71 @@ async def open_conversation_job(
     current_job = get_current_job()
     current_job.meta = {}
     current_job.save_meta()
-    
-    # Create minimal streaming conversation (conversation_id auto-generated)
-    conversation = create_conversation(
-        user_id=user_id,
-        client_id=client_id,
-        title="Recording...",
-        summary="Transcribing audio...",
+
+    # Check if a placeholder conversation already exists for this session
+    conversation_key = f"conversation:current:{session_id}"
+    existing_conversation_id_bytes = await redis_client.get(conversation_key)
+
+    logger.info(
+        f"🔍 Checking for placeholder: key={conversation_key}, found={existing_conversation_id_bytes is not None}"
     )
 
-    # Save to database
-    await conversation.insert()
-    conversation_id = conversation.conversation_id  # Get the auto-generated ID
-    logger.info(f"✅ Created streaming conversation {conversation_id} for session {session_id}")
+    conversation = None
+    if existing_conversation_id_bytes:
+        existing_conversation_id = existing_conversation_id_bytes.decode()
+        logger.info(f"🔍 Found Redis key with conversation_id={existing_conversation_id}")
+
+        # Try to fetch the existing conversation by conversation_id
+        conversation = await Conversation.find_one(
+            Conversation.conversation_id == existing_conversation_id
+        )
+
+        if conversation:
+            always_persist = getattr(conversation, "always_persist", False)
+            processing_status = getattr(conversation, "processing_status", None)
+            logger.info(
+                f"🔍 Found conversation in DB: always_persist={always_persist}, "
+                f"processing_status={processing_status}"
+            )
+        else:
+            logger.warning(f"⚠️ Conversation {existing_conversation_id} not found in database!")
+
+        # Verify it's a placeholder conversation (always_persist=True, processing_status='pending_transcription')
+        if (
+            conversation
+            and getattr(conversation, "always_persist", False)
+            and getattr(conversation, "processing_status", None) == "pending_transcription"
+        ):
+            logger.info(
+                f"🔄 Reusing placeholder conversation {conversation.conversation_id} for session {session_id}"
+            )
+            # Update placeholder with active recording status
+            conversation.title = "Recording..."
+            conversation.summary = "Transcribing audio..."
+            await conversation.save()
+            conversation_id = conversation.conversation_id
+        else:
+            if conversation:
+                logger.info(
+                    f"⚠️ Found conversation {existing_conversation_id} but not a valid placeholder "
+                    f"(always_persist={getattr(conversation, 'always_persist', False)}, "
+                    f"processing_status={getattr(conversation, 'processing_status', None)}), creating new"
+                )
+            conversation = None
+    else:
+        logger.info(f"🔍 No Redis key found for {conversation_key}, creating new conversation")
+
+    # If no valid placeholder found, create new conversation
+    if not conversation:
+        conversation = create_conversation(
+            user_id=user_id,
+            client_id=client_id,
+            title="Recording...",
+            summary="Transcribing audio...",
+        )
+        await conversation.insert()
+        conversation_id = conversation.conversation_id
+        logger.info(f"✅ Created streaming conversation {conversation_id} for session {session_id}")
 
     # Link job metadata to conversation (cascading updates)
     current_job.meta["conversation_id"] = conversation_id
@@ -268,7 +335,7 @@ async def open_conversation_job(
             )
         else:
             raise
-    
+
     # Signal audio persistence job to rotate to this conversation's file
     rotation_signal_key = f"conversation:current:{session_id}"
     await redis_client.set(rotation_signal_key, conversation_id, ex=86400)  # 24 hour TTL
@@ -290,9 +357,13 @@ async def open_conversation_job(
     # Inactivity timeout configuration
     inactivity_timeout_seconds = float(os.getenv("SPEECH_INACTIVITY_THRESHOLD_SECONDS", "60"))
     inactivity_timeout_minutes = inactivity_timeout_seconds / 60
-    last_meaningful_speech_time = 0.0  # Initialize with audio time 0 (will be updated with first speech)
+    last_meaningful_speech_time = (
+        0.0  # Initialize with audio time 0 (will be updated with first speech)
+    )
     timeout_triggered = False  # Track if closure was due to timeout
-    last_inactivity_log_time = time.time()  # Track when we last logged inactivity (wall-clock for logging)
+    last_inactivity_log_time = (
+        time.time()
+    )  # Track when we last logged inactivity (wall-clock for logging)
     last_word_count = 0  # Track word count to detect actual new speech
 
     # Test mode: wait for audio queue to drain before timing out
@@ -308,6 +379,7 @@ async def open_conversation_job(
     while True:
         # Check if job still exists in Redis (detect zombie state)
         from advanced_omi_backend.utils.job_utils import check_job_alive
+
         if not await check_job_alive(redis_client, current_job, session_id):
             break
 
@@ -321,7 +393,9 @@ async def open_conversation_job(
 
                 # Get completion reason (guaranteed to exist with unified API)
                 completion_reason = await redis_client.hget(session_key, "completion_reason")
-                completion_reason_str = completion_reason.decode() if completion_reason else "unknown"
+                completion_reason_str = (
+                    completion_reason.decode() if completion_reason else "unknown"
+                )
 
                 if completion_reason_str == "websocket_disconnect":
                     logger.warning(
@@ -347,7 +421,6 @@ async def open_conversation_job(
 
         # Analyze speech content using detailed analysis
 
-
         transcript_data = {"text": combined["text"], "words": combined.get("words", [])}
         speech_analysis = analyze_speech(transcript_data)
 
@@ -372,7 +445,9 @@ async def open_conversation_job(
             start = seg.get("start", 0.0)
             end = seg.get("end", 0.0)
             if end <= start:
-                logger.debug(f"Segment {i} has invalid timing (start={start}, end={end}), correcting")
+                logger.debug(
+                    f"Segment {i} has invalid timing (start={start}, end={end}), correcting"
+                )
                 # Auto-correct: estimate duration from text length
                 estimated_duration = len(text.split()) * 0.5  # ~0.5 seconds per word
                 seg["end"] = start + estimated_duration
@@ -472,15 +547,15 @@ async def open_conversation_job(
                 plugin_router = get_plugin_router()
                 if plugin_router:
                     # Get the latest transcript text for plugin processing
-                    transcript_text = combined.get('text', '')
+                    transcript_text = combined.get("text", "")
 
                     if transcript_text:
                         plugin_data = {
-                            'transcript': transcript_text,
-                            'segment_id': f"{session_id}_{current_count}",
-                            'conversation_id': conversation_id,
-                            'segments': validated_segments,
-                            'word_count': speech_analysis.get('word_count', 0),
+                            "transcript": transcript_text,
+                            "segment_id": f"{session_id}_{current_count}",
+                            "conversation_id": conversation_id,
+                            "segments": validated_segments,
+                            "word_count": speech_analysis.get("word_count", 0),
                         }
 
                         logger.info(
@@ -489,10 +564,10 @@ async def open_conversation_job(
                         )
 
                         plugin_results = await plugin_router.dispatch_event(
-                            event='transcript.streaming',
+                            event="transcript.streaming",
                             user_id=user_id,
                             data=plugin_data,
-                            metadata={'client_id': client_id}
+                            metadata={"client_id": client_id},
                         )
 
                         logger.info(
@@ -500,7 +575,9 @@ async def open_conversation_job(
                         )
 
                         if plugin_results:
-                            logger.info(f"📌 Triggered {len(plugin_results)} streaming transcript plugins")
+                            logger.info(
+                                f"📌 Triggered {len(plugin_results)} streaming transcript plugins"
+                            )
                             for result in plugin_results:
                                 if result.message:
                                     logger.info(f"  Plugin: {result.message}")
@@ -544,7 +621,63 @@ async def open_conversation_job(
     # This prevents empty/noise-only conversations from being processed and saved
     # NOTE: Speech was already validated during streaming, so we skip this check
     # to avoid false negatives from aggregated results lacking proper word-level data
-    logger.info("✅ Conversation has meaningful speech (validated during streaming), proceeding with post-processing")
+    logger.info(
+        "✅ Conversation has meaningful speech (validated during streaming), proceeding with post-processing"
+    )
+
+    # Wait for streaming transcription consumer to complete before reading transcript
+    # This fixes the race condition where conversation job reads transcript before
+    # streaming consumer stores all final results (seen as 24+ second delay in logs)
+    completion_key = f"transcription:complete:{session_id}"
+    max_wait_streaming = 30  # seconds
+    waited_streaming = 0.0
+    while waited_streaming < max_wait_streaming:
+        completion_status = await redis_client.get(completion_key)
+        if completion_status:
+            status_str = (
+                completion_status.decode()
+                if isinstance(completion_status, bytes)
+                else completion_status
+            )
+            if status_str == "error":
+                logger.warning(
+                    f"⚠️ Streaming transcription ended with error for {session_id}, proceeding anyway"
+                )
+            else:
+                logger.info(f"✅ Streaming transcription confirmed complete for {session_id}")
+            break
+        await asyncio.sleep(0.5)
+        waited_streaming += 0.5
+
+    if waited_streaming >= max_wait_streaming:
+        logger.warning(
+            f"⚠️ Timed out waiting for streaming completion signal for {session_id} "
+            f"(waited {max_wait_streaming}s), proceeding with available transcript"
+        )
+
+    # Wait for streaming transcription consumer to complete before reading transcript
+    # This fixes the race condition where conversation job reads transcript before
+    # streaming consumer stores all final results (seen as 24+ second delay in logs)
+    completion_key = f"transcription:complete:{session_id}"
+    max_wait_streaming = 30  # seconds
+    waited_streaming = 0.0
+    while waited_streaming < max_wait_streaming:
+        completion_status = await redis_client.get(completion_key)
+        if completion_status:
+            status_str = completion_status.decode() if isinstance(completion_status, bytes) else completion_status
+            if status_str == "error":
+                logger.warning(f"⚠️ Streaming transcription ended with error for {session_id}, proceeding anyway")
+            else:
+                logger.info(f"✅ Streaming transcription confirmed complete for {session_id}")
+            break
+        await asyncio.sleep(0.5)
+        waited_streaming += 0.5
+
+    if waited_streaming >= max_wait_streaming:
+        logger.warning(
+            f"⚠️ Timed out waiting for streaming completion signal for {session_id} "
+            f"(waited {max_wait_streaming}s), proceeding with available transcript"
+        )
 
     # Wait for audio_streaming_persistence_job to complete and write MongoDB chunks
     from advanced_omi_backend.utils.audio_chunk_utils import wait_for_audio_chunks
@@ -596,7 +729,7 @@ async def open_conversation_job(
             word=w.get("word", ""),
             start=w.get("start", 0.0),
             end=w.get("end", 0.0),
-            confidence=w.get("confidence")
+            confidence=w.get("confidence"),
         )
         for w in words_data
     ]
@@ -622,8 +755,19 @@ async def open_conversation_job(
             "chunk_count": final_transcript.get("chunk_count", 0),
             "word_count": len(words),
         },
-        set_as_active=True
+        set_as_active=True,
     )
+
+    # Update placeholder conversation if it exists
+    if (
+        getattr(conversation, "always_persist", False)
+        and getattr(conversation, "processing_status", None) == "pending_transcription"
+    ):
+        # Keep placeholder status - will be updated by title_summary_job
+        logger.info(
+            f"📝 Placeholder conversation {conversation_id} has transcript, "
+            f"waiting for title/summary generation"
+        )
 
     # Save conversation with streaming transcript
     await conversation.save()
@@ -636,12 +780,14 @@ async def open_conversation_job(
     # Enqueue post-conversation processing pipeline (no batch transcription needed - using streaming transcript)
     client_id = conversation.client_id if conversation else None
 
+    # Enqueue post-conversation jobs directly (no fallback dependency in success case)
     job_ids = start_post_conversation_jobs(
         conversation_id=conversation_id,
         user_id=user_id,
         transcript_version_id=version_id,  # Pass the streaming transcript version ID
+        depends_on_job=None,  # No dependency - streaming already succeeded
         client_id=client_id,  # Pass client_id for UI tracking
-        end_reason=end_reason  # Pass the determined end_reason (websocket_disconnect, inactivity_timeout, etc.)
+        end_reason=end_reason,  # Pass the determined end_reason (websocket_disconnect, inactivity_timeout, etc.)
     )
 
     logger.info(
@@ -693,9 +839,9 @@ async def generate_title_summary_job(conversation_id: str, *, redis_client=None)
     """
     from advanced_omi_backend.models.conversation import Conversation
     from advanced_omi_backend.utils.conversation_utils import (
-        generate_title,
-        generate_short_summary,
         generate_detailed_summary,
+        generate_short_summary,
+        generate_title,
     )
 
     logger.info(f"📝 Starting title/summary generation for conversation {conversation_id}")
@@ -726,21 +872,36 @@ async def generate_title_summary_job(conversation_id: str, *, redis_client=None)
             f"🤖 Generating title/summary/detailed_summary using LLM for conversation {conversation_id}"
         )
 
-        # Convert segments to dict format expected by utils
-        segment_dicts = None
-        if segments and len(segments) > 0:
-            segment_dicts = [
-                {"speaker": seg.speaker, "text": seg.text, "start": seg.start, "end": seg.end}
-                for seg in segments
-            ]
+        # Fetch memory context for richer detailed summaries
+        # Use the entire transcript as the search query for best semantic matching
+        # so all key topics/entities in the conversation can find relevant memories
+        memory_context = None
+        try:
+            from advanced_omi_backend.services.memory import get_memory_service
+
+            memory_service = get_memory_service()
+            memories = await memory_service.search_memories(
+                transcript_text, conversation.user_id, limit=10
+            )
+            if memories:
+                memory_context = "\n".join(m.content for m in memories if m.content)
+                logger.info(
+                    f"📚 Retrieved {len(memories)} memories as context for detailed summary"
+                )
+            else:
+                logger.info(f"📚 No memories found for context enrichment")
+        except Exception as mem_error:
+            logger.warning(f"⚠️ Could not fetch memory context (continuing without): {mem_error}")
 
         # Generate all three summaries in parallel for efficiency
         import asyncio
 
         title, short_summary, detailed_summary = await asyncio.gather(
-            generate_title(transcript_text, segments=segment_dicts),
-            generate_short_summary(transcript_text, segments=segment_dicts),
-            generate_detailed_summary(transcript_text, segments=segment_dicts),
+            generate_title(transcript_text, segments=segments),
+            generate_short_summary(transcript_text, segments=segments),
+            generate_detailed_summary(
+                transcript_text, segments=segments, memory_context=memory_context
+            ),
         )
 
         conversation.title = title
@@ -751,8 +912,28 @@ async def generate_title_summary_job(conversation_id: str, *, redis_client=None)
         logger.info(f"✅ Generated summary: '{conversation.summary}'")
         logger.info(f"✅ Generated detailed summary: {len(conversation.detailed_summary)} chars")
 
+        # Update processing status for placeholder conversations
+        if getattr(conversation, "processing_status", None) == "pending_transcription":
+            conversation.processing_status = "completed"
+            logger.info(
+                f"✅ Updated placeholder conversation {conversation_id} "
+                f"processing_status to 'completed'"
+            )
+
     except Exception as gen_error:
         logger.error(f"❌ Title/summary generation failed: {gen_error}")
+
+        # Mark placeholder conversation as failed
+        if getattr(conversation, "processing_status", None) == "pending_transcription":
+            conversation.title = "Audio Recording (Transcription Failed)"
+            conversation.summary = f"Title/summary generation failed: {str(gen_error)}"
+            conversation.processing_status = "transcription_failed"
+            await conversation.save()
+            logger.warning(
+                f"⚠️ Marked placeholder conversation {conversation_id} "
+                f"as transcription_failed (title/summary generation error). Audio is still saved."
+            )
+
         return {
             "success": False,
             "error": str(gen_error),
@@ -807,7 +988,7 @@ async def dispatch_conversation_complete_event_job(
     user_id: str,
     end_reason: Optional[str] = None,
     *,
-    redis_client=None
+    redis_client=None,
 ) -> Dict[str, Any]:
     """
     Dispatch conversation.complete plugin event for all conversation sources.
@@ -852,35 +1033,19 @@ async def dispatch_conversation_complete_event_job(
             conversation.completed_at = datetime.utcnow()
 
         await conversation.save()
-        logger.info(f"💾 Saved end_reason={conversation.end_reason} to conversation {conversation_id[:12]} in event dispatch job")
+        logger.info(
+            f"💾 Saved end_reason={conversation.end_reason} to conversation {conversation_id[:12]} in event dispatch job"
+        )
 
     # Get user email for event data
     from advanced_omi_backend.models.user import User
+
     user = await User.get(user_id)
     user_email = user.email if user else ""
 
     # Prepare plugin event data (same format as open_conversation_job)
     try:
-        # Get or initialize plugin router (same pattern as transcription_jobs.py)
-        plugin_router = get_plugin_router()
-
-        if not plugin_router:
-            logger.warning("🔧 Plugin router not found in worker process - attempting initialization...")
-            plugin_router = init_plugin_router()
-
-            if plugin_router:
-                logger.info(f"🔧 Plugin router initialized with {len(plugin_router.plugins)} plugin(s)")
-
-                # Initialize all plugins
-                for plugin_id, plugin in plugin_router.plugins.items():
-                    try:
-                        logger.info(f"   Initializing plugin '{plugin_id}'...")
-                        await plugin.initialize()
-                        logger.info(f"   ✓ Plugin '{plugin_id}' initialized")
-                    except Exception as e:
-                        logger.error(f"   ✗ Failed to initialize plugin '{plugin_id}': {e}", exc_info=True)
-            else:
-                logger.error("🔧 Plugin router initialization FAILED - router is None")
+        plugin_router = await ensure_plugin_router()
 
         # CRITICAL CHECK: Fail loudly if no router
         if not plugin_router:
@@ -895,21 +1060,21 @@ async def dispatch_conversation_complete_event_job(
                 "skipped": True,
                 "reason": "No plugin router",
                 "conversation_id": conversation_id,
-                "error": error_msg
+                "error": error_msg,
             }
 
         plugin_data = {
-            'conversation': {
-                'client_id': client_id,
-                'user_id': user_id,
+            "conversation": {
+                "client_id": client_id,
+                "user_id": user_id,
             },
-            'transcript': conversation.transcript if conversation else "",
-            'duration': 0,  # Duration not tracked for file uploads
-            'conversation_id': conversation_id,
+            "transcript": conversation.transcript if conversation else "",
+            "duration": 0,  # Duration not tracked for file uploads
+            "conversation_id": conversation_id,
         }
 
         # Use provided end_reason or default to 'file_upload' for backward compatibility
-        actual_end_reason = end_reason or 'file_upload'
+        actual_end_reason = end_reason or "file_upload"
 
         logger.info(
             f"🔌 DISPATCH: conversation.complete event for {conversation_id[:12]} "
@@ -917,10 +1082,10 @@ async def dispatch_conversation_complete_event_job(
         )
 
         plugin_results = await plugin_router.dispatch_event(
-            event='conversation.complete',
+            event="conversation.complete",
             user_id=user_id,
             data=plugin_data,
-            metadata={'end_reason': actual_end_reason}
+            metadata={"end_reason": actual_end_reason},
         )
 
         logger.info(

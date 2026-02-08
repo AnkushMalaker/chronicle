@@ -7,6 +7,7 @@ which happens in test environments. They should never be available in production
 
 import logging
 from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 
 from advanced_omi_backend.services.plugin_service import get_plugin_router

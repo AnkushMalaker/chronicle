@@ -13,9 +13,13 @@ from typing import Optional
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 
-from advanced_omi_backend.constants import OMI_CHANNELS, OMI_SAMPLE_RATE, OMI_SAMPLE_WIDTH
-from advanced_omi_backend.services.transcription import get_transcription_provider
+from advanced_omi_backend.constants import (
+    OMI_CHANNELS,
+    OMI_SAMPLE_RATE,
+    OMI_SAMPLE_WIDTH,
+)
 from advanced_omi_backend.model_registry import get_models_registry
+from advanced_omi_backend.services.transcription import get_transcription_provider
 
 # Load environment variables
 load_dotenv()

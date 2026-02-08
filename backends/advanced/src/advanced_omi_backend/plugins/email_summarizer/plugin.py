@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.database import get_database
 from advanced_omi_backend.llm_client import async_generate
+from advanced_omi_backend.utils.logging_utils import mask_dict
 
 from ..base import BasePlugin, PluginContext, PluginResult
 from .email_service import SMTPEmailService
@@ -45,6 +46,9 @@ class EmailSummarizerPlugin(BasePlugin):
     """
 
     SUPPORTED_ACCESS_LEVELS: List[str] = ['conversation']
+
+    name = "Email Summarizer"
+    description = "Sends email summaries when conversations complete"
 
     def __init__(self, config: Dict[str, Any]):
         """
@@ -286,3 +290,110 @@ class EmailSummarizerPlugin(BasePlugin):
             return f"{self.subject_prefix} - {date_str}"
         else:
             return self.subject_prefix
+
+    @staticmethod
+    async def test_connection(config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Test SMTP connection with provided configuration.
+
+        This static method tests the SMTP connection without fully initializing the plugin.
+        Used by the form-based configuration UI to validate settings before saving.
+
+        Args:
+            config: Configuration dictionary with SMTP settings
+
+        Returns:
+            Dict with success status, message, and optional details
+
+        Example:
+            >>> result = await EmailSummarizerPlugin.test_connection({
+            ...     'smtp_host': 'smtp.gmail.com',
+            ...     'smtp_port': 587,
+            ...     'smtp_username': 'user@gmail.com',
+            ...     'smtp_password': 'password',
+            ...     'smtp_use_tls': True,
+            ...     'from_email': 'noreply@example.com',
+            ...     'from_name': 'Test'
+            ... })
+            >>> result['success']
+            True
+        """
+        import time
+
+        try:
+            # Validate required config fields
+            required_fields = ['smtp_host', 'smtp_username', 'smtp_password', 'from_email']
+            missing_fields = [field for field in required_fields if not config.get(field)]
+
+            if missing_fields:
+                return {
+                    "success": False,
+                    "message": f"Missing required fields: {', '.join(missing_fields)}",
+                    "status": "error"
+                }
+
+            # Build SMTP config
+            smtp_config = {
+                'smtp_host': config.get('smtp_host'),
+                'smtp_port': config.get('smtp_port', 587),
+                'smtp_username': config.get('smtp_username'),
+                'smtp_password': config.get('smtp_password'),
+                'smtp_use_tls': config.get('smtp_use_tls', True),
+                'from_email': config.get('from_email'),
+                'from_name': config.get('from_name', 'Chronicle AI'),
+            }
+
+            # Log config with masked secrets for debugging
+            logger.debug(f"SMTP config for testing: {mask_dict(smtp_config)}")
+
+            # Create temporary email service instance
+            email_service = SMTPEmailService(smtp_config)
+
+            # Test connection
+            logger.info(f"Testing SMTP connection to {smtp_config['smtp_host']}...")
+            start_time = time.time()
+
+            connection_success = await email_service.test_connection()
+            connection_time_ms = int((time.time() - start_time) * 1000)
+
+            if connection_success:
+                return {
+                    "success": True,
+                    "message": f"Successfully connected to SMTP server at {smtp_config['smtp_host']}",
+                    "status": "success",
+                    "details": {
+                        "smtp_host": smtp_config['smtp_host'],
+                        "smtp_port": smtp_config['smtp_port'],
+                        "connection_time_ms": connection_time_ms,
+                        "use_tls": smtp_config['smtp_use_tls']
+                    }
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": "SMTP connection test failed",
+                    "status": "error"
+                }
+
+        except Exception as e:
+            logger.error(f"SMTP connection test failed: {e}", exc_info=True)
+            error_msg = str(e)
+            
+            # Provide helpful hints based on error type
+            hints = []
+            if "Authentication" in error_msg or "535" in error_msg:
+                hints.append("For Gmail: Enable 2FA and create an App Password at https://myaccount.google.com/apppasswords")
+                hints.append("Verify your username and password are correct")
+            elif "Connection" in error_msg or "timeout" in error_msg.lower():
+                hints.append("Check your SMTP host and port settings")
+                hints.append("Verify firewall/network allows outbound SMTP connections")
+            elif "TLS" in error_msg or "SSL" in error_msg:
+                hints.append("For port 587: Enable TLS")
+                hints.append("For port 465: Disable TLS (uses implicit SSL)")
+            
+            return {
+                "success": False,
+                "message": f"Connection test failed: {error_msg}",
+                "status": "error",
+                "hints": hints
+            }

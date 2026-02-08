@@ -6,9 +6,12 @@ and environment file handling. Used by wizard.py, init.py scripts, and plugin se
 """
 
 import getpass
+import json
+import re
 import secrets
+import subprocess
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from dotenv import get_key
 
@@ -324,3 +327,82 @@ def prompt_token(
         placeholders=placeholders,
         is_password=True
     )
+
+
+def detect_tailscale_info() -> Tuple[Optional[str], Optional[str]]:
+    """
+    Detect Tailscale DNS name and IPv4 address.
+
+    Returns:
+        (dns_name, ip) tuple. dns_name is the MagicDNS hostname (e.g. "myhost.tail1234.ts.net"),
+        ip is the Tailscale IPv4 address (e.g. "100.64.1.5").
+        Either or both may be None if Tailscale is not available.
+    """
+    dns_name = None
+    ip = None
+
+    # Get MagicDNS name from tailscale status --json
+    try:
+        result = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            status = json.loads(result.stdout)
+            raw_dns = status.get("Self", {}).get("DNSName", "")
+            # DNSName has trailing dot, strip it
+            if raw_dns:
+                dns_name = raw_dns.rstrip(".")
+    except (subprocess.SubprocessError, FileNotFoundError, json.JSONDecodeError):
+        pass
+
+    # Get IPv4 address as fallback
+    try:
+        result = subprocess.run(
+            ["tailscale", "ip", "-4"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            ip = result.stdout.strip()
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+
+    return dns_name, ip
+
+
+def detect_cuda_version(default: str = "cu126") -> str:
+    """
+    Detect system CUDA version from nvidia-smi output.
+
+    Parses "CUDA Version: X.Y" from nvidia-smi and maps to PyTorch CUDA version strings.
+
+    Args:
+        default: Default CUDA version if detection fails (default: "cu126")
+
+    Returns:
+        PyTorch CUDA version string: "cu121", "cu126", or "cu128"
+    """
+    try:
+        result = subprocess.run(
+            ["nvidia-smi"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            match = re.search(r'CUDA Version:\s*(\d+)\.(\d+)', result.stdout)
+            if match:
+                major, minor = int(match.group(1)), int(match.group(2))
+                if (major, minor) >= (12, 8):
+                    return "cu128"
+                elif (major, minor) >= (12, 6):
+                    return "cu126"
+                elif (major, minor) >= (12, 1):
+                    return "cu121"
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+    return default

@@ -5,8 +5,8 @@ Builds the complete list of worker definitions with conditional logic.
 Reuses model_registry.py for config.yml parsing.
 """
 
-import os
 import logging
+import os
 from typing import List
 
 from .config import WorkerDefinition, WorkerType

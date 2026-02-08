@@ -25,6 +25,7 @@ from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import JobPriority
 from advanced_omi_backend.users import User
+from advanced_omi_backend.workers.conversation_jobs import generate_title_summary_job
 from advanced_omi_backend.workers.memory_jobs import (
     enqueue_memory_processing,
     process_memory_job,
@@ -33,6 +34,7 @@ from advanced_omi_backend.workers.speaker_jobs import recognise_speakers_job
 
 logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
+
 
 async def close_current_conversation(client_id: str, user: User, client_manager: ClientManager):
     """Close the current conversation for a specific client. Users can only close their own conversations."""
@@ -118,8 +120,12 @@ async def get_conversation(conversation_id: str, user: User):
             "deleted": conversation.deleted,
             "deletion_reason": conversation.deletion_reason,
             "deleted_at": conversation.deleted_at.isoformat() if conversation.deleted_at else None,
+            "processing_status": conversation.processing_status,
+            "always_persist": conversation.always_persist,
             "end_reason": conversation.end_reason.value if conversation.end_reason else None,
-            "completed_at": conversation.completed_at.isoformat() if conversation.completed_at else None,
+            "completed_at": (
+                conversation.completed_at.isoformat() if conversation.completed_at else None
+            ),
             "title": conversation.title,
             "summary": conversation.summary,
             "detailed_summary": conversation.detailed_summary,
@@ -133,6 +139,8 @@ async def get_conversation(conversation_id: str, user: User):
             "active_memory_version": conversation.active_memory_version,
             "transcript_version_count": conversation.transcript_version_count,
             "memory_version_count": conversation.memory_version_count,
+            "active_transcript_version_number": conversation.active_transcript_version_number,
+            "active_memory_version_number": conversation.active_memory_version_number,
         }
 
         return {"conversation": response}
@@ -150,50 +158,65 @@ async def get_conversations(user: User, include_deleted: bool = False):
             # Regular users can only see their own conversations
             # Filter by deleted status
             if not include_deleted:
-                user_conversations = await Conversation.find(
-                    Conversation.user_id == str(user.user_id),
-                    Conversation.deleted == False
-                ).sort(-Conversation.created_at).to_list()
+                user_conversations = (
+                    await Conversation.find(
+                        Conversation.user_id == str(user.user_id), Conversation.deleted == False
+                    )
+                    .sort(-Conversation.created_at)
+                    .to_list()
+                )
             else:
-                user_conversations = await Conversation.find(
-                    Conversation.user_id == str(user.user_id)
-                ).sort(-Conversation.created_at).to_list()
+                user_conversations = (
+                    await Conversation.find(Conversation.user_id == str(user.user_id))
+                    .sort(-Conversation.created_at)
+                    .to_list()
+                )
         else:
             # Admins see all conversations
             # Filter by deleted status
             if not include_deleted:
-                user_conversations = await Conversation.find(
-                    Conversation.deleted == False
-                ).sort(-Conversation.created_at).to_list()
+                user_conversations = (
+                    await Conversation.find(Conversation.deleted == False)
+                    .sort(-Conversation.created_at)
+                    .to_list()
+                )
             else:
-                user_conversations = await Conversation.find_all().sort(-Conversation.created_at).to_list()
+                user_conversations = (
+                    await Conversation.find_all().sort(-Conversation.created_at).to_list()
+                )
 
         # Build response with explicit curated fields - minimal for list view
         conversations = []
         for conv in user_conversations:
-            conversations.append({
-                "conversation_id": conv.conversation_id,
-                "user_id": conv.user_id,
-                "client_id": conv.client_id,
-                "audio_chunks_count": conv.audio_chunks_count,
-                "audio_total_duration": conv.audio_total_duration,
-                "audio_compression_ratio": conv.audio_compression_ratio,
-                "created_at": conv.created_at.isoformat() if conv.created_at else None,
-                "deleted": conv.deleted,
-                "deletion_reason": conv.deletion_reason,
-                "deleted_at": conv.deleted_at.isoformat() if conv.deleted_at else None,
-                "title": conv.title,
-                "summary": conv.summary,
-                "detailed_summary": conv.detailed_summary,
-                "active_transcript_version": conv.active_transcript_version,
-                "active_memory_version": conv.active_memory_version,
-                # Computed fields (counts only, no heavy data)
-                "segment_count": conv.segment_count,
-                "has_memory": conv.has_memory,
-                "memory_count": conv.memory_count,
-                "transcript_version_count": conv.transcript_version_count,
-                "memory_version_count": conv.memory_version_count,
-            })
+            conversations.append(
+                {
+                    "conversation_id": conv.conversation_id,
+                    "user_id": conv.user_id,
+                    "client_id": conv.client_id,
+                    "audio_chunks_count": conv.audio_chunks_count,
+                    "audio_total_duration": conv.audio_total_duration,
+                    "audio_compression_ratio": conv.audio_compression_ratio,
+                    "created_at": conv.created_at.isoformat() if conv.created_at else None,
+                    "deleted": conv.deleted,
+                    "deletion_reason": conv.deletion_reason,
+                    "deleted_at": conv.deleted_at.isoformat() if conv.deleted_at else None,
+                    "processing_status": conv.processing_status,
+                    "always_persist": conv.always_persist,
+                    "title": conv.title,
+                    "summary": conv.summary,
+                    "detailed_summary": conv.detailed_summary,
+                    "active_transcript_version": conv.active_transcript_version,
+                    "active_memory_version": conv.active_memory_version,
+                    # Computed fields (counts only, no heavy data)
+                    "segment_count": conv.segment_count,
+                    "has_memory": conv.has_memory,
+                    "memory_count": conv.memory_count,
+                    "transcript_version_count": conv.transcript_version_count,
+                    "memory_version_count": conv.memory_version_count,
+                    "active_transcript_version_number": conv.active_transcript_version_number,
+                    "active_memory_version_number": conv.active_memory_version_number,
+                }
+            )
 
         return {"conversations": conversations}
 
@@ -203,30 +226,42 @@ async def get_conversations(user: User, include_deleted: bool = False):
 
 
 async def _soft_delete_conversation(conversation: Conversation, user: User) -> JSONResponse:
-    """Mark conversation and chunks as deleted (soft delete)."""
+    """Mark conversation and chunks as deleted (soft delete).
+
+    Chunks are soft-deleted first so that a crash between the two writes
+    leaves chunks deleted but the conversation still active — a safe state
+    where a retry will complete the operation.
+    """
     conversation_id = conversation.conversation_id
+    deleted_at = datetime.utcnow()
 
-    # Mark conversation as deleted
-    conversation.deleted = True
-    conversation.deletion_reason = "user_deleted"
-    conversation.deleted_at = datetime.utcnow()
-    await conversation.save()
-
-    logger.info(f"Soft deleted conversation {conversation_id} for user {user.user_id}")
-
-    # Soft delete all associated audio chunks
+    # 1. Soft delete audio chunks FIRST (safe failure mode: orphaned-deleted chunks)
     result = await AudioChunkDocument.find(
         AudioChunkDocument.conversation_id == conversation_id,
-        AudioChunkDocument.deleted == False  # Only update non-deleted chunks
-    ).update_many({
-        "$set": {
-            "deleted": True,
-            "deleted_at": datetime.utcnow()
-        }
-    })
+        AudioChunkDocument.deleted == False,
+    ).update_many({"$set": {"deleted": True, "deleted_at": deleted_at}})
 
     deleted_chunks = result.modified_count
     logger.info(f"Soft deleted {deleted_chunks} audio chunks for conversation {conversation_id}")
+
+    # 2. Mark conversation as deleted
+    conversation.deleted = True
+    conversation.deletion_reason = "user_deleted"
+    conversation.deleted_at = deleted_at
+    try:
+        await conversation.save()
+    except Exception:
+        # Rollback: undo chunk soft-delete using the exact timestamp we set
+        logger.error(
+            f"Failed to soft-delete conversation {conversation_id}, rolling back chunk deletes"
+        )
+        await AudioChunkDocument.find(
+            AudioChunkDocument.conversation_id == conversation_id,
+            AudioChunkDocument.deleted_at == deleted_at,
+        ).update_many({"$set": {"deleted": False, "deleted_at": None}})
+        raise
+
+    logger.info(f"Soft deleted conversation {conversation_id} for user {user.user_id}")
 
     return JSONResponse(
         status_code=200,
@@ -235,21 +270,22 @@ async def _soft_delete_conversation(conversation: Conversation, user: User) -> J
             "deleted_chunks": deleted_chunks,
             "conversation_id": conversation_id,
             "client_id": conversation.client_id,
-            "deleted_at": conversation.deleted_at.isoformat() if conversation.deleted_at else None
-        }
+            "deleted_at": conversation.deleted_at.isoformat() if conversation.deleted_at else None,
+        },
     )
 
 
 async def _hard_delete_conversation(conversation: Conversation) -> JSONResponse:
-    """Permanently delete conversation and chunks (admin only)."""
+    """Permanently delete conversation and chunks (admin only).
+
+    Chunks are deleted first so that a crash between the two writes
+    leaves the conversation document intact — an admin can retry the
+    delete since the conversation still exists.
+    """
     conversation_id = conversation.conversation_id
     client_id = conversation.client_id
 
-    # Delete conversation document
-    await conversation.delete()
-    logger.info(f"Hard deleted conversation {conversation_id}")
-
-    # Delete all audio chunks
+    # 1. Delete audio chunks FIRST (no rollback possible for hard deletes)
     result = await AudioChunkDocument.find(
         AudioChunkDocument.conversation_id == conversation_id
     ).delete()
@@ -257,14 +293,26 @@ async def _hard_delete_conversation(conversation: Conversation) -> JSONResponse:
     deleted_chunks = result.deleted_count
     logger.info(f"Hard deleted {deleted_chunks} audio chunks for conversation {conversation_id}")
 
+    # 2. Delete conversation document
+    try:
+        await conversation.delete()
+    except Exception:
+        logger.error(
+            f"Failed to hard-delete conversation {conversation_id} after "
+            f"deleting {deleted_chunks} chunks. Conversation document remains — retry delete."
+        )
+        raise
+
+    logger.info(f"Hard deleted conversation {conversation_id}")
+
     return JSONResponse(
         status_code=200,
         content={
             "message": f"Successfully permanently deleted conversation '{conversation_id}'",
             "deleted_chunks": deleted_chunks,
             "conversation_id": conversation_id,
-            "client_id": client_id
-        }
+            "client_id": client_id,
+        },
     )
 
 
@@ -279,16 +327,21 @@ async def delete_conversation(conversation_id: str, user: User, permanent: bool 
     """
     try:
         # Create masked identifier for logging
-        masked_id = f"{conversation_id[:8]}...{conversation_id[-4:]}" if len(conversation_id) > 12 else "***"
-        logger.info(f"Attempting to {'permanently ' if permanent else ''}delete conversation: {masked_id}")
+        masked_id = (
+            f"{conversation_id[:8]}...{conversation_id[-4:]}"
+            if len(conversation_id) > 12
+            else "***"
+        )
+        logger.info(
+            f"Attempting to {'permanently ' if permanent else ''}delete conversation: {masked_id}"
+        )
 
         # Find the conversation using Beanie
         conversation = await Conversation.find_one(Conversation.conversation_id == conversation_id)
 
         if not conversation:
             return JSONResponse(
-                status_code=404,
-                content={"error": f"Conversation '{conversation_id}' not found"}
+                status_code=404, content={"error": f"Conversation '{conversation_id}' not found"}
             )
 
         # Check ownership for non-admin users
@@ -300,8 +353,8 @@ async def delete_conversation(conversation_id: str, user: User, permanent: bool 
                 status_code=403,
                 content={
                     "error": "Access forbidden. You can only delete your own conversations.",
-                    "details": f"Conversation '{conversation_id}' does not belong to your account."
-                }
+                    "details": f"Conversation '{conversation_id}' does not belong to your account.",
+                },
             )
 
         # Hard delete (admin only, permanent flag)
@@ -314,8 +367,7 @@ async def delete_conversation(conversation_id: str, user: User, permanent: bool 
     except Exception as e:
         logger.error(f"Error deleting conversation {conversation_id}: {e}")
         return JSONResponse(
-            status_code=500,
-            content={"error": f"Failed to delete conversation: {str(e)}"}
+            status_code=500, content={"error": f"Failed to delete conversation: {str(e)}"}
         )
 
 
@@ -328,47 +380,44 @@ async def restore_conversation(conversation_id: str, user: User) -> JSONResponse
         user: Requesting user
     """
     try:
-        conversation = await Conversation.find_one(
-            Conversation.conversation_id == conversation_id
-        )
+        conversation = await Conversation.find_one(Conversation.conversation_id == conversation_id)
 
         if not conversation:
-            return JSONResponse(
-                status_code=404,
-                content={"error": "Conversation not found"}
-            )
+            return JSONResponse(status_code=404, content={"error": "Conversation not found"})
 
         # Permission check
         if not user.is_superuser and conversation.user_id != str(user.user_id):
-            return JSONResponse(
-                status_code=403,
-                content={"error": "Access denied"}
-            )
+            return JSONResponse(status_code=403, content={"error": "Access denied"})
 
         if not conversation.deleted:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Conversation is not deleted"}
-            )
+            return JSONResponse(status_code=400, content={"error": "Conversation is not deleted"})
 
-        # Restore conversation
+        # 1. Restore audio chunks FIRST (safe failure mode: restored chunks, conversation still deleted)
+        original_deleted_at = conversation.deleted_at
+        result = await AudioChunkDocument.find(
+            AudioChunkDocument.conversation_id == conversation_id,
+            AudioChunkDocument.deleted == True,
+        ).update_many({"$set": {"deleted": False, "deleted_at": None}})
+
+        restored_chunks = result.modified_count
+
+        # 2. Restore conversation
         conversation.deleted = False
         conversation.deletion_reason = None
         conversation.deleted_at = None
-        await conversation.save()
-
-        # Restore audio chunks
-        result = await AudioChunkDocument.find(
-            AudioChunkDocument.conversation_id == conversation_id,
-            AudioChunkDocument.deleted == True
-        ).update_many({
-            "$set": {
-                "deleted": False,
-                "deleted_at": None
-            }
-        })
-
-        restored_chunks = result.modified_count
+        try:
+            await conversation.save()
+        except Exception:
+            # Rollback: re-soft-delete the chunks we just restored
+            logger.error(
+                f"Failed to restore conversation {conversation_id}, "
+                f"rolling back {restored_chunks} chunk restores"
+            )
+            await AudioChunkDocument.find(
+                AudioChunkDocument.conversation_id == conversation_id,
+                AudioChunkDocument.deleted == False,
+            ).update_many({"$set": {"deleted": True, "deleted_at": original_deleted_at}})
+            raise
 
         logger.info(
             f"Restored conversation {conversation_id} "
@@ -381,14 +430,13 @@ async def restore_conversation(conversation_id: str, user: User) -> JSONResponse
                 "message": f"Successfully restored conversation '{conversation_id}'",
                 "restored_chunks": restored_chunks,
                 "conversation_id": conversation_id,
-            }
+            },
         )
 
     except Exception as e:
         logger.error(f"Error restoring conversation {conversation_id}: {e}")
         return JSONResponse(
-            status_code=500,
-            content={"error": f"Failed to restore conversation: {str(e)}"}
+            status_code=500, content={"error": f"Failed to restore conversation: {str(e)}"}
         )
 
 
@@ -396,13 +444,20 @@ async def reprocess_transcript(conversation_id: str, user: User):
     """Reprocess transcript for a conversation. Users can only reprocess their own conversations."""
     try:
         # Find the conversation using Beanie
-        conversation_model = await Conversation.find_one(Conversation.conversation_id == conversation_id)
+        conversation_model = await Conversation.find_one(
+            Conversation.conversation_id == conversation_id
+        )
         if not conversation_model:
             return JSONResponse(status_code=404, content={"error": "Conversation not found"})
 
         # Check ownership for non-admin users
         if not user.is_superuser and conversation_model.user_id != str(user.user_id):
-            return JSONResponse(status_code=403, content={"error": "Access forbidden. You can only reprocess your own conversations."})
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": "Access forbidden. You can only reprocess your own conversations."
+                },
+            )
 
         # Get audio_uuid from conversation
         # Validate audio chunks exist in MongoDB
@@ -415,8 +470,8 @@ async def reprocess_transcript(conversation_id: str, user: User):
                 status_code=404,
                 content={
                     "error": "No audio data found for this conversation",
-                    "details": f"Conversation '{conversation_id}' exists but has no audio chunks in MongoDB"
-                }
+                    "details": f"Conversation '{conversation_id}' exists but has no audio chunks in MongoDB",
+                },
             )
 
         # Create new transcript version ID
@@ -437,13 +492,15 @@ async def reprocess_transcript(conversation_id: str, user: User):
             result_ttl=JOB_RESULT_TTL,
             job_id=f"reprocess_{conversation_id[:8]}",
             description=f"Transcribe audio for {conversation_id[:8]}",
-            meta={'conversation_id': conversation_id}
+            meta={"conversation_id": conversation_id},
         )
         logger.info(f"📥 RQ: Enqueued transcription job {transcript_job.id}")
 
         # Check if speaker recognition is enabled
-        speaker_config = get_service_config('speaker_recognition')
-        speaker_enabled = speaker_config.get('enabled', True)  # Default to True for backward compatibility
+        speaker_config = get_service_config("speaker_recognition")
+        speaker_enabled = speaker_config.get(
+            "enabled", True
+        )  # Default to True for backward compatibility
 
         # Job 2: Recognize speakers (conditional - only if enabled)
         speaker_dependency = transcript_job  # Start with transcription job
@@ -459,12 +516,16 @@ async def reprocess_transcript(conversation_id: str, user: User):
                 result_ttl=JOB_RESULT_TTL,
                 job_id=f"speaker_{conversation_id[:8]}",
                 description=f"Recognize speakers for {conversation_id[:8]}",
-                meta={'conversation_id': conversation_id}
+                meta={"conversation_id": conversation_id},
             )
             speaker_dependency = speaker_job  # Chain for next job
-            logger.info(f"📥 RQ: Enqueued speaker recognition job {speaker_job.id} (depends on {transcript_job.id})")
+            logger.info(
+                f"📥 RQ: Enqueued speaker recognition job {speaker_job.id} (depends on {transcript_job.id})"
+            )
         else:
-            logger.info(f"⏭️  Speaker recognition disabled, skipping speaker job for conversation {conversation_id[:8]}")
+            logger.info(
+                f"⏭️  Speaker recognition disabled, skipping speaker job for conversation {conversation_id[:8]}"
+            )
 
         # Job 3: Extract memories
         # Depends on speaker job if it was created, otherwise depends on transcription
@@ -477,39 +538,73 @@ async def reprocess_transcript(conversation_id: str, user: User):
             result_ttl=JOB_RESULT_TTL,
             job_id=f"memory_{conversation_id[:8]}",
             description=f"Extract memories for {conversation_id[:8]}",
-            meta={'conversation_id': conversation_id}
+            meta={"conversation_id": conversation_id},
         )
         if speaker_job:
-            logger.info(f"📥 RQ: Enqueued memory job {memory_job.id} (depends on speaker job {speaker_job.id})")
+            logger.info(
+                f"📥 RQ: Enqueued memory job {memory_job.id} (depends on speaker job {speaker_job.id})"
+            )
         else:
-            logger.info(f"📥 RQ: Enqueued memory job {memory_job.id} (depends on transcript job {transcript_job.id})")
+            logger.info(
+                f"📥 RQ: Enqueued memory job {memory_job.id} (depends on transcript job {transcript_job.id})"
+            )
+
+        # Job 4: Regenerate title/summary (depends on memory job to avoid race condition
+        # and to ensure fresh memories are available for context-enriched summaries)
+        title_summary_job = default_queue.enqueue(
+            generate_title_summary_job,
+            conversation_id,
+            job_timeout=300,
+            result_ttl=JOB_RESULT_TTL,
+            depends_on=memory_job,
+            job_id=f"title_summary_{conversation_id[:8]}",
+            description=f"Regenerate title/summary for {conversation_id[:8]}",
+            meta={"conversation_id": conversation_id, "trigger": "reprocess_transcript"},
+        )
+        logger.info(
+            f"📥 RQ: Enqueued title/summary job {title_summary_job.id} (depends on memory job {memory_job.id})"
+        )
 
         job = transcript_job  # For backward compatibility with return value
-        logger.info(f"Created transcript reprocessing job {job.id} (version: {version_id}) for conversation {conversation_id}")
+        logger.info(
+            f"Created transcript reprocessing job {job.id} (version: {version_id}) for conversation {conversation_id}"
+        )
 
-        return JSONResponse(content={
-            "message": f"Transcript reprocessing started for conversation {conversation_id}",
-            "job_id": job.id,
-            "version_id": version_id,
-            "status": "queued"
-        })
+        return JSONResponse(
+            content={
+                "message": f"Transcript reprocessing started for conversation {conversation_id}",
+                "job_id": job.id,
+                "title_summary_job_id": title_summary_job.id,
+                "version_id": version_id,
+                "status": "queued",
+            }
+        )
 
     except Exception as e:
         logger.error(f"Error starting transcript reprocessing: {e}")
-        return JSONResponse(status_code=500, content={"error": "Error starting transcript reprocessing"})
+        return JSONResponse(
+            status_code=500, content={"error": "Error starting transcript reprocessing"}
+        )
 
 
 async def reprocess_memory(conversation_id: str, transcript_version_id: str, user: User):
     """Reprocess memory extraction for a specific transcript version. Users can only reprocess their own conversations."""
     try:
         # Find the conversation using Beanie
-        conversation_model = await Conversation.find_one(Conversation.conversation_id == conversation_id)
+        conversation_model = await Conversation.find_one(
+            Conversation.conversation_id == conversation_id
+        )
         if not conversation_model:
             return JSONResponse(status_code=404, content={"error": "Conversation not found"})
 
         # Check ownership for non-admin users
         if not user.is_superuser and conversation_model.user_id != str(user.user_id):
-            return JSONResponse(status_code=403, content={"error": "Access forbidden. You can only reprocess your own conversations."})
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": "Access forbidden. You can only reprocess your own conversations."
+                },
+            )
 
         # Resolve transcript version ID
         # Handle special "active" version ID
@@ -530,7 +625,8 @@ async def reprocess_memory(conversation_id: str, transcript_version_id: str, use
 
         if not transcript_version:
             return JSONResponse(
-                status_code=404, content={"error": f"Transcript version '{transcript_version_id}' not found"}
+                status_code=404,
+                content={"error": f"Transcript version '{transcript_version_id}' not found"},
             )
 
         # Create new memory version ID
@@ -539,33 +635,32 @@ async def reprocess_memory(conversation_id: str, transcript_version_id: str, use
         # Enqueue memory processing job with RQ (RQ handles job tracking)
 
         job = enqueue_memory_processing(
-            client_id=conversation_model.client_id,
-            user_id=str(user.user_id),
-            user_email=user.email,
             conversation_id=conversation_id,
-            priority=JobPriority.NORMAL
+            priority=JobPriority.NORMAL,
         )
 
-        logger.info(f"Created memory reprocessing job {job.id} (version {version_id}) for conversation {conversation_id}")
+        logger.info(
+            f"Created memory reprocessing job {job.id} (version {version_id}) for conversation {conversation_id}"
+        )
 
-        return JSONResponse(content={
-            "message": f"Memory reprocessing started for conversation {conversation_id}",
-            "job_id": job.id,
-            "version_id": version_id,
-            "transcript_version_id": transcript_version_id,
-            "status": "queued"
-        })
+        return JSONResponse(
+            content={
+                "message": f"Memory reprocessing started for conversation {conversation_id}",
+                "job_id": job.id,
+                "version_id": version_id,
+                "transcript_version_id": transcript_version_id,
+                "status": "queued",
+            }
+        )
 
     except Exception as e:
         logger.error(f"Error starting memory reprocessing: {e}")
-        return JSONResponse(status_code=500, content={"error": "Error starting memory reprocessing"})
+        return JSONResponse(
+            status_code=500, content={"error": "Error starting memory reprocessing"}
+        )
 
 
-async def reprocess_speakers(
-    conversation_id: str,
-    transcript_version_id: str,
-    user: User
-):
+async def reprocess_speakers(conversation_id: str, transcript_version_id: str, user: User):
     """
     Reprocess speaker identification for a specific transcript version.
     Users can only reprocess their own conversations.
@@ -579,16 +674,15 @@ async def reprocess_speakers(
             Conversation.conversation_id == conversation_id
         )
         if not conversation_model:
-            return JSONResponse(
-                status_code=404,
-                content={"error": "Conversation not found"}
-            )
+            return JSONResponse(status_code=404, content={"error": "Conversation not found"})
 
         # Check ownership for non-admin users
         if not user.is_superuser and conversation_model.user_id != str(user.user_id):
             return JSONResponse(
                 status_code=403,
-                content={"error": "Access forbidden. You can only reprocess your own conversations."}
+                content={
+                    "error": "Access forbidden. You can only reprocess your own conversations."
+                },
             )
 
         # 2. Resolve source transcript version ID (handle "active" special case)
@@ -597,8 +691,7 @@ async def reprocess_speakers(
             active_version_id = conversation_model.active_transcript_version
             if not active_version_id:
                 return JSONResponse(
-                    status_code=404,
-                    content={"error": "No active transcript version found"}
+                    status_code=404, content={"error": "No active transcript version found"}
                 )
             source_version_id = active_version_id
 
@@ -612,53 +705,75 @@ async def reprocess_speakers(
         if not source_version:
             return JSONResponse(
                 status_code=404,
-                content={"error": f"Transcript version '{source_version_id}' not found"}
+                content={"error": f"Transcript version '{source_version_id}' not found"},
             )
 
-        # 4. Validate transcript has content and words
+        # 4. Validate transcript has content and words (or provider-diarized segments)
         if not source_version.transcript:
             return JSONResponse(
                 status_code=400,
-                content={"error": "Cannot re-diarize empty transcript. Transcript version has no text."}
+                content={
+                    "error": "Cannot re-diarize empty transcript. Transcript version has no text."
+                },
             )
 
-        if not source_version.words:
+        provider_capabilities = source_version.metadata.get("provider_capabilities", {})
+        provider_has_diarization = (
+            provider_capabilities.get("diarization", False)
+            or source_version.diarization_source == "provider"
+        )
+
+        if not source_version.words and not (provider_has_diarization and source_version.segments):
             return JSONResponse(
                 status_code=400,
-                content={"error": "Cannot re-diarize transcript without word timings. Words are required for diarization."}
+                content={
+                    "error": "Cannot re-diarize transcript without word timings. Words are required for diarization."
+                },
             )
 
         # 5. Check if speaker recognition is enabled
-        speaker_config = get_service_config('speaker_recognition')
-        if not speaker_config.get('enabled', True):
+        speaker_config = get_service_config("speaker_recognition")
+        if not speaker_config.get("enabled", True):
             return JSONResponse(
                 status_code=400,
                 content={
                     "error": "Speaker recognition is disabled",
-                    "details": "Enable speaker service in config to use this feature"
-                }
+                    "details": "Enable speaker service in config to use this feature",
+                },
             )
 
-        # 6. Create NEW transcript version (copy text/words, empty segments)
+        # 6. Create NEW transcript version (copy text/words, segments for provider-diarized)
         new_version_id = str(uuid.uuid4())
 
-        # Add new version with copied text/words but empty segments
-        # Speaker job will populate segments with re-identified speakers
-        conversation_model.add_transcript_version(
+        # For provider-diarized transcripts, copy segments so the speaker job can
+        # identify speakers per-segment. For word-based transcripts, leave segments
+        # empty so pyannote can re-diarize.
+        new_metadata = {
+            "reprocessing_type": "speaker_diarization",
+            "source_version_id": source_version_id,
+            "trigger": "manual_reprocess",
+        }
+        if provider_has_diarization:
+            new_segments = source_version.segments  # COPY provider segments
+            new_metadata["provider_capabilities"] = provider_capabilities
+        else:
+            new_segments = []  # Empty - will be populated by speaker job
+
+        new_version = conversation_model.add_transcript_version(
             version_id=new_version_id,
             transcript=source_version.transcript,  # COPY transcript text
             words=source_version.words,  # COPY word timings
-            segments=[],  # Empty - will be populated by speaker job
+            segments=new_segments,
             provider=source_version.provider,
             model=source_version.model,
             processing_time_seconds=None,  # Will be updated by job
-            metadata={
-                "reprocessing_type": "speaker_diarization",
-                "source_version_id": source_version_id,
-                "trigger": "manual_reprocess"
-            },
-            set_as_active=True  # Set new version as active
+            metadata=new_metadata,
+            set_as_active=True,  # Set new version as active
         )
+
+        # Carry over diarization_source so speaker job knows to use segment identification
+        if provider_has_diarization:
+            new_version.diarization_source = "provider"
 
         # Save conversation with new version
         await conversation_model.save()
@@ -678,11 +793,11 @@ async def reprocess_speakers(
             job_id=f"reprocess_speaker_{conversation_id[:12]}",
             description=f"Re-diarize speakers for {conversation_id[:8]}",
             meta={
-                'conversation_id': conversation_id,
-                'version_id': new_version_id,
-                'source_version_id': source_version_id,
-                'trigger': 'reprocess'
-            }
+                "conversation_id": conversation_id,
+                "version_id": new_version_id,
+                "source_version_id": source_version_id,
+                "trigger": "reprocess",
+            },
         )
 
         logger.info(
@@ -699,10 +814,7 @@ async def reprocess_speakers(
             result_ttl=JOB_RESULT_TTL,
             job_id=f"memory_{conversation_id[:12]}",
             description=f"Extract memories for {conversation_id[:8]}",
-            meta={
-                'conversation_id': conversation_id,
-                'trigger': 'reprocess_after_speaker'
-            }
+            meta={"conversation_id": conversation_id, "trigger": "reprocess_after_speaker"},
         )
 
         logger.info(
@@ -710,20 +822,41 @@ async def reprocess_speakers(
             f"after speaker job {speaker_job.id}"
         )
 
+        # 8b. Chain title/summary regeneration after memory job
+        # Depends on memory_job to avoid race condition (both save conversation document)
+        # and to ensure fresh memories are available for context-enriched summaries
+        title_summary_job = default_queue.enqueue(
+            generate_title_summary_job,
+            conversation_id,
+            job_timeout=300,
+            result_ttl=JOB_RESULT_TTL,
+            depends_on=memory_job,
+            job_id=f"title_summary_{conversation_id[:12]}",
+            description=f"Regenerate title/summary for {conversation_id[:8]}",
+            meta={"conversation_id": conversation_id, "trigger": "reprocess_after_speaker"},
+        )
+
+        logger.info(
+            f"Chained title/summary job {title_summary_job.id} " f"after memory job {memory_job.id}"
+        )
+
         # 9. Return job information
-        return JSONResponse(content={
-            "message": "Speaker reprocessing started",
-            "job_id": speaker_job.id,
-            "version_id": new_version_id,  # NEW version ID
-            "source_version_id": source_version_id,  # Original version used as source
-            "status": "queued"
-        })
+        return JSONResponse(
+            content={
+                "message": "Speaker reprocessing started",
+                "job_id": speaker_job.id,
+                "memory_job_id": memory_job.id,
+                "title_summary_job_id": title_summary_job.id,
+                "version_id": new_version_id,  # NEW version ID
+                "source_version_id": source_version_id,  # Original version used as source
+                "status": "queued",
+            }
+        )
 
     except Exception as e:
         logger.error(f"Error starting speaker reprocessing: {e}")
         return JSONResponse(
-            status_code=500,
-            content={"error": "Error starting speaker reprocessing"}
+            status_code=500, content={"error": "Error starting speaker reprocessing"}
         )
 
 
@@ -731,13 +864,18 @@ async def activate_transcript_version(conversation_id: str, version_id: str, use
     """Activate a specific transcript version. Users can only modify their own conversations."""
     try:
         # Find the conversation using Beanie
-        conversation_model = await Conversation.find_one(Conversation.conversation_id == conversation_id)
+        conversation_model = await Conversation.find_one(
+            Conversation.conversation_id == conversation_id
+        )
         if not conversation_model:
             return JSONResponse(status_code=404, content={"error": "Conversation not found"})
 
         # Check ownership for non-admin users
         if not user.is_superuser and conversation_model.user_id != str(user.user_id):
-            return JSONResponse(status_code=403, content={"error": "Access forbidden. You can only modify your own conversations."})
+            return JSONResponse(
+                status_code=403,
+                content={"error": "Access forbidden. You can only modify your own conversations."},
+            )
 
         # Activate the transcript version using Beanie model method
         success = conversation_model.set_active_transcript_version(version_id)
@@ -751,29 +889,40 @@ async def activate_transcript_version(conversation_id: str, version_id: str, use
         # TODO: Trigger speaker recognition if configured
         # This would integrate with existing speaker recognition logic
 
-        logger.info(f"Activated transcript version {version_id} for conversation {conversation_id} by user {user.user_id}")
+        logger.info(
+            f"Activated transcript version {version_id} for conversation {conversation_id} by user {user.user_id}"
+        )
 
-        return JSONResponse(content={
-            "message": f"Transcript version {version_id} activated successfully",
-            "active_transcript_version": version_id
-        })
+        return JSONResponse(
+            content={
+                "message": f"Transcript version {version_id} activated successfully",
+                "active_transcript_version": version_id,
+            }
+        )
 
     except Exception as e:
         logger.error(f"Error activating transcript version: {e}")
-        return JSONResponse(status_code=500, content={"error": "Error activating transcript version"})
+        return JSONResponse(
+            status_code=500, content={"error": "Error activating transcript version"}
+        )
 
 
 async def activate_memory_version(conversation_id: str, version_id: str, user: User):
     """Activate a specific memory version. Users can only modify their own conversations."""
     try:
         # Find the conversation using Beanie
-        conversation_model = await Conversation.find_one(Conversation.conversation_id == conversation_id)
+        conversation_model = await Conversation.find_one(
+            Conversation.conversation_id == conversation_id
+        )
         if not conversation_model:
             return JSONResponse(status_code=404, content={"error": "Conversation not found"})
 
         # Check ownership for non-admin users
         if not user.is_superuser and conversation_model.user_id != str(user.user_id):
-            return JSONResponse(status_code=403, content={"error": "Access forbidden. You can only modify your own conversations."})
+            return JSONResponse(
+                status_code=403,
+                content={"error": "Access forbidden. You can only modify your own conversations."},
+            )
 
         # Activate the memory version using Beanie model method
         success = conversation_model.set_active_memory_version(version_id)
@@ -784,12 +933,16 @@ async def activate_memory_version(conversation_id: str, version_id: str, user: U
 
         await conversation_model.save()
 
-        logger.info(f"Activated memory version {version_id} for conversation {conversation_id} by user {user.user_id}")
+        logger.info(
+            f"Activated memory version {version_id} for conversation {conversation_id} by user {user.user_id}"
+        )
 
-        return JSONResponse(content={
-            "message": f"Memory version {version_id} activated successfully",
-            "active_memory_version": version_id
-        })
+        return JSONResponse(
+            content={
+                "message": f"Memory version {version_id} activated successfully",
+                "active_memory_version": version_id,
+            }
+        )
 
     except Exception as e:
         logger.error(f"Error activating memory version: {e}")
@@ -800,28 +953,33 @@ async def get_conversation_version_history(conversation_id: str, user: User):
     """Get version history for a conversation. Users can only access their own conversations."""
     try:
         # Find the conversation using Beanie to check ownership
-        conversation_model = await Conversation.find_one(Conversation.conversation_id == conversation_id)
+        conversation_model = await Conversation.find_one(
+            Conversation.conversation_id == conversation_id
+        )
         if not conversation_model:
             return JSONResponse(status_code=404, content={"error": "Conversation not found"})
 
         # Check ownership for non-admin users
         if not user.is_superuser and conversation_model.user_id != str(user.user_id):
-            return JSONResponse(status_code=403, content={"error": "Access forbidden. You can only access your own conversations."})
+            return JSONResponse(
+                status_code=403,
+                content={"error": "Access forbidden. You can only access your own conversations."},
+            )
 
         # Get version history from model
         # Convert datetime objects to ISO strings for JSON serialization
         transcript_versions = []
         for v in conversation_model.transcript_versions:
             version_dict = v.model_dump()
-            if version_dict.get('created_at'):
-                version_dict['created_at'] = version_dict['created_at'].isoformat()
+            if version_dict.get("created_at"):
+                version_dict["created_at"] = version_dict["created_at"].isoformat()
             transcript_versions.append(version_dict)
 
         memory_versions = []
         for v in conversation_model.memory_versions:
             version_dict = v.model_dump()
-            if version_dict.get('created_at'):
-                version_dict['created_at'] = version_dict['created_at'].isoformat()
+            if version_dict.get("created_at"):
+                version_dict["created_at"] = version_dict["created_at"].isoformat()
             memory_versions.append(version_dict)
 
         history = {
@@ -829,7 +987,7 @@ async def get_conversation_version_history(conversation_id: str, user: User):
             "active_transcript_version": conversation_model.active_transcript_version,
             "active_memory_version": conversation_model.active_memory_version,
             "transcript_versions": transcript_versions,
-            "memory_versions": memory_versions
+            "memory_versions": memory_versions,
         }
 
         return JSONResponse(content=history)

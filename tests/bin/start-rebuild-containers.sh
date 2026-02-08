@@ -5,6 +5,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TESTS_DIR="$SCRIPT_DIR/.."
 BACKEND_DIR="$SCRIPT_DIR/../../backends/advanced"
 
 cd "$BACKEND_DIR"
@@ -16,6 +17,14 @@ echo "   2. Rebuild images with latest code"
 echo "   3. Start containers"
 echo ""
 
+# Load environment variables from .env.test (API keys, etc.)
+if [ -f "$TESTS_DIR/setup/.env.test" ]; then
+    echo "📝 Loading environment variables from .env.test..."
+    set -a
+    source "$TESTS_DIR/setup/.env.test"
+    set +a
+fi
+
 # Stop containers
 echo "🛑 Stopping containers..."
 docker compose -f docker-compose-test.yml stop
@@ -23,6 +32,14 @@ docker compose -f docker-compose-test.yml stop
 # Rebuild and start
 echo "🏗️  Rebuilding images..."
 docker compose -f docker-compose-test.yml up -d --build
+
+# Flush Redis to clear stale keys from previous test runs.
+# Redis uses appendonly persistence with a bind mount, so data survives
+# stop/rebuild cycles. Stale conversation:current:* keys can cause test
+# failures when the audio persistence job finds a Redis key pointing to
+# a MongoDB document that no longer exists.
+echo "🗑️  Flushing Redis for clean test state..."
+docker compose -f docker-compose-test.yml exec -T redis-test redis-cli FLUSHALL > /dev/null 2>&1 || true
 
 # Wait for services
 echo "⏳ Waiting for services to be ready..."

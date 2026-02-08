@@ -7,7 +7,7 @@ Handles memory CRUD operations, search, and debug functionality.
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, Body
+from fastapi import APIRouter, Body, Depends, Query
 from pydantic import BaseModel
 
 from advanced_omi_backend.auth import current_active_user, current_superuser

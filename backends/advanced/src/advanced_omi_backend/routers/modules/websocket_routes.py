@@ -5,12 +5,13 @@ This module handles WebSocket connections for audio streaming.
 """
 
 import logging
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from typing import Optional
+
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from advanced_omi_backend.controllers.websocket_controller import (
     handle_omi_websocket,
-    handle_pcm_websocket
+    handle_pcm_websocket,
 )
 
 logger = logging.getLogger(__name__)

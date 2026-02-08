@@ -149,11 +149,13 @@ async def recognise_speakers_job(
     """
     RQ job function for identifying speakers in a transcribed conversation.
 
-    This job runs after transcription and:
-    1. Reconstructs audio from MongoDB chunks
-    2. Calls speaker recognition service to identify speakers
-    3. Updates the transcript version with identified speaker labels
-    4. Returns results for downstream jobs (memory)
+    This job adapts based on provider capabilities:
+    1. If provider has diarization (e.g., VibeVoice) → skip pyannote, do identification only
+    2. If provider has word timestamps (e.g., Parakeet) → full pyannote diarization + identification
+    3. If no word timestamps → cannot run diarization, keep existing segments
+
+    Speaker identification always runs if enrolled speakers exist, mapping
+    generic labels ("Speaker 0") to enrolled speaker names ("Alice").
 
     Args:
         conversation_id: Conversation ID
@@ -202,6 +204,30 @@ async def recognise_speakers_job(
             "processing_time_seconds": 0
         }
 
+    # Get provider capabilities from metadata
+    provider_capabilities = transcript_version.metadata.get("provider_capabilities", {})
+    provider_has_diarization = provider_capabilities.get("diarization", False)
+    provider_has_word_timestamps = provider_capabilities.get("word_timestamps", False)
+
+    # Check if provider already did diarization (set by transcription job)
+    diarization_source = transcript_version.diarization_source
+
+    if provider_has_diarization or diarization_source == "provider":
+        # Provider already did diarization (e.g., VibeVoice, Deepgram batch)
+        # Skip pyannote diarization, go straight to speaker identification
+        logger.info(
+            f"🎤 Provider already diarized (diarization_source={diarization_source}), "
+            f"skipping pyannote diarization - will run speaker identification only"
+        )
+
+        # If we have existing segments from provider, proceed to identification
+        if transcript_version.segments:
+            logger.info(f"🎤 Using {len(transcript_version.segments)} segments from provider")
+            # Continue to speaker identification below (after this block)
+        else:
+            logger.warning(f"🎤 Provider claimed diarization but no segments found")
+            # Still continue - identification may work with audio analysis
+
     # Read transcript text and words from the transcript version
     # (Parameters may be empty if called via job dependency)
     actual_transcript_text = transcript_text or transcript_version.transcript or ""
@@ -248,66 +274,91 @@ async def recognise_speakers_job(
             "processing_time_seconds": 0
         }
 
-    if not actual_words:
-        logger.warning(f"🎤 No words found in version {version_id}")
-        return {
-            "success": False,
-            "conversation_id": conversation_id,
-            "version_id": version_id,
-            "error": "No word-level timing data available",
-            "processing_time_seconds": 0
-        }
+    # Check if we can run pyannote diarization
+    # Pyannote requires word timestamps to align speaker segments with text
+    can_run_pyannote = bool(actual_words) and not provider_has_diarization
 
-    transcript_data = {
-        "text": actual_transcript_text,
-        "words": actual_words
-    }
-
-    # Generate backend token for speaker service to fetch audio
-    # Speaker service will check conversation duration and decide
-    # whether to chunk based on its own memory constraints
-
-    # Get user details for token generation
-    try:
-        user = await get_user_by_id(user_id)
-        if not user:
-            logger.error(f"User {user_id} not found for token generation")
+    if not actual_words and not provider_has_diarization:
+        # No words AND provider didn't diarize - we have a problem
+        # This can happen with VibeVoice if it fails to return segments
+        logger.warning(
+            f"🎤 No word timestamps available and provider didn't diarize. "
+            f"Speaker recognition cannot improve segments."
+        )
+        # Keep existing segments and return success (we can't do better)
+        if transcript_version.segments:
+            return {
+                "success": True,
+                "conversation_id": conversation_id,
+                "version_id": version_id,
+                "speaker_recognition_enabled": True,
+                "identified_speakers": [],
+                "segment_count": len(transcript_version.segments),
+                "skip_reason": "No word timestamps available for pyannote, keeping provider segments",
+                "processing_time_seconds": time.time() - start_time
+            }
+        else:
             return {
                 "success": False,
                 "conversation_id": conversation_id,
                 "version_id": version_id,
-                "error": "User not found",
+                "error": "No word timestamps and no segments available",
                 "processing_time_seconds": time.time() - start_time
             }
 
-        backend_token = generate_jwt_for_user(user_id, user.email)
-        logger.info(f"🔐 Generated backend token for speaker service")
-
-    except Exception as token_error:
-        logger.error(f"Failed to generate backend token: {token_error}", exc_info=True)
-        return {
-            "success": False,
-            "conversation_id": conversation_id,
-            "version_id": version_id,
-            "error": f"Token generation failed: {token_error}",
-            "processing_time_seconds": time.time() - start_time
-        }
-
-    # Call speaker recognition service with conversation_id
-    # Speaker service will:
-    # 1. Fetch conversation metadata to check duration
-    # 2. Decide whether to chunk based on its MAX_DIARIZE_DURATION setting
-    # 3. Request audio segments via backend API as needed
-    # 4. Return merged speaker segments
-    logger.info(f"🎤 Calling speaker recognition service with conversation_id...")
-
     try:
-        speaker_result = await speaker_client.diarize_identify_match(
-            conversation_id=conversation_id,
-            backend_token=backend_token,
-            transcript_data=transcript_data,
-            user_id=user_id
-        )
+        if provider_has_diarization and transcript_version.segments:
+            # Provider already diarized (e.g. VibeVoice) - use segment-level identification
+            logger.info(f"🎤 Using segment-level speaker identification for provider-diarized segments")
+            segments_data = [
+                {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker}
+                for s in transcript_version.segments
+            ]
+            speaker_result = await speaker_client.identify_provider_segments(
+                conversation_id=conversation_id,
+                segments=segments_data,
+                user_id=user_id,
+            )
+        else:
+            # Standard path: full diarization + identification via speaker service
+            transcript_data = {
+                "text": actual_transcript_text,
+                "words": actual_words
+            }
+
+            # Generate backend token for speaker service to fetch audio
+            try:
+                user = await get_user_by_id(user_id)
+                if not user:
+                    logger.error(f"User {user_id} not found for token generation")
+                    return {
+                        "success": False,
+                        "conversation_id": conversation_id,
+                        "version_id": version_id,
+                        "error": "User not found",
+                        "processing_time_seconds": time.time() - start_time
+                    }
+
+                backend_token = generate_jwt_for_user(user_id, user.email)
+                logger.info(f"🔐 Generated backend token for speaker service")
+
+            except Exception as token_error:
+                logger.error(f"Failed to generate backend token: {token_error}", exc_info=True)
+                return {
+                    "success": False,
+                    "conversation_id": conversation_id,
+                    "version_id": version_id,
+                    "error": f"Token generation failed: {token_error}",
+                    "processing_time_seconds": time.time() - start_time
+                }
+
+            logger.info(f"🎤 Calling speaker recognition service with conversation_id...")
+            speaker_result = await speaker_client.diarize_identify_match(
+                conversation_id=conversation_id,
+                backend_token=backend_token,
+                transcript_data=transcript_data,
+                user_id=user_id
+            )
 
         # Check for errors from speaker service
         if speaker_result.get("error"):
@@ -426,6 +477,7 @@ async def recognise_speakers_job(
                     end=seg.get("end", 0),
                     text=text,
                     speaker=speaker_name,
+                    identified_as=seg.get("identified_as"),
                     confidence=seg.get("confidence"),
                     words=segment_words  # Use words from speaker service
                 )
@@ -455,6 +507,10 @@ async def recognise_speakers_job(
             "total_segments": len(speaker_segments),
             "processing_time_seconds": time.time() - start_time
         }
+
+        # Set diarization source if pyannote ran (provider didn't do diarization)
+        if not provider_has_diarization and transcript_version.diarization_source != "provider":
+            transcript_version.diarization_source = "pyannote"
 
         await conversation.save()
 

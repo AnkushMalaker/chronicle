@@ -1,0 +1,111 @@
+chat:
+  system_prompt: You are a helpful AI assistant with access to the user's personal
+    memories and conversation history.
+defaults:
+  embedding: mock-embed
+  llm: mock-llm
+  stt: stt-deepgram-invalid
+  stt_stream: stt-deepgram-stream-invalid
+  vector_store: vs-qdrant
+memory:
+  extraction:
+    enabled: false
+  provider: chronicle
+  timeout_seconds: 1200
+models:
+- api_family: openai
+  api_key: dummy-key-not-used
+  description: Dummy LLM for testing (not called)
+  model_name: gpt-4o-mini
+  model_output: json
+  model_params:
+    max_tokens: 2000
+    temperature: 0.2
+  model_provider: openai
+  model_type: llm
+  model_url: https://api.openai.com/v1
+  name: mock-llm
+- api_family: openai
+  api_key: dummy-key-not-used
+  description: Dummy embeddings for testing (not called)
+  embedding_dimensions: 384
+  model_name: text-embedding-3-small
+  model_output: vector
+  model_provider: openai
+  model_type: embedding
+  model_url: https://api.openai.com/v1
+  name: mock-embed
+- api_family: qdrant
+  description: Qdrant vector database (local)
+  model_params:
+    collection_name: omi_memories
+    host: ${oc.env:QDRANT_BASE_URL,qdrant}
+    port: ${oc.env:QDRANT_PORT,6333}
+  model_provider: qdrant
+  model_type: vector_store
+  model_url: http://${oc.env:QDRANT_BASE_URL,qdrant}:${oc.env:QDRANT_PORT,6333}
+  name: vs-qdrant
+# Deepgram with invalid API key to trigger transcription failures
+- api_family: http
+  api_key: invalid-key-for-testing
+  description: Deepgram Nova 3 with invalid key (for testing transcription failure)
+  model_provider: deepgram
+  model_type: stt
+  model_url: https://api.deepgram.com/v1
+  name: stt-deepgram-invalid
+  operations:
+    stt_transcribe:
+      headers:
+        Authorization: Token invalid-key-for-testing
+        Content-Type: audio/raw
+      method: POST
+      path: /listen
+      query:
+        channels: '1'
+        diarize: 'true'
+        encoding: linear16
+        language: multi
+        model: nova-3
+        punctuate: 'true'
+        sample_rate: 16000
+        smart_format: 'true'
+      response:
+        extract:
+          segments: results.channels[0].alternatives[0].paragraphs.paragraphs
+          text: results.channels[0].alternatives[0].transcript
+          words: results.channels[0].alternatives[0].words
+        type: json
+- api_family: websocket
+  api_key: invalid-key-for-testing
+  description: Deepgram Nova 3 streaming with invalid key (for testing transcription failure)
+  model_provider: deepgram
+  model_type: stt_stream
+  model_url: wss://api.deepgram.com/v1/listen
+  name: stt-deepgram-stream-invalid
+  operations:
+    chunk_header:
+      message: {}
+    end:
+      message:
+        type: CloseStream
+    expect:
+      extract:
+        segments: []
+        text: channel.alternatives[0].transcript
+        words: channel.alternatives[0].words
+      final_type: Results
+      interim_type: Results
+    query:
+      channels: 1
+      encoding: linear16
+      interim_results: true
+      language: multi
+      model: nova-3
+      punctuate: true
+      sample_rate: 16000
+      smart_format: true
+    start:
+      message: {}
+speaker_recognition:
+  enabled: false
+  timeout: 60

@@ -1,8 +1,8 @@
 
-from dataclasses import dataclass, asdict
-from typing import List, Optional, Literal, Dict, Any, Union
-import xml.etree.ElementTree as ET
 import re
+import xml.etree.ElementTree as ET
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, List, Literal, Optional, Union
 
 Event = Literal["ADD", "UPDATE", "DELETE", "NONE"]
 NUMERIC_ID = re.compile(r"^\d+$")
@@ -25,7 +25,7 @@ def extract_xml_from_content(content: str) -> str:
     """
     # Try to find XML block within the content
     import re
-    
+
     # Look for <result>...</result> block
     xml_match = re.search(r'<result>.*?</result>', content, re.DOTALL)
     if xml_match:

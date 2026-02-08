@@ -255,6 +255,8 @@ async def get_audio_segment(
     Returns:
         WAV audio bytes (16kHz, mono) for the requested time range
     """
+    import time
+    request_start = time.time()
 
     # Verify conversation exists and user has access
     conversation = await Conversation.find_one(
@@ -292,6 +294,14 @@ async def get_audio_segment(
     except Exception as e:
         logger.error(f"Failed to reconstruct audio segment for {conversation_id[:12]}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to reconstruct audio: {str(e)}")
+
+    request_time = time.time() - request_start
+    logger.info(
+        f"Audio segment endpoint completed for {conversation_id[:12]}: "
+        f"{start:.1f}s - {end:.1f}s ({end - start:.1f}s duration, "
+        f"{len(wav_bytes) / 1024 / 1024:.2f} MB, "
+        f"total request time: {request_time:.2f}s)"
+    )
 
     return Response(
         content=wav_bytes,

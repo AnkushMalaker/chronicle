@@ -15,8 +15,14 @@ from urllib.parse import urlencode
 import httpx
 import websockets
 
+from advanced_omi_backend.config_loader import get_backend_config
 from advanced_omi_backend.model_registry import get_models_registry
-from .base import BaseTranscriptionProvider, BatchTranscriptionProvider, StreamingTranscriptionProvider
+
+from .base import (
+    BaseTranscriptionProvider,
+    BatchTranscriptionProvider,
+    StreamingTranscriptionProvider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,12 +70,42 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
             raise RuntimeError("No default STT model defined in config.yml")
         self.model = model
         self._name = model.model_provider or model.name
+        # Load capabilities from config.yml model definition
+        self._capabilities = set(model.capabilities) if model.capabilities else set()
 
     @property
     def name(self) -> str:
         return self._name
 
+    @property
+    def capabilities(self) -> set:
+        """Return provider capabilities from config.yml.
+
+        Capabilities indicate what the provider can produce:
+        - word_timestamps: Word-level timing data
+        - segments: Speaker segments
+        - diarization: Speaker labels in segments
+
+        Returns:
+            Set of capability strings
+        """
+        return self._capabilities
+
+    def get_capabilities_dict(self) -> dict:
+        """Return capabilities as a dict for metadata storage.
+
+        Returns:
+            Dict mapping capability names to True
+        """
+        return {cap: True for cap in self._capabilities}
+
     async def transcribe(self, audio_data: bytes, sample_rate: int, diarize: bool = False) -> dict:
+        # Special handling for mock provider (no HTTP server needed)
+        if self.model.model_provider == "mock":
+            from .mock_provider import MockTranscriptionProvider
+            mock = MockTranscriptionProvider(fail_mode=False)
+            return await mock.transcribe(audio_data, sample_rate, diarize)
+
         op = (self.model.operations or {}).get("stt_transcribe") or {}
         method = (op.get("method") or "POST").upper()
         path = (op.get("path") or "/listen")
@@ -112,7 +148,7 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
         if "diarize" in query:
             query["diarize"] = "true" if diarize else "false"
 
-        timeout = op.get("timeout", 120)
+        timeout = op.get("timeout", 300)
         async with httpx.AsyncClient(timeout=timeout) as client:
             if method == "POST":
                 if use_multipart:
@@ -142,9 +178,15 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
             words = _dotted_get(data, extract.get("words")) or []
             segments = _dotted_get(data, extract.get("segments")) or []
 
-            # Ignore segments from all providers - speaker service creates them via diarization
-            segments = []
-            logger.debug(f"Transcription: Extracted {len(words)} words, ignoring provider segments (speaker service will create them)")
+            # Check config to decide whether to keep or discard provider segments
+            transcription_config = get_backend_config("transcription")
+            use_provider_segments = transcription_config.get("use_provider_segments", False)
+
+            if not use_provider_segments:
+                segments = []
+                logger.debug(f"Transcription: Extracted {len(words)} words, ignoring provider segments (use_provider_segments=false)")
+            else:
+                logger.debug(f"Transcription: Extracted {len(words)} words, keeping {len(segments)} provider segments (use_provider_segments=true)")
 
         return {"text": text, "words": words, "segments": segments}
 
@@ -372,9 +414,23 @@ def is_transcription_available(mode: str = "batch") -> bool:
     return provider is not None
 
 
+def get_mock_transcription_provider(fail_mode: bool = False) -> BaseTranscriptionProvider:
+    """Return a mock transcription provider (for testing only).
+
+    Args:
+        fail_mode: If True, transcribe() will raise an exception to simulate transcription failure
+
+    Returns:
+        MockTranscriptionProvider instance
+    """
+    from .mock_provider import MockTranscriptionProvider
+    return MockTranscriptionProvider(fail_mode=fail_mode)
+
+
 __all__ = [
     "get_transcription_provider",
     "is_transcription_available",
+    "get_mock_transcription_provider",
     "RegistryBatchTranscriptionProvider",
     "RegistryStreamingTranscriptionProvider",
     "BaseTranscriptionProvider",

@@ -1,0 +1,15 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install websockets dependency
+RUN pip install --no-cache-dir websockets
+
+# Copy mock server script
+COPY tests/libs/mock_streaming_stt_server.py .
+
+# Expose WebSocket port
+EXPOSE 9999
+
+# Run server
+CMD ["python", "mock_streaming_stt_server.py", "--host", "0.0.0.0", "--port", "9999"]

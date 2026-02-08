@@ -1,0 +1,120 @@
+# Test Configuration: Mock VibeVoice (simulates provider with built-in diarization)
+#
+# This config tests the capability-based pipeline behavior when a provider
+# already has diarization (like VibeVoice), meaning:
+# - Segments already have speaker labels
+# - Pyannote diarization should be SKIPPED
+# - Speaker identification can still run if enrolled speakers exist
+#
+# Use with mock ASR server in vibevoice mode:
+#   python mock_asr_server.py --provider vibevoice
+
+defaults:
+  llm: mock-llm
+  embedding: mock-embed
+  stt: stt-vibevoice
+  stt_stream: mock-stt-stream
+  vector_store: vs-qdrant
+
+models:
+  - name: mock-llm
+    description: Mock LLM server for testing (local)
+    model_type: llm
+    model_provider: openai
+    api_family: openai
+    model_name: gpt-4o-mini
+    model_url: http://host.docker.internal:11435
+    api_key: dummy-key-not-used
+    model_params:
+      temperature: 0.2
+      max_tokens: 2000
+    model_output: json
+
+  - name: mock-embed
+    description: Mock embedding server for testing (local)
+    model_type: embedding
+    model_provider: openai
+    api_family: openai
+    model_name: text-embedding-3-small
+    model_url: http://host.docker.internal:11435
+    api_key: dummy-key-not-used
+    embedding_dimensions: 1536
+    model_output: vector
+
+  - name: vs-qdrant
+    description: Qdrant vector database (local)
+    model_type: vector_store
+    model_provider: qdrant
+    api_family: qdrant
+    model_url: http://${oc.env:QDRANT_BASE_URL,qdrant}:${oc.env:QDRANT_PORT,6333}
+    model_params:
+      host: ${oc.env:QDRANT_BASE_URL,qdrant}
+      port: ${oc.env:QDRANT_PORT,6333}
+      collection_name: omi_memories
+
+  - name: stt-vibevoice
+    description: Mock VibeVoice ASR with built-in speaker diarization
+    model_type: stt
+    model_provider: vibevoice
+    api_family: http
+    model_url: http://host.docker.internal:8765
+    api_key: ''
+    # VibeVoice capabilities: segments with speakers, but no word-level timestamps
+    capabilities:
+      - segments
+      - diarization
+      - timestamps
+    operations:
+      stt_transcribe:
+        method: POST
+        path: /transcribe
+        content_type: multipart/form-data
+        response:
+          type: json
+          extract:
+            text: text
+            words: words
+            segments: segments
+
+  - name: mock-stt-stream
+    description: Mock STT for testing (streaming)
+    model_type: stt_stream
+    model_provider: mock
+    api_family: mock
+    model_url: ws://host.docker.internal:9999
+    api_key: mock-key-not-used
+    operations:
+      start:
+        message: {}
+      end:
+        message:
+          type: CloseStream
+      chunk_header:
+        message: {}
+      expect:
+        interim_type: Results
+        final_type: Results
+        extract:
+          text: channel.alternatives[0].transcript
+          words: channel.alternatives[0].words
+          segments: []
+
+memory:
+  provider: chronicle
+  timeout_seconds: 1200
+  extraction:
+    enabled: true
+    prompt: ''
+
+backend:
+  audio:
+    always_persist_enabled: true
+  transcription:
+    # Use segments from provider (VibeVoice provides pre-diarized segments)
+    use_provider_segments: true
+
+# Speaker recognition should skip diarization step for VibeVoice
+# but can still run speaker identification if enrolled speakers exist
+speaker_recognition:
+  enabled: true
+  timeout: 60

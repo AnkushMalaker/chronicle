@@ -12,7 +12,6 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from advanced_omi_backend.task_manager import get_task_manager
 from wyoming.audio import AudioChunk
 
 # Get loggers

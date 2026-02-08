@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from advanced_omi_backend.auth import generate_jwt_for_user
+from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.users import User
 
 from ..base import MemoryEntry, MemoryServiceBase
@@ -23,7 +24,6 @@ from ..prompts import (
     get_temporal_entity_extraction_prompt,
 )
 from .llm_providers import _get_openai_client
-from advanced_omi_backend.model_registry import get_models_registry
 
 memory_logger = logging.getLogger("memory_service")
 
@@ -60,6 +60,10 @@ class MyceliaMemoryService(MemoryServiceBase):
         timeout: Request timeout in seconds
         **kwargs: Additional configuration parameters
     """
+
+    @property
+    def provider_identifier(self) -> str:
+        return "mycelia"
 
     def __init__(self, config: MemoryConfig):
         """Initialize Mycelia memory service.
@@ -253,7 +257,9 @@ class MyceliaMemoryService(MemoryServiceBase):
             if not llm_def:
                 memory_logger.warning("No default LLM in config.yml; cannot extract facts")
                 return []
-            client = _get_openai_client(api_key=llm_def.api_key or "", base_url=llm_def.model_url, is_async=True)
+            client = _get_openai_client(
+                api_key=llm_def.api_key or "", base_url=llm_def.model_url, is_async=True
+            )
             response = await client.chat.completions.create(
                 model=llm_def.model_name,
                 messages=[
@@ -302,13 +308,19 @@ class MyceliaMemoryService(MemoryServiceBase):
             # Use registry-driven default LLM with OpenAI SDK
             reg = get_models_registry()
             if not reg:
-                memory_logger.warning("No registry available for LLM; cannot extract temporal entity")
+                memory_logger.warning(
+                    "No registry available for LLM; cannot extract temporal entity"
+                )
                 return None
             llm_def = reg.get_default("llm")
             if not llm_def:
-                memory_logger.warning("No default LLM in config.yml; cannot extract temporal entity")
+                memory_logger.warning(
+                    "No default LLM in config.yml; cannot extract temporal entity"
+                )
                 return None
-            client = _get_openai_client(api_key=llm_def.api_key or "", base_url=llm_def.model_url, is_async=True)
+            client = _get_openai_client(
+                api_key=llm_def.api_key or "", base_url=llm_def.model_url, is_async=True
+            )
             response = await client.chat.completions.create(
                 model=llm_def.model_name,
                 messages=[

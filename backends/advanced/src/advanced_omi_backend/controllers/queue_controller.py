@@ -9,20 +9,20 @@ This module provides:
 """
 
 import asyncio
-import os
 import logging
+import os
 import uuid
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 import redis
 from rq import Queue, Worker
 from rq.job import Job, JobStatus
-from rq.registry import ScheduledJobRegistry, DeferredJobRegistry
+from rq.registry import DeferredJobRegistry, ScheduledJobRegistry
 
-from advanced_omi_backend.models.job import JobPriority
-from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.config_loader import get_service_config
+from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.job import JobPriority
 
 logger = logging.getLogger(__name__)
 
@@ -342,10 +342,14 @@ def start_streaming_jobs(
     Returns:
         Dict with job IDs: {'speech_detection': job_id, 'audio_persistence': job_id}
 
-    Note: user_email is fetched from the database when needed.
+    Note:
+        - user_email is fetched from the database when needed.
+        - always_persist setting is read from global config by the audio persistence job.
     """
-    from advanced_omi_backend.workers.transcription_jobs import stream_speech_detection_job
     from advanced_omi_backend.workers.audio_jobs import audio_streaming_persistence_job
+    from advanced_omi_backend.workers.transcription_jobs import (
+        stream_speech_detection_job,
+    )
 
     # Enqueue speech detection job
     speech_job = transcription_queue.enqueue(
@@ -381,6 +385,7 @@ def start_streaming_jobs(
     # Enqueue audio persistence job on dedicated audio queue
     # NOTE: This job handles file rotation for multiple conversations automatically
     # Runs for entire session, not tied to individual conversations
+    # The job reads always_persist_enabled from global config internally
     audio_job = audio_queue.enqueue(
         audio_streaming_persistence_job,
         session_id,
@@ -441,9 +446,12 @@ def start_post_conversation_jobs(
     Returns:
         Dict with job IDs for speaker_recognition, memory, title_summary, event_dispatch
     """
-    from advanced_omi_backend.workers.speaker_jobs import recognise_speakers_job
+    from advanced_omi_backend.workers.conversation_jobs import (
+        dispatch_conversation_complete_event_job,
+        generate_title_summary_job,
+    )
     from advanced_omi_backend.workers.memory_jobs import process_memory_job
-    from advanced_omi_backend.workers.conversation_jobs import generate_title_summary_job, dispatch_conversation_complete_event_job
+    from advanced_omi_backend.workers.speaker_jobs import recognise_speakers_job
 
     version_id = transcript_version_id or str(uuid.uuid4())
 
@@ -514,7 +522,9 @@ def start_post_conversation_jobs(
         logger.info(f"⏭️  Memory extraction disabled, skipping memory job for conversation {conversation_id[:8]}")
 
     # Step 3: Title/summary generation job
-    # Depends on speaker job if enabled, otherwise on upstream dependency
+    # Depends on memory job to avoid race condition (both jobs save the conversation document)
+    # and to ensure fresh memories are available for context-enriched summaries
+    title_dependency = memory_job if memory_job else speaker_dependency
     title_job_id = f"title_summary_{conversation_id[:12]}"
     logger.info(f"🔍 DEBUG: Creating title/summary job with job_id={title_job_id}, conversation_id={conversation_id[:12]}")
 
@@ -523,12 +533,14 @@ def start_post_conversation_jobs(
         conversation_id,
         job_timeout=300,  # 5 minutes
         result_ttl=JOB_RESULT_TTL,
-        depends_on=speaker_dependency,  # Depends on speaker job if enabled, NOT memory job
+        depends_on=title_dependency,
         job_id=title_job_id,
         description=f"Generate title and summary for conversation {conversation_id[:8]}",
         meta=job_meta
     )
-    if speaker_job:
+    if memory_job:
+        logger.info(f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (depends on memory job {memory_job.id})")
+    elif speaker_job:
         logger.info(f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (depends on speaker job {speaker_job.id})")
     elif depends_on_job:
         logger.info(f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (depends on {depends_on_job.id})")
@@ -636,6 +648,7 @@ def get_queue_health() -> Dict[str, Any]:
 async def cleanup_stuck_stream_workers(request):
     """Clean up stuck Redis Stream consumers and pending messages from all active streams."""
     import time
+
     from fastapi.responses import JSONResponse
 
     try:

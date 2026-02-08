@@ -107,3 +107,50 @@ Get Backend Logs
     ...    shell=True    stderr=STDOUT
 
     RETURN    ${result.stdout}
+
+Verify Redis Key Exists
+    [Documentation]    Verify that a Redis key exists
+    [Arguments]    ${redis_key}
+
+    # Use Redis EXISTS command (returns 1 if key exists, 0 otherwise)
+    ${exists}=    Redis Command    EXISTS    ${redis_key}
+
+    Should Be Equal As Integers    ${exists}    1
+    ...    Redis key does not exist: ${redis_key}
+
+    Log    ✅ Redis key exists: ${redis_key}
+
+Verify Conversation Current Key
+    [Documentation]    Verify conversation:current:{session_id} key exists and has correct value
+    ...                Uses pattern matching to handle counter suffixes (-2, -3, etc)
+    [Arguments]    ${session_id}    ${expected_conversation_id}=${None}
+
+    # Use KEYS pattern to find matching key (handles counter suffixes like -2, -3)
+    ${pattern}=    Set Variable    conversation:current:${session_id}*
+    ${result}=    Run Process    docker    exec    ${REDIS_CONTAINER}
+    ...    redis-cli    KEYS    ${pattern}
+    Should Be Equal As Integers    ${result.rc}    0
+
+    # Get matching keys
+    @{keys}=    Split String    ${result.stdout}    \n
+    ${keys_list}=    Evaluate    [k for k in ${keys} if k.strip()]
+    ${num_keys}=    Get Length    ${keys_list}
+
+    Should Be True    ${num_keys} > 0
+    ...    Redis key not found for pattern: ${pattern}
+
+    # Get the first matching key
+    ${redis_key}=    Get From List    ${keys_list}    0
+    Log    Found Redis key: ${redis_key}
+
+    # Get the conversation_id value
+    ${conversation_id}=    Redis Command    GET    ${redis_key}
+
+    # Optionally verify it matches expected value
+    IF    '${expected_conversation_id}' != '${None}'
+        Should Be Equal As Strings    ${conversation_id}    ${expected_conversation_id}
+        ...    Redis key value mismatch: expected ${expected_conversation_id}, got ${conversation_id}
+    END
+
+    Log    ✅ ${redis_key} = ${conversation_id}
+    RETURN    ${conversation_id}

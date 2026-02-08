@@ -1,9 +1,10 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import { MessageSquare, RefreshCw, Calendar, User, Play, Pause, MoreVertical, RotateCcw, Zap, ChevronDown, ChevronUp, Trash2, Save, X } from 'lucide-react'
-import { conversationsApi, annotationsApi, BACKEND_URL } from '../services/api'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { MessageSquare, RefreshCw, Calendar, User, Play, Pause, MoreVertical, RotateCcw, Zap, ChevronDown, ChevronUp, Trash2, Save, X, Check } from 'lucide-react'
+import { conversationsApi, annotationsApi, speakerApi, BACKEND_URL } from '../services/api'
 import ConversationVersionHeader from '../components/ConversationVersionHeader'
 import { getStorageKey } from '../utils/storage'
 import { WaveformDisplay } from '../components/audio/WaveformDisplay'
+import SpeakerNameDropdown from '../components/SpeakerNameDropdown'
 
 interface Conversation {
   conversation_id: string
@@ -30,6 +31,8 @@ interface Conversation {
   active_memory_version?: string
   transcript_version_count?: number
   memory_version_count?: number
+  active_transcript_version_number?: number
+  active_memory_version_number?: number
   deleted?: boolean
   deletion_reason?: string
   deleted_at?: string
@@ -76,6 +79,34 @@ export default function Conversations() {
   const [editedSegmentText, setEditedSegmentText] = useState<string>('')
   const [savingSegment, setSavingSegment] = useState<boolean>(false)
   const [segmentEditError, setSegmentEditError] = useState<string | null>(null)
+
+  // Diarization annotation state
+  const [enrolledSpeakers, setEnrolledSpeakers] = useState<Array<{speaker_id: string, name: string}>>([])
+  const [diarizationAnnotations, setDiarizationAnnotations] = useState<Map<string, any[]>>(new Map()) // conversationId -> annotations[]
+
+  // Transcript annotation state
+  const [transcriptAnnotations, setTranscriptAnnotations] = useState<Map<string, any[]>>(new Map()) // conversationId -> annotations[]
+
+  // Unified apply state
+  const [applyingAnnotations, setApplyingAnnotations] = useState<Set<string>>(new Set())
+
+  // Compute merged speaker list that includes speakers from annotations
+  // This ensures newly created speaker names appear in all dropdowns immediately
+  const allSpeakers = useMemo(() => {
+    const speakers = [...enrolledSpeakers]
+    const existingNames = new Set(speakers.map(s => s.name))
+    
+    // Add speakers from all diarization annotations
+    diarizationAnnotations.forEach((annotations) => {
+      annotations.forEach(a => {
+        if (a.corrected_speaker && !existingNames.has(a.corrected_speaker)) {
+          speakers.push({ speaker_id: `annotation_${a.corrected_speaker}`, name: a.corrected_speaker })
+          existingNames.add(a.corrected_speaker)
+        }
+      })
+    })
+    return speakers
+  }, [enrolledSpeakers, diarizationAnnotations])
 
   // Stable seek handler for waveform click-to-seek
   const handleSeek = useCallback((conversationId: string, time: number) => {
@@ -150,8 +181,97 @@ export default function Conversations() {
     }
   }
 
+  const loadEnrolledSpeakers = async () => {
+    try {
+      const response = await speakerApi.getEnrolledSpeakers()
+      setEnrolledSpeakers(response.data.speakers || [])
+    } catch (err: any) {
+      console.error('Failed to load enrolled speakers:', err)
+    }
+  }
+
+  const loadDiarizationAnnotations = async (conversationId: string) => {
+    try {
+      const response = await annotationsApi.getDiarizationAnnotations(conversationId)
+      setDiarizationAnnotations(prev => new Map(prev).set(conversationId, response.data))
+    } catch (err: any) {
+      console.error('Failed to load diarization annotations:', err)
+    }
+  }
+
+  const loadTranscriptAnnotations = async (conversationId: string) => {
+    try {
+      const response = await annotationsApi.getTranscriptAnnotations(conversationId)
+      setTranscriptAnnotations(prev => new Map(prev).set(conversationId, response.data))
+    } catch (err: any) {
+      console.error('Failed to load transcript annotations:', err)
+    }
+  }
+
+  const handleSpeakerChange = async (conversationId: string, segmentIndex: number, originalSpeaker: string, newSpeaker: string, segmentStartTime: number) => {
+    try {
+      await annotationsApi.createDiarizationAnnotation({
+        conversation_id: conversationId,
+        segment_index: segmentIndex,
+        original_speaker: originalSpeaker,
+        corrected_speaker: newSpeaker,
+        segment_start_time: segmentStartTime,
+      })
+      
+      // Temporarily add new speaker name to enrolledSpeakers if it doesn't exist
+      // This makes it immediately available in all dropdowns without requiring a backend reload
+      setEnrolledSpeakers(prev => {
+        const speakerExists = prev.some(speaker => speaker.name === newSpeaker)
+        if (!speakerExists) {
+          // Generate a temporary speaker_id for in-memory use
+          const tempSpeakerId = `temp_${Date.now()}_${newSpeaker.replace(/\s+/g, '_')}`
+          return [...prev, { speaker_id: tempSpeakerId, name: newSpeaker }]
+        }
+        return prev
+      })
+      
+      // Reload annotations for this conversation
+      await loadDiarizationAnnotations(conversationId)
+    } catch (err: any) {
+      console.error('Failed to create annotation:', err)
+      setError('Failed to create speaker annotation')
+    }
+  }
+
+  const handleApplyAllAnnotations = async (conversationId: string) => {
+    try {
+      setApplyingAnnotations(prev => new Set(prev).add(conversationId))
+      setOpenDropdown(null)
+
+      const response = await annotationsApi.applyAllAnnotations(conversationId)
+
+      if (response.status === 200) {
+        const data = response.data
+        console.log(`Applied ${data.diarization_count} diarization and ${data.transcript_count} transcript annotations`)
+
+        // Refresh conversation to show new version
+        await loadConversations()
+
+        // Reload annotations (should be empty now)
+        await loadDiarizationAnnotations(conversationId)
+        await loadTranscriptAnnotations(conversationId)
+      } else {
+        setError(`Failed to apply annotations: ${response.data?.error || 'Unknown error'}`)
+      }
+    } catch (err: any) {
+      setError(`Error applying annotations: ${err.message || 'Unknown error'}`)
+    } finally {
+      setApplyingAnnotations(prev => {
+        const newSet = new Set(prev)
+        newSet.delete(conversationId)
+        return newSet
+      })
+    }
+  }
+
   useEffect(() => {
     loadConversations()
+    loadEnrolledSpeakers()
   }, [])
 
   // Close dropdown when clicking outside
@@ -332,7 +452,7 @@ export default function Conversations() {
       setSavingSegment(true)
       setSegmentEditError(null)
 
-      // Create transcript annotation
+      // Create annotation (NOT applied immediately)
       await annotationsApi.createTranscriptAnnotation({
         conversation_id: conversationId,
         segment_index: segmentIndex,
@@ -340,22 +460,13 @@ export default function Conversations() {
         corrected_text: editedSegmentText
       })
 
-      // Update local state - find the conversation and update the segment
-      setConversations(prev => prev.map(conv => {
-        if (conv.conversation_id === conversationId && conv.segments) {
-          const updatedSegments = [...conv.segments]
-          updatedSegments[segmentIndex] = {
-            ...updatedSegments[segmentIndex],
-            text: editedSegmentText
-          }
-          return { ...conv, segments: updatedSegments }
-        }
-        return conv
-      }))
-
-      // Clear editing state
+      // Exit edit mode
       setEditingSegment(null)
       setEditedSegmentText('')
+
+      // Reload transcript annotations to show pending badge
+      await loadTranscriptAnnotations(conversationId)
+
     } catch (err: any) {
       console.error('Error saving segment edit:', err)
       setSegmentEditError(err.response?.data?.detail || err.message || 'Failed to save segment edit')
@@ -457,6 +568,10 @@ export default function Conversations() {
             ? { ...c, ...response.data.conversation }
             : c
         ))
+        // Load diarization annotations for this conversation
+        await loadDiarizationAnnotations(conversationId)
+        // Load transcript annotations for this conversation
+        await loadTranscriptAnnotations(conversationId)
         // Expand the transcript
         setExpandedTranscripts(prev => new Set(prev).add(conversationId))
       }
@@ -606,7 +721,9 @@ export default function Conversations() {
                     transcript_count: conversation.transcript_version_count || 0,
                     memory_count: conversation.memory_version_count || 0,
                     active_transcript_version: conversation.active_transcript_version,
-                    active_memory_version: conversation.active_memory_version
+                    active_memory_version: conversation.active_memory_version,
+                    active_transcript_version_number: conversation.active_transcript_version_number,
+                    active_memory_version_number: conversation.active_memory_version_number
                   }}
                   onVersionChange={async () => {
                     // Update only this specific conversation without reloading all conversations
@@ -747,6 +864,43 @@ export default function Conversations() {
                         )}
                       </button>
                       <div className="border-t border-gray-200 dark:border-gray-600 my-1"></div>
+
+                      {/* Apply All Annotations Button */}
+                      {(() => {
+                        const diarAnnotations = diarizationAnnotations.get(conversation.conversation_id!) || []
+                        const transcriptAnnots = transcriptAnnotations.get(conversation.conversation_id!) || []
+
+                        const diarPending = diarAnnotations.filter(a => !a.processed).length
+                        const transcriptPending = transcriptAnnots.filter(a => !a.processed).length
+                        const totalPending = diarPending + transcriptPending
+
+                        if (totalPending === 0) return null
+
+                        return (
+                          <button
+                            onClick={() => handleApplyAllAnnotations(conversation.conversation_id!)}
+                            disabled={!conversation.conversation_id || applyingAnnotations.has(conversation.conversation_id!)}
+                            className="w-full text-left px-4 py-2 text-sm text-blue-700 dark:text-blue-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+                            title={`Apply ${diarPending} speaker and ${transcriptPending} text corrections`}
+                          >
+                            {conversation.conversation_id && applyingAnnotations.has(conversation.conversation_id!) ? (
+                              <RefreshCw className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Check className="h-4 w-4" />
+                            )}
+                            <span>
+                              Apply Changes ({totalPending})
+                              {diarPending > 0 && transcriptPending > 0 && (
+                                <span className="text-xs ml-1 text-gray-500">
+                                  ({diarPending} speaker, {transcriptPending} text)
+                                </span>
+                              )}
+                            </span>
+                          </button>
+                        )
+                      })()}
+
+                      <div className="border-t border-gray-200 dark:border-gray-600 my-1"></div>
                       <button
                         onClick={() => conversation.conversation_id && handleDeleteConversation(conversation.conversation_id)}
                         disabled={!conversation.conversation_id || (!!conversation.conversation_id && deletingConversation.has(conversation.conversation_id))}
@@ -873,7 +1027,6 @@ export default function Conversations() {
                                   // Render the transcript
                                   return segments.map((segment, index) => {
                           const speaker = segment.speaker || 'Unknown'
-                          const speakerColor = speakerColorMap[speaker]
                           // Use conversation_id for unique segment IDs
                           const segmentId = `${conversation.conversation_id}-${index}`
                           const isPlaying = playingSegment === segmentId
@@ -912,52 +1065,112 @@ export default function Conversations() {
                                     [start: {segment.start.toFixed(1)}s, end: {segment.end.toFixed(1)}s, duration: {formatDuration(segment.start, segment.end)}]
                                   </span>
                                 )}
-                                <span className={`font-medium ${speakerColor}`}>
-                                  {speaker}:
-                                </span>
 
-                                {/* Segment Text - Editable */}
-                                {isEditing ? (
-                                  <div className="ml-1 space-y-2">
-                                    <textarea
-                                      value={editedSegmentText}
-                                      onChange={(e) => setEditedSegmentText(e.target.value)}
-                                      onKeyDown={(e) => handleSegmentKeyDown(e, conversation.conversation_id, index, segment.text)}
-                                      className="w-full min-h-[60px] px-3 py-2 text-sm border-2 border-blue-500 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-                                      autoFocus
-                                      disabled={savingSegment}
-                                    />
-                                    <div className="flex items-center gap-2">
-                                      <button
-                                        onClick={() => handleSaveSegmentEdit(conversation.conversation_id, index, segment.text)}
-                                        disabled={savingSegment || editedSegmentText === segment.text}
-                                        className="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                                      >
-                                        <Save className="w-3 h-3" />
-                                        {savingSegment ? 'Saving...' : 'Save'}
-                                      </button>
-                                      <button
-                                        onClick={handleCancelSegmentEdit}
-                                        disabled={savingSegment}
-                                        className="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium text-gray-700 dark:text-gray-300 bg-gray-200 dark:bg-gray-600 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                                      >
-                                        <X className="w-3 h-3" />
-                                        Cancel
-                                      </button>
-                                      {segmentEditError && (
-                                        <span className="text-xs text-red-600 dark:text-red-400">{segmentEditError}</span>
+                                {/* Speaker Name - Clickable Dropdown for Annotation */}
+                                {(() => {
+                                  const conversationAnnotations = diarizationAnnotations.get(conversation.conversation_id!) || []
+                                  const annotation = conversationAnnotations.find(a => a.segment_index === index && !a.processed)
+                                  const speakerColor = speakerColorMap[speaker]
+
+                                  // Always show dropdown, but use corrected speaker if annotation exists
+                                  // This allows users to edit annotations even after creating them
+                                  const currentSpeaker = annotation ? annotation.corrected_speaker : speaker
+                                  const originalSpeaker = annotation ? annotation.original_speaker : speaker
+
+                                  return (
+                                    <span className="inline-flex items-center space-x-1">
+                                      {annotation && (
+                                        <span className="text-xs bg-orange-100 dark:bg-orange-900 text-orange-600 dark:text-orange-300 px-2 py-0.5 rounded" title="Pending annotation">
+                                          Pending
+                                        </span>
                                       )}
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <span
-                                    onClick={() => conversation.conversation_id && handleStartSegmentEdit(conversation.conversation_id, index, segment.text)}
-                                    className="text-gray-900 dark:text-gray-100 ml-1 cursor-pointer hover:bg-yellow-100 dark:hover:bg-yellow-900/30 px-1 rounded transition-colors"
-                                    title="Click to edit segment"
-                                  >
-                                    {segment.text}
-                                  </span>
-                                )}
+                                      <SpeakerNameDropdown
+                                        currentSpeaker={currentSpeaker}
+                                        enrolledSpeakers={allSpeakers}
+                                        onSpeakerChange={(newSpeaker) =>
+                                          handleSpeakerChange(conversation.conversation_id!, index, originalSpeaker, newSpeaker, segment.start)
+                                        }
+                                        segmentIndex={index}
+                                        conversationId={conversation.conversation_id!}
+                                        annotated={!!annotation}
+                                        speakerColor={annotation ? 'text-green-600 dark:text-green-400' : speakerColor}
+                                      />
+                                      <span>:</span>
+                                    </span>
+                                  )
+                                })()}
+
+                                {/* Segment Text - Show pending edit indicator or editable */}
+                                {(() => {
+                                  const transcriptAnnots = transcriptAnnotations.get(conversation.conversation_id!) || []
+                                  const textAnnotation = transcriptAnnots.find(
+                                    a => a.segment_index === index && !a.processed
+                                  )
+
+                                  if (textAnnotation && !isEditing) {
+                                    // Show pending text edit - corrected text is clickable like normal text
+                                    return (
+                                      <span className="inline-flex items-start space-x-2 ml-1">
+                                        <span className="line-through text-gray-400">{textAnnotation.original_text}</span>
+                                        <span>→</span>
+                                        <span
+                                          onClick={() => conversation.conversation_id && handleStartSegmentEdit(conversation.conversation_id, index, textAnnotation.corrected_text)}
+                                          className="text-blue-600 dark:text-blue-400 cursor-pointer hover:bg-yellow-100 dark:hover:bg-yellow-900/30 px-1 rounded transition-colors"
+                                          title="Click to edit segment"
+                                        >
+                                          {textAnnotation.corrected_text}
+                                        </span>
+                                        <span className="text-xs bg-blue-100 dark:bg-blue-900 text-blue-600 dark:text-blue-300 px-2 py-0.5 rounded">Pending</span>
+                                      </span>
+                                    )
+                                  } else if (isEditing) {
+                                    // Show edit textarea
+                                    return (
+                                      <div className="ml-1 space-y-2">
+                                        <textarea
+                                          value={editedSegmentText}
+                                          onChange={(e) => setEditedSegmentText(e.target.value)}
+                                          onKeyDown={(e) => handleSegmentKeyDown(e, conversation.conversation_id, index, segment.text)}
+                                          className="w-full min-h-[60px] px-3 py-2 text-sm border-2 border-blue-500 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                                          autoFocus
+                                          disabled={savingSegment}
+                                        />
+                                        <div className="flex items-center gap-2">
+                                          <button
+                                            onClick={() => handleSaveSegmentEdit(conversation.conversation_id, index, segment.text)}
+                                            disabled={savingSegment || editedSegmentText === segment.text}
+                                            className="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                          >
+                                            <Save className="w-3 h-3" />
+                                            {savingSegment ? 'Saving...' : 'Save'}
+                                          </button>
+                                          <button
+                                            onClick={handleCancelSegmentEdit}
+                                            disabled={savingSegment}
+                                            className="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium text-gray-700 dark:text-gray-300 bg-gray-200 dark:bg-gray-600 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                          >
+                                            <X className="w-3 h-3" />
+                                            Cancel
+                                          </button>
+                                          {segmentEditError && (
+                                            <span className="text-xs text-red-600 dark:text-red-400">{segmentEditError}</span>
+                                          )}
+                                        </div>
+                                      </div>
+                                    )
+                                  } else {
+                                    // Show normal text (clickable to edit)
+                                    return (
+                                      <span
+                                        onClick={() => conversation.conversation_id && handleStartSegmentEdit(conversation.conversation_id, index, segment.text)}
+                                        className="text-gray-900 dark:text-gray-100 ml-1 cursor-pointer hover:bg-yellow-100 dark:hover:bg-yellow-900/30 px-1 rounded transition-colors"
+                                        title="Click to edit segment"
+                                      >
+                                        {segment.text}
+                                      </span>
+                                    )
+                                  }
+                                })()}
                               </div>
                             </div>
                           )
@@ -1012,6 +1225,18 @@ export default function Conversations() {
                     <div>Memory Count: {conversation.memory_count || 0}</div>
                     <div>Client ID: {conversation.client_id}</div>
                   </div>
+
+                  {/* Raw Segments JSON */}
+                  {conversation.segments && conversation.segments.length > 0 && (
+                    <details className="mt-3 p-2 bg-gray-100 dark:bg-gray-800 rounded text-xs">
+                      <summary className="cursor-pointer font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100">
+                        Raw Segments ({conversation.segments.length})
+                      </summary>
+                      <pre className="mt-2 overflow-auto max-h-96 whitespace-pre-wrap text-gray-600 dark:text-gray-400 bg-white dark:bg-gray-900 p-2 rounded border border-gray-200 dark:border-gray-700">
+                        {JSON.stringify(conversation.segments, null, 2)}
+                      </pre>
+                    </details>
+                  )}
                 </div>
               )}
             </div>

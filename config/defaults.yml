@@ -311,11 +311,21 @@ backend:
     model: gpt-4o-mini
     timeout: 60
 
+  # Audio processing settings
+  audio:
+    # When enabled, always persist audio even if no speech is detected
+    # This creates conversations for all audio sessions regardless of speech content
+    always_persist_enabled: false
+
   # Transcription provider configuration
   transcription:
     provider: deepgram  # or parakeet
     api_key: ${oc.env:DEEPGRAM_API_KEY,''}
     base_url: https://api.deepgram.com
+    # Fallback to provider segments when speaker service unavailable
+    # When true: Use segments from transcription provider (e.g., mock provider in tests)
+    # When false: Expect speaker service to create segments via diarization (default production behavior)
+    use_provider_segments: false
 
   # Diarization settings
   diarization:

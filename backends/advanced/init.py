@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
-from dotenv import get_key, set_key
+from dotenv import set_key
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
@@ -24,12 +24,9 @@ from rich.text import Text
 # Add repo root to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from config_manager import ConfigManager
-from setup_utils import (
-    prompt_password as util_prompt_password,
-    prompt_with_existing_masked,
-    mask_value,
-    read_env_value
-)
+from setup_utils import detect_tailscale_info, mask_value
+from setup_utils import prompt_password as util_prompt_password
+from setup_utils import prompt_with_existing_masked, read_env_value
 
 
 class ChronicleSetup:
@@ -174,47 +171,73 @@ class ChronicleSetup:
         self.console.print("Configure admin account for the dashboard")
         self.console.print()
 
-        self.config["ADMIN_EMAIL"] = self.prompt_value("Admin email", "admin@example.com")
-        self.config["ADMIN_PASSWORD"] = self.prompt_password("Admin password (min 8 chars)")
-        self.config["AUTH_SECRET_KEY"] = secrets.token_hex(32)
+        # Read existing values for re-run support
+        existing_email = self.read_existing_env_value("ADMIN_EMAIL")
+        default_email = existing_email if existing_email else "admin@example.com"
+        self.config["ADMIN_EMAIL"] = self.prompt_value("Admin email", default_email)
+
+        # Allow reusing existing admin password
+        existing_password = self.read_existing_env_value("ADMIN_PASSWORD")
+        if existing_password:
+            password = prompt_with_existing_masked(
+                prompt_text="Admin password (min 8 chars)",
+                existing_value=existing_password,
+                is_password=True,
+            )
+            self.config["ADMIN_PASSWORD"] = password
+        else:
+            self.config["ADMIN_PASSWORD"] = self.prompt_password("Admin password (min 8 chars)")
+
+        # Preserve existing AUTH_SECRET_KEY to avoid invalidating JWTs
+        existing_secret = self.read_existing_env_value("AUTH_SECRET_KEY")
+        if existing_secret:
+            self.config["AUTH_SECRET_KEY"] = existing_secret
+            self.console.print("[blue][INFO][/blue] Reusing existing AUTH_SECRET_KEY (existing JWT tokens remain valid)")
+        else:
+            self.config["AUTH_SECRET_KEY"] = secrets.token_hex(32)
 
         self.console.print("[green][SUCCESS][/green] Admin account configured")
 
     def setup_transcription(self):
         """Configure transcription provider - updates config.yml and .env"""
-        self.print_section("Speech-to-Text Configuration")
-
-        self.console.print("[blue][INFO][/blue] Provider selection is configured in config.yml (defaults.stt)")
-        self.console.print("[blue][INFO][/blue] API keys are stored in .env")
-        self.console.print()
-
         # Check if transcription provider was provided via command line
         if hasattr(self.args, 'transcription_provider') and self.args.transcription_provider:
             provider = self.args.transcription_provider
-            self.console.print(f"[green][SUCCESS][/green] Transcription provider configured via wizard: {provider}")
+            self.console.print(f"[green]✅[/green] Transcription: {provider} (configured via wizard)")
 
             # Map provider to choice
             if provider == "deepgram":
                 choice = "1"
             elif provider == "parakeet":
                 choice = "2"
-            elif provider == "none":
+            elif provider == "vibevoice":
                 choice = "3"
+            elif provider == "none":
+                choice = "4"
             else:
                 choice = "1"  # Default to Deepgram
         else:
+            self.print_section("Speech-to-Text Configuration")
+
+            self.console.print("[blue][INFO][/blue] Provider selection is configured in config.yml (defaults.stt)")
+            self.console.print("[blue][INFO][/blue] API keys are stored in .env")
+            self.console.print()
+
             # Interactive prompt
             is_macos = platform.system() == 'Darwin'
 
             if is_macos:
                 parakeet_desc = "Offline (Parakeet ASR - CPU-based, runs locally)"
+                vibevoice_desc = "Offline (VibeVoice - CPU-based, built-in diarization)"
             else:
                 parakeet_desc = "Offline (Parakeet ASR - GPU recommended, runs locally)"
+                vibevoice_desc = "Offline (VibeVoice - GPU recommended, built-in diarization)"
 
             choices = {
                 "1": "Deepgram (recommended - high quality, cloud-based)",
                 "2": parakeet_desc,
-                "3": "None (skip transcription setup)"
+                "3": vibevoice_desc,
+                "4": "None (skip transcription setup)"
             }
 
             choice = self.prompt_choice("Choose your transcription provider:", choices, "1")
@@ -256,9 +279,24 @@ class ChronicleSetup:
 
             self.console.print("[green][SUCCESS][/green] Parakeet configured in config.yml and .env")
             self.console.print("[blue][INFO][/blue] Set defaults.stt: stt-parakeet-batch")
-            self.console.print("[yellow][WARNING][/yellow] Remember to start Parakeet service: cd ../../extras/asr-services && docker compose up parakeet")
+            self.console.print("[yellow][WARNING][/yellow] Remember to start Parakeet service: cd ../../extras/asr-services && docker compose up nemo-asr")
 
         elif choice == "3":
+            self.console.print("[blue][INFO][/blue] Offline VibeVoice ASR selected (built-in speaker diarization)")
+            vibevoice_url = self.prompt_value("VibeVoice ASR URL", "http://host.docker.internal:8767")
+
+            # Write URL to .env for ${VIBEVOICE_ASR_URL} placeholder in config.yml
+            self.config["VIBEVOICE_ASR_URL"] = vibevoice_url
+
+            # Update config.yml to use VibeVoice
+            self.config_manager.update_config_defaults({"stt": "stt-vibevoice"})
+
+            self.console.print("[green][SUCCESS][/green] VibeVoice configured in config.yml and .env")
+            self.console.print("[blue][INFO][/blue] Set defaults.stt: stt-vibevoice")
+            self.console.print("[blue][INFO][/blue] VibeVoice provides built-in speaker diarization - pyannote will be skipped")
+            self.console.print("[yellow][WARNING][/yellow] Remember to start VibeVoice service: cd ../../extras/asr-services && docker compose up vibevoice-asr")
+
+        elif choice == "4":
             self.console.print("[blue][INFO][/blue] Skipping transcription setup")
 
     def setup_llm(self):
@@ -375,13 +413,20 @@ class ChronicleSetup:
 
     def setup_optional_services(self):
         """Configure optional services"""
-        self.print_section("Optional Services")
-
         # Check if speaker service URL provided via args
-        if hasattr(self.args, 'speaker_service_url') and self.args.speaker_service_url:
+        has_speaker_arg = hasattr(self.args, 'speaker_service_url') and self.args.speaker_service_url
+        has_asr_arg = hasattr(self.args, 'parakeet_asr_url') and self.args.parakeet_asr_url
+
+        if has_speaker_arg:
             self.config["SPEAKER_SERVICE_URL"] = self.args.speaker_service_url
-            self.console.print(f"[green][SUCCESS][/green] Speaker Recognition configured via args: {self.args.speaker_service_url}")
-        else:
+            self.console.print(f"[green]✅[/green] Speaker Recognition: {self.args.speaker_service_url} (configured via wizard)")
+
+        if has_asr_arg:
+            self.config["PARAKEET_ASR_URL"] = self.args.parakeet_asr_url
+            self.console.print(f"[green]✅[/green] Parakeet ASR: {self.args.parakeet_asr_url} (configured via wizard)")
+
+        # Only show interactive section if not all configured via args
+        if not has_speaker_arg:
             try:
                 enable_speaker = Confirm.ask("Enable Speaker Recognition?", default=False)
             except EOFError:
@@ -394,11 +439,6 @@ class ChronicleSetup:
                 self.console.print("[green][SUCCESS][/green] Speaker Recognition configured")
                 self.console.print("[blue][INFO][/blue] Start with: cd ../../extras/speaker-recognition && docker compose up -d")
         
-        # Check if ASR service URL provided via args
-        if hasattr(self.args, 'parakeet_asr_url') and self.args.parakeet_asr_url:
-            self.config["PARAKEET_ASR_URL"] = self.args.parakeet_asr_url
-            self.console.print(f"[green][SUCCESS][/green] Parakeet ASR configured via args: {self.args.parakeet_asr_url}")
-
         # Check if Tailscale auth key provided via args
         if hasattr(self.args, 'ts_authkey') and self.args.ts_authkey:
             self.config["TS_AUTHKEY"] = self.args.ts_authkey
@@ -414,6 +454,8 @@ class ChronicleSetup:
             if not neo4j_password:
                 self.console.print("[yellow][WARNING][/yellow] --enable-obsidian provided but no password")
                 neo4j_password = self.prompt_password("Neo4j password (min 8 chars)")
+
+            self.console.print(f"[green]✅[/green] Obsidian/Neo4j: enabled (configured via wizard)")
         else:
             # Interactive prompt (fallback)
             self.console.print()
@@ -432,7 +474,7 @@ class ChronicleSetup:
 
         if enable_obsidian:
             # Update .env with credentials only (secrets, not feature flags)
-            self.config["NEO4J_HOST"] = "neo4j-mem0"
+            self.config["NEO4J_HOST"] = "neo4j"
             self.config["NEO4J_USER"] = "neo4j"
             self.config["NEO4J_PASSWORD"] = neo4j_password
 
@@ -440,7 +482,7 @@ class ChronicleSetup:
             self.config_manager.update_memory_config({
                 "obsidian": {
                     "enabled": True,
-                    "neo4j_host": "neo4j-mem0",
+                    "neo4j_host": "neo4j",
                     "timeout": 30
                 }
             })
@@ -452,11 +494,77 @@ class ChronicleSetup:
             self.config_manager.update_memory_config({
                 "obsidian": {
                     "enabled": False,
-                    "neo4j_host": "neo4j-mem0",
+                    "neo4j_host": "neo4j",
                     "timeout": 30
                 }
             })
             self.console.print("[blue][INFO][/blue] Obsidian/Neo4j integration disabled")
+
+    def setup_knowledge_graph(self):
+        """Configure Knowledge Graph (Neo4j-based entity/relationship extraction)"""
+        # Check if enabled via command line
+        if hasattr(self.args, 'enable_knowledge_graph') and self.args.enable_knowledge_graph:
+            enable_kg = True
+            neo4j_password = getattr(self.args, 'neo4j_password', None)
+
+            if not neo4j_password:
+                # Check if already set from obsidian setup
+                neo4j_password = self.config.get("NEO4J_PASSWORD")
+                if not neo4j_password:
+                    self.console.print("[yellow][WARNING][/yellow] --enable-knowledge-graph provided but no password")
+                    neo4j_password = self.prompt_password("Neo4j password (min 8 chars)")
+        else:
+            # Interactive prompt (fallback)
+            self.console.print()
+            self.console.print("[bold cyan]Knowledge Graph (Entity Extraction)[/bold cyan]")
+            self.console.print("Enable graph-based entity and relationship extraction from conversations")
+            self.console.print("Extracts: People, Places, Organizations, Events, Promises/Tasks")
+            self.console.print()
+
+            try:
+                enable_kg = Confirm.ask("Enable Knowledge Graph?", default=False)
+            except EOFError:
+                self.console.print("Using default: No")
+                enable_kg = False
+
+            if enable_kg:
+                # Check if Neo4j password already set from obsidian setup
+                existing_password = self.config.get("NEO4J_PASSWORD")
+                if existing_password:
+                    self.console.print("[blue][INFO][/blue] Using Neo4j password from Obsidian configuration")
+                    neo4j_password = existing_password
+                else:
+                    neo4j_password = self.prompt_password("Neo4j password (min 8 chars)")
+
+        if enable_kg:
+            # Update .env with credentials only (secrets, not feature flags)
+            self.config["NEO4J_HOST"] = "neo4j"
+            self.config["NEO4J_USER"] = "neo4j"
+            if neo4j_password:
+                self.config["NEO4J_PASSWORD"] = neo4j_password
+
+            # Update config.yml with feature flag (source of truth) - auto-saves via ConfigManager
+            self.config_manager.update_memory_config({
+                "knowledge_graph": {
+                    "enabled": True,
+                    "neo4j_host": "neo4j",
+                    "timeout": 30
+                }
+            })
+
+            self.console.print("[green][SUCCESS][/green] Knowledge Graph configured")
+            self.console.print("[blue][INFO][/blue] Neo4j will start automatically with --profile knowledge-graph")
+            self.console.print("[blue][INFO][/blue] Entities and relationships will be extracted from conversations")
+        else:
+            # Explicitly disable Knowledge Graph in config.yml when not enabled
+            self.config_manager.update_memory_config({
+                "knowledge_graph": {
+                    "enabled": False,
+                    "neo4j_host": "neo4j",
+                    "timeout": 30
+                }
+            })
+            self.console.print("[blue][INFO][/blue] Knowledge Graph disabled")
 
     def setup_network(self):
         """Configure network settings"""
@@ -471,7 +579,7 @@ class ChronicleSetup:
         if hasattr(self.args, 'enable_https') and self.args.enable_https:
             enable_https = True
             server_ip = getattr(self.args, 'server_ip', 'localhost')
-            self.console.print(f"[green][SUCCESS][/green] HTTPS configured via command line: {server_ip}")
+            self.console.print(f"[green]✅[/green] HTTPS: {server_ip} (configured via wizard)")
         else:
             # Interactive configuration
             self.print_section("HTTPS Configuration (Optional)")
@@ -484,16 +592,32 @@ class ChronicleSetup:
 
             if enable_https:
                 self.console.print("[blue][INFO][/blue] HTTPS enables microphone access in browsers")
-                self.console.print("[blue][INFO][/blue] For distributed deployments, use your Tailscale IP (e.g., 100.64.1.2)")
+
+                # Try to auto-detect Tailscale address
+                ts_dns, ts_ip = detect_tailscale_info()
+
+                if ts_dns:
+                    self.console.print(f"[green][AUTO-DETECTED][/green] Tailscale DNS: {ts_dns}")
+                    if ts_ip:
+                        self.console.print(f"[green][AUTO-DETECTED][/green] Tailscale IP:  {ts_ip}")
+                    default_address = ts_dns
+                elif ts_ip:
+                    self.console.print(f"[green][AUTO-DETECTED][/green] Tailscale IP: {ts_ip}")
+                    default_address = ts_ip
+                else:
+                    self.console.print("[blue][INFO][/blue] Tailscale not detected")
+                    self.console.print("[blue][INFO][/blue] To find your Tailscale address: tailscale status --json | jq -r '.Self.DNSName'")
+                    default_address = "localhost"
+
                 self.console.print("[blue][INFO][/blue] For local-only access, use 'localhost'")
 
                 # Use the new masked prompt function (not masked for IP, but shows existing)
                 server_ip = self.prompt_with_existing_masked(
-                    prompt_text="Server IP/Domain for SSL certificate (Tailscale IP or localhost)",
+                    prompt_text="Server IP/Domain for SSL certificate",
                     env_key="SERVER_IP",
                     placeholders=['localhost', 'your-server-ip-here'],
                     is_password=False,
-                    default="localhost"
+                    default=default_address
                 )
         
         if enable_https:
@@ -626,6 +750,12 @@ class ChronicleSetup:
             neo4j_host = obsidian_config.get("neo4j_host", "not set")
             self.console.print(f"✅ Obsidian/Neo4j: Enabled ({neo4j_host})")
 
+        # Show Knowledge Graph status (read from config.yml)
+        kg_config = config_yml.get("memory", {}).get("knowledge_graph", {})
+        if kg_config.get("enabled", False):
+            neo4j_host = kg_config.get("neo4j_host", "not set")
+            self.console.print(f"✅ Knowledge Graph: Enabled ({neo4j_host})")
+
         # Auto-determine URLs based on HTTPS configuration
         if self.config.get('HTTPS_ENABLED') == 'true':
             server_ip = self.config.get('SERVER_IP', 'localhost')
@@ -646,11 +776,23 @@ class ChronicleSetup:
         config_yml = self.config_manager.get_full_config()
 
         self.console.print("1. Start the main services:")
-        # Include --profile obsidian if Obsidian is enabled (read from config.yml)
+        # Include --profile obsidian/knowledge-graph if enabled (read from config.yml)
         obsidian_enabled = config_yml.get("memory", {}).get("obsidian", {}).get("enabled", False)
+        kg_enabled = config_yml.get("memory", {}).get("knowledge_graph", {}).get("enabled", False)
+
+        profiles = []
+        profile_notes = []
         if obsidian_enabled:
-            self.console.print("   [cyan]docker compose --profile obsidian up --build -d[/cyan]")
-            self.console.print("   [dim](Includes Neo4j for Obsidian integration)[/dim]")
+            profiles.append("obsidian")
+            profile_notes.append("Obsidian integration")
+        if kg_enabled:
+            profiles.append("knowledge-graph")
+            profile_notes.append("Knowledge Graph")
+
+        if profiles:
+            profile_args = " ".join([f"--profile {p}" for p in profiles])
+            self.console.print(f"   [cyan]docker compose {profile_args} up --build -d[/cyan]")
+            self.console.print(f"   [dim](Includes Neo4j for: {', '.join(profile_notes)})[/dim]")
         else:
             self.console.print("   [cyan]docker compose up --build -d[/cyan]")
         self.console.print()
@@ -686,7 +828,8 @@ class ChronicleSetup:
         """Run the complete setup process"""
         self.print_header("🚀 Chronicle Interactive Setup")
         self.console.print("This wizard will help you configure Chronicle with all necessary services.")
-        self.console.print("We'll ask for your API keys and preferences step by step.")
+        self.console.print("[dim]Safe to run again — it backs up your config and preserves previous values.[/dim]")
+        self.console.print("[dim]When unsure, just press Enter — the defaults will work.[/dim]")
         self.console.print()
 
         try:
@@ -700,6 +843,7 @@ class ChronicleSetup:
             self.setup_memory()
             self.setup_optional_services()
             self.setup_obsidian()
+            self.setup_knowledge_graph()
             self.setup_network()
             self.setup_https()
 
@@ -741,7 +885,7 @@ def main():
     parser.add_argument("--parakeet-asr-url",
                        help="Parakeet ASR service URL (default: prompt user)")
     parser.add_argument("--transcription-provider",
-                       choices=["deepgram", "parakeet", "none"],
+                       choices=["deepgram", "parakeet", "vibevoice", "none"],
                        help="Transcription provider (default: prompt user)")
     parser.add_argument("--enable-https", action="store_true",
                        help="Enable HTTPS configuration (default: prompt user)")
@@ -749,6 +893,8 @@ def main():
                        help="Server IP/domain for SSL certificate (default: prompt user)")
     parser.add_argument("--enable-obsidian", action="store_true",
                        help="Enable Obsidian/Neo4j integration (default: prompt user)")
+    parser.add_argument("--enable-knowledge-graph", action="store_true",
+                       help="Enable Knowledge Graph entity extraction (default: prompt user)")
     parser.add_argument("--neo4j-password",
                        help="Neo4j password (default: prompt user)")
     parser.add_argument("--ts-authkey",

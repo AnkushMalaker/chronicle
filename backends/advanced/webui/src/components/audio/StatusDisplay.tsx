@@ -1,9 +1,9 @@
 import React from 'react'
 import { Check, Loader2, AlertCircle, Mic, Wifi, Play, Radio } from 'lucide-react'
-import { SimpleAudioRecordingReturn, RecordingStep } from '../../hooks/useSimpleAudioRecording'
+import { RecordingContextType, RecordingStep } from '../../contexts/RecordingContext'
 
 interface StatusDisplayProps {
-  recording: SimpleAudioRecordingReturn
+  recording: RecordingContextType
 }
 
 interface StepInfo {

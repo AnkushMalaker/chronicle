@@ -6,23 +6,20 @@ Handles service selection and delegation only - no configuration duplication
 
 import shutil
 import subprocess
-import sys
 from datetime import datetime
 from pathlib import Path
 
 import yaml
-from rich import print as rprint
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
 # Import shared setup utilities
 from setup_utils import (
-    prompt_password,
-    prompt_value,
+    detect_tailscale_info,
+    is_placeholder,
+    mask_value,
     prompt_with_existing_masked,
     read_env_value,
-    mask_value,
-    is_placeholder
 )
 
 console = Console()
@@ -45,7 +42,7 @@ SERVICES = {
         'asr-services': {
             'path': 'extras/asr-services',
             'cmd': ['uv', 'run', '--with-requirements', '../../setup-requirements.txt', 'python', 'init.py'],
-            'description': 'Offline speech-to-text (Parakeet)'
+            'description': 'Offline speech-to-text'
         },
         'openmemory-mcp': {
             'path': 'extras/openmemory-mcp',
@@ -112,36 +109,47 @@ def check_service_exists(service_name, service_config):
 
     return True, "OK"
 
-def select_services():
+def select_services(transcription_provider=None):
     """Let user select which services to setup"""
     console.print("🚀 [bold cyan]Chronicle Service Setup[/bold cyan]")
     console.print("Select which services to configure:\n")
-    
+
     selected = []
-    
+
     # Backend is required
     console.print("📱 [bold]Backend (Required):[/bold]")
     console.print("  ✅ Advanced Backend - Full AI features")
     selected.append('advanced')
-    
+
+    # Services that will be auto-added based on transcription provider choice
+    auto_added = set()
+    if transcription_provider in ("parakeet", "vibevoice"):
+        auto_added.add('asr-services')
+
     # Optional extras
     console.print("\n🔧 [bold]Optional Services:[/bold]")
     for service_name, service_config in SERVICES['extras'].items():
+        # Skip services that will be auto-added based on earlier choices
+        if service_name in auto_added:
+            provider_label = {"vibevoice": "VibeVoice", "parakeet": "Parakeet"}.get(transcription_provider, transcription_provider)
+            console.print(f"  ✅ {service_config['description']} ({provider_label}) [dim](auto-selected)[/dim]")
+            continue
+
         # Check if service exists
         exists, msg = check_service_exists(service_name, service_config)
         if not exists:
             console.print(f"  ⏸️  {service_config['description']} - [dim]{msg}[/dim]")
             continue
-        
+
         try:
             enable_service = Confirm.ask(f"  Setup {service_config['description']}?", default=False)
         except EOFError:
             console.print("Using default: No")
             enable_service = False
-            
+
         if enable_service:
             selected.append(service_name)
-    
+
     return selected
 
 def cleanup_unselected_services(selected_services):
@@ -222,8 +230,18 @@ def run_service_setup(service_name, selected_services, https_enabled=False, serv
                 cmd.extend(['--compute-mode', compute_mode])
                 console.print(f"[blue][INFO][/blue] Found existing COMPUTE_MODE ({compute_mode}), reusing")
         
-        # For asr-services, try to reuse PYTORCH_CUDA_VERSION from speaker-recognition
+        # For asr-services, pass provider from wizard's transcription choice and reuse CUDA version
         if service_name == 'asr-services':
+            # Map wizard transcription provider to asr-services provider name
+            wizard_to_asr_provider = {
+                'vibevoice': 'vibevoice',
+                'parakeet': 'nemo',
+            }
+            asr_provider = wizard_to_asr_provider.get(transcription_provider)
+            if asr_provider:
+                cmd.extend(['--provider', asr_provider])
+                console.print(f"[blue][INFO][/blue] Pre-selecting ASR provider: {asr_provider} (from wizard choice: {transcription_provider})")
+
             speaker_env_path = 'extras/speaker-recognition/.env'
             cuda_version = read_env_value(speaker_env_path, 'PYTORCH_CUDA_VERSION')
             if cuda_version and cuda_version in ['cu121', 'cu126', 'cu128']:
@@ -259,12 +277,20 @@ def run_service_setup(service_name, selected_services, https_enabled=False, serv
             
     except FileNotFoundError as e:
         console.print(f"❌ {service_name} setup failed: {e}")
+        console.print(f"[yellow]   Check that the service directory exists: {service['path']}[/yellow]")
+        console.print(f"[yellow]   And that 'uv' is installed and on your PATH[/yellow]")
         return False
     except subprocess.TimeoutExpired as e:
-        console.print(f"❌ {service_name} setup timed out after {e.timeout} seconds")
+        console.print(f"❌ {service_name} setup timed out after {e.timeout}s")
+        console.print(f"[yellow]   Configuration may be partially written.[/yellow]")
+        console.print(f"[yellow]   To retry just this service:[/yellow]")
+        console.print(f"[yellow]   cd {service['path']} && {' '.join(service['cmd'])}[/yellow]")
         return False
     except subprocess.CalledProcessError as e:
         console.print(f"❌ {service_name} setup failed with exit code {e.returncode}")
+        console.print(f"[yellow]   Check the error output above for details.[/yellow]")
+        console.print(f"[yellow]   To retry just this service:[/yellow]")
+        console.print(f"[yellow]   cd {service['path']} && {' '.join(service['cmd'])}[/yellow]")
         return False
     except Exception as e:
         console.print(f"❌ {service_name} setup failed: {e}")
@@ -399,7 +425,7 @@ def setup_hf_token_if_needed(selected_services):
         HF_TOKEN string if provided, None otherwise
     """
     # Check if any selected services need HF_TOKEN
-    needs_hf_token = 'speaker-recognition' in selected_services or 'advanced' in selected_services
+    needs_hf_token = 'speaker-recognition' in selected_services
 
     if not needs_hf_token:
         return None
@@ -454,7 +480,8 @@ def select_transcription_provider():
     choices = {
         "1": "Deepgram (cloud-based, high quality, requires API key)",
         "2": "Parakeet ASR (offline, runs locally, requires GPU)",
-        "3": "None (skip transcription setup)"
+        "3": "VibeVoice ASR (offline, built-in speaker diarization, requires GPU)",
+        "4": "None (skip transcription setup)"
     }
 
     for key, desc in choices.items():
@@ -470,6 +497,8 @@ def select_transcription_provider():
                 elif choice == "2":
                     return "parakeet"
                 elif choice == "3":
+                    return "vibevoice"
+                elif choice == "4":
                     return "none"
             console.print(f"[red]Invalid choice. Please select from {list(choices.keys())}[/red]")
         except EOFError:
@@ -479,6 +508,9 @@ def select_transcription_provider():
 def main():
     """Main orchestration logic"""
     console.print("🎉 [bold green]Welcome to Chronicle![/bold green]\n")
+    console.print("[dim]This wizard is safe to run as many times as you like.[/dim]")
+    console.print("[dim]It backs up your existing config and preserves previously entered values.[/dim]")
+    console.print("[dim]When unsure, just press Enter — the defaults will work.[/dim]\n")
 
     # Setup config file from template
     setup_config_file()
@@ -492,12 +524,12 @@ def main():
     # Ask about transcription provider FIRST (determines which services are needed)
     transcription_provider = select_transcription_provider()
 
-    # Service Selection
-    selected_services = select_services()
+    # Service Selection (pass transcription_provider so we skip asking about ASR when already chosen)
+    selected_services = select_services(transcription_provider)
 
-    # Auto-add asr-services if Parakeet was chosen
-    if transcription_provider == "parakeet" and 'asr-services' not in selected_services:
-        console.print("[blue][INFO][/blue] Auto-adding ASR services for Parakeet transcription")
+    # Auto-add asr-services if local ASR was chosen (Parakeet or VibeVoice)
+    if transcription_provider in ("parakeet", "vibevoice") and 'asr-services' not in selected_services:
+        console.print(f"[blue][INFO][/blue] Auto-adding ASR services for {transcription_provider.capitalize()} transcription")
         selected_services.append('asr-services')
 
     if not selected_services:
@@ -526,21 +558,38 @@ def main():
             https_enabled = False
 
         if https_enabled:
-            console.print("\n[blue][INFO][/blue] For distributed deployments, use your Tailscale IP")
+            # Try to auto-detect Tailscale address
+            ts_dns, ts_ip = detect_tailscale_info()
+
+            if ts_dns:
+                console.print(f"\n[green][AUTO-DETECTED][/green] Tailscale DNS: {ts_dns}")
+                if ts_ip:
+                    console.print(f"[green][AUTO-DETECTED][/green] Tailscale IP:  {ts_ip}")
+                default_address = ts_dns
+            elif ts_ip:
+                console.print(f"\n[green][AUTO-DETECTED][/green] Tailscale IP: {ts_ip}")
+                default_address = ts_ip
+            else:
+                console.print("\n[blue][INFO][/blue] Tailscale not detected")
+                console.print("[blue][INFO][/blue] To find your Tailscale address: tailscale status --json | jq -r '.Self.DNSName'")
+                default_address = None
+
             console.print("[blue][INFO][/blue] For local-only access, use 'localhost'")
-            console.print("Examples: localhost, 100.64.1.2, your-domain.com")
+            console.print("Examples: localhost, myhost.tail1234.ts.net, 100.64.1.2")
 
             # Check for existing SERVER_IP from backend .env
             backend_env_path = 'backends/advanced/.env'
             existing_ip = read_env_value(backend_env_path, 'SERVER_IP')
 
-            # Use the new masked prompt function
+            # Use existing value, or auto-detected address, or localhost as default
+            effective_default = default_address or "localhost"
+
             server_ip = prompt_with_existing_masked(
                 prompt_text="Server IP/Domain for SSL certificates",
                 existing_value=existing_ip,
                 placeholders=['localhost', 'your-server-ip-here'],
                 is_password=False,
-                default="localhost"
+                default=effective_default
             )
 
             console.print(f"[green]✅[/green] HTTPS configured for: {server_ip}")

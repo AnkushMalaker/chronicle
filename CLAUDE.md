@@ -373,6 +373,11 @@ curl -s -H "Authorization: Bearer YOUR_TOKEN" \
   http://localhost:8000/api/conversations
 ```
 
+### Backend API Interaction Rules
+- **Get token first**: Always authenticate in a separate Bash call, store the token, then use it in subsequent calls. Never chain login + API call in one command.
+- **Read .env with Read tool**: Use the Read tool to get values from `.env` files. Don't use `grep | sed | cut` in Bash to extract env values.
+- **Keep Bash simple**: Each Bash call should do one thing. Don't string together complex piped commands for backend queries.
+
 ### Development Reset Commands
 ```bash
 # Reset all data (development only)

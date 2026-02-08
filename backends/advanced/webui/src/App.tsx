@@ -1,6 +1,7 @@
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
 import { AuthProvider } from './contexts/AuthContext'
 import { ThemeProvider } from './contexts/ThemeContext'
+import { RecordingProvider } from './contexts/RecordingContext'
 import Layout from './components/layout/Layout'
 import LoginPage from './pages/LoginPage'
 import Chat from './pages/Chat'
@@ -14,6 +15,7 @@ import Upload from './pages/Upload'
 import Queue from './pages/Queue'
 import LiveRecord from './pages/LiveRecord'
 import Plugins from './pages/Plugins'
+import Finetuning from './pages/Finetuning'
 import ProtectedRoute from './components/auth/ProtectedRoute'
 import { ErrorBoundary, PageErrorBoundary } from './components/ErrorBoundary'
 
@@ -27,7 +29,8 @@ function App() {
     <ErrorBoundary>
       <ThemeProvider>
         <AuthProvider>
-          <Router basename={basename} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+          <RecordingProvider>
+            <Router basename={basename} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
             <Routes>
               <Route path="/login" element={<LoginPage />} />
               <Route path="/" element={
@@ -95,9 +98,15 @@ function App() {
                     <Plugins />
                   </PageErrorBoundary>
                 } />
+                <Route path="finetuning" element={
+                  <PageErrorBoundary>
+                    <Finetuning />
+                  </PageErrorBoundary>
+                } />
               </Route>
             </Routes>
-          </Router>
+            </Router>
+          </RecordingProvider>
         </AuthProvider>
       </ThemeProvider>
     </ErrorBoundary>

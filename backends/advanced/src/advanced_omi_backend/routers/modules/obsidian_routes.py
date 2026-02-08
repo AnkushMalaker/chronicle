@@ -1,21 +1,21 @@
 
+import json
 import logging
 import os
 import uuid
-import json
+import zipfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Body
+from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
+from pydantic import BaseModel
 from rq.exceptions import NoSuchJobError
 from rq.job import Job
-from pydantic import BaseModel
-import zipfile
 
 from advanced_omi_backend.auth import current_active_user, current_superuser
 from advanced_omi_backend.controllers.queue_controller import default_queue, redis_conn
-from advanced_omi_backend.users import User
 from advanced_omi_backend.services.obsidian_service import obsidian_service
-from advanced_omi_backend.utils.file_utils import extract_zip, ZipExtractionError
+from advanced_omi_backend.users import User
+from advanced_omi_backend.utils.file_utils import ZipExtractionError, extract_zip
 from advanced_omi_backend.workers.obsidian_jobs import (
     count_markdown_files,
     ingest_obsidian_vault_job,

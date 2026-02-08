@@ -16,6 +16,37 @@ Get User Conversations
     ${response}=    GET On Session    api    /api/conversations    expected_status=200
     RETURN    ${response.json()}[conversations]
 
+Get Conversations By Client ID
+    [Documentation]    Get conversations filtered by client_id
+    ...                Returns only conversations matching the specified client_id
+    [Arguments]    ${client_id}
+
+    ${all_conversations}=    Get User Conversations
+    ${filtered}=    Create List
+
+    FOR    ${conv}    IN    @{all_conversations}
+        ${conv_client_id}=    Set Variable    ${conv}[client_id]
+        IF    '${conv_client_id}' == '${client_id}'
+            Append To List    ${filtered}    ${conv}
+        END
+    END
+
+    RETURN    ${filtered}
+
+Wait For Conversation By Client ID
+    [Documentation]    Wait for at least one conversation to exist for the given client_id.
+    ...                Polls until a conversation is found or timeout is reached.
+    ...                Returns the list of conversations for that client.
+    [Arguments]    ${client_id}    ${expected_count}=1
+
+    ${conversations}=    Get Conversations By Client ID    ${client_id}
+    ${count}=    Get Length    ${conversations}
+
+    Should Be True    ${count} >= ${expected_count}
+    ...    Expected at least ${expected_count} conversation(s) for client ${client_id}, found ${count}
+
+    RETURN    ${conversations}
+
 Get Conversation By ID
     [Documentation]    Get a specific conversation by ID
     [Arguments]       ${conversation_id}
@@ -178,3 +209,45 @@ Conversation Should Have End Reason
     ${actual_end_reason}=    Set Variable    ${conversation}[end_reason]
     Should Be Equal As Strings    ${actual_end_reason}    ${expected_end_reason}
     ...    msg=Expected end_reason '${expected_end_reason}', got '${actual_end_reason}'
+
+Verify Conversation Processing Status
+    [Documentation]    Verify conversation has expected processing_status value
+    [Arguments]    ${conversation_id}    ${expected_status}
+
+    ${conversation}=    Get Conversation By ID    ${conversation_id}
+
+    Should Contain    ${conversation}    processing_status
+    Should Be Equal As Strings    ${conversation}[processing_status]    ${expected_status}
+    ...    Expected processing_status='${expected_status}', got '${conversation}[processing_status]'
+
+    Log    ✅ Conversation ${conversation_id} has processing_status='${expected_status}'
+
+Verify Conversation Always Persist Flag
+    [Documentation]    Verify conversation has always_persist=True
+    [Arguments]    ${conversation_id}
+
+    ${conversation}=    Get Conversation By ID    ${conversation_id}
+
+    Should Contain    ${conversation}    always_persist
+    Should Be True    ${conversation}[always_persist]
+    ...    Expected always_persist=True, got ${conversation}[always_persist]
+
+    Log    ✅ Conversation ${conversation_id} has always_persist=True
+
+Verify Placeholder Conversation Title
+    [Documentation]    Verify conversation has placeholder title
+    [Arguments]    ${conversation_id}
+
+    ${conversation}=    Get Conversation By ID    ${conversation_id}
+
+    # Placeholder title can be either "Processing..." or "Transcription Failed"
+    ${title}=    Set Variable    ${conversation}[title]
+    ${has_processing}=    Run Keyword And Return Status    Should Contain    ${title}    Processing
+    ${has_failed}=    Run Keyword And Return Status    Should Contain    ${title}    Transcription Failed
+
+    ${is_placeholder}=    Evaluate    ${has_processing} or ${has_failed}
+
+    Should Be True    ${is_placeholder}
+    ...    Expected placeholder title, got: ${title}
+
+    Log    ✅ Conversation has placeholder title: ${title}

@@ -8,6 +8,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
+
 from .event_storage import EventStorage
 
 logger = logging.getLogger(__name__)
