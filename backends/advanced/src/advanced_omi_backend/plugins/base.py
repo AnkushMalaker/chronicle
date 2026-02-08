@@ -143,3 +143,17 @@ class BasePlugin(ABC):
             PluginResult with success status, optional message, and should_continue flag
         """
         pass
+
+    async def on_button_event(self, context: PluginContext) -> Optional[PluginResult]:
+        """
+        Called when a device button event is received.
+
+        Context data contains:
+            - state: str - Button state (e.g., "SINGLE_TAP", "DOUBLE_TAP", "LONG_PRESS")
+            - timestamp: float - Unix timestamp of the event
+            - audio_uuid: str - Current audio session UUID (may be None)
+
+        Returns:
+            PluginResult with success status, optional message, and should_continue flag
+        """
+        pass
