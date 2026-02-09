@@ -107,10 +107,12 @@ export const authApi = {
 }
 
 export const conversationsApi = {
-  getAll: (includeDeleted?: boolean, includeUnprocessed?: boolean) => api.get('/api/conversations', {
+  getAll: (includeDeleted?: boolean, includeUnprocessed?: boolean, limit?: number, offset?: number) => api.get('/api/conversations', {
     params: {
       ...(includeDeleted !== undefined && { include_deleted: includeDeleted }),
       ...(includeUnprocessed !== undefined && { include_unprocessed: includeUnprocessed }),
+      ...(limit !== undefined && { limit }),
+      ...(offset !== undefined && { offset }),
     }
   }),
   getById: (id: string) => api.get(`/api/conversations/${id}`),

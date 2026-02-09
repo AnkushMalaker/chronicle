@@ -384,7 +384,7 @@ class Conversation(Document):
             "conversation_id",
             "user_id",
             "created_at",
-            [("user_id", 1), ("created_at", -1)],  # Compound index for user queries
+            [("user_id", 1), ("deleted", 1), ("created_at", -1)],  # Compound index for paginated list queries
             IndexModel([("external_source_id", 1)], sparse=True)  # Sparse index for deduplication
         ]
 

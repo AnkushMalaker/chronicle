@@ -157,37 +157,40 @@ async def get_conversation(conversation_id: str, user: User):
         return JSONResponse(status_code=500, content={"error": "Error fetching conversation"})
 
 
-async def get_conversations(user: User, include_deleted: bool = False, include_unprocessed: bool = False):
-    """Get conversations with speech only (speech-driven architecture)."""
+async def get_conversations(
+    user: User,
+    include_deleted: bool = False,
+    include_unprocessed: bool = False,
+    limit: int = 200,
+    offset: int = 0,
+):
+    """Get conversations with speech only (speech-driven architecture).
+
+    Uses a single consolidated query with ``$or`` when ``include_unprocessed``
+    is True, eliminating multiple round-trips and Python-side merge/sort.
+    Results are paginated with ``limit``/``offset``.
+    """
     try:
-        # Build base query conditions
         user_filter = {} if user.is_superuser else {"user_id": str(user.user_id)}
 
+        # Build query conditions — single $or when orphans are requested
+        conditions = []
+
+        # Condition 1: normal (non-deleted or all) conversations
         if include_deleted:
-            # No deleted filter - show everything
-            base_query = user_filter
+            conditions.append({})  # no filter on deleted
         else:
-            base_query = {**user_filter, "deleted": False}
+            conditions.append({"deleted": False})
 
-        user_conversations = (
-            await Conversation.find(base_query)
-            .sort(-Conversation.created_at)
-            .to_list()
-        )
-
-        # If include_unprocessed, also fetch orphan conversations
-        orphan_ids = set()
         if include_unprocessed:
-            # Orphan type 1: always_persist conversations stuck in pending/failed (not deleted)
-            orphan_query_1 = {
-                **user_filter,
+            # Orphan type 1: always_persist stuck in pending/failed (not deleted)
+            conditions.append({
                 "always_persist": True,
                 "processing_status": {"$in": ["pending_transcription", "transcription_failed"]},
                 "deleted": False,
-            }
+            })
             # Orphan type 2: soft-deleted due to no speech but have audio data
-            orphan_query_2 = {
-                **user_filter,
+            conditions.append({
                 "deleted": True,
                 "deletion_reason": {"$in": [
                     "no_meaningful_speech",
@@ -195,21 +198,44 @@ async def get_conversations(user: User, include_deleted: bool = False, include_u
                     "no_meaningful_speech_batch_transcription",
                 ]},
                 "audio_chunks_count": {"$gt": 0},
-            }
+            })
 
-            orphan_convs_1 = await Conversation.find(orphan_query_1).sort(-Conversation.created_at).to_list()
-            orphan_convs_2 = await Conversation.find(orphan_query_2).sort(-Conversation.created_at).to_list()
+        # Assemble final query
+        if len(conditions) == 1:
+            query = {**user_filter, **conditions[0]}
+        else:
+            query = {**user_filter, "$or": conditions}
 
-            # Merge orphans that aren't already in the main list
-            existing_ids = {c.conversation_id for c in user_conversations}
-            for conv in orphan_convs_1 + orphan_convs_2:
-                orphan_ids.add(conv.conversation_id)
-                if conv.conversation_id not in existing_ids:
-                    user_conversations.append(conv)
-                    existing_ids.add(conv.conversation_id)
+        total = await Conversation.find(query).count()
 
-            # Re-sort after merge
-            user_conversations.sort(key=lambda c: c.created_at or datetime.min, reverse=True)
+        user_conversations = (
+            await Conversation.find(query)
+            .sort(-Conversation.created_at)
+            .skip(offset)
+            .limit(limit)
+            .to_list()
+        )
+
+        # Mark orphans in results (lightweight in-memory check on the page)
+        orphan_ids: set = set()
+        if include_unprocessed:
+            for conv in user_conversations:
+                is_orphan_type1 = (
+                    conv.always_persist
+                    and conv.processing_status in ("pending_transcription", "transcription_failed")
+                    and not conv.deleted
+                )
+                is_orphan_type2 = (
+                    conv.deleted
+                    and conv.deletion_reason in (
+                        "no_meaningful_speech",
+                        "audio_file_not_ready",
+                        "no_meaningful_speech_batch_transcription",
+                    )
+                    and (conv.audio_chunks_count or 0) > 0
+                )
+                if is_orphan_type1 or is_orphan_type2:
+                    orphan_ids.add(conv.conversation_id)
 
         # Build response with explicit curated fields - minimal for list view
         conversations = []
@@ -245,7 +271,12 @@ async def get_conversations(user: User, include_deleted: bool = False, include_u
                 }
             )
 
-        return {"conversations": conversations}
+        return {
+            "conversations": conversations,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
 
     except Exception as e:
         logger.exception(f"Error fetching conversations: {e}")

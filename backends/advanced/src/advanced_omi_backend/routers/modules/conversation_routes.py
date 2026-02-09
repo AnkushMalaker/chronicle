@@ -33,10 +33,12 @@ async def close_current_conversation(
 async def get_conversations(
     include_deleted: bool = Query(False, description="Include soft-deleted conversations"),
     include_unprocessed: bool = Query(False, description="Include orphan audio sessions (always_persist with failed/pending transcription)"),
+    limit: int = Query(200, ge=1, le=500, description="Max conversations to return"),
+    offset: int = Query(0, ge=0, description="Number of conversations to skip"),
     current_user: User = Depends(current_active_user)
 ):
     """Get conversations. Admins see all conversations, users see only their own."""
-    return await conversation_controller.get_conversations(current_user, include_deleted, include_unprocessed)
+    return await conversation_controller.get_conversations(current_user, include_deleted, include_unprocessed, limit, offset)
 
 
 @router.get("/{conversation_id}")
