@@ -121,8 +121,7 @@ class ClientState:
         return time_since_last_transcript > timeout_seconds
 
     async def close_current_conversation(self):
-        """Close the current conversation and queue necessary processing."""
-        # Prevent double closure
+        """Clean up in-memory speech segments for the current conversation."""
         if self.conversation_closed:
             audio_logger.debug(
                 f"🔒 Conversation already closed for client {self.client_id}, skipping"
@@ -132,22 +131,14 @@ class ClientState:
         self.conversation_closed = True
 
         if not self.current_audio_uuid:
-            audio_logger.info(f"🔒 No active conversation to close for client {self.client_id}")
             return
 
-        # NOTE: ClientState is legacy V1 code. In V2 architecture, conversation closure
-        # is handled by the websocket controllers using RQ jobs directly.
-        # This method is kept minimal for backward compatibility.
+        audio_logger.info(f"🔒 Closing conversation state for client {self.client_id}")
 
-        audio_logger.info(f"🔒 Closing conversation for client {self.client_id}, audio_uuid: {self.current_audio_uuid}")
-
-        # Clean up speech segments for this conversation
         if self.current_audio_uuid in self.speech_segments:
             del self.speech_segments[self.current_audio_uuid]
         if self.current_audio_uuid in self.current_speech_start:
             del self.current_speech_start[self.current_audio_uuid]
-
-        audio_logger.info(f"✅ Cleaned up state for {self.current_audio_uuid}")
 
     async def start_new_conversation(self):
         """Start a new conversation by closing current and resetting state."""
@@ -159,10 +150,7 @@ class ClientState:
         self.last_transcript_time = None
         self.conversation_closed = False
 
-        audio_logger.info(
-            f"Client {self.client_id}: Started new conversation due to "
-            f"{NEW_CONVERSATION_TIMEOUT_MINUTES}min timeout"
-        )
+        audio_logger.info(f"Client {self.client_id}: Started new conversation")
 
     async def disconnect(self):
         """Clean disconnect of client state."""

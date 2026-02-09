@@ -5,10 +5,12 @@ This module contains all jobs related to speech-to-text transcription processing
 """
 
 import asyncio
+import io
 import logging
 import os
 import time
 import uuid
+import wave
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
@@ -30,6 +32,7 @@ from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import BaseRQJob, JobPriority, async_job
 from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggregator
+from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.services.plugin_service import ensure_plugin_router
 from advanced_omi_backend.services.transcription import (
     get_transcription_provider,
@@ -224,11 +227,18 @@ async def transcribe_full_audio_job(
         logger.warning(f"Failed to build ASR context: {e}")
         context_info = None
 
+    # Read actual sample rate from WAV header
+    try:
+        with wave.open(io.BytesIO(wav_data), "rb") as wf:
+            actual_sample_rate = wf.getframerate()
+    except Exception:
+        actual_sample_rate = 16000
+
     try:
         # Transcribe the audio directly from memory (no disk I/O needed)
         transcribe_kwargs: Dict[str, Any] = {
             "audio_data": wav_data,
-            "sample_rate": 16000,
+            "sample_rate": actual_sample_rate,
             "diarize": True,
         }
         if context_info:
@@ -279,7 +289,7 @@ async def transcribe_full_audio_job(
                 )
 
                 plugin_results = await plugin_router.dispatch_event(
-                    event="transcript.batch",
+                    event=PluginEvent.TRANSCRIPT_BATCH,
                     user_id=user_id,
                     data=plugin_data,
                     metadata={"client_id": client_id},

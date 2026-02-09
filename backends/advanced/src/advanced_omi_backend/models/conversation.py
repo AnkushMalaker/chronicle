@@ -39,6 +39,7 @@ class Conversation(Document):
         INACTIVITY_TIMEOUT = "inactivity_timeout"  # No speech detected for threshold period
         WEBSOCKET_DISCONNECT = "websocket_disconnect"  # Connection lost (Bluetooth, network, etc.)
         MAX_DURATION = "max_duration"  # Hit maximum conversation duration
+        CLOSE_REQUESTED = "close_requested"  # External close signal (API, plugin, button)
         ERROR = "error"  # Processing error forced conversation end
         UNKNOWN = "unknown"  # Unknown or legacy reason
 

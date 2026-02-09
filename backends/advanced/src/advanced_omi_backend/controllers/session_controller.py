@@ -65,6 +65,37 @@ async def mark_session_complete(
     logger.info(f"✅ Session {session_id[:12]} marked finished: {reason} [TIME: {mark_time:.3f}]")
 
 
+async def request_conversation_close(
+    redis_client,
+    session_id: str,
+    reason: str = "user_requested",
+) -> bool:
+    """
+    Request closing the current conversation without killing the session.
+
+    Unlike mark_session_complete() which finalizes the entire session,
+    this signals open_conversation_job to close just the current conversation
+    and trigger post-processing. The session stays active for new conversations.
+
+    Sets 'conversation_close_requested' field on the session hash.
+    The open_conversation_job checks this field every poll iteration.
+
+    Args:
+        redis_client: Redis async client
+        session_id: Session UUID
+        reason: Why the conversation is being closed
+
+    Returns:
+        True if the close request was set, False if session not found
+    """
+    session_key = f"audio:session:{session_id}"
+    if not await redis_client.exists(session_key):
+        return False
+    await redis_client.hset(session_key, "conversation_close_requested", reason)
+    logger.info(f"🔒 Conversation close requested for session {session_id[:12]}: {reason}")
+    return True
+
+
 async def get_session_info(redis_client, session_id: str) -> Optional[Dict]:
     """
     Get detailed information about a specific session.

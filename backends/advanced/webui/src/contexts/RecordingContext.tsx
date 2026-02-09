@@ -28,6 +28,11 @@ export interface RecordingContextType {
   stopRecording: () => void
   setMode: (mode: RecordingMode) => void
 
+  // Microphone selection
+  availableDevices: MediaDeviceInfo[]
+  selectedDeviceId: string | null
+  setSelectedDeviceId: (id: string | null) => void
+
   // For components
   analyser: AnalyserNode | null
   debugStats: DebugStats
@@ -49,6 +54,10 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null)
   const [mode, setMode] = useState<RecordingMode>('streaming')
   const [analyserState, setAnalyserState] = useState<AnalyserNode | null>(null)
+
+  // Microphone selection
+  const [availableDevices, setAvailableDevices] = useState<MediaDeviceInfo[]>([])
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null)
 
   // Debug stats
   const [debugStats, setDebugStats] = useState<DebugStats>({
@@ -82,6 +91,24 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   const isDevelopmentHost = devAllowedHosts.includes(window.location.hostname)
 
   const canAccessMicrophone = isLocalhost || isHttps || isDevelopmentHost
+
+  // Enumerate audio input devices
+  const refreshDevices = useCallback(async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      const audioInputs = devices.filter(d => d.kind === 'audioinput')
+      setAvailableDevices(audioInputs)
+    } catch (e) {
+      console.warn('Failed to enumerate audio devices:', e)
+    }
+  }, [])
+
+  // Initial device enumeration + listen for device changes
+  useEffect(() => {
+    refreshDevices()
+    navigator.mediaDevices.addEventListener('devicechange', refreshDevices)
+    return () => navigator.mediaDevices.removeEventListener('devicechange', refreshDevices)
+  }, [refreshDevices])
 
   // Format duration helper
   const formatDuration = useCallback((seconds: number) => {
@@ -141,17 +168,22 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       throw new Error('Microphone access requires HTTPS or localhost')
     }
 
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        sampleRate: 16000,
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true
-      }
-    })
+    const audioConstraints: MediaTrackConstraints = {
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    }
+    if (selectedDeviceId) {
+      audioConstraints.deviceId = { exact: selectedDeviceId }
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints })
 
     mediaStreamRef.current = stream
+
+    // Re-enumerate to get labels after permission grant
+    refreshDevices()
 
     // Track when mic permission is revoked
     stream.getTracks().forEach(track => {
@@ -168,7 +200,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
 
     console.log('✅ Microphone access granted')
     return stream
-  }, [canAccessMicrophone, isRecording, cleanup])
+  }, [canAccessMicrophone, selectedDeviceId, isRecording, cleanup, refreshDevices])
 
   // Step 2: Connect WebSocket
   const connectWebSocket = useCallback(async (): Promise<WebSocket> => {
@@ -299,10 +331,12 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       throw new Error('WebSocket not connected')
     }
 
+    const rate = audioContextRef.current?.sampleRate ?? 16000
+
     const startMessage = {
       type: 'audio-start',
       data: {
-        rate: 16000,
+        rate,
         width: 2,
         channels: 1,
         mode: mode  // Pass recording mode to backend
@@ -311,15 +345,15 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     }
 
     ws.send(JSON.stringify(startMessage) + '\n')
-    console.log('✅ Audio-start message sent with mode:', mode)
+    console.log(`✅ Audio-start message sent with mode: ${mode}, rate: ${rate}`)
   }, [mode])
 
   // Step 4: Start audio streaming
   const startAudioStreaming = useCallback(async (stream: MediaStream, ws: WebSocket): Promise<void> => {
     console.log('🎵 Step 4: Starting audio streaming')
 
-    // Set up audio context and analyser for visualization
-    const audioContext = new AudioContext({ sampleRate: 16000 })
+    // Reuse the AudioContext created in startRecording
+    const audioContext = audioContextRef.current!
     const analyser = audioContext.createAnalyser()
     const source = audioContext.createMediaStreamSource(stream)
 
@@ -336,8 +370,6 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       await audioContext.resume()
       console.log('🎧 Audio context resumed, new state:', audioContext.state)
     }
-
-    audioContextRef.current = audioContext
     analyserRef.current = analyser
     setAnalyserState(analyser)
 
@@ -395,7 +427,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
         const chunkHeader = {
           type: 'audio-chunk',
           data: {
-            rate: 16000,
+            rate: audioContext.sampleRate,
             width: 2,
             channels: 1
           },
@@ -444,16 +476,22 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       // Step 1: Get microphone access
       const stream = await getMicrophoneAccess()
 
+      // Create AudioContext at 16kHz to match the backend pipeline expectation.
+      // The browser will internally resample from the mic's native rate (e.g. 48kHz).
+      const audioContext = new AudioContext({ sampleRate: 16000 })
+      audioContextRef.current = audioContext
+      console.log(`🎧 AudioContext created, sample rate: ${audioContext.sampleRate}Hz`)
+
       setCurrentStep('websocket')
       // Step 2: Connect WebSocket (includes stabilization delay)
       const ws = await connectWebSocket()
 
       setCurrentStep('audio-start')
-      // Step 3: Send audio-start message
+      // Step 3: Send audio-start message (uses audioContextRef for sample rate)
       await sendAudioStartMessage(ws)
 
       setCurrentStep('streaming')
-      // Step 4: Start audio streaming (includes processing delay)
+      // Step 4: Start audio streaming (reuses existing AudioContext)
       await startAudioStreaming(stream, ws)
 
       // All steps complete - mark as recording
@@ -551,6 +589,9 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       startRecording,
       stopRecording,
       setMode,
+      availableDevices,
+      selectedDeviceId,
+      setSelectedDeviceId,
       analyser: analyserState,
       debugStats,
       formatDuration,

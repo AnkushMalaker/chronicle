@@ -109,6 +109,27 @@ interface StreamingStatus {
   timestamp: number;
 }
 
+interface EventRecord {
+  timestamp: number;
+  event: string;
+  user_id: string;
+  plugins_subscribed: string[];
+  plugins_executed: Array<{ plugin_id: string; success: boolean; message: string }>;
+  metadata: Record<string, any>;
+}
+
+// Known event type colors — unknown types fall back to gray via getEventColor()
+const EVENT_TYPE_COLORS: Record<string, string> = {
+  'conversation.complete': 'bg-green-100 text-green-700',
+  'transcript.batch': 'bg-blue-100 text-blue-700',
+  'memory.processed': 'bg-purple-100 text-purple-700',
+  'button.single_press': 'bg-orange-100 text-orange-700',
+  'button.double_press': 'bg-orange-100 text-orange-700',
+  'plugin_action': 'bg-indigo-100 text-indigo-700',
+};
+const DEFAULT_EVENT_COLOR = 'bg-gray-100 text-gray-700';
+const getEventColor = (eventType: string) => EVENT_TYPE_COLORS[eventType] || DEFAULT_EVENT_COLOR;
+
 const Queue: React.FC = () => {
   const [jobs, setJobs] = useState<any[]>([]);
   const [stats, setStats] = useState<QueueStats | null>(null);
@@ -146,6 +167,11 @@ const Queue: React.FC = () => {
     const saved = localStorage.getItem('queue_auto_refresh');
     return saved !== null ? saved === 'true' : true;
   });
+
+  // System events
+  const [events, setEvents] = useState<EventRecord[]>([]);
+  const [eventTypeFilter, setEventTypeFilter] = useState<string>('');
+  const [eventsExpanded, setEventsExpanded] = useState(true);
 
   // Completed conversations pagination
   const [completedConvPage, setCompletedConvPage] = useState(1);
@@ -255,6 +281,7 @@ const Queue: React.FC = () => {
       setConversationJobs(jobsByConversation);
       setStats(dashboardData.stats);
       setStreamingStatus(dashboardData.streaming_status);
+      setEvents(dashboardData.events || []);
       setLastUpdate(Date.now());
 
       // Auto-expand active conversations (those with open_conversation_job in progress)
@@ -687,7 +714,7 @@ const Queue: React.FC = () => {
         <div className="flex items-center space-x-3">
           <Layers className="w-6 h-6 text-blue-600" />
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">Queue Management</h1>
+            <h1 className="text-2xl font-bold text-gray-900">Queue & Events</h1>
             <p className="text-xs text-gray-500">
               Last updated: {new Date(lastUpdate).toLocaleTimeString()} • Auto-refresh every 2s
             </p>
@@ -2020,6 +2047,113 @@ const Queue: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Events */}
+      <div className="bg-white rounded-lg border overflow-hidden">
+        <div
+          className="px-6 py-4 border-b border-gray-200 flex justify-between items-center cursor-pointer"
+          onClick={() => setEventsExpanded(!eventsExpanded)}
+        >
+          <div className="flex items-center space-x-2">
+            <Zap className="w-5 h-5 text-purple-600" />
+            <h3 className="text-lg font-medium">Events</h3>
+            <span className="text-xs text-gray-500">({events.length})</span>
+          </div>
+          <div className="flex items-center space-x-3">
+            {eventsExpanded && (
+              <select
+                value={eventTypeFilter}
+                onChange={(e) => { e.stopPropagation(); setEventTypeFilter(e.target.value); }}
+                onClick={(e) => e.stopPropagation()}
+                className="text-sm border border-gray-300 rounded-md px-2 py-1"
+              >
+                <option value="">All Events</option>
+                {[...new Set(events.map(e => e.event))].sort().map(eventType => (
+                  <option key={eventType} value={eventType}>{eventType}</option>
+                ))}
+              </select>
+            )}
+            {eventsExpanded ? <ChevronDown className="w-4 h-4 text-gray-500" /> : <ChevronRight className="w-4 h-4 text-gray-500" />}
+          </div>
+        </div>
+
+        {eventsExpanded && (
+          <div className="overflow-x-auto">
+            {(() => {
+              const filtered = eventTypeFilter
+                ? events.filter(e => e.event === eventTypeFilter)
+                : events;
+
+              if (filtered.length === 0) {
+                return (
+                  <div className="px-6 py-8 text-center text-gray-500 text-sm">
+                    No events recorded yet. Events are logged when system actions like conversation.complete, memory.processed, or button presses occur.
+                  </div>
+                );
+              }
+
+              return (
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Event</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">User</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Plugins Triggered</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-200">
+                    {filtered.map((evt, idx) => {
+                      const allSuccess = evt.plugins_executed.length > 0 && evt.plugins_executed.every(p => p.success);
+                      const anyFailure = evt.plugins_executed.some(p => !p.success);
+
+                      return (
+                        <tr key={idx} className="hover:bg-gray-50">
+                          <td className="px-4 py-2 text-xs text-gray-600 whitespace-nowrap">
+                            {new Date(evt.timestamp * 1000).toLocaleTimeString()}
+                          </td>
+                          <td className="px-4 py-2">
+                            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${getEventColor(evt.event)}`}>
+                              {evt.event}
+                            </span>
+                          </td>
+                          <td className="px-4 py-2 text-xs text-gray-600 font-mono">
+                            {evt.user_id.length > 12 ? `${evt.user_id.slice(-8)}` : evt.user_id}
+                          </td>
+                          <td className="px-4 py-2 text-xs text-gray-700">
+                            {evt.plugins_executed.length > 0
+                              ? evt.plugins_executed.map(p => p.plugin_id).join(', ')
+                              : <span className="text-gray-400">none</span>
+                            }
+                          </td>
+                          <td className="px-4 py-2">
+                            {evt.plugins_executed.length === 0 ? (
+                              <span className="text-xs text-gray-400">no plugins ran</span>
+                            ) : allSuccess ? (
+                              <span className="flex items-center space-x-1 text-xs text-green-600">
+                                <CheckCircle className="w-3.5 h-3.5" />
+                                <span>OK</span>
+                              </span>
+                            ) : anyFailure ? (
+                              <span className="flex items-center space-x-1 text-xs text-red-600" title={evt.plugins_executed.filter(p => !p.success).map(p => `${p.plugin_id}: ${p.message}`).join('; ')}>
+                                <XCircle className="w-3.5 h-3.5" />
+                                <span>Error</span>
+                              </span>
+                            ) : (
+                              <span className="text-xs text-gray-500">partial</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              );
+            })()}
+          </div>
+        )}
+      </div>
 
       {/* Filters */}
       <div className="bg-white rounded-lg border p-4">

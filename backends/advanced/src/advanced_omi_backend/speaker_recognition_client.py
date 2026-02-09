@@ -181,7 +181,7 @@ class SpeakerRecognitionClient:
 
                     form_data.add_field("transcript_data", json.dumps(transcript_data))
                     form_data.add_field("user_id", "1")  # TODO: Implement proper user mapping
-                    form_data.add_field("similarity_threshold", str(config.get("similarity_threshold", 0.15)))
+                    form_data.add_field("similarity_threshold", str(config.get("similarity_threshold", 0.45)))
                     form_data.add_field("min_duration", str(config.get("min_duration", 0.5)))
 
                     # Use /v1/diarize-identify-match endpoint as fallback
@@ -194,7 +194,7 @@ class SpeakerRecognitionClient:
                     # Send existing transcript for diarization and speaker matching
                     form_data.add_field("transcript_data", json.dumps(transcript_data))
                     form_data.add_field("user_id", "1")  # TODO: Implement proper user mapping
-                    form_data.add_field("similarity_threshold", str(config.get("similarity_threshold", 0.15)))
+                    form_data.add_field("similarity_threshold", str(config.get("similarity_threshold", 0.45)))
 
                     # Add pyannote diarization parameters
                     form_data.add_field("min_duration", str(config.get("min_duration", 0.5)))
@@ -352,7 +352,7 @@ class SpeakerRecognitionClient:
         )
 
         config = get_diarization_settings()
-        similarity_threshold = config.get("similarity_threshold", 0.15)
+        similarity_threshold = config.get("similarity_threshold", 0.45)
 
         MAX_SAMPLES_PER_LABEL = 3
 
@@ -496,7 +496,7 @@ class SpeakerRecognitionClient:
                     "end": seg["end"],
                     "text": seg.get("text", ""),
                     "speaker": label,
-                    "identified_as": mapped[0] if mapped else label,
+                    "identified_as": mapped[0] if mapped else None,
                     "confidence": mapped[1] if mapped else 0.0,
                     "status": "identified" if mapped else "unknown",
                 })
@@ -610,7 +610,7 @@ class SpeakerRecognitionClient:
                     "end": seg["end"],
                     "text": seg.get("text", ""),
                     "speaker": label,
-                    "identified_as": label,
+                    "identified_as": None,
                     "confidence": 0.0,
                     "status": "too_short",
                 })
@@ -640,7 +640,7 @@ class SpeakerRecognitionClient:
                     "end": seg["end"],
                     "text": seg.get("text", ""),
                     "speaker": label,
-                    "identified_as": label,
+                    "identified_as": None,
                     "confidence": 0.0,
                     "status": "unknown",
                 })
@@ -700,7 +700,7 @@ class SpeakerRecognitionClient:
 
                 # Add all diarization parameters for the diarize-and-identify endpoint
                 min_duration = diarization_settings.get("min_duration", 0.5)
-                similarity_threshold = diarization_settings.get("similarity_threshold", 0.15)
+                similarity_threshold = diarization_settings.get("similarity_threshold", 0.45)
                 collar = diarization_settings.get("collar", 2.0)
                 min_duration_off = diarization_settings.get("min_duration_off", 1.5)
 
@@ -829,7 +829,7 @@ class SpeakerRecognitionClient:
 
                     # Add all diarization parameters for the diarize-and-identify endpoint
                     form_data.add_field("min_duration", str(_diarization_settings.get("min_duration", 0.5)))
-                    form_data.add_field("similarity_threshold", str(_diarization_settings.get("similarity_threshold", 0.15)))
+                    form_data.add_field("similarity_threshold", str(_diarization_settings.get("similarity_threshold", 0.45)))
                     form_data.add_field("collar", str(_diarization_settings.get("collar", 2.0)))
                     form_data.add_field("min_duration_off", str(_diarization_settings.get("min_duration_off", 1.5)))
                     if _diarization_settings.get("min_speakers"):

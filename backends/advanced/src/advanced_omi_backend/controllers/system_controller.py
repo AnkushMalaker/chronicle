@@ -353,7 +353,7 @@ async def save_misc_settings_controller(settings: dict):
     """Save miscellaneous settings."""
     try:
         # Validate settings
-        valid_keys = {"always_persist_enabled", "use_provider_segments"}
+        valid_keys = {"always_persist_enabled", "use_provider_segments", "per_segment_speaker_id"}
 
         # Filter to only valid keys
         filtered_settings = {}
@@ -1102,8 +1102,7 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
         Success message with list of updated files
     """
     try:
-        import advanced_omi_backend.plugins
-        from advanced_omi_backend.services.plugin_service import discover_plugins
+        from advanced_omi_backend.services.plugin_service import _get_plugins_dir, discover_plugins
 
         # Validate plugin exists
         discovered_plugins = discover_plugins()
@@ -1151,7 +1150,7 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
 
         # 2. Update plugins/{plugin_id}/config.yml (settings with env var references)
         if 'settings' in config:
-            plugins_dir = Path(advanced_omi_backend.plugins.__file__).parent
+            plugins_dir = _get_plugins_dir()
             plugin_config_path = plugins_dir / plugin_id / "config.yml"
 
             # Load current config.yml

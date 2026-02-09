@@ -8,6 +8,7 @@ Also includes audio cropping operations that work with the Conversation model.
 """
 
 import logging
+import os
 import time
 import uuid
 
@@ -24,7 +25,10 @@ from advanced_omi_backend.models.user import User
 from advanced_omi_backend.services.transcription import is_transcription_available
 from advanced_omi_backend.utils.audio_chunk_utils import convert_audio_to_chunks
 from advanced_omi_backend.utils.audio_utils import (
+    SUPPORTED_AUDIO_EXTENSIONS,
+    VIDEO_EXTENSIONS,
     AudioValidationError,
+    convert_any_to_wav,
     validate_and_prepare_audio,
 )
 from advanced_omi_backend.workers.transcription_jobs import (
@@ -71,14 +75,19 @@ async def upload_and_process_audio_files(
 
         for file_index, file in enumerate(files):
             try:
-                # Validate file type (only WAV for now)
-                if not file.filename or not file.filename.lower().endswith(".wav"):
+                # Validate file type
+                filename = file.filename or "unknown"
+                _, ext = os.path.splitext(filename.lower())
+                if not ext or ext not in SUPPORTED_AUDIO_EXTENSIONS:
+                    supported = ", ".join(sorted(SUPPORTED_AUDIO_EXTENSIONS))
                     processed_files.append({
-                        "filename": file.filename or "unknown",
+                        "filename": filename,
                         "status": "error",
-                        "error": "Only WAV files are currently supported",
+                        "error": f"Unsupported format '{ext}'. Supported: {supported}",
                     })
                     continue
+
+                is_video_source = ext in VIDEO_EXTENSIONS
 
                 audio_logger.info(
                     f"📁 Uploading file {file_index + 1}/{len(files)}: {file.filename}"
@@ -87,6 +96,17 @@ async def upload_and_process_audio_files(
                 # Read file content
                 content = await file.read()
 
+                # Convert non-WAV files to WAV via FFmpeg
+                if ext != ".wav":
+                    try:
+                        content = await convert_any_to_wav(content, ext)
+                    except AudioValidationError as e:
+                        processed_files.append({
+                            "filename": filename,
+                            "status": "error",
+                            "error": str(e),
+                        })
+                        continue
 
                 # Track external source for deduplication (Google Drive, etc.)
                 external_source_id = None
@@ -209,7 +229,7 @@ async def upload_and_process_audio_files(
                     client_id=client_id  # Pass client_id for UI tracking
                 )
 
-                processed_files.append({
+                file_result = {
                     "filename": file.filename,
                     "status": "started",  # RQ standard: job has been enqueued
                     "conversation_id": conversation_id,
@@ -217,7 +237,10 @@ async def upload_and_process_audio_files(
                     "speaker_job_id": job_ids['speaker_recognition'],
                     "memory_job_id": job_ids['memory'],
                     "duration_seconds": round(duration, 2),
-                })
+                }
+                if is_video_source:
+                    file_result["note"] = "Audio extracted from video file"
+                processed_files.append(file_result)
 
                 # Build job chain description
                 job_chain = []

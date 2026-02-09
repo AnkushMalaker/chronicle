@@ -961,7 +961,8 @@ async def _handle_button_event(
 ) -> None:
     """Handle a button event from the device.
 
-    Stores a marker on the client state and dispatches to the plugin system.
+    Stores a marker on the client state and dispatches granular events
+    to the plugin system using typed enums.
 
     Args:
         client_state: Client state object
@@ -969,6 +970,10 @@ async def _handle_button_event(
         user_id: User ID
         client_id: Client ID
     """
+    from advanced_omi_backend.plugins.events import (
+        BUTTON_STATE_TO_EVENT,
+        ButtonState,
+    )
     from advanced_omi_backend.services.plugin_service import get_plugin_router
 
     timestamp = time.time()
@@ -989,16 +994,30 @@ async def _handle_button_event(
     }
     client_state.add_marker(marker)
 
-    # Dispatch to plugin system
+    # Map device button state to typed plugin event
+    try:
+        button_state_enum = ButtonState(button_state)
+    except ValueError:
+        application_logger.warning(f"Unknown button state: {button_state}")
+        return
+
+    event = BUTTON_STATE_TO_EVENT.get(button_state_enum)
+    if not event:
+        application_logger.debug(f"No plugin event mapped for {button_state_enum}")
+        return
+
+    # Dispatch granular event to plugin system
     router = get_plugin_router()
     if router:
         await router.dispatch_event(
-            event="button.event",
+            event=event.value,
             user_id=user_id,
             data={
-                "state": button_state,
+                "state": button_state_enum.value,
                 "timestamp": timestamp,
                 "audio_uuid": audio_uuid,
+                "session_id": getattr(client_state, 'stream_session_id', None),
+                "client_id": client_id,
             },
         )
 

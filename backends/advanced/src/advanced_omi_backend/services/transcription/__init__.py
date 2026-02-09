@@ -141,7 +141,13 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
         # Build headers (skip Content-Type for multipart as httpx will set it)
         headers = {}
         if not use_multipart:
-            headers["Content-Type"] = "audio/raw"
+            # Auto-detect WAV format from RIFF header and use correct Content-Type.
+            # Sending WAV data as audio/raw can cause Deepgram to silently return
+            # empty transcripts because it tries to decode the WAV header as raw PCM.
+            if audio_data[:4] == b"RIFF":
+                headers["Content-Type"] = "audio/wav"
+            else:
+                headers["Content-Type"] = "audio/raw"
             
         if self.model.api_key:
             # Allow templated header, otherwise fallback to Bearer/Token conventions by config

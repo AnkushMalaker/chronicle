@@ -9,6 +9,7 @@ import inspect
 import logging
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
 
@@ -16,11 +17,28 @@ import yaml
 
 from advanced_omi_backend.config_loader import get_plugins_yml_path
 from advanced_omi_backend.plugins import BasePlugin, PluginRouter
+from advanced_omi_backend.plugins.services import PluginServices
 
 logger = logging.getLogger(__name__)
 
 # Global plugin router instance
 _plugin_router: Optional[PluginRouter] = None
+
+
+def _get_plugins_dir() -> Path:
+    """Get external plugins directory.
+
+    Priority: PLUGINS_DIR env var > Docker path > local dev path.
+    """
+    env_dir = os.getenv("PLUGINS_DIR")
+    if env_dir:
+        return Path(env_dir)
+    docker_path = Path("/app/plugins")
+    if docker_path.is_dir():
+        return docker_path
+    # Local dev: plugin_service.py is at <repo>/backends/advanced/src/advanced_omi_backend/services/
+    repo_root = Path(__file__).resolve().parents[5]
+    return repo_root / "plugins"
 
 
 def expand_env_vars(value: Any) -> Any:
@@ -105,9 +123,7 @@ def load_plugin_config(plugin_id: str, orchestration_config: Dict[str, Any]) -> 
 
     # 1. Load plugin-specific config.yml if it exists
     try:
-        import advanced_omi_backend.plugins
-
-        plugins_dir = Path(advanced_omi_backend.plugins.__file__).parent
+        plugins_dir = _get_plugins_dir()
         plugin_config_path = plugins_dir / plugin_id / "config.yml"
 
         if plugin_config_path.exists():
@@ -284,9 +300,7 @@ def load_schema_yml(plugin_id: str) -> Optional[Dict[str, Any]]:
         Schema dictionary if schema.yml exists, None otherwise
     """
     try:
-        import advanced_omi_backend.plugins
-
-        plugins_dir = Path(advanced_omi_backend.plugins.__file__).parent
+        plugins_dir = _get_plugins_dir()
         schema_path = plugins_dir / plugin_id / "schema.yml"
 
         if schema_path.exists():
@@ -396,9 +410,7 @@ def get_plugin_metadata(
     """
     # Load plugin config.yml
     try:
-        import advanced_omi_backend.plugins
-
-        plugins_dir = Path(advanced_omi_backend.plugins.__file__).parent
+        plugins_dir = _get_plugins_dir()
         plugin_config_path = plugins_dir / plugin_id / "config.yml"
 
         config_dict = {}
@@ -469,23 +481,21 @@ def discover_plugins() -> Dict[str, Type[BasePlugin]]:
     """
     discovered_plugins = {}
 
-    # Get the plugins directory path
-    try:
-        import advanced_omi_backend.plugins
-
-        plugins_dir = Path(advanced_omi_backend.plugins.__file__).parent
-    except Exception as e:
-        logger.error(f"Failed to locate plugins directory: {e}")
+    plugins_dir = _get_plugins_dir()
+    if not plugins_dir.is_dir():
+        logger.warning(f"Plugins directory not found: {plugins_dir}")
         return discovered_plugins
 
-    logger.info(f"🔍 Scanning for plugins in: {plugins_dir}")
+    # Add plugins dir to sys.path so plugin packages can be imported directly
+    plugins_dir_str = str(plugins_dir)
+    if plugins_dir_str not in sys.path:
+        sys.path.insert(0, plugins_dir_str)
 
-    # Skip these known system directories/files
-    skip_items = {"__pycache__", "__init__.py", "base.py", "router.py"}
+    logger.info(f"Scanning for plugins in: {plugins_dir}")
 
-    # Scan for plugin directories
+    # Scan for plugin directories (skip hidden/underscore dirs)
     for item in plugins_dir.iterdir():
-        if not item.is_dir() or item.name in skip_items:
+        if not item.is_dir() or item.name.startswith("_"):
             continue
 
         plugin_id = item.name
@@ -500,12 +510,9 @@ def discover_plugins() -> Dict[str, Type[BasePlugin]]:
             # e.g., email_summarizer -> EmailSummarizerPlugin
             class_name = "".join(word.capitalize() for word in plugin_id.split("_")) + "Plugin"
 
-            # Import the plugin module
-            module_path = f"advanced_omi_backend.plugins.{plugin_id}"
-            logger.debug(f"Attempting to import plugin from: {module_path}")
-
-            # Import the plugin package (which should export the class in __init__.py)
-            plugin_module = importlib.import_module(module_path)
+            # Import the plugin package directly (it's on sys.path now)
+            logger.debug(f"Attempting to import plugin: {plugin_id}")
+            plugin_module = importlib.import_module(plugin_id)
 
             # Try to get the plugin class
             if not hasattr(plugin_module, class_name):
@@ -530,14 +537,14 @@ def discover_plugins() -> Dict[str, Type[BasePlugin]]:
 
             # Successfully discovered plugin
             discovered_plugins[plugin_id] = plugin_class
-            logger.info(f"✅ Discovered plugin: '{plugin_id}' ({class_name})")
+            logger.info(f"Discovered plugin: '{plugin_id}' ({class_name})")
 
         except ImportError as e:
             logger.warning(f"Failed to import plugin '{plugin_id}': {e}")
         except Exception as e:
             logger.error(f"Error discovering plugin '{plugin_id}': {e}", exc_info=True)
 
-    logger.info(f"🎉 Plugin discovery complete: {len(discovered_plugins)} plugin(s) found")
+    logger.info(f"Plugin discovery complete: {len(discovered_plugins)} plugin(s) found")
     return discovered_plugins
 
 
@@ -577,9 +584,6 @@ def init_plugin_router() -> Optional[PluginRouter]:
             # Discover all plugins via auto-discovery
             discovered_plugins = discover_plugins()
 
-            # Core plugin names (for informational logging only)
-            CORE_PLUGIN_NAMES = {"homeassistant", "test_event"}
-
             # Initialize each plugin listed in config/plugins.yml
             for plugin_id, orchestration_config in plugins_data.items():
                 logger.info(
@@ -602,7 +606,6 @@ def init_plugin_router() -> Optional[PluginRouter]:
 
                     # Get plugin class from discovered plugins
                     plugin_class = discovered_plugins[plugin_id]
-                    plugin_type = "core" if plugin_id in CORE_PLUGIN_NAMES else "community"
 
                     # Instantiate and register the plugin
                     plugin = plugin_class(plugin_config)
@@ -616,7 +619,7 @@ def init_plugin_router() -> Optional[PluginRouter]:
 
                     # Note: async initialization happens in app_factory lifespan
                     _plugin_router.register_plugin(plugin_id, plugin)
-                    logger.info(f"✅ Plugin '{plugin_id}' registered successfully ({plugin_type})")
+                    logger.info(f"Plugin '{plugin_id}' registered successfully")
 
                 except Exception as e:
                     logger.error(f"Failed to register plugin '{plugin_id}': {e}", exc_info=True)
@@ -626,6 +629,11 @@ def init_plugin_router() -> Optional[PluginRouter]:
             )
         else:
             logger.info("No plugins.yml found, plugins disabled")
+
+        # Attach PluginServices for cross-plugin and system interaction
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        services = PluginServices(router=_plugin_router, redis_url=redis_url)
+        _plugin_router.set_services(services)
 
         return _plugin_router
 

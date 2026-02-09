@@ -21,6 +21,7 @@ from advanced_omi_backend.controllers.queue_controller import (
 )
 from advanced_omi_backend.controllers.session_controller import mark_session_complete
 from advanced_omi_backend.models.job import async_job
+from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.services.plugin_service import (
     ensure_plugin_router,
     get_plugin_router,
@@ -305,6 +306,7 @@ async def open_conversation_job(
         logger.info(f"✅ Created streaming conversation {conversation_id} for session {session_id}")
 
     # Attach markers from Redis session (e.g., button events captured during streaming)
+    session_key = f"audio:session:{session_id}"
     markers_json = await redis_client.hget(session_key, "markers")
     if markers_json:
         try:
@@ -373,6 +375,7 @@ async def open_conversation_job(
         0.0  # Initialize with audio time 0 (will be updated with first speech)
     )
     timeout_triggered = False  # Track if closure was due to timeout
+    close_requested_reason = None  # Track if closure was requested via API/plugin/button
     last_inactivity_log_time = (
         time.time()
     )  # Track when we last logged inactivity (wall-clock for logging)
@@ -421,6 +424,17 @@ async def open_conversation_job(
                         f"waiting for audio persistence job to complete..."
                     )
                 break  # Exit immediately when finalize signal received
+
+        # Check for conversation close request (set by API, plugins, button press)
+        if not finalize_received:
+            close_reason = await redis_client.hget(session_key, "conversation_close_requested")
+            if close_reason:
+                await redis_client.hdel(session_key, "conversation_close_requested")
+                close_requested_reason = close_reason.decode() if isinstance(close_reason, bytes) else close_reason
+                logger.info(f"🔒 Conversation close requested: {close_requested_reason}")
+                timeout_triggered = True  # Same path as inactivity: session stays active
+                finalize_received = True
+                break
 
         # Check max runtime timeout
         if time.time() - start_time > max_runtime:
@@ -576,7 +590,7 @@ async def open_conversation_job(
                         )
 
                         plugin_results = await plugin_router.dispatch_event(
-                            event="transcript.streaming",
+                            event=PluginEvent.TRANSCRIPT_STREAMING,
                             user_id=user_id,
                             data=plugin_data,
                             metadata={"client_id": client_id},
@@ -614,12 +628,16 @@ async def open_conversation_job(
 
     # Determine end_reason with proper precedence:
     # 1. completion_reason from Redis (set by WebSocket controller: websocket_disconnect, user_stopped)
-    # 2. inactivity_timeout (no speech for SPEECH_INACTIVITY_THRESHOLD_SECONDS)
-    # 3. max_duration (conversation exceeded max runtime)
-    # 4. user_stopped (fallback for any other exit condition)
+    # 2. close_requested (via API, plugin, or button press)
+    # 3. inactivity_timeout (no speech for SPEECH_INACTIVITY_THRESHOLD_SECONDS)
+    # 4. max_duration (conversation exceeded max runtime)
+    # 5. user_stopped (fallback for any other exit condition)
     if completion_reason_str:
         end_reason = completion_reason_str
         logger.info(f"📊 Using completion_reason from session: {end_reason}")
+    elif close_requested_reason:
+        end_reason = "close_requested"
+        logger.info(f"📊 Conversation closed by request: {close_requested_reason}")
     elif timeout_triggered:
         end_reason = "inactivity_timeout"
     elif time.time() - start_time > max_runtime:
@@ -922,8 +940,8 @@ async def generate_title_summary_job(conversation_id: str, *, redis_client=None)
         logger.info(f"✅ Generated summary: '{conversation.summary}'")
         logger.info(f"✅ Generated detailed summary: {len(conversation.detailed_summary)} chars")
 
-        # Update processing status for placeholder conversations
-        if getattr(conversation, "processing_status", None) == "pending_transcription":
+        # Update processing status for placeholder/reprocessing conversations
+        if getattr(conversation, "processing_status", None) in ["pending_transcription", "reprocessing"]:
             conversation.processing_status = "completed"
             logger.info(
                 f"✅ Updated placeholder conversation {conversation_id} "
@@ -933,8 +951,8 @@ async def generate_title_summary_job(conversation_id: str, *, redis_client=None)
     except Exception as gen_error:
         logger.error(f"❌ Title/summary generation failed: {gen_error}")
 
-        # Mark placeholder conversation as failed
-        if getattr(conversation, "processing_status", None) == "pending_transcription":
+        # Mark placeholder/reprocessing conversation as failed
+        if getattr(conversation, "processing_status", None) in ["pending_transcription", "reprocessing"]:
             conversation.title = "Audio Recording (Transcription Failed)"
             conversation.summary = f"Title/summary generation failed: {str(gen_error)}"
             conversation.processing_status = "transcription_failed"
@@ -1092,7 +1110,7 @@ async def dispatch_conversation_complete_event_job(
         )
 
         plugin_results = await plugin_router.dispatch_event(
-            event="conversation.complete",
+            event=PluginEvent.CONVERSATION_COMPLETE,
             user_id=user_id,
             data=plugin_data,
             metadata={"end_reason": actual_end_reason},
