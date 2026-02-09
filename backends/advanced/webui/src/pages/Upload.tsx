@@ -3,6 +3,9 @@ import { Upload as UploadIcon, File, X, CheckCircle, AlertCircle, RefreshCw, Fol
 import { uploadApi, obsidianApi } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
 
+const SUPPORTED_EXTENSIONS = ['.wav', '.mp3', '.m4a', '.flac', '.ogg', '.mp4', '.webm']
+const VIDEO_EXTENSIONS = ['.mp4', '.webm']
+
 interface UploadFile {
   file: File
   id: string
@@ -16,6 +19,7 @@ export default function Upload() {
   const [dragActive, setDragActive] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [gdriveFolderId, setGdriveFolderId] = useState('')
+  const [videoWarning, setVideoWarning] = useState(false)
 
   const { isAdmin } = useAuth()
 
@@ -70,16 +74,22 @@ export default function Upload() {
   const handleFileSelect = (selectedFiles: FileList | null) => {
     if (!selectedFiles) return
 
-    const audioFiles = Array.from(selectedFiles).filter(
-      (file) =>
+    const acceptedFiles = Array.from(selectedFiles).filter((file) => {
+      const ext = '.' + file.name.split('.').pop()?.toLowerCase()
+      return (
         file.type.startsWith('audio/') ||
-        file.name.toLowerCase().endsWith('.wav') ||
-        file.name.toLowerCase().endsWith('.mp3') ||
-        file.name.toLowerCase().endsWith('.m4a') ||
-        file.name.toLowerCase().endsWith('.flac')
-    )
+        file.type.startsWith('video/') ||
+        SUPPORTED_EXTENSIONS.includes(ext)
+      )
+    })
 
-    const newFiles: UploadFile[] = audioFiles.map((file) => ({
+    const hasVideo = acceptedFiles.some((file) => {
+      const ext = '.' + file.name.split('.').pop()?.toLowerCase()
+      return file.type.startsWith('video/') || VIDEO_EXTENSIONS.includes(ext)
+    })
+    if (hasVideo) setVideoWarning(true)
+
+    const newFiles: UploadFile[] = acceptedFiles.map((file) => ({
       file,
       id: generateId(),
       status: 'pending',
@@ -211,7 +221,9 @@ export default function Upload() {
   }, [obsidianPolling, obsidianJobId])
 
   const clearCompleted = () => {
-    setFiles(files.filter((f) => f.status === 'pending' || f.status === 'uploading'))
+    const remaining = files.filter((f) => f.status === 'pending' || f.status === 'uploading')
+    setFiles(remaining)
+    if (remaining.length === 0) setVideoWarning(false)
   }
 
   const formatFileSize = (bytes: number) => {
@@ -313,13 +325,13 @@ export default function Upload() {
           Drop audio files here or click to browse
         </h3>
         <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-          Supported formats: WAV, MP3, M4A, FLAC
+          Supported formats: WAV, MP3, M4A, FLAC, OGG, MP4, WebM
         </p>
 
         <input
           type="file"
           multiple
-          accept="audio/*,.wav,.mp3,.m4a,.flac"
+          accept="audio/*,video/mp4,video/webm,.wav,.mp3,.m4a,.flac,.ogg,.mp4,.webm"
           onChange={(e) => handleFileSelect(e.target.files)}
           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
         />
@@ -331,6 +343,16 @@ export default function Upload() {
           Select Files
         </button>
       </div>
+
+      {/* Video Warning */}
+      {videoWarning && (
+        <div className="mt-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded-lg flex items-start gap-2">
+          <AlertCircle className="h-5 w-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
+          <p className="text-sm text-amber-800 dark:text-amber-300">
+            Video files detected — only the audio track will be extracted.
+          </p>
+        </div>
+      )}
 
       {/* File List */}
       {files.length > 0 && (
@@ -442,7 +464,7 @@ export default function Upload() {
           <li>• Processing time varies based on audio length (roughly 3× duration + 60s)</li>
           <li>• Large files or multiple files may cause timeout errors</li>
           <li>• Check the Conversations tab for processed results</li>
-          <li>• Supported formats: WAV, MP3, M4A, FLAC</li>
+          <li>• Supported formats: WAV, MP3, M4A, FLAC, OGG, MP4, WebM</li>
         </ul>
       </div>
 

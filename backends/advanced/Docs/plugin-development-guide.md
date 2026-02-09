@@ -24,11 +24,6 @@ Chronicle's plugin system allows you to extend functionality by subscribing to e
 - **Configurable**: YAML-based configuration with environment variable support
 - **Isolated**: Each plugin runs independently with proper error handling
 
-### Plugin Types
-
-- **Core Plugins**: Built-in plugins (`homeassistant`, `test_event`)
-- **Community Plugins**: Auto-discovered plugins in `plugins/` directory
-
 ## Quick Start
 
 ### 1. Generate Plugin Boilerplate
@@ -207,6 +202,84 @@ async def on_memory_processed(self, context: PluginContext):
         await self.index_memory(memory)
 ```
 
+### 4. Button Events (`button.single_press`, `button.double_press`)
+
+**When**: OMI device button is pressed
+**Context Data**:
+- `state` (str): Button state (`SINGLE_TAP`, `DOUBLE_TAP`)
+- `timestamp` (float): Unix timestamp of the event
+- `audio_uuid` (str): Current audio session UUID (may be None)
+- `session_id` (str): Streaming session ID (for conversation close)
+- `client_id` (str): Client device identifier
+
+**Data Flow**:
+```
+OMI Device (BLE)
+  → Button press on physical device
+  → BLE characteristic notifies with 8-byte payload
+  ↓
+friend-lite-sdk (extras/friend-lite-sdk/)
+  → parse_button_event() converts payload → ButtonState IntEnum
+  ↓
+BLE Client (extras/local-omi-bt/ or mobile app)
+  → Formats as Wyoming protocol: {"type": "button-event", "data": {"state": "SINGLE_TAP"}}
+  → Sends over WebSocket
+  ↓
+Backend (websocket_controller.py)
+  → _handle_button_event() stores marker on client_state
+  → Maps ButtonState → PluginEvent using enums (plugins/events.py)
+  → Dispatches granular event to plugin system
+  ↓
+Plugin System
+  → Routed to subscribed plugins (e.g., test_button_actions)
+  → Plugins use PluginServices for system actions and cross-plugin calls
+```
+
+**Use Cases**:
+- Close current conversation (single press)
+- Toggle smart home devices (double press)
+- Custom actions via cross-plugin communication
+
+**Example**:
+```python
+async def on_button_event(self, context: PluginContext):
+    if context.event == PluginEvent.BUTTON_SINGLE_PRESS:
+        session_id = context.data.get('session_id')
+        await context.services.close_conversation(session_id)
+```
+
+### 5. Plugin Action Events (`plugin_action`)
+
+**When**: Another plugin calls `context.services.call_plugin()`
+**Context Data**:
+- `action` (str): Action name (e.g., `toggle_lights`)
+- Plus any additional data from the calling plugin
+
+**Use Cases**:
+- Cross-plugin communication (button press → toggle lights)
+- Service orchestration between plugins
+
+**Example**:
+```python
+async def on_plugin_action(self, context: PluginContext):
+    action = context.data.get('action')
+    if action == 'toggle_lights':
+        # Handle the action
+        ...
+```
+
+### PluginServices
+
+Plugins receive a `services` object on the context for system and cross-plugin interaction:
+
+```python
+# Close the current conversation (triggers post-processing)
+await context.services.close_conversation(session_id, reason)
+
+# Call another plugin's on_plugin_action() handler
+result = await context.services.call_plugin("homeassistant", "toggle_lights", data)
+```
+
 ## Creating Your First Plugin
 
 ### Step 1: Generate Boilerplate
@@ -225,7 +298,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
-from ..base import BasePlugin, PluginContext, PluginResult
+from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
 
 logger = logging.getLogger(__name__)
 
@@ -671,7 +744,7 @@ async def on_conversation_complete(self, context):
 **Solution**:
 - Restart backend after adding dependencies
 - Verify imports are from correct modules
-- Check relative imports use `..base` for base classes
+- Use absolute imports for framework classes: `from advanced_omi_backend.plugins.base import BasePlugin`
 
 ### Database Connection Issues
 
@@ -749,12 +822,13 @@ class ExternalServicePlugin(BasePlugin):
 
 ## Resources
 
-- **Base Plugin Class**: `backends/advanced/src/advanced_omi_backend/plugins/base.py`
-- **Example Plugins**:
+- **Plugin Framework**: `backends/advanced/src/advanced_omi_backend/plugins/` (base.py, router.py, events.py, services.py)
+- **Plugin Implementations**: `plugins/` at repo root
   - Email Summarizer: `plugins/email_summarizer/`
   - Home Assistant: `plugins/homeassistant/`
   - Test Event: `plugins/test_event/`
-- **Plugin Generator**: `scripts/create_plugin.py`
+  - Test Button Actions: `plugins/test_button_actions/`
+- **Plugin Generator**: `backends/advanced/scripts/create_plugin.py`
 - **Configuration**: `config/plugins.yml.template`
 
 ## Contributing Plugins

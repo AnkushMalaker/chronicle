@@ -37,10 +37,10 @@ def create_plugin(plugin_name: str, force: bool = False):
     # Convert to class name
     class_name = snake_to_pascal(plugin_name) + 'Plugin'
 
-    # Get plugins directory
+    # Get plugins directory (repo root plugins/)
     script_dir = Path(__file__).parent
     backend_dir = script_dir.parent
-    plugins_dir = backend_dir / 'src' / 'advanced_omi_backend' / 'plugins'
+    plugins_dir = backend_dir.parent.parent / 'plugins'
     plugin_dir = plugins_dir / plugin_name
 
     # Check if plugin already exists
@@ -83,7 +83,7 @@ This plugin [describe what it does].
 import logging
 from typing import Any, Dict, List, Optional
 
-from ..base import BasePlugin, PluginContext, PluginResult
+from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
 
 logger = logging.getLogger(__name__)
 

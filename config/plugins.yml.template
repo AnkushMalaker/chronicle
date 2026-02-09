@@ -76,3 +76,21 @@ plugins:
     summary_max_sentences: 3  # LLM summary length
     include_conversation_id: true
     include_duration: true
+
+  # ========================================
+  # Test Button Actions Plugin
+  # ========================================
+  # Maps OMI device button presses to system actions.
+  # Single press: close current conversation (triggers post-processing)
+  # Double press: cross-plugin call (e.g., toggle lights via Home Assistant)
+  #
+  # Actions are configured in: plugins/test_button_actions/config.yml
+  # See: backends/advanced/Docs/plugin-development-guide.md for button event data flow
+
+  test_button_actions:
+    enabled: false  # Set to true to enable button actions
+    events:
+      - button.single_press   # OMI device single tap
+      - button.double_press   # OMI device double tap
+    condition:
+      type: always  # Always execute on button events

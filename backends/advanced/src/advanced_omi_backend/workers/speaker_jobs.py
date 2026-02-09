@@ -452,6 +452,20 @@ async def recognise_speakers_job(
         speaker_segments = speaker_result["segments"]
         logger.info(f"🎤 Speaker recognition returned {len(speaker_segments)} segments")
 
+        # Build mapping for unknown speakers: diarization_label -> "Unknown Speaker N"
+        unknown_label_map = {}
+        unknown_counter = 1
+        for seg in speaker_segments:
+            identified_as = seg.get("identified_as")
+            if not identified_as:
+                label = seg.get("speaker", "Unknown")
+                if label not in unknown_label_map:
+                    unknown_label_map[label] = f"Unknown Speaker {unknown_counter}"
+                    unknown_counter += 1
+
+        if unknown_label_map:
+            logger.info(f"🎤 Unknown speaker mapping: {unknown_label_map}")
+
         # Update the transcript version segments with identified speakers
         # Filter out empty segments (diarization sometimes creates segments with no text)
         updated_segments = []
@@ -472,7 +486,7 @@ async def recognise_speakers_job(
                 logger.debug(f"Filtered segment with invalid timing: {seg}")
                 continue
 
-            speaker_name = seg.get("identified_as") or seg.get("speaker", "Unknown")
+            speaker_name = seg.get("identified_as") or unknown_label_map.get(seg.get("speaker", "Unknown"), "Unknown Speaker")
 
             # Extract words from speaker service response (already matched to this segment)
             words_data = seg.get("words", [])

@@ -22,6 +22,7 @@ from advanced_omi_backend.controllers.queue_controller import (
     memory_queue,
 )
 from advanced_omi_backend.models.job import JobPriority, async_job
+from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.services.plugin_service import ensure_plugin_router
 
 logger = logging.getLogger(__name__)
@@ -379,7 +380,7 @@ async def process_memory_job(conversation_id: str, *, redis_client=None) -> Dict
                     )
 
                     plugin_results = await plugin_router.dispatch_event(
-                        event="memory.processed",
+                        event=PluginEvent.MEMORY_PROCESSED,
                         user_id=user_id,
                         data=plugin_data,
                         metadata={

@@ -39,6 +39,7 @@ class Conversation(Document):
         INACTIVITY_TIMEOUT = "inactivity_timeout"  # No speech detected for threshold period
         WEBSOCKET_DISCONNECT = "websocket_disconnect"  # Connection lost (Bluetooth, network, etc.)
         MAX_DURATION = "max_duration"  # Hit maximum conversation duration
+        CLOSE_REQUESTED = "close_requested"  # External close signal (API, plugin, button)
         ERROR = "error"  # Processing error forced conversation end
         UNKNOWN = "unknown"  # Unknown or legacy reason
 
@@ -120,6 +121,12 @@ class Conversation(Document):
     audio_compression_ratio: Optional[float] = Field(
         None,
         description="Compression ratio (compressed_size / original_size), typically ~0.047 for Opus"
+    )
+
+    # Markers (e.g., button events) captured during the session
+    markers: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Markers captured during audio session (button events, bookmarks, etc.)"
     )
 
     # Creation metadata
@@ -377,7 +384,7 @@ class Conversation(Document):
             "conversation_id",
             "user_id",
             "created_at",
-            [("user_id", 1), ("created_at", -1)],  # Compound index for user queries
+            [("user_id", 1), ("deleted", 1), ("created_at", -1)],  # Compound index for paginated list queries
             IndexModel([("external_source_id", 1)], sparse=True)  # Sparse index for deduplication
         ]
 

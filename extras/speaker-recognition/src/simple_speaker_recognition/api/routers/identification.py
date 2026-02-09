@@ -311,7 +311,7 @@ async def diarize_identify_match(
     conversation_id: Optional[str] = Form(default=None, description="Conversation ID to fetch audio from backend"),
     backend_token: Optional[str] = Form(default=None, description="JWT token for backend API authentication"),
     min_duration: float = Form(default=0.5, description="Minimum segment duration in seconds"),
-    similarity_threshold: float = Form(default=0.15, description="Speaker similarity threshold"),
+    similarity_threshold: float = Form(default=0.45, description="Speaker similarity threshold"),
     min_speakers: Optional[int] = Form(default=None, description="Minimum number of speakers to detect"),
     max_speakers: Optional[int] = Form(default=None, description="Maximum number of speakers to detect"),
     collar: float = Form(default=2.0, description="Collar duration (seconds) around speaker boundaries to merge segments"),

@@ -321,6 +321,30 @@ async def get_jobs_by_client(
         raise HTTPException(status_code=500, detail=f"Failed to get jobs for client: {str(e)}")
 
 
+@router.get("/events")
+async def get_events(
+    limit: int = Query(50, ge=1, le=200, description="Number of recent events"),
+    event_type: str = Query(None, description="Filter by event type"),
+    current_user: User = Depends(current_active_user),
+):
+    """Get recent system events from the event log (admin only)."""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    try:
+        from advanced_omi_backend.services.plugin_service import get_plugin_router
+
+        router_instance = get_plugin_router()
+        if not router_instance:
+            return {"events": [], "total": 0}
+
+        events = router_instance.get_recent_events(limit=limit, event_type=event_type or None)
+        return {"events": events, "total": len(events)}
+    except Exception as e:
+        logger.error(f"Failed to get events: {e}")
+        return {"events": [], "total": 0}
+
+
 @router.get("/stats")
 async def get_queue_stats_endpoint(
     current_user: User = Depends(current_active_user)
@@ -1034,6 +1058,21 @@ async def get_dashboard_data(
                 logger.error(f"Error fetching jobs for client {client_id}: {e}")
                 return {"client_id": client_id, "jobs": []}
 
+        async def fetch_events():
+            """Fetch recent system events from the event log (admin only)."""
+            if not current_user.is_superuser:
+                return []
+            try:
+                from advanced_omi_backend.services.plugin_service import get_plugin_router
+
+                router_instance = get_plugin_router()
+                if not router_instance:
+                    return []
+                return router_instance.get_recent_events(limit=50)
+            except Exception as e:
+                logger.error(f"Error fetching events: {e}")
+                return []
+
         # Execute all fetches in parallel (using RQ standard status names)
         queued_jobs_task = fetch_jobs_by_status("queued", limit=100)
         started_jobs_task = fetch_jobs_by_status("started", limit=100)  # RQ standard, not "processing"
@@ -1041,6 +1080,7 @@ async def get_dashboard_data(
         failed_jobs_task = fetch_jobs_by_status("failed", limit=50)
         stats_task = fetch_stats()
         streaming_status_task = fetch_streaming_status()
+        events_task = fetch_events()
         client_jobs_tasks = [fetch_client_jobs(cid) for cid in expanded_client_ids]
 
         results = await asyncio.gather(
@@ -1050,6 +1090,7 @@ async def get_dashboard_data(
             failed_jobs_task,
             stats_task,
             streaming_status_task,
+            events_task,
             *client_jobs_tasks,
             return_exceptions=True
         )
@@ -1060,8 +1101,9 @@ async def get_dashboard_data(
         failed_jobs = results[3] if not isinstance(results[3], Exception) else []
         stats = results[4] if not isinstance(results[4], Exception) else {"total_jobs": 0}
         streaming_status = results[5] if not isinstance(results[5], Exception) else {"active_sessions": []}
+        events = results[6] if not isinstance(results[6], Exception) else []
         recent_conversations = []
-        client_jobs_results = results[6:] if len(results) > 6 else []
+        client_jobs_results = results[7:] if len(results) > 7 else []
 
         # Convert client jobs list to dict
         client_jobs = {}
@@ -1092,6 +1134,7 @@ async def get_dashboard_data(
             "streaming_status": streaming_status,
             "recent_conversations": conversations_list,
             "client_jobs": client_jobs,
+            "events": events,
             "timestamp": asyncio.get_event_loop().time()
         }
 

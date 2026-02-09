@@ -11,7 +11,7 @@ from advanced_omi_backend.database import get_database
 from advanced_omi_backend.llm_client import async_generate
 from advanced_omi_backend.utils.logging_utils import mask_dict
 
-from ..base import BasePlugin, PluginContext, PluginResult
+from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
 from .email_service import SMTPEmailService
 from .templates import format_html_email, format_text_email
 

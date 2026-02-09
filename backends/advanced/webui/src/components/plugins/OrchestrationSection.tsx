@@ -15,10 +15,14 @@ interface OrchestrationSectionProps {
   disabled?: boolean
 }
 
-const AVAILABLE_EVENTS = [
+// Keep in sync with backend PluginEvent enum (plugins/events.py)
+const AVAILABLE_EVENTS: { value: string; label: string; note?: string }[] = [
   { value: 'conversation.complete', label: 'Conversation Complete' },
   { value: 'transcript.streaming', label: 'Transcript Streaming' },
-  { value: 'memory.created', label: 'Memory Created' },
+  { value: 'memory.processed', label: 'Memory Processed' },
+  { value: 'transcript.batch', label: 'Transcript Batch', note: 'file upload' },
+  { value: 'button.single_press', label: 'Button Single Press', note: 'from OMI' },
+  { value: 'button.double_press', label: 'Button Double Press', note: 'from OMI' },
 ]
 
 export default function OrchestrationSection({
@@ -132,6 +136,11 @@ export default function OrchestrationSection({
               />
               <span className="text-sm text-gray-900 dark:text-gray-100">
                 {event.label}
+                {event.note && (
+                  <span className="ml-1.5 text-xs text-gray-400 dark:text-gray-500 italic">
+                    ({event.note})
+                  </span>
+                )}
               </span>
             </label>
           ))}

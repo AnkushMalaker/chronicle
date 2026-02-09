@@ -13,6 +13,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
+    { name = "croniter" },
     { name = "easy-audio-interfaces" },
     { name = "en-core-web-sm" },
     { name = "fastapi" },
@@ -72,6 +73,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.8.0" },
+    { name = "croniter", specifier = ">=1.3.0" },
     { name = "deepgram-sdk", marker = "extra == 'deepgram'", specifier = ">=4.0.0" },
     { name = "easy-audio-interfaces", specifier = ">=0.7.1" },
     { name = "easy-audio-interfaces", extras = ["local-audio"], marker = "extra == 'local-audio'", specifier = ">=0.7.1" },
