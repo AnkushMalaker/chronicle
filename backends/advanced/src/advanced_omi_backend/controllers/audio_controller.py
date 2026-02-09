@@ -90,7 +90,7 @@ async def upload_and_process_audio_files(
                 is_video_source = ext in VIDEO_EXTENSIONS
 
                 audio_logger.info(
-                    f"📁 Uploading file {file_index + 1}/{len(files)}: {file.filename}"
+                    f"📁 Uploading file {file_index + 1}/{len(files)}: {filename}"
                 )
 
                 # Read file content
@@ -115,7 +115,7 @@ async def upload_and_process_audio_files(
                     external_source_id = getattr(file, "file_id", None) or getattr(file, "audio_uuid", None)
                     external_source_type = "gdrive"
                     if not external_source_id:
-                        audio_logger.warning(f"Missing file_id for gdrive file: {file.filename}")
+                        audio_logger.warning(f"Missing file_id for gdrive file: {filename}")
                 timestamp = int(time.time() * 1000)
 
                 # Validate and prepare audio (read format from WAV file)
@@ -128,21 +128,18 @@ async def upload_and_process_audio_files(
                     )
                 except AudioValidationError as e:
                     processed_files.append({
-                        "filename": file.filename,
+                        "filename": filename,
                         "status": "error",
                         "error": str(e),
                     })
                     continue
 
                 audio_logger.info(
-                    f"📊 {file.filename}: {duration:.1f}s ({sample_rate}Hz, {channels}ch, {sample_width} bytes/sample)"
+                    f"📊 {filename}: {duration:.1f}s ({sample_rate}Hz, {channels}ch, {sample_width} bytes/sample)"
                 )
 
-                # Create conversation immediately for uploaded files (conversation_id auto-generated)
-                version_id = str(uuid.uuid4())
-
                 # Generate title from filename
-                title = file.filename.rsplit('.', 1)[0][:50] if file.filename else "Uploaded Audio"
+                title = filename.rsplit('.', 1)[0][:50] if filename != "unknown" else "Uploaded Audio"
 
                 conversation = create_conversation(
                     user_id=user.user_id,
@@ -174,7 +171,7 @@ async def upload_and_process_audio_files(
                     # Handle validation errors (e.g., file too long)
                     audio_logger.error(f"Audio validation failed: {val_error}")
                     processed_files.append({
-                        "filename": file.filename,
+                        "filename": filename,
                         "status": "error",
                         "error": str(val_error),
                     })
@@ -187,7 +184,7 @@ async def upload_and_process_audio_files(
                         exc_info=True
                     )
                     processed_files.append({
-                        "filename": file.filename,
+                        "filename": filename,
                         "status": "error",
                         "error": f"Audio conversion failed: {str(chunk_error)}",
                     })
@@ -230,7 +227,7 @@ async def upload_and_process_audio_files(
                 )
 
                 file_result = {
-                    "filename": file.filename,
+                    "filename": filename,
                     "status": "started",  # RQ standard: job has been enqueued
                     "conversation_id": conversation_id,
                     "transcript_job_id": transcription_job.id if transcription_job else None,
@@ -252,23 +249,23 @@ async def upload_and_process_audio_files(
                     job_chain.append(job_ids['memory'])
 
                 audio_logger.info(
-                    f"✅ Processed {file.filename} → conversation {conversation_id}, "
+                    f"✅ Processed {filename} → conversation {conversation_id}, "
                     f"jobs: {' → '.join(job_chain) if job_chain else 'none'}"
                 )
 
             except (OSError, IOError) as e:
                 # File I/O errors during audio processing
-                audio_logger.exception(f"File I/O error processing {file.filename}")
+                audio_logger.exception(f"File I/O error processing {filename}")
                 processed_files.append({
-                    "filename": file.filename or "unknown",
+                    "filename": filename,
                     "status": "error",
                     "error": str(e),
                 })
             except Exception as e:
                 # Unexpected errors during file processing
-                audio_logger.exception(f"Unexpected error processing file {file.filename}")
+                audio_logger.exception(f"Unexpected error processing file {filename}")
                 processed_files.append({
-                    "filename": file.filename or "unknown",
+                    "filename": filename,
                     "status": "error",
                     "error": str(e),
                 })

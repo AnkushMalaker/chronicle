@@ -274,11 +274,10 @@ export default function Conversations() {
   }
 
   useEffect(() => {
-    loadConversations()
     loadEnrolledSpeakers()
   }, [])
 
-  // Reload conversations when debug mode toggles (to include/exclude orphans)
+  // Load conversations on mount and when debug mode toggles (to include/exclude orphans)
   useEffect(() => {
     loadConversations()
   }, [debugMode])

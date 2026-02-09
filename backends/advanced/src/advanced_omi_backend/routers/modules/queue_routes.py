@@ -1059,7 +1059,9 @@ async def get_dashboard_data(
                 return {"client_id": client_id, "jobs": []}
 
         async def fetch_events():
-            """Fetch recent system events from the event log."""
+            """Fetch recent system events from the event log (admin only)."""
+            if not current_user.is_superuser:
+                return []
             try:
                 from advanced_omi_backend.services.plugin_service import get_plugin_router
 

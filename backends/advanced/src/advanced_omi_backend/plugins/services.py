@@ -82,7 +82,7 @@ class PluginServices:
         context = PluginContext(
             user_id=user_id,
             event=PluginEvent.PLUGIN_ACTION,
-            data={"action": action, **data},
+            data={**data, "action": action},
             services=self,
         )
 

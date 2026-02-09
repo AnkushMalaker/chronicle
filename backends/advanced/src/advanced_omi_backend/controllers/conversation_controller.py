@@ -92,7 +92,7 @@ async def close_current_conversation(client_id: str, user: User):
             status_code=404,
         )
 
-    logger.info(f"Conversation close requested for client {client_id} by user {user.id}")
+    logger.info(f"Conversation close requested for client {client_id} by user {user.user_id}")
 
     return JSONResponse(
         content={
