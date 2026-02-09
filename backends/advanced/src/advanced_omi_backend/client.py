@@ -149,6 +149,7 @@ class ClientState:
         self.conversation_start_time = time.time()
         self.last_transcript_time = None
         self.conversation_closed = False
+        self.markers = []
 
         audio_logger.info(f"Client {self.client_id}: Started new conversation")
 

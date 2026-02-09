@@ -432,7 +432,7 @@ async def open_conversation_job(
                 await redis_client.hdel(session_key, "conversation_close_requested")
                 close_requested_reason = close_reason.decode() if isinstance(close_reason, bytes) else close_reason
                 logger.info(f"🔒 Conversation close requested: {close_requested_reason}")
-                timeout_triggered = True  # Same path as inactivity: session stays active
+                timeout_triggered = True  # Session stays active (same restart behavior as inactivity timeout)
                 finalize_received = True
                 break
 
@@ -673,30 +673,6 @@ async def open_conversation_job(
                 logger.warning(
                     f"⚠️ Streaming transcription ended with error for {session_id}, proceeding anyway"
                 )
-            else:
-                logger.info(f"✅ Streaming transcription confirmed complete for {session_id}")
-            break
-        await asyncio.sleep(0.5)
-        waited_streaming += 0.5
-
-    if waited_streaming >= max_wait_streaming:
-        logger.warning(
-            f"⚠️ Timed out waiting for streaming completion signal for {session_id} "
-            f"(waited {max_wait_streaming}s), proceeding with available transcript"
-        )
-
-    # Wait for streaming transcription consumer to complete before reading transcript
-    # This fixes the race condition where conversation job reads transcript before
-    # streaming consumer stores all final results (seen as 24+ second delay in logs)
-    completion_key = f"transcription:complete:{session_id}"
-    max_wait_streaming = 30  # seconds
-    waited_streaming = 0.0
-    while waited_streaming < max_wait_streaming:
-        completion_status = await redis_client.get(completion_key)
-        if completion_status:
-            status_str = completion_status.decode() if isinstance(completion_status, bytes) else completion_status
-            if status_str == "error":
-                logger.warning(f"⚠️ Streaming transcription ended with error for {session_id}, proceeding anyway")
             else:
                 logger.info(f"✅ Streaming transcription confirmed complete for {session_id}")
             break
