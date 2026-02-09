@@ -27,6 +27,9 @@ audio_logger = logging.getLogger("audio_processing")
 MIN_SPEECH_SEGMENT_DURATION = float(os.getenv("MIN_SPEECH_SEGMENT_DURATION", "1.0"))  # seconds
 CROPPING_CONTEXT_PADDING = float(os.getenv("CROPPING_CONTEXT_PADDING", "0.1"))  # seconds
 
+SUPPORTED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".mp4", ".m4a", ".flac", ".ogg", ".webm"}
+VIDEO_EXTENSIONS = {".mp4", ".webm"}
+
 
 class AudioValidationError(Exception):
     """Exception raised when audio validation fails."""
@@ -102,6 +105,59 @@ async def resample_audio_with_ffmpeg(
         f"Resampled audio: {input_sample_rate}Hz/{input_channels}ch → "
         f"{target_sample_rate}Hz/{target_channels}ch "
         f"({len(audio_data)} → {len(stdout)} bytes)"
+    )
+
+    return stdout
+
+
+async def convert_any_to_wav(file_data: bytes, file_extension: str) -> bytes:
+    """
+    Convert any supported audio/video file to 16kHz mono WAV using FFmpeg.
+
+    For .wav input, returns the data as-is.
+    For everything else, runs FFmpeg to extract audio and convert to WAV.
+
+    Args:
+        file_data: Raw file bytes
+        file_extension: File extension including dot (e.g. ".mp3", ".mp4")
+
+    Returns:
+        WAV file bytes (16kHz, mono, 16-bit PCM)
+
+    Raises:
+        AudioValidationError: If FFmpeg conversion fails
+    """
+    ext = file_extension.lower()
+    if ext == ".wav":
+        return file_data
+
+    cmd = [
+        "ffmpeg",
+        "-i", "pipe:0",
+        "-vn",  # Strip video track (no-op for audio-only files)
+        "-acodec", "pcm_s16le",
+        "-ar", "16000",
+        "-ac", "1",
+        "-f", "wav",
+        "pipe:1",
+    ]
+
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    stdout, stderr = await process.communicate(input=file_data)
+
+    if process.returncode != 0:
+        error_msg = stderr.decode() if stderr else "Unknown error"
+        audio_logger.error(f"FFmpeg conversion failed for {ext}: {error_msg}")
+        raise AudioValidationError(f"Failed to convert {ext} file to WAV: {error_msg}")
+
+    audio_logger.info(
+        f"Converted {ext} to WAV: {len(file_data)} → {len(stdout)} bytes"
     )
 
     return stdout
@@ -207,6 +263,9 @@ async def write_audio_file(
     timestamp: int,
     chunk_dir: Optional[Path] = None,
     validate: bool = True,
+    pcm_sample_rate: int = 16000,
+    pcm_channels: int = 1,
+    pcm_sample_width: int = 2,
 ) -> tuple[str, str, float]:
     """
     Validate, write audio data to WAV file, and create AudioSession database entry.
@@ -223,6 +282,9 @@ async def write_audio_file(
         timestamp: Timestamp in milliseconds
         chunk_dir: Optional directory path (defaults to CHUNK_DIR from config)
         validate: Whether to validate and prepare audio (default: True for uploads, False for WebSocket)
+        pcm_sample_rate: Sample rate for raw PCM data when validate=False (default: 16000)
+        pcm_channels: Channel count for raw PCM data when validate=False (default: 1)
+        pcm_sample_width: Sample width in bytes for raw PCM data when validate=False (default: 2)
 
     Returns:
         Tuple of (relative_audio_path, absolute_file_path, duration)
@@ -242,11 +304,11 @@ async def write_audio_file(
         audio_data, sample_rate, sample_width, channels, duration = \
             await validate_and_prepare_audio(raw_audio_data)
     else:
-        # For WebSocket path - audio is already processed PCM
+        # For WebSocket/streaming path - audio is already processed PCM
         audio_data = raw_audio_data
-        sample_rate = 16000  # WebSocket always uses 16kHz
-        sample_width = 2
-        channels = 1
+        sample_rate = pcm_sample_rate
+        sample_width = pcm_sample_width
+        channels = pcm_channels
         duration = len(audio_data) / (sample_rate * sample_width * channels)
 
     # Use provided chunk_dir or default from config

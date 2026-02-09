@@ -159,65 +159,20 @@ def analyze_speech(transcript_data: dict) -> dict:
     }
 
 
-async def generate_title(text: str, segments: Optional[list] = None) -> str:
+async def generate_title_and_summary(
+    text: str, segments: Optional[list] = None
+) -> tuple[str, str]:
     """
-    Generate an LLM-powered title from conversation text.
+    Generate title and short summary in a single LLM call using full conversation context.
 
     Args:
         text: Conversation transcript (used if segments not provided)
         segments: Optional list of speaker segments with structure:
             [{"speaker": str, "text": str, "start": float, "end": float}, ...]
-            If provided, uses speaker-aware conversation formatting
+            If provided, uses speaker-formatted text for richer context
 
     Returns:
-        str: Generated title (3-6 words) or fallback
-
-    Note:
-        Title intentionally does NOT include speaker names - focuses on topic/theme only.
-    """
-    # Format conversation text from segments if provided
-    if segments:
-        conversation_text = ""
-        for segment in segments[:10]:  # Use first 10 segments for title generation
-            segment_text = segment.text.strip() if segment.text else ""
-            if segment_text:
-                conversation_text += f"{segment_text}\n"
-        text = conversation_text if conversation_text.strip() else text
-
-    if not text or len(text.strip()) < 10:
-        return "Conversation"
-
-    try:
-        registry = get_prompt_registry()
-        prompt_template = await registry.get_prompt("conversation.title")
-        prompt = f"""{prompt_template}
-
-"{text[:500]}"
-"""
-
-        title = await async_generate(prompt, temperature=0.3)
-        return title.strip().strip('"').strip("'") or "Conversation"
-
-    except Exception as e:
-        logger.warning(f"Failed to generate LLM title: {e}")
-        # Fallback to simple title generation
-        words = text.split()[:6]
-        title = " ".join(words)
-        return title[:40] + "..." if len(title) > 40 else title or "Conversation"
-
-
-async def generate_short_summary(text: str, segments: Optional[list] = None) -> str:
-    """
-    Generate a brief LLM-powered summary from conversation text.
-
-    Args:
-        text: Conversation transcript (used if segments not provided)
-        segments: Optional list of speaker segments with structure:
-            [{"speaker": str, "text": str, "start": float, "end": float}, ...]
-            If provided, includes speaker context in summary
-
-    Returns:
-        str: Generated short summary (1-2 sentences, max 120 chars) or fallback
+        Tuple of (title, short_summary)
     """
     # Format conversation text from segments if provided
     conversation_text = text
@@ -241,37 +196,52 @@ async def generate_short_summary(text: str, segments: Optional[list] = None) -> 
             include_speakers = len(speakers_in_conv) > 0
 
     if not conversation_text or len(conversation_text.strip()) < 10:
-        return "No content"
+        return "Conversation", "No content"
 
     try:
         speaker_instruction = (
-            '- Include speaker names when relevant (e.g., "John discusses X with Sarah")\n'
+            '- Include speaker names when relevant in the summary (e.g., "John discusses X with Sarah")\n'
             if include_speakers
             else ""
         )
 
         registry = get_prompt_registry()
         prompt_text = await registry.get_prompt(
-            "conversation.short_summary",
+            "conversation.title_summary",
             speaker_instruction=speaker_instruction,
         )
 
         prompt = f"""{prompt_text}
 
-"{conversation_text[:1000]}"
+TRANSCRIPT:
+"{conversation_text}"
 """
 
-        summary = await async_generate(prompt, temperature=0.3)
-        return summary.strip().strip('"').strip("'") or "No content"
+        response = await async_generate(prompt, temperature=0.3)
+
+        # Parse response for Title: and Summary: lines
+        title = None
+        summary = None
+        for line in response.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("Title:"):
+                title = line.replace("Title:", "").strip().strip('"').strip("'")
+            elif line.startswith("Summary:"):
+                summary = line.replace("Summary:", "").strip().strip('"').strip("'")
+
+        title = title or "Conversation"
+        summary = summary or "No content"
+
+        return title, summary
 
     except Exception as e:
-        logger.warning(f"Failed to generate LLM short summary: {e}")
-        # Fallback to simple summary generation
-        return (
-            conversation_text[:120] + "..."
-            if len(conversation_text) > 120
-            else conversation_text or "No content"
-        )
+        logger.warning(f"Failed to generate title and summary: {e}")
+        # Fallback
+        words = text.split()[:6]
+        fallback_title = " ".join(words)
+        fallback_title = fallback_title[:40] + "..." if len(fallback_title) > 40 else fallback_title
+        fallback_summary = text[:120] + "..." if len(text) > 120 else text
+        return fallback_title or "Conversation", fallback_summary or "No content"
 
 
 

@@ -13,6 +13,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from advanced_omi_backend.auth import current_active_user
+from advanced_omi_backend.models.annotation import (
+    Annotation,
+    AnnotationStatus,
+    AnnotationType,
+)
 from advanced_omi_backend.services.knowledge_graph import (
     KnowledgeGraphService,
     PromiseStatus,
@@ -28,6 +33,13 @@ router = APIRouter(prefix="/knowledge-graph", tags=["knowledge-graph"])
 # =============================================================================
 # REQUEST MODELS
 # =============================================================================
+
+
+class UpdateEntityRequest(BaseModel):
+    """Request model for updating entity fields."""
+    name: Optional[str] = None
+    details: Optional[str] = None
+    icon: Optional[str] = None
 
 
 class UpdatePromiseRequest(BaseModel):
@@ -141,6 +153,78 @@ async def get_entity_relationships(
         return JSONResponse(
             status_code=500,
             content={"message": f"Error getting relationships: {str(e)}"},
+        )
+
+
+@router.patch("/entities/{entity_id}")
+async def update_entity(
+    entity_id: str,
+    request: UpdateEntityRequest,
+    current_user: User = Depends(current_active_user),
+):
+    """Update an entity's name, details, or icon.
+
+    Also creates entity annotations as a side effect for each changed field.
+    These annotations feed the jargon and entity extraction pipelines.
+    """
+    try:
+        if request.name is None and request.details is None and request.icon is None:
+            raise HTTPException(
+                status_code=400,
+                detail="At least one field (name, details, icon) must be provided",
+            )
+
+        service = get_knowledge_graph_service()
+
+        # Get current entity for annotation original values
+        existing = await service.get_entity(
+            entity_id=entity_id,
+            user_id=str(current_user.id),
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="Entity not found")
+
+        # Apply update to Neo4j
+        updated = await service.update_entity(
+            entity_id=entity_id,
+            user_id=str(current_user.id),
+            name=request.name,
+            details=request.details,
+            icon=request.icon,
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="Entity not found")
+
+        # Create annotations for changed text fields (name, details)
+        # These feed the jargon pipeline and entity extraction pipeline.
+        # Icon changes don't create annotations (not text corrections).
+        for field in ("name", "details"):
+            new_value = getattr(request, field)
+            if new_value is not None:
+                old_value = getattr(existing, field) or ""
+                annotation = Annotation(
+                    annotation_type=AnnotationType.ENTITY,
+                    user_id=str(current_user.id),
+                    entity_id=entity_id,
+                    entity_field=field,
+                    original_text=old_value,
+                    corrected_text=new_value,
+                    status=AnnotationStatus.ACCEPTED,
+                    processed=False,
+                )
+                await annotation.save()
+                logger.info(
+                    f"Created entity annotation for {field} change on entity {entity_id}"
+                )
+
+        return {"entity": updated.to_dict()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating entity {entity_id}: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"message": f"Error updating entity: {str(e)}"},
         )
 
 

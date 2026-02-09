@@ -5,6 +5,10 @@ This module provides an optional integration with the speaker recognition servic
 to enhance transcripts with actual speaker names instead of generic labels.
 
 Configuration is managed via config.yml (speaker_recognition section).
+
+NOTE: user_id is currently hardcoded to "1" throughout this client because only
+a single admin user is supported at this time. Update when multi-user support
+is implemented.
 """
 
 import asyncio
@@ -177,7 +181,7 @@ class SpeakerRecognitionClient:
 
                     form_data.add_field("transcript_data", json.dumps(transcript_data))
                     form_data.add_field("user_id", "1")  # TODO: Implement proper user mapping
-                    form_data.add_field("similarity_threshold", str(config.get("similarity_threshold", 0.15)))
+                    form_data.add_field("similarity_threshold", str(config.get("similarity_threshold", 0.45)))
                     form_data.add_field("min_duration", str(config.get("min_duration", 0.5)))
 
                     # Use /v1/diarize-identify-match endpoint as fallback
@@ -190,7 +194,7 @@ class SpeakerRecognitionClient:
                     # Send existing transcript for diarization and speaker matching
                     form_data.add_field("transcript_data", json.dumps(transcript_data))
                     form_data.add_field("user_id", "1")  # TODO: Implement proper user mapping
-                    form_data.add_field("similarity_threshold", str(config.get("similarity_threshold", 0.15)))
+                    form_data.add_field("similarity_threshold", str(config.get("similarity_threshold", 0.45)))
 
                     # Add pyannote diarization parameters
                     form_data.add_field("min_duration", str(config.get("min_duration", 0.5)))
@@ -274,8 +278,10 @@ class SpeakerRecognitionClient:
                 form_data.add_field(
                     "file", audio_wav_bytes, filename="segment.wav", content_type="audio/wav"
                 )
+                # TODO: Implement proper user mapping between MongoDB ObjectIds and speaker service integer IDs
+                # Speaker service expects integer user_id, not MongoDB ObjectId strings
                 if user_id is not None:
-                    form_data.add_field("user_id", str(user_id))
+                    form_data.add_field("user_id", "1")
                 if similarity_threshold is not None:
                     form_data.add_field("similarity_threshold", str(similarity_threshold))
 
@@ -309,24 +315,32 @@ class SpeakerRecognitionClient:
         conversation_id: str,
         segments: List[Dict],
         user_id: Optional[str] = None,
+        per_segment: bool = False,
+        min_segment_duration: float = 1.5,
     ) -> Dict:
         """
-        Identify speakers in provider-diarized segments using majority-vote per label.
+        Identify speakers in provider-diarized segments.
 
-        For each unique speaker label, picks the top 3 longest segments (min 1.5s),
-        extracts audio, calls /identify, and majority-votes to map labels to names.
+        Default mode: majority-vote per label. Picks top 3 longest segments per label,
+        identifies each, and majority-votes to map labels to names.
+
+        Per-segment mode (per_segment=True): identifies every segment individually.
+        Used during reprocessing so that fine-tuned embeddings benefit each segment.
 
         Args:
             conversation_id: Conversation ID for audio extraction from MongoDB
             segments: List of dicts with keys: start, end, text, speaker
             user_id: Optional user ID for speaker identification
+            per_segment: If True, identify each segment individually instead of majority-vote
+            min_segment_duration: Minimum segment duration in seconds for identification
 
         Returns:
             Dict with 'segments' list matching diarize_identify_match() format
         """
         if hasattr(self, "_mock_client"):
             return await self._mock_client.identify_provider_segments(
-                conversation_id, segments, user_id
+                conversation_id, segments, user_id,
+                per_segment=per_segment, min_segment_duration=min_segment_duration,
             )
 
         if not self.enabled:
@@ -338,9 +352,8 @@ class SpeakerRecognitionClient:
         )
 
         config = get_diarization_settings()
-        similarity_threshold = config.get("similarity_threshold", 0.15)
+        similarity_threshold = config.get("similarity_threshold", 0.45)
 
-        MIN_SEGMENT_DURATION = 1.5
         MAX_SAMPLES_PER_LABEL = 3
 
         # Detect non-speech segments (e.g. [Music], [Environmental Sounds], [Human Sounds])
@@ -379,14 +392,26 @@ class SpeakerRecognitionClient:
             f"{len(label_groups)} unique labels: {list(label_groups.keys())}"
         )
 
-        # For each label, pick top N longest segments >= MIN_SEGMENT_DURATION
+        # Per-segment mode: identify every segment individually (used during reprocess)
+        if per_segment:
+            return await self._identify_per_segment(
+                conversation_id=conversation_id,
+                segments=segments,
+                speech_segments=speech_segments,
+                non_speech_indices=non_speech_indices,
+                user_id=user_id,
+                similarity_threshold=similarity_threshold,
+                min_segment_duration=min_segment_duration,
+            )
+
+        # For each label, pick top N longest segments >= min_segment_duration
         label_samples: Dict[str, List[Dict]] = {}
         for label, segs in label_groups.items():
-            eligible = [s for s in segs if (s["end"] - s["start"]) >= MIN_SEGMENT_DURATION]
+            eligible = [s for s in segs if (s["end"] - s["start"]) >= min_segment_duration]
             eligible.sort(key=lambda s: s["end"] - s["start"], reverse=True)
             label_samples[label] = eligible[:MAX_SAMPLES_PER_LABEL]
             if not label_samples[label]:
-                logger.info(f"🎤 Label '{label}': no segments >= {MIN_SEGMENT_DURATION}s, skipping identification")
+                logger.info(f"🎤 Label '{label}': no segments >= {min_segment_duration}s, skipping identification")
 
         # Extract audio and identify concurrently with semaphore
         semaphore = asyncio.Semaphore(3)
@@ -398,7 +423,7 @@ class SpeakerRecognitionClient:
                         conversation_id, seg["start"], seg["end"]
                     )
                     result = await self.identify_segment(
-                        wav_bytes, user_id="1", similarity_threshold=similarity_threshold
+                        wav_bytes, user_id=user_id, similarity_threshold=similarity_threshold
                     )
                     return result
                 except Exception as e:
@@ -471,7 +496,7 @@ class SpeakerRecognitionClient:
                     "end": seg["end"],
                     "text": seg.get("text", ""),
                     "speaker": label,
-                    "identified_as": mapped[0] if mapped else label,
+                    "identified_as": mapped[0] if mapped else None,
                     "confidence": mapped[1] if mapped else 0.0,
                     "status": "identified" if mapped else "unknown",
                 })
@@ -480,6 +505,150 @@ class SpeakerRecognitionClient:
         logger.info(
             f"🎤 Segment identification complete: {identified_count}/{len(label_groups)} labels identified, "
             f"{len(result_segments)} total segments ({len(non_speech_indices)} non-speech kept as-is)"
+        )
+
+        return {"segments": result_segments}
+
+    async def _identify_per_segment(
+        self,
+        conversation_id: str,
+        segments: List[Dict],
+        speech_segments: List[Dict],
+        non_speech_indices: set,
+        user_id: Optional[str],
+        similarity_threshold: float,
+        min_segment_duration: float,
+    ) -> Dict:
+        """
+        Identify every speech segment individually (no majority vote).
+
+        Used during reprocessing so that fine-tuned speaker embeddings
+        benefit each segment directly.
+
+        Args:
+            conversation_id: Conversation ID for audio extraction
+            segments: All segments (speech + non-speech) in original order
+            speech_segments: Only the speech segments
+            non_speech_indices: Indices of non-speech segments in the original list
+            user_id: User ID for speaker identification
+            similarity_threshold: Similarity threshold for identification
+            min_segment_duration: Minimum duration for identification attempt
+
+        Returns:
+            Dict with 'segments' list matching diarize_identify_match() format
+        """
+        from advanced_omi_backend.utils.audio_chunk_utils import (
+            reconstruct_audio_segment,
+        )
+
+        logger.info(
+            f"🎤 Per-segment identification: {len(speech_segments)} speech segments "
+            f"(min_duration={min_segment_duration}s)"
+        )
+
+        semaphore = asyncio.Semaphore(3)
+
+        async def _identify_one(seg: Dict) -> Optional[Dict]:
+            async with semaphore:
+                try:
+                    wav_bytes = await reconstruct_audio_segment(
+                        conversation_id, seg["start"], seg["end"]
+                    )
+                    return await self.identify_segment(
+                        wav_bytes, user_id=user_id, similarity_threshold=similarity_threshold
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"🎤 Failed to identify segment [{seg['start']:.1f}-{seg['end']:.1f}]: {e}"
+                    )
+                    return None
+
+        # Build tasks for speech segments that meet the duration threshold
+        seg_tasks: List[tuple] = []  # (original_index, task_or_None)
+        all_tasks = []
+        for i, seg in enumerate(segments):
+            if i in non_speech_indices:
+                seg_tasks.append((i, None))
+                continue
+            duration = seg["end"] - seg["start"]
+            if duration >= min_segment_duration:
+                task = asyncio.create_task(_identify_one(seg))
+                seg_tasks.append((i, task))
+                all_tasks.append(task)
+            else:
+                seg_tasks.append((i, None))  # too short
+
+        if all_tasks:
+            await asyncio.gather(*all_tasks, return_exceptions=True)
+
+        # Build result segments
+        result_segments = []
+        identified_count = 0
+        for i, seg in enumerate(segments):
+            label = seg.get("speaker", "Unknown")
+
+            if i in non_speech_indices:
+                result_segments.append({
+                    "start": seg["start"],
+                    "end": seg["end"],
+                    "text": seg.get("text", ""),
+                    "speaker": label,
+                    "identified_as": label,
+                    "confidence": 0.0,
+                    "status": "non_speech",
+                })
+                continue
+
+            # Find the matching task entry
+            task_entry = seg_tasks[i]
+            task = task_entry[1]
+
+            if task is None:
+                # Too short for identification
+                result_segments.append({
+                    "start": seg["start"],
+                    "end": seg["end"],
+                    "text": seg.get("text", ""),
+                    "speaker": label,
+                    "identified_as": None,
+                    "confidence": 0.0,
+                    "status": "too_short",
+                })
+                continue
+
+            try:
+                result = task.result()
+            except Exception:
+                result = None
+
+            if result and result.get("found"):
+                name = result.get("speaker_name", label)
+                confidence = result.get("confidence", 0.0)
+                result_segments.append({
+                    "start": seg["start"],
+                    "end": seg["end"],
+                    "text": seg.get("text", ""),
+                    "speaker": label,
+                    "identified_as": name,
+                    "confidence": confidence,
+                    "status": "identified",
+                })
+                identified_count += 1
+            else:
+                result_segments.append({
+                    "start": seg["start"],
+                    "end": seg["end"],
+                    "text": seg.get("text", ""),
+                    "speaker": label,
+                    "identified_as": None,
+                    "confidence": 0.0,
+                    "status": "unknown",
+                })
+
+        logger.info(
+            f"🎤 Per-segment identification complete: "
+            f"{identified_count}/{len(speech_segments)} segments identified, "
+            f"{len(result_segments)} total segments"
         )
 
         return {"segments": result_segments}
@@ -531,7 +700,7 @@ class SpeakerRecognitionClient:
 
                 # Add all diarization parameters for the diarize-and-identify endpoint
                 min_duration = diarization_settings.get("min_duration", 0.5)
-                similarity_threshold = diarization_settings.get("similarity_threshold", 0.15)
+                similarity_threshold = diarization_settings.get("similarity_threshold", 0.45)
                 collar = diarization_settings.get("collar", 2.0)
                 min_duration_off = diarization_settings.get("min_duration_off", 1.5)
 
@@ -660,7 +829,7 @@ class SpeakerRecognitionClient:
 
                     # Add all diarization parameters for the diarize-and-identify endpoint
                     form_data.add_field("min_duration", str(_diarization_settings.get("min_duration", 0.5)))
-                    form_data.add_field("similarity_threshold", str(_diarization_settings.get("similarity_threshold", 0.15)))
+                    form_data.add_field("similarity_threshold", str(_diarization_settings.get("similarity_threshold", 0.45)))
                     form_data.add_field("collar", str(_diarization_settings.get("collar", 2.0)))
                     form_data.add_field("min_duration_off", str(_diarization_settings.get("min_duration_off", 1.5)))
                     if _diarization_settings.get("min_speakers"):

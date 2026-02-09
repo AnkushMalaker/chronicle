@@ -7,11 +7,10 @@ from typing import Any, AsyncGenerator
 
 import asyncstdlib as asyncstd
 from bleak import BleakClient, BleakScanner
-from bleak.backends.device import BLEDevice
 from dotenv import load_dotenv, set_key
 from easy_audio_interfaces.filesystem import RollingFileSink
-from chronicle.bluetooth import listen_to_omi, print_devices
-from chronicle.decoder import OmiOpusDecoder
+from friend_lite import ButtonState, OmiConnection, parse_button_event
+from friend_lite.decoder import OmiOpusDecoder
 from wyoming.audio import AudioChunk
 
 # Setup logging
@@ -25,15 +24,12 @@ env_path = ".env"
 load_dotenv(env_path)
 
 sys.path.append(os.path.dirname(__file__))
-from send_to_adv import stream_to_backend
+from send_to_adv import send_button_event, stream_to_backend
 
 OMI_MAC = os.getenv("OMI_MAC")
 if not OMI_MAC:
     logger.info("OMI_MAC not found in .env. Will try to find and set.")
     
-# Standard Omi audio characteristic UUID
-OMI_CHAR_UUID = "19B10001-E8F2-537E-4F6C-D104768A1214"
-
 async def source_bytes(audio_queue: Queue[bytes]) -> AsyncGenerator[bytes, None]:
     """Single source iterator from the queue."""
     while True:
@@ -48,16 +44,6 @@ async def as_audio_chunks(it) -> AsyncGenerator[AudioChunk, None]:
     """Convert bytes iterator to AudioChunk iterator."""
     async for data in it:
         yield AudioChunk(audio=data, rate=16000, width=2, channels=1)
-
-# Add this to chronicle sdk
-async def list_devices(prefix: str = "OMI") -> list[BLEDevice]:
-    devices = await BleakScanner.discover()
-    filtered_devices = []
-    for d in devices:
-        if d.name:
-            if prefix.casefold() in d.name.casefold():
-                filtered_devices.append(d)
-    return filtered_devices
 
 
 def main() -> None:
@@ -76,15 +62,78 @@ def main() -> None:
                 audio_queue.put_nowait(decoded_pcm)
             except Exception as e:
                 logger.error("Queue Error: %s", e)
+
+    def handle_button_event(sender: Any, data: bytes) -> None:
+        try:
+            state = parse_button_event(data)
+        except Exception as e:
+            logger.error("Button event parse error: %s", e)
+            return
+        if state != ButtonState.IDLE:
+            logger.info("Button event: %s", state.name)
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(send_button_event(state.name))
+            except RuntimeError:
+                logger.debug("No running event loop, cannot send button event")
                 
 
+    def prompt_user_to_pick_device(all_devices) -> str | None:
+        """Interactively prompt the user to select an OMI/Neo device from scan results.
+
+        Returns the selected MAC address string, or None if no selection was made.
+        Saves the selected MAC to .env via set_key().
+        """
+        omi_devices = [
+            d for d in all_devices
+            if d.name and ("omi" in d.name.casefold() or "neo" in d.name.casefold())
+        ]
+
+        if not omi_devices:
+            logger.info("No OMI/Neo devices found. All discovered BLE devices:")
+            if all_devices:
+                for i, d in enumerate(all_devices):
+                    logger.info("  %d. %s [%s]", i + 1, d.name or "(unnamed)", d.address)
+            else:
+                logger.info("  (no BLE devices found at all)")
+            return None
+
+        if len(omi_devices) == 1:
+            device = omi_devices[0]
+            answer = input(f"Found {device.name} [{device.address}]. Use this device? [Y/n] ").strip().lower()
+            if answer in ("", "y", "yes"):
+                set_key(env_path, "OMI_MAC", device.address)
+                logger.info("OMI_MAC set to %s and saved to .env", device.address)
+                return device.address
+            return None
+
+        # Multiple OMI/Neo devices found
+        logger.info("Multiple OMI/Neo devices found:")
+        for i, d in enumerate(omi_devices):
+            logger.info("  %d. %s [%s]", i + 1, d.name, d.address)
+        choice = input("Enter number to select (or q to quit): ").strip().lower()
+        if choice == "q":
+            return None
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(omi_devices):
+                selected = omi_devices[idx]
+                set_key(env_path, "OMI_MAC", selected.address)
+                logger.info("OMI_MAC set to %s and saved to .env", selected.address)
+                return selected.address
+            else:
+                logger.error("Invalid selection: %s", choice)
+                return None
+        except ValueError:
+            logger.error("Invalid input: %s", choice)
+            return None
+
     async def find_and_set_omi_mac() -> str:
-        devices = await list_devices()
-        assert len(devices) == 1, "Expected 1 Omi device, got %d" % len(devices)
-        discovered_mac = devices[0].address
-        set_key(env_path, "OMI_MAC", discovered_mac)
-        logger.info("OMI_MAC set to %s and saved to .env" % discovered_mac)
-        return discovered_mac
+        all_devices = await BleakScanner.discover()
+        selected = prompt_user_to_pick_device(all_devices)
+        if not selected:
+            raise SystemExit(1)
+        return selected
 
     async def run() -> None:
         logger.info("Starting OMI Bluetooth connection and audio streaming")
@@ -101,8 +150,20 @@ def main() -> None:
                 logger.info(f"Successfully connected to device {mac_address}")
         except Exception as e:
             logger.error(f"Failed to connect to device {mac_address}: {e}")
-            logger.error("Exiting without creating audio sink or backend connection")
-            return
+            logger.info("Scanning for nearby BLE devices...")
+            all_devices = await BleakScanner.discover()
+            selected = prompt_user_to_pick_device(all_devices)
+            if not selected:
+                return
+            mac_address = selected
+            # Verify the newly selected device is reachable
+            logger.info("Connecting to newly selected device %s...", mac_address)
+            try:
+                async with BleakClient(mac_address) as test_client:
+                    logger.info(f"Successfully connected to device {mac_address}")
+            except Exception as e2:
+                logger.error(f"Failed to connect to newly selected device {mac_address}: {e2}")
+                return
 
         # Device is available, now setup audio sink and backend connection
         logger.info("Device found and connected, setting up audio pipeline...")
@@ -148,11 +209,14 @@ def main() -> None:
 
         async with file_sink:
             try:
-                await asyncio.gather(
-                    listen_to_omi(mac_address, OMI_CHAR_UUID, handle_ble_data),
-                    process_audio(),
-                    backend_stream_wrapper(),
-                )
+                async with OmiConnection(mac_address) as conn:
+                    await conn.subscribe_audio(handle_ble_data)
+                    await conn.subscribe_button(handle_button_event)
+                    await asyncio.gather(
+                        conn.wait_until_disconnected(),
+                        process_audio(),
+                        backend_stream_wrapper(),
+                    )
             except Exception as e:
                 logger.error(f"Error in audio processing: {e}", exc_info=True)
             finally:

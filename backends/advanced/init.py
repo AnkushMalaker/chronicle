@@ -444,41 +444,44 @@ class ChronicleSetup:
             self.config["TS_AUTHKEY"] = self.args.ts_authkey
             self.console.print(f"[green][SUCCESS][/green] Tailscale auth key configured (Docker integration enabled)")
 
+    def setup_neo4j(self):
+        """Configure Neo4j credentials (always required - used by Knowledge Graph)"""
+        neo4j_password = getattr(self.args, 'neo4j_password', None)
+
+        if neo4j_password:
+            self.console.print(f"[green]✅[/green] Neo4j: password configured via wizard")
+        else:
+            # Interactive prompt (standalone init.py run)
+            self.console.print()
+            self.console.print("[bold cyan]Neo4j Configuration[/bold cyan]")
+            self.console.print("Neo4j is used for Knowledge Graph (entity/relationship extraction)")
+            self.console.print()
+            neo4j_password = self.prompt_password("Neo4j password (min 8 chars)")
+
+        self.config["NEO4J_HOST"] = "neo4j"
+        self.config["NEO4J_USER"] = "neo4j"
+        self.config["NEO4J_PASSWORD"] = neo4j_password
+        self.console.print("[green][SUCCESS][/green] Neo4j credentials configured")
+
     def setup_obsidian(self):
-        """Configure Obsidian/Neo4j integration"""
-        # Check if enabled via command line
+        """Configure Obsidian integration (optional feature flag only - Neo4j credentials handled by setup_neo4j)"""
         if hasattr(self.args, 'enable_obsidian') and self.args.enable_obsidian:
             enable_obsidian = True
-            neo4j_password = getattr(self.args, 'neo4j_password', None)
-
-            if not neo4j_password:
-                self.console.print("[yellow][WARNING][/yellow] --enable-obsidian provided but no password")
-                neo4j_password = self.prompt_password("Neo4j password (min 8 chars)")
-
-            self.console.print(f"[green]✅[/green] Obsidian/Neo4j: enabled (configured via wizard)")
+            self.console.print(f"[green]✅[/green] Obsidian: enabled (configured via wizard)")
         else:
             # Interactive prompt (fallback)
             self.console.print()
-            self.console.print("[bold cyan]Obsidian/Neo4j Integration[/bold cyan]")
+            self.console.print("[bold cyan]Obsidian Integration (Optional)[/bold cyan]")
             self.console.print("Enable graph-based knowledge management for Obsidian vault notes")
             self.console.print()
 
             try:
-                enable_obsidian = Confirm.ask("Enable Obsidian/Neo4j integration?", default=False)
+                enable_obsidian = Confirm.ask("Enable Obsidian integration?", default=False)
             except EOFError:
                 self.console.print("Using default: No")
                 enable_obsidian = False
 
-            if enable_obsidian:
-                neo4j_password = self.prompt_password("Neo4j password (min 8 chars)")
-
         if enable_obsidian:
-            # Update .env with credentials only (secrets, not feature flags)
-            self.config["NEO4J_HOST"] = "neo4j"
-            self.config["NEO4J_USER"] = "neo4j"
-            self.config["NEO4J_PASSWORD"] = neo4j_password
-
-            # Update config.yml with feature flag (source of truth) - auto-saves via ConfigManager
             self.config_manager.update_memory_config({
                 "obsidian": {
                     "enabled": True,
@@ -486,11 +489,8 @@ class ChronicleSetup:
                     "timeout": 30
                 }
             })
-
-            self.console.print("[green][SUCCESS][/green] Obsidian/Neo4j configured")
-            self.console.print("[blue][INFO][/blue] Neo4j will start automatically with --profile obsidian")
+            self.console.print("[green][SUCCESS][/green] Obsidian integration enabled")
         else:
-            # Explicitly disable Obsidian in config.yml when not enabled
             self.config_manager.update_memory_config({
                 "obsidian": {
                     "enabled": False,
@@ -498,52 +498,25 @@ class ChronicleSetup:
                     "timeout": 30
                 }
             })
-            self.console.print("[blue][INFO][/blue] Obsidian/Neo4j integration disabled")
+            self.console.print("[blue][INFO][/blue] Obsidian integration disabled")
 
     def setup_knowledge_graph(self):
-        """Configure Knowledge Graph (Neo4j-based entity/relationship extraction)"""
-        # Check if enabled via command line
+        """Configure Knowledge Graph (Neo4j-based entity/relationship extraction - enabled by default)"""
         if hasattr(self.args, 'enable_knowledge_graph') and self.args.enable_knowledge_graph:
             enable_kg = True
-            neo4j_password = getattr(self.args, 'neo4j_password', None)
-
-            if not neo4j_password:
-                # Check if already set from obsidian setup
-                neo4j_password = self.config.get("NEO4J_PASSWORD")
-                if not neo4j_password:
-                    self.console.print("[yellow][WARNING][/yellow] --enable-knowledge-graph provided but no password")
-                    neo4j_password = self.prompt_password("Neo4j password (min 8 chars)")
         else:
-            # Interactive prompt (fallback)
             self.console.print()
             self.console.print("[bold cyan]Knowledge Graph (Entity Extraction)[/bold cyan]")
-            self.console.print("Enable graph-based entity and relationship extraction from conversations")
-            self.console.print("Extracts: People, Places, Organizations, Events, Promises/Tasks")
+            self.console.print("Extract people, places, organizations, events, and tasks from conversations")
             self.console.print()
 
             try:
-                enable_kg = Confirm.ask("Enable Knowledge Graph?", default=False)
+                enable_kg = Confirm.ask("Enable Knowledge Graph?", default=True)
             except EOFError:
-                self.console.print("Using default: No")
-                enable_kg = False
-
-            if enable_kg:
-                # Check if Neo4j password already set from obsidian setup
-                existing_password = self.config.get("NEO4J_PASSWORD")
-                if existing_password:
-                    self.console.print("[blue][INFO][/blue] Using Neo4j password from Obsidian configuration")
-                    neo4j_password = existing_password
-                else:
-                    neo4j_password = self.prompt_password("Neo4j password (min 8 chars)")
+                self.console.print("Using default: Yes")
+                enable_kg = True
 
         if enable_kg:
-            # Update .env with credentials only (secrets, not feature flags)
-            self.config["NEO4J_HOST"] = "neo4j"
-            self.config["NEO4J_USER"] = "neo4j"
-            if neo4j_password:
-                self.config["NEO4J_PASSWORD"] = neo4j_password
-
-            # Update config.yml with feature flag (source of truth) - auto-saves via ConfigManager
             self.config_manager.update_memory_config({
                 "knowledge_graph": {
                     "enabled": True,
@@ -551,12 +524,9 @@ class ChronicleSetup:
                     "timeout": 30
                 }
             })
-
-            self.console.print("[green][SUCCESS][/green] Knowledge Graph configured")
-            self.console.print("[blue][INFO][/blue] Neo4j will start automatically with --profile knowledge-graph")
+            self.console.print("[green][SUCCESS][/green] Knowledge Graph enabled")
             self.console.print("[blue][INFO][/blue] Entities and relationships will be extracted from conversations")
         else:
-            # Explicitly disable Knowledge Graph in config.yml when not enabled
             self.config_manager.update_memory_config({
                 "knowledge_graph": {
                     "enabled": False,
@@ -577,12 +547,14 @@ class ChronicleSetup:
 
         if langfuse_pub and langfuse_sec:
             # Auto-configure from wizard — no prompts needed
-            self.config["LANGFUSE_HOST"] = "http://langfuse-web:3000"
+            langfuse_host = getattr(self.args, 'langfuse_host', None) or "http://langfuse-web:3000"
+            self.config["LANGFUSE_HOST"] = langfuse_host
             self.config["LANGFUSE_PUBLIC_KEY"] = langfuse_pub
             self.config["LANGFUSE_SECRET_KEY"] = langfuse_sec
-            self.config["LANGFUSE_BASE_URL"] = "http://langfuse-web:3000"
-            self.console.print("[green][SUCCESS][/green] LangFuse auto-configured from wizard")
-            self.console.print(f"[blue][INFO][/blue] Host: http://langfuse-web:3000")
+            self.config["LANGFUSE_BASE_URL"] = langfuse_host
+            source = "external" if "langfuse-web" not in langfuse_host else "local"
+            self.console.print(f"[green][SUCCESS][/green] LangFuse auto-configured ({source})")
+            self.console.print(f"[blue][INFO][/blue] Host: {langfuse_host}")
             self.console.print(f"[blue][INFO][/blue] Public key: {self.mask_api_key(langfuse_pub)}")
             return
 
@@ -842,25 +814,7 @@ class ChronicleSetup:
         config_yml = self.config_manager.get_full_config()
 
         self.console.print("1. Start the main services:")
-        # Include --profile obsidian/knowledge-graph if enabled (read from config.yml)
-        obsidian_enabled = config_yml.get("memory", {}).get("obsidian", {}).get("enabled", False)
-        kg_enabled = config_yml.get("memory", {}).get("knowledge_graph", {}).get("enabled", False)
-
-        profiles = []
-        profile_notes = []
-        if obsidian_enabled:
-            profiles.append("obsidian")
-            profile_notes.append("Obsidian integration")
-        if kg_enabled:
-            profiles.append("knowledge-graph")
-            profile_notes.append("Knowledge Graph")
-
-        if profiles:
-            profile_args = " ".join([f"--profile {p}" for p in profiles])
-            self.console.print(f"   [cyan]docker compose {profile_args} up --build -d[/cyan]")
-            self.console.print(f"   [dim](Includes Neo4j for: {', '.join(profile_notes)})[/dim]")
-        else:
-            self.console.print("   [cyan]docker compose up --build -d[/cyan]")
+        self.console.print("   [cyan]docker compose up --build -d[/cyan]")
         self.console.print()
         
         # Auto-determine URLs for next steps
@@ -908,6 +862,7 @@ class ChronicleSetup:
             self.setup_llm()
             self.setup_memory()
             self.setup_optional_services()
+            self.setup_neo4j()
             self.setup_obsidian()
             self.setup_knowledge_graph()
             self.setup_langfuse()
@@ -967,9 +922,11 @@ def main():
     parser.add_argument("--ts-authkey",
                        help="Tailscale auth key for Docker integration (default: prompt user)")
     parser.add_argument("--langfuse-public-key",
-                       help="LangFuse project public key (from langfuse init)")
+                       help="LangFuse project public key (from langfuse init or external)")
     parser.add_argument("--langfuse-secret-key",
-                       help="LangFuse project secret key (from langfuse init)")
+                       help="LangFuse project secret key (from langfuse init or external)")
+    parser.add_argument("--langfuse-host",
+                       help="LangFuse host URL (default: http://langfuse-web:3000 for local)")
 
     args = parser.parse_args()
     

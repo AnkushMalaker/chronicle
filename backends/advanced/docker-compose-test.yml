@@ -21,6 +21,7 @@ services:
       - ../../config:/app/config  # Mount config directory with defaults.yml
       - ../../tests/configs:/app/test-configs:ro  # Mount test-specific configs
       - ${PLUGINS_CONFIG:-../../tests/config/plugins.test.yml}:/app/config/plugins.yml  # Mount test plugins config to correct location
+      - ../../plugins:/app/plugins  # External plugins directory
     environment:
       # Override with test-specific settings
       - MONGODB_URI=mongodb://mongo-test:27017/test_db
@@ -223,6 +224,7 @@ services:
       - ../../config:/app/config  # Mount config directory with defaults.yml
       - ../../tests/configs:/app/test-configs:ro  # Mount test-specific configs
       - ${PLUGINS_CONFIG:-../../tests/config/plugins.test.yml}:/app/config/plugins.yml  # Mount test plugins config to correct location
+      - ../../plugins:/app/plugins  # External plugins directory
     environment:
       # Same environment as backend
       - MONGODB_URI=mongodb://mongo-test:27017/test_db

@@ -221,6 +221,23 @@ async def lifespan(app: FastAPI):
     # Register OpenMemory user if using openmemory_mcp provider
     await initialize_openmemory_user()
 
+    # Start cron scheduler (requires Redis to be available)
+    try:
+        from advanced_omi_backend.cron_scheduler import get_scheduler, register_cron_job
+        from advanced_omi_backend.workers.finetuning_jobs import (
+            run_asr_jargon_extraction_job,
+            run_speaker_finetuning_job,
+        )
+
+        register_cron_job("speaker_finetuning", run_speaker_finetuning_job)
+        register_cron_job("asr_jargon_extraction", run_asr_jargon_extraction_job)
+
+        scheduler = get_scheduler()
+        await scheduler.start()
+        application_logger.info("Cron scheduler started")
+    except Exception as e:
+        application_logger.warning(f"Cron scheduler failed to start: {e}")
+
     # SystemTracker is used for monitoring and debugging
     application_logger.info("Using SystemTracker for monitoring and debugging")
 
@@ -318,6 +335,16 @@ async def lifespan(app: FastAPI):
             application_logger.info("Plugins shut down")
         except Exception as e:
             application_logger.error(f"Error shutting down plugins: {e}")
+
+        # Shutdown cron scheduler
+        try:
+            from advanced_omi_backend.cron_scheduler import get_scheduler
+
+            scheduler = get_scheduler()
+            await scheduler.stop()
+            application_logger.info("Cron scheduler stopped")
+        except Exception as e:
+            application_logger.error(f"Error stopping cron scheduler: {e}")
 
         # Shutdown memory service and speaker service
         shutdown_memory_service()

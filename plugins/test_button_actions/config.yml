@@ -1,0 +1,3 @@
+actions:
+  single_press:
+    type: close_conversation

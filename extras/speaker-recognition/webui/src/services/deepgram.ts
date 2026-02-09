@@ -88,8 +88,9 @@ export async function transcribeWithDeepgram(
   const formData = new FormData()
   formData.append('file', file)
   
-  // Choose endpoint based on mode
-  const endpoint = opts.mode === 'hybrid' ? '/v1/transcribe-and-diarize' : '/v1/listen'
+  // Always use /v1/listen for transcription
+  // Hybrid mode (transcribe + internal diarization) is handled by speakerIdentification service
+  const endpoint = '/v1/listen'
   
   const params: Record<string, any> = {
     model: opts.model,
@@ -104,12 +105,6 @@ export async function transcribeWithDeepgram(
     params.enhance_speakers = true
     params.user_id = opts.userId
     params.speaker_confidence_threshold = opts.speakerConfidenceThreshold
-  }
-  
-  // Additional params for hybrid mode
-  if (opts.mode === 'hybrid') {
-    params.similarity_threshold = opts.speakerConfidenceThreshold
-    params.min_duration = opts.minDuration || 1.0
   }
   
   // Plain mode parameter for internal processing

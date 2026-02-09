@@ -157,18 +157,37 @@ export default function MemoryDetail() {
     loadMemory()
   }, [id, user?.id])
 
-  const formatDate = (dateString: string) => {
-    try {
-      return new Date(dateString).toLocaleString('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit'
-      })
-    } catch {
-      return dateString
+  const formatDate = (dateInput: string | number | undefined | null) => {
+    if (dateInput === undefined || dateInput === null || dateInput === '') {
+      return 'N/A'
     }
+
+    let date: Date
+
+    if (typeof dateInput === 'number') {
+      date = dateInput > 1e10 ? new Date(dateInput) : new Date(dateInput * 1000)
+    } else if (typeof dateInput === 'string') {
+      if (dateInput.match(/^\d+$/)) {
+        const timestamp = parseInt(dateInput)
+        date = timestamp > 1e10 ? new Date(timestamp) : new Date(timestamp * 1000)
+      } else {
+        date = new Date(dateInput)
+      }
+    } else {
+      date = new Date(dateInput)
+    }
+
+    if (isNaN(date.getTime())) {
+      return 'N/A'
+    }
+
+    return date.toLocaleString('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    })
   }
 
   const getMemoryTypeIcon = () => {

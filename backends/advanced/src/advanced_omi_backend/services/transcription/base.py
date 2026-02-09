@@ -122,12 +122,14 @@ class BatchTranscriptionProvider(BaseTranscriptionProvider):
         return "batch"
 
     @abc.abstractmethod
-    async def transcribe(self, audio_data: bytes, sample_rate: int, diarize: bool = False) -> dict:
+    async def transcribe(self, audio_data: bytes, sample_rate: int, diarize: bool = False, context_info: Optional[str] = None, **kwargs) -> dict:
         """Transcribe audio data.
 
         Args:
             audio_data: Raw audio bytes
             sample_rate: Audio sample rate
             diarize: Whether to enable speaker diarization (provider-dependent)
+            context_info: Optional ASR context (hot words, jargon) to boost recognition
+            **kwargs: Additional parameters (e.g. Langfuse trace IDs)
         """
         pass

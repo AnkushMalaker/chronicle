@@ -32,10 +32,13 @@ async def close_current_conversation(
 @router.get("")
 async def get_conversations(
     include_deleted: bool = Query(False, description="Include soft-deleted conversations"),
+    include_unprocessed: bool = Query(False, description="Include orphan audio sessions (always_persist with failed/pending transcription)"),
+    limit: int = Query(200, ge=1, le=500, description="Max conversations to return"),
+    offset: int = Query(0, ge=0, description="Number of conversations to skip"),
     current_user: User = Depends(current_active_user)
 ):
     """Get conversations. Admins see all conversations, users see only their own."""
-    return await conversation_controller.get_conversations(current_user, include_deleted)
+    return await conversation_controller.get_conversations(current_user, include_deleted, include_unprocessed, limit, offset)
 
 
 @router.get("/{conversation_id}")
@@ -48,6 +51,14 @@ async def get_conversation_detail(
 
 
 # New reprocessing endpoints
+@router.post("/{conversation_id}/reprocess-orphan")
+async def reprocess_orphan(
+    conversation_id: str, current_user: User = Depends(current_active_user)
+):
+    """Reprocess an orphan audio session (always_persist conversation with failed/pending transcription)."""
+    return await conversation_controller.reprocess_orphan(conversation_id, current_user)
+
+
 @router.post("/{conversation_id}/reprocess-transcript")
 async def reprocess_transcript(
     conversation_id: str, current_user: User = Depends(current_active_user)

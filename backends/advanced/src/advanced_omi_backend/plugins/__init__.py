@@ -5,6 +5,8 @@ Plugins can hook into different stages of the processing pipeline:
 - transcript: When new transcript segment arrives
 - conversation: When conversation processing completes
 - memory: After memory extraction finishes
+- button: When device button events are received
+- plugin_action: Cross-plugin communication
 
 Trigger types control when plugins execute:
 - wake_word: Only when transcript starts with specified wake word
@@ -13,6 +15,18 @@ Trigger types control when plugins execute:
 """
 
 from .base import BasePlugin, PluginContext, PluginResult
+from .events import ButtonActionType, ButtonState, ConversationCloseReason, PluginEvent
 from .router import PluginRouter
+from .services import PluginServices
 
-__all__ = ['BasePlugin', 'PluginContext', 'PluginResult', 'PluginRouter']
+__all__ = [
+    'BasePlugin',
+    'ButtonActionType',
+    'ButtonState',
+    'ConversationCloseReason',
+    'PluginContext',
+    'PluginEvent',
+    'PluginResult',
+    'PluginRouter',
+    'PluginServices',
+]

@@ -17,6 +17,7 @@ import websockets
 
 from advanced_omi_backend.config_loader import get_backend_config
 from advanced_omi_backend.model_registry import get_models_registry
+from advanced_omi_backend.prompt_registry import get_prompt_registry
 
 from .base import (
     BaseTranscriptionProvider,
@@ -25,6 +26,26 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_hot_words_to_keyterm(hot_words_str: str) -> str:
+    """Convert comma-separated hot words to Deepgram keyterm format.
+
+    Input:  "hey vivi, chronicle, omi"
+    Output: "hey vivi Hey Vivi chronicle Chronicle omi Omi"
+    """
+    if not hot_words_str or not hot_words_str.strip():
+        return ""
+    terms = []
+    for word in hot_words_str.split(","):
+        word = word.strip()
+        if not word:
+            continue
+        terms.append(word)
+        capitalized = word.title()
+        if capitalized != word:
+            terms.append(capitalized)
+    return " ".join(terms)
 
 
 def _dotted_get(d: dict | list | None, dotted: Optional[str]):
@@ -99,7 +120,7 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
         """
         return {cap: True for cap in self._capabilities}
 
-    async def transcribe(self, audio_data: bytes, sample_rate: int, diarize: bool = False) -> dict:
+    async def transcribe(self, audio_data: bytes, sample_rate: int, diarize: bool = False, context_info: Optional[str] = None, **kwargs) -> dict:
         # Special handling for mock provider (no HTTP server needed)
         if self.model.model_provider == "mock":
             from .mock_provider import MockTranscriptionProvider
@@ -120,7 +141,13 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
         # Build headers (skip Content-Type for multipart as httpx will set it)
         headers = {}
         if not use_multipart:
-            headers["Content-Type"] = "audio/raw"
+            # Auto-detect WAV format from RIFF header and use correct Content-Type.
+            # Sending WAV data as audio/raw can cause Deepgram to silently return
+            # empty transcripts because it tries to decode the WAV header as raw PCM.
+            if audio_data[:4] == b"RIFF":
+                headers["Content-Type"] = "audio/wav"
+            else:
+                headers["Content-Type"] = "audio/raw"
             
         if self.model.api_key:
             # Allow templated header, otherwise fallback to Bearer/Token conventions by config
@@ -148,14 +175,34 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
         if "diarize" in query:
             query["diarize"] = "true" if diarize else "false"
 
+        # Use caller-provided context or fall back to LangFuse prompt store
+        if context_info:
+            hot_words_str = context_info
+        else:
+            hot_words_str = ""
+            try:
+                registry = get_prompt_registry()
+                hot_words_str = await registry.get_prompt("asr.hot_words")
+            except Exception as e:
+                logger.debug(f"Failed to fetch asr.hot_words prompt: {e}")
+
+        # For Deepgram: inject as keyterm query param
+        if self.model.model_provider == "deepgram" and hot_words_str.strip():
+            keyterm = _parse_hot_words_to_keyterm(hot_words_str)
+            if keyterm:
+                query["keyterm"] = keyterm
+
         timeout = op.get("timeout", 300)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 if method == "POST":
                     if use_multipart:
-                        # Send as multipart file upload (for Parakeet)
+                        # Send as multipart file upload (for Parakeet/VibeVoice)
                         files = {"file": ("audio.wav", audio_data, "audio/wav")}
-                        resp = await client.post(url, headers=headers, params=query, files=files)
+                        data = {}
+                        if hot_words_str and hot_words_str.strip():
+                            data["context_info"] = hot_words_str.strip()
+                        resp = await client.post(url, headers=headers, params=query, files=files, data=data)
                     else:
                         # Send as raw audio data (for Deepgram)
                         resp = await client.post(url, headers=headers, params=query, content=audio_data)
@@ -239,6 +286,18 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
             query_dict["sample_rate"] = sample_rate
         if diarize and "diarize" in query_dict:
             query_dict["diarize"] = "true"
+
+        # Inject hot words for streaming (Deepgram only)
+        if self.model.model_provider == "deepgram":
+            try:
+                registry = get_prompt_registry()
+                hot_words_str = await registry.get_prompt("asr.hot_words")
+                if hot_words_str and hot_words_str.strip():
+                    keyterm = _parse_hot_words_to_keyterm(hot_words_str)
+                    if keyterm:
+                        query_dict["keyterm"] = keyterm
+            except Exception as e:
+                logger.debug(f"Failed to fetch asr.hot_words for streaming: {e}")
 
         # Normalize boolean values to lowercase strings (Deepgram expects "true"/"false", not "True"/"False")
         normalized_query = {}

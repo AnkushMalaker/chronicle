@@ -4,12 +4,18 @@ Plugin routing system for multi-level plugin architecture.
 Routes pipeline events to appropriate plugins based on access level and triggers.
 """
 
+import json
 import logging
+import os
 import re
 import string
+import time
 from typing import Dict, List, Optional
 
+import redis
+
 from .base import BasePlugin, PluginContext, PluginResult
+from .events import PluginEvent
 
 logger = logging.getLogger(__name__)
 
@@ -86,10 +92,26 @@ def extract_command_after_wake_word(transcript: str, wake_word: str) -> str:
 class PluginRouter:
     """Routes pipeline events to appropriate plugins based on event subscriptions"""
 
+    _EVENT_LOG_KEY = "system:event_log"
+    _EVENT_LOG_MAX = 1000
+
     def __init__(self):
         self.plugins: Dict[str, BasePlugin] = {}
         # Index plugins by event for fast lookup
         self._plugins_by_event: Dict[str, List[str]] = {}
+        self._services = None
+
+        # Sync Redis for event logging (works from both FastAPI and RQ workers)
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        try:
+            self._event_redis = redis.from_url(redis_url, decode_responses=True)
+        except Exception:
+            logger.warning("Could not connect to Redis for event logging")
+            self._event_redis = None
+
+    def set_services(self, services) -> None:
+        """Attach PluginServices instance for injection into plugin contexts."""
+        self._services = services
 
     def register_plugin(self, plugin_id: str, plugin: BasePlugin):
         """Register a plugin with the router"""
@@ -126,16 +148,15 @@ class PluginRouter:
         logger.info(f"🔌 ROUTER: Dispatching '{event}' event (user={user_id})")
 
         results = []
+        executed = []  # Track per-plugin outcomes for event log
 
         # Get plugins subscribed to this event
         plugin_ids = self._plugins_by_event.get(event, [])
 
-        # Add subscription check
         if not plugin_ids:
-            logger.warning(f"🔌 ROUTER: No plugins subscribed to event '{event}'")
-            return results
-
-        logger.info(f"🔌 ROUTER: Found {len(plugin_ids)} subscribed plugin(s): {plugin_ids}")
+            logger.info(f"🔌 ROUTER: No plugins subscribed to event '{event}'")
+        else:
+            logger.info(f"🔌 ROUTER: Found {len(plugin_ids)} subscribed plugin(s): {plugin_ids}")
 
         for plugin_id in plugin_ids:
             plugin = self.plugins[plugin_id]
@@ -157,7 +178,8 @@ class PluginRouter:
                     user_id=user_id,
                     event=event,
                     data=data,
-                    metadata=metadata or {}
+                    metadata=metadata or {},
+                    services=self._services,
                 )
 
                 result = await self._execute_plugin(plugin, event, context)
@@ -169,6 +191,7 @@ class PluginRouter:
                         f"success={result.success}, message={result.message}"
                     )
                     results.append(result)
+                    executed.append({"plugin_id": plugin_id, "success": result.success, "message": result.message})
 
                     # If plugin says stop processing, break
                     if not result.should_continue:
@@ -181,11 +204,20 @@ class PluginRouter:
                     f"   ✗ Plugin '{plugin_id}' FAILED with exception: {e}",
                     exc_info=True
                 )
+                executed.append({"plugin_id": plugin_id, "success": False, "message": str(e)})
 
         # Add at end
         logger.info(
             f"🔌 ROUTER: Dispatch complete for '{event}': "
             f"{len(results)} plugin(s) executed successfully"
+        )
+
+        self._log_event(
+            event=event,
+            user_id=user_id,
+            plugins_subscribed=plugin_ids,
+            plugins_executed=executed,
+            metadata=metadata,
         )
 
         return results
@@ -236,15 +268,65 @@ class PluginRouter:
         context: PluginContext
     ) -> Optional[PluginResult]:
         """Execute plugin method for specified event"""
-        # Map events to plugin callback methods
-        if event.startswith('transcript.'):
+        # Map events to plugin callback methods using enums
+        # str(Enum) comparisons work because PluginEvent inherits from str
+        if event in (PluginEvent.TRANSCRIPT_STREAMING, PluginEvent.TRANSCRIPT_BATCH):
             return await plugin.on_transcript(context)
-        elif event.startswith('conversation.'):
+        elif event in (PluginEvent.CONVERSATION_COMPLETE,):
             return await plugin.on_conversation_complete(context)
-        elif event.startswith('memory.'):
+        elif event in (PluginEvent.MEMORY_PROCESSED,):
             return await plugin.on_memory_processed(context)
+        elif event in (PluginEvent.BUTTON_SINGLE_PRESS, PluginEvent.BUTTON_DOUBLE_PRESS):
+            return await plugin.on_button_event(context)
+        elif event == PluginEvent.PLUGIN_ACTION:
+            return await plugin.on_plugin_action(context)
 
+        # Fallback for any unrecognized events (forward compatibility)
+        logger.warning(f"No handler mapping for event '{event}'")
         return None
+
+    def _log_event(
+        self,
+        event: str,
+        user_id: str,
+        plugins_subscribed: List[str],
+        plugins_executed: List[Dict],
+        metadata: Optional[Dict] = None,
+    ) -> None:
+        """Append an event record to the Redis event log (capped list)."""
+        if not self._event_redis:
+            return
+        try:
+            record = json.dumps({
+                "timestamp": time.time(),
+                "event": event,
+                "user_id": user_id,
+                "plugins_subscribed": plugins_subscribed,
+                "plugins_executed": plugins_executed,
+                "metadata": metadata or {},
+            })
+            pipe = self._event_redis.pipeline()
+            pipe.lpush(self._EVENT_LOG_KEY, record)
+            pipe.ltrim(self._EVENT_LOG_KEY, 0, self._EVENT_LOG_MAX - 1)
+            pipe.execute()
+        except Exception:
+            logger.debug("Failed to log event to Redis", exc_info=True)
+
+    def get_recent_events(self, limit: int = 50, event_type: Optional[str] = None) -> List[Dict]:
+        """Read recent events from the Redis log."""
+        if not self._event_redis:
+            return []
+        try:
+            # Fetch more than needed when filtering by type
+            fetch_count = self._EVENT_LOG_MAX if event_type else limit
+            raw = self._event_redis.lrange(self._EVENT_LOG_KEY, 0, fetch_count - 1)
+            events = [json.loads(r) for r in raw]
+            if event_type:
+                events = [e for e in events if e.get("event") == event_type][:limit]
+            return events
+        except Exception:
+            logger.debug("Failed to read events from Redis", exc_info=True)
+            return []
 
     async def cleanup_all(self):
         """Clean up all registered plugins"""

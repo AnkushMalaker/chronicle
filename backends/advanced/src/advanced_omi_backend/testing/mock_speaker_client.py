@@ -181,6 +181,8 @@ class MockSpeakerRecognitionClient:
         conversation_id: str,
         segments: List[Dict],
         user_id: Optional[str] = None,
+        per_segment: bool = False,
+        min_segment_duration: float = 1.5,
     ) -> Dict:
         """Mock identify_provider_segments - returns segments with original labels."""
         logger.info(f"🎤 Mock identify_provider_segments: {len(segments)} segments")

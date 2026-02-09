@@ -5,10 +5,13 @@ This module contains all jobs related to speech-to-text transcription processing
 """
 
 import asyncio
+import io
+import json
 import logging
 import os
 import time
 import uuid
+import wave
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
@@ -30,6 +33,7 @@ from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import BaseRQJob, JobPriority, async_job
 from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggregator
+from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.services.plugin_service import ensure_plugin_router
 from advanced_omi_backend.services.transcription import (
     get_transcription_provider,
@@ -215,13 +219,32 @@ async def transcribe_full_audio_job(
         logger.error(f"Failed to reconstruct audio from MongoDB: {e}", exc_info=True)
         raise RuntimeError(f"Audio reconstruction failed: {e}")
 
+    # Build ASR context (static hot words + per-user cached jargon)
+    try:
+        from advanced_omi_backend.services.transcription.context import get_asr_context
+
+        context_info = await get_asr_context(user_id=user_id)
+    except Exception as e:
+        logger.warning(f"Failed to build ASR context: {e}")
+        context_info = None
+
+    # Read actual sample rate from WAV header
+    try:
+        with wave.open(io.BytesIO(wav_data), "rb") as wf:
+            actual_sample_rate = wf.getframerate()
+    except Exception:
+        actual_sample_rate = 16000
+
     try:
         # Transcribe the audio directly from memory (no disk I/O needed)
-        transcription_result = await provider.transcribe(
-            audio_data=wav_data,  # Pass bytes directly, already in memory
-            sample_rate=16000,
-            diarize=True,
-        )
+        transcribe_kwargs: Dict[str, Any] = {
+            "audio_data": wav_data,
+            "sample_rate": actual_sample_rate,
+            "diarize": True,
+        }
+        if context_info:
+            transcribe_kwargs["context_info"] = context_info
+        transcription_result = await provider.transcribe(**transcribe_kwargs)
     except ConnectionError as e:
         logger.exception(f"Transcription service unreachable for {conversation_id}")
         raise RuntimeError(str(e))
@@ -267,7 +290,7 @@ async def transcribe_full_audio_job(
                 )
 
                 plugin_results = await plugin_router.dispatch_event(
-                    event="transcript.batch",
+                    event=PluginEvent.TRANSCRIPT_BATCH,
                     user_id=user_id,
                     data=plugin_data,
                     metadata={"client_id": client_id},
@@ -653,7 +676,7 @@ async def create_audio_only_conversation(
 
 @async_job(redis=True, beanie=True)
 async def transcription_fallback_check_job(
-    session_id: str, user_id: str, client_id: str, timeout_seconds: int = 1800, *, redis_client=None
+    session_id: str, user_id: str, client_id: str, timeout_seconds: int = 900, *, redis_client=None
 ) -> Dict[str, Any]:
     """
     Check if streaming transcription succeeded, fallback to batch if needed.
@@ -666,7 +689,7 @@ async def transcription_fallback_check_job(
         session_id: Stream session ID
         user_id: User ID
         client_id: Client ID
-        timeout_seconds: Max wait time for batch transcription (default 30 minutes)
+        timeout_seconds: Max wait time for batch transcription (default 15 minutes)
         redis_client: Redis client (injected by decorator)
 
     Returns:
@@ -781,9 +804,23 @@ async def transcription_fallback_check_job(
                 sorted_chunks = sorted(audio_chunks.items())
                 combined_audio = b"".join(data for _, data in sorted_chunks)
 
+                # Read audio format from Redis session metadata
+                sample_rate, channels, sample_width = 16000, 1, 2
+                session_key = f"audio:session:{session_id}"
+                try:
+                    audio_format_raw = await redis_client.hget(session_key, "audio_format")
+                    if audio_format_raw:
+                        audio_format = json.loads(audio_format_raw)
+                        sample_rate = int(audio_format.get("rate", 16000))
+                        channels = int(audio_format.get("channels", 1))
+                        sample_width = int(audio_format.get("width", 2))
+                except Exception as e:
+                    logger.warning(f"Failed to read audio_format from Redis for {session_id}: {e}")
+
+                bytes_per_second = sample_rate * channels * sample_width
                 logger.info(
                     f"✅ Extracted {len(sorted_chunks)} audio chunks from Redis stream "
-                    f"({len(combined_audio)} bytes, ~{len(combined_audio)/32000:.1f}s)"
+                    f"({len(combined_audio)} bytes, ~{len(combined_audio)/bytes_per_second:.1f}s)"
                 )
 
                 # Create conversation placeholder
@@ -793,9 +830,9 @@ async def transcription_fallback_check_job(
                 num_chunks = await convert_audio_to_chunks(
                     conversation_id=conversation.conversation_id,
                     audio_data=combined_audio,
-                    sample_rate=16000,
-                    channels=1,
-                    sample_width=2,
+                    sample_rate=sample_rate,
+                    channels=channels,
+                    sample_width=sample_width,
                 )
 
                 logger.info(
@@ -822,7 +859,7 @@ async def transcription_fallback_check_job(
         conversation.conversation_id,
         version_id,
         "batch_fallback",
-        job_timeout=1800,
+        job_timeout=900,  # 15 minutes
         job_id=f"transcribe_{conversation.conversation_id[:12]}",
         description=f"Batch transcription fallback for {session_id[:8]}",
         meta={"session_id": session_id, "client_id": client_id},
@@ -1248,8 +1285,8 @@ async def stream_speech_detection_job(
         session_id,
         user_id,
         client_id,
-        timeout_seconds=1800,  # 30 minutes for batch transcription
-        job_timeout=2400,  # 40 minutes job timeout
+        timeout_seconds=900,  # 15 minutes for batch transcription
+        job_timeout=1200,  # 20 minutes job timeout (includes overhead for fallback check)
         job_id=f"fallback_check_{session_id[:12]}",
         description=f"Transcription fallback check for {session_id[:8]} (no speech)",
         meta={"session_id": session_id, "client_id": client_id, "no_speech": True},

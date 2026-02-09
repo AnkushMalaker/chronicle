@@ -107,8 +107,13 @@ export const authApi = {
 }
 
 export const conversationsApi = {
-  getAll: (includeDeleted?: boolean) => api.get('/api/conversations', {
-    params: includeDeleted !== undefined ? { include_deleted: includeDeleted } : {}
+  getAll: (includeDeleted?: boolean, includeUnprocessed?: boolean, limit?: number, offset?: number) => api.get('/api/conversations', {
+    params: {
+      ...(includeDeleted !== undefined && { include_deleted: includeDeleted }),
+      ...(includeUnprocessed !== undefined && { include_unprocessed: includeUnprocessed }),
+      ...(limit !== undefined && { limit }),
+      ...(offset !== undefined && { offset }),
+    }
   }),
   getById: (id: string) => api.get(`/api/conversations/${id}`),
   delete: (id: string) => api.delete(`/api/conversations/${id}`),
@@ -118,6 +123,7 @@ export const conversationsApi = {
   }),
 
   // Reprocessing endpoints
+  reprocessOrphan: (conversationId: string) => api.post(`/api/conversations/${conversationId}/reprocess-orphan`),
   reprocessTranscript: (conversationId: string) => api.post(`/api/conversations/${conversationId}/reprocess-transcript`),
   reprocessMemory: (conversationId: string, transcriptVersionId: string = 'active') => api.post(`/api/conversations/${conversationId}/reprocess-memory`, null, {
     params: { transcript_version_id: transcriptVersionId }
@@ -213,6 +219,21 @@ export const finetuningApi = {
 
   // Get fine-tuning status
   getStatus: () => api.get('/api/finetuning/status'),
+
+  // Orphaned annotation management
+  deleteOrphanedAnnotations: (annotationType?: string) =>
+    api.delete('/api/finetuning/orphaned-annotations', {
+      params: annotationType ? { annotation_type: annotationType } : {}
+    }),
+  reattachOrphanedAnnotations: () =>
+    api.post('/api/finetuning/orphaned-annotations/reattach'),
+
+  // Cron job management
+  getCronJobs: () => api.get('/api/finetuning/cron-jobs'),
+  updateCronJob: (jobId: string, data: { enabled?: boolean; schedule?: string }) =>
+    api.put(`/api/finetuning/cron-jobs/${jobId}`, data),
+  runCronJob: (jobId: string) =>
+    api.post(`/api/finetuning/cron-jobs/${jobId}/run`),
 }
 
 export const usersApi = {
@@ -235,7 +256,7 @@ export const systemApi = {
 
   // Miscellaneous Configuration Settings
   getMiscSettings: () => api.get('/api/misc-settings'),
-  saveMiscSettings: (settings: { always_persist_enabled?: boolean; use_provider_segments?: boolean }) =>
+  saveMiscSettings: (settings: { always_persist_enabled?: boolean; use_provider_segments?: boolean; per_segment_speaker_id?: boolean }) =>
     api.post('/api/misc-settings', settings),
   
   // Memory Configuration Management
@@ -319,6 +340,11 @@ export const queueApi = {
     const endpoint = flushAll ? '/api/queue/flush-all' : '/api/queue/flush'
     return api.post(endpoint, body)
   },
+
+  // Plugin events
+  getEvents: (limit: number = 50, eventType?: string) => api.get('/api/queue/events', {
+    params: { limit, ...(eventType && { event_type: eventType }) }
+  }),
 
   // Legacy endpoints - kept for backward compatibility but not used in Queue page
   // getJobs: (params: URLSearchParams) => api.get(`/api/queue/jobs?${params}`),
@@ -441,6 +467,9 @@ export const knowledgeGraphApi = {
 
   getEntityRelationships: (entityId: string) =>
     api.get(`/api/knowledge-graph/entities/${entityId}/relationships`),
+
+  updateEntity: (entityId: string, data: { name?: string; details?: string; icon?: string }) =>
+    api.patch(`/api/knowledge-graph/entities/${entityId}`, data),
 
   deleteEntity: (entityId: string) =>
     api.delete(`/api/knowledge-graph/entities/${entityId}`),

@@ -60,7 +60,6 @@ conflicts = [
 ]
 
 [tool.uv.sources]
-useful-moonshine-onnx = { git = "https://github.com/usefulsensors/moonshine.git", subdirectory = "moonshine-onnx" }
 torch = [
     { index = "pytorch-cu121", extra = "cu121" },
     { index = "pytorch-cu126", extra = "cu126" },
@@ -115,6 +114,7 @@ vibevoice = [
     "torch>=2.3",
     "torchaudio>=2.3",
     "librosa>=0.10.0",
+    "bitsandbytes>=0.43.0",
 ]
 
 # Legacy groups (kept for backward compatibility)
@@ -122,10 +122,6 @@ parakeet = [
     "nemo-toolkit[asr]>=2.2.0",
     "cuda-python>=12.3",
     "numpy>=1.26,<2.0",
-]
-
-moonshine = [
-  "useful-moonshine-onnx",
 ]
 
 # Development dependencies

@@ -18,6 +18,7 @@ from setup_utils import (
     detect_tailscale_info,
     is_placeholder,
     mask_value,
+    prompt_password,
     prompt_with_existing_masked,
     read_env_value,
 )
@@ -52,8 +53,7 @@ SERVICES = {
         'langfuse': {
             'path': 'extras/langfuse',
             'cmd': ['uv', 'run', '--with-requirements', '../../setup-requirements.txt', 'python', 'init.py'],
-            'description': 'LLM observability and prompt management (local)',
-            'auto_enable': True
+            'description': 'LLM observability and prompt management (local)'
         }
     }
 }
@@ -141,14 +141,8 @@ def select_services(transcription_provider=None):
             console.print(f"  ✅ {service_config['description']} ({provider_label}) [dim](auto-selected)[/dim]")
             continue
 
-        # Auto-enable services marked as such (e.g., langfuse)
-        if service_config.get('auto_enable'):
-            exists, msg = check_service_exists(service_name, service_config)
-            if exists:
-                console.print(f"  ✅ {service_config['description']} [dim](auto-selected)[/dim]")
-                selected.append(service_name)
-            else:
-                console.print(f"  ⏸️  {service_config['description']} - [dim]{msg}[/dim]")
+        # LangFuse is handled separately via setup_langfuse_choice()
+        if service_name == 'langfuse':
             continue
 
         # Check if service exists
@@ -157,11 +151,14 @@ def select_services(transcription_provider=None):
             console.print(f"  ⏸️  {service_config['description']} - [dim]{msg}[/dim]")
             continue
 
+        # Speaker recognition is recommended by default
+        default_enable = service_name == 'speaker-recognition'
+
         try:
-            enable_service = Confirm.ask(f"  Setup {service_config['description']}?", default=False)
+            enable_service = Confirm.ask(f"  Setup {service_config['description']}?", default=default_enable)
         except EOFError:
-            console.print("Using default: No")
-            enable_service = False
+            console.print(f"Using default: {'Yes' if default_enable else 'No'}")
+            enable_service = default_enable
 
         if enable_service:
             selected.append(service_name)
@@ -191,7 +188,7 @@ def cleanup_unselected_services(selected_services):
 def run_service_setup(service_name, selected_services, https_enabled=False, server_ip=None,
                      obsidian_enabled=False, neo4j_password=None, hf_token=None,
                      transcription_provider='deepgram', admin_email=None, admin_password=None,
-                     langfuse_public_key=None, langfuse_secret_key=None):
+                     langfuse_public_key=None, langfuse_secret_key=None, langfuse_host=None):
     """Execute individual service setup script"""
     if service_name == 'advanced':
         service = SERVICES['backend'][service_name]
@@ -211,14 +208,20 @@ def run_service_setup(service_name, selected_services, https_enabled=False, serv
         if https_enabled and server_ip:
             cmd.extend(['--enable-https', '--server-ip', server_ip])
 
-        # Add Obsidian configuration
-        if obsidian_enabled and neo4j_password:
-            cmd.extend(['--enable-obsidian', '--neo4j-password', neo4j_password])
+        # Always pass Neo4j password (neo4j is a required service)
+        if neo4j_password:
+            cmd.extend(['--neo4j-password', neo4j_password])
 
-        # Pass LangFuse keys from langfuse init (if langfuse was set up first)
+        # Add Obsidian configuration
+        if obsidian_enabled:
+            cmd.extend(['--enable-obsidian'])
+
+        # Pass LangFuse keys from langfuse init or external config
         if langfuse_public_key and langfuse_secret_key:
             cmd.extend(['--langfuse-public-key', langfuse_public_key])
             cmd.extend(['--langfuse-secret-key', langfuse_secret_key])
+            if langfuse_host:
+                cmd.extend(['--langfuse-host', langfuse_host])
 
     else:
         service = SERVICES['extras'][service_name]
@@ -461,7 +464,21 @@ def setup_hf_token_if_needed(selected_services):
 
     console.print("\n🤗 [bold cyan]Hugging Face Token Configuration[/bold cyan]")
     console.print("Required for speaker recognition (PyAnnote models)")
-    console.print("\n[blue][INFO][/blue] Get yours from: https://huggingface.co/settings/tokens\n")
+    console.print("\n[blue][INFO][/blue] Get your token from: https://huggingface.co/settings/tokens")
+    console.print()
+    console.print("[yellow]⚠️  You must also accept the model agreements for these gated models:[/yellow]")
+    console.print("   1. [cyan]Speaker Diarization[/cyan]")
+    console.print("      https://huggingface.co/pyannote/speaker-diarization-community-1")
+    console.print("   2. [cyan]Segmentation Model[/cyan]")
+    console.print("      https://huggingface.co/pyannote/segmentation-3.0")
+    console.print("   3. [cyan]Segmentation Model[/cyan]")
+    console.print("      https://huggingface.co/pyannote/segmentation-3.1")
+    console.print("   4. [cyan]Embedding Model[/cyan]")
+    console.print("      https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM")
+    console.print()
+    console.print("[yellow]→[/yellow] Open each link and click 'Agree and access repository'")
+    console.print("[yellow]→[/yellow] Use the same Hugging Face account as your token")
+    console.print()
 
     # Check for existing token from speaker-recognition service
     speaker_env_path = 'extras/speaker-recognition/.env'
@@ -534,6 +551,94 @@ def select_transcription_provider():
             console.print("Using default: Deepgram")
             return "deepgram"
 
+def setup_langfuse_choice():
+    """Ask user about LangFuse configuration: local, external, or disabled.
+
+    Returns:
+        Tuple of (mode, config) where:
+        - mode: 'local', 'external', or None (disabled)
+        - config: dict with keys {host, public_key, secret_key} for external, empty for local/None
+    """
+    console.print("\n📊 [bold cyan]LangFuse Configuration[/bold cyan]")
+    console.print("LangFuse provides LLM observability, tracing, and prompt management")
+    console.print()
+
+    try:
+        enable = Confirm.ask("Enable LangFuse?", default=True)
+    except EOFError:
+        console.print("Using default: Yes")
+        enable = True
+
+    if not enable:
+        console.print("[blue][INFO][/blue] LangFuse disabled")
+        return None, {}
+
+    try:
+        has_existing = Confirm.ask("Do you have an existing LangFuse installation?", default=False)
+    except EOFError:
+        console.print("Using default: No (will set up locally)")
+        has_existing = False
+
+    if not has_existing:
+        # Check if the local langfuse directory exists
+        exists, msg = check_service_exists('langfuse', SERVICES['extras']['langfuse'])
+        if exists:
+            console.print("[green]✅[/green] Will set up local LangFuse instance")
+            return 'local', {}
+        else:
+            console.print(f"[yellow]⚠️  Local LangFuse not available: {msg}[/yellow]")
+            console.print("[yellow]   Skipping LangFuse setup[/yellow]")
+            return None, {}
+
+    # External LangFuse — collect connection details
+    console.print()
+    console.print("[bold]Enter your external LangFuse connection details:[/bold]")
+
+    backend_env_path = 'backends/advanced/.env'
+
+    existing_host = read_env_value(backend_env_path, 'LANGFUSE_HOST')
+    # Don't treat the local docker host as an existing external value
+    if existing_host and 'langfuse-web' in existing_host:
+        existing_host = None
+
+    host = prompt_with_existing_masked(
+        prompt_text="LangFuse host URL",
+        existing_value=existing_host,
+        placeholders=[""],
+        is_password=False,
+        default="https://cloud.langfuse.com"
+    )
+
+    existing_pub = read_env_value(backend_env_path, 'LANGFUSE_PUBLIC_KEY')
+    public_key = prompt_with_existing_masked(
+        prompt_text="LangFuse public key",
+        existing_value=existing_pub,
+        placeholders=[""],
+        is_password=False,
+        default=""
+    )
+
+    existing_sec = read_env_value(backend_env_path, 'LANGFUSE_SECRET_KEY')
+    secret_key = prompt_with_existing_masked(
+        prompt_text="LangFuse secret key",
+        existing_value=existing_sec,
+        placeholders=[""],
+        is_password=True,
+        default=""
+    )
+
+    if not (host and public_key and secret_key):
+        console.print("[yellow]⚠️  Incomplete LangFuse configuration — skipping[/yellow]")
+        return None, {}
+
+    console.print(f"[green]✅[/green] External LangFuse configured: {host}")
+    return 'external', {
+        'host': host,
+        'public_key': public_key,
+        'secret_key': secret_key,
+    }
+
+
 def main():
     """Main orchestration logic"""
     console.print("🎉 [bold green]Welcome to Chronicle![/bold green]\n")
@@ -564,6 +669,11 @@ def main():
     if not selected_services:
         console.print("\n[yellow]No services selected. Exiting.[/yellow]")
         return
+
+    # LangFuse Configuration (before service setup so keys can be passed to backend)
+    langfuse_mode, langfuse_external = setup_langfuse_choice()
+    if langfuse_mode == 'local' and 'langfuse' not in selected_services:
+        selected_services.append('langfuse')
 
     # HF Token Configuration (if services require it)
     hf_token = setup_hf_token_if_needed(selected_services)
@@ -623,41 +733,40 @@ def main():
 
             console.print(f"[green]✅[/green] HTTPS configured for: {server_ip}")
 
-    # Obsidian/Neo4j Integration
-    obsidian_enabled = False
+    # Neo4j Configuration (always required - used by Knowledge Graph)
     neo4j_password = None
+    obsidian_enabled = False
 
-    # Check if advanced backend is selected
     if 'advanced' in selected_services:
-        console.print("\n🗂️ [bold cyan]Obsidian/Neo4j Integration[/bold cyan]")
+        console.print("\n🗄️ [bold cyan]Neo4j Configuration[/bold cyan]")
+        console.print("Neo4j is used for Knowledge Graph (entity/relationship extraction from conversations)")
+        console.print()
+
+        # Always prompt for Neo4j password (masked input)
+        try:
+            console.print("Neo4j password (min 8 chars) [leave empty for default: neo4jpassword]")
+            neo4j_password = prompt_password("Neo4j password", min_length=8)
+        except (EOFError, KeyboardInterrupt):
+            neo4j_password = "neo4jpassword"
+            console.print("Using default password")
+        if not neo4j_password:
+            neo4j_password = "neo4jpassword"
+
+        console.print("[green]✅[/green] Neo4j configured")
+
+        # Obsidian is optional (graph-based knowledge management for vault notes)
+        console.print("\n🗂️ [bold cyan]Obsidian Integration (Optional)[/bold cyan]")
         console.print("Enable graph-based knowledge management for Obsidian vault notes")
         console.print()
 
         try:
-            obsidian_enabled = Confirm.ask("Enable Obsidian/Neo4j integration?", default=False)
+            obsidian_enabled = Confirm.ask("Enable Obsidian integration?", default=False)
         except EOFError:
             console.print("Using default: No")
             obsidian_enabled = False
 
         if obsidian_enabled:
-            console.print("[blue][INFO][/blue] Neo4j will be configured for graph-based memory storage")
-            console.print()
-
-            # Prompt for Neo4j password
-            while True:
-                try:
-                    neo4j_password = console.input("Neo4j password (min 8 chars) [default: neo4jpassword]: ").strip()
-                    if not neo4j_password:
-                        neo4j_password = "neo4jpassword"
-                    if len(neo4j_password) >= 8:
-                        break
-                    console.print("[yellow][WARNING][/yellow] Password must be at least 8 characters")
-                except EOFError:
-                    neo4j_password = "neo4jpassword"
-                    console.print(f"Using default password")
-                    break
-
-            console.print("[green]✅[/green] Obsidian/Neo4j integration will be configured")
+            console.print("[green]✅[/green] Obsidian integration will be configured")
 
     # Pure Delegation - Run Each Service Setup
     console.print(f"\n📋 [bold]Setting up {len(selected_services)} services...[/bold]")
@@ -667,8 +776,11 @@ def main():
 
     success_count = 0
     failed_services = []
-    langfuse_public_key = None
-    langfuse_secret_key = None
+
+    # Pre-populate langfuse keys from external config (if user chose external mode)
+    langfuse_public_key = langfuse_external.get('public_key')
+    langfuse_secret_key = langfuse_external.get('secret_key')
+    langfuse_host = langfuse_external.get('host')  # None for local (backend defaults to langfuse-web)
 
     # Determine setup order: langfuse first (to get API keys), then backend (with langfuse keys), then others
     setup_order = []
@@ -689,10 +801,11 @@ def main():
         if run_service_setup(service, selected_services, https_enabled, server_ip,
                             obsidian_enabled, neo4j_password, hf_token, transcription_provider,
                             admin_email=wizard_admin_email, admin_password=wizard_admin_password,
-                            langfuse_public_key=langfuse_public_key, langfuse_secret_key=langfuse_secret_key):
+                            langfuse_public_key=langfuse_public_key, langfuse_secret_key=langfuse_secret_key,
+                            langfuse_host=langfuse_host):
             success_count += 1
 
-            # After langfuse setup, read generated API keys for backend
+            # After local langfuse setup, read generated API keys for backend
             if service == 'langfuse':
                 langfuse_env_path = 'extras/langfuse/.env'
                 langfuse_public_key = read_env_value(langfuse_env_path, 'LANGFUSE_INIT_PROJECT_PUBLIC_KEY')
@@ -707,31 +820,12 @@ def main():
     # without the backend init overwriting them
     setup_plugins()
 
-    # Check for Obsidian/Neo4j configuration (read from config.yml)
-    obsidian_enabled = False
-    if 'advanced' in selected_services and 'advanced' not in failed_services:
-        config_yml_path = Path('config/config.yml')
-        if config_yml_path.exists():
-            try:
-                with open(config_yml_path, 'r') as f:
-                    config_data = yaml.safe_load(f)
-                    obsidian_config = config_data.get('memory', {}).get('obsidian', {})
-                    obsidian_enabled = obsidian_config.get('enabled', False)
-            except Exception as e:
-                console.print(f"[yellow]Warning: Could not read config.yml: {e}[/yellow]")
-
     # Final Summary
     console.print(f"\n🎊 [bold green]Setup Complete![/bold green]")
     console.print(f"✅ {success_count}/{len(selected_services)} services configured successfully")
 
     if failed_services:
         console.print(f"❌ Failed services: {', '.join(failed_services)}")
-
-    # Inform about Obsidian/Neo4j if configured
-    if obsidian_enabled:
-        console.print(f"\n📚 [bold cyan]Obsidian Integration Detected[/bold cyan]")
-        console.print("   Neo4j will be automatically started with the 'obsidian' profile")
-        console.print("   when you start the backend service.")
     
     # Next Steps
     console.print("\n📖 [bold]Next Steps:[/bold]")
@@ -768,10 +862,14 @@ def main():
         configured_services.append("langfuse")
 
     # LangFuse prompt management info
-    if 'langfuse' in selected_services and 'langfuse' not in failed_services:
+    if langfuse_mode == 'local' and 'langfuse' not in failed_services:
         console.print("")
         console.print("[bold cyan]Prompt Management:[/bold cyan] Once services are running, edit AI prompts at:")
         console.print("   [link=http://localhost:3002/project/chronicle/prompts]http://localhost:3002/project/chronicle/prompts[/link]")
+    elif langfuse_mode == 'external' and langfuse_host:
+        console.print("")
+        console.print(f"[bold cyan]Prompt Management:[/bold cyan] Edit AI prompts at your LangFuse instance:")
+        console.print(f"   {langfuse_host}")
 
     if configured_services:
         service_list = " ".join(configured_services)

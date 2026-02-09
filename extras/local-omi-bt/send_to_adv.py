@@ -32,6 +32,28 @@ DEVICE_NAME = "omi-bt"  # Device name for client identification
 
 logger = logging.getLogger(__name__)
 
+# Module-level websocket reference for sending control messages (e.g., button events)
+_active_websocket = None
+
+
+async def send_button_event(button_state: str) -> None:
+    """Send a button event to the backend via the active WebSocket connection.
+
+    Args:
+        button_state: Button state string (e.g., "SINGLE_TAP", "DOUBLE_TAP")
+    """
+    if _active_websocket is None:
+        logger.debug("No active websocket, dropping button event: %s", button_state)
+        return
+
+    event = {
+        "type": "button-event",
+        "data": {"state": button_state},
+        "payload_length": None,
+    }
+    await _active_websocket.send(json.dumps(event) + "\n")
+    logger.info("Sent button event to backend: %s", button_state)
+
 
 async def get_jwt_token(username: str, password: str) -> Optional[str]:
     """
@@ -152,6 +174,8 @@ async def stream_to_backend(stream: AsyncGenerator[AudioChunk, None]):
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
 
+    global _active_websocket
+
     logger.info(f"Connecting to WebSocket: {websocket_uri}")
     async with websockets.connect(
         uri_with_token,
@@ -160,6 +184,8 @@ async def stream_to_backend(stream: AsyncGenerator[AudioChunk, None]):
         ping_timeout=120,      # Wait up to 120 seconds for pong (increased from default 20s)
         close_timeout=10,      # Graceful close timeout
     ) as websocket:
+        _active_websocket = websocket
+
         # Wait for ready message from backend
         ready_msg = await websocket.recv()
         logger.info(f"Backend ready: {ready_msg}")
@@ -217,6 +243,7 @@ async def stream_to_backend(stream: AsyncGenerator[AudioChunk, None]):
             logger.info(f"Sent audio-stop event. Total chunks: {chunk_count}")
 
         finally:
+            _active_websocket = None
             # Clean up receive task
             receive_task.cancel()
             try:

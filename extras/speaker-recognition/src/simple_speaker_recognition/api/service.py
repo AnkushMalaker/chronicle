@@ -63,7 +63,7 @@ def load_speaker_config_from_root() -> dict:
 
 class Settings(BaseSettings):
     """Service configuration settings."""
-    similarity_threshold: float = Field(default=0.15, description="Cosine similarity threshold for speaker identification (0.1-0.3 typical for ECAPA-TDNN)")
+    similarity_threshold: float = Field(default=0.45, description="Cosine similarity threshold for speaker identification")
     data_dir: Path = Field(default_factory=get_data_directory, description="Directory for storing speaker data")
     enrollment_audio_dir: Path = Field(default_factory=lambda: get_data_directory() / "enrollment_audio", description="Directory for storing enrollment audio files")
     max_file_seconds: int = Field(default=180, description="Maximum file duration in seconds")

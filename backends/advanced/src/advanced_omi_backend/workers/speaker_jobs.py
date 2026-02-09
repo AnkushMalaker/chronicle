@@ -279,25 +279,12 @@ async def recognise_speakers_job(
     can_run_pyannote = bool(actual_words) and not provider_has_diarization
 
     if not actual_words and not provider_has_diarization:
-        # No words AND provider didn't diarize - we have a problem
-        # This can happen with VibeVoice if it fails to return segments
-        logger.warning(
-            f"🎤 No word timestamps available and provider didn't diarize. "
-            f"Speaker recognition cannot improve segments."
-        )
-        # Keep existing segments and return success (we can't do better)
-        if transcript_version.segments:
-            return {
-                "success": True,
-                "conversation_id": conversation_id,
-                "version_id": version_id,
-                "speaker_recognition_enabled": True,
-                "identified_speakers": [],
-                "segment_count": len(transcript_version.segments),
-                "skip_reason": "No word timestamps available for pyannote, keeping provider segments",
-                "processing_time_seconds": time.time() - start_time
-            }
-        else:
+        if not transcript_version.segments:
+            # No words, no provider diarization, no existing segments - nothing we can do
+            logger.warning(
+                f"🎤 No word timestamps available, provider didn't diarize, "
+                f"and no existing segments to identify."
+            )
             return {
                 "success": False,
                 "conversation_id": conversation_id,
@@ -305,11 +292,37 @@ async def recognise_speakers_job(
                 "error": "No word timestamps and no segments available",
                 "processing_time_seconds": time.time() - start_time
             }
+        # Has existing segments - fall through to run identification on them
+        logger.info(
+            f"🎤 No word timestamps for pyannote re-diarization, but "
+            f"{len(transcript_version.segments)} existing segments found. "
+            f"Running speaker identification on existing segments."
+        )
+
+    # Determine speaker identification mode:
+    # 1. Config toggle (per_segment_speaker_id) enables per-segment globally
+    # 2. Manual reprocess trigger also enables per-segment for that run
+    from advanced_omi_backend.config import get_misc_settings
+    misc_config = get_misc_settings()
+    per_segment_config = misc_config.get("per_segment_speaker_id", False)
+
+    trigger = transcript_version.metadata.get("trigger", "")
+    is_reprocess = trigger == "manual_reprocess"
+
+    use_per_segment = per_segment_config or is_reprocess
+    if use_per_segment:
+        reason = []
+        if per_segment_config:
+            reason.append("config toggle enabled")
+        if is_reprocess:
+            reason.append("manual reprocess")
+        logger.info(f"🎤 Per-segment identification mode active ({', '.join(reason)})")
 
     try:
-        if provider_has_diarization and transcript_version.segments:
-            # Provider already diarized (e.g. VibeVoice) - use segment-level identification
-            logger.info(f"🎤 Using segment-level speaker identification for provider-diarized segments")
+        if transcript_version.segments and not can_run_pyannote:
+            # Have existing segments and can't/shouldn't run pyannote - do identification only
+            # Covers: provider already diarized, no word timestamps but segments exist, etc.
+            logger.info(f"🎤 Using segment-level speaker identification on {len(transcript_version.segments)} existing segments")
             segments_data = [
                 {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker}
                 for s in transcript_version.segments
@@ -318,6 +331,8 @@ async def recognise_speakers_job(
                 conversation_id=conversation_id,
                 segments=segments_data,
                 user_id=user_id,
+                per_segment=use_per_segment,
+                min_segment_duration=0.5 if use_per_segment else 1.5,
             )
         else:
             # Standard path: full diarization + identification via speaker service
@@ -437,6 +452,20 @@ async def recognise_speakers_job(
         speaker_segments = speaker_result["segments"]
         logger.info(f"🎤 Speaker recognition returned {len(speaker_segments)} segments")
 
+        # Build mapping for unknown speakers: diarization_label -> "Unknown Speaker N"
+        unknown_label_map = {}
+        unknown_counter = 1
+        for seg in speaker_segments:
+            identified_as = seg.get("identified_as")
+            if not identified_as:
+                label = seg.get("speaker", "Unknown")
+                if label not in unknown_label_map:
+                    unknown_label_map[label] = f"Unknown Speaker {unknown_counter}"
+                    unknown_counter += 1
+
+        if unknown_label_map:
+            logger.info(f"🎤 Unknown speaker mapping: {unknown_label_map}")
+
         # Update the transcript version segments with identified speakers
         # Filter out empty segments (diarization sometimes creates segments with no text)
         updated_segments = []
@@ -457,7 +486,7 @@ async def recognise_speakers_job(
                 logger.debug(f"Filtered segment with invalid timing: {seg}")
                 continue
 
-            speaker_name = seg.get("identified_as") or seg.get("speaker", "Unknown")
+            speaker_name = seg.get("identified_as") or unknown_label_map.get(seg.get("speaker", "Unknown"), "Unknown Speaker")
 
             # Extract words from speaker service response (already matched to this segment)
             words_data = seg.get("words", [])
@@ -502,6 +531,7 @@ async def recognise_speakers_job(
 
         transcript_version.metadata["speaker_recognition"] = {
             "enabled": True,
+            "identification_mode": "per_segment" if use_per_segment else "majority_vote",
             "identified_speakers": list(identified_speakers),
             "speaker_count": len(identified_speakers),
             "total_segments": len(speaker_segments),

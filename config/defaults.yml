@@ -286,6 +286,15 @@ speaker_recognition:
   deepgram_api_key: ${oc.env:DEEPGRAM_API_KEY,''}
 
 # ===========================
+# ASR Services Configuration
+# ===========================
+asr_services:
+  vibevoice:
+    batch_threshold_seconds: 300    # Audio longer than this triggers batching
+    batch_duration_seconds: 240     # Non-overlapping window size
+    batch_overlap_seconds: 30       # Overlap between windows
+
+# ===========================
 # Chat Configuration
 # ===========================
 chat:

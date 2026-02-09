@@ -476,6 +476,202 @@ class MemoryService(MemoryServiceBase):
         self.vector_store = None
         memory_logger.info("Memory service shut down")
 
+    async def reprocess_memory(
+        self,
+        transcript: str,
+        client_id: str,
+        source_id: str,
+        user_id: str,
+        user_email: str,
+        transcript_diff: Optional[list] = None,
+        previous_transcript: Optional[str] = None,
+    ) -> Tuple[bool, List[str]]:
+        """Reprocess memories after speaker re-identification.
+
+        Instead of extracting fresh facts from scratch, this method:
+        1. Fetches existing memories for this specific conversation
+        2. Computes what changed (speaker labels) between old and new transcript
+        3. Asks the LLM to make targeted updates to the existing memories
+
+        Falls back to normal ``add_memory`` when there are no existing
+        memories or no meaningful diff.
+
+        Args:
+            transcript: Updated full transcript (with corrected speakers)
+            client_id: Client identifier
+            source_id: Conversation identifier
+            user_id: User identifier
+            user_email: User email
+            transcript_diff: List of dicts describing speaker changes
+            previous_transcript: Previous transcript text (before changes)
+
+        Returns:
+            Tuple of (success, affected_memory_ids)
+        """
+        await self._ensure_initialized()
+
+        try:
+            # 1. Get existing memories for this conversation
+            existing_memories = await self.vector_store.get_memories_by_source(
+                user_id, source_id
+            )
+
+            # 2. If no existing memories, fall back to normal extraction
+            if not existing_memories:
+                memory_logger.info(
+                    f"🔄 Reprocess: no existing memories for {source_id}, "
+                    f"falling back to normal extraction"
+                )
+                return await self.add_memory(
+                    transcript, client_id, source_id, user_id, user_email,
+                    allow_update=True,
+                )
+
+            # 3. If no diff provided, fall back to normal extraction
+            if not transcript_diff:
+                memory_logger.info(
+                    f"🔄 Reprocess: no transcript diff for {source_id}, "
+                    f"falling back to normal extraction"
+                )
+                return await self.add_memory(
+                    transcript, client_id, source_id, user_id, user_email,
+                    allow_update=True,
+                )
+
+            # 4. Format the diff for the LLM
+            diff_text = self._format_speaker_diff(transcript_diff)
+
+            memory_logger.info(
+                f"🔄 Reprocess: {len(existing_memories)} existing memories, "
+                f"{len(transcript_diff)} speaker changes for {source_id}"
+            )
+
+            # 5. Build temp ID mapping (avoid hallucinated UUIDs)
+            temp_uuid_mapping = {}
+            existing_memory_dicts = []
+            for idx, mem in enumerate(existing_memories):
+                temp_uuid_mapping[str(idx)] = mem.id
+                existing_memory_dicts.append({"id": str(idx), "text": mem.content})
+
+            # 6. Ask LLM for targeted update actions
+            try:
+                actions_obj = await self.llm_provider.propose_reprocess_actions(
+                    existing_memories=existing_memory_dicts,
+                    diff_context=diff_text,
+                    new_transcript=transcript,
+                )
+                memory_logger.info(
+                    f"🔄 Reprocess LLM returned actions: {actions_obj}"
+                )
+            except NotImplementedError:
+                memory_logger.warning(
+                    "LLM provider does not support propose_reprocess_actions, "
+                    "falling back to normal extraction"
+                )
+                return await self.add_memory(
+                    transcript, client_id, source_id, user_id, user_email,
+                    allow_update=True,
+                )
+            except Exception as e:
+                memory_logger.error(f"Reprocess LLM call failed: {e}")
+                return await self.add_memory(
+                    transcript, client_id, source_id, user_id, user_email,
+                    allow_update=True,
+                )
+
+            # 7. Normalize and pre-generate embeddings for ADD/UPDATE actions
+            actions_list = self._normalize_actions(actions_obj)
+
+            texts_needing_embeddings = [
+                action.get("text")
+                for action in actions_list
+                if action.get("event") in ("ADD", "UPDATE")
+                and action.get("text")
+                and isinstance(action.get("text"), str)
+            ]
+
+            text_to_embedding = {}
+            if texts_needing_embeddings:
+                try:
+                    embeddings = await asyncio.wait_for(
+                        self.llm_provider.generate_embeddings(texts_needing_embeddings),
+                        timeout=self.config.timeout_seconds,
+                    )
+                    text_to_embedding = dict(
+                        zip(texts_needing_embeddings, embeddings, strict=True)
+                    )
+                except Exception as e:
+                    memory_logger.warning(
+                        f"Batch embedding generation failed for reprocess: {e}"
+                    )
+
+            # 8. Apply the actions (reuses existing infrastructure)
+            created_ids = await self._apply_memory_actions(
+                actions_list,
+                text_to_embedding,
+                temp_uuid_mapping,
+                client_id,
+                source_id,
+                user_id,
+                user_email,
+            )
+
+            memory_logger.info(
+                f"✅ Reprocess complete for {source_id}: "
+                f"{len(created_ids)} memories affected"
+            )
+            return True, created_ids
+
+        except Exception as e:
+            memory_logger.error(
+                f"❌ Reprocess memory failed for {source_id}: {e}"
+            )
+            # Fall back to normal extraction on any unexpected error
+            memory_logger.info(
+                f"🔄 Falling back to normal extraction after reprocess error"
+            )
+            return await self.add_memory(
+                transcript, client_id, source_id, user_id, user_email,
+                allow_update=True,
+            )
+
+    @staticmethod
+    def _format_speaker_diff(transcript_diff: list) -> str:
+        """Format a transcript diff into a human-readable string for the LLM.
+
+        Args:
+            transcript_diff: List of change dicts from
+                ``compute_speaker_diff``
+
+        Returns:
+            Formatted multi-line string describing the changes
+        """
+        if not transcript_diff:
+            return "No changes detected."
+
+        lines = []
+        for change in transcript_diff:
+            change_type = change.get("type", "unknown")
+            if change_type == "speaker_change":
+                lines.append(
+                    f"- \"{change.get('text', '')}\" "
+                    f"was spoken by \"{change.get('old_speaker', '?')}\" "
+                    f"but is now identified as \"{change.get('new_speaker', '?')}\""
+                )
+            elif change_type == "text_change":
+                lines.append(
+                    f"- Segment by {change.get('speaker', '?')}: "
+                    f"text changed from \"{change.get('old_text', '')}\" "
+                    f"to \"{change.get('new_text', '')}\""
+                )
+            elif change_type == "new_segment":
+                lines.append(
+                    f"- New segment: {change.get('speaker', '?')}: "
+                    f"\"{change.get('text', '')}\""
+                )
+
+        return "\n".join(lines)
+
     # Private helper methods
 
     def _deduplicate_memories(self, memories_text: List[str]) -> List[str]:

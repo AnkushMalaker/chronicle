@@ -40,6 +40,7 @@ services:
       - ./data/debug_dir:/app/debug_dir
       - ./data:/app/data
       - ../../config:/app/config  # Mount entire config directory (includes config.yml, defaults.yml, plugins.yml)
+      - ../../plugins:/app/plugins  # External plugins directory
     environment:
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
@@ -95,6 +96,7 @@ services:
       - ./data/audio_chunks:/app/audio_chunks
       - ./data:/app/data
       - ../../config:/app/config  # Mount entire config directory (includes config.yml, defaults.yml, plugins.yml)
+      - ../../plugins:/app/plugins  # External plugins directory
     environment:
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
@@ -212,8 +214,8 @@ services:
       - "6033:6033" # gRPC
       - "6034:6034" # HTTP
     volumes:
-      - ./data/qdrant_data:/qdrant/storage 
-  
+      - ./data/qdrant_data:/qdrant/storage
+    restart: unless-stopped
 
   mongo:
     image: mongo:8.0.14
@@ -227,6 +229,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
@@ -235,6 +238,7 @@ services:
     volumes:
       - ./data/redis_data:/data
     command: redis-server --appendonly yes
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -267,9 +271,6 @@ services:
       timeout: 10s
       retries: 5
       start_period: 30s
-    profiles:
-      - obsidian
-      - knowledge-graph
 
   # ollama:
   #   image: ollama/ollama:latest

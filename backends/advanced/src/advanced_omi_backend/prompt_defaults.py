@@ -261,6 +261,60 @@ You are a memory summarization system that records and preserves the complete in
     )
 
     # ------------------------------------------------------------------
+    # memory.reprocess_speaker_update
+    # ------------------------------------------------------------------
+    registry.register_default(
+        "memory.reprocess_speaker_update",
+        template="""\
+You are a memory correction system. A conversation's transcript has been reprocessed with \
+updated speaker identification. The words spoken are the same, but speakers have been \
+re-identified more accurately. Your job is to update the existing memories so they \
+correctly attribute information to the right people.
+
+## Rules
+
+1. **UPDATE** — If a memory attributes information to a speaker whose label changed, \
+rewrite it with the correct speaker name. Keep the same `id`.
+2. **NONE** — If the memory is unaffected by the speaker changes, leave it unchanged.
+3. **DELETE** — If a memory is now nonsensical or completely wrong because the speaker \
+was misidentified (e.g., personal traits wrongly attributed), remove it.
+4. **ADD** — If the corrected transcript reveals important new facts that become clear \
+only with the correct speaker attribution, add them.
+
+## Important guidelines
+
+- Focus on **speaker attribution corrections**. This is the primary reason for reprocessing.
+- A change from "Speaker 0" to "John" means memories referencing "Speaker 0" must now \
+reference "John".
+- A change from "Alice" to "Bob" means facts previously attributed to "Alice" must be \
+attributed to "Bob" instead — this is critical because it changes *who* said or did something.
+- Preserve the factual content when only the speaker name changes.
+- Do NOT add memories that duplicate existing ones.
+- When you UPDATE, always include `old_memory` with the previous text.
+
+## Output format (strict JSON only)
+
+Return ONLY a valid JSON object with this structure:
+
+{
+    "memory": [
+        {
+            "id": "<existing_id or new_N for additions>",
+            "event": "UPDATE|NONE|DELETE|ADD",
+            "text": "<corrected or new memory text>",
+            "old_memory": "<previous memory text, only for UPDATE>"
+        }
+    ]
+}
+
+Do not output any text outside the JSON object.
+""",
+        name="Reprocess Speaker Update",
+        description="Updates existing memories after speaker re-identification to correct speaker attribution.",
+        category="memory",
+    )
+
+    # ------------------------------------------------------------------
     # memory.temporal_extraction
     # ------------------------------------------------------------------
     registry.register_default(
@@ -343,44 +397,23 @@ If no relevant memories are available, respond normally based on the conversatio
     )
 
     # ------------------------------------------------------------------
-    # conversation.title
+    # conversation.title_summary
     # ------------------------------------------------------------------
     registry.register_default(
-        "conversation.title",
+        "conversation.title_summary",
         template="""\
-Generate a concise, descriptive title (3-6 words) for this conversation transcript.
+Based on the full conversation transcript below, generate a concise title and a brief summary.
+
+Respond in this exact format:
+Title: <concise descriptive title, 3-6 words, no speaker names>
+Summary: <brief summary, 1-2 sentences, max 120 characters>
 
 Rules:
-- Maximum 6 words
-- Capture the main topic or theme
-- Do NOT include speaker names or participants
-- No quotes or special characters
-- Examples: "Planning Weekend Trip", "Work Project Discussion", "Medical Appointment"
-
-Title:""",
-        name="Conversation Title",
-        description="Generates a short title for a conversation from its transcript.",
-        category="conversation",
-    )
-
-    # ------------------------------------------------------------------
-    # conversation.short_summary
-    # ------------------------------------------------------------------
-    registry.register_default(
-        "conversation.short_summary",
-        template="""\
-Generate a brief, informative summary (1-2 sentences, max 120 characters) for this conversation.
-
-Rules:
-- Maximum 120 characters
-- 1-2 complete sentences
-{{speaker_instruction}}- Capture key topics and outcomes
-- Use present tense
-- Be specific and informative
-
-Summary:""",
-        name="Conversation Short Summary",
-        description="Generates a brief 1-2 sentence summary of a conversation.",
+- Title: Maximum 6 words, capture the main topic/theme, no quotes or special characters
+- Summary: Maximum 120 characters, capture key topics and outcomes, use present tense
+{{speaker_instruction}}""",
+        name="Conversation Title & Summary",
+        description="Generates both title and short summary from full conversation context in one LLM call.",
         category="conversation",
         variables=["speaker_instruction"],
         is_dynamic=True,
@@ -484,6 +517,42 @@ Only return valid JSON, no additional text.""",
         name="Entity Extraction",
         description="Extracts entities, relationships, and promises from conversation transcripts.",
         category="knowledge_graph",
+    )
+
+    # ------------------------------------------------------------------
+    # asr.hot_words
+    # ------------------------------------------------------------------
+    registry.register_default(
+        "asr.hot_words",
+        template="hey vivi, chronicle, omi",
+        name="ASR Hot Words",
+        description="Comma-separated hot words for speech recognition. "
+        "For Deepgram: boosts keyword recognition via keyterm. "
+        "For VibeVoice: passed as context_info to guide the LLM backbone. "
+        "Supports names, technical terms, and domain-specific vocabulary.",
+        category="asr",
+    )
+
+    # ------------------------------------------------------------------
+    # asr.jargon_extraction
+    # ------------------------------------------------------------------
+    registry.register_default(
+        "asr.jargon_extraction",
+        template="""\
+Extract up to 20 key jargon terms, names, and technical vocabulary from these memory facts.
+Return ONLY a comma-separated list of words or short phrases (1-3 words each).
+Focus on: proper nouns, technical terms, domain-specific vocabulary, names of people/places/products.
+Skip generic everyday words.
+
+Memory facts:
+{{memories}}
+
+Jargon:""",
+        name="ASR Jargon Extraction",
+        description="Extracts key jargon terms from user memories for ASR context boosting.",
+        category="asr",
+        variables=["memories"],
+        is_dynamic=True,
     )
 
     # ------------------------------------------------------------------

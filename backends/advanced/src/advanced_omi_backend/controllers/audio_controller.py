@@ -8,6 +8,7 @@ Also includes audio cropping operations that work with the Conversation model.
 """
 
 import logging
+import os
 import time
 import uuid
 
@@ -24,7 +25,10 @@ from advanced_omi_backend.models.user import User
 from advanced_omi_backend.services.transcription import is_transcription_available
 from advanced_omi_backend.utils.audio_chunk_utils import convert_audio_to_chunks
 from advanced_omi_backend.utils.audio_utils import (
+    SUPPORTED_AUDIO_EXTENSIONS,
+    VIDEO_EXTENSIONS,
     AudioValidationError,
+    convert_any_to_wav,
     validate_and_prepare_audio,
 )
 from advanced_omi_backend.workers.transcription_jobs import (
@@ -71,22 +75,38 @@ async def upload_and_process_audio_files(
 
         for file_index, file in enumerate(files):
             try:
-                # Validate file type (only WAV for now)
-                if not file.filename or not file.filename.lower().endswith(".wav"):
+                # Validate file type
+                filename = file.filename or "unknown"
+                _, ext = os.path.splitext(filename.lower())
+                if not ext or ext not in SUPPORTED_AUDIO_EXTENSIONS:
+                    supported = ", ".join(sorted(SUPPORTED_AUDIO_EXTENSIONS))
                     processed_files.append({
-                        "filename": file.filename or "unknown",
+                        "filename": filename,
                         "status": "error",
-                        "error": "Only WAV files are currently supported",
+                        "error": f"Unsupported format '{ext}'. Supported: {supported}",
                     })
                     continue
 
+                is_video_source = ext in VIDEO_EXTENSIONS
+
                 audio_logger.info(
-                    f"📁 Uploading file {file_index + 1}/{len(files)}: {file.filename}"
+                    f"📁 Uploading file {file_index + 1}/{len(files)}: {filename}"
                 )
 
                 # Read file content
                 content = await file.read()
 
+                # Convert non-WAV files to WAV via FFmpeg
+                if ext != ".wav":
+                    try:
+                        content = await convert_any_to_wav(content, ext)
+                    except AudioValidationError as e:
+                        processed_files.append({
+                            "filename": filename,
+                            "status": "error",
+                            "error": str(e),
+                        })
+                        continue
 
                 # Track external source for deduplication (Google Drive, etc.)
                 external_source_id = None
@@ -95,7 +115,7 @@ async def upload_and_process_audio_files(
                     external_source_id = getattr(file, "file_id", None) or getattr(file, "audio_uuid", None)
                     external_source_type = "gdrive"
                     if not external_source_id:
-                        audio_logger.warning(f"Missing file_id for gdrive file: {file.filename}")
+                        audio_logger.warning(f"Missing file_id for gdrive file: {filename}")
                 timestamp = int(time.time() * 1000)
 
                 # Validate and prepare audio (read format from WAV file)
@@ -108,21 +128,18 @@ async def upload_and_process_audio_files(
                     )
                 except AudioValidationError as e:
                     processed_files.append({
-                        "filename": file.filename,
+                        "filename": filename,
                         "status": "error",
                         "error": str(e),
                     })
                     continue
 
                 audio_logger.info(
-                    f"📊 {file.filename}: {duration:.1f}s ({sample_rate}Hz, {channels}ch, {sample_width} bytes/sample)"
+                    f"📊 {filename}: {duration:.1f}s ({sample_rate}Hz, {channels}ch, {sample_width} bytes/sample)"
                 )
 
-                # Create conversation immediately for uploaded files (conversation_id auto-generated)
-                version_id = str(uuid.uuid4())
-
                 # Generate title from filename
-                title = file.filename.rsplit('.', 1)[0][:50] if file.filename else "Uploaded Audio"
+                title = filename.rsplit('.', 1)[0][:50] if filename != "unknown" else "Uploaded Audio"
 
                 conversation = create_conversation(
                     user_id=user.user_id,
@@ -154,7 +171,7 @@ async def upload_and_process_audio_files(
                     # Handle validation errors (e.g., file too long)
                     audio_logger.error(f"Audio validation failed: {val_error}")
                     processed_files.append({
-                        "filename": file.filename,
+                        "filename": filename,
                         "status": "error",
                         "error": str(val_error),
                     })
@@ -167,7 +184,7 @@ async def upload_and_process_audio_files(
                         exc_info=True
                     )
                     processed_files.append({
-                        "filename": file.filename,
+                        "filename": filename,
                         "status": "error",
                         "error": f"Audio conversion failed: {str(chunk_error)}",
                     })
@@ -187,7 +204,7 @@ async def upload_and_process_audio_files(
                         conversation_id,
                         version_id,
                         "batch",  # trigger
-                        job_timeout=1800,  # 30 minutes
+                        job_timeout=900,  # 15 minutes
                         result_ttl=JOB_RESULT_TTL,
                         job_id=transcribe_job_id,
                         description=f"Transcribe uploaded file {conversation_id[:8]}",
@@ -209,15 +226,18 @@ async def upload_and_process_audio_files(
                     client_id=client_id  # Pass client_id for UI tracking
                 )
 
-                processed_files.append({
-                    "filename": file.filename,
+                file_result = {
+                    "filename": filename,
                     "status": "started",  # RQ standard: job has been enqueued
                     "conversation_id": conversation_id,
                     "transcript_job_id": transcription_job.id if transcription_job else None,
                     "speaker_job_id": job_ids['speaker_recognition'],
                     "memory_job_id": job_ids['memory'],
                     "duration_seconds": round(duration, 2),
-                })
+                }
+                if is_video_source:
+                    file_result["note"] = "Audio extracted from video file"
+                processed_files.append(file_result)
 
                 # Build job chain description
                 job_chain = []
@@ -229,23 +249,23 @@ async def upload_and_process_audio_files(
                     job_chain.append(job_ids['memory'])
 
                 audio_logger.info(
-                    f"✅ Processed {file.filename} → conversation {conversation_id}, "
+                    f"✅ Processed {filename} → conversation {conversation_id}, "
                     f"jobs: {' → '.join(job_chain) if job_chain else 'none'}"
                 )
 
             except (OSError, IOError) as e:
                 # File I/O errors during audio processing
-                audio_logger.exception(f"File I/O error processing {file.filename}")
+                audio_logger.exception(f"File I/O error processing {filename}")
                 processed_files.append({
-                    "filename": file.filename or "unknown",
+                    "filename": filename,
                     "status": "error",
                     "error": str(e),
                 })
             except Exception as e:
                 # Unexpected errors during file processing
-                audio_logger.exception(f"Unexpected error processing file {file.filename}")
+                audio_logger.exception(f"Unexpected error processing file {filename}")
                 processed_files.append({
-                    "filename": file.filename or "unknown",
+                    "filename": filename,
                     "status": "error",
                     "error": str(e),
                 })

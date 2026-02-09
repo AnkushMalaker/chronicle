@@ -19,6 +19,7 @@ from qdrant_client.models import (
     FilterSelector,
     MatchValue,
     PointStruct,
+    Range,
     VectorParams,
 )
 
@@ -445,7 +446,112 @@ class QdrantVectorStore(VectorStoreBase):
             memory_logger.error(f"Qdrant get memory failed for {memory_id}: {e}")
             return None
 
+    async def get_memories_by_source(
+        self, user_id: str, source_id: str, limit: int = 100
+    ) -> List[MemoryEntry]:
+        """Get all memories for a specific source (conversation) for a user.
 
+        Filters by both user_id and source_id in metadata to return only
+        memories extracted from a particular conversation.
 
+        Args:
+            user_id: User identifier
+            source_id: Source/conversation identifier
+            limit: Maximum number of memories to return
 
+        Returns:
+            List of MemoryEntry objects for the specified source
+        """
+        try:
+            search_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="metadata.user_id",
+                        match=MatchValue(value=user_id),
+                    ),
+                    FieldCondition(
+                        key="metadata.source_id",
+                        match=MatchValue(value=source_id),
+                    ),
+                ]
+            )
+
+            results = await self.client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=search_filter,
+                limit=limit,
+            )
+
+            memories = []
+            for point in results[0]:
+                memory = MemoryEntry(
+                    id=str(point.id),
+                    content=point.payload.get("content", ""),
+                    metadata=point.payload.get("metadata", {}),
+                    created_at=point.payload.get("created_at"),
+                    updated_at=point.payload.get("updated_at"),
+                )
+                memories.append(memory)
+
+            memory_logger.info(
+                f"Found {len(memories)} memories for source {source_id} (user {user_id})"
+            )
+            return memories
+
+        except Exception as e:
+            memory_logger.error(f"Qdrant get memories by source failed: {e}")
+            return []
+
+    async def get_recent_memories(
+        self, user_id: str, since_timestamp: int, limit: int = 100
+    ) -> List[MemoryEntry]:
+        """Get memories created after a given unix timestamp for a user.
+
+        Args:
+            user_id: User identifier
+            since_timestamp: Unix timestamp; only memories at or after this time are returned
+            limit: Maximum number of memories to return
+
+        Returns:
+            List of MemoryEntry objects
+        """
+        try:
+            search_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="metadata.user_id",
+                        match=MatchValue(value=user_id),
+                    ),
+                    FieldCondition(
+                        key="metadata.timestamp",
+                        range=Range(gte=since_timestamp),
+                    ),
+                ]
+            )
+
+            results = await self.client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=search_filter,
+                limit=limit,
+            )
+
+            memories = []
+            for point in results[0]:
+                memory = MemoryEntry(
+                    id=str(point.id),
+                    content=point.payload.get("content", ""),
+                    metadata=point.payload.get("metadata", {}),
+                    created_at=point.payload.get("created_at"),
+                    updated_at=point.payload.get("updated_at"),
+                )
+                memories.append(memory)
+
+            memory_logger.info(
+                f"Found {len(memories)} recent memories since {since_timestamp} for user {user_id}"
+            )
+            return memories
+
+        except Exception as e:
+            memory_logger.error(f"Qdrant get recent memories failed: {e}")
+            return []
 

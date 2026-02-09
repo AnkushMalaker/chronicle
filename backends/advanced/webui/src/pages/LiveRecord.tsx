@@ -1,4 +1,4 @@
-import { Radio, Zap, Archive } from 'lucide-react'
+import { Radio, Zap, Archive, Settings } from 'lucide-react'
 import { useRecording } from '../contexts/RecordingContext'
 import SimplifiedControls from '../components/audio/SimplifiedControls'
 import StatusDisplay from '../components/audio/StatusDisplay'
@@ -53,6 +53,34 @@ export default function LiveRecord() {
           </button>
         </div>
       </div>
+
+      {/* Microphone Selector */}
+      {recording.availableDevices.length > 1 && (
+        <div className="mb-4 flex items-center gap-2">
+          <Settings className="h-4 w-4 text-gray-500 dark:text-gray-400 flex-shrink-0" />
+          <label className="text-sm font-medium text-gray-700 dark:text-gray-300 flex-shrink-0">
+            Microphone:
+          </label>
+          <select
+            value={recording.selectedDeviceId ?? ''}
+            onChange={(e) => recording.setSelectedDeviceId(e.target.value || null)}
+            disabled={recording.isRecording}
+            className={`
+              flex-1 min-w-0 text-sm px-2 py-1.5 rounded-lg border
+              bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100
+              border-gray-300 dark:border-gray-600
+              ${recording.isRecording ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+            `}
+          >
+            <option value="">System Default</option>
+            {recording.availableDevices.map((device) => (
+              <option key={device.deviceId} value={device.deviceId}>
+                {device.label || `Microphone (${device.deviceId.slice(0, 8)}...)`}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
       {/* Mode Description */}
       <div className="mb-4 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-3">

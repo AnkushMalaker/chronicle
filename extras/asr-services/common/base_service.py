@@ -11,14 +11,13 @@ import time
 from abc import ABC, abstractmethod
 from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
-
 from common.response_models import (
     HealthResponse,
     InfoResponse,
     TranscriptionResult,
 )
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +50,17 @@ class BaseASRService(ABC):
         pass
 
     @abstractmethod
-    async def transcribe(self, audio_file_path: str) -> TranscriptionResult:
+    async def transcribe(
+        self,
+        audio_file_path: str,
+        context_info: Optional[str] = None,
+    ) -> TranscriptionResult:
         """
         Transcribe audio file and return result.
 
         Args:
             audio_file_path: Path to audio file (WAV format, 16kHz mono preferred)
+            context_info: Optional hot words / context string for providers that support it
 
         Returns:
             TranscriptionResult with text, words, segments, etc.
@@ -143,12 +147,16 @@ def create_asr_app(service: BaseASRService) -> FastAPI:
         )
 
     @app.post("/transcribe")
-    async def transcribe(file: UploadFile = File(...)):
+    async def transcribe(
+        file: UploadFile = File(...),
+        context_info: Optional[str] = Form(None),
+    ):
         """
         Transcribe uploaded audio file.
 
         Accepts audio files (WAV, MP3, etc.) and returns transcription
-        with word-level timestamps.
+        with word-level timestamps. Optionally accepts context_info
+        (hot words, speaker names, topics) for providers that support it.
         """
         if not service.is_ready:
             raise HTTPException(status_code=503, detail="Service not ready")
@@ -180,7 +188,10 @@ def create_asr_app(service: BaseASRService) -> FastAPI:
 
             # Transcribe
             transcribe_start = time.time()
-            result = await service.transcribe(tmp_filename)
+            result = await service.transcribe(
+                tmp_filename,
+                context_info=context_info,
+            )
             transcribe_time = time.time() - transcribe_start
             logger.info(f"Transcription completed in {transcribe_time:.3f}s")
 

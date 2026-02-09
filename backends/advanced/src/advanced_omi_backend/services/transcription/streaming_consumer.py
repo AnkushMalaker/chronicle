@@ -19,6 +19,8 @@ from typing import Dict, Optional
 import redis.asyncio as redis
 from redis import exceptions as redis_exceptions
 
+from advanced_omi_backend.plugins.events import PluginEvent
+
 from advanced_omi_backend.client_manager import get_client_owner_async
 from advanced_omi_backend.plugins.router import PluginRouter
 from advanced_omi_backend.services.transcription import get_transcription_provider
@@ -357,7 +359,7 @@ class StreamingTranscriptionConsumer:
             logger.info(f"🎯 Dispatching transcript.streaming event for user {user_id}, transcript: {plugin_data['transcript'][:50]}...")
 
             plugin_results = await self.plugin_router.dispatch_event(
-                event='transcript.streaming',
+                event=PluginEvent.TRANSCRIPT_STREAMING,
                 user_id=user_id,
                 data=plugin_data,
                 metadata={'client_id': session_id}
@@ -387,8 +389,20 @@ class StreamingTranscriptionConsumer:
             "started_at": time.time()
         }
 
+        # Read actual sample rate from the session's audio_format stored in Redis
+        sample_rate = 16000
+        session_key = f"audio:session:{session_id}"
+        try:
+            audio_format_raw = await self.redis_client.hget(session_key, "audio_format")
+            if audio_format_raw:
+                audio_format = json.loads(audio_format_raw)
+                sample_rate = int(audio_format.get("rate", 16000))
+                logger.info(f"📊 Read sample rate {sample_rate}Hz from session {session_id}")
+        except Exception as e:
+            logger.warning(f"Failed to read audio_format from Redis for {session_id}: {e}")
+
         # Start WebSocket connection to Deepgram
-        await self.start_session_stream(session_id)
+        await self.start_session_stream(session_id, sample_rate=sample_rate)
 
         last_id = "0"  # Start from beginning
         stream_ended = False

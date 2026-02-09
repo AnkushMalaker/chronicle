@@ -19,10 +19,12 @@ from advanced_omi_backend.models.annotation import (
     AnnotationStatus,
     AnnotationType,
     DiarizationAnnotationCreate,
+    EntityAnnotationCreate,
     MemoryAnnotationCreate,
     TranscriptAnnotationCreate,
 )
 from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.services.knowledge_graph import get_knowledge_graph_service
 from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.users import User
 
@@ -266,6 +268,25 @@ async def update_annotation_status(
                 except Exception as e:
                     logger.error(f"Error applying transcript suggestion: {e}")
                     # Don't fail the status update if segment update fails
+            elif annotation.is_entity_annotation():
+                # Update entity in Neo4j
+                try:
+                    kg_service = get_knowledge_graph_service()
+                    update_kwargs = {}
+                    if annotation.entity_field == "name":
+                        update_kwargs["name"] = annotation.corrected_text
+                    elif annotation.entity_field == "details":
+                        update_kwargs["details"] = annotation.corrected_text
+                    if update_kwargs:
+                        await kg_service.update_entity(
+                            entity_id=annotation.entity_id,
+                            user_id=annotation.user_id,
+                            **update_kwargs,
+                        )
+                        logger.info(f"Applied entity suggestion to entity {annotation.entity_id}")
+                except Exception as e:
+                    logger.error(f"Error applying entity suggestion: {e}")
+                    # Don't fail the status update if entity update fails
 
         await annotation.save()
         logger.info(f"Updated annotation {annotation_id} status to {status}")
@@ -279,6 +300,113 @@ async def update_annotation_status(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to update annotation status: {str(e)}",
+        )
+
+
+# === Entity Annotation Routes ===
+
+
+@router.post("/entity", response_model=AnnotationResponse)
+async def create_entity_annotation(
+    annotation_data: EntityAnnotationCreate,
+    current_user: User = Depends(current_active_user),
+):
+    """
+    Create annotation for entity edit (name or details correction).
+
+    - Validates user owns the entity
+    - Creates annotation record for jargon/finetuning pipeline
+    - Applies correction to Neo4j immediately
+    - Marked as processed=False for downstream cron consumption
+
+    Dual purpose: entity name corrections feed both the jargon pipeline
+    (domain vocabulary for ASR) and the entity extraction pipeline
+    (improving future extraction accuracy).
+    """
+    try:
+        # Validate entity_field
+        if annotation_data.entity_field not in ("name", "details"):
+            raise HTTPException(
+                status_code=400,
+                detail="entity_field must be 'name' or 'details'",
+            )
+
+        # Verify entity exists and belongs to user
+        kg_service = get_knowledge_graph_service()
+        entity = await kg_service.get_entity(
+            entity_id=annotation_data.entity_id,
+            user_id=current_user.user_id,
+        )
+        if not entity:
+            raise HTTPException(status_code=404, detail="Entity not found")
+
+        # Create annotation
+        annotation = Annotation(
+            annotation_type=AnnotationType.ENTITY,
+            user_id=current_user.user_id,
+            entity_id=annotation_data.entity_id,
+            entity_field=annotation_data.entity_field,
+            original_text=annotation_data.original_text,
+            corrected_text=annotation_data.corrected_text,
+            status=AnnotationStatus.ACCEPTED,
+            processed=False,  # Unprocessed — jargon/finetuning cron will consume later
+        )
+        await annotation.save()
+        logger.info(
+            f"Created entity annotation {annotation.id} for entity {annotation_data.entity_id} "
+            f"field={annotation_data.entity_field}"
+        )
+
+        # Apply correction to Neo4j immediately
+        try:
+            update_kwargs = {}
+            if annotation_data.entity_field == "name":
+                update_kwargs["name"] = annotation_data.corrected_text
+            elif annotation_data.entity_field == "details":
+                update_kwargs["details"] = annotation_data.corrected_text
+
+            await kg_service.update_entity(
+                entity_id=annotation_data.entity_id,
+                user_id=current_user.user_id,
+                **update_kwargs,
+            )
+            logger.info(f"Applied entity correction to Neo4j for entity {annotation_data.entity_id}")
+        except Exception as e:
+            logger.error(f"Error applying entity correction to Neo4j: {e}")
+            # Annotation is saved but Neo4j update failed — log but don't fail the request
+
+        return AnnotationResponse.model_validate(annotation)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating entity annotation: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create entity annotation: {str(e)}",
+        )
+
+
+@router.get("/entity/{entity_id}", response_model=List[AnnotationResponse])
+async def get_entity_annotations(
+    entity_id: str,
+    current_user: User = Depends(current_active_user),
+):
+    """Get all annotations for an entity."""
+    try:
+        annotations = await Annotation.find(
+            Annotation.annotation_type == AnnotationType.ENTITY,
+            Annotation.entity_id == entity_id,
+            Annotation.user_id == current_user.user_id,
+        ).to_list()
+
+        return [AnnotationResponse.model_validate(a) for a in annotations]
+
+    except Exception as e:
+        logger.error(f"Error fetching entity annotations: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch entity annotations: {str(e)}",
         )
 
 

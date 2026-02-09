@@ -51,6 +51,9 @@ class ClientState:
         # NOTE: Removed in-memory transcript storage for single source of truth
         # Transcripts are stored only in MongoDB via TranscriptionManager
 
+        # Markers (e.g., button events) collected during the session
+        self.markers: List[dict] = []
+
         # Track if conversation has been closed
         self.conversation_closed: bool = False
 
@@ -102,6 +105,10 @@ class ClientState:
         """Update timestamp when transcript is received (for timeout detection)."""
         self.last_transcript_time = time.time()
 
+    def add_marker(self, marker: dict) -> None:
+        """Add a marker (e.g., button event) to the current session."""
+        self.markers.append(marker)
+
     def should_start_new_conversation(self) -> bool:
         """Check if we should start a new conversation based on timeout."""
         if self.last_transcript_time is None:
@@ -114,8 +121,7 @@ class ClientState:
         return time_since_last_transcript > timeout_seconds
 
     async def close_current_conversation(self):
-        """Close the current conversation and queue necessary processing."""
-        # Prevent double closure
+        """Clean up in-memory speech segments for the current conversation."""
         if self.conversation_closed:
             audio_logger.debug(
                 f"🔒 Conversation already closed for client {self.client_id}, skipping"
@@ -125,22 +131,14 @@ class ClientState:
         self.conversation_closed = True
 
         if not self.current_audio_uuid:
-            audio_logger.info(f"🔒 No active conversation to close for client {self.client_id}")
             return
 
-        # NOTE: ClientState is legacy V1 code. In V2 architecture, conversation closure
-        # is handled by the websocket controllers using RQ jobs directly.
-        # This method is kept minimal for backward compatibility.
+        audio_logger.info(f"🔒 Closing conversation state for client {self.client_id}")
 
-        audio_logger.info(f"🔒 Closing conversation for client {self.client_id}, audio_uuid: {self.current_audio_uuid}")
-
-        # Clean up speech segments for this conversation
         if self.current_audio_uuid in self.speech_segments:
             del self.speech_segments[self.current_audio_uuid]
         if self.current_audio_uuid in self.current_speech_start:
             del self.current_speech_start[self.current_audio_uuid]
-
-        audio_logger.info(f"✅ Cleaned up state for {self.current_audio_uuid}")
 
     async def start_new_conversation(self):
         """Start a new conversation by closing current and resetting state."""
@@ -151,11 +149,9 @@ class ClientState:
         self.conversation_start_time = time.time()
         self.last_transcript_time = None
         self.conversation_closed = False
+        self.markers = []
 
-        audio_logger.info(
-            f"Client {self.client_id}: Started new conversation due to "
-            f"{NEW_CONVERSATION_TIMEOUT_MINUTES}min timeout"
-        )
+        audio_logger.info(f"Client {self.client_id}: Started new conversation")
 
     async def disconnect(self):
         """Clean disconnect of client state."""

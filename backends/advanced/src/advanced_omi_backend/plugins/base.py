@@ -18,6 +18,7 @@ class PluginContext:
     event: str  # Event name (e.g., "transcript.streaming", "conversation.complete")
     data: Dict[str, Any]  # Event-specific data
     metadata: Dict[str, Any] = field(default_factory=dict)
+    services: Optional[Any] = None  # PluginServices instance for system/cross-plugin calls
 
 
 @dataclass
@@ -56,24 +57,10 @@ class BasePlugin(ABC):
             config: Plugin configuration from config/plugins.yml
                    Contains: enabled, events, condition, and plugin-specific config
         """
-        import logging
-        logger = logging.getLogger(__name__)
-
         self.config = config
         self.enabled = config.get('enabled', False)
-
-        # NEW terminology with backward compatibility
-        self.events = config.get('events') or config.get('subscriptions', [])
-        self.condition = config.get('condition') or config.get('trigger', {'type': 'always'})
-
-        # Deprecation warnings
-        plugin_name = config.get('name', 'unknown')
-        if 'subscriptions' in config:
-            logger.warning(f"Plugin '{plugin_name}': 'subscriptions' is deprecated, use 'events' instead")
-        if 'trigger' in config:
-            logger.warning(f"Plugin '{plugin_name}': 'condition' is deprecated, use 'condition' instead")
-        if 'access_level' in config:
-            logger.warning(f"Plugin '{plugin_name}': 'access_level' is deprecated and ignored")
+        self.events = config.get('events', [])
+        self.condition = config.get('condition', {'type': 'always'})
 
     def register_prompts(self, registry) -> None:
         """Register plugin prompts with the prompt registry.
@@ -149,6 +136,33 @@ class BasePlugin(ABC):
             - conversation: dict - Source conversation
             - memory_count: int - Number of memories created
             - conversation_id: str - Conversation identifier
+
+        Returns:
+            PluginResult with success status, optional message, and should_continue flag
+        """
+        pass
+
+    async def on_button_event(self, context: PluginContext) -> Optional[PluginResult]:
+        """
+        Called when a device button event is received.
+
+        Context data contains:
+            - state: str - Button state (e.g., "SINGLE_TAP", "DOUBLE_TAP", "LONG_PRESS")
+            - timestamp: float - Unix timestamp of the event
+            - audio_uuid: str - Current audio session UUID (may be None)
+
+        Returns:
+            PluginResult with success status, optional message, and should_continue flag
+        """
+        pass
+
+    async def on_plugin_action(self, context: PluginContext) -> Optional[PluginResult]:
+        """
+        Called when another plugin dispatches an action to this plugin via PluginServices.call_plugin().
+
+        Context data contains:
+            - action: str - Action name (e.g., "toggle_lights", "call_service")
+            - Plus any additional data from the calling plugin
 
         Returns:
             PluginResult with success status, optional message, and should_continue flag

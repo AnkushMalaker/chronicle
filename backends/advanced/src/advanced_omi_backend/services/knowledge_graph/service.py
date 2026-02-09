@@ -535,6 +535,44 @@ class KnowledgeGraphService:
 
         return entities
 
+    async def update_entity(
+        self,
+        entity_id: str,
+        user_id: str,
+        name: str = None,
+        details: str = None,
+        icon: str = None,
+    ) -> Optional[Entity]:
+        """Update an entity's fields (partial update via COALESCE).
+
+        Args:
+            entity_id: Entity UUID
+            user_id: User ID for permission check
+            name: New name (None keeps existing)
+            details: New details (None keeps existing)
+            icon: New icon (None keeps existing)
+
+        Returns:
+            Updated Entity object or None if not found
+        """
+        self._ensure_initialized()
+
+        results = self._write.run(
+            queries.UPDATE_ENTITY,
+            id=entity_id,
+            user_id=user_id,
+            name=name,
+            details=details,
+            icon=icon,
+            metadata=None,
+        )
+
+        if not results:
+            return None
+
+        entity_data = dict(results[0]["e"])
+        return self._row_to_entity(entity_data)
+
     async def delete_entity(
         self,
         entity_id: str,

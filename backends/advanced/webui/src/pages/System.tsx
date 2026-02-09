@@ -95,7 +95,8 @@ export default function System() {
   // Miscellaneous settings state
   const [miscSettings, setMiscSettings] = useState({
     always_persist_enabled: false,
-    use_provider_segments: false
+    use_provider_segments: false,
+    per_segment_speaker_id: false
   })
   const [miscLoading, setMiscLoading] = useState(false)
   const [miscMessage, setMiscMessage] = useState('')
@@ -899,6 +900,40 @@ export default function System() {
                 />
                 <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
               </label>
+            </div>
+
+            {/* Speaker Identification Mode Toggle */}
+            <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-md">
+              <div className="flex-1">
+                <div className="font-medium text-gray-900 dark:text-gray-100">
+                  Speaker Identification Mode
+                </div>
+                <div className="text-sm text-gray-600 dark:text-gray-400">
+                  {miscSettings.per_segment_speaker_id
+                    ? 'Identify each segment individually — better accuracy after fine-tuning'
+                    : 'Majority vote per speaker label — faster, groups segments by label'}
+                </div>
+              </div>
+              <div className="flex items-center ml-4 gap-2">
+                <span className={`text-xs font-medium ${!miscSettings.per_segment_speaker_id ? 'text-blue-600 dark:text-blue-400' : 'text-gray-400 dark:text-gray-500'}`}>
+                  Voting
+                </span>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={miscSettings.per_segment_speaker_id}
+                    onChange={(e) => setMiscSettings(prev => ({
+                      ...prev,
+                      per_segment_speaker_id: e.target.checked
+                    }))}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
+                </label>
+                <span className={`text-xs font-medium ${miscSettings.per_segment_speaker_id ? 'text-blue-600 dark:text-blue-400' : 'text-gray-400 dark:text-gray-500'}`}>
+                  Per Segment
+                </span>
+              </div>
             </div>
 
             {/* Status Message */}

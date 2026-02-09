@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { MessageSquare, RefreshCw, Calendar, User, Play, Pause, MoreVertical, RotateCcw, Zap, ChevronDown, ChevronUp, Trash2, Save, X, Check } from 'lucide-react'
+import { MessageSquare, RefreshCw, Calendar, User, Play, Pause, MoreVertical, RotateCcw, Zap, ChevronDown, ChevronUp, Trash2, Save, X, Check, AlertTriangle } from 'lucide-react'
 import { conversationsApi, annotationsApi, speakerApi, BACKEND_URL } from '../services/api'
 import ConversationVersionHeader from '../components/ConversationVersionHeader'
 import { getStorageKey } from '../utils/storage'
@@ -36,6 +36,9 @@ interface Conversation {
   deleted?: boolean
   deletion_reason?: string
   deleted_at?: string
+  always_persist?: boolean
+  processing_status?: string
+  is_orphan?: boolean
 }
 
 // Speaker color palette for consistent colors across conversations
@@ -72,6 +75,7 @@ export default function Conversations() {
   const [reprocessingTranscript, setReprocessingTranscript] = useState<Set<string>>(new Set())
   const [reprocessingMemory, setReprocessingMemory] = useState<Set<string>>(new Set())
   const [reprocessingSpeakers, setReprocessingSpeakers] = useState<Set<string>>(new Set())
+  const [reprocessingOrphan, setReprocessingOrphan] = useState<Set<string>>(new Set())
   const [deletingConversation, setDeletingConversation] = useState<Set<string>>(new Set())
 
   // Transcript segment editing state
@@ -168,8 +172,8 @@ export default function Conversations() {
   const loadConversations = async () => {
     try {
       setLoading(true)
-      // Exclude deleted conversations from main view
-      const response = await conversationsApi.getAll(false)
+      // Exclude deleted conversations from main view; include orphans in debug mode
+      const response = await conversationsApi.getAll(false, debugMode ? true : undefined)
       // API now returns a flat list with client_id as a field
       const conversationsList = response.data.conversations || []
       setConversations(conversationsList)
@@ -270,9 +274,13 @@ export default function Conversations() {
   }
 
   useEffect(() => {
-    loadConversations()
     loadEnrolledSpeakers()
   }, [])
+
+  // Load conversations on mount and when debug mode toggles (to include/exclude orphans)
+  useEffect(() => {
+    loadConversations()
+  }, [debugMode])
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -393,6 +401,32 @@ export default function Conversations() {
     } finally {
       if (conversation.conversation_id) {
         setReprocessingSpeakers(prev => {
+          const newSet = new Set(prev)
+          newSet.delete(conversation.conversation_id!)
+          return newSet
+        })
+      }
+    }
+  }
+
+  const handleReprocessOrphan = async (conversation: Conversation) => {
+    try {
+      if (!conversation.conversation_id) return
+
+      setReprocessingOrphan(prev => new Set(prev).add(conversation.conversation_id!))
+
+      const response = await conversationsApi.reprocessOrphan(conversation.conversation_id)
+
+      if (response.status === 200) {
+        await loadConversations()
+      } else {
+        setError(`Failed to start orphan reprocessing: ${response.data?.error || 'Unknown error'}`)
+      }
+    } catch (err: any) {
+      setError(`Error starting orphan reprocessing: ${err.message || 'Unknown error'}`)
+    } finally {
+      if (conversation.conversation_id) {
+        setReprocessingOrphan(prev => {
           const newSet = new Set(prev)
           newSet.delete(conversation.conversation_id!)
           return newSet
@@ -712,8 +746,45 @@ export default function Conversations() {
           conversations.map((conversation) => (
             <div
               key={conversation.conversation_id}
-              className="rounded-lg p-6 border bg-gray-50 dark:bg-gray-700 border-gray-200 dark:border-gray-600"
+              className={`rounded-lg p-6 border ${
+                conversation.is_orphan
+                  ? 'bg-amber-50 dark:bg-amber-900/10 border-amber-300 dark:border-amber-700'
+                  : 'bg-gray-50 dark:bg-gray-700 border-gray-200 dark:border-gray-600'
+              }`}
             >
+              {/* Orphan Audio Session Banner */}
+              {conversation.is_orphan && (
+                <div className="mb-4 p-3 bg-amber-100 dark:bg-amber-900/30 rounded-lg border border-amber-200 dark:border-amber-800 flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400 flex-shrink-0" />
+                    <div>
+                      <span className="text-sm font-medium text-amber-800 dark:text-amber-200">
+                        Unprocessed Audio Session
+                      </span>
+                      <span className="text-xs text-amber-600 dark:text-amber-400 ml-2">
+                        {conversation.processing_status === 'transcription_failed' ? 'Transcription failed' :
+                         conversation.processing_status === 'reprocessing' ? 'Reprocessing...' :
+                         conversation.deleted ? `Deleted: ${conversation.deletion_reason}` :
+                         conversation.processing_status || 'Pending'}
+                        {conversation.audio_total_duration ? ` · ${Math.floor(conversation.audio_total_duration / 60)}:${Math.floor(conversation.audio_total_duration % 60).toString().padStart(2, '0')} audio` : ''}
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleReprocessOrphan(conversation)}
+                    disabled={reprocessingOrphan.has(conversation.conversation_id)}
+                    className="flex items-center space-x-1 px-3 py-1.5 text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {reprocessingOrphan.has(conversation.conversation_id) ? (
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <RotateCcw className="h-3.5 w-3.5" />
+                    )}
+                    <span>{reprocessingOrphan.has(conversation.conversation_id) ? 'Reprocessing...' : 'Reprocess'}</span>
+                  </button>
+                </div>
+              )}
+
               {/* Version Selector Header */}
               <ConversationVersionHeader
                 conversationId={conversation.conversation_id}

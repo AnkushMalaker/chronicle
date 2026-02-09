@@ -18,7 +18,7 @@ export default function Layout() {
     { path: '/users', label: 'User Management', icon: Users },
     ...(isAdmin ? [
       { path: '/upload', label: 'Upload Audio', icon: Upload },
-      { path: '/queue', label: 'Queue Management', icon: Layers },
+      { path: '/queue', label: 'Queue & Events', icon: Layers },
       { path: '/plugins', label: 'Plugins', icon: Puzzle },
       { path: '/finetuning', label: 'Fine-tuning', icon: Zap },
       { path: '/system', label: 'System State', icon: Settings },

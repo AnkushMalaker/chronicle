@@ -222,6 +222,8 @@ export class SpeakerIdentificationService {
 
   /**
    * Process with hybrid mode (Deepgram transcription + internal diarization)
+   * Step 1: Transcribe audio via /v1/listen (Deepgram)
+   * Step 2: Send audio + transcript to /v1/diarize-identify-match for speaker diarization & identification
    */
   private async processWithHybrid(
     audioFile: File | Blob,
@@ -229,44 +231,80 @@ export class SpeakerIdentificationService {
   ): Promise<ProcessingResult> {
     try {
       const filename = audioFile instanceof File ? audioFile.name : 'Audio'
-      
-      // Use shared Deepgram service in hybrid mode
+
+      // Step 1: Transcribe with Deepgram via /v1/listen
       const deepgramResponse = await transcribeWithDeepgram(audioFile, {
-        enhanceSpeakers: options.enhanceSpeakers !== false,
+        enhanceSpeakers: false, // Speaker enhancement done by internal diarization
         userId: options.userId,
         speakerConfidenceThreshold: options.confidenceThreshold || 0.15,
-        mode: 'hybrid'
+        mode: 'standard'
       })
 
-      // Process response using shared service
-      const deepgramSegments = processDeepgramResponse(deepgramResponse)
+      // Step 2: Send audio + transcript to diarize-identify-match
+      const transcriptData = this.transformDeepgramForDiarizeMatch(deepgramResponse)
 
-      // Convert to SpeakerSegment format
-      const speakerSegments: SpeakerSegment[] = deepgramSegments.map(segment => ({
+      const formData = new FormData()
+      formData.append('file', audioFile)
+      formData.append('transcript_data', transcriptData)
+
+      if (options.userId) {
+        formData.append('user_id', options.userId.toString())
+      }
+      if (options.minDuration !== undefined) {
+        formData.append('min_duration', options.minDuration.toString())
+      }
+      if (options.confidenceThreshold !== undefined) {
+        formData.append('similarity_threshold', options.confidenceThreshold.toString())
+      }
+      if (options.minSpeakers !== undefined) {
+        formData.append('min_speakers', options.minSpeakers.toString())
+      }
+      if (options.maxSpeakers !== undefined) {
+        formData.append('max_speakers', options.maxSpeakers.toString())
+      }
+      if (options.collar !== undefined) {
+        formData.append('collar', options.collar.toString())
+      }
+      if (options.minDurationOff !== undefined) {
+        formData.append('min_duration_off', options.minDurationOff.toString())
+      }
+
+      const response = await apiService.post('/v1/diarize-identify-match', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 300000
+      })
+
+      const backendSegments = response.data.segments || []
+
+      // Convert backend format to frontend format
+      const speakers: SpeakerSegment[] = backendSegments.map((segment: any) => ({
         start: segment.start,
         end: segment.end,
-        speaker_id: segment.speakerId || `speaker_${segment.speaker}`,
-        speaker_name: segment.speakerName || `Speaker ${segment.speaker}`,
-        confidence: segment.confidence,
-        text: segment.text,
-        identified_speaker_id: segment.identifiedSpeakerId,
-        identified_speaker_name: segment.identifiedSpeakerName,
-        speaker_identification_confidence: segment.speakerIdentificationConfidence,
-        speaker_status: segment.speakerStatus
+        speaker_id: segment.speaker_id || segment.speaker,
+        speaker_name: segment.identified_as || `Unknown (${segment.speaker})`,
+        confidence: segment.confidence || 0,
+        text: segment.text
       }))
 
       // Calculate confidence summary
-      const confidenceSummary = calculateConfidenceSummary(deepgramSegments)
+      const high_confidence = speakers.filter(s => s.confidence >= 0.8).length
+      const medium_confidence = speakers.filter(s => s.confidence >= 0.6 && s.confidence < 0.8).length
+      const low_confidence = speakers.filter(s => s.confidence >= 0.4 && s.confidence < 0.6).length
 
       return {
         id: Math.random().toString(36),
         filename,
-        duration: this.estimateDuration(speakerSegments),
+        duration: this.estimateDuration(speakers),
         status: 'completed',
         created_at: new Date().toISOString(),
         mode: 'deepgram-transcript-internal-speakers',
-        speakers: speakerSegments,
-        confidence_summary: confidenceSummary,
+        speakers,
+        confidence_summary: {
+          total_segments: speakers.length,
+          high_confidence,
+          medium_confidence,
+          low_confidence
+        },
         deepgram_response: deepgramResponse
       }
     } catch (error) {
@@ -377,7 +415,7 @@ export class SpeakerIdentificationService {
       const speakers: SpeakerSegment[] = backendSegments.map((segment: any) => ({
         start: segment.start,
         end: segment.end,
-        speaker_id: segment.identified_id || segment.speaker,
+        speaker_id: segment.speaker_id || segment.speaker,
         speaker_name: segment.identified_as || `Unknown (${segment.speaker})`,
         confidence: segment.confidence || 0
         // No text in diarization-only mode
@@ -464,7 +502,7 @@ export class SpeakerIdentificationService {
       const speakers: SpeakerSegment[] = backendSegments.map((segment: any) => ({
         start: segment.start,
         end: segment.end,
-        speaker_id: segment.identified_id || segment.speaker,
+        speaker_id: segment.speaker_id || segment.speaker,
         speaker_name: segment.identified_as || `Unknown (${segment.speaker})`,
         confidence: segment.confidence || 0,
         text: segment.text // This mode includes matched transcript text
