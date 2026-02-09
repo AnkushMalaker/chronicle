@@ -9,7 +9,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from ..base import BasePlugin, PluginContext, PluginResult
+from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
 from .entity_cache import EntityCache
 from .mcp_client import HAMCPClient, MCPError
 
@@ -249,6 +249,87 @@ class HomeAssistantPlugin(BasePlugin):
                 message="Sorry, something went wrong while executing that command",
                 should_continue=True,
             )
+
+    async def on_plugin_action(self, context: PluginContext) -> Optional[PluginResult]:
+        """Handle cross-plugin action calls (e.g., toggle lights from button press).
+
+        Supported actions:
+            - toggle_lights / call_service: Call a Home Assistant service on resolved entities
+              Data keys: target_type, target, entity_type, service (all optional with defaults)
+        """
+        action = context.data.get("action", "")
+
+        if action not in ("toggle_lights", "call_service"):
+            return PluginResult(
+                success=False,
+                message=f"Unknown action: {action}",
+            )
+
+        if not self.mcp_client:
+            logger.error("MCP client not initialized for plugin action")
+            return PluginResult(
+                success=False,
+                message="Home Assistant is not connected",
+            )
+
+        try:
+            from .command_parser import ParsedCommand
+
+            # Build a ParsedCommand from the action data
+            target_type = context.data.get("target_type", "area")
+            target = context.data.get("target", "")
+            entity_type = context.data.get("entity_type", "light")
+            service = context.data.get("service", "toggle")
+
+            if not target:
+                return PluginResult(success=False, message="No target specified")
+
+            parsed = ParsedCommand(
+                action=service,
+                target_type=target_type,
+                target=target,
+                entity_type=entity_type,
+                parameters={},
+            )
+
+            # Resolve entities using existing cache-based resolution
+            entity_ids = await self._resolve_entities(parsed)
+            domain = entity_ids[0].split(".")[0] if entity_ids else entity_type
+
+            # Call the service
+            logger.info(
+                f"Plugin action: {domain}.{service} for {len(entity_ids)} entities: {entity_ids}"
+            )
+            result = await self.mcp_client.call_service(
+                domain=domain, service=service, entity_ids=entity_ids
+            )
+
+            message = (
+                f"Called {domain}.{service} on {len(entity_ids)} "
+                f"{entity_type}{'s' if len(entity_ids) != 1 else ''} in {target}"
+            )
+            logger.info(f"Plugin action executed: {message}")
+
+            return PluginResult(
+                success=True,
+                data={
+                    "action": service,
+                    "entity_ids": entity_ids,
+                    "ha_result": result,
+                },
+                message=message,
+                should_continue=True,
+            )
+
+        except ValueError as e:
+            logger.warning(f"Entity resolution failed for plugin action: {e}")
+            return PluginResult(success=False, message=str(e))
+        except MCPError as e:
+            logger.error(f"HA API error during plugin action: {e}")
+            return PluginResult(success=False, message=f"Home Assistant error: {e}")
+        except Exception as e:
+            logger.error(f"Plugin action failed: {e}", exc_info=True)
+            return PluginResult(success=False, message=f"Action failed: {e}")
 
     async def cleanup(self):
         """Clean up resources"""
