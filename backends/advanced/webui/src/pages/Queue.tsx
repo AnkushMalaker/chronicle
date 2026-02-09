@@ -170,7 +170,22 @@ const Queue: React.FC = () => {
 
   // System events
   const [events, setEvents] = useState<EventRecord[]>([]);
-  const [eventTypeFilter, setEventTypeFilter] = useState<string>('');
+  const [eventFilters, setEventFilters] = useState<Record<string, 'include' | 'exclude'>>({});
+
+  const cycleEventFilter = (eventType: string) => {
+    setEventFilters(prev => {
+      const current = prev[eventType];
+      const next = { ...prev };
+      if (!current) {
+        next[eventType] = 'include';
+      } else if (current === 'include') {
+        next[eventType] = 'exclude';
+      } else {
+        delete next[eventType];
+      }
+      return next;
+    });
+  };
   const [eventsExpanded, setEventsExpanded] = useState(true);
 
   // Completed conversations pagination
@@ -2057,32 +2072,65 @@ const Queue: React.FC = () => {
           <div className="flex items-center space-x-2">
             <Zap className="w-5 h-5 text-purple-600" />
             <h3 className="text-lg font-medium">Events</h3>
-            <span className="text-xs text-gray-500">({events.length})</span>
+            <span className="text-xs text-gray-500">
+              {(() => {
+                const includes = Object.entries(eventFilters).filter(([, v]) => v === 'include').map(([k]) => k);
+                const excludes = Object.entries(eventFilters).filter(([, v]) => v === 'exclude').map(([k]) => k);
+                const hasFilters = includes.length > 0 || excludes.length > 0;
+                if (!hasFilters) return `(${events.length})`;
+                const count = includes.length > 0
+                  ? events.filter(e => includes.includes(e.event) && !excludes.includes(e.event)).length
+                  : events.filter(e => !excludes.includes(e.event)).length;
+                return `(${count} / ${events.length})`;
+              })()}
+            </span>
           </div>
           <div className="flex items-center space-x-3">
-            {eventsExpanded && (
-              <select
-                value={eventTypeFilter}
-                onChange={(e) => { e.stopPropagation(); setEventTypeFilter(e.target.value); }}
-                onClick={(e) => e.stopPropagation()}
-                className="text-sm border border-gray-300 rounded-md px-2 py-1"
-              >
-                <option value="">All Events</option>
-                {[...new Set(events.map(e => e.event))].sort().map(eventType => (
-                  <option key={eventType} value={eventType}>{eventType}</option>
-                ))}
-              </select>
-            )}
             {eventsExpanded ? <ChevronDown className="w-4 h-4 text-gray-500" /> : <ChevronRight className="w-4 h-4 text-gray-500" />}
           </div>
         </div>
 
+        {eventsExpanded && [...new Set(events.map(e => e.event))].sort().length > 0 && (
+          <div className="px-6 py-2 border-b border-gray-100 flex flex-wrap items-center gap-2">
+            {[...new Set(events.map(e => e.event))].sort().map(eventType => {
+              const state = eventFilters[eventType];
+              return (
+                <button
+                  key={eventType}
+                  onClick={() => cycleEventFilter(eventType)}
+                  className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border cursor-pointer transition-colors ${
+                    state === 'include'
+                      ? 'bg-blue-100 text-blue-700 border-blue-400'
+                      : state === 'exclude'
+                      ? 'bg-red-100 text-red-700 border-red-400 line-through'
+                      : 'bg-gray-100 text-gray-500 border-gray-300'
+                  }`}
+                >
+                  {eventType}
+                </button>
+              );
+            })}
+            {Object.keys(eventFilters).length > 0 && (
+              <button
+                onClick={() => setEventFilters({})}
+                className="inline-flex items-center px-2 py-0.5 rounded text-xs text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        )}
+
         {eventsExpanded && (
           <div className="overflow-x-auto">
             {(() => {
-              const filtered = eventTypeFilter
-                ? events.filter(e => e.event === eventTypeFilter)
-                : events;
+              const includes = Object.entries(eventFilters).filter(([, v]) => v === 'include').map(([k]) => k);
+              const excludes = Object.entries(eventFilters).filter(([, v]) => v === 'exclude').map(([k]) => k);
+              let filtered = events;
+              if (includes.length > 0) {
+                filtered = filtered.filter(e => includes.includes(e.event));
+              }
+              filtered = filtered.filter(e => !excludes.includes(e.event));
 
               if (filtered.length === 0) {
                 return (

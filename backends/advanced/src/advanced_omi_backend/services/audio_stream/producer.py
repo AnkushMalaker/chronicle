@@ -4,6 +4,7 @@ Audio stream producer - publishes audio chunks to Redis Streams.
 
 import logging
 import time
+import json
 
 import redis.asyncio as redis
 
@@ -139,6 +140,19 @@ class AudioStreamProducer:
         stream_name = buffer["stream_name"]
 
         # Send special "end" message to signal workers to flush
+        # Read audio format from Redis session metadata (stored at audio-start time)
+        sample_rate, channels, sample_width = 16000, 1, 2
+        try:
+            session_key = f"audio:session:{session_id}"
+            audio_format_raw = await self.redis_client.hget(session_key, "audio_format")
+            if audio_format_raw:
+                audio_format = json.loads(audio_format_raw)
+                sample_rate = int(audio_format.get("rate", 16000))
+                channels = int(audio_format.get("channels", 1))
+                sample_width = int(audio_format.get("width", 2))
+        except Exception:
+            pass  # Fall back to defaults
+
         end_signal = {
             b"audio_data": b"",  # Empty audio data
             b"session_id": session_id.encode(),
@@ -146,9 +160,9 @@ class AudioStreamProducer:
             b"user_id": buffer["user_id"].encode(),
             b"client_id": buffer["client_id"].encode(),
             b"timestamp": str(time.time()).encode(),
-            b"sample_rate": b"16000",
-            b"channels": b"1",
-            b"sample_width": b"2",
+            b"sample_rate": str(sample_rate).encode(),
+            b"channels": str(channels).encode(),
+            b"sample_width": str(sample_width).encode(),
         }
 
         await self.redis_client.xadd(

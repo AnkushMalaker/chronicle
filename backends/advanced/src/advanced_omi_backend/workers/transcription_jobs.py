@@ -6,6 +6,7 @@ This module contains all jobs related to speech-to-text transcription processing
 
 import asyncio
 import io
+import json
 import logging
 import os
 import time
@@ -803,9 +804,23 @@ async def transcription_fallback_check_job(
                 sorted_chunks = sorted(audio_chunks.items())
                 combined_audio = b"".join(data for _, data in sorted_chunks)
 
+                # Read audio format from Redis session metadata
+                sample_rate, channels, sample_width = 16000, 1, 2
+                session_key = f"audio:session:{session_id}"
+                try:
+                    audio_format_raw = await redis_client.hget(session_key, "audio_format")
+                    if audio_format_raw:
+                        audio_format = json.loads(audio_format_raw)
+                        sample_rate = int(audio_format.get("rate", 16000))
+                        channels = int(audio_format.get("channels", 1))
+                        sample_width = int(audio_format.get("width", 2))
+                except Exception as e:
+                    logger.warning(f"Failed to read audio_format from Redis for {session_id}: {e}")
+
+                bytes_per_second = sample_rate * channels * sample_width
                 logger.info(
                     f"✅ Extracted {len(sorted_chunks)} audio chunks from Redis stream "
-                    f"({len(combined_audio)} bytes, ~{len(combined_audio)/32000:.1f}s)"
+                    f"({len(combined_audio)} bytes, ~{len(combined_audio)/bytes_per_second:.1f}s)"
                 )
 
                 # Create conversation placeholder
@@ -815,9 +830,9 @@ async def transcription_fallback_check_job(
                 num_chunks = await convert_audio_to_chunks(
                     conversation_id=conversation.conversation_id,
                     audio_data=combined_audio,
-                    sample_rate=16000,
-                    channels=1,
-                    sample_width=2,
+                    sample_rate=sample_rate,
+                    channels=channels,
+                    sample_width=sample_width,
                 )
 
                 logger.info(

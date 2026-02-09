@@ -263,6 +263,9 @@ async def write_audio_file(
     timestamp: int,
     chunk_dir: Optional[Path] = None,
     validate: bool = True,
+    pcm_sample_rate: int = 16000,
+    pcm_channels: int = 1,
+    pcm_sample_width: int = 2,
 ) -> tuple[str, str, float]:
     """
     Validate, write audio data to WAV file, and create AudioSession database entry.
@@ -279,6 +282,9 @@ async def write_audio_file(
         timestamp: Timestamp in milliseconds
         chunk_dir: Optional directory path (defaults to CHUNK_DIR from config)
         validate: Whether to validate and prepare audio (default: True for uploads, False for WebSocket)
+        pcm_sample_rate: Sample rate for raw PCM data when validate=False (default: 16000)
+        pcm_channels: Channel count for raw PCM data when validate=False (default: 1)
+        pcm_sample_width: Sample width in bytes for raw PCM data when validate=False (default: 2)
 
     Returns:
         Tuple of (relative_audio_path, absolute_file_path, duration)
@@ -298,11 +304,11 @@ async def write_audio_file(
         audio_data, sample_rate, sample_width, channels, duration = \
             await validate_and_prepare_audio(raw_audio_data)
     else:
-        # For WebSocket path - audio is already processed PCM
+        # For WebSocket/streaming path - audio is already processed PCM
         audio_data = raw_audio_data
-        sample_rate = 16000  # WebSocket always uses 16kHz
-        sample_width = 2
-        channels = 1
+        sample_rate = pcm_sample_rate
+        sample_width = pcm_sample_width
+        channels = pcm_channels
         duration = len(audio_data) / (sample_rate * sample_width * channels)
 
     # Use provided chunk_dir or default from config

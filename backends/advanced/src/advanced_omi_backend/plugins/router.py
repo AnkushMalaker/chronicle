@@ -93,7 +93,7 @@ class PluginRouter:
     """Routes pipeline events to appropriate plugins based on event subscriptions"""
 
     _EVENT_LOG_KEY = "system:event_log"
-    _EVENT_LOG_MAX = 200
+    _EVENT_LOG_MAX = 1000
 
     def __init__(self):
         self.plugins: Dict[str, BasePlugin] = {}
@@ -212,15 +212,13 @@ class PluginRouter:
             f"{len(results)} plugin(s) executed successfully"
         )
 
-        # Log to Redis (skip transcript.streaming — too frequent)
-        if event != PluginEvent.TRANSCRIPT_STREAMING:
-            self._log_event(
-                event=event,
-                user_id=user_id,
-                plugins_subscribed=plugin_ids,
-                plugins_executed=executed,
-                metadata=metadata,
-            )
+        self._log_event(
+            event=event,
+            user_id=user_id,
+            plugins_subscribed=plugin_ids,
+            plugins_executed=executed,
+            metadata=metadata,
+        )
 
         return results
 
