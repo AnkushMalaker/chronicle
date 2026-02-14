@@ -1,14 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
 import { MessageCircle, Send, Plus, Trash2, Brain, Clock, User, Bot, BookOpen, Loader2 } from 'lucide-react'
+import { useQueryClient } from '@tanstack/react-query'
 import { chatApi } from '../services/api'
-
-interface ChatSession {
-  session_id: string
-  title: string
-  created_at: string
-  updated_at: string
-  message_count?: number
-}
+import { useChatSessions, useChatMessages, useCreateChatSession, useDeleteChatSession, useExtractChatMemories } from '../hooks/useChat'
 
 interface ChatMessage {
   message_id: string
@@ -31,25 +25,51 @@ interface MemoryContext {
 }
 
 export default function Chat() {
-  // State management
-  const [sessions, setSessions] = useState<ChatSession[]>([])
-  const [currentSession, setCurrentSession] = useState<ChatSession | null>(null)
-  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const queryClient = useQueryClient()
+
+  // TanStack Query hooks
+  const { data: sessions = [], isLoading } = useChatSessions()
+  const createSession = useCreateChatSession()
+  const deleteSessionMutation = useDeleteChatSession()
+  const extractMemories = useExtractChatMemories()
+
+  // Local state
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
+  const [localMessages, setLocalMessages] = useState<ChatMessage[] | null>(null)
   const [inputMessage, setInputMessage] = useState('')
-  const [isLoading, setIsLoading] = useState(false)
   const [isSending, setIsSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [streamingMessage, setStreamingMessage] = useState('')
   const [memoryContext, setMemoryContext] = useState<MemoryContext | null>(null)
   const [showMemoryPanel, setShowMemoryPanel] = useState(false)
-  const [isExtractingMemories, setIsExtractingMemories] = useState(false)
   const [extractionMessage, setExtractionMessage] = useState('')
   const [includeObsidian, setIncludeObsidian] = useState(false)
-  
+
+  // Query for messages of current session
+  const { data: queryMessages } = useChatMessages(currentSessionId)
+
+  // Sync query messages into local state (local state allows optimistic updates during streaming)
+  useEffect(() => {
+    if (queryMessages && !isSending) {
+      setLocalMessages(queryMessages)
+    }
+  }, [queryMessages, isSending])
+
+  const messages = localMessages ?? queryMessages ?? []
+
+  // Derived: find current session object from sessions list
+  const currentSession = sessions.find((s: any) => s.session_id === currentSessionId) ?? null
+
+  // Auto-select first session when sessions load
+  useEffect(() => {
+    if (sessions.length > 0 && !currentSessionId) {
+      setCurrentSessionId(sessions[0].session_id)
+    }
+  }, [sessions, currentSessionId])
+
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  
 
   // Auto-scroll to bottom (only when actively sending messages)
   const scrollToBottom = () => {
@@ -57,59 +77,16 @@ export default function Chat() {
   }
 
   useEffect(() => {
-    // Only auto-scroll when streaming or sending messages
     if (streamingMessage || isSending) {
       scrollToBottom()
     }
   }, [messages, streamingMessage, isSending])
 
-  // Load sessions on mount
-  useEffect(() => {
-    loadSessions()
-  }, [])
-
-  // Load messages when session changes
-  useEffect(() => {
-    if (currentSession) {
-      loadMessages(currentSession.session_id)
-    }
-  }, [currentSession])
-
-  const loadSessions = async () => {
-    try {
-      setIsLoading(true)
-      const response = await chatApi.getSessions()
-      setSessions(response.data)
-      
-      // Auto-select first session if available
-      if (response.data.length > 0 && !currentSession) {
-        setCurrentSession(response.data[0])
-      }
-    } catch (err: any) {
-      console.error('Failed to load chat sessions:', err)
-      setError('Failed to load chat sessions')
-    } finally {
-      setIsLoading(false)
-    }
-  }
-
-  const loadMessages = async (sessionId: string) => {
-    try {
-      const response = await chatApi.getMessages(sessionId)
-      setMessages(response.data)
-    } catch (err: any) {
-      console.error('Failed to load messages:', err)
-      setError('Failed to load messages')
-    }
-  }
-
   const createNewSession = async () => {
     try {
-      const response = await chatApi.createSession()
-      const newSession = response.data
-      setSessions([newSession, ...sessions])
-      setCurrentSession(newSession)
-      setMessages([])
+      const newSession = await createSession.mutateAsync(undefined)
+      setCurrentSessionId(newSession.session_id)
+      setLocalMessages([])
       setMemoryContext(null)
     } catch (err: any) {
       console.error('Failed to create session:', err)
@@ -121,14 +98,12 @@ export default function Chat() {
     if (!confirm('Are you sure you want to delete this chat session?')) return
 
     try {
-      await chatApi.deleteSession(sessionId)
-      setSessions(sessions.filter(s => s.session_id !== sessionId))
-      
-      // If deleted session was current, select another
-      if (currentSession?.session_id === sessionId) {
-        const remainingSessions = sessions.filter(s => s.session_id !== sessionId)
-        setCurrentSession(remainingSessions[0] || null)
-        setMessages([])
+      await deleteSessionMutation.mutateAsync(sessionId)
+
+      if (currentSessionId === sessionId) {
+        const remaining = sessions.filter((s: any) => s.session_id !== sessionId)
+        setCurrentSessionId(remaining[0]?.session_id ?? null)
+        setLocalMessages([])
         setMemoryContext(null)
       }
     } catch (err: any) {
@@ -138,36 +113,24 @@ export default function Chat() {
   }
 
   const extractMemoriesFromChat = async () => {
-    if (!currentSession) return
+    if (!currentSessionId) return
 
-    setIsExtractingMemories(true)
     setExtractionMessage('')
-    
+
     try {
-      const response = await chatApi.extractMemories(currentSession.session_id)
-      
-      if (response.data.success) {
-        setExtractionMessage(`✅ Successfully extracted ${response.data.count} memories from this chat`)
-        
-        // Clear the success message after 5 seconds
-        setTimeout(() => {
-          setExtractionMessage('')
-        }, 5000)
+      const result = await extractMemories.mutateAsync(currentSessionId)
+
+      if (result.success) {
+        setExtractionMessage(`Successfully extracted ${result.count} memories from this chat`)
+        setTimeout(() => setExtractionMessage(''), 5000)
       } else {
-        setExtractionMessage(`⚠️ ${response.data.message || 'Failed to extract memories'}`)
+        setExtractionMessage(`${result.message || 'Failed to extract memories'}`)
+        setTimeout(() => setExtractionMessage(''), 5000)
       }
     } catch (err: any) {
       console.error('Failed to extract memories:', err)
-      setExtractionMessage('❌ Failed to extract memories from chat')
-    } finally {
-      setIsExtractingMemories(false)
-      
-      // Clear any error message after 5 seconds
-      setTimeout(() => {
-        if (extractionMessage.startsWith('❌') || extractionMessage.startsWith('⚠️')) {
-          setExtractionMessage('')
-        }
-      }, 5000)
+      setExtractionMessage('Failed to extract memories from chat')
+      setTimeout(() => setExtractionMessage(''), 5000)
     }
   }
 
@@ -182,12 +145,10 @@ export default function Chat() {
 
     try {
       // Create session if none exists
-      let sessionId = currentSession?.session_id
+      let sessionId = currentSessionId
       if (!sessionId) {
-        const response = await chatApi.createSession()
-        const newSession = response.data
-        setSessions([newSession, ...sessions])
-        setCurrentSession(newSession)
+        const newSession = await createSession.mutateAsync(undefined)
+        setCurrentSessionId(newSession.session_id)
         sessionId = newSession.session_id
       }
 
@@ -200,11 +161,11 @@ export default function Chat() {
         timestamp: new Date().toISOString(),
         memories_used: []
       }
-      setMessages(prev => [...prev, userMessage])
+      setLocalMessages(prev => [...(prev ?? []), userMessage])
 
       // Send message and handle streaming response
-      const response = await chatApi.sendMessage(messageText, sessionId, includeObsidian)
-      
+      const response = await chatApi.sendMessage(messageText, sessionId!, includeObsidian)
+
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`)
       }
@@ -221,7 +182,7 @@ export default function Chat() {
 
       while (true) {
         const { done, value } = await reader.read()
-        
+
         if (done) break
 
         buffer += decoder.decode(value, { stream: true })
@@ -231,15 +192,14 @@ export default function Chat() {
         for (const line of lines) {
           if (line.startsWith('data: ')) {
             const data = line.slice(6) // Remove 'data: ' prefix
-            
+
             if (data === '[DONE]') {
-              // Stream complete
               break
             }
 
             try {
               const event: StreamingEvent = JSON.parse(data)
-              
+
               switch (event.type) {
                 case 'memory_context':
                   setMemoryContext(event.data)
@@ -249,7 +209,6 @@ export default function Chat() {
                   setStreamingMessage(accumulatedContent)
                   break
                 case 'complete':
-                  // Clear streaming message and reload from backend
                   setStreamingMessage('')
                   break
                 case 'error':
@@ -262,13 +221,9 @@ export default function Chat() {
         }
       }
 
-      // Refresh sessions to update message counts
-      loadSessions()
-      
-      // Reload messages to sync with backend
-      if (sessionId) {
-        await loadMessages(sessionId)
-      }
+      // Refresh sessions and messages via TanStack Query
+      queryClient.invalidateQueries({ queryKey: ['chat', 'sessions'] })
+      queryClient.invalidateQueries({ queryKey: ['chat', 'messages', sessionId] })
 
     } catch (err: any) {
       console.error('Failed to send message:', err)
@@ -336,7 +291,7 @@ export default function Chat() {
                       ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-900 dark:text-blue-100'
                       : 'hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300'
                   }`}
-                  onClick={() => setCurrentSession(session)}
+                  onClick={() => setCurrentSessionId(session.session_id)}
                 >
                   <div className="flex items-center justify-between">
                     <div className="flex-1 min-w-0">
@@ -377,16 +332,16 @@ export default function Chat() {
                   {/* Remember from Chat Button */}
                   <button
                     onClick={extractMemoriesFromChat}
-                    disabled={isExtractingMemories}
+                    disabled={extractMemories.isPending}
                     className="flex items-center space-x-2 px-3 py-1 rounded-full text-sm transition-colors bg-green-100 text-green-700 hover:bg-green-200 dark:bg-green-900/30 dark:text-green-300 dark:hover:bg-green-900/50 disabled:opacity-50"
                     title="Extract memories from this chat session"
                   >
-                    {isExtractingMemories ? (
+                    {extractMemories.isPending ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
                     ) : (
                       <BookOpen className="h-4 w-4" />
                     )}
-                    <span>{isExtractingMemories ? 'Extracting...' : 'Remember from Chat'}</span>
+                    <span>{extractMemories.isPending ? 'Extracting...' : 'Remember from Chat'}</span>
                   </button>
 
                   {memoryContext && memoryContext.memory_count > 0 && (
@@ -410,8 +365,8 @@ export default function Chat() {
             {/* Memory Extraction Notification */}
             {extractionMessage && (
               <div className={`p-3 border-b border-gray-200 dark:border-gray-700 text-sm ${
-                extractionMessage.startsWith('✅') 
-                  ? 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300' 
+                extractionMessage.startsWith('Successfully')
+                  ? 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300'
                   : 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300'
               }`}>
                 {extractionMessage}

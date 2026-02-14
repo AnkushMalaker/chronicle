@@ -35,12 +35,8 @@ Upload Audio For ASR Transcription
     # Verify file exists
     File Should Exist    ${audio_file}
 
-    # Create session if not exists
-    ${session_exists}=    Run Keyword And Return Status
-    ...    GET On Session    asr-session    /health    expected_status=any
-    IF    not ${session_exists}
-        Create Session    asr-session    ${base_url}    verify=True
-    END
+    # Always create session with the specified base_url to avoid cross-suite contamination
+    Create Session    asr-session    ${base_url}    verify=True
 
     # Upload file using multipart form
     ${file_data}=    Get Binary File    ${audio_file}

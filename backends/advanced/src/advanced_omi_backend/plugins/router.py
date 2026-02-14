@@ -10,7 +10,7 @@ import os
 import re
 import string
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 
 import redis
 
@@ -89,6 +89,35 @@ def extract_command_after_wake_word(transcript: str, wake_word: str) -> str:
         return transcript.strip()
 
 
+class ConditionResult(NamedTuple):
+    """Result of a plugin condition check."""
+    execute: bool
+    extra: Dict[str, Any] = {}
+
+
+class PluginHealth:
+    """Health status for a single plugin."""
+
+    # Possible status values
+    REGISTERED = "registered"     # Registered but not yet initialized
+    INITIALIZED = "initialized"   # Successfully initialized
+    FAILED = "failed"             # initialize() raised an exception
+
+    def __init__(self, plugin_id: str):
+        self.plugin_id = plugin_id
+        self.status: str = self.REGISTERED
+        self.error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "plugin_id": self.plugin_id,
+            "status": self.status,
+        }
+        if self.error:
+            result["error"] = self.error
+        return result
+
+
 class PluginRouter:
     """Routes pipeline events to appropriate plugins based on event subscriptions"""
 
@@ -97,6 +126,7 @@ class PluginRouter:
 
     def __init__(self):
         self.plugins: Dict[str, BasePlugin] = {}
+        self.plugin_health: Dict[str, PluginHealth] = {}
         # Index plugins by event for fast lookup
         self._plugins_by_event: Dict[str, List[str]] = {}
         self._services = None
@@ -116,6 +146,7 @@ class PluginRouter:
     def register_plugin(self, plugin_id: str, plugin: BasePlugin):
         """Register a plugin with the router"""
         self.plugins[plugin_id] = plugin
+        self.plugin_health[plugin_id] = PluginHealth(plugin_id)
 
         # Index by each event
         for event in plugin.events:
@@ -124,6 +155,30 @@ class PluginRouter:
             self._plugins_by_event[event].append(plugin_id)
 
         logger.info(f"Registered plugin '{plugin_id}' for events: {plugin.events}")
+
+    def mark_plugin_initialized(self, plugin_id: str) -> None:
+        """Mark a plugin as successfully initialized."""
+        if plugin_id in self.plugin_health:
+            self.plugin_health[plugin_id].status = PluginHealth.INITIALIZED
+
+    def mark_plugin_failed(self, plugin_id: str, error: str) -> None:
+        """Mark a plugin as failed during initialization."""
+        if plugin_id in self.plugin_health:
+            health = self.plugin_health[plugin_id]
+            health.status = PluginHealth.FAILED
+            health.error = error
+
+    def get_health_summary(self) -> Dict[str, Any]:
+        """Get health summary for all registered plugins."""
+        plugins = [h.to_dict() for h in self.plugin_health.values()]
+        statuses = [h.status for h in self.plugin_health.values()]
+        return {
+            "total": len(plugins),
+            "initialized": statuses.count(PluginHealth.INITIALIZED),
+            "failed": statuses.count(PluginHealth.FAILED),
+            "registered": statuses.count(PluginHealth.REGISTERED),
+            "plugins": plugins,
+        }
 
     async def dispatch_event(
         self,
@@ -167,17 +222,21 @@ class PluginRouter:
 
             # Check execution condition (wake_word, etc.)
             logger.info(f"   → Checking execution condition for '{plugin_id}'")
-            if not await self._should_execute(plugin, data):
+            condition = await self._should_execute(plugin, data)
+            if not condition.execute:
                 logger.info(f"   ⊘ Skipping '{plugin_id}': condition not met")
                 continue
 
             # Execute plugin
             try:
                 logger.info(f"   ▶ Executing '{plugin_id}' for event '{event}'")
+                # Per-plugin data copy: merge extra context (e.g. wake word
+                # command) without mutating the shared data dict.
+                plugin_data = {**data, **condition.extra} if condition.extra else data
                 context = PluginContext(
                     user_id=user_id,
                     event=event,
-                    data=data,
+                    data=plugin_data,
                     metadata=metadata or {},
                     services=self._services,
                 )
@@ -222,12 +281,20 @@ class PluginRouter:
 
         return results
 
-    async def _should_execute(self, plugin: BasePlugin, data: Dict) -> bool:
-        """Check if plugin should be executed based on condition configuration"""
+    _SKIP = ConditionResult(execute=False)
+    _PASS = ConditionResult(execute=True)
+
+    async def _should_execute(self, plugin: BasePlugin, data: Dict) -> ConditionResult:
+        """Check if plugin should be executed based on condition configuration.
+
+        Returns a ConditionResult. The ``extra`` dict contains per-plugin data
+        (e.g. wake word command extraction) that gets merged into a copy of data
+        for the plugin's PluginContext — never mutating the shared data dict.
+        """
         condition_type = plugin.condition.get('type', 'always')
 
         if condition_type == 'always':
-            return True
+            return self._PASS
 
         elif condition_type == 'wake_word':
             # Normalize transcript for matching (handles punctuation and spacing)
@@ -248,18 +315,19 @@ class PluginRouter:
                 if normalized_wake_word and normalized_transcript.startswith(normalized_wake_word):
                     # Smart extraction: find where wake word actually ends in original text
                     command = extract_command_after_wake_word(transcript, wake_word)
-                    data['command'] = command
-                    data['original_transcript'] = transcript
                     logger.debug(f"Wake word '{wake_word}' detected. Original: '{transcript}', Command: '{command}'")
-                    return True
+                    return ConditionResult(
+                        execute=True,
+                        extra={'command': command, 'original_transcript': transcript},
+                    )
 
-            return False
+            return self._SKIP
 
         elif condition_type == 'conditional':
             # Future: Custom condition checking
-            return True
+            return self._PASS
 
-        return False
+        return self._SKIP
 
     async def _execute_plugin(
         self,

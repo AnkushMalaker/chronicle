@@ -165,11 +165,19 @@ async def handle_client(websocket: WebSocketServerProtocol):
                 chunk_count += 1
                 logger.debug(f"Received audio chunk {chunk_count} from {client_id}")
 
+                # Send periodic final results every 50 chunks (mimics Deepgram phrase finalization)
+                # Speech detection relies on is_final=True results stored in transcription:results stream
+                if chunk_count % 50 == 0:
+                    current_offset = connection_state[client_id]["cumulative_offset"]
+                    final, new_offset = create_final_response(cumulative_offset=current_offset)
+                    connection_state[client_id]["cumulative_offset"] = new_offset
+                    await websocket.send(json.dumps(final))
+                    logger.info(f"Sent periodic final result to {client_id} (offset: {current_offset:.2f}s → {new_offset:.2f}s)")
                 # Send interim results every 10 chunks
-                if chunk_count % 10 == 0:
+                elif chunk_count % 10 == 0:
                     current_offset = connection_state[client_id]["cumulative_offset"]
                     interim, new_offset = create_deepgram_response(
-                        transcript=f"Interim transcription chunk {chunk_count // 10}",
+                        transcript=f"This is interim transcription for chunk {chunk_count // 10}",
                         is_final=False,
                         cumulative_offset=current_offset
                     )

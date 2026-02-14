@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
 
@@ -23,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 # Global plugin router instance
 _plugin_router: Optional[PluginRouter] = None
+
+# Redis key for signaling worker restart (consumed by orchestrator's HealthMonitor)
+WORKER_RESTART_KEY = "chronicle:worker_restart_requested"
 
 
 def _get_plugins_dir() -> Path:
@@ -441,12 +445,23 @@ def get_plugin_metadata(
         else:
             env_var_schema["value"] = os.environ.get(env_var_name, "")
 
-    return {
+    # Determine runtime health status from the live router
+    health_status = "unknown"
+    health_error = None
+    router = get_plugin_router()
+    if router and plugin_id in router.plugin_health:
+        h = router.plugin_health[plugin_id]
+        health_status = h.status
+        health_error = h.error
+    elif not orchestration_config.get("enabled", False):
+        health_status = "disabled"
+
+    result = {
         "plugin_id": plugin_id,
         "name": plugin_name,
         "description": plugin_description,
         "enabled": orchestration_config.get("enabled", False),
-        "status": "active" if orchestration_config.get("enabled", False) else "disabled",
+        "status": health_status,
         "supports_testing": supports_testing,
         "config_schema": config_schema,
         "current_config": masked_config,
@@ -456,6 +471,9 @@ def get_plugin_metadata(
             "condition": orchestration_config.get("condition", {"type": "always"}),
         },
     }
+    if health_error:
+        result["error"] = health_error
+    return result
 
 
 def discover_plugins() -> Dict[str, Type[BasePlugin]]:
@@ -465,19 +483,21 @@ def discover_plugins() -> Dict[str, Type[BasePlugin]]:
     Scans the plugins directory for subdirectories containing plugin.py files.
     Each plugin must:
     1. Have a plugin.py file with a class inheriting from BasePlugin
-    2. Export the plugin class in __init__.py
-    3. Plugin class name should match directory name in PascalCase
+    2. Export exactly one BasePlugin subclass in __init__.py
+
+    Discovery works by scanning module exports for BasePlugin subclasses,
+    so no naming convention between directory name and class name is required.
 
     Returns:
         Dictionary mapping plugin_id (directory name) to plugin class
 
     Example:
         plugins/
-        ├── email_summarizer/
-        │   ├── __init__.py  (exports EmailSummarizerPlugin)
-        │   └── plugin.py    (defines EmailSummarizerPlugin)
+        ├── homeassistant/
+        │   ├── __init__.py  (exports HomeAssistantPlugin)
+        │   └── plugin.py    (defines HomeAssistantPlugin)
 
-        Returns: {'email_summarizer': EmailSummarizerPlugin}
+        Returns: {'homeassistant': HomeAssistantPlugin}
     """
     discovered_plugins = {}
 
@@ -493,9 +513,9 @@ def discover_plugins() -> Dict[str, Type[BasePlugin]]:
 
     logger.info(f"Scanning for plugins in: {plugins_dir}")
 
-    # Scan for plugin directories (skip hidden/underscore dirs)
-    for item in plugins_dir.iterdir():
-        if not item.is_dir() or item.name.startswith("_"):
+    # Scan for plugin directories in deterministic order (skip hidden/underscore dirs)
+    for item in sorted(plugins_dir.iterdir()):
+        if not item.is_dir() or item.name.startswith(("_", ".")):
             continue
 
         plugin_id = item.name
@@ -506,38 +526,41 @@ def discover_plugins() -> Dict[str, Type[BasePlugin]]:
             continue
 
         try:
-            # Convert snake_case directory name to PascalCase class name
-            # e.g., email_summarizer -> EmailSummarizerPlugin
-            class_name = "".join(word.capitalize() for word in plugin_id.split("_")) + "Plugin"
-
             # Import the plugin package directly (it's on sys.path now)
             logger.debug(f"Attempting to import plugin: {plugin_id}")
             plugin_module = importlib.import_module(plugin_id)
 
-            # Try to get the plugin class
-            if not hasattr(plugin_module, class_name):
+            # Scan module exports for BasePlugin subclasses, deduplicate by id()
+            seen_ids = set()
+            plugin_classes = []
+            for attr_name in dir(plugin_module):
+                attr = getattr(plugin_module, attr_name)
+                if (
+                    inspect.isclass(attr)
+                    and issubclass(attr, BasePlugin)
+                    and attr is not BasePlugin
+                    and id(attr) not in seen_ids
+                ):
+                    seen_ids.add(id(attr))
+                    plugin_classes.append(attr)
+
+            if len(plugin_classes) == 0:
                 logger.warning(
-                    f"Plugin '{plugin_id}' does not export '{class_name}' in __init__.py. "
-                    f"Make sure the class is exported: from .plugin import {class_name}"
+                    f"Plugin '{plugin_id}': no BasePlugin subclass found in __init__.py. "
+                    f"Make sure to export your plugin class: from .plugin import YourPlugin"
                 )
                 continue
 
-            plugin_class = getattr(plugin_module, class_name)
-
-            # Validate it's a class and inherits from BasePlugin
-            if not inspect.isclass(plugin_class):
-                logger.warning(f"'{class_name}' in '{plugin_id}' is not a class")
-                continue
-
-            if not issubclass(plugin_class, BasePlugin):
+            if len(plugin_classes) > 1:
+                class_names = [cls.__name__ for cls in plugin_classes]
                 logger.warning(
-                    f"Plugin class '{class_name}' in '{plugin_id}' does not inherit from BasePlugin"
+                    f"Plugin '{plugin_id}': found multiple BasePlugin subclasses "
+                    f"{class_names}, expected exactly 1. Using first: {class_names[0]}"
                 )
-                continue
 
-            # Successfully discovered plugin
+            plugin_class = plugin_classes[0]
             discovered_plugins[plugin_id] = plugin_class
-            logger.info(f"Discovered plugin: '{plugin_id}' ({class_name})")
+            logger.info(f"Discovered plugin: '{plugin_id}' ({plugin_class.__name__})")
 
         except ImportError as e:
             logger.warning(f"Failed to import plugin '{plugin_id}': {e}")
@@ -548,27 +571,23 @@ def discover_plugins() -> Dict[str, Type[BasePlugin]]:
     return discovered_plugins
 
 
-def init_plugin_router() -> Optional[PluginRouter]:
-    """Initialize the plugin router from configuration.
+def _build_plugin_router() -> Optional[PluginRouter]:
+    """Build a new plugin router from configuration without touching the global.
 
-    This is called during app startup to create and register the plugin router.
+    This is the internal builder used by both init_plugin_router() (first startup)
+    and reload_plugins() (hot-reload). It never reads or writes _plugin_router.
 
     Returns:
-        Initialized plugin router, or None if no plugins configured
+        Fully-built plugin router with plugins registered (but not yet async-initialized),
+        or None if construction fails
     """
-    global _plugin_router
-
-    if _plugin_router is not None:
-        logger.warning("Plugin router already initialized")
-        return _plugin_router
-
     try:
-        _plugin_router = PluginRouter()
+        router = PluginRouter()
 
         # Load plugin configuration
         plugins_yml = get_plugins_yml_path()
-        logger.info(f"🔍 Looking for plugins config at: {plugins_yml}")
-        logger.info(f"🔍 File exists: {plugins_yml.exists()}")
+        logger.info(f"Looking for plugins config at: {plugins_yml}")
+        logger.info(f"File exists: {plugins_yml.exists()}")
 
         if plugins_yml.exists():
             with open(plugins_yml, "r") as f:
@@ -578,7 +597,7 @@ def init_plugin_router() -> Optional[PluginRouter]:
                 plugins_data = plugins_config.get("plugins", {})
 
             logger.info(
-                f"🔍 Loaded plugins config with {len(plugins_data)} plugin(s): {list(plugins_data.keys())}"
+                f"Loaded plugins config with {len(plugins_data)} plugin(s): {list(plugins_data.keys())}"
             )
 
             # Discover all plugins via auto-discovery
@@ -587,7 +606,7 @@ def init_plugin_router() -> Optional[PluginRouter]:
             # Initialize each plugin listed in config/plugins.yml
             for plugin_id, orchestration_config in plugins_data.items():
                 logger.info(
-                    f"🔍 Processing plugin '{plugin_id}', enabled={orchestration_config.get('enabled', False)}"
+                    f"Processing plugin '{plugin_id}', enabled={orchestration_config.get('enabled', False)}"
                 )
                 if not orchestration_config.get("enabled", False):
                     continue
@@ -617,30 +636,51 @@ def init_plugin_router() -> Optional[PluginRouter]:
                     except Exception as e:
                         logger.debug(f"Plugin '{plugin_id}' prompt registration skipped: {e}")
 
-                    # Note: async initialization happens in app_factory lifespan
-                    _plugin_router.register_plugin(plugin_id, plugin)
+                    # Note: async initialization happens in app_factory lifespan or reload_plugins
+                    router.register_plugin(plugin_id, plugin)
                     logger.info(f"Plugin '{plugin_id}' registered successfully")
 
                 except Exception as e:
                     logger.error(f"Failed to register plugin '{plugin_id}': {e}", exc_info=True)
 
             logger.info(
-                f"🎉 Plugin registration complete: {len(_plugin_router.plugins)} plugin(s) registered"
+                f"Plugin registration complete: {len(router.plugins)} plugin(s) registered"
             )
         else:
             logger.info("No plugins.yml found, plugins disabled")
 
         # Attach PluginServices for cross-plugin and system interaction
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        services = PluginServices(router=_plugin_router, redis_url=redis_url)
-        _plugin_router.set_services(services)
+        services = PluginServices(router=router, redis_url=redis_url)
+        router.set_services(services)
 
-        return _plugin_router
+        return router
 
     except Exception as e:
-        logger.error(f"Failed to initialize plugin router: {e}", exc_info=True)
-        _plugin_router = None
+        logger.error(f"Failed to build plugin router: {e}", exc_info=True)
         return None
+
+
+def init_plugin_router() -> Optional[PluginRouter]:
+    """Initialize the plugin router from configuration.
+
+    This is called during app startup to create and install the global plugin router.
+    For hot-reload, use reload_plugins() instead.
+
+    Returns:
+        Initialized plugin router, or None if no plugins configured
+    """
+    global _plugin_router
+
+    if _plugin_router is not None:
+        logger.warning("Plugin router already initialized")
+        return _plugin_router
+
+    router = _build_plugin_router()
+    if router:
+        _plugin_router = router
+        logger.info("Plugin router installed as global singleton")
+    return _plugin_router
 
 
 async def ensure_plugin_router() -> Optional[PluginRouter]:
@@ -662,8 +702,10 @@ async def ensure_plugin_router() -> Optional[PluginRouter]:
         for plugin_id, plugin in plugin_router.plugins.items():
             try:
                 await plugin.initialize()
+                plugin_router.mark_plugin_initialized(plugin_id)
                 logger.info(f"Plugin '{plugin_id}' initialized")
             except Exception as e:
+                plugin_router.mark_plugin_failed(plugin_id, str(e))
                 logger.error(f"Failed to initialize plugin '{plugin_id}': {e}")
     return plugin_router
 
@@ -674,9 +716,130 @@ async def cleanup_plugin_router() -> None:
 
     if _plugin_router:
         try:
+            if _plugin_router._services:
+                await _plugin_router._services.cleanup()
             await _plugin_router.cleanup_all()
             logger.info("Plugin router cleanup complete")
         except Exception as e:
             logger.error(f"Error during plugin router cleanup: {e}")
         finally:
             _plugin_router = None
+
+
+async def reload_plugins(app=None) -> Dict[str, Any]:
+    """Hot-reload all plugins by building a new router and atomically swapping it in.
+
+    The old router continues serving requests while the new one is being built.
+    The global _plugin_router is only replaced once the new router is fully
+    initialized, so concurrent callers of get_plugin_router() never see None.
+
+    Steps:
+    1. Purge sys.modules entries for plugin packages (so importlib re-reads from disk)
+    2. Build and initialize a new router (old router still active)
+    3. Atomic swap: replace global _plugin_router with the new router
+    4. Clean up old plugin instances (close SMTP, HA sessions, etc.)
+    5. Update app.state if app provided
+
+    Args:
+        app: Optional FastAPI app instance to update app.state.plugin_router
+
+    Returns:
+        Result dict with reload status, counts, and timing
+    """
+    global _plugin_router
+    start = time.monotonic()
+
+    old_router = _plugin_router
+    old_count = len(old_router.plugins) if old_router else 0
+
+    # 1. Purge sys.modules for plugin packages only (before re-importing)
+    plugins_dir = _get_plugins_dir()
+    purged_modules = []
+    if plugins_dir.is_dir():
+        plugin_names = {
+            item.name
+            for item in plugins_dir.iterdir()
+            if item.is_dir() and not item.name.startswith(("_", "."))
+        }
+        for mod_name in list(sys.modules.keys()):
+            top_level = mod_name.split(".")[0]
+            if top_level in plugin_names:
+                del sys.modules[mod_name]
+                purged_modules.append(mod_name)
+        if purged_modules:
+            logger.info(f"Purged {len(purged_modules)} cached plugin modules")
+
+    # 2. Build a new router (old router still serves requests during this)
+    new_router = _build_plugin_router()
+
+    # 3. Initialize each plugin on the new router
+    initialized = []
+    failed = []
+    if new_router:
+        for plugin_id, plugin in new_router.plugins.items():
+            try:
+                await plugin.initialize()
+                new_router.mark_plugin_initialized(plugin_id)
+                initialized.append(plugin_id)
+            except Exception as e:
+                new_router.mark_plugin_failed(plugin_id, str(e))
+                failed.append({"plugin_id": plugin_id, "error": str(e)})
+                logger.error(f"Failed to initialize plugin '{plugin_id}': {e}")
+
+    # 4. Atomic swap — from this point, all callers see the new router
+    _plugin_router = new_router
+
+    # 5. Update app.state if provided
+    if app and new_router:
+        app.state.plugin_router = new_router
+
+    # 6. Clean up old router *after* the swap (best-effort, never blocks the new router)
+    if old_router:
+        try:
+            if old_router._services:
+                await old_router._services.cleanup()
+            await old_router.cleanup_all()
+        except Exception as e:
+            logger.warning(f"Error during old plugin router cleanup: {e}")
+
+    elapsed = time.monotonic() - start
+    new_count = len(new_router.plugins) if new_router else 0
+
+    result = {
+        "success": True,
+        "previous_plugin_count": old_count,
+        "new_plugin_count": new_count,
+        "initialized": initialized,
+        "failed": failed,
+        "purged_modules": len(purged_modules),
+        "elapsed_seconds": round(elapsed, 3),
+    }
+    logger.info(
+        f"Plugin reload complete: {new_count} plugins loaded "
+        f"({len(initialized)} initialized, {len(failed)} failed) in {elapsed:.3f}s"
+    )
+    return result
+
+
+def signal_worker_restart() -> None:
+    """Write a Redis key to signal the worker orchestrator to restart all workers.
+
+    The orchestrator's HealthMonitor polls for this key and triggers a restart
+    when found. The key is consumed (deleted) after the restart is initiated.
+
+    Uses its own short-lived Redis connection so it works regardless of the
+    plugin router's lifecycle (e.g. during or after a failed reload).
+    """
+    try:
+        import redis
+
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        client = redis.from_url(redis_url, decode_responses=True)
+        try:
+            timestamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+            client.set(WORKER_RESTART_KEY, timestamp)
+            logger.info(f"Worker restart signal sent via Redis key '{WORKER_RESTART_KEY}'")
+        finally:
+            client.close()
+    except Exception as e:
+        logger.error(f"Failed to send worker restart signal: {e}")

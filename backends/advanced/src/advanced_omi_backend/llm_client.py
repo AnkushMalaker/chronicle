@@ -101,6 +101,18 @@ class OpenAILLMClient(LLMClient):
             self.logger.error(f"Error generating completion: {e}")
             raise
 
+    def chat_with_tools(
+        self, messages: list, tools: list | None = None, model: str | None = None, temperature: float | None = None
+    ):
+        """Chat completion with tool/function calling support. Returns raw response object."""
+        model_name = model or self.model
+        params = {"model": model_name, "messages": messages}
+        if tools:
+            params["tools"] = tools
+        if not (model_name and "gpt-4o-mini" in model_name):
+            params["temperature"] = temperature or self.temperature
+        return self.client.chat.completions.create(**params)
+
     def health_check(self) -> Dict:
         """Check OpenAI-compatible service health."""
         try:
@@ -188,6 +200,15 @@ async def async_generate(
     client = get_llm_client()
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, client.generate, prompt, model, temperature)
+
+
+async def async_chat_with_tools(
+    messages: list, tools: list | None = None, model: str | None = None, temperature: float | None = None
+):
+    """Async wrapper for chat completion with tool calling."""
+    client = get_llm_client()
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, client.chat_with_tools, messages, tools, model, temperature)
 
 
 async def async_health_check() -> Dict:

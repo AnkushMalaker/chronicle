@@ -13,6 +13,8 @@ from typing import Optional
 from redis import Redis
 from rq import Worker
 
+from advanced_omi_backend.services.plugin_service import WORKER_RESTART_KEY
+
 from .config import OrchestratorConfig, WorkerType
 from .process_manager import ProcessManager, WorkerState
 
@@ -44,6 +46,7 @@ class HealthMonitor:
         self.start_time = time.time()
         self.last_registration_recovery: Optional[float] = None
         self.registration_recovery_cooldown = 60  # seconds
+        self.last_plugin_reload_restart: Optional[float] = None
 
     async def start(self):
         """Start the health monitoring loop"""
@@ -108,6 +111,11 @@ class HealthMonitor:
     async def _check_health(self):
         """Perform all health checks and restart failed workers"""
         try:
+            # Check for plugin reload restart signal first
+            if self._check_restart_signal():
+                # Workers are restarting — skip normal health checks this iteration
+                return
+
             # Check individual worker health
             worker_health = self._check_worker_health()
 
@@ -129,6 +137,67 @@ class HealthMonitor:
 
         except Exception as e:
             logger.error(f"Error during health check: {e}", exc_info=True)
+
+    def _check_restart_signal(self) -> bool:
+        """Check Redis for a plugin-reload restart signal and restart all workers if found.
+
+        Returns:
+            True if a restart was triggered, False otherwise
+        """
+        try:
+            signal_value = self.redis.get(WORKER_RESTART_KEY)
+            if signal_value is None:
+                return False
+
+            # Consume the signal immediately
+            self.redis.delete(WORKER_RESTART_KEY)
+            logger.info(
+                f"Plugin reload restart signal received (set at {signal_value}) "
+                "— restarting all workers"
+            )
+
+            self._restart_all_workers()
+            self.last_plugin_reload_restart = time.time()
+            return True
+
+        except Exception as e:
+            logger.error(f"Error checking restart signal: {e}")
+            return False
+
+    def _restart_all_workers(self) -> bool:
+        """Restart ALL workers (RQ + streaming) for plugin reload.
+
+        Unlike _restart_all_rq_workers which only restarts RQ workers,
+        this restarts every managed worker since plugin changes can affect
+        any worker type.
+
+        Returns:
+            True if all workers restarted successfully
+        """
+        all_workers = list(self.process_manager.get_all_workers())
+        if not all_workers:
+            logger.warning("No workers found to restart")
+            return False
+
+        start_time = time.time()
+        logger.info(f"Restarting all {len(all_workers)} workers for plugin reload")
+
+        all_success = True
+        for i, worker in enumerate(all_workers, 1):
+            logger.info(f"  [{i}/{len(all_workers)}] Restarting {worker.name}...")
+            success = self.process_manager.restart_worker(worker.name)
+            if success:
+                logger.info(f"  [{i}/{len(all_workers)}] {worker.name} restarted")
+            else:
+                logger.error(f"  [{i}/{len(all_workers)}] {worker.name} restart failed")
+                all_success = False
+
+        elapsed = time.time() - start_time
+        logger.info(
+            f"Plugin reload worker restart complete: "
+            f"{len(all_workers)} workers in {elapsed:.2f}s"
+        )
+        return all_success
 
     def _check_worker_health(self) -> bool:
         """

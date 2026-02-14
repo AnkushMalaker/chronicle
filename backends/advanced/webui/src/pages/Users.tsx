@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import { Users as UsersIcon, Plus, Edit, Trash2, RefreshCw, Shield, User, Mail } from 'lucide-react'
-import { usersApi } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
+import { useUsers, useCreateUser, useUpdateUser, useDeleteUser } from '../hooks/useUsers'
 
 interface User {
   _id: string
@@ -20,13 +20,17 @@ interface UserFormData {
 }
 
 export default function Users() {
-  const [users, setUsers] = useState<User[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
   const [showCreateForm, setShowCreateForm] = useState(false)
   const [editingUser, setEditingUser] = useState<User | null>(null)
-  
+  const [actionError, setActionError] = useState<string | null>(null)
+
   const { isAdmin } = useAuth()
+  const { data: users = [], isLoading: loading, error: queryError, refetch } = useUsers()
+  const createUser = useCreateUser()
+  const updateUser = useUpdateUser()
+  const deleteUser = useDeleteUser()
+
+  const error = queryError?.message ?? actionError ?? null
 
   const [formData, setFormData] = useState<UserFormData>({
     display_name: '',
@@ -35,23 +39,6 @@ export default function Users() {
     is_superuser: false,
     is_active: true,
   })
-
-  const loadUsers = async () => {
-    try {
-      setLoading(true)
-      const response = await usersApi.getAll()
-      setUsers(response.data)
-      setError(null)
-    } catch (err: any) {
-      setError(err.message || 'Failed to load users')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    loadUsers()
-  }, [])
 
   const resetForm = () => {
     setFormData({
@@ -68,11 +55,10 @@ export default function Users() {
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault()
     try {
-      await usersApi.create(formData)
-      await loadUsers()
+      await createUser.mutateAsync(formData)
       resetForm()
     } catch (err: any) {
-      setError(err.message || 'Failed to create user')
+      setActionError(err.message || 'Failed to create user')
     }
   }
 
@@ -85,11 +71,10 @@ export default function Users() {
       if (!updateData.password) {
         delete (updateData as any).password
       }
-      await usersApi.update(editingUser._id, updateData)
-      await loadUsers()
+      await updateUser.mutateAsync({ id: editingUser._id, userData: updateData })
       resetForm()
     } catch (err: any) {
-      setError(err.message || 'Failed to update user')
+      setActionError(err.message || 'Failed to update user')
     }
   }
 
@@ -97,10 +82,9 @@ export default function Users() {
     if (!confirm(`Are you sure you want to delete user "${user.display_name || user.email}"?`)) return
 
     try {
-      await usersApi.delete(user._id)
-      await loadUsers()
+      await deleteUser.mutateAsync(user._id)
     } catch (err: any) {
-      setError(err.message || 'Failed to delete user')
+      setActionError(err.message || 'Failed to delete user')
     }
   }
 
@@ -143,7 +127,7 @@ export default function Users() {
         </div>
         <div className="flex items-center space-x-2">
           <button
-            onClick={loadUsers}
+            onClick={() => refetch()}
             className="flex items-center space-x-2 px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
           >
             <RefreshCw className="h-4 w-4" />
@@ -164,7 +148,7 @@ export default function Users() {
         <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md p-4 mb-6">
           <p className="text-sm text-red-700 dark:text-red-300">{error}</p>
           <button
-            onClick={() => setError(null)}
+            onClick={() => setActionError(null)}
             className="text-red-600 hover:text-red-800 text-sm underline mt-1"
           >
             Dismiss

@@ -1,7 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
 import { Calendar, RefreshCw, AlertCircle } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import * as d3 from 'd3'
+import { select } from 'd3-selection'
+import { scaleTime, scaleBand } from 'd3-scale'
+import { axisBottom } from 'd3-axis'
+import { timeFormat } from 'd3-time-format'
+import { min, max } from 'd3-array'
+import { zoom, type D3ZoomEvent } from 'd3-zoom'
 import { memoriesApi } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
 
@@ -167,7 +172,7 @@ export default function MyceliaTimeline() {
     const tasks = convertToTasks(useDemoData ? getDemoMemories() : memories)
     if (tasks.length === 0) return
 
-    const svg = d3.select(svgRef.current)
+    const svg = select(svgRef.current)
     svg.selectAll('*').remove()
 
     const margin = { top: 60, right: 40, bottom: 60, left: 150 }
@@ -176,15 +181,15 @@ export default function MyceliaTimeline() {
 
     // Find time range
     const allDates = tasks.flatMap(t => [t.start, t.end])
-    const minDate = d3.min(allDates)!
-    const maxDate = d3.max(allDates)!
+    const minDate = min(allDates)!
+    const maxDate = max(allDates)!
 
     // Create scales
-    const xScale = d3.scaleTime()
+    const xScale = scaleTime()
       .domain([minDate, maxDate])
       .range([0, width])
 
-    const yScale = d3.scaleBand()
+    const yScale = scaleBand()
       .domain(tasks.map(t => t.id))
       .range([0, height])
       .padding(0.3)
@@ -195,9 +200,9 @@ export default function MyceliaTimeline() {
       .attr('class', 'zoomable')
 
     // Add axes
-    const xAxis = d3.axisBottom(xScale)
+    const xAxis = axisBottom(xScale)
       .ticks(6)
-      .tickFormat(d3.timeFormat('%b %d, %Y') as any)
+      .tickFormat(timeFormat('%b %d, %Y') as any)
 
     g.append('g')
       .attr('class', 'x-axis')
@@ -224,11 +229,11 @@ export default function MyceliaTimeline() {
       .style('opacity', 0.8)
       .style('cursor', 'pointer')
       .on('mouseover', function(this: SVGRectElement, event: MouseEvent, d: TimelineTask) {
-        d3.select(this).style('opacity', 1)
+        select(this).style('opacity', 1)
 
         // Show tooltip
         if (tooltipRef.current) {
-          const tooltip = d3.select(tooltipRef.current)
+          const tooltip = select(tooltipRef.current)
           const startDate = d.start.toLocaleDateString('en-US', {
             year: 'numeric',
             month: 'short',
@@ -280,11 +285,11 @@ export default function MyceliaTimeline() {
         }
       })
       .on('mouseout', function(this: SVGRectElement) {
-        d3.select(this).style('opacity', 0.8)
+        select(this).style('opacity', 0.8)
 
         // Hide tooltip
         if (tooltipRef.current) {
-          d3.select(tooltipRef.current).style('opacity', 0)
+          select(tooltipRef.current).style('opacity', 0)
         }
       })
       .on('click', function(this: SVGRectElement, event: MouseEvent, d: TimelineTask) {
@@ -315,9 +320,9 @@ export default function MyceliaTimeline() {
       .style('font-size', '12px')
 
     // Zoom behavior
-    const zoom = d3.zoom<SVGSVGElement, unknown>()
+    const zoomBehavior = zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.5, 5])
-      .on('zoom', (event: d3.D3ZoomEvent<SVGSVGElement, unknown>) => {
+      .on('zoom', (event: D3ZoomEvent<SVGSVGElement, unknown>) => {
         const transform = event.transform
 
         // Update x scale
@@ -325,9 +330,9 @@ export default function MyceliaTimeline() {
 
         // Update axis
         g.select<SVGGElement>('.x-axis').call(
-          d3.axisBottom(newXScale)
+          axisBottom(newXScale)
             .ticks(6)
-            .tickFormat(d3.timeFormat('%b %d, %Y') as any) as any
+            .tickFormat(timeFormat('%b %d, %Y') as any) as any
         )
 
         // Update bars
@@ -336,7 +341,7 @@ export default function MyceliaTimeline() {
           .attr('width', (d: TimelineTask) => Math.max(2, newXScale(d.end) - newXScale(d.start)))
       })
 
-    svg.call(zoom as any)
+    svg.call(zoomBehavior as any)
 
   }, [memories, dimensions, useDemoData])
 

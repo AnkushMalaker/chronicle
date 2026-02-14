@@ -284,6 +284,7 @@ test-no-api:
 		--exclude slow \
 		--exclude sdk \
 		--exclude requires-api-keys \
+		--exclude requires-gpu \
 		$(TEST_DIR)
 
 # Run ALL tests including slow and SDK tests

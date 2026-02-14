@@ -4,11 +4,12 @@ System and utility routes for Chronicle API.
 Handles metrics, auth config, and other system utilities.
 """
 
+import json
 import logging
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from advanced_omi_backend.auth import current_active_user, current_superuser
@@ -18,6 +19,7 @@ from advanced_omi_backend.controllers import (
     system_controller,
 )
 from advanced_omi_backend.models.user import User
+from advanced_omi_backend.services import plugin_assistant
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +270,39 @@ async def validate_plugins_config(
 
 # Structured Plugin Configuration Endpoints (Form-based UI)
 
+@router.post("/admin/plugins/reload")
+async def reload_plugins(
+    request: Request,
+    current_user: User = Depends(current_superuser),
+):
+    """Hot-reload all plugins and signal workers to restart. Admin only.
+
+    Reloads plugin code and configuration without a full container restart.
+    Workers are signaled asynchronously via Redis and will restart after
+    finishing their current job.
+    """
+    try:
+        result = await system_controller.reload_plugins_controller(app=request.app)
+        return JSONResponse(content=result)
+    except Exception as e:
+        logger.error(f"Failed to reload plugins: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/admin/plugins/health")
+async def get_plugins_health(current_user: User = Depends(current_superuser)):
+    """Get plugin health status for all registered plugins. Admin only."""
+    try:
+        from advanced_omi_backend.services.plugin_service import get_plugin_router
+        plugin_router = get_plugin_router()
+        if not plugin_router:
+            return {"total": 0, "initialized": 0, "failed": 0, "registered": 0, "plugins": []}
+        return plugin_router.get_health_summary()
+    except Exception as e:
+        logger.error(f"Failed to get plugins health: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/admin/plugins/metadata")
 async def get_plugins_metadata(current_user: User = Depends(current_superuser)):
     """Get plugin metadata for form-based configuration UI. Admin only.
@@ -290,6 +325,20 @@ class PluginConfigRequest(BaseModel):
     orchestration: Optional[dict] = None
     settings: Optional[dict] = None
     env_vars: Optional[dict] = None
+
+
+class CreatePluginRequest(BaseModel):
+    """Request model for creating a new plugin."""
+    plugin_name: str
+    description: str
+    events: list[str] = []
+    plugin_code: Optional[str] = None
+
+
+class WritePluginCodeRequest(BaseModel):
+    """Request model for writing plugin code."""
+    code: str
+    config_yml: Optional[str] = None
 
 
 @router.post("/admin/plugins/config/structured/{plugin_id}")
@@ -336,6 +385,103 @@ async def test_plugin_connection(
     except Exception as e:
         logger.error(f"Failed to test plugin connection: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/admin/plugins/create")
+async def create_plugin(
+    request: CreatePluginRequest,
+    current_user: User = Depends(current_superuser),
+):
+    """Create a new plugin with boilerplate or LLM-generated code. Admin only."""
+    try:
+        result = await system_controller.create_plugin(
+            plugin_name=request.plugin_name,
+            description=request.description,
+            events=request.events,
+            plugin_code=request.plugin_code,
+        )
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "Unknown error"))
+        return JSONResponse(content=result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to create plugin: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/admin/plugins/{plugin_id}/code")
+async def write_plugin_code(
+    plugin_id: str,
+    request: WritePluginCodeRequest,
+    current_user: User = Depends(current_superuser),
+):
+    """Write or update plugin code. Admin only."""
+    try:
+        result = await system_controller.write_plugin_code(
+            plugin_id=plugin_id,
+            code=request.code,
+            config_yml=request.config_yml,
+        )
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "Unknown error"))
+        return JSONResponse(content=result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to write plugin code: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/admin/plugins/{plugin_id}")
+async def delete_plugin(
+    plugin_id: str,
+    remove_files: bool = False,
+    current_user: User = Depends(current_superuser),
+):
+    """Delete a plugin from plugins.yml and optionally remove files. Admin only."""
+    try:
+        result = await system_controller.delete_plugin(
+            plugin_id=plugin_id,
+            remove_files=remove_files,
+        )
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("error", "Unknown error"))
+        return JSONResponse(content=result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete plugin: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/admin/plugins/assistant")
+async def plugin_assistant_chat(
+    request: Request,
+    current_user: User = Depends(current_superuser),
+):
+    """AI-powered plugin configuration assistant. Admin only. Returns SSE stream."""
+    body = await request.json()
+    messages = body.get("messages", [])
+
+    async def event_stream():
+        try:
+            async for event in plugin_assistant.generate_response_stream(messages):
+                yield f"data: {json.dumps(event, default=str)}\n\n"
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            logger.error(f"Plugin assistant error: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'data': {'error': str(e)}})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Content-Type": "text/event-stream",
+        },
+    )
 
 
 @router.get("/streaming/status")

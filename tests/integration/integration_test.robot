@@ -118,7 +118,7 @@ End To End Pipeline With Memory Validation Test
     [Documentation]    Complete E2E test with memory extraction and OpenAI quality validation.
     ...                Provides comprehensive integration testing of the entire audio started pipeline.
     ...                Separate from other tests to avoid breaking existing upload-only tests.
-    [Tags]    e2e	memory
+    [Tags]    e2e	memory	requires-api-keys
     [Timeout]    600s
 
     Log    Starting End-to-End Pipeline Test with Memory Validation    INFO

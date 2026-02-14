@@ -14,7 +14,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-import yaml
+from ruamel.yaml import YAML
 from dotenv import set_key
 from rich.console import Console
 from rich.prompt import Confirm
@@ -26,6 +26,9 @@ sys.path.insert(0, str(project_root))
 from setup_utils import prompt_value, prompt_with_existing_masked
 
 console = Console()
+
+_yaml = YAML()
+_yaml.preserve_quotes = True
 
 
 def update_plugins_yml_orchestration():
@@ -39,13 +42,13 @@ def update_plugins_yml_orchestration():
     # Load existing or create from template
     if plugins_yml_path.exists():
         with open(plugins_yml_path, 'r') as f:
-            config = yaml.safe_load(f) or {}
+            config = _yaml.load(f) or {}
     else:
         # Copy from template
         template_path = project_root / "config" / "plugins.yml.template"
         if template_path.exists():
             with open(template_path, 'r') as f:
-                config = yaml.safe_load(f) or {}
+                config = _yaml.load(f) or {}
         else:
             config = {'plugins': {}}
 
@@ -74,7 +77,7 @@ def update_plugins_yml_orchestration():
     # Write updated config
     plugins_yml_path.parent.mkdir(parents=True, exist_ok=True)
     with open(plugins_yml_path, 'w') as f:
-        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+        _yaml.dump(config, f)
 
     console.print("[green]✅ Updated config/plugins.yml (orchestration only)[/green]")
 
@@ -158,10 +161,10 @@ def main():
     enable_now = Confirm.ask("\nEnable email_summarizer plugin now?", default=True)
     if enable_now:
         with open(plugins_yml_path, 'r') as f:
-            config = yaml.safe_load(f)
+            config = _yaml.load(f)
         config['plugins']['email_summarizer']['enabled'] = True
         with open(plugins_yml_path, 'w') as f:
-            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+            _yaml.dump(config, f)
         console.print("[green]✅ Plugin enabled in config/plugins.yml[/green]")
 
     console.print("\n[bold cyan]✅ Email Summarizer configured successfully![/bold cyan]")

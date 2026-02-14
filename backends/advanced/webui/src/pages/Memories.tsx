@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Brain, Search, RefreshCw, Trash2, Calendar, Tag, X, Target, Users, CheckSquare } from 'lucide-react'
+import { Brain, Search, RefreshCw, Trash2, Calendar, Tag, X, Target, Users, CheckSquare, ArrowUpDown } from 'lucide-react'
 import { memoriesApi, systemApi } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
+import { useMemories, useDeleteMemory } from '../hooks/useMemories'
 import { EntityList, PromisesList } from '../components/knowledge-graph'
 import '../styles/slider.css'
 
@@ -20,16 +21,15 @@ interface Memory {
 }
 
 type Tab = 'memories' | 'entities' | 'promises'
+type SortOrder = 'newest' | 'oldest'
 
 export default function Memories() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const [activeTab, setActiveTab] = useState<Tab>((searchParams.get('tab') as Tab) || 'memories')
-  const [memories, setMemories] = useState<Memory[]>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
-  const [totalCount, setTotalCount] = useState<number | null>(null)
+  const [sortOrder, setSortOrder] = useState<SortOrder>('newest')
+  const [actionError, setActionError] = useState<string | null>(null)
 
   // Semantic search state
   const [semanticResults, setSemanticResults] = useState<Memory[]>([])
@@ -43,6 +43,21 @@ export default function Memories() {
   const [memoryProvider, setMemoryProvider] = useState<string>('')
 
   const { user } = useAuth()
+
+  const {
+    data: memoriesData,
+    isLoading: loading,
+    error: queryError,
+    refetch: refetchMemories,
+  } = useMemories(user?.id)
+
+  const memories = (() => {
+    if (!memoriesData) return []
+    const data = memoriesData.memories || memoriesData || []
+    return Array.isArray(data) ? data : []
+  })()
+  const totalCount = memoriesData?.total_count ?? null
+  const error = queryError?.message ?? actionError ?? null
 
   const handleTabChange = (tab: Tab) => {
     setActiveTab(tab)
@@ -65,46 +80,9 @@ export default function Memories() {
     }
   }
 
-  const loadMemories = async () => {
-    if (!user?.id) return
-
-    try {
-      setLoading(true)
-      const response = await memoriesApi.getAll(user.id)
-
-      console.log('🧠 Memories API response:', response.data)
-
-      // Handle the API response structure
-      const memoriesData = response.data.memories || response.data || []
-      const totalCount = response.data.total_count
-      console.log('🧠 Processed memories data:', memoriesData)
-      console.log('🧠 Total count:', totalCount)
-
-      // Log first few memories to inspect structure
-      if (memoriesData.length > 0) {
-        console.log('🧠 First memory object:', memoriesData[0])
-        console.log('🧠 Memory fields:', Object.keys(memoriesData[0]))
-      }
-
-      setMemories(Array.isArray(memoriesData) ? memoriesData : [])
-      // Store total count in state for display
-      setTotalCount(totalCount)
-      setError(null)
-    } catch (err: any) {
-      console.error('❌ Memory loading error:', err)
-      setError(err.message || 'Failed to load memories')
-    } finally {
-      setLoading(false)
-    }
-  }
-
   useEffect(() => {
     loadSystemConfig()
   }, [])
-
-  useEffect(() => {
-    loadMemories()
-  }, [user?.id])
 
   // Semantic search handlers
   const handleSemanticSearch = async () => {
@@ -132,9 +110,9 @@ export default function Memories() {
       setSemanticQuery(searchQuery.trim())
       setIsSemanticFilterActive(true)
       setSearchQuery('') // Clear search box
-      setError(null)
+      setActionError(null)
     } catch (err: any) {
-      setError(err.message || 'Semantic search failed')
+      setActionError(err.message || 'Semantic search failed')
     } finally {
       setSemanticLoading(false)
     }
@@ -148,18 +126,19 @@ export default function Memories() {
     setRelevanceThreshold(0) // Reset threshold
   }
 
+  const deleteMemoryMutation = useDeleteMemory()
+
   const handleDeleteMemory = async (memoryId: string) => {
     if (!confirm('Are you sure you want to delete this memory?')) return
 
     try {
-      await memoriesApi.delete(memoryId)
-      // Remove from both regular memories and semantic results if present
-      setMemories(memories.filter(m => m.id !== memoryId))
+      await deleteMemoryMutation.mutateAsync(memoryId)
+      // Also remove from semantic results if present
       if (isSemanticFilterActive) {
         setSemanticResults(semanticResults.filter(m => m.id !== memoryId))
       }
     } catch (err: any) {
-      setError(err.message || 'Failed to delete memory')
+      setActionError(err.message || 'Failed to delete memory')
     }
   }
 
@@ -180,6 +159,13 @@ export default function Memories() {
     memory.memory.toLowerCase().includes(searchQuery.toLowerCase()) ||
     (memory.category?.toLowerCase() || '').includes(searchQuery.toLowerCase())
   )
+
+  // Apply sort order
+  const sortedMemories = [...filteredMemories].sort((a, b) => {
+    const dateA = new Date(a.created_at).getTime()
+    const dateB = new Date(b.created_at).getTime()
+    return sortOrder === 'newest' ? dateB - dateA : dateA - dateB
+  })
 
   const formatDate = (dateInput: string | number | undefined | null) => {
     // Handle missing/undefined dates
@@ -343,7 +329,7 @@ export default function Memories() {
       <div className="space-y-4 mb-6">
         <div className="flex items-center justify-end">
           <button
-            onClick={loadMemories}
+            onClick={() => refetchMemories()}
             disabled={loading || !user}
             className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50"
           >
@@ -455,7 +441,7 @@ export default function Memories() {
       {/* Status Messages */}
       {user && (memories.length > 0 || isSemanticFilterActive) && (
         <div className="mb-4">
-          <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md p-4">
+          <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md p-4 flex items-center justify-between">
             <p className="text-sm text-blue-700 dark:text-blue-300">
               {isSemanticFilterActive ? (
                 relevanceThreshold > 0 ? (
@@ -479,6 +465,17 @@ export default function Memories() {
                 )
               )}
             </p>
+            <div className="flex items-center space-x-2 ml-4">
+              <ArrowUpDown className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
+              <select
+                value={sortOrder}
+                onChange={(e) => setSortOrder(e.target.value as SortOrder)}
+                className="text-sm bg-white dark:bg-gray-800 border border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              >
+                <option value="newest">Newest first</option>
+                <option value="oldest">Oldest first</option>
+              </select>
+            </div>
           </div>
         </div>
       )}
@@ -530,7 +527,7 @@ export default function Memories() {
           </div>
 
           <div className="space-y-4">
-            {filteredMemories.map((memory) => (
+            {sortedMemories.map((memory) => (
               <div
                 key={memory.id}
                 className="bg-gray-50 dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600 hover:border-blue-400 dark:hover:border-blue-500 transition-colors group"

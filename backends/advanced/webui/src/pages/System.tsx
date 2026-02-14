@@ -4,36 +4,12 @@ import { systemApi, speakerApi } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
 import MemorySettings from '../components/MemorySettings'
 import ChatSettings from '../components/ChatSettings'
+import { useSystemData, useDiarizationSettings, useMemoryProvider, useMiscSettings } from '../hooks/useSystem'
 
-interface HealthData {
-  status: 'healthy' | 'partial' | 'unhealthy'
-  services: Record<string, {
-    healthy: boolean
-    message?: string
-  }>
-  timestamp?: string
-}
-
-interface MetricsData {
-  debug_tracker?: {
-    total_files: number
-    processed_files: number
-    failed_files: number
-  }
-}
-
-interface ProcessorStatus {
-  audio_queue_size: number
-  transcription_queue_size: number
-  memory_queue_size: number
-  active_tasks: number
-}
-
-interface ActiveClient {
-  id: string
-  user_id: string
-  connected_at: string
-  last_activity: string
+interface ServiceStatus {
+  healthy: boolean
+  message?: string
+  status?: string
 }
 
 interface DiarizationSettings {
@@ -46,36 +22,26 @@ interface DiarizationSettings {
   max_speakers: number
 }
 
-interface DiagnosticIssue {
-  component: string
-  severity: 'error' | 'warning' | 'info'
-  message: string
-  resolution?: string
-}
-
-interface ConfigDiagnostics {
-  timestamp: string
-  overall_status: 'healthy' | 'partial' | 'unhealthy'
-  issues: DiagnosticIssue[]
-  warnings: DiagnosticIssue[]
-  info: DiagnosticIssue[]
-  components: Record<string, {
-    status: string
-    message: string
-    details?: any
-  }>
-}
-
 export default function System() {
-  const [healthData, setHealthData] = useState<HealthData | null>(null)
-  const [readinessData, setReadinessData] = useState<any>(null)
-  const [metricsData, setMetricsData] = useState<MetricsData | null>(null)
-  const [configDiagnostics, setConfigDiagnostics] = useState<ConfigDiagnostics | null>(null)
-  const [processorStatus, setProcessorStatus] = useState<ProcessorStatus | null>(null)
-  const [activeClients, setActiveClients] = useState<ActiveClient[]>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  const { isAdmin } = useAuth()
+
+  // TanStack Query hooks for data fetching
+  const { data: systemData, isLoading: loading, error: systemError, refetch: refetchSystem, dataUpdatedAt } = useSystemData(isAdmin)
+  const { data: diarizationData } = useDiarizationSettings()
+  const { data: memoryProviderData } = useMemoryProvider()
+  const { data: miscSettingsData } = useMiscSettings()
+
+  // Derive state from query results
+  const healthData = systemData?.healthData ?? null
+  const readinessData = systemData?.readinessData ?? null
+  const metricsData = systemData?.metricsData ?? null
+  const configDiagnostics = systemData?.configDiagnostics ?? null
+  const processorStatus = systemData?.processorStatus ?? null
+  const activeClients = systemData?.activeClients ?? []
+  const error = systemError?.message ?? null
+  const lastUpdated = dataUpdatedAt ? new Date(dataUpdatedAt) : null
+
+  // Local state for editable settings
   const [diarizationSettings, setDiarizationSettings] = useState<DiarizationSettings>({
     diarization_source: 'pyannote',
     similarity_threshold: 0.15,
@@ -92,7 +58,6 @@ export default function System() {
   const [providerLoading, setProviderLoading] = useState(false)
   const [providerMessage, setProviderMessage] = useState('')
 
-  // Miscellaneous settings state
   const [miscSettings, setMiscSettings] = useState({
     always_persist_enabled: false,
     use_provider_segments: false,
@@ -101,94 +66,24 @@ export default function System() {
   const [miscLoading, setMiscLoading] = useState(false)
   const [miscMessage, setMiscMessage] = useState('')
 
-  const { isAdmin } = useAuth()
+  // Sync query data into local editable state
+  useEffect(() => {
+    if (diarizationData) setDiarizationSettings(diarizationData)
+  }, [diarizationData])
 
-  const loadSystemData = async () => {
-    if (!isAdmin) return
-
-    try {
-      setLoading(true)
-      setError(null)
-
-      const [health, readiness, metrics, diagnostics, processor, clients] = await Promise.allSettled([
-        systemApi.getHealth(),
-        systemApi.getReadiness(),
-        systemApi.getMetrics().catch(() => ({ data: null })), // Optional endpoint
-        systemApi.getConfigDiagnostics().catch(() => ({ data: null })), // Optional endpoint
-        systemApi.getProcessorStatus().catch(() => ({ data: null })), // Optional endpoint
-        systemApi.getActiveClients().catch(() => ({ data: [] })), // Optional endpoint
-      ])
-
-      if (health.status === 'fulfilled') {
-        setHealthData(health.value.data)
-      }
-      if (readiness.status === 'fulfilled') {
-        setReadinessData(readiness.value.data)
-      }
-      if (metrics.status === 'fulfilled' && metrics.value.data) {
-        setMetricsData(metrics.value.data)
-      }
-      if (diagnostics.status === 'fulfilled' && diagnostics.value.data) {
-        setConfigDiagnostics(diagnostics.value.data)
-      }
-      if (processor.status === 'fulfilled' && processor.value.data) {
-        setProcessorStatus(processor.value.data)
-      }
-      if (clients.status === 'fulfilled' && clients.value.data) {
-        setActiveClients(clients.value.data)
-      }
-
-      setLastUpdated(new Date())
-    } catch (err: any) {
-      setError(err.message || 'Failed to load system data')
-    } finally {
-      setLoading(false)
+  useEffect(() => {
+    if (memoryProviderData) {
+      setCurrentProvider(memoryProviderData.currentProvider)
+      setAvailableProviders(memoryProviderData.availableProviders)
+      setSelectedProvider(memoryProviderData.currentProvider)
     }
-  }
+  }, [memoryProviderData])
 
-  const loadDiarizationSettings = async () => {
-    try {
-      setDiarizationLoading(true)
-      const response = await systemApi.getDiarizationSettings()
-      if (response.data.status === 'success') {
-        setDiarizationSettings(response.data.settings)
-      }
-    } catch (err: any) {
-      console.error('Failed to load diarization settings:', err)
-    } finally {
-      setDiarizationLoading(false)
-    }
-  }
+  useEffect(() => {
+    if (miscSettingsData) setMiscSettings(miscSettingsData)
+  }, [miscSettingsData])
 
-  const loadMemoryProvider = async () => {
-    try {
-      setProviderLoading(true)
-      const response = await systemApi.getMemoryProvider()
-      if (response.data.status === 'success') {
-        setCurrentProvider(response.data.current_provider)
-        setAvailableProviders(response.data.available_providers)
-        setSelectedProvider(response.data.current_provider)
-      }
-    } catch (err: any) {
-      console.error('Failed to load memory provider:', err)
-    } finally {
-      setProviderLoading(false)
-    }
-  }
-
-  const loadMiscSettings = async () => {
-    try {
-      setMiscLoading(true)
-      const response = await systemApi.getMiscSettings()
-      if (response.data.status === 'success') {
-        setMiscSettings(response.data.settings)
-      }
-    } catch (err: any) {
-      console.error('Failed to load misc settings:', err)
-    } finally {
-      setMiscLoading(false)
-    }
-  }
+  const loadSystemData = () => refetchSystem()
 
   const saveMiscSettings = async () => {
     try {
@@ -248,12 +143,7 @@ export default function System() {
     }
   }
 
-  useEffect(() => {
-    loadSystemData()
-    loadDiarizationSettings()
-    loadMemoryProvider()
-    loadMiscSettings()
-  }, [isAdmin])
+  // Data loading is handled by TanStack Query hooks above
 
   const getStatusIcon = (healthy: boolean) => {
     return healthy 
@@ -464,7 +354,7 @@ export default function System() {
               Services Status
             </h3>
             <div className="space-y-3">
-              {Object.entries(healthData.services).map(([service, status]) => (
+              {Object.entries(healthData.services as Record<string, ServiceStatus>).map(([service, status]) => (
                 <div key={service} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-md">
                   <div className="flex items-center space-x-3">
                     {getStatusIcon(status.healthy)}

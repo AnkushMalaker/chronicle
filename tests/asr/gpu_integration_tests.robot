@@ -94,8 +94,14 @@ GPU ASR Transcription Returns Text
 
 GPU ASR Transcription Has Word Timestamps
     [Documentation]    Verify word timestamps from actual model inference
+    ...                Only runs when provider reports word_timestamps capability
     [Tags]    requires-gpu	e2e
     [Timeout]    180s
+
+    # Check if provider supports word timestamps
+    ${info}=    Get ASR Service Info    ${GPU_ASR_URL}
+    ${has_word_timestamps}=    Evaluate    'word_timestamps' in $info.get('capabilities', [])
+    Skip If    not ${has_word_timestamps}    Provider does not report word_timestamps capability
 
     ${response}=    Upload Audio For ASR Transcription    ${TEST_AUDIO_FILE}    ${GPU_ASR_URL}
     ${json}=    Set Variable    ${response.json()}

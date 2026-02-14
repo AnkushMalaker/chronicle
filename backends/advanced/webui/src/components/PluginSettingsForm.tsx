@@ -11,8 +11,15 @@ interface PluginMetadata {
   enabled: boolean
   status: 'active' | 'disabled' | 'error'
   supports_testing: boolean
+  orchestration: {
+    enabled: boolean
+    events: string[]
+    condition: {
+      type: 'always' | 'wake_word'
+      wake_words?: string[]
+    }
+  }
   config_schema: {
-    orchestration: any
     settings: Record<string, any>
     env_vars: Record<string, any>
   }
@@ -96,11 +103,12 @@ export default function PluginSettingsForm({ className }: PluginSettingsFormProp
     if (!plugin) return
 
     // Extract current configuration from plugin metadata
+    const orch = plugin.orchestration || { enabled: false, events: [], condition: { type: 'always' } }
     const config: PluginConfig = {
       orchestration: {
-        enabled: plugin.enabled || false,
-        events: [],
-        condition: { type: 'always' }
+        enabled: orch.enabled || false,
+        events: orch.events || [],
+        condition: orch.condition || { type: 'always' }
       },
       settings: {},
       env_vars: {}
@@ -137,8 +145,8 @@ export default function PluginSettingsForm({ className }: PluginSettingsFormProp
       await systemApi.updatePluginConfigStructured(pluginId, {
         orchestration: {
           enabled,
-          events: plugin.config_schema.orchestration?.events || [],
-          condition: plugin.config_schema.orchestration?.condition || { type: 'always' }
+          events: plugin.orchestration?.events || [],
+          condition: plugin.orchestration?.condition || { type: 'always' }
         }
       })
 

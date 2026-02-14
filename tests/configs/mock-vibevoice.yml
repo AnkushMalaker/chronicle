@@ -23,7 +23,7 @@ models:
     model_provider: openai
     api_family: openai
     model_name: gpt-4o-mini
-    model_url: http://host.docker.internal:11435
+    model_url: http://host.docker.internal:11435/v1
     api_key: dummy-key-not-used
     model_params:
       temperature: 0.2
@@ -36,7 +36,7 @@ models:
     model_provider: openai
     api_family: openai
     model_name: text-embedding-3-small
-    model_url: http://host.docker.internal:11435
+    model_url: http://host.docker.internal:11435/v1
     api_key: dummy-key-not-used
     embedding_dimensions: 1536
     model_output: vector

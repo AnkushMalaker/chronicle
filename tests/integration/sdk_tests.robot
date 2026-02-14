@@ -25,7 +25,7 @@ ${TEST_AUDIO_DIR}     ${CURDIR}/../../extras/test-audios
 *** Test Cases ***
 SDK Can Authenticate With Admin Credentials
     [Documentation]    Test SDK login functionality
-    [Tags]    permissions
+    [Tags]    permissions	sdk
 
     ${result}=    Run Process    uv    run    python
     ...    ${CURDIR}/../scripts/sdk_test_auth.py
@@ -58,7 +58,7 @@ SDK Can Retrieve Conversations
 
 SDK Upload Respects Backend File Size Limit
     [Documentation]    Verify SDK properly reports backend errors for oversized files
-    [Tags]    audio-upload
+    [Tags]    audio-upload	sdk
 
     # Note: This tests that SDK handles backend rejection gracefully
     # The 30-minute limit is enforced by the backend, not the SDK

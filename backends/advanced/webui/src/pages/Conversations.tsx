@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { MessageSquare, RefreshCw, Calendar, User, Play, Pause, MoreVertical, RotateCcw, Zap, ChevronDown, ChevronUp, Trash2, Save, X, Check, AlertTriangle } from 'lucide-react'
 import { conversationsApi, annotationsApi, speakerApi, BACKEND_URL } from '../services/api'
+import { useConversations, useDeleteConversation, useReprocessTranscript, useReprocessMemory, useReprocessSpeakers, useReprocessOrphan } from '../hooks/useConversations'
 import ConversationVersionHeader from '../components/ConversationVersionHeader'
 import { getStorageKey } from '../utils/storage'
 import { WaveformDisplay } from '../components/audio/WaveformDisplay'
@@ -56,10 +58,19 @@ const SPEAKER_COLOR_PALETTE = [
 ];
 
 export default function Conversations() {
-  const [conversations, setConversations] = useState<Conversation[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const queryClient = useQueryClient()
   const [debugMode, setDebugMode] = useState(false)
+
+  const {
+    data: conversationsData,
+    isLoading: loading,
+    error: queryError,
+    refetch,
+  } = useConversations({ includeUnprocessed: debugMode || undefined })
+
+  const conversations: Conversation[] = conversationsData?.conversations ?? []
+  const [actionError, setActionError] = useState<string | null>(null)
+  const error = queryError?.message ?? actionError ?? null
 
   // Transcript expand/collapse state
   const [expandedTranscripts, setExpandedTranscripts] = useState<Set<string>>(new Set())
@@ -114,24 +125,17 @@ export default function Conversations() {
 
   // Stable seek handler for waveform click-to-seek
   const handleSeek = useCallback((conversationId: string, time: number) => {
-    console.log(`🎯 handleSeek called: conversationId=${conversationId}, time=${time.toFixed(2)}s`);
-
     const audioElement = audioRefs.current[conversationId];
 
     if (!audioElement) {
-      console.error(`❌ Audio element not found for conversation ${conversationId}`);
-      console.log('Available audio refs:', Object.keys(audioRefs.current));
       return;
     }
-
-    console.log(`📍 Audio element found, readyState=${audioElement.readyState}, paused=${audioElement.paused}`);
 
     // Check if audio is ready for seeking (readyState >= 1 means HAVE_METADATA)
     if (audioElement.readyState < 1) {
       console.warn(`⚠️ Audio not ready for seeking (readyState=${audioElement.readyState})`);
       // Try again after metadata loads
       audioElement.addEventListener('loadedmetadata', () => {
-        console.log('✅ Metadata loaded, retrying seek');
         audioElement.currentTime = time;
       }, { once: true });
       return;
@@ -151,10 +155,8 @@ export default function Conversations() {
 
       // Verify the seek worked
       setTimeout(() => {
-        console.log(`✅ Seek complete: requested=${time.toFixed(2)}s, actual=${audioElement.currentTime.toFixed(2)}s`);
-
         if (Math.abs(audioElement.currentTime - time) > 1.0) {
-          console.error(`⚠️ Seek failed! Requested ${time.toFixed(2)}s but got ${audioElement.currentTime.toFixed(2)}s`);
+          console.error(`Seek failed! Requested ${time.toFixed(2)}s but got ${audioElement.currentTime.toFixed(2)}s`);
         }
       }, 100);
 
@@ -168,22 +170,6 @@ export default function Conversations() {
       console.error('❌ Seek failed:', err);
     }
   }, []); // Empty deps - uses ref which is always stable
-
-  const loadConversations = async () => {
-    try {
-      setLoading(true)
-      // Exclude deleted conversations from main view; include orphans in debug mode
-      const response = await conversationsApi.getAll(false, debugMode ? true : undefined)
-      // API now returns a flat list with client_id as a field
-      const conversationsList = response.data.conversations || []
-      setConversations(conversationsList)
-      setError(null)
-    } catch (err: any) {
-      setError(err.message || 'Failed to load conversations')
-    } finally {
-      setLoading(false)
-    }
-  }
 
   const loadEnrolledSpeakers = async () => {
     try {
@@ -238,7 +224,7 @@ export default function Conversations() {
       await loadDiarizationAnnotations(conversationId)
     } catch (err: any) {
       console.error('Failed to create annotation:', err)
-      setError('Failed to create speaker annotation')
+      setActionError('Failed to create speaker annotation')
     }
   }
 
@@ -250,20 +236,19 @@ export default function Conversations() {
       const response = await annotationsApi.applyAllAnnotations(conversationId)
 
       if (response.status === 200) {
-        const data = response.data
-        console.log(`Applied ${data.diarization_count} diarization and ${data.transcript_count} transcript annotations`)
+        // Applied annotations successfully
 
         // Refresh conversation to show new version
-        await loadConversations()
+        await queryClient.invalidateQueries({ queryKey: ['conversations'] })
 
         // Reload annotations (should be empty now)
         await loadDiarizationAnnotations(conversationId)
         await loadTranscriptAnnotations(conversationId)
       } else {
-        setError(`Failed to apply annotations: ${response.data?.error || 'Unknown error'}`)
+        setActionError(`Failed to apply annotations: ${response.data?.error || 'Unknown error'}`)
       }
     } catch (err: any) {
-      setError(`Error applying annotations: ${err.message || 'Unknown error'}`)
+      setActionError(`Error applying annotations: ${err.message || 'Unknown error'}`)
     } finally {
       setApplyingAnnotations(prev => {
         const newSet = new Set(prev)
@@ -276,11 +261,6 @@ export default function Conversations() {
   useEffect(() => {
     loadEnrolledSpeakers()
   }, [])
-
-  // Load conversations on mount and when debug mode toggles (to include/exclude orphans)
-  useEffect(() => {
-    loadConversations()
-  }, [debugMode])
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -312,147 +292,117 @@ export default function Conversations() {
     return `${minutes}:${seconds.toString().padStart(2, '0')}`
   }
 
+  const reprocessTranscriptMutation = useReprocessTranscript()
+
   const handleReprocessTranscript = async (conversation: Conversation) => {
+    if (!conversation.conversation_id) {
+      setActionError('Cannot reprocess transcript: Conversation ID is missing. This conversation may be from an older format.')
+      return
+    }
+
+    setReprocessingTranscript(prev => new Set(prev).add(conversation.conversation_id!))
+    setOpenDropdown(null)
+
     try {
-      if (!conversation.conversation_id) {
-        setError('Cannot reprocess transcript: Conversation ID is missing. This conversation may be from an older format.')
-        return
-      }
-
-      setReprocessingTranscript(prev => new Set(prev).add(conversation.conversation_id!))
-      setOpenDropdown(null)
-
-      const response = await conversationsApi.reprocessTranscript(conversation.conversation_id)
-
-      if (response.status === 200) {
-        // Refresh conversations to show updated data
-        await loadConversations()
-      } else {
-        setError(`Failed to start transcript reprocessing: ${response.data?.error || 'Unknown error'}`)
-      }
+      await reprocessTranscriptMutation.mutateAsync(conversation.conversation_id)
     } catch (err: any) {
-      setError(`Error starting transcript reprocessing: ${err.message || 'Unknown error'}`)
+      setActionError(`Error starting transcript reprocessing: ${err.message || 'Unknown error'}`)
     } finally {
-      if (conversation.conversation_id) {
-        setReprocessingTranscript(prev => {
-          const newSet = new Set(prev)
-          newSet.delete(conversation.conversation_id!)
-          return newSet
-        })
-      }
+      setReprocessingTranscript(prev => {
+        const newSet = new Set(prev)
+        newSet.delete(conversation.conversation_id!)
+        return newSet
+      })
     }
   }
+
+  const reprocessMemoryMutation = useReprocessMemory()
 
   const handleReprocessMemory = async (conversation: Conversation, transcriptVersionId?: string) => {
+    if (!conversation.conversation_id) {
+      setActionError('Cannot reprocess memory: Conversation ID is missing. This conversation may be from an older format.')
+      return
+    }
+
+    setReprocessingMemory(prev => new Set(prev).add(conversation.conversation_id!))
+    setOpenDropdown(null)
+
     try {
-      if (!conversation.conversation_id) {
-        setError('Cannot reprocess memory: Conversation ID is missing. This conversation may be from an older format.')
-        return
-      }
-
-      setReprocessingMemory(prev => new Set(prev).add(conversation.conversation_id!))
-      setOpenDropdown(null)
-
-      // For now, use active transcript version. In future, this could be selected from UI
-      const response = await conversationsApi.reprocessMemory(conversation.conversation_id, transcriptVersionId || 'active')
-
-      if (response.status === 200) {
-        // Refresh conversations to show updated data
-        await loadConversations()
-      } else {
-        setError(`Failed to start memory reprocessing: ${response.data?.error || 'Unknown error'}`)
-      }
+      await reprocessMemoryMutation.mutateAsync({
+        conversationId: conversation.conversation_id,
+        transcriptVersionId: transcriptVersionId,
+      })
     } catch (err: any) {
-      setError(`Error starting memory reprocessing: ${err.message || 'Unknown error'}`)
+      setActionError(`Error starting memory reprocessing: ${err.message || 'Unknown error'}`)
     } finally {
-      if (conversation.conversation_id) {
-        setReprocessingMemory(prev => {
-          const newSet = new Set(prev)
-          newSet.delete(conversation.conversation_id!)
-          return newSet
-        })
-      }
+      setReprocessingMemory(prev => {
+        const newSet = new Set(prev)
+        newSet.delete(conversation.conversation_id!)
+        return newSet
+      })
     }
   }
+
+  const reprocessSpeakersMutation = useReprocessSpeakers()
 
   const handleReprocessSpeakers = async (conversation: Conversation) => {
+    if (!conversation.conversation_id) {
+      setActionError('Cannot reprocess speakers: Conversation ID is missing. This conversation may be from an older format.')
+      return
+    }
+
+    setReprocessingSpeakers(prev => new Set(prev).add(conversation.conversation_id!))
+    setOpenDropdown(null)
+
     try {
-      if (!conversation.conversation_id) {
-        setError('Cannot reprocess speakers: Conversation ID is missing. This conversation may be from an older format.')
-        return
-      }
-
-      setReprocessingSpeakers(prev => new Set(prev).add(conversation.conversation_id!))
-      setOpenDropdown(null)
-
-      const response = await conversationsApi.reprocessSpeakers(
-        conversation.conversation_id,
-        'active'  // Use active transcript version as source
-      )
-
-      if (response.status === 200) {
-        // Refresh conversations to show new version with updated speakers
-        await loadConversations()
-      } else {
-        setError(`Failed to start speaker reprocessing: ${response.data?.error || 'Unknown error'}`)
-      }
+      await reprocessSpeakersMutation.mutateAsync({
+        conversationId: conversation.conversation_id,
+        transcriptVersionId: 'active',
+      })
     } catch (err: any) {
-      setError(`Error starting speaker reprocessing: ${err.message || 'Unknown error'}`)
+      setActionError(`Error starting speaker reprocessing: ${err.message || 'Unknown error'}`)
     } finally {
-      if (conversation.conversation_id) {
-        setReprocessingSpeakers(prev => {
-          const newSet = new Set(prev)
-          newSet.delete(conversation.conversation_id!)
-          return newSet
-        })
-      }
+      setReprocessingSpeakers(prev => {
+        const newSet = new Set(prev)
+        newSet.delete(conversation.conversation_id!)
+        return newSet
+      })
     }
   }
+
+  const reprocessOrphanMutation = useReprocessOrphan()
 
   const handleReprocessOrphan = async (conversation: Conversation) => {
+    if (!conversation.conversation_id) return
+
+    setReprocessingOrphan(prev => new Set(prev).add(conversation.conversation_id!))
+
     try {
-      if (!conversation.conversation_id) return
-
-      setReprocessingOrphan(prev => new Set(prev).add(conversation.conversation_id!))
-
-      const response = await conversationsApi.reprocessOrphan(conversation.conversation_id)
-
-      if (response.status === 200) {
-        await loadConversations()
-      } else {
-        setError(`Failed to start orphan reprocessing: ${response.data?.error || 'Unknown error'}`)
-      }
+      await reprocessOrphanMutation.mutateAsync(conversation.conversation_id)
     } catch (err: any) {
-      setError(`Error starting orphan reprocessing: ${err.message || 'Unknown error'}`)
+      setActionError(`Error starting orphan reprocessing: ${err.message || 'Unknown error'}`)
     } finally {
-      if (conversation.conversation_id) {
-        setReprocessingOrphan(prev => {
-          const newSet = new Set(prev)
-          newSet.delete(conversation.conversation_id!)
-          return newSet
-        })
-      }
+      setReprocessingOrphan(prev => {
+        const newSet = new Set(prev)
+        newSet.delete(conversation.conversation_id!)
+        return newSet
+      })
     }
   }
 
+  const deleteConversationMutation = useDeleteConversation()
+
   const handleDeleteConversation = async (conversationId: string) => {
+    const confirmed = window.confirm('Are you sure you want to delete this conversation? This action cannot be undone.')
+    if (!confirmed) return
+
+    setDeletingConversation(prev => new Set(prev).add(conversationId))
+    setOpenDropdown(null)
+
     try {
-      const confirmed = window.confirm('Are you sure you want to delete this conversation? This action cannot be undone.')
-      if (!confirmed) return
-
-      setDeletingConversation(prev => new Set(prev).add(conversationId))
-      setOpenDropdown(null)
-
-      const response = await conversationsApi.delete(conversationId)
-
-      if (response.status === 200) {
-        // Refresh conversations to show updated data
-        await loadConversations()
-      } else {
-        setError(`Failed to delete conversation: ${response.data?.error || 'Unknown error'}`)
-      }
+      await deleteConversationMutation.mutateAsync(conversationId)
     } catch (err: any) {
-      setError(`Error deleting conversation: ${err.message || 'Unknown error'}`)
+      setActionError(`Error deleting conversation: ${err.message || 'Unknown error'}`)
     } finally {
       setDeletingConversation(prev => {
         const newSet = new Set(prev)
@@ -553,18 +503,24 @@ export default function Conversations() {
     try {
       const response = await conversationsApi.getById(conversation.conversation_id)
       if (response.status === 200 && response.data.conversation) {
-        // Update the conversation in state with detailed_summary
-        setConversations(prev => prev.map(c =>
-          c.conversation_id === conversationId
-            ? { ...c, detailed_summary: response.data.conversation.detailed_summary }
-            : c
-        ))
+        // Update the conversation in query cache with detailed_summary
+        queryClient.setQueryData(['conversations', { includeUnprocessed: debugMode || undefined }], (old: any) => {
+          if (!old) return old
+          return {
+            ...old,
+            conversations: old.conversations.map((c: Conversation) =>
+              c.conversation_id === conversationId
+                ? { ...c, detailed_summary: response.data.conversation.detailed_summary }
+                : c
+            ),
+          }
+        })
         // Expand the detailed summary
         setExpandedDetailedSummaries(prev => new Set(prev).add(conversationId))
       }
     } catch (err: any) {
       console.error('Failed to fetch detailed summary:', err)
-      setError(`Failed to load detailed summary: ${err.message || 'Unknown error'}`)
+      setActionError(`Failed to load detailed summary: ${err.message || 'Unknown error'}`)
     }
   }
 
@@ -596,12 +552,18 @@ export default function Conversations() {
     try {
       const response = await conversationsApi.getById(conversation.conversation_id)
       if (response.status === 200 && response.data.conversation) {
-        // Update the conversation in state with full data
-        setConversations(prev => prev.map(c =>
-          c.conversation_id === conversationId
-            ? { ...c, ...response.data.conversation }
-            : c
-        ))
+        // Update the conversation in query cache with full data
+        queryClient.setQueryData(['conversations', { includeUnprocessed: debugMode || undefined }], (old: any) => {
+          if (!old) return old
+          return {
+            ...old,
+            conversations: old.conversations.map((c: Conversation) =>
+              c.conversation_id === conversationId
+                ? { ...c, ...response.data.conversation }
+                : c
+            ),
+          }
+        })
         // Load diarization annotations for this conversation
         await loadDiarizationAnnotations(conversationId)
         // Load transcript annotations for this conversation
@@ -611,7 +573,7 @@ export default function Conversations() {
       }
     } catch (err: any) {
       console.error('Failed to fetch conversation details:', err)
-      setError(`Failed to load transcript: ${err.message || 'Unknown error'}`)
+      setActionError(`Failed to load transcript: ${err.message || 'Unknown error'}`)
     }
   }
 
@@ -644,8 +606,6 @@ export default function Conversations() {
       const token = localStorage.getItem(getStorageKey('token')) || '';
       // Use chunks endpoint with time range for instant loading (only fetches needed chunks)
       const audioUrl = `${BACKEND_URL}/api/audio/chunks/${conversationId}?start_time=${segment.start}&end_time=${segment.end}&token=${token}`;
-      console.log('Creating segment audio element with URL:', audioUrl);
-      console.log('Segment range:', segment.start, 'to', segment.end, '(duration:', segment.end - segment.start, 'seconds)');
       audio = new Audio(audioUrl);
       audioRefs.current[segmentId] = audio;
 
@@ -662,7 +622,6 @@ export default function Conversations() {
     }
 
     // Play the segment (no need to seek since audio is already trimmed to exact range)
-    console.log('Playing segment:', segment.start, 'to', segment.end);
     audio.play().then(() => {
       setPlayingSegment(segmentId);
     }).catch(err => {
@@ -696,7 +655,7 @@ export default function Conversations() {
       <div className="text-center">
         <div className="text-red-600 dark:text-red-400 mb-4">{error}</div>
         <button
-          onClick={loadConversations}
+          onClick={() => { setActionError(null); refetch() }}
           className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
         >
           Try Again
@@ -726,7 +685,7 @@ export default function Conversations() {
             <span className="text-gray-700 dark:text-gray-300">Debug Mode</span>
           </label>
           <button
-            onClick={loadConversations}
+            onClick={() => refetch()}
             className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
           >
             <RefreshCw className="h-4 w-4" />
@@ -802,16 +761,22 @@ export default function Conversations() {
                     try {
                       const response = await conversationsApi.getById(conversation.conversation_id!)
                       if (response.status === 200 && response.data.conversation) {
-                        setConversations(prev => prev.map(c =>
-                          c.conversation_id === conversation.conversation_id
-                            ? { ...c, ...response.data.conversation }
-                            : c
-                        ))
+                        queryClient.setQueryData(['conversations', { includeUnprocessed: debugMode || undefined }], (old: any) => {
+                          if (!old) return old
+                          return {
+                            ...old,
+                            conversations: old.conversations.map((c: Conversation) =>
+                              c.conversation_id === conversation.conversation_id
+                                ? { ...c, ...response.data.conversation }
+                                : c
+                            ),
+                          }
+                        })
                       }
                     } catch (err: any) {
                       console.error('Failed to refresh conversation:', err)
                       // Fallback to full reload on error
-                      loadConversations()
+                      refetch()
                     }
                   }}
                 />

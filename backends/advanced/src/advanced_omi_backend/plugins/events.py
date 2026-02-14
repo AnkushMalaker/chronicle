@@ -49,6 +49,17 @@ class ButtonActionType(str, Enum):
     CALL_PLUGIN = "call_plugin"
 
 
+EVENT_DESCRIPTIONS: Dict[str, str] = {
+    PluginEvent.CONVERSATION_COMPLETE: "Fires when conversation processing finishes (transcript ready)",
+    PluginEvent.TRANSCRIPT_STREAMING: "Real-time transcript segments during a live conversation",
+    PluginEvent.TRANSCRIPT_BATCH: "Batch transcript from file upload processing",
+    PluginEvent.MEMORY_PROCESSED: "After memories are extracted from a conversation",
+    PluginEvent.BUTTON_SINGLE_PRESS: "OMI device button single press",
+    PluginEvent.BUTTON_DOUBLE_PRESS: "OMI device button double press",
+    PluginEvent.PLUGIN_ACTION: "Cross-plugin dispatch via PluginServices.call_plugin()",
+}
+
+
 class ConversationCloseReason(str, Enum):
     """Reasons for requesting a conversation close."""
 

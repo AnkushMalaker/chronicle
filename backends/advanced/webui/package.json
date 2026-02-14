@@ -10,10 +10,16 @@
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.90.20",
     "axios": "^1.6.2",
-    "cronstrue": "^2.50.0",
     "clsx": "^2.0.0",
-    "d3": "^7.8.5",
+    "cronstrue": "^2.50.0",
+    "d3-array": "^3.2.4",
+    "d3-axis": "^3.0.0",
+    "d3-scale": "^4.0.2",
+    "d3-selection": "^3.0.0",
+    "d3-time-format": "^4.1.0",
+    "d3-zoom": "^3.0.0",
     "frappe-gantt": "^1.0.4",
     "lucide-react": "^0.294.0",
     "react": "^18.2.0",
@@ -22,7 +28,12 @@
     "react-vertical-timeline-component": "^3.6.0"
   },
   "devDependencies": {
-    "@types/d3": "^7.4.3",
+    "@types/d3-array": "^3.2.2",
+    "@types/d3-axis": "^3.0.6",
+    "@types/d3-scale": "^4.0.9",
+    "@types/d3-selection": "^3.0.11",
+    "@types/d3-time-format": "^4.0.3",
+    "@types/d3-zoom": "^3.0.8",
     "@types/frappe-gantt": "^0.9.0",
     "@types/react": "^18.2.43",
     "@types/react-dom": "^18.2.17",

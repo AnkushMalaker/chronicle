@@ -314,6 +314,26 @@ export const systemApi = {
     env_vars?: Record<string, string>
   }) => api.post(`/api/admin/plugins/test-connection/${pluginId}`, config),
 
+  // Plugin CRUD
+  createPlugin: (data: { plugin_name: string; description: string; events: string[]; plugin_code?: string }) =>
+    api.post('/api/admin/plugins/create', data),
+  deletePlugin: (pluginId: string, removeFiles: boolean = false) =>
+    api.delete(`/api/admin/plugins/${pluginId}`, { params: { remove_files: removeFiles } }),
+  writePluginCode: (pluginId: string, data: { code: string; config_yml?: string }) =>
+    api.put(`/api/admin/plugins/${pluginId}/code`, data),
+
+  // Plugin AI Assistant (SSE streaming)
+  pluginAssistantChat: (messages: Array<{ role: string; content: string }>) => {
+    return fetch(`${BACKEND_URL}/api/admin/plugins/assistant`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${localStorage.getItem(getStorageKey('token'))}`
+      },
+      body: JSON.stringify({ messages })
+    })
+  },
+
   // Memory Provider Management
   getMemoryProvider: () => api.get('/api/admin/memory/provider'),
   setMemoryProvider: (provider: string) => api.post('/api/admin/memory/provider', { provider }),

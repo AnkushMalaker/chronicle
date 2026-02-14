@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { MessageSquare, RefreshCw, User, Clock, ChevronDown, ChevronUp } from 'lucide-react'
 import { VerticalTimeline, VerticalTimelineElement } from 'react-vertical-timeline-component'
 import 'react-vertical-timeline-component/style.min.css'
-import { conversationsApi } from '../services/api'
+import { useConversations } from '../hooks/useConversations'
 
 interface Conversation {
   conversation_id: string
@@ -162,28 +162,15 @@ function ConversationCard({ conversation, formatDuration }: ConversationCardProp
 }
 
 export default function ConversationsTimeline() {
-  const [conversations, setConversations] = useState<Conversation[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const {
+    data: conversationsData,
+    isLoading: loading,
+    error: queryError,
+    refetch,
+  } = useConversations({})
 
-  const loadConversations = async () => {
-    try {
-      setLoading(true)
-      // Exclude deleted conversations from timeline view
-      const response = await conversationsApi.getAll(false)
-      const conversationsList = response.data.conversations || []
-      setConversations(conversationsList)
-      setError(null)
-    } catch (err: any) {
-      setError(err.message || 'Failed to load conversations')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    loadConversations()
-  }, [])
+  const conversations = conversationsData?.conversations ?? []
+  const error = queryError?.message ?? null
 
   const formatDate = (timestamp: number | string): Date => {
     if (typeof timestamp === 'string') {
@@ -218,7 +205,7 @@ export default function ConversationsTimeline() {
       <div className="text-center">
         <div className="text-red-600 dark:text-red-400 mb-4">{error}</div>
         <button
-          onClick={loadConversations}
+          onClick={() => refetch()}
           className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
         >
           Try Again
@@ -238,7 +225,7 @@ export default function ConversationsTimeline() {
           </h1>
         </div>
         <button
-          onClick={loadConversations}
+          onClick={() => refetch()}
           className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
         >
           <RefreshCw className="h-4 w-4" />

@@ -236,22 +236,6 @@ const Queue: React.FC = () => {
       // Combine all jobs
       const allFetchedJobs = [...queuedJobs, ...startedJobs, ...finishedJobs, ...failedJobs];
 
-      console.log(`📊 Fetched ${allFetchedJobs.length} total jobs via consolidated endpoint`);
-      console.log(`  - Queued: ${queuedJobs.length}`);
-      console.log(`  - Started: ${startedJobs.length}`);  // RQ standard
-      console.log(`  - Finished: ${finishedJobs.length}`);  // RQ standard
-      console.log(`  - Failed: ${failedJobs.length}`);
-
-      // Debug: Log open_conversation_job details
-      const openConvJobs = allFetchedJobs.filter(j => j?.job_type === 'open_conversation_job');
-      console.log(`🔍 Found ${openConvJobs.length} open_conversation_job(s):`);
-      openConvJobs.forEach(job => {
-        console.log(`  Job ID: ${job.job_id}`);
-        console.log(`  Status: ${job.status}`);
-        console.log(`  meta.audio_uuid: ${job.meta?.audio_uuid}`);
-        console.log(`  meta.conversation_id: ${job.meta?.conversation_id}`);
-      });
-
       // Group jobs by conversation_id (primary identifier for conversations)
       const jobsByConversation: {[conversationId: string]: any[]} = {};
 
@@ -267,15 +251,10 @@ const Queue: React.FC = () => {
           jobsByConversation[conversationId].push(job);
 
           // Debug logging for grouping
-          if (job.job_type === 'open_conversation_job') {
-            console.log(`✅ Grouped open_conversation_job ${job.job_id} under conversation ${conversationId}`);
-          }
         } else {
           // Only log warning for non-session-level jobs
           // Audio persistence jobs are expected to not have conversation_id
-          if (job.meta?.session_level !== true && job.job_type !== 'audio_streaming_persistence_job') {
-            console.log(`⚠️ Job ${job.job_id} (${job.job_type}) has no conversation_id - cannot group`);
-          }
+          // Job has no conversation_id - cannot group (expected for session-level and audio persistence jobs)
         }
       });
 
@@ -313,7 +292,6 @@ const Queue: React.FC = () => {
           if (conversationId && !expandedConversations.has(conversationId)) {
             newExpanded.add(conversationId);
             expandedCount++;
-            console.log(`🔓 Auto-expanding active conversation: ${conversationId}`);
           }
 
           // Also expand all job cards in active conversations
@@ -326,15 +304,11 @@ const Queue: React.FC = () => {
         }
       });
 
-      // Update expanded conversations if any new active conversations found
       if (expandedCount > 0) {
-        console.log(`📂 Auto-expanded ${expandedCount} active conversation(s)`);
         setExpandedConversations(newExpanded);
       }
 
-      // Update expanded jobs if any new jobs found
       if (expandedJobsCount > 0) {
-        console.log(`📂 Auto-expanded ${expandedJobsCount} job card(s) in active conversations`);
         setExpandedJobs(newExpandedJobs);
       }
     } catch (error: any) {
@@ -364,7 +338,7 @@ const Queue: React.FC = () => {
 
     const intervalId = setInterval(() => {
       fetchData();
-    }, 2000); // Refresh every 2 seconds
+    }, 5000); // Refresh every 5 seconds
 
     return () => {
       clearInterval(intervalId);
@@ -431,10 +405,8 @@ const Queue: React.FC = () => {
     if (!confirm('This will clean up all stuck workers and pending messages. Continue?')) return;
 
     try {
-      console.log('🧹 Starting cleanup of stuck workers...');
       const response = await queueApi.cleanupStuckWorkers();
       const data = response.data;
-      console.log('✅ Cleanup complete:', data);
 
       alert(`✅ Cleanup complete!\n\nTotal cleaned: ${data.total_cleaned} messages\n\n${
         Object.entries(data.providers).map(([provider, result]: [string, any]) =>
@@ -454,10 +426,8 @@ const Queue: React.FC = () => {
     if (!confirm('This will remove old and stuck "finalizing" sessions from the dashboard. Continue?')) return;
 
     try {
-      console.log('🧹 Starting cleanup of old sessions...');
       const response = await queueApi.cleanupOldSessions(3600); // 1 hour
       const data = response.data;
-      console.log('✅ Cleanup complete:', data);
 
       alert(`✅ Cleanup complete!\n\nRemoved ${data.cleaned_count} old session(s)`);
 
@@ -921,13 +891,6 @@ const Queue: React.FC = () => {
                   });
                   const allJobs = Array.from(jobMap.values());
 
-                  // Debug logging for listen job filtering
-                  console.log(`🔍 Stream ${streamKey}:`);
-                  console.log(`  - clientId extracted: ${clientId}`);
-                  console.log(`  - Total jobs available: ${allJobs.length}`);
-                  const speechDetectionJobs = allJobs.filter((job: any) => job && job.job_type === 'stream_speech_detection_job');
-                  console.log(`  - Speech detection jobs: ${speechDetectionJobs.length}`, speechDetectionJobs.map((j: any) => ({ job_id: j.job_id, meta_client_id: j.meta?.client_id })));
-
                   // Get all listen jobs for this client (only active/queued/processing, not completed)
                   const allListenJobs = allJobs.filter((job: any) =>
                     job && job.job_type === 'stream_speech_detection_job' &&
@@ -943,8 +906,6 @@ const Queue: React.FC = () => {
                         new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
                       )[0]]
                     : [];
-
-                  console.log(`  - All listen jobs (active): ${allListenJobs.length}, showing latest: ${listenJobs.length}`);
 
                   return (
                     <div key={streamKey} className="p-4 bg-gray-50 rounded-lg border border-gray-200">

@@ -99,41 +99,28 @@ Open Audio Stream
     RETURN    ${stream_id}
 
 Open Audio Stream With Always Persist
-    [Documentation]    Start a WebSocket audio stream with always_persist=True
-    ...                This ensures audio is saved to MongoDB even if transcription fails.
+    [Documentation]    Start a WebSocket audio stream with always_persist enabled.
+    ...                always_persist is a backend-level setting (not per-session).
+    ...                This keyword ensures the setting is enabled before opening the stream.
     ...                Returns stream_id for sending chunks.
     [Arguments]    ${device_name}=robot-test    ${recording_mode}=streaming
 
-    ${token}=    Get Authentication Token    api    ${ADMIN_EMAIL}    ${ADMIN_PASSWORD}
+    # Open a regular stream - always_persist is read from backend config at enqueue time
+    ${stream_id}=    Open Audio Stream    device_name=${device_name}    recording_mode=${recording_mode}
 
-    ${stream_id}=    Start Audio Stream
-    ...    base_url=${API_URL}
-    ...    token=${token}
-    ...    device_name=${device_name}
-    ...    recording_mode=${recording_mode}
-    ...    always_persist=${True}
-
-    Log    Started audio stream ${stream_id} with always_persist=True
+    Log    Started audio stream ${stream_id} (always_persist is a backend setting)
     RETURN    ${stream_id}
 
 Stream Audio File With Always Persist
-    [Documentation]    Stream a WAV file via WebSocket with always_persist=True
-    ...                This ensures audio is saved to MongoDB even if transcription fails.
+    [Documentation]    Stream a WAV file via WebSocket with always_persist enabled.
+    ...                always_persist is a backend-level setting (not per-session).
+    ...                Caller should ensure the setting is enabled via API before calling.
     [Arguments]    ${audio_file_path}    ${device_name}=robot-test    ${recording_mode}=streaming
 
-    File Should Exist    ${audio_file_path}
+    # Stream normally - always_persist is read from backend config at enqueue time
+    ${chunks_sent}=    Stream Audio File Via WebSocket    ${audio_file_path}    device_name=${device_name}    recording_mode=${recording_mode}
 
-    ${token}=    Get Authentication Token    api    ${ADMIN_EMAIL}    ${ADMIN_PASSWORD}
-
-    ${chunks_sent}=    Stream Audio File
-    ...    base_url=${API_URL}
-    ...    token=${token}
-    ...    wav_path=${audio_file_path}
-    ...    device_name=${device_name}
-    ...    recording_mode=${recording_mode}
-    ...    always_persist=${True}
-
-    Log    Streamed ${chunks_sent} chunks with always_persist=True
+    Log    Streamed ${chunks_sent} chunks (always_persist is a backend setting)
     Should Be True    ${chunks_sent} > 0
     RETURN    ${chunks_sent}
 

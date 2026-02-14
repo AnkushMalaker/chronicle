@@ -2,15 +2,20 @@
 System controller for handling system-related business logic.
 """
 
+import inspect
 import logging
 import os
+import re
 import shutil
 import time
 import warnings
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Optional
 
-import yaml
+from io import StringIO
+
+from ruamel.yaml import YAML
 from fastapi import HTTPException
 
 from advanced_omi_backend.config import (
@@ -27,6 +32,9 @@ from advanced_omi_backend.models.user import User
 
 logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
+
+_yaml = YAML()
+_yaml.preserve_quotes = True
 
 
 async def get_config_diagnostics():
@@ -597,9 +605,11 @@ async def get_memory_config_raw():
             raise FileNotFoundError(f"Config file not found: {cfg_path}")
 
         with open(cfg_path, 'r') as f:
-            data = yaml.safe_load(f) or {}
+            data = _yaml.load(f) or {}
         memory_section = data.get("memory", {})
-        config_yaml = yaml.safe_dump(memory_section, sort_keys=False)
+        stream = StringIO()
+        _yaml.dump(dict(memory_section) if memory_section else {}, stream)
+        config_yaml = stream.getvalue()
 
         return {
             "config_yaml": config_yaml,
@@ -617,8 +627,8 @@ async def update_memory_config_raw(config_yaml: str):
     try:
         # Validate YAML
         try:
-            new_mem = yaml.safe_load(config_yaml) or {}
-        except yaml.YAMLError as e:
+            new_mem = _yaml.load(config_yaml) or {}
+        except Exception as e:
             raise ValueError(f"Invalid YAML syntax: {str(e)}")
 
         cfg_path = _find_config_path()
@@ -631,10 +641,10 @@ async def update_memory_config_raw(config_yaml: str):
 
         # Update memory section and write file
         with open(cfg_path, 'r') as f:
-            data = yaml.safe_load(f) or {}
+            data = _yaml.load(f) or {}
         data["memory"] = new_mem
         with open(cfg_path, 'w') as f:
-            yaml.safe_dump(data, f, sort_keys=False)
+            _yaml.dump(data, f)
 
         # Reload registry
         load_models_config(force_reload=True)
@@ -654,8 +664,8 @@ async def validate_memory_config(config_yaml: str):
     """Validate memory configuration YAML syntax (memory section)."""
     try:
         try:
-            parsed = yaml.safe_load(config_yaml)
-        except yaml.YAMLError as e:
+            parsed = _yaml.load(config_yaml)
+        except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid YAML syntax: {str(e)}")
         if not isinstance(parsed, dict):
             raise HTTPException(status_code=400, detail="Configuration must be a YAML object")
@@ -809,7 +819,7 @@ If no relevant memories are available, respond normally based on the conversatio
             return default_prompt
 
         with open(config_path, 'r') as f:
-            full_config = yaml.safe_load(f) or {}
+            full_config = _yaml.load(f) or {}
 
         chat_config = full_config.get('chat', {})
         system_prompt = chat_config.get('system_prompt', default_prompt)
@@ -843,7 +853,7 @@ async def save_chat_config_yaml(prompt_text: str) -> dict:
         # Load full config
         if os.path.exists(config_path):
             with open(config_path, 'r') as f:
-                full_config = yaml.safe_load(f) or {}
+                full_config = _yaml.load(f) or {}
         else:
             full_config = {}
 
@@ -858,7 +868,7 @@ async def save_chat_config_yaml(prompt_text: str) -> dict:
 
         # Save
         with open(config_path, 'w') as f:
-            yaml.dump(full_config, f, default_flow_style=False, allow_unicode=True)
+            _yaml.dump(full_config, f)
 
         # Reload config in memory (hot-reload)
         load_models_config(force_reload=True)
@@ -933,7 +943,7 @@ async def save_plugins_config_yaml(yaml_content: str) -> dict:
 
         # Validate YAML can be parsed
         try:
-            parsed_config = yaml.safe_load(yaml_content)
+            parsed_config = _yaml.load(yaml_content)
             if not isinstance(parsed_config, dict):
                 raise ValueError("Configuration must be a YAML dictionary")
 
@@ -941,7 +951,9 @@ async def save_plugins_config_yaml(yaml_content: str) -> dict:
             if 'plugins' not in parsed_config:
                 raise ValueError("Configuration must contain 'plugins' key")
 
-        except yaml.YAMLError as e:
+        except ValueError:
+            raise
+        except Exception as e:
             raise ValueError(f"Invalid YAML syntax: {e}")
 
         # Create config directory if it doesn't exist
@@ -957,20 +969,30 @@ async def save_plugins_config_yaml(yaml_content: str) -> dict:
         with open(plugins_yml_path, 'w') as f:
             f.write(yaml_content)
 
-        # Hot-reload plugins (optional - may require restart)
+        # Hot-reload plugins and signal worker restart
+        reload_result = None
         try:
-            from advanced_omi_backend.services.plugin_service import get_plugin_router
-            plugin_router = get_plugin_router()
-            if plugin_router:
-                logger.info("Plugin configuration updated - restart backend for changes to take effect")
+            from advanced_omi_backend.services.plugin_service import (
+                reload_plugins,
+                signal_worker_restart,
+            )
+
+            reload_result = await reload_plugins()
+            signal_worker_restart()
+            logger.info("Plugins reloaded and worker restart signaled")
         except Exception as reload_err:
-            logger.warning(f"Could not reload plugins: {reload_err}")
+            logger.warning(f"Auto-reload failed, manual restart needed: {reload_err}")
 
         logger.info("Plugins configuration updated successfully")
 
+        message = "Plugins configuration updated and reloaded successfully."
+        if reload_result is None:
+            message = "Plugins configuration updated. Restart backend for changes to take effect."
+
         return {
             "success": True,
-            "message": "Plugins configuration updated successfully. Restart backend for changes to take effect."
+            "message": message,
+            "reload": reload_result,
         }
 
     except Exception as e:
@@ -983,8 +1005,8 @@ async def validate_plugins_config_yaml(yaml_content: str) -> dict:
     try:
         # Parse YAML
         try:
-            parsed_config = yaml.safe_load(yaml_content)
-        except yaml.YAMLError as e:
+            parsed_config = _yaml.load(yaml_content)
+        except Exception as e:
             return {"valid": False, "error": f"Invalid YAML syntax: {e}"}
 
         # Check structure
@@ -1028,6 +1050,42 @@ async def validate_plugins_config_yaml(yaml_content: str) -> dict:
         return {"valid": False, "error": f"Validation error: {str(e)}"}
 
 
+async def reload_plugins_controller(app=None) -> dict:
+    """Reload all plugins and signal workers to restart.
+
+    1. Calls reload_plugins() — synchronous backend reload
+    2. Calls signal_worker_restart() — async worker restart via Redis signal
+
+    Args:
+        app: Optional FastAPI app instance for updating app.state.plugin_router
+
+    Returns:
+        Combined result with backend reload details and worker signal status
+    """
+    from advanced_omi_backend.services.plugin_service import (
+        reload_plugins,
+        signal_worker_restart,
+    )
+
+    reload_result = await reload_plugins(app=app)
+
+    worker_signal_sent = False
+    try:
+        signal_worker_restart()
+        worker_signal_sent = True
+    except Exception as e:
+        logger.error(f"Failed to signal worker restart: {e}")
+
+    return {
+        "success": reload_result.get("success", False),
+        "message": "Plugins reloaded and worker restart signaled"
+        if worker_signal_sent
+        else "Plugins reloaded but worker restart signal failed",
+        "reload": reload_result,
+        "worker_signal_sent": worker_signal_sent,
+    }
+
+
 # Structured Plugin Configuration Management Functions (Form-based UI)
 
 async def get_plugins_metadata() -> dict:
@@ -1057,7 +1115,7 @@ async def get_plugins_metadata() -> dict:
 
         if plugins_yml_path.exists():
             with open(plugins_yml_path, 'r') as f:
-                plugins_data = yaml.safe_load(f) or {}
+                plugins_data = _yaml.load(f) or {}
                 orchestration_configs = plugins_data.get('plugins', {})
 
         # Build metadata for each plugin
@@ -1118,7 +1176,7 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
             # Load current plugins.yml
             if plugins_yml_path.exists():
                 with open(plugins_yml_path, 'r') as f:
-                    plugins_data = yaml.safe_load(f) or {}
+                    plugins_data = _yaml.load(f) or {}
             else:
                 plugins_data = {}
 
@@ -1143,7 +1201,7 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
 
             # Write updated plugins.yml
             with open(plugins_yml_path, 'w') as f:
-                yaml.dump(plugins_data, f, default_flow_style=False, sort_keys=False)
+                _yaml.dump(plugins_data, f)
 
             updated_files.append(str(plugins_yml_path))
             logger.info(f"Updated orchestration config for '{plugin_id}' in {plugins_yml_path}")
@@ -1156,7 +1214,7 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
             # Load current config.yml
             if plugin_config_path.exists():
                 with open(plugin_config_path, 'r') as f:
-                    plugin_config_data = yaml.safe_load(f) or {}
+                    plugin_config_data = _yaml.load(f) or {}
             else:
                 plugin_config_data = {}
 
@@ -1171,7 +1229,7 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
 
             # Write updated config.yml
             with open(plugin_config_path, 'w') as f:
-                yaml.dump(plugin_config_data, f, default_flow_style=False, sort_keys=False)
+                _yaml.dump(plugin_config_data, f)
 
             updated_files.append(str(plugin_config_path))
             logger.info(f"Updated settings for '{plugin_id}' in {plugin_config_path}")
@@ -1226,11 +1284,28 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
                 updated_files.append(env_path)
                 logger.info(f"Updated {len(updated_vars)} environment variables in {env_path}")
 
+        # Hot-reload plugins and signal worker restart
+        reload_result = None
+        try:
+            from advanced_omi_backend.services.plugin_service import (
+                reload_plugins,
+                signal_worker_restart,
+            )
+
+            reload_result = await reload_plugins()
+            signal_worker_restart()
+        except Exception as reload_err:
+            logger.warning(f"Auto-reload failed, manual restart needed: {reload_err}")
+
+        message = f"Plugin '{plugin_id}' configuration updated and reloaded successfully."
+        if reload_result is None:
+            message = f"Plugin '{plugin_id}' configuration updated. Restart backend for changes to take effect."
+
         return {
             "success": True,
-            "message": f"Plugin '{plugin_id}' configuration updated successfully. Restart backend for changes to take effect.",
+            "message": message,
             "updated_files": updated_files,
-            "requires_restart": True,
+            "reload": reload_result,
             "status": "success"
         }
 
@@ -1306,3 +1381,277 @@ async def test_plugin_connection(plugin_id: str, config: dict) -> dict:
             "message": f"Connection test failed: {str(e)}",
             "status": "error"
         }
+
+
+# Plugin Lifecycle Management Functions (create / write-code / delete)
+
+def _snake_to_pascal(snake_str: str) -> str:
+    """Convert snake_case to PascalCase."""
+    return "".join(word.capitalize() for word in snake_str.split("_"))
+
+
+def _extract_class_name(code: str) -> Optional[str]:
+    """Extract the BasePlugin subclass name from plugin code."""
+    match = re.search(r"class\s+(\w+)\s*\(.*BasePlugin.*\)", code)
+    return match.group(1) if match else None
+
+
+async def create_plugin(
+    plugin_name: str,
+    description: str,
+    events: list[str],
+    plugin_code: Optional[str] = None,
+) -> dict:
+    """Create a new plugin directory with boilerplate or LLM-generated code.
+
+    Args:
+        plugin_name: snake_case plugin identifier
+        description: Human-readable description
+        events: List of event strings the plugin subscribes to
+        plugin_code: Optional full plugin.py source (LLM-generated)
+
+    Returns:
+        Success dict with plugin_id and created_files list
+    """
+    from advanced_omi_backend.services.plugin_service import _get_plugins_dir, discover_plugins
+
+    # Validate name
+    if not plugin_name.replace("_", "").isalnum():
+        return {"success": False, "error": "Plugin name must be alphanumeric with underscores only"}
+
+    if not re.match(r"^[a-z][a-z0-9_]*$", plugin_name):
+        return {"success": False, "error": "Plugin name must be lowercase snake_case starting with a letter"}
+
+    plugins_dir = _get_plugins_dir()
+    plugin_dir = plugins_dir / plugin_name
+
+    # Collision check
+    if plugin_dir.exists():
+        return {"success": False, "error": f"Plugin '{plugin_name}' already exists at {plugin_dir}"}
+
+    discovered = discover_plugins()
+    if plugin_name in discovered:
+        return {"success": False, "error": f"Plugin '{plugin_name}' is already registered"}
+
+    class_name = _snake_to_pascal(plugin_name) + "Plugin"
+    created_files: list[str] = []
+
+    try:
+        plugin_dir.mkdir(parents=True, exist_ok=True)
+
+        # plugin.py
+        if plugin_code:
+            # Use LLM-generated code; extract real class name from it
+            extracted = _extract_class_name(plugin_code)
+            if extracted:
+                class_name = extracted
+            (plugin_dir / "plugin.py").write_text(plugin_code, encoding="utf-8")
+        else:
+            # Write standard boilerplate
+            events_str = ", ".join(f'"{e}"' for e in events) if events else '"conversation.complete"'
+            boilerplate = inspect.cleandoc(f'''
+                """
+                {class_name} implementation.
+
+                {description}
+                """
+                import logging
+                from typing import Any, Dict, Optional
+
+                from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
+
+                logger = logging.getLogger(__name__)
+
+
+                class {class_name}(BasePlugin):
+                    """{description}
+
+                    Subscribes to: [{events_str}]
+                    """
+
+                    SUPPORTED_ACCESS_LEVELS = ["conversation"]
+
+                    def __init__(self, config: Dict[str, Any]):
+                        super().__init__(config)
+                        logger.info("{class_name} loaded")
+
+                    async def initialize(self):
+                        if not self.enabled:
+                            return
+                        logger.info("{class_name} initialized")
+
+                    async def cleanup(self):
+                        logger.info("{class_name} cleanup complete")
+
+                    async def on_conversation_complete(self, context: PluginContext) -> Optional[PluginResult]:
+                        logger.info(f"Processing conversation for user: {{context.user_id}}")
+                        return PluginResult(success=True, message="OK")
+            ''') + "\n"
+            (plugin_dir / "plugin.py").write_text(boilerplate, encoding="utf-8")
+        created_files.append("plugin.py")
+
+        # __init__.py
+        init_content = f'"""{class_name} for Chronicle."""\n\nfrom .plugin import {class_name}\n\n__all__ = ["{class_name}"]\n'
+        (plugin_dir / "__init__.py").write_text(init_content, encoding="utf-8")
+        created_files.append("__init__.py")
+
+        # config.yml
+        config_yml = {"description": description}
+        with open(plugin_dir / "config.yml", 'w', encoding="utf-8") as f:
+            _yaml.dump(config_yml, f)
+        created_files.append("config.yml")
+
+        # README.md
+        readme = f"# {class_name}\n\n{description}\n"
+        (plugin_dir / "README.md").write_text(readme, encoding="utf-8")
+        created_files.append("README.md")
+
+        # Add disabled entry to plugins.yml
+        plugins_yml_path = get_plugins_yml_path()
+        if plugins_yml_path.exists():
+            with open(plugins_yml_path, "r") as f:
+                plugins_data = _yaml.load(f) or {}
+        else:
+            plugins_data = {}
+            plugins_yml_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if "plugins" not in plugins_data:
+            plugins_data["plugins"] = {}
+
+        plugins_data["plugins"][plugin_name] = {
+            "enabled": False,
+            "events": events or ["conversation.complete"],
+            "condition": {"type": "always"},
+        }
+        with open(plugins_yml_path, "w") as f:
+            _yaml.dump(plugins_data, f)
+
+        logger.info(f"Created plugin '{plugin_name}' at {plugin_dir}")
+        return {
+            "success": True,
+            "plugin_id": plugin_name,
+            "created_files": created_files,
+            "plugin_dir": str(plugin_dir),
+        }
+
+    except Exception as e:
+        # Clean up partial directory on error
+        if plugin_dir.exists():
+            shutil.rmtree(plugin_dir, ignore_errors=True)
+        logger.exception(f"Error creating plugin '{plugin_name}'")
+        return {"success": False, "error": str(e)}
+
+
+async def write_plugin_code(
+    plugin_id: str,
+    code: str,
+    config_yml: Optional[str] = None,
+) -> dict:
+    """Overwrite an existing plugin's code.
+
+    Args:
+        plugin_id: Plugin identifier (directory name)
+        code: New plugin.py source code
+        config_yml: Optional new config.yml content (YAML string)
+
+    Returns:
+        Success dict with updated_files list
+    """
+    from advanced_omi_backend.services.plugin_service import _get_plugins_dir
+
+    plugins_dir = _get_plugins_dir()
+    plugin_dir = plugins_dir / plugin_id
+
+    if not plugin_dir.exists():
+        return {"success": False, "error": f"Plugin '{plugin_id}' not found at {plugin_dir}"}
+
+    updated_files: list[str] = []
+
+    try:
+        # Write plugin.py
+        (plugin_dir / "plugin.py").write_text(code, encoding="utf-8")
+        updated_files.append("plugin.py")
+
+        # Update __init__.py with extracted class name
+        class_name = _extract_class_name(code)
+        if class_name:
+            init_content = f'"""{class_name} for Chronicle."""\n\nfrom .plugin import {class_name}\n\n__all__ = ["{class_name}"]\n'
+            (plugin_dir / "__init__.py").write_text(init_content, encoding="utf-8")
+            updated_files.append("__init__.py")
+
+        # Optionally update config.yml
+        if config_yml is not None:
+            # Validate YAML
+            _yaml.load(config_yml)
+            (plugin_dir / "config.yml").write_text(config_yml, encoding="utf-8")
+            updated_files.append("config.yml")
+
+        logger.info(f"Updated plugin code for '{plugin_id}': {updated_files}")
+        return {
+            "success": True,
+            "plugin_id": plugin_id,
+            "updated_files": updated_files,
+        }
+
+    except Exception as e:
+        logger.exception(f"Error writing code for plugin '{plugin_id}'")
+        return {"success": False, "error": str(e)}
+
+
+async def delete_plugin(plugin_id: str, remove_files: bool = False) -> dict:
+    """Delete a plugin from plugins.yml and optionally remove its files.
+
+    Args:
+        plugin_id: Plugin identifier
+        remove_files: If True, also delete the plugin directory
+
+    Returns:
+        Success dict
+    """
+    from advanced_omi_backend.services.plugin_service import _get_plugins_dir
+
+    plugins_yml_path = get_plugins_yml_path()
+
+    # Check plugins.yml
+    if plugins_yml_path.exists():
+        with open(plugins_yml_path, "r") as f:
+            plugins_data = _yaml.load(f) or {}
+    else:
+        plugins_data = {}
+
+    plugin_entry = plugins_data.get("plugins", {}).get(plugin_id)
+
+    # Refuse if enabled
+    if plugin_entry and plugin_entry.get("enabled"):
+        return {
+            "success": False,
+            "error": f"Plugin '{plugin_id}' is currently enabled. Disable it first before deleting.",
+        }
+
+    # Remove from plugins.yml
+    removed_from_yml = False
+    if plugin_entry is not None:
+        del plugins_data["plugins"][plugin_id]
+        with open(plugins_yml_path, "w") as f:
+            _yaml.dump(plugins_data, f)
+        removed_from_yml = True
+
+    # Optionally remove files
+    files_removed = False
+    plugins_dir = _get_plugins_dir()
+    plugin_dir = plugins_dir / plugin_id
+    if remove_files and plugin_dir.exists():
+        shutil.rmtree(plugin_dir)
+        files_removed = True
+        logger.info(f"Removed plugin directory: {plugin_dir}")
+
+    if not removed_from_yml and not files_removed:
+        return {"success": False, "error": f"Plugin '{plugin_id}' not found in plugins.yml or on disk"}
+
+    logger.info(f"Deleted plugin '{plugin_id}' (yml={removed_from_yml}, files={files_removed})")
+    return {
+        "success": True,
+        "plugin_id": plugin_id,
+        "removed_from_yml": removed_from_yml,
+        "files_removed": files_removed,
+    }

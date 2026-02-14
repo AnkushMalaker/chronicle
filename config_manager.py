@@ -29,9 +29,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import yaml
+from ruamel.yaml import YAML
 
 logger = logging.getLogger(__name__)
+
+_yaml = YAML()
+_yaml.preserve_quotes = True
 
 
 class ConfigManager:
@@ -97,17 +100,15 @@ class ConfigManager:
 
         try:
             with open(self.config_yml_path, 'r') as f:
-                config = yaml.safe_load(f)
+                config = _yaml.load(f)
                 if config is None:
                     raise RuntimeError(
                         f"Configuration file {self.config_yml_path} is empty or invalid. "
                         "Please ensure it contains valid YAML configuration."
                     )
                 return config
-        except yaml.YAMLError as e:
-            raise RuntimeError(
-                f"Invalid YAML in configuration file {self.config_yml_path}: {e}"
-            )
+        except RuntimeError:
+            raise
         except Exception as e:
             raise RuntimeError(
                 f"Failed to load configuration file {self.config_yml_path}: {e}"
@@ -125,7 +126,7 @@ class ConfigManager:
 
             # Write updated config
             with open(self.config_yml_path, 'w') as f:
-                yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+                _yaml.dump(config, f)
 
             logger.info(f"Saved config.yml to {self.config_yml_path}")
 

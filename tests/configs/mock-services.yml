@@ -24,7 +24,7 @@ models:
     temperature: 0.2
   model_provider: openai
   model_type: llm
-  model_url: http://host.docker.internal:11435
+  model_url: http://host.docker.internal:11435/v1
   name: mock-llm
 - api_family: openai
   api_key: dummy-key-not-used
@@ -34,7 +34,7 @@ models:
   model_output: vector
   model_provider: openai
   model_type: embedding
-  model_url: http://host.docker.internal:11435
+  model_url: http://host.docker.internal:11435/v1
   name: mock-embed
 - api_family: qdrant
   description: Qdrant vector database (local)

@@ -1,33 +1,55 @@
+import { lazy, Suspense } from 'react'
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { AuthProvider } from './contexts/AuthContext'
 import { ThemeProvider } from './contexts/ThemeContext'
 import { RecordingProvider } from './contexts/RecordingContext'
 import Layout from './components/layout/Layout'
 import LoginPage from './pages/LoginPage'
-import Chat from './pages/Chat'
-import ConversationsRouter from './pages/ConversationsRouter'
-import MemoriesRouter from './pages/MemoriesRouter'
-import MemoryDetail from './pages/MemoryDetail'
-import TimelineRouter from './pages/TimelineRouter'
-import Users from './pages/Users'
-import System from './pages/System'
-import Upload from './pages/Upload'
-import Queue from './pages/Queue'
-import LiveRecord from './pages/LiveRecord'
-import Plugins from './pages/Plugins'
-import Finetuning from './pages/Finetuning'
 import ProtectedRoute from './components/auth/ProtectedRoute'
 import { ErrorBoundary, PageErrorBoundary } from './components/ErrorBoundary'
 
-function App() {
-  console.log('🚀 Full App restored with working login!')
+// Lazy-loaded page components (code-split into separate chunks)
+const Chat = lazy(() => import('./pages/Chat'))
+const ConversationsRouter = lazy(() => import('./pages/ConversationsRouter'))
+const MemoriesRouter = lazy(() => import('./pages/MemoriesRouter'))
+const MemoryDetail = lazy(() => import('./pages/MemoryDetail'))
+const TimelineRouter = lazy(() => import('./pages/TimelineRouter'))
+const Users = lazy(() => import('./pages/Users'))
+const System = lazy(() => import('./pages/System'))
+const Upload = lazy(() => import('./pages/Upload'))
+const Queue = lazy(() => import('./pages/Queue'))
+const LiveRecord = lazy(() => import('./pages/LiveRecord'))
+const Plugins = lazy(() => import('./pages/Plugins'))
+const Finetuning = lazy(() => import('./pages/Finetuning'))
 
+function PageSkeleton() {
+  return (
+    <div className="flex items-center justify-center h-64">
+      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+    </div>
+  )
+}
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 30_000,
+      gcTime: 5 * 60_000,
+      refetchOnWindowFocus: false,
+      retry: 1,
+    },
+  },
+})
+
+function App() {
   // Get base path from Vite config (e.g., "/prod/" for path-based routing)
   const basename = import.meta.env.BASE_URL
 
   return (
     <ErrorBoundary>
       <ThemeProvider>
+        <QueryClientProvider client={queryClient}>
         <AuthProvider>
           <RecordingProvider>
             <Router basename={basename} future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
@@ -40,67 +62,93 @@ function App() {
               }>
                 <Route index element={
                   <PageErrorBoundary>
-                    <ConversationsRouter />
+                    <Suspense fallback={<PageSkeleton />}>
+                      <ConversationsRouter />
+                    </Suspense>
                   </PageErrorBoundary>
                 } />
                 <Route path="live-record" element={
                   <PageErrorBoundary>
-                    <LiveRecord />
+                    <Suspense fallback={<PageSkeleton />}>
+                      <LiveRecord />
+                    </Suspense>
                   </PageErrorBoundary>
                 } />
                 <Route path="chat" element={
                   <PageErrorBoundary>
-                    <Chat />
+                    <Suspense fallback={<PageSkeleton />}>
+                      <Chat />
+                    </Suspense>
                   </PageErrorBoundary>
                 } />
                 <Route path="conversations" element={
                   <PageErrorBoundary>
-                    <ConversationsRouter />
+                    <Suspense fallback={<PageSkeleton />}>
+                      <ConversationsRouter />
+                    </Suspense>
                   </PageErrorBoundary>
                 } />
                 <Route path="memories/:id" element={
                   <PageErrorBoundary>
-                    <MemoryDetail />
+                    <Suspense fallback={<PageSkeleton />}>
+                      <MemoryDetail />
+                    </Suspense>
                   </PageErrorBoundary>
                 } />
                 <Route path="memories" element={
                   <PageErrorBoundary>
-                    <MemoriesRouter />
+                    <Suspense fallback={<PageSkeleton />}>
+                      <MemoriesRouter />
+                    </Suspense>
                   </PageErrorBoundary>
                 } />
                 <Route path="timeline" element={
                   <PageErrorBoundary>
-                    <TimelineRouter />
+                    <Suspense fallback={<PageSkeleton />}>
+                      <TimelineRouter />
+                    </Suspense>
                   </PageErrorBoundary>
                 } />
                 <Route path="users" element={
                   <PageErrorBoundary>
-                    <Users />
+                    <Suspense fallback={<PageSkeleton />}>
+                      <Users />
+                    </Suspense>
                   </PageErrorBoundary>
                 } />
                 <Route path="system" element={
                   <PageErrorBoundary>
-                    <System />
+                    <Suspense fallback={<PageSkeleton />}>
+                      <System />
+                    </Suspense>
                   </PageErrorBoundary>
                 } />
                 <Route path="upload" element={
                   <PageErrorBoundary>
-                    <Upload />
+                    <Suspense fallback={<PageSkeleton />}>
+                      <Upload />
+                    </Suspense>
                   </PageErrorBoundary>
                 } />
                 <Route path="queue" element={
                   <PageErrorBoundary>
-                    <Queue />
+                    <Suspense fallback={<PageSkeleton />}>
+                      <Queue />
+                    </Suspense>
                   </PageErrorBoundary>
                 } />
                 <Route path="plugins" element={
                   <PageErrorBoundary>
-                    <Plugins />
+                    <Suspense fallback={<PageSkeleton />}>
+                      <Plugins />
+                    </Suspense>
                   </PageErrorBoundary>
                 } />
                 <Route path="finetuning" element={
                   <PageErrorBoundary>
-                    <Finetuning />
+                    <Suspense fallback={<PageSkeleton />}>
+                      <Finetuning />
+                    </Suspense>
                   </PageErrorBoundary>
                 } />
               </Route>
@@ -108,6 +156,7 @@ function App() {
             </Router>
           </RecordingProvider>
         </AuthProvider>
+        </QueryClientProvider>
       </ThemeProvider>
     </ErrorBoundary>
   )

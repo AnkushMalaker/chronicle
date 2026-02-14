@@ -127,7 +127,6 @@ class AudioStreamClient:
         sample_rate: int = OMI_SAMPLE_RATE,
         sample_width: int = OMI_SAMPLE_WIDTH,
         channels: int = OMI_CHANNELS,
-        always_persist: bool = False,
     ) -> None:
         """Send Wyoming audio-start event.
 
@@ -136,11 +135,11 @@ class AudioStreamClient:
             sample_rate: Audio sample rate in Hz (default: 16000)
             sample_width: Bytes per sample (default: 2 for 16-bit)
             channels: Number of audio channels (default: 1)
-            always_persist: Save audio even if transcription fails (default: False)
 
         Note:
             The mode is inside the "data" dict, matching _handle_audio_session_start
             in websocket_controller.py (line 618).
+            always_persist is a backend-level setting (not per-session).
         """
         if not self.ws:
             raise RuntimeError("Not connected. Call connect() first.")
@@ -152,15 +151,14 @@ class AudioStreamClient:
                 "width": sample_width,
                 "channels": channels,
                 "mode": recording_mode,
-                "always_persist": always_persist,
             },
             "payload_length": None,
         }
         print(f"🔵 CLIENT: Sending audio-start message: {header}")
         logger.info(f"🔵 CLIENT: Sending audio-start message: {header}")
         await self.ws.send(json.dumps(header) + "\n")
-        print(f"✅ CLIENT: Sent audio-start with mode={recording_mode}, always_persist={always_persist}")
-        logger.info(f"✅ CLIENT: Sent audio-start with mode={recording_mode}, always_persist={always_persist}")
+        print(f"✅ CLIENT: Sent audio-start with mode={recording_mode}")
+        logger.info(f"✅ CLIENT: Sent audio-start with mode={recording_mode}")
 
     async def send_audio_chunk_wyoming(
         self,
@@ -242,7 +240,6 @@ class AudioStreamClient:
         use_wyoming: bool = True,
         recording_mode: str = "streaming",
         realtime_factor: float = 0.1,
-        always_persist: bool = False,
     ) -> int:
         """Stream a WAV file in chunks, simulating real-time audio.
 
@@ -252,7 +249,6 @@ class AudioStreamClient:
             use_wyoming: If True, use Wyoming protocol; if False, send raw binary
             recording_mode: "streaming" or "batch"
             realtime_factor: Fraction of real-time to simulate (0.1 = 10x speed)
-            always_persist: Save audio even if transcription fails (default: False)
 
         Returns:
             Number of chunks sent
@@ -280,7 +276,6 @@ class AudioStreamClient:
                 sample_rate=sample_rate,
                 sample_width=sample_width,
                 channels=channels,
-                always_persist=always_persist,
             )
 
             # Reset counters
@@ -348,7 +343,6 @@ def stream_audio_file(
     device_name: str = "robot-test",
     recording_mode: str = "streaming",
     use_wyoming: bool = True,
-    always_persist: bool = False,
 ) -> int:
     """Synchronous wrapper for streaming audio file.
 
@@ -362,7 +356,6 @@ def stream_audio_file(
         device_name: Device name for client identification
         recording_mode: "streaming" or "batch"
         use_wyoming: If True, use Wyoming protocol
-        always_persist: Save audio even if transcription fails (default: False)
 
     Returns:
         Number of chunks sent
@@ -374,7 +367,6 @@ def stream_audio_file(
                 wav_path,
                 use_wyoming=use_wyoming,
                 recording_mode=recording_mode,
-                always_persist=always_persist,
             )
 
     return asyncio.run(_run())
@@ -423,7 +415,6 @@ class StreamManager:
         token: str,
         device_name: str = "robot-test",
         recording_mode: str = "streaming",
-        always_persist: bool = False,
     ) -> str:
         """Start a new audio stream (non-blocking).
 
@@ -432,7 +423,6 @@ class StreamManager:
             token: JWT token
             device_name: Device name for client ID
             recording_mode: "streaming" or "batch"
-            always_persist: Save audio even if transcription fails (default: False)
 
         Returns:
             stream_id: Unique ID for this stream session
@@ -462,7 +452,7 @@ class StreamManager:
                 await client.connect()
                 session.connected = True
                 logger.info(f"✅ CLIENT: Stream {stream_id} connected, sending audio-start...")
-                await client.send_audio_start(recording_mode=recording_mode, always_persist=always_persist)
+                await client.send_audio_start(recording_mode=recording_mode)
                 session.audio_started = True
                 logger.info(f"✅ CLIENT: Stream {stream_id} started for {device_name}")
             except Exception as e:

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import * as d3 from 'd3'
+import { select, selectAll } from 'd3-selection'
+import { zoom, zoomIdentity, type ZoomTransform, type D3ZoomEvent } from 'd3-zoom'
 
 interface UseD3ZoomOptions {
-  onZoom?: (transform: d3.ZoomTransform) => void
+  onZoom?: (transform: ZoomTransform) => void
   scaleExtent?: [number, number]
   wheelDelta?: (event: WheelEvent) => number
 }
@@ -15,18 +16,18 @@ export function useD3Zoom(options: UseD3ZoomOptions = {}) {
   } = options
 
   const svgRef = useRef<SVGSVGElement>(null)
-  const [transform, setTransform] = useState<d3.ZoomTransform>(d3.zoomIdentity)
+  const [transform, setTransform] = useState<ZoomTransform>(zoomIdentity)
   const initializedRef = useRef(false)
 
   const handleZoom = useCallback(
-    (event: d3.D3ZoomEvent<SVGSVGElement, unknown>) => {
+    (event: D3ZoomEvent<SVGSVGElement, unknown>) => {
       const t = event.transform
       setTransform(t)
       onZoom?.(t)
 
       // Synchronize zoom across all zoomable SVG elements
-      d3.selectAll<SVGSVGElement, unknown>('.zoomable').each(function (this: SVGSVGElement) {
-        const svg = d3.select(this)
+      selectAll<SVGSVGElement, unknown>('.zoomable').each(function (this: SVGSVGElement) {
+        const svg = select(this)
         const node = svg.node()
 
         // Skip the source element
@@ -42,7 +43,7 @@ export function useD3Zoom(options: UseD3ZoomOptions = {}) {
 
   const zoomBehavior = useMemo(
     () =>
-      d3.zoom<SVGSVGElement, unknown>()
+      zoom<SVGSVGElement, unknown>()
         .scaleExtent(scaleExtent)
         .on('zoom', handleZoom)
         .wheelDelta(wheelDelta)
@@ -60,8 +61,8 @@ export function useD3Zoom(options: UseD3ZoomOptions = {}) {
   useEffect(() => {
     if (!svgRef.current || initializedRef.current) return
 
-    const svg = d3.select(svgRef.current)
-    svg.property('__zoom', d3.zoomIdentity)
+    const svg = select(svgRef.current)
+    svg.property('__zoom', zoomIdentity)
     initializedRef.current = true
   }, [])
 
@@ -69,7 +70,7 @@ export function useD3Zoom(options: UseD3ZoomOptions = {}) {
   useEffect(() => {
     if (!svgRef.current) return
 
-    const svg = d3.select(svgRef.current)
+    const svg = select(svgRef.current)
     const node = svg.node()
 
     if (node) {

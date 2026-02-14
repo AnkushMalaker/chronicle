@@ -125,7 +125,7 @@ def create_memory_update_response() -> dict:
       <text>User likes hiking in the mountains</text>
       <old_memory>User likes hiking</old_memory>
     </item>
-    <item id="1" event="CREATE">
+    <item id="1" event="ADD">
       <text>User prefers morning meetings before 10am</text>
     </item>
   </memory>

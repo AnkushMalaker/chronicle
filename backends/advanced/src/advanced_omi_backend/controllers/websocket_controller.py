@@ -528,14 +528,6 @@ async def _finalize_streaming_session(
         # Mark session as finalizing with user_stopped reason (audio-stop event)
         await audio_stream_producer.finalize_session(session_id, completion_reason="user_stopped")
 
-        # Store markers in Redis so open_conversation_job can persist them
-        if client_state.markers:
-            session_key = f"audio:session:{session_id}"
-            await audio_stream_producer.redis_client.hset(
-                session_key, "markers", json.dumps(client_state.markers)
-            )
-            client_state.markers.clear()
-
         # NOTE: Finalize job disabled - open_conversation_job now handles everything
         # The open_conversation_job will:
         # 1. Detect the "finalizing" status
@@ -961,8 +953,7 @@ async def _handle_button_event(
 ) -> None:
     """Handle a button event from the device.
 
-    Stores a marker on the client state and dispatches granular events
-    to the plugin system using typed enums.
+    Dispatches granular events to the plugin system using typed enums.
 
     Args:
         client_state: Client state object
@@ -983,16 +974,6 @@ async def _handle_button_event(
         f"🔘 Button event from {client_id}: {button_state} "
         f"(audio_uuid={audio_uuid})"
     )
-
-    # Store marker on client state for later persistence to conversation
-    marker = {
-        "type": "button_event",
-        "state": button_state,
-        "timestamp": timestamp,
-        "audio_uuid": audio_uuid,
-        "client_id": client_id,
-    }
-    client_state.add_marker(marker)
 
     # Map device button state to typed plugin event
     try:
@@ -1171,10 +1152,6 @@ async def _process_batch_audio_complete(
             title="Batch Recording",
             summary="Processing batch audio..."
         )
-        # Attach any markers (e.g., button events) captured during the session
-        if client_state.markers:
-            conversation.markers = list(client_state.markers)
-            client_state.markers.clear()
         await conversation.insert()
         conversation_id = conversation.conversation_id  # Get the auto-generated ID
 

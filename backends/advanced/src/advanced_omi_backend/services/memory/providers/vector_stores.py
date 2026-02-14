@@ -322,9 +322,14 @@ class QdrantVectorStore(VectorStoreBase):
     ) -> bool:
         """Update (upsert) an existing memory in Qdrant."""
         try:
+            # Preserve original created_at from the existing point
+            existing = await self.get_memory(memory_id)
+            created_at = existing.created_at if existing else str(int(time.time()))
+
             payload = {
                 "content": new_content,
                 "metadata": new_metadata,
+                "created_at": created_at,
                 "updated_at": str(int(time.time())),
             }
 

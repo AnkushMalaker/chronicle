@@ -424,11 +424,31 @@ def start_services(services, build=False):
     
     console.print(f"\n[green]🎉 {success_count}/{len(services)} services started successfully[/green]")
 
+    # Show access URLs if backend was started
+    if 'backend' in services and check_service_configured('backend'):
+        backend_env = _get_backend_env_path()
+        https_enabled = (read_env_value(backend_env, "HTTPS_ENABLED") or "").lower() == "true"
+        server_ip = read_env_value(backend_env, "SERVER_IP") or ""
+
+        if https_enabled and server_ip:
+            webui_url = f"https://{server_ip}"
+            api_url = f"https://{server_ip}/api"
+        else:
+            host = server_ip or "localhost"
+            webui_port = read_env_value(backend_env, "WEBUI_PORT") or "5173"
+            backend_port = read_env_value(backend_env, "BACKEND_PUBLIC_PORT") or "8000"
+            webui_url = f"http://{host}:{webui_port}"
+            api_url = f"http://{host}:{backend_port}/api"
+
+        console.print("")
+        console.print("[bold cyan]Access URLs:[/bold cyan]")
+        console.print(f"   Web Dashboard:  {webui_url}")
+        console.print(f"   API:            {api_url}")
+
     # Show LangFuse prompt management tip if langfuse was started
     if 'langfuse' in services and check_service_configured('langfuse'):
-        console.print("")
-        console.print("[bold cyan]Prompt Management:[/bold cyan] Edit AI prompts in the LangFuse UI")
-        console.print("   http://localhost:3002/project/chronicle/prompts")
+        langfuse_url = "http://localhost:3002/project/chronicle/prompts"
+        console.print(f"   Prompt Mgmt:    {langfuse_url}")
 
 def stop_services(services):
     """Stop specified services"""

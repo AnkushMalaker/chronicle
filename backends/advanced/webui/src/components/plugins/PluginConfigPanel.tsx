@@ -12,7 +12,6 @@ interface PluginMetadata {
   status: string
   supports_testing: boolean
   config_schema: {
-    orchestration: any
     settings: Record<string, FieldSchema>
     env_vars: Record<string, FieldSchema>
   }

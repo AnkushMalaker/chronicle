@@ -256,11 +256,17 @@ async def lifespan(app: FastAPI):
                 if plugin.enabled:
                     try:
                         await plugin.initialize()
+                        plugin_router.mark_plugin_initialized(plugin_id)
                         application_logger.info(f"✅ Plugin '{plugin_id}' initialized")
                     except Exception as e:
+                        plugin_router.mark_plugin_failed(plugin_id, str(e))
                         application_logger.error(f"Failed to initialize plugin '{plugin_id}': {e}", exc_info=True)
 
-            application_logger.info(f"Plugins initialized: {len(plugin_router.plugins)} active")
+            health = plugin_router.get_health_summary()
+            application_logger.info(
+                f"Plugins initialized: {health['initialized']}/{health['total']} active"
+                + (f", {health['failed']} failed" if health['failed'] else "")
+            )
 
             # Store in app state for API access
             app.state.plugin_router = plugin_router

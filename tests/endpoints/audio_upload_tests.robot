@@ -128,17 +128,17 @@ Multiple Audio Files Upload Test
 
 
 Invalid File Upload Test
-    [Documentation]    Test uploading non-WAV files
+    [Documentation]    Test uploading unsupported file formats
     ...
     ...                Verifies:
-    ...                - Non-WAV files are rejected
-    ...                - Proper error messages returned
+    ...                - Unsupported file formats are rejected
+    ...                - Proper error messages returned with supported formats
     [Tags]    audio-upload
 
-    # Create a temporary non-WAV file
+    # Create a temporary non-audio file
     Create File    ${TEMPDIR}/test.txt    This is not an audio file
 
-    # Try to upload non-WAV file
+    # Try to upload non-audio file
     ${token}=    Get Authentication Token    api    ${ADMIN_EMAIL}    ${ADMIN_PASSWORD}
 
     ${curl_cmd}=    Catenate    SEPARATOR=${SPACE}
@@ -159,9 +159,10 @@ Invalid File Upload Test
     Should Be Equal As Integers    ${upload_response}[summary][failed]    1    msg=Expected 1 file to fail
     Should Be Equal As Integers    ${upload_response}[summary][started]    0    msg=Expected 0 files started
 
-    # Verify error message mentions WAV files
+    # Verify error message mentions unsupported format and lists supported formats
     ${error_msg}=    Set Variable    ${upload_response}[files][0][error]
-    Should Contain    ${error_msg}    WAV    msg=Error should mention WAV format
+    Should Contain    ${error_msg}    Unsupported format    msg=Error should mention unsupported format
+    Should Contain    ${error_msg}    .wav    msg=Error should list supported formats
 
     # Cleanup
     Remove File    ${TEMPDIR}/test.txt

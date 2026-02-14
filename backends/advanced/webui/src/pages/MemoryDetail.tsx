@@ -1,8 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, Calendar, Tag, Trash2, RefreshCw, Edit3, Save, X } from 'lucide-react'
-import { memoriesApi, annotationsApi } from '../services/api'
+import { annotationsApi } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
+import { useMemoryDetail, useDeleteMemory } from '../hooks/useMemories'
 
 interface Memory {
   id: string
@@ -36,46 +38,23 @@ export default function MemoryDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const { user } = useAuth()
-  const [memory, setMemory] = useState<Memory | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const queryClient = useQueryClient()
+
+  const {
+    data: memoryData,
+    isLoading: loading,
+    error: queryError,
+  } = useMemoryDetail(id, user?.id)
+
+  const memory = memoryData as Memory | undefined
+
+  const error = queryError?.message ?? ((!loading && !memory) ? 'Memory not found' : null)
 
   // Inline editing state
   const [isEditing, setIsEditing] = useState(false)
   const [editedContent, setEditedContent] = useState('')
   const [isSaving, setIsSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
-
-  const loadMemory = async () => {
-    if (!user?.id || !id) {
-      console.log('⏭️ MemoryDetail: Missing user or id', { userId: user?.id, memoryId: id })
-      return
-    }
-
-    try {
-      console.log('🔍 MemoryDetail: Loading memory', id)
-      setLoading(true)
-      setError(null)
-      const response = await memoriesApi.getById(id, user.id)
-      const memoryData = response.data.memory
-      console.log('📦 MemoryDetail: Loaded memory', memoryData?.id)
-
-      if (memoryData) {
-        setMemory(memoryData)
-      } else {
-        setError('Memory not found')
-      }
-    } catch (err: any) {
-      console.error('❌ Failed to load memory:', err)
-      if (err.response?.status === 404) {
-        setError('Memory not found')
-      } else {
-        setError(err.message || 'Failed to load memory')
-      }
-    } finally {
-      setLoading(false)
-    }
-  }
 
   const handleStartEdit = () => {
     if (memory) {
@@ -111,8 +90,8 @@ export default function MemoryDetail() {
         corrected_text: editedContent
       })
 
-      // Update local state
-      setMemory({
+      // Update query cache
+      queryClient.setQueryData(['memory', id], {
         ...memory,
         memory: editedContent,
         updated_at: new Date().toISOString()
@@ -138,6 +117,8 @@ export default function MemoryDetail() {
     }
   }
 
+  const deleteMemoryMutation = useDeleteMemory()
+
   const handleDelete = async () => {
     if (!memory || !id) return
 
@@ -145,17 +126,13 @@ export default function MemoryDetail() {
     if (!confirmed) return
 
     try {
-      await memoriesApi.delete(id)
+      await deleteMemoryMutation.mutateAsync(id)
       navigate('/memories')
     } catch (err: any) {
-      console.error('❌ Failed to delete memory:', err)
+      console.error('Failed to delete memory:', err)
       alert('Failed to delete memory: ' + (err.message || 'Unknown error'))
     }
   }
-
-  useEffect(() => {
-    loadMemory()
-  }, [id, user?.id])
 
   const formatDate = (dateInput: string | number | undefined | null) => {
     if (dateInput === undefined || dateInput === null || dateInput === '') {

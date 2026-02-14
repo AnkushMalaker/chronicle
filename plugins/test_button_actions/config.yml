@@ -1,3 +1,12 @@
 actions:
   single_press:
     type: close_conversation
+  double_press:
+    type: call_plugin
+    plugin_id: homeassistant
+    action: call_service
+    data:
+      target_type: area
+      target: hall
+      entity_type: light
+      service: turn_off

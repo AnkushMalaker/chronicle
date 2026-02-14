@@ -89,7 +89,13 @@ ASR Transcribe Response Contains Required Fields
 
 ASR Transcribe Response Words Have Timestamps
     [Documentation]    Verify word-level timestamps in transcription response
+    ...                Only runs when provider reports word_timestamps capability
     [Tags]    audio-upload
+
+    # Check if provider supports word timestamps
+    ${info}=    Get ASR Service Info    ${ASR_URL}
+    ${has_word_timestamps}=    Evaluate    'word_timestamps' in $info['capabilities']
+    Skip If    not ${has_word_timestamps}    Provider does not report word_timestamps capability
 
     ${response}=    Upload Audio For ASR Transcription    ${TEST_AUDIO_FILE}
     ${json}=    Set Variable    ${response.json()}
@@ -111,7 +117,13 @@ ASR Transcribe Response Words Have Timestamps
 
 ASR Transcribe Response Words Have Confidence Scores
     [Documentation]    Verify confidence scores in word-level transcription
+    ...                Only runs when provider reports word_timestamps capability
     [Tags]    audio-upload
+
+    # Check if provider supports word timestamps
+    ${info}=    Get ASR Service Info    ${ASR_URL}
+    ${has_word_timestamps}=    Evaluate    'word_timestamps' in $info['capabilities']
+    Skip If    not ${has_word_timestamps}    Provider does not report word_timestamps capability
 
     ${response}=    Upload Audio For ASR Transcription    ${TEST_AUDIO_FILE}
     ${json}=    Set Variable    ${response.json()}

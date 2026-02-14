@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { Archive as ArchiveIcon, RefreshCw, Calendar, User, RotateCcw, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
-import { conversationsApi } from '../services/api'
-import { authApi } from '../services/api'
+import { conversationsApi, authApi } from '../services/api'
+import { useConversations, useRestoreConversation, usePermanentDeleteConversation } from '../hooks/useConversations'
 
 interface Conversation {
   conversation_id: string
@@ -25,30 +26,23 @@ interface Conversation {
 }
 
 export default function Archive() {
-  const [conversations, setConversations] = useState<Conversation[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const queryClient = useQueryClient()
   const [expandedTranscripts, setExpandedTranscripts] = useState<Set<string>>(new Set())
   const [restoringConversation, setRestoringConversation] = useState<Set<string>>(new Set())
   const [deletingConversation, setDeletingConversation] = useState<Set<string>>(new Set())
   const [isAdmin, setIsAdmin] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
 
-  const loadArchivedConversations = async () => {
-    try {
-      setLoading(true)
-      // Include deleted conversations and filter for only deleted ones
-      const response = await conversationsApi.getAll(true)
-      const allConversations = response.data.conversations || []
-      // Filter to show only deleted conversations
-      const deletedConversations = allConversations.filter((conv: Conversation) => conv.deleted === true)
-      setConversations(deletedConversations)
-      setError(null)
-    } catch (err: any) {
-      setError(err.message || 'Failed to load archived conversations')
-    } finally {
-      setLoading(false)
-    }
-  }
+  const {
+    data: conversationsData,
+    isLoading: loading,
+    error: queryError,
+    refetch,
+  } = useConversations({ includeDeleted: true })
+
+  // Filter to show only deleted conversations
+  const conversations = (conversationsData?.conversations ?? []).filter((conv: Conversation) => conv.deleted === true)
+  const error = queryError?.message ?? actionError ?? null
 
   const checkAdminStatus = async () => {
     try {
@@ -60,7 +54,6 @@ export default function Archive() {
   }
 
   useEffect(() => {
-    loadArchivedConversations()
     checkAdminStatus()
   }, [])
 
@@ -77,20 +70,15 @@ export default function Archive() {
     return new Date(timestamp * 1000).toLocaleString()
   }
 
+  const restoreConversationMutation = useRestoreConversation()
+
   const handleRestoreConversation = async (conversationId: string) => {
+    setRestoringConversation(prev => new Set(prev).add(conversationId))
+
     try {
-      setRestoringConversation(prev => new Set(prev).add(conversationId))
-
-      const response = await conversationsApi.restore(conversationId)
-
-      if (response.status === 200) {
-        // Refresh archived conversations to show updated data
-        await loadArchivedConversations()
-      } else {
-        setError(`Failed to restore conversation: ${response.data?.error || 'Unknown error'}`)
-      }
+      await restoreConversationMutation.mutateAsync(conversationId)
     } catch (err: any) {
-      setError(`Error restoring conversation: ${err.message || 'Unknown error'}`)
+      setActionError(`Error restoring conversation: ${err.message || 'Unknown error'}`)
     } finally {
       setRestoringConversation(prev => {
         const newSet = new Set(prev)
@@ -100,25 +88,20 @@ export default function Archive() {
     }
   }
 
+  const permanentDeleteMutation = usePermanentDeleteConversation()
+
   const handlePermanentDelete = async (conversationId: string) => {
+    const confirmed = window.confirm(
+      'Are you sure you want to PERMANENTLY delete this conversation? This action CANNOT be undone and will remove all data including audio.'
+    )
+    if (!confirmed) return
+
+    setDeletingConversation(prev => new Set(prev).add(conversationId))
+
     try {
-      const confirmed = window.confirm(
-        'Are you sure you want to PERMANENTLY delete this conversation? This action CANNOT be undone and will remove all data including audio.'
-      )
-      if (!confirmed) return
-
-      setDeletingConversation(prev => new Set(prev).add(conversationId))
-
-      const response = await conversationsApi.permanentDelete(conversationId)
-
-      if (response.status === 200) {
-        // Refresh archived conversations to show updated data
-        await loadArchivedConversations()
-      } else {
-        setError(`Failed to permanently delete conversation: ${response.data?.error || 'Unknown error'}`)
-      }
+      await permanentDeleteMutation.mutateAsync(conversationId)
     } catch (err: any) {
-      setError(`Error permanently deleting conversation: ${err.message || 'Unknown error'}`)
+      setActionError(`Error permanently deleting conversation: ${err.message || 'Unknown error'}`)
     } finally {
       setDeletingConversation(prev => {
         const newSet = new Set(prev)
@@ -151,16 +134,22 @@ export default function Archive() {
     try {
       const response = await conversationsApi.getById(conversation.conversation_id)
       if (response.status === 200 && response.data.conversation) {
-        setConversations(prev => prev.map(c =>
-          c.conversation_id === conversationId
-            ? { ...c, ...response.data.conversation }
-            : c
-        ))
+        queryClient.setQueryData(['conversations', { includeDeleted: true }], (old: any) => {
+          if (!old) return old
+          return {
+            ...old,
+            conversations: old.conversations.map((c: Conversation) =>
+              c.conversation_id === conversationId
+                ? { ...c, ...response.data.conversation }
+                : c
+            ),
+          }
+        })
         setExpandedTranscripts(prev => new Set(prev).add(conversationId))
       }
     } catch (err: any) {
       console.error('Failed to fetch conversation details:', err)
-      setError(`Failed to load transcript: ${err.message || 'Unknown error'}`)
+      setActionError(`Failed to load transcript: ${err.message || 'Unknown error'}`)
     }
   }
 
@@ -178,7 +167,7 @@ export default function Archive() {
       <div className="text-center">
         <div className="text-red-600 dark:text-red-400 mb-4">{error}</div>
         <button
-          onClick={loadArchivedConversations}
+          onClick={() => { setActionError(null); refetch() }}
           className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
         >
           Try Again
@@ -198,7 +187,7 @@ export default function Archive() {
           </h1>
         </div>
         <button
-          onClick={loadArchivedConversations}
+          onClick={() => refetch()}
           className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
         >
           <RefreshCw className="h-4 w-4" />
