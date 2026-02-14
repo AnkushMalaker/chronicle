@@ -27,7 +27,8 @@ from advanced_omi_backend.config import (
     save_misc_settings,
 )
 from advanced_omi_backend.config_loader import get_plugins_yml_path
-from advanced_omi_backend.model_registry import _find_config_path, load_models_config
+from advanced_omi_backend.config_loader import save_config_section
+from advanced_omi_backend.model_registry import _find_config_path, get_models_registry, load_models_config
 from advanced_omi_backend.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -726,7 +727,7 @@ async def get_memory_provider():
             current_provider = "chronicle"
 
         # Get available providers
-        available_providers = ["chronicle", "openmemory_mcp", "mycelia"]
+        available_providers = ["chronicle", "openmemory_mcp"]
 
         return {
             "current_provider": current_provider,
@@ -744,7 +745,7 @@ async def set_memory_provider(provider: str):
     try:
         # Validate provider
         provider = provider.lower().strip()
-        valid_providers = ["chronicle", "openmemory_mcp", "mycelia"]
+        valid_providers = ["chronicle", "openmemory_mcp"]
 
         if provider not in valid_providers:
             raise ValueError(f"Invalid provider '{provider}'. Valid providers: {', '.join(valid_providers)}")
@@ -800,6 +801,149 @@ async def set_memory_provider(provider: str):
     except Exception as e:
         logger.exception("Error setting memory provider")
         raise e
+
+
+# LLM Operations Configuration Functions
+
+async def get_llm_operations():
+    """Get LLM operation configurations and available models."""
+    try:
+        registry = get_models_registry()
+        if not registry:
+            raise RuntimeError("Model registry not loaded")
+
+        # Serialize each LLMOperationConfig to dict
+        operations = {}
+        for op_name, op_config in registry.llm_operations.items():
+            operations[op_name] = {
+                "model": op_config.model,
+                "temperature": op_config.temperature,
+                "max_tokens": op_config.max_tokens,
+                "response_format": op_config.response_format,
+            }
+
+        # Collect available LLM models
+        available_models = [
+            {"name": m.name, "description": m.description, "provider": m.model_provider}
+            for m in registry.get_all_by_type("llm")
+        ]
+
+        default_llm = registry.defaults.get("llm")
+
+        return {
+            "operations": operations,
+            "available_models": available_models,
+            "default_llm": default_llm,
+            "status": "success",
+        }
+    except Exception as e:
+        logger.exception("Error getting LLM operations")
+        raise e
+
+
+async def save_llm_operations(operations: dict):
+    """Save LLM operation configurations to config.yml and hot-reload."""
+    try:
+        registry = get_models_registry()
+        if not registry:
+            raise RuntimeError("Model registry not loaded")
+
+        valid_keys = {"model", "temperature", "max_tokens", "response_format"}
+
+        for op_name, op_value in operations.items():
+            if not isinstance(op_value, dict):
+                raise HTTPException(status_code=400, detail=f"Operation '{op_name}' must be a dict")
+
+            extra_keys = set(op_value.keys()) - valid_keys
+            if extra_keys:
+                raise HTTPException(status_code=400, detail=f"Invalid keys for '{op_name}': {extra_keys}")
+
+            if "temperature" in op_value and op_value["temperature"] is not None:
+                t = op_value["temperature"]
+                if not isinstance(t, (int, float)) or t < 0 or t > 2:
+                    raise HTTPException(status_code=400, detail=f"Invalid temperature for '{op_name}': must be 0-2")
+
+            if "max_tokens" in op_value and op_value["max_tokens"] is not None:
+                mt = op_value["max_tokens"]
+                if not isinstance(mt, int) or mt <= 0:
+                    raise HTTPException(status_code=400, detail=f"Invalid max_tokens for '{op_name}': must be positive int")
+
+            if "model" in op_value and op_value["model"] is not None:
+                if not registry.get_by_name(op_value["model"]):
+                    raise HTTPException(status_code=400, detail=f"Model '{op_value['model']}' not found in registry")
+
+            if "response_format" in op_value and op_value["response_format"] is not None:
+                if op_value["response_format"] != "json":
+                    raise HTTPException(status_code=400, detail=f"response_format must be 'json' or null")
+
+        if save_config_section("llm_operations", operations):
+            load_models_config(force_reload=True)
+            logger.info(f"Updated LLM operations config: {list(operations.keys())}")
+            return {
+                "message": "LLM operations saved successfully",
+                "status": "success",
+            }
+        else:
+            return {
+                "message": "Failed to save LLM operations",
+                "status": "error",
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error saving LLM operations")
+        raise e
+
+
+async def test_llm_model(model_name: Optional[str]):
+    """Test an LLM model connection with a trivial prompt."""
+    try:
+        from advanced_omi_backend.openai_factory import create_openai_client
+
+        registry = get_models_registry()
+        if not registry:
+            raise RuntimeError("Model registry not loaded")
+
+        if model_name:
+            model_def = registry.get_by_name(model_name)
+            if not model_def:
+                return {"success": False, "model_name": model_name, "error": f"Model '{model_name}' not found", "status": "error"}
+        else:
+            model_def = registry.get_default("llm")
+            if not model_def:
+                return {"success": False, "model_name": None, "error": "No default LLM configured", "status": "error"}
+
+        client = create_openai_client(
+            api_key=model_def.api_key or "",
+            base_url=model_def.model_url,
+            is_async=True,
+        )
+
+        start = time.time()
+        response = await client.chat.completions.create(
+            model=model_def.model_name,
+            messages=[{"role": "user", "content": "Say hello in one word."}],
+            temperature=0,
+            max_tokens=10,
+        )
+        latency_ms = int((time.time() - start) * 1000)
+
+        return {
+            "success": True,
+            "model_name": model_def.name,
+            "model_provider": model_def.model_provider,
+            "response": response.choices[0].message.content.strip(),
+            "latency_ms": latency_ms,
+            "status": "success",
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "model_name": model_name or "(default)",
+            "error": str(e),
+            "status": "error",
+        }
 
 
 # Chat Configuration Management Functions
@@ -972,13 +1116,7 @@ async def save_plugins_config_yaml(yaml_content: str) -> dict:
         # Hot-reload plugins and signal worker restart
         reload_result = None
         try:
-            from advanced_omi_backend.services.plugin_service import (
-                reload_plugins,
-                signal_worker_restart,
-            )
-
-            reload_result = await reload_plugins()
-            signal_worker_restart()
+            reload_result, _ = await _reload_and_signal()
             logger.info("Plugins reloaded and worker restart signaled")
         except Exception as reload_err:
             logger.warning(f"Auto-reload failed, manual restart needed: {reload_err}")
@@ -1050,17 +1188,11 @@ async def validate_plugins_config_yaml(yaml_content: str) -> dict:
         return {"valid": False, "error": f"Validation error: {str(e)}"}
 
 
-async def reload_plugins_controller(app=None) -> dict:
-    """Reload all plugins and signal workers to restart.
-
-    1. Calls reload_plugins() — synchronous backend reload
-    2. Calls signal_worker_restart() — async worker restart via Redis signal
-
-    Args:
-        app: Optional FastAPI app instance for updating app.state.plugin_router
+async def _reload_and_signal(app=None) -> tuple[dict, bool]:
+    """Reload plugins and signal worker restart.
 
     Returns:
-        Combined result with backend reload details and worker signal status
+        (reload_result, worker_signal_sent) tuple.
     """
     from advanced_omi_backend.services.plugin_service import (
         reload_plugins,
@@ -1075,6 +1207,20 @@ async def reload_plugins_controller(app=None) -> dict:
         worker_signal_sent = True
     except Exception as e:
         logger.error(f"Failed to signal worker restart: {e}")
+
+    return reload_result, worker_signal_sent
+
+
+async def reload_plugins_controller(app=None) -> dict:
+    """Reload all plugins and signal workers to restart.
+
+    Args:
+        app: Optional FastAPI app instance for updating app.state.plugin_router
+
+    Returns:
+        Combined result with backend reload details and worker signal status
+    """
+    reload_result, worker_signal_sent = await _reload_and_signal(app=app)
 
     return {
         "success": reload_result.get("success", False),
@@ -1287,13 +1433,7 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
         # Hot-reload plugins and signal worker restart
         reload_result = None
         try:
-            from advanced_omi_backend.services.plugin_service import (
-                reload_plugins,
-                signal_worker_restart,
-            )
-
-            reload_result = await reload_plugins()
-            signal_worker_restart()
+            reload_result, _ = await _reload_and_signal()
         except Exception as reload_err:
             logger.warning(f"Auto-reload failed, manual restart needed: {reload_err}")
 

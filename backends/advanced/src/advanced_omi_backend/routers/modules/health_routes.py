@@ -307,42 +307,6 @@ async def health_check():
             "provider": "openmemory_mcp",
             "critical": False,
         }
-    elif memory_provider == "mycelia":
-        # Mycelia memory service check
-        try:
-            # Test Mycelia memory service connection with timeout
-            test_success = await asyncio.wait_for(memory_service.test_connection(), timeout=8.0)
-            if test_success:
-                health_status["services"]["memory_service"] = {
-                    "status": "✅ Mycelia Memory Connected",
-                    "healthy": True,
-                    "provider": "mycelia",
-                    "critical": False,
-                }
-            else:
-                health_status["services"]["memory_service"] = {
-                    "status": "⚠️ Mycelia Memory Test Failed",
-                    "healthy": False,
-                    "provider": "mycelia",
-                    "critical": False,
-                }
-                overall_healthy = False
-        except asyncio.TimeoutError:
-            health_status["services"]["memory_service"] = {
-                "status": "⚠️ Mycelia Memory Timeout (8s) - Check Mycelia service",
-                "healthy": False,
-                "provider": "mycelia",
-                "critical": False,
-            }
-            overall_healthy = False
-        except Exception as e:
-            health_status["services"]["memory_service"] = {
-                "status": f"⚠️ Mycelia Memory Failed: {str(e)}",
-                "healthy": False,
-                "provider": "mycelia",
-                "critical": False,
-            }
-            overall_healthy = False
     else:
         health_status["services"]["memory_service"] = {
             "status": f"❌ Unknown memory provider: {memory_provider}",

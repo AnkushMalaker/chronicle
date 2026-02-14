@@ -54,19 +54,6 @@ def create_memory_service(config: MemoryConfig) -> MemoryServiceBase:
 
         return OpenMemoryMCPService(**config.openmemory_config)
 
-    elif config.memory_provider == MemoryProvider.MYCELIA:
-        # Use Mycelia implementation
-        try:
-            from .providers.mycelia import MyceliaMemoryService
-        except ImportError as e:
-            raise RuntimeError(f"Mycelia memory service not available: {e}")
-
-        if not config.mycelia_config:
-            raise ValueError("Mycelia configuration is required for MYCELIA provider")
-
-        # Pass the full config so Mycelia can access llm_config
-        return MyceliaMemoryService(config)
-
     else:
         raise ValueError(f"Unsupported memory provider: {config.memory_provider}")
 

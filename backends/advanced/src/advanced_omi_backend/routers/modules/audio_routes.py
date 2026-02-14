@@ -6,6 +6,7 @@ Audio is served from MongoDB chunks with Opus compression.
 """
 
 import io
+import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
@@ -32,6 +33,18 @@ from advanced_omi_backend.utils.gdrive_audio_utils import (
 )
 
 router = APIRouter(prefix="/audio", tags=["audio"])
+
+
+def _safe_filename(conversation: "Conversation") -> str:
+    """Build a filesystem-safe filename from the conversation title, falling back to ID."""
+    title = conversation.title
+    if not title:
+        return conversation.conversation_id
+    # Replace anything that isn't alphanumeric, space, hyphen, or underscore
+    safe = re.sub(r"[^\w\s-]", "", title).strip()
+    # Collapse whitespace to single underscore
+    safe = re.sub(r"\s+", "_", safe)
+    return safe[:120] or conversation.conversation_id
 
 
 @router.post("/upload_audio_from_gdrive")
@@ -117,6 +130,7 @@ async def get_conversation_audio(
     # Handle Range requests for seeking support
     file_size = len(wav_data)
     range_header = request.headers.get("range")
+    filename = _safe_filename(conversation)
 
     # If no Range header, return complete file
     if not range_header:
@@ -124,7 +138,7 @@ async def get_conversation_audio(
             io.BytesIO(wav_data),
             media_type="audio/wav",
             headers={
-                "Content-Disposition": f"inline; filename={conversation_id}.wav",
+                "Content-Disposition": f'inline; filename="{filename}.wav"',
                 "Content-Length": str(file_size),
                 "Accept-Ranges": "bytes",
                 "X-Audio-Source": "mongodb-chunks",
@@ -156,7 +170,7 @@ async def get_conversation_audio(
                 "Content-Range": f"bytes {range_start}-{range_end}/{file_size}",
                 "Content-Length": str(content_length),
                 "Accept-Ranges": "bytes",
-                "Content-Disposition": f"inline; filename={conversation_id}.wav",
+                "Content-Disposition": f'inline; filename="{filename}.wav"',
                 "X-Audio-Source": "mongodb-chunks",
             }
         )
@@ -269,11 +283,12 @@ async def stream_conversation_audio(
             # Move to next batch
             start_index += batch_size
 
+    filename = _safe_filename(conversation)
     return StreamingResponse(
         stream_chunks(),
         media_type="audio/wav",
         headers={
-            "Content-Disposition": f"inline; filename={conversation_id}_stream.wav",
+            "Content-Disposition": f'inline; filename="{filename}.wav"',
             "X-Audio-Source": "mongodb-chunks-stream",
             "X-Chunk-Count": str(conversation.audio_chunks_count or 0),
             "X-Total-Duration": str(conversation.audio_total_duration or 0),

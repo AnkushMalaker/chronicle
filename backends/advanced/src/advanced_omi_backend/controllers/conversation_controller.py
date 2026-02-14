@@ -157,6 +157,36 @@ async def get_conversation(conversation_id: str, user: User):
         return JSONResponse(status_code=500, content={"error": "Error fetching conversation"})
 
 
+def _conversation_to_list_dict(conv: Conversation) -> dict:
+    """Convert a Conversation model to a dict for list-view responses."""
+    return {
+        "conversation_id": conv.conversation_id,
+        "user_id": conv.user_id,
+        "client_id": conv.client_id,
+        "audio_chunks_count": conv.audio_chunks_count,
+        "audio_total_duration": conv.audio_total_duration,
+        "audio_compression_ratio": conv.audio_compression_ratio,
+        "created_at": conv.created_at.isoformat() if conv.created_at else None,
+        "deleted": conv.deleted,
+        "deletion_reason": conv.deletion_reason,
+        "deleted_at": conv.deleted_at.isoformat() if conv.deleted_at else None,
+        "processing_status": conv.processing_status,
+        "always_persist": conv.always_persist,
+        "title": conv.title,
+        "summary": conv.summary,
+        "detailed_summary": conv.detailed_summary,
+        "active_transcript_version": conv.active_transcript_version,
+        "active_memory_version": conv.active_memory_version,
+        "segment_count": conv.segment_count,
+        "has_memory": conv.has_memory,
+        "memory_count": conv.memory_count,
+        "transcript_version_count": conv.transcript_version_count,
+        "memory_version_count": conv.memory_version_count,
+        "active_transcript_version_number": conv.active_transcript_version_number,
+        "active_memory_version_number": conv.active_memory_version_number,
+    }
+
+
 async def get_conversations(
     user: User,
     include_deleted: bool = False,
@@ -240,36 +270,9 @@ async def get_conversations(
         # Build response with explicit curated fields - minimal for list view
         conversations = []
         for conv in user_conversations:
-            conversations.append(
-                {
-                    "conversation_id": conv.conversation_id,
-                    "user_id": conv.user_id,
-                    "client_id": conv.client_id,
-                    "audio_chunks_count": conv.audio_chunks_count,
-                    "audio_total_duration": conv.audio_total_duration,
-                    "audio_compression_ratio": conv.audio_compression_ratio,
-                    "created_at": conv.created_at.isoformat() if conv.created_at else None,
-                    "deleted": conv.deleted,
-                    "deletion_reason": conv.deletion_reason,
-                    "deleted_at": conv.deleted_at.isoformat() if conv.deleted_at else None,
-                    "processing_status": conv.processing_status,
-                    "always_persist": conv.always_persist,
-                    "title": conv.title,
-                    "summary": conv.summary,
-                    "detailed_summary": conv.detailed_summary,
-                    "active_transcript_version": conv.active_transcript_version,
-                    "active_memory_version": conv.active_memory_version,
-                    # Computed fields (counts only, no heavy data)
-                    "segment_count": conv.segment_count,
-                    "has_memory": conv.has_memory,
-                    "memory_count": conv.memory_count,
-                    "transcript_version_count": conv.transcript_version_count,
-                    "memory_version_count": conv.memory_version_count,
-                    "active_transcript_version_number": conv.active_transcript_version_number,
-                    "active_memory_version_number": conv.active_memory_version_number,
-                    "is_orphan": conv.conversation_id in orphan_ids,
-                }
-            )
+            d = _conversation_to_list_dict(conv)
+            d["is_orphan"] = conv.conversation_id in orphan_ids
+            conversations.append(d)
 
         return {
             "conversations": conversations,
@@ -281,6 +284,61 @@ async def get_conversations(
     except Exception as e:
         logger.exception(f"Error fetching conversations: {e}")
         return JSONResponse(status_code=500, content={"error": "Error fetching conversations"})
+
+
+async def search_conversations(
+    query: str,
+    user: User,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """Full-text search across conversation titles, summaries, and transcripts."""
+    try:
+        collection = Conversation.get_motor_collection()
+
+        match_filter: dict = {"$text": {"$search": query}, "deleted": False}
+        if not user.is_superuser:
+            match_filter["user_id"] = str(user.user_id)
+
+        pipeline = [
+            {"$match": match_filter},
+            {"$addFields": {"score": {"$meta": "textScore"}}},
+            {"$sort": {"score": -1}},
+            {
+                "$facet": {
+                    "results": [{"$skip": offset}, {"$limit": limit}],
+                    "count": [{"$count": "total"}],
+                }
+            },
+        ]
+
+        cursor = collection.aggregate(pipeline)
+        facet_result = await cursor.to_list(length=1)
+        facet = facet_result[0] if facet_result else {"results": [], "count": []}
+
+        raw_docs = facet.get("results", [])
+        count_list = facet.get("count", [])
+        total = count_list[0]["total"] if count_list else 0
+
+        conversations = []
+        for doc in raw_docs:
+            score = doc.pop("score", 0)
+            conv = Conversation.model_validate(doc)
+            d = _conversation_to_list_dict(conv)
+            d["score"] = round(score, 4)
+            conversations.append(d)
+
+        return {
+            "conversations": conversations,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "query": query,
+        }
+
+    except Exception as e:
+        logger.exception(f"Error searching conversations: {e}")
+        return JSONResponse(status_code=500, content={"error": "Error searching conversations"})
 
 
 async def _soft_delete_conversation(conversation: Conversation, user: User) -> JSONResponse:

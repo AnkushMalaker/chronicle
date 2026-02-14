@@ -186,7 +186,10 @@ const Queue: React.FC = () => {
       return next;
     });
   };
-  const [eventsExpanded, setEventsExpanded] = useState(true);
+  const [eventsExpanded, setEventsExpanded] = useState<boolean>(() => {
+    const saved = localStorage.getItem('queue_events_expanded');
+    return saved !== null ? saved === 'true' : true;
+  });
 
   // Completed conversations pagination
   const [completedConvPage, setCompletedConvPage] = useState(1);
@@ -2028,7 +2031,11 @@ const Queue: React.FC = () => {
       <div className="bg-white rounded-lg border overflow-hidden">
         <div
           className="px-6 py-4 border-b border-gray-200 flex justify-between items-center cursor-pointer"
-          onClick={() => setEventsExpanded(!eventsExpanded)}
+          onClick={() => {
+            const next = !eventsExpanded;
+            setEventsExpanded(next);
+            localStorage.setItem('queue_events_expanded', String(next));
+          }}
         >
           <div className="flex items-center space-x-2">
             <Zap className="w-5 h-5 text-purple-600" />

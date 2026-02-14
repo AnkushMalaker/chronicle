@@ -28,13 +28,16 @@ class MockLLMProvider(LLMProviderBase):
         self._is_connected = False
         self.embedding_dimension = 384  # Standard dimension for mock embeddings
 
-    async def extract_memories(self, text: str, prompt: str) -> List[str]:
+    async def extract_memories(
+        self, text: str, prompt: str, user_id: Optional[str] = None,
+    ) -> List[str]:
         """
         Return predefined mock memories extracted from text.
 
         Args:
             text: Input text to extract memories from (analyzed for mock generation)
             prompt: System prompt (ignored in mock)
+            user_id: Optional user ID (ignored in mock)
 
         Returns:
             List of mock memory strings based on text content

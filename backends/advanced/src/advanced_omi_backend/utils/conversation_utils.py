@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.config import get_speech_detection_settings
 from advanced_omi_backend.llm_client import async_generate
+from advanced_omi_backend.prompt_optimizer import get_user_prompt
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 
 logger = logging.getLogger(__name__)
@@ -160,7 +161,9 @@ def analyze_speech(transcript_data: dict) -> dict:
 
 
 async def generate_title_and_summary(
-    text: str, segments: Optional[list] = None
+    text: str,
+    segments: Optional[list] = None,
+    user_id: Optional[str] = None,
 ) -> tuple[str, str]:
     """
     Generate title and short summary in a single LLM call using full conversation context.
@@ -170,6 +173,7 @@ async def generate_title_and_summary(
         segments: Optional list of speaker segments with structure:
             [{"speaker": str, "text": str, "start": float, "end": float}, ...]
             If provided, uses speaker-formatted text for richer context
+        user_id: Optional user ID for per-user prompt override resolution
 
     Returns:
         Tuple of (title, short_summary)
@@ -205,9 +209,9 @@ async def generate_title_and_summary(
             else ""
         )
 
-        registry = get_prompt_registry()
-        prompt_text = await registry.get_prompt(
+        prompt_text = await get_user_prompt(
             "conversation.title_summary",
+            user_id,
             speaker_instruction=speaker_instruction,
         )
 
@@ -217,7 +221,7 @@ TRANSCRIPT:
 "{conversation_text}"
 """
 
-        response = await async_generate(prompt, temperature=0.3)
+        response = await async_generate(prompt, operation="title_summary")
 
         # Parse response for Title: and Summary: lines
         title = None
@@ -324,7 +328,7 @@ TRANSCRIPT:
 "{conversation_text}"
 """
 
-        summary = await async_generate(prompt, temperature=0.3)
+        summary = await async_generate(prompt, operation="detailed_summary")
         return summary.strip().strip('"').strip("'") or "No meaningful content to summarize"
 
     except Exception as e:

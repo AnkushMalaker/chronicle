@@ -41,6 +41,17 @@ async def get_conversations(
     return await conversation_controller.get_conversations(current_user, include_deleted, include_unprocessed, limit, offset)
 
 
+@router.get("/search")
+async def search_conversations(
+    q: str = Query(..., min_length=1, description="Text search query"),
+    limit: int = Query(50, ge=1, le=200, description="Max results to return"),
+    offset: int = Query(0, ge=0, description="Number of results to skip"),
+    current_user: User = Depends(current_active_user),
+):
+    """Full-text search across conversation titles, summaries, and transcripts."""
+    return await conversation_controller.search_conversations(q, current_user, limit, offset)
+
+
 @router.get("/{conversation_id}")
 async def get_conversation_detail(
     conversation_id: str,

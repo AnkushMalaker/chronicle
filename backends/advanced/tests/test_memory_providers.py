@@ -5,88 +5,8 @@ when converting their native formats to MemoryEntry objects.
 """
 
 import time
-from unittest.mock import Mock
-from advanced_omi_backend.services.memory.providers.mycelia import MyceliaMemoryService
 from advanced_omi_backend.services.memory.providers.openmemory_mcp import OpenMemoryMCPService
 from advanced_omi_backend.services.memory.base import MemoryEntry
-
-
-class TestMyceliaProviderTimestamps:
-    """Test Mycelia provider timestamp handling."""
-
-    def test_mycelia_object_to_memory_entry_with_both_timestamps(self):
-        """Test that Mycelia provider extracts both created_at and updated_at."""
-        # Create a Mycelia service instance
-        service = MyceliaMemoryService(Mock())
-
-        # Mock Mycelia API object response
-        mycelia_obj = {
-            "_id": {"$oid": "507f1f77bcf86cd799439011"},
-            "name": "Test Memory",
-            "details": "Test content",
-            "createdAt": {"$date": "2024-01-01T00:00:00.000Z"},
-            "updatedAt": {"$date": "2024-01-02T00:00:00.000Z"},
-            "isPerson": False,
-            "isEvent": False,
-        }
-
-        # Convert to MemoryEntry
-        entry = service._mycelia_object_to_memory_entry(mycelia_obj, user_id="user-123")
-
-        # Verify both timestamps are extracted
-        assert entry.created_at is not None, "created_at should be extracted"
-        assert entry.updated_at is not None, "updated_at should be extracted"
-
-        # Verify timestamps match the source
-        assert entry.created_at == "2024-01-01T00:00:00.000Z", "created_at should match Mycelia createdAt"
-        assert entry.updated_at == "2024-01-02T00:00:00.000Z", "updated_at should match Mycelia updatedAt"
-
-        # Verify timestamps are different (updated after created)
-        assert entry.created_at != entry.updated_at, "Timestamps should be different"
-
-    def test_mycelia_object_to_memory_entry_with_missing_updated_at(self):
-        """Test that Mycelia provider handles missing updatedAt gracefully."""
-        service = MyceliaMemoryService(Mock())
-
-        # Mock Mycelia object without updatedAt
-        mycelia_obj = {
-            "_id": {"$oid": "507f1f77bcf86cd799439011"},
-            "name": "Test Memory",
-            "details": "Test content",
-            "createdAt": {"$date": "2024-01-01T00:00:00.000Z"},
-            # updatedAt is missing
-            "isPerson": False,
-            "isEvent": False,
-        }
-
-        # Convert to MemoryEntry
-        entry = service._mycelia_object_to_memory_entry(mycelia_obj, user_id="user-123")
-
-        # created_at should be present
-        assert entry.created_at is not None, "created_at should be extracted"
-
-        # updated_at should default to created_at (via MemoryEntry __post_init__)
-        # The _extract_bson_date returns None for missing fields, then __post_init__ sets it to created_at
-        assert entry.updated_at is not None, "updated_at should be set by __post_init__"
-        assert entry.updated_at == entry.created_at, "updated_at should default to created_at when missing"
-
-    def test_mycelia_extract_bson_date(self):
-        """Test Mycelia BSON date extraction."""
-        service = MyceliaMemoryService(Mock())
-
-        # Test BSON date format
-        bson_date = {"$date": "2024-01-01T00:00:00.000Z"}
-        extracted = service._extract_bson_date(bson_date)
-        assert extracted == "2024-01-01T00:00:00.000Z", "Should extract date from BSON format"
-
-        # Test plain string date
-        plain_date = "2024-01-01T00:00:00.000Z"
-        extracted = service._extract_bson_date(plain_date)
-        assert extracted == "2024-01-01T00:00:00.000Z", "Should pass through plain date"
-
-        # Test None
-        extracted = service._extract_bson_date(None)
-        assert extracted is None, "Should return None for None input"
 
 
 class TestOpenMemoryMCPProviderTimestamps:
@@ -205,19 +125,6 @@ class TestProviderTimestampConsistency:
 
     def test_all_providers_return_memory_entry_with_timestamps(self):
         """Test that all providers return MemoryEntry objects with both timestamp fields."""
-        # This is a meta-test to ensure all providers conform to the MemoryEntry interface
-
-        # Mycelia
-        mycelia_service = MyceliaMemoryService(Mock())
-        mycelia_obj = {
-            "_id": {"$oid": "507f1f77bcf86cd799439011"},
-            "name": "Test",
-            "details": "Content",
-            "createdAt": {"$date": "2024-01-01T00:00:00.000Z"},
-            "updatedAt": {"$date": "2024-01-02T00:00:00.000Z"},
-        }
-        mycelia_entry = mycelia_service._mycelia_object_to_memory_entry(mycelia_obj, "user-123")
-
         # OpenMemory MCP
         mcp_service = OpenMemoryMCPService()
         mcp_service.client_name = "test"
@@ -231,7 +138,7 @@ class TestProviderTimestampConsistency:
         mcp_entry = mcp_service._mcp_result_to_memory_entry(mcp_result, "user-123")
 
         # Verify all return MemoryEntry instances with both timestamp fields
-        for entry, provider_name in [(mycelia_entry, "Mycelia"), (mcp_entry, "OpenMemory MCP")]:
+        for entry, provider_name in [(mcp_entry, "OpenMemory MCP")]:
             assert isinstance(entry, MemoryEntry), f"{provider_name} should return MemoryEntry"
             assert hasattr(entry, "created_at"), f"{provider_name} entry should have created_at"
             assert hasattr(entry, "updated_at"), f"{provider_name} entry should have updated_at"

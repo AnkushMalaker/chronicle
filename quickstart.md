@@ -115,40 +115,6 @@ git clone https://github.com/chronicle-ai/chronicle.git
 cd chronicle
 ```
 
-*The `--recursive` flag downloads the Mycelia submodule (see note below)*
-
-**If you already cloned without `--recursive`:**
-```bash
-git submodule update --init --recursive
-```
-
-<details>
-<summary><strong>📦 About the Mycelia Submodule (Optional - Click to expand)</strong></summary>
-
-**What is Mycelia?**
-Mycelia is an optional self-hosted AI memory system that Chronicle can use as an alternative memory backend. It provides:
-- Timeline-based memory visualization
-- Advanced audio processing with speaker diarization
-- MongoDB-based full-text search
-- MCP (Model Context Protocol) integration
-
-**Do I need it?**
-**Most users don't need Mycelia!** The default Chronicle memory system works great for most use cases. Only consider Mycelia if you:
-- Want timeline-based memory visualization
-- Need advanced speaker diarization features
-- Want to use MongoDB for memory storage instead of Qdrant
-
-**Runtime Dependencies (if using Mycelia):**
-- **Deno** - JavaScript/TypeScript runtime (install: `curl -fsSL https://deno.land/install.sh | sh`)
-- **MongoDB** - Database for memory storage
-- **Redis** - Caching layer
-- **FFmpeg** - Audio processing (usually pre-installed)
-
-**Build/Setup:**
-If you choose Mycelia as your memory provider during setup wizard, the wizard will configure the necessary services automatically. No manual build steps required!
-
-</details>
-
 **Run the setup wizard:**
 ```bash
 # Using convenience script (recommended)

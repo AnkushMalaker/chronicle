@@ -20,6 +20,7 @@ class AnnotationType(str, Enum):
     TRANSCRIPT = "transcript"
     DIARIZATION = "diarization"  # Speaker identification corrections
     ENTITY = "entity"  # Knowledge graph entity corrections (name/details edits)
+    TITLE = "title"  # Conversation title corrections
 
 
 class AnnotationSource(str, Enum):
@@ -120,6 +121,10 @@ class Annotation(Document):
         """Check if this is an entity annotation."""
         return self.annotation_type == AnnotationType.ENTITY
 
+    def is_title_annotation(self) -> bool:
+        """Check if this is a title annotation."""
+        return self.annotation_type == AnnotationType.TITLE
+
     def is_pending_suggestion(self) -> bool:
         """Check if this is a pending AI suggestion."""
         return (
@@ -171,6 +176,13 @@ class EntityAnnotationCreate(BaseModel):
     """
     entity_id: str
     entity_field: str  # "name" or "details"
+    original_text: str
+    corrected_text: str
+
+
+class TitleAnnotationCreate(AnnotationCreateBase):
+    """Create title annotation request."""
+    conversation_id: str
     original_text: str
     corrected_text: str
 

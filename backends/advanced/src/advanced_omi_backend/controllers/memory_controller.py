@@ -123,7 +123,7 @@ async def delete_memory(memory_id: str, user: User):
             if memory_id not in memory_ids:
                 return JSONResponse(status_code=404, content={"message": "Memory not found"})
 
-        # Delete the memory (pass user_id and user_email for Mycelia authentication)
+        # Delete the memory
         audio_logger.info(f"Deleting memory {memory_id} for user_id={user.user_id}, email={user.email}")
         success = await memory_service.delete_memory(memory_id, user_id=user.user_id, user_email=user.email)
 

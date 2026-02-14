@@ -187,7 +187,7 @@ class ConfigManager:
         Get current memory provider from config.yml.
 
         Returns:
-            Memory provider name (chronicle, openmemory_mcp, or mycelia)
+            Memory provider name (chronicle or openmemory_mcp)
         """
         config = self._load_config_yml()
         provider = config.get("memory", {}).get("provider", "chronicle").lower()
@@ -207,7 +207,7 @@ class ConfigManager:
         2. .env: MEMORY_PROVIDER variable (backward compatibility, if service_path set)
 
         Args:
-            provider: Memory provider name (chronicle, openmemory_mcp, or mycelia)
+            provider: Memory provider name (chronicle or openmemory_mcp)
 
         Returns:
             Dict with status and details of the update
@@ -217,7 +217,7 @@ class ConfigManager:
         """
         # Validate provider
         provider = provider.lower().strip()
-        valid_providers = ["chronicle", "openmemory_mcp", "mycelia"]
+        valid_providers = ["chronicle", "openmemory_mcp"]
 
         if provider not in valid_providers:
             raise ValueError(

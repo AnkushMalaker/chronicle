@@ -148,19 +148,19 @@ class OpenAIProvider(LLMProviderBase):
         if not registry:
             raise RuntimeError("config.yml not found or invalid; cannot initialize model registry")
 
-        # Resolve default models
+        self._registry = registry
+
+        # Resolve default models (still needed for embeddings and API key validation)
         self.llm_def: ModelDef = registry.get_default("llm")  # type: ignore
         self.embed_def: ModelDef | None = registry.get_default("embedding")
 
         if not self.llm_def:
             raise RuntimeError("No default LLM defined in config.yml")
 
-        # Store parameters for LLM
+        # Store parameters for LLM (used by embeddings and connection test)
         self.api_key = self.llm_def.api_key or ""
         self.base_url = self.llm_def.model_url
         self.model = self.llm_def.model_name
-        self.temperature = float(self.llm_def.model_params.get("temperature", 0.1))
-        self.max_tokens = int(self.llm_def.model_params.get("max_tokens", 2000))
 
         # Store parameters for embeddings (use separate config if available)
         self.embedding_model = (self.embed_def.model_name if self.embed_def else self.llm_def.model_name)
@@ -184,12 +184,15 @@ class OpenAIProvider(LLMProviderBase):
         # Lazy client creation
         self._client = None
 
-    async def extract_memories(self, text: str, prompt: str) -> List[str]:
+    async def extract_memories(
+        self, text: str, prompt: str, user_id: Optional[str] = None,
+    ) -> List[str]:
         """Extract memories using OpenAI API with the enhanced fact retrieval prompt.
 
         Args:
             text: Input text to extract memories from
             prompt: System prompt to guide extraction (uses default if empty)
+            user_id: Optional user ID for per-user prompt override resolution
 
         Returns:
             List of extracted memory strings
@@ -199,9 +202,11 @@ class OpenAIProvider(LLMProviderBase):
             if prompt and prompt.strip():
                 system_prompt = prompt
             else:
-                registry = get_prompt_registry()
-                system_prompt = await registry.get_prompt(
+                from advanced_omi_backend.prompt_optimizer import get_user_prompt
+
+                system_prompt = await get_user_prompt(
                     "memory.fact_retrieval",
+                    user_id,
                     current_date=datetime.now().strftime("%Y-%m-%d"),
                 )
             
@@ -245,23 +250,21 @@ class OpenAIProvider(LLMProviderBase):
             memory extraction process.
         """
         try:
-            client = _get_openai_client(api_key=self.api_key, base_url=self.base_url, is_async=True)
+            op = self._registry.get_llm_operation("memory_extraction")
+            client = op.get_client(is_async=True)
             response = await client.chat.completions.create(
-                model=self.model,
+                **op.to_api_params(),
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": chunk},
                 ],
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                response_format={"type": "json_object"},
             )
             facts = (response.choices[0].message.content or "").strip()
             if not facts:
                 return []
 
             return _parse_memories_content(facts)
-            
+
         except Exception as e:
             memory_logger.error(f"Error processing chunk {index}: {e}")
             return []
@@ -332,12 +335,11 @@ class OpenAIProvider(LLMProviderBase):
             )
             memory_logger.debug(f"🧠 Generated prompt user content: {update_memory_messages[1]['content'][:200]}...")
 
-            client = _get_openai_client(api_key=self.api_key, base_url=self.base_url, is_async=True)
+            op = self._registry.get_llm_operation("memory_update")
+            client = op.get_client(is_async=True)
             response = await client.chat.completions.create(
-                model=self.model,
+                **op.to_api_params(),
                 messages=update_memory_messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
             )
             content = (response.choices[0].message.content or "").strip()
             if not content:
@@ -420,15 +422,11 @@ class OpenAIProvider(LLMProviderBase):
                 f"🔄 Reprocess user content (first 300 chars): {user_content[:300]}..."
             )
 
-            client = _get_openai_client(
-                api_key=self.api_key, base_url=self.base_url, is_async=True
-            )
+            op = self._registry.get_llm_operation("memory_reprocess")
+            client = op.get_client(is_async=True)
             response = await client.chat.completions.create(
-                model=self.model,
+                **op.to_api_params(),
                 messages=messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                response_format={"type": "json_object"},
             )
             content = (response.choices[0].message.content or "").strip()
 

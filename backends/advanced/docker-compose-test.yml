@@ -46,8 +46,6 @@ services:
       - MEMORY_PROVIDER=${MEMORY_PROVIDER:-chronicle}
       - OPENMEMORY_MCP_URL=${OPENMEMORY_MCP_URL:-http://host.docker.internal:8765}
       - OPENMEMORY_USER_ID=${OPENMEMORY_USER_ID:-openmemory}
-      - MYCELIA_URL=http://mycelia-backend-test:5173
-      - MYCELIA_DB=mycelia_test
       # Speaker recognition controlled by config.yml (disabled in test config for CI performance)
       - SPEAKER_SERVICE_URL=http://speaker-service-test:8085
       - CORS_ORIGINS=http://localhost:3001,http://localhost:8001,https://localhost:3001,https://localhost:8001
@@ -245,8 +243,6 @@ services:
       - MEMORY_PROVIDER=${MEMORY_PROVIDER:-chronicle}
       - OPENMEMORY_MCP_URL=${OPENMEMORY_MCP_URL:-http://host.docker.internal:8765}
       - OPENMEMORY_USER_ID=${OPENMEMORY_USER_ID:-openmemory}
-      - MYCELIA_URL=http://mycelia-backend-test:5173
-      - MYCELIA_DB=mycelia_test
       # Speaker recognition controlled by config.yml (disabled in test config for CI performance)
       - SPEAKER_SERVICE_URL=http://speaker-service-test:8085
       # Set inactivity timeout for tests (20 seconds of audio time)
@@ -270,60 +266,6 @@ services:
       qdrant-test:
         condition: service_started
     restart: unless-stopped
-
-  # Mycelia - AI memory and timeline service (test environment)
-  # mycelia-backend-test:
-  #   build:
-  #     context: ../../extras/mycelia/backend
-  #     dockerfile: Dockerfile.simple
-  #   ports:
-  #     - "5100:5173"  # Test backend port
-  #   environment:
-  #     # Shared JWT secret for Chronicle authentication (test key)
-  #     - JWT_SECRET=test-jwt-signing-key-for-integration-tests
-  #     - SECRET_KEY=test-jwt-signing-key-for-integration-tests
-  #     # MongoDB connection (test database)
-  #     - MONGO_URL=mongodb://mongo-test:27017
-  #     - MONGO_DB=mycelia_test
-  #     - DATABASE_NAME=mycelia_test
-  #     # Redis connection (ioredis uses individual host/port, not URL)
-  #     - REDIS_HOST=redis-test
-  #     - REDIS_PORT=6379
-  #   volumes:
-  #     - ../../extras/mycelia/backend/app:/app/app  # Mount source for development
-  #   depends_on:
-  #     mongo-test:
-  #       condition: service_healthy
-  #     redis-test:
-  #       condition: service_started
-  #   healthcheck:
-  #     test: ["CMD", "deno", "eval", "fetch('http://localhost:5173/health').then(r => r.ok ? Deno.exit(0) : Deno.exit(1))"]
-  #     interval: 30s
-  #     timeout: 10s
-  #     retries: 3
-  #     start_period: 5s
-  #   restart: unless-stopped
-  #   profiles:
-  #     - mycelia
-
-  # mycelia-frontend-test:
-  #   build:
-  #     context: ../../extras/mycelia
-  #     dockerfile: frontend/Dockerfile.simple
-  #     args:
-  #       - VITE_API_URL=http://localhost:5100
-  #   ports:
-  #     - "3002:8080"  # Nginx serves on 8080 internally
-  #   environment:
-  #     - VITE_API_URL=http://localhost:5100
-  #   volumes:
-  #     - ../../extras/mycelia/frontend/src:/app/src  # Mount source for development
-  #   depends_on:
-  #     mycelia-backend-test:
-  #       condition: service_healthy
-  #   restart: unless-stopped
-  #   profiles:
-  #     - mycelia
 
   # caddy:
   #   image: caddy:2-alpine

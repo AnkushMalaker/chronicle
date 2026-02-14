@@ -72,3 +72,17 @@ export function useMiscSettings() {
     staleTime: 5 * 60_000,
   })
 }
+
+export function useLLMOperations() {
+  return useQuery({
+    queryKey: ['system', 'llmOperations'],
+    queryFn: async () => {
+      const response = await systemApi.getLLMOperations()
+      if (response.data.status === 'success') {
+        return response.data
+      }
+      return null
+    },
+    staleTime: 5 * 60_000,
+  })
+}

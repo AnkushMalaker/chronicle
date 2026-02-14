@@ -72,7 +72,7 @@ Memory extraction and storage configuration:
 
 ```yaml
 memory:
-  provider: chronicle  # chronicle, openmemory_mcp, or mycelia
+  provider: chronicle  # chronicle or openmemory_mcp
   timeout_seconds: 1200
   extraction:
     enabled: true

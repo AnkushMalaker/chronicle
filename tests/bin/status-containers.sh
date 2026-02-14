@@ -21,6 +21,22 @@ docker ps -a --filter "name=$PROJECT_NAME" --format "table {{.Names}}\t{{.Status
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
+# Check for restart loops
+echo ""
+echo "🔄 Restart Counts:"
+HAS_RESTARTS=false
+for CONTAINER_ID in $(docker ps -q --filter "name=$PROJECT_NAME" 2>/dev/null); do
+    NAME=$(docker inspect --format '{{.Name}}' "$CONTAINER_ID" | sed 's/^\///')
+    RESTART_COUNT=$(docker inspect --format '{{.RestartCount}}' "$CONTAINER_ID")
+    if [ "$RESTART_COUNT" -gt 0 ]; then
+        echo "   ⚠️  ${NAME}: ${RESTART_COUNT} restarts"
+        HAS_RESTARTS=true
+    fi
+done
+if [ "$HAS_RESTARTS" = false ]; then
+    echo "   ✅ All containers stable (0 restarts)"
+fi
+
 # Check if backend is responsive
 echo ""
 echo "🏥 Health Checks:"

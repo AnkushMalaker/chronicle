@@ -103,6 +103,76 @@ class ModelDef(BaseModel):
         return self
 
 
+class LLMOperationConfig(BaseModel):
+    """Per-operation LLM config as written in YAML.
+
+    Each field is optional so users can override only what they need;
+    unset fields are resolved from the model's model_params at runtime.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: Optional[str] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    response_format: Optional[str] = None  # "json" → {"type": "json_object"}
+
+
+class ResolvedLLMOperation(BaseModel):
+    """Everything needed to make an LLM call. No further lookups required.
+
+    Works uniformly for OpenAI, Ollama, Groq, or any OpenAI-compatible provider.
+    The model_def carries all provider details (api_key, base_url, model_name).
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    model_def: ModelDef
+    temperature: float
+    max_tokens: Optional[int] = None
+    response_format: Optional[Dict[str, Any]] = None  # {"type": "json_object"} or None
+
+    @property
+    def model_name(self) -> str:
+        return self.model_def.model_name
+
+    @property
+    def api_key(self) -> Optional[str]:
+        return self.model_def.api_key
+
+    @property
+    def base_url(self) -> str:
+        return self.model_def.model_url
+
+    def to_api_params(self) -> Dict[str, Any]:
+        """Returns kwargs for client.chat.completions.create().
+
+        Works for OpenAI, Ollama, Groq — all OpenAI-compatible.
+        """
+        params: Dict[str, Any] = {
+            "model": self.model_def.model_name,
+            "temperature": self.temperature,
+        }
+        if self.max_tokens is not None:
+            params["max_tokens"] = self.max_tokens
+        if self.response_format is not None:
+            params["response_format"] = self.response_format
+        return params
+
+    def get_client(self, is_async: bool = False):
+        """Create an OpenAI-compatible client for this operation.
+
+        Uses create_openai_client which handles Langfuse tracing.
+        """
+        from advanced_omi_backend.openai_factory import create_openai_client
+
+        return create_openai_client(
+            api_key=self.model_def.api_key or "",
+            base_url=self.model_def.model_url,
+            is_async=is_async,
+        )
+
+
 class AppModels(BaseModel):
     """Application models registry.
 
@@ -133,6 +203,10 @@ class AppModels(BaseModel):
     chat: Dict[str, Any] = Field(
         default_factory=dict,
         description="Chat service configuration including system prompt"
+    )
+    llm_operations: Dict[str, LLMOperationConfig] = Field(
+        default_factory=dict,
+        description="Per-operation LLM configuration (temperature, model override, etc.)"
     )
     
     def get_by_name(self, name: str) -> Optional[ModelDef]:
@@ -183,11 +257,72 @@ class AppModels(BaseModel):
     
     def list_model_types(self) -> List[str]:
         """Get all unique model types in the registry.
-        
+
         Returns:
             Sorted list of model types
         """
         return sorted(set(m.model_type for m in self.models.values()))
+
+    def get_llm_operation(self, name: str) -> ResolvedLLMOperation:
+        """Resolve a named LLM operation to a self-contained config.
+
+        Resolution:
+          1. Look up llm_operations[name] (empty LLMOperationConfig if missing)
+          2. Resolve model_def: op.model → get_by_name, else defaults.llm
+          3. Merge parameters: operation > model_def.model_params > safe fallback
+          4. Return ResolvedLLMOperation ready for use
+
+        Args:
+            name: Operation name (e.g. "memory_extraction", "chat")
+
+        Returns:
+            ResolvedLLMOperation with model_def, temperature, max_tokens, response_format
+
+        Raises:
+            RuntimeError: If no model can be resolved for the operation
+        """
+        op_config = self.llm_operations.get(name, LLMOperationConfig())
+
+        # Resolve model definition
+        if op_config.model:
+            model_def = self.get_by_name(op_config.model)
+            if not model_def:
+                raise RuntimeError(
+                    f"LLM operation '{name}' references model '{op_config.model}' "
+                    f"which is not defined in the models list"
+                )
+        else:
+            model_def = self.get_default("llm")
+            if not model_def:
+                raise RuntimeError(
+                    f"No model specified for operation '{name}' and no default LLM defined"
+                )
+
+        # Merge parameters: operation config > model_params > safe fallback
+        model_params = model_def.model_params or {}
+
+        temperature = (
+            op_config.temperature
+            if op_config.temperature is not None
+            else model_params.get("temperature", 0.2)
+        )
+        max_tokens = (
+            op_config.max_tokens
+            if op_config.max_tokens is not None
+            else model_params.get("max_tokens")
+        )
+
+        # Convert "json" shorthand to OpenAI format
+        response_format = None
+        if op_config.response_format == "json":
+            response_format = {"type": "json_object"}
+
+        return ResolvedLLMOperation(
+            model_def=model_def,
+            temperature=float(temperature),
+            max_tokens=int(max_tokens) if max_tokens is not None else None,
+            response_format=response_format,
+        )
 
 
 # Global registry singleton
@@ -242,6 +377,7 @@ def load_models_config(force_reload: bool = False) -> Optional[AppModels]:
     memory_settings = raw.get("memory", {}) or {}
     speaker_recognition_cfg = raw.get("speaker_recognition", {}) or {}
     chat_settings = raw.get("chat", {}) or {}
+    llm_ops_raw = raw.get("llm_operations", {}) or {}
 
     # Parse and validate models using Pydantic
     models: Dict[str, ModelDef] = {}
@@ -255,13 +391,22 @@ def load_models_config(force_reload: bool = False) -> Optional[AppModels]:
             logging.warning(f"Failed to load model '{m.get('name', 'unknown')}': {e}")
             continue
 
+    # Parse LLM operation configs
+    llm_operations: Dict[str, LLMOperationConfig] = {}
+    for op_name, op_dict in llm_ops_raw.items():
+        try:
+            llm_operations[op_name] = LLMOperationConfig(**(op_dict or {}))
+        except ValidationError as e:
+            logging.warning(f"Failed to load llm_operation '{op_name}': {e}")
+
     # Create and cache registry
     _REGISTRY = AppModels(
         defaults=defaults,
         models=models,
         memory=memory_settings,
         speaker_recognition=speaker_recognition_cfg,
-        chat=chat_settings
+        chat=chat_settings,
+        llm_operations=llm_operations,
     )
     return _REGISTRY
 

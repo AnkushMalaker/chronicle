@@ -24,7 +24,6 @@ class Conversation(Document):
         """Supported memory providers."""
         CHRONICLE = "chronicle"
         OPENMEMORY_MCP = "openmemory_mcp"
-        MYCELIA = "mycelia"
         FRIEND_LITE = "friend_lite"  # Legacy value
 
     class ConversationStatus(str, Enum):
@@ -379,7 +378,13 @@ class Conversation(Document):
             "user_id",
             "created_at",
             [("user_id", 1), ("deleted", 1), ("created_at", -1)],  # Compound index for paginated list queries
-            IndexModel([("external_source_id", 1)], sparse=True)  # Sparse index for deduplication
+            IndexModel([("external_source_id", 1)], sparse=True),  # Sparse index for deduplication
+            IndexModel(
+                [("title", "text"), ("summary", "text"), ("detailed_summary", "text"),
+                 ("transcript_versions.transcript", "text")],
+                weights={"title": 10, "summary": 5, "detailed_summary": 3, "transcript_versions.transcript": 1},
+                name="conversation_text_search",
+            ),
         ]
 
 

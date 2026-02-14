@@ -129,6 +129,32 @@ async def get_speaker_service_status(current_user: User = Depends(current_superu
     return await system_controller.get_speaker_service_status()
 
 
+# LLM Operations Configuration Endpoints
+
+@router.get("/admin/llm-operations")
+async def get_llm_operations(current_user: User = Depends(current_superuser)):
+    """Get LLM operation configurations. Admin only."""
+    return await system_controller.get_llm_operations()
+
+
+@router.post("/admin/llm-operations")
+async def save_llm_operations(
+    operations: dict,
+    current_user: User = Depends(current_superuser)
+):
+    """Save LLM operation configurations. Admin only."""
+    return await system_controller.save_llm_operations(operations)
+
+
+@router.post("/admin/llm-operations/test")
+async def test_llm_model(
+    model_name: Optional[str] = Body(None, embed=True),
+    current_user: User = Depends(current_superuser)
+):
+    """Test an LLM model connection with a trivial prompt. Admin only."""
+    return await system_controller.test_llm_model(model_name)
+
+
 # Memory Configuration Management Endpoints Removed - Project uses config.yml exclusively
 @router.get("/admin/memory/config/raw")
 async def get_memory_config_raw(current_user: User = Depends(current_superuser)):
@@ -341,6 +367,11 @@ class WritePluginCodeRequest(BaseModel):
     config_yml: Optional[str] = None
 
 
+class PluginAssistantRequest(BaseModel):
+    """Request model for plugin assistant chat."""
+    messages: list[dict]
+
+
 @router.post("/admin/plugins/config/structured/{plugin_id}")
 async def update_plugin_config_structured(
     plugin_id: str,
@@ -457,12 +488,11 @@ async def delete_plugin(
 
 @router.post("/admin/plugins/assistant")
 async def plugin_assistant_chat(
-    request: Request,
+    body: PluginAssistantRequest,
     current_user: User = Depends(current_superuser),
 ):
     """AI-powered plugin configuration assistant. Admin only. Returns SSE stream."""
-    body = await request.json()
-    messages = body.get("messages", [])
+    messages = body.messages
 
     async def event_stream():
         try:
@@ -475,11 +505,10 @@ async def plugin_assistant_chat(
 
     return StreamingResponse(
         event_stream(),
-        media_type="text/plain",
+        media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "Content-Type": "text/event-stream",
         },
     )
 

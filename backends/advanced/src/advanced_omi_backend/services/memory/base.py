@@ -76,7 +76,7 @@ class MemoryServiceBase(ABC):
     @property
     @abstractmethod
     def provider_identifier(self) -> str:
-        """Return the provider identifier (e.g., 'chronicle', 'openmemory_mcp', 'mycelia')."""
+        """Return the provider identifier (e.g., 'chronicle', 'openmemory_mcp')."""
         ...
 
     @abstractmethod
@@ -252,8 +252,8 @@ class MemoryServiceBase(ABC):
 
         Args:
             memory_id: Unique identifier of the memory to delete
-            user_id: Optional user ID for authentication (required for Mycelia provider)
-            user_email: Optional user email for authentication (required for Mycelia provider)
+            user_id: Optional user ID for authentication
+            user_email: Optional user email for authentication
 
         Returns:
             True if successfully deleted, False otherwise
@@ -321,12 +321,15 @@ class LLMProviderBase(ABC):
     """
 
     @abstractmethod
-    async def extract_memories(self, text: str, prompt: str) -> List[str]:
+    async def extract_memories(
+        self, text: str, prompt: str, user_id: Optional[str] = None,
+    ) -> List[str]:
         """Extract meaningful fact memories from text using an LLM.
 
         Args:
             text: Input text to extract memories from
             prompt: System prompt to guide the extraction process
+            user_id: Optional user ID for per-user prompt override resolution
 
         Returns:
             List of extracted fact memory strings

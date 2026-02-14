@@ -890,7 +890,9 @@ async def generate_title_summary_job(conversation_id: str, *, redis_client=None)
         import asyncio
 
         (title, short_summary), detailed_summary = await asyncio.gather(
-            generate_title_and_summary(transcript_text, segments=segments),
+            generate_title_and_summary(
+                transcript_text, segments=segments, user_id=conversation.user_id
+            ),
             generate_detailed_summary(
                 transcript_text, segments=segments, memory_context=memory_context
             ),

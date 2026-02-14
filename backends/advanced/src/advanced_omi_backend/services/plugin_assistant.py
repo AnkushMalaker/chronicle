@@ -291,8 +291,9 @@ async def _exec_tool(name: str, arguments: dict) -> dict:
         return metadata
 
     if name == "apply_plugin_config":
-        plugin_id = arguments.pop("plugin_id")
-        return await system_controller.update_plugin_config_structured(plugin_id, arguments)
+        plugin_id = arguments["plugin_id"]
+        config = {k: v for k, v in arguments.items() if k != "plugin_id"}
+        return await system_controller.update_plugin_config_structured(plugin_id, config)
 
     if name == "test_plugin_connection":
         plugin_id = arguments["plugin_id"]
@@ -418,7 +419,7 @@ async def generate_response_stream(messages: list[dict]) -> AsyncGenerator[dict,
     full_messages = [{"role": "system", "content": system_prompt}] + messages
 
     for _ in range(MAX_TOOL_ROUNDS):
-        response = await async_chat_with_tools(full_messages, tools=TOOLS)
+        response = await async_chat_with_tools(full_messages, tools=TOOLS, operation="plugin_assistant")
         choice = response.choices[0]
 
         # If the model wants to call tools, execute them and loop

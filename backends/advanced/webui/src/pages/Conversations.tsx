@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { MessageSquare, RefreshCw, Calendar, User, Play, Pause, MoreVertical, RotateCcw, Zap, ChevronDown, ChevronUp, Trash2, Save, X, Check, AlertTriangle } from 'lucide-react'
+import { MessageSquare, RefreshCw, Calendar, User, Play, Pause, MoreVertical, RotateCcw, Zap, ChevronDown, ChevronUp, Trash2, Save, X, Check, AlertTriangle, Pencil, Search, Brain } from 'lucide-react'
 import { conversationsApi, annotationsApi, speakerApi, BACKEND_URL } from '../services/api'
 import { useConversations, useDeleteConversation, useReprocessTranscript, useReprocessMemory, useReprocessSpeakers, useReprocessOrphan } from '../hooks/useConversations'
 import ConversationVersionHeader from '../components/ConversationVersionHeader'
@@ -104,6 +104,19 @@ export default function Conversations() {
 
   // Unified apply state
   const [applyingAnnotations, setApplyingAnnotations] = useState<Set<string>>(new Set())
+
+  // Title editing state
+  const [editingTitle, setEditingTitle] = useState<string | null>(null) // conversationId being edited
+  const [editedTitle, setEditedTitle] = useState<string>('')
+  const [savingTitle, setSavingTitle] = useState<boolean>(false)
+  const [titleEditError, setTitleEditError] = useState<string | null>(null)
+
+  // Search state
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<Conversation[] | null>(null)
+  const [isSearching, setIsSearching] = useState(false)
+  const [searchTotal, setSearchTotal] = useState(0)
+  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Compute merged speaker list that includes speakers from annotations
   // This ensures newly created speaker names appear in all dropdowns immediately
@@ -268,6 +281,40 @@ export default function Conversations() {
     document.addEventListener('click', handleClickOutside)
     return () => document.removeEventListener('click', handleClickOutside)
   }, [])
+
+  // Debounced search
+  useEffect(() => {
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current)
+    }
+
+    const trimmed = searchQuery.trim()
+    if (!trimmed) {
+      setSearchResults(null)
+      setSearchTotal(0)
+      setIsSearching(false)
+      return
+    }
+
+    setIsSearching(true)
+    searchTimeoutRef.current = setTimeout(async () => {
+      try {
+        const response = await conversationsApi.search(trimmed, 50)
+        setSearchResults(response.data.conversations ?? [])
+        setSearchTotal(response.data.total ?? 0)
+      } catch (err: any) {
+        console.error('Search failed:', err)
+        setSearchResults([])
+        setSearchTotal(0)
+      } finally {
+        setIsSearching(false)
+      }
+    }, 300)
+
+    return () => {
+      if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current)
+    }
+  }, [searchQuery])
 
   const formatDate = (timestamp: number | string) => {
     // Handle both Unix timestamp (number) and ISO string
@@ -475,6 +522,73 @@ export default function Conversations() {
     }
   }
 
+  // Title editing handlers
+  const handleStartTitleEdit = (conversationId: string, currentTitle: string) => {
+    setEditingTitle(conversationId)
+    setEditedTitle(currentTitle)
+    setTitleEditError(null)
+  }
+
+  const handleSaveTitleEdit = async (conversationId: string, originalTitle: string) => {
+    if (!editedTitle.trim()) {
+      setTitleEditError('Title cannot be empty')
+      return
+    }
+
+    if (editedTitle === originalTitle) {
+      handleCancelTitleEdit()
+      return
+    }
+
+    try {
+      setSavingTitle(true)
+      setTitleEditError(null)
+
+      await annotationsApi.createTitleAnnotation({
+        conversation_id: conversationId,
+        original_text: originalTitle,
+        corrected_text: editedTitle.trim(),
+      })
+
+      // Optimistically update the title in local state
+      queryClient.setQueryData(['conversations', { includeUnprocessed: debugMode || undefined }], (old: any) => {
+        if (!old) return old
+        return {
+          ...old,
+          conversations: old.conversations.map((c: Conversation) =>
+            c.conversation_id === conversationId
+              ? { ...c, title: editedTitle.trim() }
+              : c
+          ),
+        }
+      })
+
+      setEditingTitle(null)
+      setEditedTitle('')
+    } catch (err: any) {
+      console.error('Error saving title edit:', err)
+      setTitleEditError(err.response?.data?.detail || err.message || 'Failed to save title')
+    } finally {
+      setSavingTitle(false)
+    }
+  }
+
+  const handleCancelTitleEdit = () => {
+    setEditingTitle(null)
+    setEditedTitle('')
+    setTitleEditError(null)
+  }
+
+  const handleTitleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>, conversationId: string, originalTitle: string) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      handleSaveTitleEdit(conversationId, originalTitle)
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      handleCancelTitleEdit()
+    }
+  }
+
   const toggleDetailedSummary = async (conversationId: string) => {
     // If already expanded, just collapse
     if (expandedDetailedSummaries.has(conversationId)) {
@@ -666,43 +780,91 @@ export default function Conversations() {
 
   return (
     <div>
-      {/* Header */}
-      <div className="flex justify-between items-center mb-6">
-        <div className="flex items-center space-x-2">
-          <MessageSquare className="h-6 w-6 text-blue-600" />
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-            Latest Conversations
-          </h1>
+      {/* Header with Search */}
+      <div className="flex flex-col gap-4 mb-6">
+        <div className="flex justify-between items-center">
+          <div className="flex items-center space-x-2">
+            <MessageSquare className="h-6 w-6 text-blue-600" />
+            <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
+              Conversations
+            </h1>
+          </div>
+          <div className="flex items-center space-x-4">
+            <label className="flex items-center space-x-2 text-sm">
+              <input
+                type="checkbox"
+                checked={debugMode}
+                onChange={(e) => setDebugMode(e.target.checked)}
+                className="rounded border-gray-300"
+              />
+              <span className="text-gray-700 dark:text-gray-300">Debug Mode</span>
+            </label>
+            <button
+              onClick={() => refetch()}
+              className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+            >
+              <RefreshCw className="h-4 w-4" />
+              <span>Refresh</span>
+            </button>
+          </div>
         </div>
-        <div className="flex items-center space-x-4">
-          <label className="flex items-center space-x-2 text-sm">
+
+        {/* Search Bar */}
+        <div className="flex items-center gap-2">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
             <input
-              type="checkbox"
-              checked={debugMode}
-              onChange={(e) => setDebugMode(e.target.checked)}
-              className="rounded border-gray-300"
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search conversations..."
+              className="w-full pl-9 pr-9 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
             />
-            <span className="text-gray-700 dark:text-gray-300">Debug Mode</span>
-          </label>
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
           <button
-            onClick={() => refetch()}
-            className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+            disabled
+            title="Semantic search coming soon"
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 text-gray-400 dark:text-gray-500 cursor-not-allowed text-sm"
           >
-            <RefreshCw className="h-4 w-4" />
-            <span>Refresh</span>
+            <Brain className="h-4 w-4" />
+            <span>Semantic</span>
           </button>
         </div>
+
+        {/* Search status */}
+        {searchQuery.trim() && (
+          <div className="text-sm text-gray-500 dark:text-gray-400">
+            {isSearching ? (
+              <span className="flex items-center gap-1">
+                <RefreshCw className="h-3 w-3 animate-spin" />
+                Searching...
+              </span>
+            ) : searchResults !== null ? (
+              <span>{searchTotal} result{searchTotal !== 1 ? 's' : ''} for "{searchQuery.trim()}"</span>
+            ) : null}
+          </div>
+        )}
       </div>
 
       {/* Conversations List */}
       <div className="space-y-6">
-        {conversations.length === 0 ? (
+        {(() => {
+          const displayConversations = searchResults ?? conversations
+          return displayConversations.length === 0 ? (
           <div className="text-center text-gray-500 dark:text-gray-400 py-12">
             <MessageSquare className="h-12 w-12 mx-auto mb-4 opacity-50" />
-            <p>No conversations found</p>
+            <p>{searchResults !== null ? 'No matching conversations' : 'No conversations found'}</p>
           </div>
         ) : (
-          conversations.map((conversation) => (
+          displayConversations.map((conversation) => (
             <div
               key={conversation.conversation_id}
               className={`rounded-lg p-6 border ${
@@ -784,10 +946,48 @@ export default function Conversations() {
               {/* Conversation Header */}
               <div className="flex justify-between items-start mb-4">
                 <div className="flex flex-col space-y-2">
-                  {/* Conversation Title */}
-                  <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-                    {conversation.title || "Conversation"}
-                  </h2>
+                  {/* Conversation Title - Editable */}
+                  {editingTitle === conversation.conversation_id ? (
+                    <div className="flex items-center space-x-2">
+                      <input
+                        type="text"
+                        value={editedTitle}
+                        onChange={(e) => setEditedTitle(e.target.value)}
+                        onKeyDown={(e) => handleTitleKeyDown(e, conversation.conversation_id, conversation.title || 'Conversation')}
+                        className="text-xl font-semibold px-2 py-1 border-2 border-blue-500 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 min-w-[200px]"
+                        autoFocus
+                        disabled={savingTitle}
+                      />
+                      <button
+                        onClick={() => handleSaveTitleEdit(conversation.conversation_id, conversation.title || 'Conversation')}
+                        disabled={savingTitle || editedTitle === (conversation.title || 'Conversation')}
+                        className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      >
+                        <Save className="w-3 h-3" />
+                        {savingTitle ? 'Saving...' : 'Save'}
+                      </button>
+                      <button
+                        onClick={handleCancelTitleEdit}
+                        disabled={savingTitle}
+                        className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-gray-700 dark:text-gray-300 bg-gray-200 dark:bg-gray-600 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      >
+                        <X className="w-3 h-3" />
+                        Cancel
+                      </button>
+                      {titleEditError && (
+                        <span className="text-xs text-red-600 dark:text-red-400">{titleEditError}</span>
+                      )}
+                    </div>
+                  ) : (
+                    <h2
+                      className="text-xl font-semibold text-gray-900 dark:text-gray-100 group cursor-pointer hover:bg-yellow-100 dark:hover:bg-yellow-900/30 px-1 rounded transition-colors inline-flex items-center gap-2"
+                      onClick={() => handleStartTitleEdit(conversation.conversation_id, conversation.title || 'Conversation')}
+                      title="Click to edit title"
+                    >
+                      {conversation.title || "Conversation"}
+                      <Pencil className="w-3.5 h-3.5 text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity" />
+                    </h2>
+                  )}
 
                   {/* Short Summary - Always visible */}
                   {conversation.summary && (
@@ -1277,7 +1477,8 @@ export default function Conversations() {
               )}
             </div>
           ))
-        )}
+        )
+        })()}
       </div>
     </div>
   )

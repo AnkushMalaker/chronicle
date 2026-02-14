@@ -154,7 +154,9 @@ class MemoryService(MemoryServiceBase):
             fact_memories_text = []
             if self.config.extraction_enabled and self.config.extraction_prompt:
                 fact_memories_text = await asyncio.wait_for(
-                    self.llm_provider.extract_memories(transcript, self.config.extraction_prompt),
+                    self.llm_provider.extract_memories(
+                        transcript, self.config.extraction_prompt, user_id=user_id,
+                    ),
                     timeout=self.config.timeout_seconds,
                 )
                 memory_logger.info(

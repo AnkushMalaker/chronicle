@@ -1,15 +1,15 @@
 #!/bin/bash
-# Wrapper script for cleanup_state.py
-# Usage: ./cleanup.sh --backup --export-audio
+# Chronicle Cleanup & Backup Tool
 #
-# This script runs the cleanup_state.py script inside the chronicle-backend container
-# to handle data ownership and permissions correctly.
+# This script runs cleanup_state.py inside the chronicle-backend container.
 #
-# Examples:
-#   ./cleanup.sh --dry-run              # Preview what would be deleted
-#   ./cleanup.sh --backup               # Cleanup with metadata backup
-#   ./cleanup.sh --backup --export-audio  # Full backup including audio
-#   ./cleanup.sh --backup --force       # Skip confirmation prompts
+# Usage:
+#   ./cleanup.sh --dry-run                     Preview what would happen
+#   ./cleanup.sh --backup-only                 Back up everything (no cleanup)
+#   ./cleanup.sh --backup-only --export-audio  Back up with audio WAV files
+#   ./cleanup.sh --backup                      Back up then clean
+#   ./cleanup.sh --backup --export-audio       Back up with audio then clean
+#   ./cleanup.sh --backup --force              Skip confirmation prompt
 
 cd "$(dirname "$0")"
 docker compose exec chronicle-backend uv run python src/scripts/cleanup_state.py "$@"

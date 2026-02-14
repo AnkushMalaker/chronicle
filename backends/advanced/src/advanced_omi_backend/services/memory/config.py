@@ -35,7 +35,6 @@ class MemoryProvider(Enum):
 
     CHRONICLE = "chronicle"  # Default sophisticated implementation
     OPENMEMORY_MCP = "openmemory_mcp"  # OpenMemory MCP backend
-    MYCELIA = "mycelia"  # Mycelia memory backend
 
 
 @dataclass
@@ -49,7 +48,6 @@ class MemoryConfig:
     vector_store_config: Dict[str, Any] = None
     embedder_config: Dict[str, Any] = None
     openmemory_config: Dict[str, Any] = None  # Configuration for OpenMemory MCP
-    mycelia_config: Dict[str, Any] = None  # Configuration for Mycelia
     extraction_prompt: str = None
     extraction_enabled: bool = True
     timeout_seconds: int = 1200
@@ -92,20 +90,6 @@ def create_openmemory_config(
         "user_id": user_id,
         "timeout": timeout,
     }
-
-
-def create_mycelia_config(
-    api_url: str = "http://localhost:8080", api_key: str = None, timeout: int = 30, **kwargs
-) -> Dict[str, Any]:
-    """Create Mycelia configuration."""
-    config = {
-        "api_url": api_url,
-        "timeout": timeout,
-    }
-    if api_key:
-        config["api_key"] = api_key
-    config.update(kwargs)
-    return config
 
 
 def create_openai_config(
@@ -179,43 +163,6 @@ def build_memory_config_from_env() -> MemoryConfig:
                 memory_provider=memory_provider_enum,
                 openmemory_config=openmemory_config,
                 timeout_seconds=int(mem_settings.get("timeout_seconds", 1200)),
-            )
-
-        # For Mycelia provider, build mycelia_config + llm_config (for temporal extraction)
-        if memory_provider_enum == MemoryProvider.MYCELIA:
-            # Registry-driven Mycelia configuration
-            mys = mem_settings.get("mycelia") or {}
-            api_url = mys.get("api_url", "http://localhost:5173")
-            timeout = int(mys.get("timeout", 30))
-            mycelia_config = create_mycelia_config(api_url=api_url, timeout=timeout)
-
-            # Use default LLM from registry for temporal extraction
-            llm_config = None
-            if reg:
-                llm_def = reg.get_default("llm")
-                if llm_def:
-                    llm_config = create_openai_config(
-                        api_key=llm_def.api_key or "",
-                        model=llm_def.model_name,
-                        base_url=llm_def.model_url,
-                    )
-                    memory_logger.info(
-                        f"🔧 Mycelia temporal extraction (registry): LLM={llm_def.model_name}"
-                    )
-            else:
-                memory_logger.warning(
-                    "Registry not available for Mycelia temporal extraction; disabled"
-                )
-
-            memory_logger.info(
-                f"🔧 Memory config: Provider=Mycelia, URL={mycelia_config['api_url']}"
-            )
-
-            return MemoryConfig(
-                memory_provider=memory_provider_enum,
-                mycelia_config=mycelia_config,
-                llm_config=llm_config,
-                timeout_seconds=int(mem_settings.get("timeout_seconds", timeout)),
             )
 
         # For Chronicle provider, use registry-driven configuration

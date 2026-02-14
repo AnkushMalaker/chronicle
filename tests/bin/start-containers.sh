@@ -81,6 +81,31 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
     sleep 2
 done
 
+# Stability check - verify no containers are restart-looping
+echo ""
+echo "🔍 Checking container stability (waiting 5s)..."
+sleep 5
+
+RESTART_ISSUES=""
+for CONTAINER_ID in $(docker compose -f docker-compose-test.yml ps -q); do
+    NAME=$(docker inspect --format '{{.Name}}' "$CONTAINER_ID" | sed 's/^\///')
+    RESTART_COUNT=$(docker inspect --format '{{.RestartCount}}' "$CONTAINER_ID")
+    if [ "$RESTART_COUNT" -gt 0 ]; then
+        RESTART_ISSUES="${RESTART_ISSUES}   ⚠️  ${NAME} has restarted ${RESTART_COUNT} times\n"
+    fi
+done
+
+if [ -n "$RESTART_ISSUES" ]; then
+    echo ""
+    echo "❌ Container stability check FAILED - restart loops detected:"
+    echo ""
+    echo -e "$RESTART_ISSUES"
+    echo "   Check logs: docker compose -f docker-compose-test.yml logs <service>"
+    echo "   Common causes: missing env vars, import errors, dependency crashes"
+    exit 1
+fi
+echo "✅ All containers stable (0 restarts)"
+
 echo ""
 echo "✅ Test containers are running and healthy"
 echo "   Backend: http://localhost:8001"

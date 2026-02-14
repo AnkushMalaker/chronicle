@@ -10,7 +10,6 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.model_registry import get_models_registry
-from advanced_omi_backend.openai_factory import create_openai_client
 
 from .models import (
     EntityType,
@@ -82,21 +81,12 @@ If no entities, relationships, or promises are found, return empty arrays.
 Only return valid JSON, no additional text."""
 
 
-def _get_llm_client():
-    """Get async OpenAI client from model registry."""
+def _get_entity_extraction_op():
+    """Get resolved LLM operation config for entity extraction."""
     registry = get_models_registry()
     if not registry:
         raise RuntimeError("Model registry not configured")
-
-    llm_def = registry.get_default("llm")
-    if not llm_def:
-        raise RuntimeError("No default LLM defined in config.yml")
-
-    return create_openai_client(
-        api_key=llm_def.api_key or "",
-        base_url=llm_def.model_url,
-        is_async=True,
-    ), llm_def
+    return registry.get_llm_operation("entity_extraction")
 
 
 async def extract_entities_from_transcript(
@@ -121,22 +111,20 @@ async def extract_entities_from_transcript(
     try:
         from advanced_omi_backend.prompt_registry import get_prompt_registry
 
-        client, llm_def = _get_llm_client()
+        op = _get_entity_extraction_op()
         if custom_prompt:
             prompt = custom_prompt
         else:
             registry = get_prompt_registry()
             prompt = await registry.get_prompt("knowledge_graph.entity_extraction")
 
+        client = op.get_client(is_async=True)
         response = await client.chat.completions.create(
-            model=llm_def.model_name,
+            **op.to_api_params(),
             messages=[
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": transcript},
             ],
-            temperature=0.1,
-            max_tokens=2000,
-            response_format={"type": "json_object"},
         )
 
         content = (response.choices[0].message.content or "").strip()

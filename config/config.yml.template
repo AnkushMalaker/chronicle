@@ -306,9 +306,6 @@ memory:
     client_name: chronicle
     user_id: default
     timeout: 30
-  mycelia:
-    api_url: http://localhost:5173
-    timeout: 30
   obsidian:
     enabled: false
     neo4j_host: neo4j

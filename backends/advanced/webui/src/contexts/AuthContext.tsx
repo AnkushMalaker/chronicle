@@ -66,8 +66,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const { access_token } = response.data
       setToken(access_token)
       localStorage.setItem(getStorageKey('token'), access_token)
-      // Store JWT for Mycelia auto-login (enables seamless access to Mycelia frontend)
-      localStorage.setItem(getStorageKey('mycelia_jwt_token'), access_token)
 
       // Get user info
       const userResponse = await authApi.getMe()
@@ -102,7 +100,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null)
     setToken(null)
     localStorage.removeItem(getStorageKey('token'))
-    localStorage.removeItem(getStorageKey('mycelia_jwt_token'))
   }
 
   return (

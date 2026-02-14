@@ -130,14 +130,6 @@ async def lifespan(app: FastAPI):
         application_logger.error(f"Failed to create admin user: {e}")
         # Don't raise here as this is not critical for startup
 
-    # Sync admin user with Mycelia OAuth (if using Mycelia memory provider)
-    try:
-        from advanced_omi_backend.services.mycelia_sync import sync_admin_on_startup
-        await sync_admin_on_startup()
-    except Exception as e:
-        application_logger.error(f"Failed to sync admin with Mycelia OAuth: {e}")
-        # Don't raise here as this is not critical for startup
-
     # Initialize Redis connection for RQ
     try:
         from advanced_omi_backend.controllers.queue_controller import redis_conn
@@ -228,9 +220,13 @@ async def lifespan(app: FastAPI):
             run_asr_jargon_extraction_job,
             run_speaker_finetuning_job,
         )
+        from advanced_omi_backend.workers.prompt_optimization_jobs import (
+            run_prompt_optimization_job,
+        )
 
         register_cron_job("speaker_finetuning", run_speaker_finetuning_job)
         register_cron_job("asr_jargon_extraction", run_asr_jargon_extraction_job)
+        register_cron_job("prompt_optimization", run_prompt_optimization_job)
 
         scheduler = get_scheduler()
         await scheduler.start()

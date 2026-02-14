@@ -358,7 +358,6 @@ class ChronicleSetup:
         choices = {
             "1": "Chronicle Native (Qdrant + custom extraction)",
             "2": "OpenMemory MCP (cross-client compatible, external server)",
-            "3": "Mycelia (Timeline-based memory with speaker diarization)"
         }
 
         choice = self.prompt_choice("Choose your memory storage backend:", choices, "1")
@@ -393,23 +392,6 @@ class ChronicleSetup:
             })
             self.console.print("[green][SUCCESS][/green] OpenMemory MCP configured in config.yml and .env")
             self.console.print("[yellow][WARNING][/yellow] Remember to start OpenMemory: cd ../../extras/openmemory-mcp && docker compose up -d")
-
-        elif choice == "3":
-            self.console.print("[blue][INFO][/blue] Mycelia memory provider selected")
-
-            mycelia_url = self.prompt_value("Mycelia API URL", "http://localhost:5173")
-            timeout = self.prompt_value("Mycelia timeout (seconds)", "30")
-
-            # Update config.yml with Mycelia settings (also updates .env automatically)
-            self.config_manager.update_memory_config({
-                "provider": "mycelia",
-                "mycelia": {
-                    "api_url": mycelia_url,
-                    "timeout": int(timeout)
-                }
-            })
-            self.console.print("[green][SUCCESS][/green] Mycelia memory provider configured in config.yml and .env")
-            self.console.print("[yellow][WARNING][/yellow] Make sure Mycelia is running at the configured URL")
 
     def setup_optional_services(self):
         """Configure optional services"""

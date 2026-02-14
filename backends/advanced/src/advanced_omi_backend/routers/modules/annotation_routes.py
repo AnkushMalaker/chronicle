@@ -21,6 +21,7 @@ from advanced_omi_backend.models.annotation import (
     DiarizationAnnotationCreate,
     EntityAnnotationCreate,
     MemoryAnnotationCreate,
+    TitleAnnotationCreate,
     TranscriptAnnotationCreate,
 )
 from advanced_omi_backend.models.conversation import Conversation
@@ -287,6 +288,22 @@ async def update_annotation_status(
                 except Exception as e:
                     logger.error(f"Error applying entity suggestion: {e}")
                     # Don't fail the status update if entity update fails
+            elif annotation.is_title_annotation():
+                # Update conversation title
+                try:
+                    conversation = await Conversation.find_one(
+                        Conversation.conversation_id == annotation.conversation_id,
+                        Conversation.user_id == annotation.user_id,
+                    )
+                    if conversation:
+                        conversation.title = annotation.corrected_text
+                        await conversation.save()
+                        logger.info(
+                            f"Applied title suggestion to conversation {annotation.conversation_id}"
+                        )
+                except Exception as e:
+                    logger.error(f"Error applying title suggestion: {e}")
+                    # Don't fail the status update if title update fails
 
         await annotation.save()
         logger.info(f"Updated annotation {annotation_id} status to {status}")
@@ -407,6 +424,91 @@ async def get_entity_annotations(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to fetch entity annotations: {str(e)}",
+        )
+
+
+# === Title Annotation Routes ===
+
+
+@router.post("/title", response_model=AnnotationResponse)
+async def create_title_annotation(
+    annotation_data: TitleAnnotationCreate,
+    current_user: User = Depends(current_active_user),
+):
+    """
+    Create annotation for conversation title edit.
+
+    - Validates user owns conversation
+    - Creates annotation record (instantly applied)
+    - Updates conversation title immediately
+    """
+    try:
+        # Verify conversation ownership
+        conversation = await Conversation.find_one(
+            Conversation.conversation_id == annotation_data.conversation_id,
+            Conversation.user_id == current_user.user_id,
+        )
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+        # Create annotation (instantly applied)
+        annotation = Annotation(
+            annotation_type=AnnotationType.TITLE,
+            user_id=current_user.user_id,
+            conversation_id=annotation_data.conversation_id,
+            original_text=annotation_data.original_text,
+            corrected_text=annotation_data.corrected_text,
+            status=AnnotationStatus.ACCEPTED,
+            processed=True,
+            processed_at=datetime.now(timezone.utc),
+            processed_by="instant",
+        )
+        await annotation.save()
+        logger.info(
+            f"Created title annotation {annotation.id} for conversation {annotation_data.conversation_id}"
+        )
+
+        # Apply title change immediately
+        try:
+            conversation.title = annotation_data.corrected_text
+            await conversation.save()
+            logger.info(f"Updated title for conversation {annotation_data.conversation_id}")
+        except Exception as e:
+            logger.error(f"Error updating conversation title: {e}")
+            # Annotation is saved but title update failed — log but don't fail the request
+
+        return AnnotationResponse.model_validate(annotation)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating title annotation: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create title annotation: {str(e)}",
+        )
+
+
+@router.get("/title/{conversation_id}", response_model=List[AnnotationResponse])
+async def get_title_annotations(
+    conversation_id: str,
+    current_user: User = Depends(current_active_user),
+):
+    """Get all title annotations for a conversation (audit trail)."""
+    try:
+        annotations = await Annotation.find(
+            Annotation.annotation_type == AnnotationType.TITLE,
+            Annotation.conversation_id == conversation_id,
+            Annotation.user_id == current_user.user_id,
+        ).to_list()
+
+        return [AnnotationResponse.model_validate(a) for a in annotations]
+
+    except Exception as e:
+        logger.error(f"Error fetching title annotations: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch title annotations: {str(e)}",
         )
 
 

@@ -622,3 +622,75 @@ Summary: <brief summary under 150 characters>""",
         description="Generates title and summary during transcription pipeline processing.",
         category="transcription",
     )
+
+    # ------------------------------------------------------------------
+    # prompt_optimization.title_optimizer
+    # ------------------------------------------------------------------
+    registry.register_default(
+        "prompt_optimization.title_optimizer",
+        template="""\
+You are a prompt engineering specialist for conversation title generation.
+Analyze user corrections to auto-generated titles and improve the system prompt.
+
+## Current Title Generation Prompt
+{{current_prompt}}
+
+## User Title Corrections ({{count}} examples)
+Each shows what the LLM generated vs what the user preferred:
+{{formatted_corrections}}
+
+## Task
+1. Identify patterns: Do users prefer shorter/longer titles? Different vocabulary?
+   More/less specific? Different framing (noun phrases vs descriptions)?
+2. Revise the prompt to produce titles matching user preferences
+3. Keep the exact output format (Title: ... / Summary: ...) and {{variable}} placeholders
+4. Add specific style guidance based on the correction patterns
+
+## Output Format
+ANALYSIS:
+<2-3 sentences describing title style patterns found>
+
+REVISED_PROMPT:
+<the complete revised prompt — replaces the current one entirely>""",
+        name="Title Optimizer Meta-Prompt",
+        description="Meta-prompt that analyzes title corrections and produces an improved title generation prompt.",
+        category="prompt_optimization",
+        variables=["current_prompt", "count", "formatted_corrections"],
+        is_dynamic=True,
+    )
+
+    # ------------------------------------------------------------------
+    # prompt_optimization.memory_optimizer
+    # ------------------------------------------------------------------
+    registry.register_default(
+        "prompt_optimization.memory_optimizer",
+        template="""\
+You are a prompt engineering specialist for personal fact extraction from conversations.
+Analyze user corrections to extracted facts and improve the system prompt.
+
+## Current Fact Extraction Prompt
+{{current_prompt}}
+
+## User Memory Corrections ({{count}} examples)
+Each shows what the LLM extracted vs what the user corrected it to:
+{{formatted_corrections}}
+
+## Task
+1. Identify patterns: Are facts too vague/specific? Missing context? Wrong attribution?
+   Over-extracting trivial info? Missing important details?
+2. Revise the prompt to extract facts matching user expectations
+3. Keep the JSON output format ({{"facts": [...]}}) and {{variable}} placeholders
+4. Update the few-shot examples if the correction patterns suggest better ones
+
+## Output Format
+ANALYSIS:
+<2-3 sentences describing fact extraction patterns found>
+
+REVISED_PROMPT:
+<the complete revised prompt — replaces the current one entirely>""",
+        name="Memory Optimizer Meta-Prompt",
+        description="Meta-prompt that analyzes memory corrections and produces an improved fact extraction prompt.",
+        category="prompt_optimization",
+        variables=["current_prompt", "count", "formatted_corrections"],
+        is_dynamic=True,
+    )

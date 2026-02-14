@@ -116,6 +116,8 @@ export const conversationsApi = {
     }
   }),
   getById: (id: string) => api.get(`/api/conversations/${id}`),
+  search: (query: string, limit?: number, offset?: number) =>
+    api.get('/api/conversations/search', { params: { q: query, limit, offset } }),
   delete: (id: string) => api.delete(`/api/conversations/${id}`),
   restore: (id: string) => api.post(`/api/conversations/${id}/restore`),
   permanentDelete: (id: string) => api.delete(`/api/conversations/${id}`, {
@@ -208,6 +210,16 @@ export const annotationsApi = {
   // Apply ALL pending annotations (diarization + transcript) - creates single new version
   applyAllAnnotations: (conversation_id: string) =>
     api.post(`/api/annotations/${conversation_id}/apply`),
+
+  // Title annotations (instantly applied)
+  createTitleAnnotation: (data: {
+    conversation_id: string
+    original_text: string
+    corrected_text: string
+  }) => api.post('/api/annotations/title', data),
+
+  getTitleAnnotations: (conversation_id: string) =>
+    api.get(`/api/annotations/title/${conversation_id}`),
 }
 
 export const finetuningApi = {
@@ -259,29 +271,6 @@ export const systemApi = {
   saveMiscSettings: (settings: { always_persist_enabled?: boolean; use_provider_segments?: boolean; per_segment_speaker_id?: boolean }) =>
     api.post('/api/misc-settings', settings),
   
-  // Memory Configuration Management
-  getMemoryConfigRaw: () => api.get('/api/admin/memory/config/raw'),
-  updateMemoryConfigRaw: (configYaml: string) =>
-    api.post('/api/admin/memory/config/raw', configYaml, {
-      headers: { 'Content-Type': 'text/plain' }
-    }),
-  validateMemoryConfig: (configYaml: string) =>
-    api.post('/api/admin/memory/config/validate/raw', configYaml, {
-      headers: { 'Content-Type': 'text/plain' }
-    }),
-  reloadMemoryConfig: () => api.post('/api/admin/memory/config/reload'),
-
-  // Chat Configuration Management
-  getChatConfigRaw: () => api.get('/api/admin/chat/config'),
-  updateChatConfigRaw: (configYaml: string) =>
-    api.post('/api/admin/chat/config', configYaml, {
-      headers: { 'Content-Type': 'text/plain' }
-    }),
-  validateChatConfig: (configYaml: string) =>
-    api.post('/api/admin/chat/config/validate', configYaml, {
-      headers: { 'Content-Type': 'text/plain' }
-    }),
-
   // Plugin Configuration Management (YAML-based)
   getPluginsConfigRaw: () => api.get('/api/admin/plugins/config'),
   updatePluginsConfigRaw: (configYaml: string) =>
@@ -337,6 +326,13 @@ export const systemApi = {
   // Memory Provider Management
   getMemoryProvider: () => api.get('/api/admin/memory/provider'),
   setMemoryProvider: (provider: string) => api.post('/api/admin/memory/provider', { provider }),
+
+  // LLM Operations Settings
+  getLLMOperations: () => api.get('/api/admin/llm-operations'),
+  saveLLMOperations: (operations: Record<string, any>) =>
+    api.post('/api/admin/llm-operations', operations),
+  testLLMModel: (modelName: string | null) =>
+    api.post('/api/admin/llm-operations/test', { model_name: modelName }),
 }
 
 export const queueApi = {

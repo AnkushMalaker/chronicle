@@ -440,10 +440,18 @@ If no relevant memories are available, respond normally based on the conversatio
             # Generate streaming response
             logger.info(f"Generating response for session {session_id} with {len(memory_ids)} memories")
             
+            # Resolve chat operation temperature from config
+            chat_temp = None
+            registry = get_models_registry()
+            if registry:
+                chat_op = registry.get_llm_operation("chat")
+                chat_temp = chat_op.temperature
+
             # Note: For now, we'll use the regular generate method
             # In the future, this should be replaced with actual streaming
             response_content = self.llm_client.generate(
-                prompt=full_prompt
+                prompt=full_prompt,
+                temperature=chat_temp,
             )
 
             # Simulate streaming by yielding chunks

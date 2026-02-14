@@ -528,7 +528,7 @@ Transcript:
 {transcript_text[:2000]}"""
 
             logger.info(f"🤖 Generating title/summary using LLM for conversation {conversation_id}")
-            llm_response = await async_generate(prompt, temperature=0.7)
+            llm_response = await async_generate(prompt, operation="title_summary")
 
             # Parse LLM response
             lines = llm_response.strip().split("\n")

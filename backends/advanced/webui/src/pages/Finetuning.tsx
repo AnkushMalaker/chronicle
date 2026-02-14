@@ -30,12 +30,19 @@ const JOB_DISPLAY_NAMES: Record<string, string> = {
   asr_jargon_extraction: 'ASR Jargon Extraction',
 }
 
-const ANNOTATION_TYPE_CONFIG = [
-  { key: 'diarization', label: 'Diarization', description: 'Speaker identification corrections', color: 'green' as const },
-  { key: 'entity', label: 'Entity', description: 'Knowledge graph entity corrections', color: 'green' as const },
-  { key: 'transcript', label: 'Transcript', description: 'Transcript text corrections', color: 'green' as const },
-  { key: 'memory', label: 'Memory', description: 'Memory content corrections', color: 'green' as const },
-]
+const ANNOTATION_TYPE_DISPLAY: Record<string, { label: string; description: string }> = {
+  diarization: { label: 'Diarization', description: 'Speaker identification corrections' },
+  entity: { label: 'Entity', description: 'Knowledge graph entity corrections' },
+  transcript: { label: 'Transcript', description: 'Transcript text corrections' },
+  memory: { label: 'Memory', description: 'Memory content corrections' },
+  title: { label: 'Title', description: 'Conversation title corrections' },
+}
+
+function getAnnotationDisplay(key: string): { label: string; description: string } {
+  if (ANNOTATION_TYPE_DISPLAY[key]) return ANNOTATION_TYPE_DISPLAY[key]
+  const label = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+  return { label, description: `${label} annotations` }
+}
 
 const COLOR_CLASSES = {
   blue: 'text-blue-600 dark:text-blue-400',
@@ -359,9 +366,10 @@ export default function Finetuning() {
                   These annotations reference conversations that no longer exist.
                 </p>
                 <div className="space-y-2">
-                  {ANNOTATION_TYPE_CONFIG.map(({ key, label }) => {
-                    const orphaned = status?.annotation_counts?.[key]?.orphaned || 0
+                  {Object.entries((status?.annotation_counts || {}) as Record<string, AnnotationTypeCounts>).map(([key, counts]) => {
+                    const orphaned = counts.orphaned || 0
                     if (orphaned === 0) return null
+                    const { label } = getAnnotationDisplay(key)
                     return (
                       <div key={key} className="flex items-center justify-between">
                         <span className="text-sm text-gray-700 dark:text-gray-300">
@@ -394,9 +402,8 @@ export default function Finetuning() {
       })()}
       {status?.annotation_counts && (
         <div className="space-y-6 mb-6">
-          {ANNOTATION_TYPE_CONFIG.map(({ key, label, description, color }) => {
-            const counts = status.annotation_counts![key]
-            if (!counts) return null
+          {Object.entries(status.annotation_counts! as Record<string, AnnotationTypeCounts>).map(([key, counts]) => {
+            const { label, description } = getAnnotationDisplay(key)
             return (
               <div key={key}>
                 <div className="flex items-center space-x-2 mb-2">
@@ -407,7 +414,7 @@ export default function Finetuning() {
                   <StatCard label="Total" value={counts.total} />
                   <StatCard label="Pending" value={counts.pending} subtitle="Not yet applied" />
                   <StatCard label="Applied" value={counts.applied} color="blue" subtitle="Applied, not trained" />
-                  <StatCard label="Trained" value={counts.trained} color={color} subtitle="Sent to model" />
+                  <StatCard label="Trained" value={counts.trained} color="green" subtitle="Sent to model" />
                 </div>
               </div>
             )

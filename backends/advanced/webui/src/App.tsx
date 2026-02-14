@@ -14,9 +14,9 @@ const Chat = lazy(() => import('./pages/Chat'))
 const ConversationsRouter = lazy(() => import('./pages/ConversationsRouter'))
 const MemoriesRouter = lazy(() => import('./pages/MemoriesRouter'))
 const MemoryDetail = lazy(() => import('./pages/MemoryDetail'))
-const TimelineRouter = lazy(() => import('./pages/TimelineRouter'))
 const Users = lazy(() => import('./pages/Users'))
 const System = lazy(() => import('./pages/System'))
+const Settings = lazy(() => import('./pages/Settings'))
 const Upload = lazy(() => import('./pages/Upload'))
 const Queue = lazy(() => import('./pages/Queue'))
 const LiveRecord = lazy(() => import('./pages/LiveRecord'))
@@ -102,13 +102,6 @@ function App() {
                     </Suspense>
                   </PageErrorBoundary>
                 } />
-                <Route path="timeline" element={
-                  <PageErrorBoundary>
-                    <Suspense fallback={<PageSkeleton />}>
-                      <TimelineRouter />
-                    </Suspense>
-                  </PageErrorBoundary>
-                } />
                 <Route path="users" element={
                   <PageErrorBoundary>
                     <Suspense fallback={<PageSkeleton />}>
@@ -120,6 +113,13 @@ function App() {
                   <PageErrorBoundary>
                     <Suspense fallback={<PageSkeleton />}>
                       <System />
+                    </Suspense>
+                  </PageErrorBoundary>
+                } />
+                <Route path="settings" element={
+                  <PageErrorBoundary>
+                    <Suspense fallback={<PageSkeleton />}>
+                      <Settings />
                     </Suspense>
                   </PageErrorBoundary>
                 } />
