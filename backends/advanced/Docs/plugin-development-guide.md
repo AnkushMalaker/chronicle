@@ -221,7 +221,7 @@ OMI Device (BLE)
 friend-lite-sdk (extras/friend-lite-sdk/)
   → parse_button_event() converts payload → ButtonState IntEnum
   ↓
-BLE Client (extras/local-omi-bt/ or mobile app)
+BLE Client (extras/local-wearable-client/ or mobile app)
   → Formats as Wyoming protocol: {"type": "button-event", "data": {"state": "SINGLE_TAP"}}
   → Sends over WebSocket
   ↓
