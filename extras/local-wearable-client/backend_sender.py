@@ -10,7 +10,6 @@ from typing import AsyncGenerator, Optional
 import httpx
 import websockets
 from dotenv import load_dotenv
-from wyoming.audio import AudioChunk
 
 load_dotenv()
 
@@ -21,7 +20,7 @@ VERIFY_SSL = os.getenv("VERIFY_SSL", "true").lower() == "true"
 ws_protocol = "wss" if USE_HTTPS else "ws"
 http_protocol = "https" if USE_HTTPS else "http"
 
-websocket_uri = f"{ws_protocol}://{BACKEND_HOST}/ws?codec=pcm"
+websocket_uri = f"{ws_protocol}://{BACKEND_HOST}/ws?codec=opus"
 backend_url = f"{http_protocol}://{BACKEND_HOST}"
 
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
@@ -122,10 +121,10 @@ async def receive_handler(websocket, logger) -> None:
 
 
 async def stream_to_backend(
-    stream: AsyncGenerator[AudioChunk, None],
+    stream: AsyncGenerator[bytes, None],
     device_name: str = "wearable",
 ) -> None:
-    """Stream audio to backend using Wyoming protocol with JWT authentication."""
+    """Stream raw Opus audio to backend using Wyoming protocol with JWT authentication."""
     token = await get_jwt_token(ADMIN_EMAIL, ADMIN_PASSWORD)
     if not token:
         logger.error("Failed to get JWT token, cannot stream audio")
@@ -172,21 +171,20 @@ async def stream_to_backend(
             logger.info("Sent audio-start event")
 
             chunk_count = 0
-            async for chunk in stream:
+            async for opus_data in stream:
                 chunk_count += 1
-                audio_data = chunk.audio
 
                 audio_chunk_header = {
                     "type": "audio-chunk",
                     "data": {
-                        "rate": chunk.rate,
-                        "width": chunk.width,
-                        "channels": chunk.channels,
+                        "rate": 16000,
+                        "width": 2,
+                        "channels": 1,
                     },
-                    "payload_length": len(audio_data),
+                    "payload_length": len(opus_data),
                 }
                 await websocket.send(json.dumps(audio_chunk_header) + "\n")
-                await websocket.send(audio_data)
+                await websocket.send(opus_data)
 
                 if chunk_count % 100 == 0:
                     logger.info("Sent %d chunks", chunk_count)

@@ -1,6 +1,18 @@
 """Local wearable client — background service that auto-scans, connects,
-and streams audio from OMI/Neo devices to the Chronicle backend."""
+and streams audio from OMI/Neo devices to the Chronicle backend.
 
+CLI usage:
+    ./start.sh              # Menu bar mode (default)
+    ./start.sh run          # Headless mode (for launchd)
+    ./start.sh menu         # Menu bar mode
+    ./start.sh scan         # One-shot scan, print nearby devices
+    ./start.sh install      # Install launchd agent
+    ./start.sh uninstall    # Remove launchd agent
+    ./start.sh status       # Show service status
+    ./start.sh logs         # Tail log file
+"""
+
+import argparse
 import asyncio
 import logging
 import os
@@ -121,6 +133,13 @@ async def connect_and_stream(device: dict, backend_enabled: bool = True) -> None
                 audio_queue.put_nowait(decoded_pcm)
             except Exception as e:
                 logger.error("Queue error: %s", e)
+        # Send Opus payload to backend (strip 3-byte BLE header)
+        # Backend's OmiOpusDecoder uses strip_header=False, expecting headerless data
+        if backend_enabled and len(data) > 3:
+            try:
+                backend_queue.put_nowait(data[3:])
+            except asyncio.QueueFull:
+                pass  # backend not keeping up, drop — file is saved
 
     def handle_button_event(_sender: Any, data: bytes) -> None:
         try:
@@ -139,8 +158,9 @@ async def connect_and_stream(device: dict, backend_enabled: bool = True) -> None
     device_name = device["name"] or device["type"]
     conn = create_connection(device["mac"], device["type"])
 
-    # Cap at 500 chunks (~15s of audio) so a dead backend doesn't eat memory
-    backend_queue: asyncio.Queue[AudioChunk | None] = asyncio.Queue(maxsize=500)
+    # Cap at 500 chunks so a dead backend doesn't eat memory
+    # Raw Opus bytes are queued directly from handle_ble_data
+    backend_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=500)
 
     file_sink = RollingFileSink(
         directory="./audio_chunks",
@@ -152,22 +172,18 @@ async def connect_and_stream(device: dict, backend_enabled: bool = True) -> None
     )
 
     async def process_audio() -> None:
+        """Write decoded PCM to local file sink."""
         async for chunk_bytes in source_bytes(audio_queue):
             chunk = AudioChunk(audio=chunk_bytes, rate=16000, width=2, channels=1)
             await file_sink.write(chunk)
-            if backend_enabled:
-                try:
-                    backend_queue.put_nowait(chunk)
-                except asyncio.QueueFull:
-                    pass  # backend not keeping up, drop chunk — file is saved
 
     async def backend_stream_wrapper() -> None:
         async def queue_to_stream():
             while True:
-                chunk = await backend_queue.get()
-                if chunk is None:
+                raw_opus = await backend_queue.get()
+                if raw_opus is None:
                     break
-                yield chunk
+                yield raw_opus
 
         try:
             await stream_to_backend(queue_to_stream(), device_name=device_name)
@@ -229,8 +245,98 @@ async def run() -> None:
             await asyncio.sleep(scan_interval)
 
 
+async def scan_and_print() -> None:
+    """One-shot scan: print a table of nearby devices and exit."""
+    config = load_config()
+    known = {d["mac"]: d for d in config.get("devices", [])}
+    auto_discover = config.get("auto_discover", True)
+
+    print("Scanning for BLE wearable devices (5s)...\n")
+    discovered = await BleakScanner.discover(timeout=5.0)
+
+    devices = []
+    for d in discovered:
+        if d.address in known:
+            entry = known[d.address]
+            devices.append({
+                "mac": d.address,
+                "name": entry.get("name", d.name or "Unknown"),
+                "type": entry.get("type", detect_device_type(d.name or "")),
+                "rssi": d.rssi,
+                "known": True,
+            })
+        elif auto_discover and d.name:
+            lower = d.name.casefold()
+            if "omi" in lower or "neo" in lower or "friend" in lower:
+                devices.append({
+                    "mac": d.address,
+                    "name": d.name,
+                    "type": detect_device_type(d.name),
+                    "rssi": d.rssi,
+                    "known": False,
+                })
+
+    if not devices:
+        print("No wearable devices found.")
+        return
+
+    devices.sort(key=lambda x: x.get("rssi", -999), reverse=True)
+
+    # Print table
+    print(f"{'Name':<20} {'MAC':<20} {'Type':<8} {'RSSI':<8} {'Known'}")
+    print("-" * 70)
+    for d in devices:
+        print(f"{d['name']:<20} {d['mac']:<20} {d['type']:<8} {d['rssi']:<8} {'yes' if d['known'] else 'auto'}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="chronicle-wearable",
+        description="Chronicle local wearable client — connect BLE devices and stream audio.",
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    sub.add_parser("menu", help="Launch menu bar app (default)")
+    sub.add_parser("run", help="Headless mode — scan, connect, and stream (for launchd)")
+    sub.add_parser("scan", help="One-shot scan — print nearby devices and exit")
+    sub.add_parser("install", help="Install macOS launchd agent (auto-start on login)")
+    sub.add_parser("uninstall", help="Remove macOS launchd agent")
+    sub.add_parser("status", help="Show launchd service status")
+    sub.add_parser("logs", help="Tail service log file")
+
+    return parser
+
+
 def main() -> None:
-    asyncio.run(run())
+    parser = build_parser()
+    args = parser.parse_args()
+    command = args.command or "menu"  # Default to menu mode
+
+    if command == "run":
+        asyncio.run(run())
+
+    elif command == "menu":
+        from menu_app import run_menu_app
+        run_menu_app()
+
+    elif command == "scan":
+        asyncio.run(scan_and_print())
+
+    elif command == "install":
+        from service import install
+        install()
+
+    elif command == "uninstall":
+        from service import uninstall
+        uninstall()
+
+    elif command == "status":
+        from service import status
+        status()
+
+    elif command == "logs":
+        from service import logs
+        logs()
 
 
 if __name__ == "__main__":
