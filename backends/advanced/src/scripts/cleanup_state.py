@@ -1,32 +1,27 @@
 #!/usr/bin/env python3
 """
-Backend State Cleanup Script for Chronicle
-
-This script provides comprehensive cleanup of Chronicle backend data including:
-- MongoDB collections (conversations, audio_chunks)
-- Qdrant vector store (memories)
-- Neo4j knowledge graph (entities, relationships, promises)
-- Redis job queues and registries
-- Legacy WAV files (backward compatibility)
+Chronicle Backend Cleanup & Backup Tool
 
 Features:
-- Optional backup before cleanup (metadata and/or full audio export)
-- Dry-run mode for safe preview
-- User account preservation by default
-- Confirmation prompts with detailed warnings
+- Rich terminal UI with progress bars, panels, and colored output
+- Backup-only mode (no cleanup)
+- Strict backup verification before cleanup proceeds
+- Conversation-filtered audio export (only conversations with transcripts)
+- Comprehensive backup manifest with checksums
+- MongoDB, Qdrant, Neo4j, Redis cleanup
 """
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
-import shutil
 import struct
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -38,8 +33,15 @@ try:
     from neo4j import GraphDatabase
     from qdrant_client import AsyncQdrantClient
     from qdrant_client.models import Distance, VectorParams
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+    from rich.prompt import Confirm
+    from rich.table import Table
+    from rich.text import Text
     from rq import Queue
 
+    from advanced_omi_backend.models.annotation import Annotation
     from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
     from advanced_omi_backend.models.conversation import Conversation
     from advanced_omi_backend.models.user import User
@@ -50,412 +52,548 @@ except ImportError as e:
     print("This script must be run inside the chronicle-backend container")
     sys.exit(1)
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.WARNING, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+console = Console()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def get_qdrant_collection_name() -> str:
     """Get Qdrant collection name from memory service configuration."""
     try:
         memory_config = build_memory_config_from_env()
-        if hasattr(memory_config, 'vector_store_config') and memory_config.vector_store_config:
-            collection_name = memory_config.vector_store_config.get('collection_name', 'chronicle_memories')
-            logger.info(f"Using Qdrant collection name from config: {collection_name}")
-            return collection_name
-    except Exception as e:
-        logger.warning(f"Could not load collection name from config: {e}")
-
-    # Fallback to default
-    logger.info("Using default Qdrant collection name: chronicle_memories")
+        if hasattr(memory_config, "vector_store_config") and memory_config.vector_store_config:
+            return memory_config.vector_store_config.get("collection_name", "chronicle_memories")
+    except Exception:
+        pass
     return "chronicle_memories"
 
 
-class CleanupStats:
-    """Track cleanup statistics"""
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _human_size(nbytes: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(nbytes) < 1024:
+            return f"{nbytes:.1f} {unit}"
+        nbytes /= 1024
+    return f"{nbytes:.1f} TB"
+
+
+# ---------------------------------------------------------------------------
+# Stats
+# ---------------------------------------------------------------------------
+
+class Stats:
+    """Track counts across the system."""
+
     def __init__(self):
-        self.conversations_count = 0
-        self.audio_chunks_count = 0
-        self.waveforms_count = 0
-        self.chat_sessions_count = 0
-        self.chat_messages_count = 0
-        self.memories_count = 0
-        self.neo4j_nodes_count = 0
-        self.neo4j_relationships_count = 0
-        self.neo4j_promises_count = 0
-        self.redis_jobs_count = 0
-        self.legacy_wav_count = 0
-        self.users_count = 0
-        self.backup_size_bytes = 0
-        self.backup_path = None
+        self.conversations = 0
+        self.conversations_with_transcript = 0
+        self.audio_chunks = 0
+        self.waveforms = 0
+        self.chat_sessions = 0
+        self.chat_messages = 0
+        self.annotations = 0
+        self.memories = 0
+        self.neo4j_nodes = 0
+        self.neo4j_relationships = 0
+        self.neo4j_promises = 0
+        self.redis_jobs = 0
+        self.legacy_wav = 0
+        self.users = 0
+        self.langfuse_prompts = 0
+
+
+async def gather_stats(
+    mongo_db: Any,
+    redis_conn: Any,
+    qdrant_client: Optional[AsyncQdrantClient],
+    neo4j_driver: Any = None,
+    langfuse_client: Any = None,
+) -> Stats:
+    """Gather current system statistics."""
+    s = Stats()
+
+    # MongoDB
+    s.conversations = await Conversation.find_all().count()
+    s.conversations_with_transcript = await Conversation.find(
+        Conversation.active_transcript_version != None  # noqa: E711
+    ).count()
+    s.audio_chunks = await mongo_db["audio_chunks"].count_documents({})
+    s.waveforms = await WaveformData.find_all().count()
+    s.chat_sessions = await mongo_db["chat_sessions"].count_documents({})
+    s.chat_messages = await mongo_db["chat_messages"].count_documents({})
+    s.annotations = await Annotation.find_all().count()
+    s.users = await User.find_all().count()
+
+    # Qdrant
+    if qdrant_client:
+        try:
+            info = await qdrant_client.get_collection(get_qdrant_collection_name())
+            s.memories = info.points_count
+        except Exception:
+            pass
+
+    # Neo4j
+    if neo4j_driver:
+        try:
+            with neo4j_driver.session() as session:
+                r = session.run("MATCH (n) RETURN count(n) AS c").single()
+                s.neo4j_nodes = r["c"] if r else 0
+                r = session.run("MATCH ()-[r]->() RETURN count(r) AS c").single()
+                s.neo4j_relationships = r["c"] if r else 0
+                r = session.run("MATCH (p:Promise) RETURN count(p) AS c").single()
+                s.neo4j_promises = r["c"] if r else 0
+        except Exception:
+            pass
+
+    # Redis
+    try:
+        for qname in ("transcription", "memory", "audio", "default"):
+            q = Queue(qname, connection=redis_conn)
+            s.redis_jobs += (
+                len(q)
+                + len(q.started_job_registry)
+                + len(q.finished_job_registry)
+                + len(q.failed_job_registry)
+                + len(q.canceled_job_registry)
+                + len(q.deferred_job_registry)
+                + len(q.scheduled_job_registry)
+            )
+    except Exception:
+        pass
+
+    # LangFuse prompts
+    if langfuse_client:
+        try:
+            prompts_response = langfuse_client.prompts.list(limit=100)
+            s.langfuse_prompts = len(prompts_response.data) if hasattr(prompts_response, "data") else 0
+        except Exception:
+            pass
+
+    # Legacy WAV
+    wav_dir = Path("/app/data/audio_chunks")
+    if wav_dir.exists():
+        s.legacy_wav = len(list(wav_dir.glob("*.wav")))
+
+    return s
+
+
+def render_stats_table(stats: Stats, title: str = "Current State") -> Table:
+    """Build a rich Table from Stats."""
+    table = Table(
+        title=title,
+        show_header=True,
+        header_style="bold cyan",
+        border_style="dim",
+        title_style="bold white",
+        padding=(0, 2),
+    )
+    table.add_column("Category", style="white", min_width=24)
+    table.add_column("Count", justify="right", style="bold", min_width=10)
+
+    def row(label, value, style="white"):
+        table.add_row(label, f"[{style}]{value}[/{style}]")
+
+    row("Conversations", str(stats.conversations), "green" if stats.conversations else "dim")
+    row(
+        "  with transcripts",
+        str(stats.conversations_with_transcript),
+        "green" if stats.conversations_with_transcript else "dim",
+    )
+    row("Audio Chunks", str(stats.audio_chunks), "green" if stats.audio_chunks else "dim")
+    row("Waveforms", str(stats.waveforms), "dim")
+    row("Chat Sessions", str(stats.chat_sessions), "dim")
+    row("Chat Messages", str(stats.chat_messages), "dim")
+    row("Annotations", str(stats.annotations), "green" if stats.annotations else "dim")
+    table.add_section()
+    row("Memories (Qdrant)", str(stats.memories), "yellow" if stats.memories else "dim")
+    row("Neo4j Nodes", str(stats.neo4j_nodes), "dim")
+    row("Neo4j Relationships", str(stats.neo4j_relationships), "dim")
+    row("LangFuse Prompts", str(stats.langfuse_prompts), "yellow" if stats.langfuse_prompts else "dim")
+    table.add_section()
+    row("Redis Jobs", str(stats.redis_jobs), "dim")
+    row("Legacy WAV Files", str(stats.legacy_wav), "dim")
+    table.add_section()
+    row("Users", str(stats.users), "cyan")
+
+    return table
+
+
+# ---------------------------------------------------------------------------
+# Backup
+# ---------------------------------------------------------------------------
+
+class BackupResult:
+    """Track which backup exports succeeded or failed."""
+
+    def __init__(self):
+        self.exports: dict[str, dict] = {}  # name -> {ok, path, size, sha256, error}
+
+    def record(self, name: str, path: Optional[Path], ok: bool, error: str = ""):
+        entry = {"ok": ok, "error": error, "path": str(path) if path else None, "size": 0, "sha256": ""}
+        if ok and path and path.exists():
+            entry["size"] = path.stat().st_size
+            entry["sha256"] = _file_sha256(path)
+        self.exports[name] = entry
+
+    @property
+    def all_ok(self) -> bool:
+        return all(e["ok"] for e in self.exports.values())
+
+    @property
+    def critical_ok(self) -> bool:
+        """conversations, audio_metadata, and annotations are critical."""
+        critical = ("conversations", "audio_metadata", "annotations")
+        return all(self.exports.get(n, {}).get("ok", False) for n in critical if n in self.exports)
+
+    def render_table(self) -> Table:
+        table = Table(title="Backup Verification", border_style="dim", title_style="bold white")
+        table.add_column("Export", style="white", min_width=24)
+        table.add_column("Status", justify="center", min_width=8)
+        table.add_column("Size", justify="right", min_width=10)
+        table.add_column("SHA-256", style="dim", min_width=12)
+
+        for name, info in self.exports.items():
+            if info["ok"]:
+                status = "[green]OK[/green]"
+                size = _human_size(info["size"])
+                sha = info["sha256"][:12] + "..." if info["sha256"] else ""
+            else:
+                status = "[red]FAILED[/red]"
+                size = "-"
+                sha = info.get("error", "")[:30]
+            table.add_row(name, status, size, sha)
+
+        return table
+
+    @property
+    def total_size(self) -> int:
+        return sum(e["size"] for e in self.exports.values())
 
 
 class BackupManager:
-    """Handle backup operations"""
+    """Export data to a timestamped backup directory."""
 
-    def __init__(self, backup_dir: str, export_audio: bool, mongo_db: Any, neo4j_driver: Any = None):
+    def __init__(self, backup_dir: str, export_audio: bool, mongo_db: Any, neo4j_driver: Any = None, langfuse_client: Any = None):
         self.backup_dir = Path(backup_dir)
         self.export_audio = export_audio
         self.mongo_db = mongo_db
         self.neo4j_driver = neo4j_driver
+        self.langfuse_client = langfuse_client
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.backup_path = self.backup_dir / f"backup_{self.timestamp}"
 
-    async def create_backup(
+    async def run(
         self,
         qdrant_client: Optional[AsyncQdrantClient],
-        stats: CleanupStats
-    ) -> bool:
-        """Create complete backup of all data"""
-        try:
-            logger.info(f"Creating backup at {self.backup_path}")
-            self.backup_path.mkdir(parents=True, exist_ok=True)
-            stats.backup_path = str(self.backup_path)
+        stats: Stats,
+    ) -> BackupResult:
+        """Run all backup exports, return a BackupResult for verification."""
+        self.backup_path.mkdir(parents=True, exist_ok=True)
+        result = BackupResult()
 
-            # Export MongoDB data
-            await self._export_conversations(stats)
-            await self._export_audio_chunks_metadata(stats)
-            await self._export_waveforms(stats)
-            await self._export_chat_sessions(stats)
-            await self._export_chat_messages(stats)
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(bar_width=30),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            steps = [
+                ("conversations", self._export_conversations),
+                ("audio_metadata", self._export_audio_metadata),
+                ("waveforms", self._export_waveforms),
+                ("chat_sessions", self._export_chat_sessions),
+                ("chat_messages", self._export_chat_messages),
+                ("annotations", self._export_annotations),
+            ]
 
-            # Export audio as WAV if requested
             if self.export_audio:
-                await self._export_audio_wav(stats)
+                steps.append(("audio_wav", self._export_audio_wav))
 
-            # Export Qdrant vectors
             if qdrant_client:
-                await self._export_memories(qdrant_client, stats)
+                steps.append(("memories", lambda r: self._export_memories(qdrant_client, r)))
 
-            # Export Neo4j knowledge graph
             if self.neo4j_driver:
-                self._export_neo4j(stats)
+                steps.append(("neo4j_graph", self._export_neo4j))
 
-            # Generate summary
-            await self._generate_summary(stats)
+            if self.langfuse_client:
+                steps.append(("langfuse_prompts", self._export_langfuse_prompts))
 
-            # Calculate backup size
-            stats.backup_size_bytes = sum(
-                f.stat().st_size for f in self.backup_path.rglob('*') if f.is_file()
-            )
+            task = progress.add_task("Backing up...", total=len(steps))
 
-            logger.info(f"Backup completed: {stats.backup_size_bytes / (1024**2):.2f} MB")
-            return True
+            for name, func in steps:
+                progress.update(task, description=f"Exporting {name}...")
+                try:
+                    path = await func(result) if asyncio.iscoroutinefunction(func) else func(result)
+                    if not result.exports.get(name):
+                        # func didn't record itself - record success
+                        result.record(name, path, True)
+                except Exception as e:
+                    logger.warning(f"Export {name} failed: {e}")
+                    result.record(name, None, False, str(e))
+                progress.advance(task)
 
-        except Exception as e:
-            logger.error(f"Backup failed: {e}", exc_info=True)
-            return False
+        # Write manifest
+        manifest = {
+            "timestamp": self.timestamp,
+            "backup_path": str(self.backup_path),
+            "exports": result.exports,
+            "total_size_bytes": result.total_size,
+            "total_size_human": _human_size(result.total_size),
+            "stats": {
+                "conversations": stats.conversations,
+                "conversations_with_transcript": stats.conversations_with_transcript,
+                "audio_chunks": stats.audio_chunks,
+                "annotations": stats.annotations,
+                "memories": stats.memories,
+                "langfuse_prompts": stats.langfuse_prompts,
+                "users": stats.users,
+            },
+        }
+        manifest_path = self.backup_path / "manifest.json"
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2, default=str)
 
-    async def _export_conversations(self, stats: CleanupStats):
-        """Export all conversations to JSON"""
-        logger.info("Exporting conversations...")
+        return result
+
+    # -- Individual exports --------------------------------------------------
+
+    async def _export_conversations(self, result: BackupResult) -> Path:
         conversations = await Conversation.find_all().to_list()
-        stats.conversations_count = len(conversations)
+        data = [c.model_dump(mode="json") for c in conversations]
+        path = self.backup_path / "conversations.json"
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+        result.record("conversations", path, True)
+        return path
 
-        # Serialize conversations (handle datetime, UUID, etc.)
-        conversations_data = []
-        for conv in conversations:
-            conv_dict = conv.model_dump(mode='json')
-            conversations_data.append(conv_dict)
+    async def _export_audio_metadata(self, result: BackupResult) -> Path:
+        collection = self.mongo_db["audio_chunks"]
+        cursor = collection.find({})
+        data = []
+        async for chunk in cursor:
+            data.append({
+                "conversation_id": chunk.get("conversation_id"),
+                "chunk_index": chunk.get("chunk_index"),
+                "start_time": chunk.get("start_time"),
+                "end_time": chunk.get("end_time"),
+                "duration": chunk.get("duration"),
+                "original_size": chunk.get("original_size"),
+                "compressed_size": chunk.get("compressed_size"),
+                "sample_rate": chunk.get("sample_rate", 16000),
+                "channels": chunk.get("channels", 1),
+                "has_speech": chunk.get("has_speech"),
+                "created_at": str(chunk.get("created_at", "")),
+            })
+        path = self.backup_path / "audio_chunks_metadata.json"
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+        result.record("audio_metadata", path, True)
+        return path
 
-        output_path = self.backup_path / "conversations.json"
-        with open(output_path, 'w') as f:
-            json.dump(conversations_data, f, indent=2, default=str)
-
-        logger.info(f"Exported {stats.conversations_count} conversations")
-
-    async def _export_audio_chunks_metadata(self, stats: CleanupStats):
-        """Export audio chunks metadata (not the actual audio)"""
-        logger.info("Exporting audio chunks metadata...")
-
-        # Use raw MongoDB query to handle malformed documents
-        # (some old/corrupted chunks may not validate against current schema)
-        audio_chunks_collection = self.mongo_db["audio_chunks"]
-        chunks_cursor = audio_chunks_collection.find({})
-
-        chunks_data = []
-        malformed_count = 0
-
-        async for chunk in chunks_cursor:
-            try:
-                # Extract fields safely with defaults for missing values
-                chunk_dict = {
-                    'conversation_id': chunk.get('conversation_id'),
-                    'chunk_index': chunk.get('chunk_index'),
-                    'start_time': chunk.get('start_time'),
-                    'end_time': chunk.get('end_time'),
-                    'duration': chunk.get('duration'),
-                    'original_size': chunk.get('original_size'),
-                    'compressed_size': chunk.get('compressed_size'),
-                    'sample_rate': chunk.get('sample_rate', 16000),
-                    'channels': chunk.get('channels', 1),
-                    'has_speech': chunk.get('has_speech'),
-                    'created_at': str(chunk.get('created_at', ''))
-                }
-                chunks_data.append(chunk_dict)
-            except Exception as e:
-                malformed_count += 1
-                logger.warning(f"Skipping malformed chunk {chunk.get('_id')}: {e}")
-                continue
-
-        stats.audio_chunks_count = len(chunks_data)
-
-        output_path = self.backup_path / "audio_chunks_metadata.json"
-        with open(output_path, 'w') as f:
-            json.dump(chunks_data, f, indent=2, default=str)
-
-        logger.info(f"Exported {stats.audio_chunks_count} audio chunks metadata")
-        if malformed_count > 0:
-            logger.warning(f"Skipped {malformed_count} malformed chunks")
-
-    async def _export_waveforms(self, stats: CleanupStats):
-        """Export waveform visualization data"""
-        logger.info("Exporting waveforms...")
-
+    async def _export_waveforms(self, result: BackupResult) -> Path:
         waveforms = await WaveformData.find_all().to_list()
-        stats.waveforms_count = len(waveforms)
+        data = [w.model_dump(mode="json") for w in waveforms]
+        path = self.backup_path / "waveforms.json"
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+        result.record("waveforms", path, True)
+        return path
 
-        # Serialize waveforms
-        waveforms_data = []
-        for waveform in waveforms:
-            waveform_dict = waveform.model_dump(mode='json')
-            waveforms_data.append(waveform_dict)
+    async def _export_chat_sessions(self, result: BackupResult) -> Path:
+        collection = self.mongo_db["chat_sessions"]
+        cursor = collection.find({})
+        data = []
+        async for session in cursor:
+            data.append({
+                "session_id": session.get("session_id"),
+                "user_id": session.get("user_id"),
+                "title": session.get("title"),
+                "created_at": str(session.get("created_at", "")),
+                "updated_at": str(session.get("updated_at", "")),
+                "metadata": session.get("metadata", {}),
+            })
+        path = self.backup_path / "chat_sessions.json"
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+        result.record("chat_sessions", path, True)
+        return path
 
-        output_path = self.backup_path / "waveforms.json"
-        with open(output_path, 'w') as f:
-            json.dump(waveforms_data, f, indent=2, default=str)
+    async def _export_chat_messages(self, result: BackupResult) -> Path:
+        collection = self.mongo_db["chat_messages"]
+        cursor = collection.find({})
+        data = []
+        async for msg in cursor:
+            data.append({
+                "message_id": msg.get("message_id"),
+                "session_id": msg.get("session_id"),
+                "user_id": msg.get("user_id"),
+                "role": msg.get("role"),
+                "content": msg.get("content"),
+                "timestamp": str(msg.get("timestamp", "")),
+                "memories_used": msg.get("memories_used", []),
+                "metadata": msg.get("metadata", {}),
+            })
+        path = self.backup_path / "chat_messages.json"
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+        result.record("chat_messages", path, True)
+        return path
 
-        logger.info(f"Exported {stats.waveforms_count} waveforms")
+    async def _export_annotations(self, result: BackupResult) -> Path:
+        annotations = await Annotation.find_all().to_list()
+        data = [a.model_dump(mode="json") for a in annotations]
+        path = self.backup_path / "annotations.json"
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+        result.record("annotations", path, True)
+        return path
 
-    async def _export_chat_sessions(self, stats: CleanupStats):
-        """Export chat sessions metadata"""
-        logger.info("Exporting chat sessions...")
+    async def _export_audio_wav(self, result: BackupResult) -> Optional[Path]:
+        """Export audio WAV files for conversations that have transcripts."""
+        # Only export audio for conversations with actual transcripts
+        conversations = await Conversation.find(
+            Conversation.active_transcript_version != None  # noqa: E711
+        ).to_list()
 
-        chat_sessions_collection = self.mongo_db["chat_sessions"]
-        sessions_cursor = chat_sessions_collection.find({})
+        if not conversations:
+            result.record("audio_wav", None, True)
+            return None
 
-        sessions_data = []
-        async for session in sessions_cursor:
-            session_dict = {
-                'session_id': session.get('session_id'),
-                'user_id': session.get('user_id'),
-                'title': session.get('title'),
-                'created_at': str(session.get('created_at', '')),
-                'updated_at': str(session.get('updated_at', '')),
-                'metadata': session.get('metadata', {})
-            }
-            sessions_data.append(session_dict)
-
-        stats.chat_sessions_count = len(sessions_data)
-
-        output_path = self.backup_path / "chat_sessions.json"
-        with open(output_path, 'w') as f:
-            json.dump(sessions_data, f, indent=2, default=str)
-
-        logger.info(f"Exported {stats.chat_sessions_count} chat sessions")
-
-    async def _export_chat_messages(self, stats: CleanupStats):
-        """Export chat messages"""
-        logger.info("Exporting chat messages...")
-
-        chat_messages_collection = self.mongo_db["chat_messages"]
-        messages_cursor = chat_messages_collection.find({})
-
-        messages_data = []
-        async for message in messages_cursor:
-            message_dict = {
-                'message_id': message.get('message_id'),
-                'session_id': message.get('session_id'),
-                'user_id': message.get('user_id'),
-                'role': message.get('role'),
-                'content': message.get('content'),
-                'timestamp': str(message.get('timestamp', '')),
-                'memories_used': message.get('memories_used', []),
-                'metadata': message.get('metadata', {})
-            }
-            messages_data.append(message_dict)
-
-        stats.chat_messages_count = len(messages_data)
-
-        output_path = self.backup_path / "chat_messages.json"
-        with open(output_path, 'w') as f:
-            json.dump(messages_data, f, indent=2, default=str)
-
-        logger.info(f"Exported {stats.chat_messages_count} chat messages")
-
-    async def _export_audio_wav(self, stats: CleanupStats):
-        """Export audio as WAV files (1-minute chunks)"""
-        logger.info("Exporting audio as WAV files (this may take a while)...")
-
-        # Get all unique conversation IDs
-        conversations = await Conversation.find_all().to_list()
         audio_dir = self.backup_path / "audio"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        exported = 0
+        failed = 0
 
         for conv in conversations:
             try:
-                await self._export_conversation_audio(conv.conversation_id, audio_dir)
+                ok = await self._export_conversation_audio(conv.conversation_id, audio_dir)
+                if ok:
+                    exported += 1
             except Exception as e:
-                logger.warning(f"Failed to export audio for {conv.conversation_id}: {e}")
-                continue
+                logger.warning(f"Audio export failed for {conv.conversation_id}: {e}")
+                failed += 1
 
-        logger.info("Audio export completed")
+        ok = exported > 0 or (len(conversations) == 0)
+        error = f"{failed} failed" if failed else ""
+        result.record("audio_wav", audio_dir, ok, error)
+        return audio_dir
 
-    async def _export_conversation_audio(self, conversation_id: str, audio_dir: Path):
-        """Export audio for a single conversation as 1-minute WAV chunks"""
-        # Get all chunks for this conversation
+    async def _export_conversation_audio(self, conversation_id: str, audio_dir: Path) -> bool:
+        """Decode Opus chunks to WAV for a single conversation. Returns True if audio was exported."""
         chunks = await AudioChunkDocument.find(
             AudioChunkDocument.conversation_id == conversation_id
         ).sort("+chunk_index").to_list()
 
         if not chunks:
-            return
+            return False
 
-        # Create conversation directory
         conv_dir = audio_dir / conversation_id
         conv_dir.mkdir(parents=True, exist_ok=True)
 
-        # Decode all Opus chunks to PCM
-        pcm_data = []
         sample_rate = chunks[0].sample_rate
         channels = chunks[0].channels
 
+        # Try opuslib, fall back gracefully
         try:
             import opuslib
-            decoder = opuslib.Decoder(sample_rate, channels)
 
+            decoder = opuslib.Decoder(sample_rate, channels)
+            pcm_parts = []
             for chunk in chunks:
-                # Decode Opus to PCM
-                # Note: frame_size depends on sample rate and duration
                 frame_size = int(sample_rate * chunk.duration / channels)
                 decoded = decoder.decode(bytes(chunk.audio_data), frame_size)
-                pcm_data.append(decoded)
-
+                pcm_parts.append(decoded)
         except ImportError:
             logger.warning("opuslib not available, skipping audio export")
-            return
+            return False
         except Exception as e:
-            logger.warning(f"Failed to decode audio for {conversation_id}: {e}")
-            return
+            logger.warning(f"Opus decode error for {conversation_id}: {e}")
+            return False
 
-        # Concatenate all PCM data
-        all_pcm = b''.join(pcm_data)
+        all_pcm = b"".join(pcm_parts)
+        samples = struct.unpack(f"<{len(all_pcm) // 2}h", all_pcm)
 
-        # Convert bytes to int16 samples
-        samples = struct.unpack(f'<{len(all_pcm)//2}h', all_pcm)
-
-        # Split into 1-minute chunks
+        # Split into 1-minute WAV files
         samples_per_minute = sample_rate * 60 * channels
-        chunk_num = 1
-
-        for start_idx in range(0, len(samples), samples_per_minute):
-            chunk_samples = samples[start_idx:start_idx + samples_per_minute]
-
-            # Write WAV file
-            wav_path = conv_dir / f"chunk_{chunk_num:03d}.wav"
-            self._write_wav(wav_path, sample_rate, channels, chunk_samples)
-            chunk_num += 1
-
-    def _write_wav(self, path: Path, sample_rate: int, channels: int, samples: Tuple[int, ...]):
-        """Write PCM samples to WAV file"""
         import wave
 
-        with wave.open(str(path), 'wb') as wav_file:
-            wav_file.setnchannels(channels)
-            wav_file.setsampwidth(2)  # 16-bit
-            wav_file.setframerate(sample_rate)
+        chunk_num = 1
+        for start in range(0, len(samples), samples_per_minute):
+            wav_path = conv_dir / f"chunk_{chunk_num:03d}.wav"
+            segment = samples[start : start + samples_per_minute]
+            with wave.open(str(wav_path), "wb") as wf:
+                wf.setnchannels(channels)
+                wf.setsampwidth(2)
+                wf.setframerate(sample_rate)
+                wf.writeframes(struct.pack(f"<{len(segment)}h", *segment))
+            chunk_num += 1
 
-            # Convert samples back to bytes
-            pcm_bytes = struct.pack(f'<{len(samples)}h', *samples)
-            wav_file.writeframes(pcm_bytes)
+        return True
 
-    async def _export_memories(self, qdrant_client: AsyncQdrantClient, stats: CleanupStats):
-        """Export Qdrant vectors to JSON"""
-        logger.info("Exporting memories from Qdrant...")
+    async def _export_memories(self, qdrant_client: AsyncQdrantClient, result: BackupResult) -> Path:
+        collection_name = get_qdrant_collection_name()
+        collections = await qdrant_client.get_collections()
+        exists = any(c.name == collection_name for c in collections.collections)
 
-        try:
-            collection_name = get_qdrant_collection_name()
+        path = self.backup_path / "memories.json"
+        if not exists:
+            with open(path, "w") as f:
+                json.dump([], f)
+            result.record("memories", path, True)
+            return path
 
-            # Check if collection exists
-            collections = await qdrant_client.get_collections()
-            collection_exists = any(
-                col.name == collection_name
-                for col in collections.collections
+        data = []
+        offset = None
+        while True:
+            points, next_offset = await qdrant_client.scroll(
+                collection_name=collection_name,
+                limit=100,
+                offset=offset,
+                with_payload=True,
+                with_vectors=True,
             )
+            if not points:
+                break
+            for pt in points:
+                data.append({"id": str(pt.id), "vector": pt.vector, "payload": pt.payload})
+            if next_offset is None:
+                break
+            offset = next_offset
 
-            if not collection_exists:
-                logger.info("Memories collection does not exist, skipping export")
-                return
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+        result.record("memories", path, True)
+        return path
 
-            # Scroll through all vectors
-            memories_data = []
-            offset = None
-
-            while True:
-                result = await qdrant_client.scroll(
-                    collection_name=collection_name,
-                    limit=100,
-                    offset=offset,
-                    with_payload=True,
-                    with_vectors=True
-                )
-
-                points, next_offset = result
-
-                if not points:
-                    break
-
-                for point in points:
-                    memory_dict = {
-                        'id': str(point.id),
-                        'vector': point.vector,
-                        'payload': point.payload
-                    }
-                    memories_data.append(memory_dict)
-
-                if next_offset is None:
-                    break
-
-                offset = next_offset
-
-            stats.memories_count = len(memories_data)
-
-            output_path = self.backup_path / "memories.json"
-            with open(output_path, 'w') as f:
-                json.dump(memories_data, f, indent=2)
-
-            logger.info(f"Exported {stats.memories_count} memories")
-
-        except Exception as e:
-            logger.warning(f"Failed to export memories: {e}")
-
-    def _export_neo4j(self, stats: CleanupStats):
-        """Export Neo4j knowledge graph data to JSON"""
-        logger.info("Exporting Neo4j knowledge graph...")
-
+    def _export_neo4j(self, result: BackupResult) -> Path:
+        path = self.backup_path / "neo4j_graph.json"
         try:
             with self.neo4j_driver.session() as session:
-                # Export nodes
-                nodes_result = session.run(
-                    "MATCH (n) RETURN n, labels(n) AS labels, elementId(n) AS eid"
-                )
                 nodes_data = []
-                for record in nodes_result:
+                for record in session.run("MATCH (n) RETURN n, labels(n) AS labels, elementId(n) AS eid"):
                     node = dict(record["n"])
                     node["_labels"] = record["labels"]
                     node["_element_id"] = record["eid"]
                     nodes_data.append(node)
 
-                # Export relationships
-                rels_result = session.run(
-                    "MATCH (a)-[r]->(b) "
-                    "RETURN elementId(a) AS src, type(r) AS rel_type, "
-                    "properties(r) AS props, elementId(b) AS dst"
-                )
                 rels_data = []
-                for record in rels_result:
+                for record in session.run(
+                    "MATCH (a)-[r]->(b) RETURN elementId(a) AS src, type(r) AS rel_type, "
+                    "properties(r) AS props, elementId(b) AS dst"
+                ):
                     rels_data.append({
                         "source": record["src"],
                         "type": record["rel_type"],
@@ -463,40 +601,61 @@ class BackupManager:
                         "target": record["dst"],
                     })
 
-            output_path = self.backup_path / "neo4j_graph.json"
-            with open(output_path, "w") as f:
+            with open(path, "w") as f:
                 json.dump({"nodes": nodes_data, "relationships": rels_data}, f, indent=2, default=str)
+            result.record("neo4j_graph", path, True)
+        except Exception as e:
+            result.record("neo4j_graph", None, False, str(e))
 
-            logger.info(f"Exported {len(nodes_data)} nodes, {len(rels_data)} relationships from Neo4j")
+        return path
+
+    def _export_langfuse_prompts(self, result: BackupResult) -> Path:
+        """Export all LangFuse prompts (production versions) including admin edits."""
+        path = self.backup_path / "langfuse_prompts.json"
+        data = []
+
+        try:
+            # Discover all prompt names via list API
+            prompt_names = []
+            prompts_response = self.langfuse_client.prompts.list(limit=100)
+            if hasattr(prompts_response, "data"):
+                for p in prompts_response.data:
+                    prompt_names.append(p.name)
+
+            # Fetch each prompt's production version with full text
+            for name in prompt_names:
+                try:
+                    prompt_obj = self.langfuse_client.get_prompt(name)
+                    entry = {
+                        "name": name,
+                        "prompt": prompt_obj.prompt,
+                        "version": prompt_obj.version,
+                    }
+                    if hasattr(prompt_obj, "labels"):
+                        entry["labels"] = prompt_obj.labels
+                    if hasattr(prompt_obj, "config") and prompt_obj.config:
+                        entry["config"] = prompt_obj.config
+                    data.append(entry)
+                except Exception as e:
+                    logger.warning(f"Failed to fetch prompt '{name}': {e}")
+                    data.append({"name": name, "error": str(e)})
 
         except Exception as e:
-            logger.warning(f"Failed to export Neo4j data: {e}")
+            result.record("langfuse_prompts", None, False, str(e))
+            return path
 
-    async def _generate_summary(self, stats: CleanupStats):
-        """Generate backup summary"""
-        summary = {
-            'timestamp': self.timestamp,
-            'backup_path': str(self.backup_path),
-            'total_conversations': stats.conversations_count,
-            'total_audio_chunks': stats.audio_chunks_count,
-            'total_waveforms': stats.waveforms_count,
-            'total_chat_sessions': stats.chat_sessions_count,
-            'total_chat_messages': stats.chat_messages_count,
-            'total_memories': stats.memories_count,
-            'total_neo4j_nodes': stats.neo4j_nodes_count,
-            'total_neo4j_relationships': stats.neo4j_relationships_count,
-            'total_neo4j_promises': stats.neo4j_promises_count,
-            'audio_exported': self.export_audio,
-            'backup_size_bytes': 0  # Will be calculated after all files written
-        }
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+        result.record("langfuse_prompts", path, True)
+        return path
 
-        output_path = self.backup_path / "backup_summary.json"
-        with open(output_path, 'w') as f:
-            json.dump(summary, f, indent=2)
 
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
 
 class CleanupManager:
-    """Handle cleanup operations"""
+    """Delete data across all services."""
 
     def __init__(
         self,
@@ -514,402 +673,111 @@ class CleanupManager:
         self.delete_users = delete_users
         self.neo4j_driver = neo4j_driver
 
-    async def perform_cleanup(self, stats: CleanupStats) -> bool:
-        """Perform all cleanup operations"""
-        try:
-            logger.info("Starting cleanup operations...")
+    async def run(self, stats: Stats) -> bool:
+        """Perform cleanup with progress display."""
+        steps = [
+            ("MongoDB collections", self._cleanup_mongodb),
+        ]
+        if self.qdrant_client:
+            steps.append(("Qdrant memories", self._cleanup_qdrant))
+        if self.neo4j_driver:
+            steps.append(("Neo4j graph", self._cleanup_neo4j))
+        steps.append(("Redis queues", self._cleanup_redis))
+        if self.include_wav:
+            steps.append(("Legacy WAV files", self._cleanup_legacy_wav))
 
-            # MongoDB cleanup
-            await self._cleanup_mongodb(stats)
+        ok = True
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(bar_width=30),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Cleaning...", total=len(steps))
+            for label, func in steps:
+                progress.update(task, description=f"Cleaning {label}...")
+                try:
+                    if asyncio.iscoroutinefunction(func):
+                        await func(stats)
+                    else:
+                        func(stats)
+                except Exception as e:
+                    logger.error(f"Failed to clean {label}: {e}")
+                    ok = False
+                progress.advance(task)
 
-            # Qdrant cleanup
-            if self.qdrant_client:
-                await self._cleanup_qdrant(stats)
+        return ok
 
-            # Neo4j cleanup
-            if self.neo4j_driver:
-                self._cleanup_neo4j(stats)
-
-            # Redis cleanup
-            self._cleanup_redis(stats)
-
-            # Legacy WAV cleanup
-            if self.include_wav:
-                self._cleanup_legacy_wav(stats)
-
-            logger.info("Cleanup completed successfully")
-            return True
-
-        except Exception as e:
-            logger.error(f"Cleanup failed: {e}", exc_info=True)
-            return False
-
-    async def _cleanup_mongodb(self, stats: CleanupStats):
-        """Clean MongoDB collections"""
-        logger.info("Cleaning MongoDB collections...")
-
-        # Count before deletion
-        stats.conversations_count = await Conversation.find_all().count()
-        # Use raw MongoDB count to handle malformed documents
-        stats.audio_chunks_count = await self.mongo_db["audio_chunks"].count_documents({})
-        stats.waveforms_count = await WaveformData.find_all().count()
-        stats.chat_sessions_count = await self.mongo_db["chat_sessions"].count_documents({})
-        stats.chat_messages_count = await self.mongo_db["chat_messages"].count_documents({})
-
+    async def _cleanup_mongodb(self, stats: Stats):
+        await Conversation.find_all().delete()
+        await self.mongo_db["audio_chunks"].delete_many({})
+        await WaveformData.find_all().delete()
+        await self.mongo_db["chat_sessions"].delete_many({})
+        await self.mongo_db["chat_messages"].delete_many({})
+        await Annotation.find_all().delete()
         if self.delete_users:
-            stats.users_count = await User.find_all().count()
+            await User.find_all().delete()
 
-        # Delete conversations
-        result = await Conversation.find_all().delete()
-        logger.info(f"Deleted {stats.conversations_count} conversations")
+    async def _cleanup_qdrant(self, stats: Stats):
+        collection_name = get_qdrant_collection_name()
+        collections = await self.qdrant_client.get_collections()
+        exists = any(c.name == collection_name for c in collections.collections)
+        if not exists:
+            return
+        await self.qdrant_client.delete_collection(collection_name)
+        await self.qdrant_client.create_collection(
+            collection_name=collection_name,
+            vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
+        )
 
-        # Delete audio chunks using raw MongoDB to handle malformed documents
-        result = await self.mongo_db["audio_chunks"].delete_many({})
-        logger.info(f"Deleted {stats.audio_chunks_count} audio chunks")
-
-        # Delete waveforms
-        result = await WaveformData.find_all().delete()
-        logger.info(f"Deleted {stats.waveforms_count} waveforms")
-
-        # Delete chat sessions
-        result = await self.mongo_db["chat_sessions"].delete_many({})
-        logger.info(f"Deleted {stats.chat_sessions_count} chat sessions")
-
-        # Delete chat messages
-        result = await self.mongo_db["chat_messages"].delete_many({})
-        logger.info(f"Deleted {stats.chat_messages_count} chat messages")
-
-        # Delete users if requested
-        if self.delete_users:
-            result = await User.find_all().delete()
-            logger.info(f"DANGEROUS: Deleted {stats.users_count} users")
-
-    async def _cleanup_qdrant(self, stats: CleanupStats):
-        """Clean Qdrant vector store"""
-        logger.info("Cleaning Qdrant memories...")
-
-        try:
-            collection_name = get_qdrant_collection_name()
-
-            # Check if collection exists
-            collections = await self.qdrant_client.get_collections()
-            collection_exists = any(
-                col.name == collection_name
-                for col in collections.collections
-            )
-
-            if not collection_exists:
-                logger.info("Memories collection does not exist, skipping cleanup")
-                return
-
-            # Get count before deletion
-            collection_info = await self.qdrant_client.get_collection(collection_name)
-            stats.memories_count = collection_info.points_count
-
-            # Delete and recreate collection
-            await self.qdrant_client.delete_collection(collection_name)
-            logger.info(f"Deleted memories collection ({stats.memories_count} vectors)")
-
-            # Recreate with default configuration
-            await self.qdrant_client.create_collection(
-                collection_name=collection_name,
-                vectors_config=VectorParams(size=1536, distance=Distance.COSINE)
-            )
-            logger.info("Recreated memories collection")
-
-        except Exception as e:
-            logger.warning(f"Failed to clean Qdrant: {e}")
-
-    def _cleanup_neo4j(self, stats: CleanupStats):
-        """Clean Neo4j knowledge graph"""
-        logger.info("Cleaning Neo4j knowledge graph...")
-
+    def _cleanup_neo4j(self, stats: Stats):
         try:
             with self.neo4j_driver.session() as session:
-                # Count before deletion
-                nodes = session.run("MATCH (n) RETURN count(n) AS count").single()
-                stats.neo4j_nodes_count = nodes["count"] if nodes else 0
-
-                rels = session.run("MATCH ()-[r]->() RETURN count(r) AS count").single()
-                stats.neo4j_relationships_count = rels["count"] if rels else 0
-
-                promises = session.run("MATCH (p:Promise) RETURN count(p) AS count").single()
-                stats.neo4j_promises_count = promises["count"] if promises else 0
-
-                # Delete all nodes and relationships
                 session.run("MATCH (n) DETACH DELETE n")
-
-            logger.info(
-                f"Deleted {stats.neo4j_nodes_count} nodes, "
-                f"{stats.neo4j_relationships_count} relationships, "
-                f"{stats.neo4j_promises_count} promises from Neo4j"
-            )
-
         except Exception as e:
-            logger.warning(f"Failed to clean Neo4j: {e}")
+            logger.warning(f"Neo4j cleanup failed: {e}")
 
-    def _cleanup_redis(self, stats: CleanupStats):
-        """Clean Redis job queues"""
-        logger.info("Cleaning Redis job queues...")
-
-        queue_names = ["transcription", "memory", "audio", "default"]
-        successful_jobs = 0
-        failed_jobs = 0
-        failed_queues = []
-
-        for queue_name in queue_names:
-            job_count = 0  # Initialize to 0 in case counting fails
+    def _cleanup_redis(self, stats: Stats):
+        for qname in ("transcription", "memory", "audio", "default"):
             try:
-                queue = Queue(queue_name, connection=self.redis_conn)
-
-                # Count jobs
-                job_count = (
-                    len(queue) +
-                    len(queue.started_job_registry) +
-                    len(queue.finished_job_registry) +
-                    len(queue.failed_job_registry) +
-                    len(queue.canceled_job_registry) +
-                    len(queue.deferred_job_registry) +
-                    len(queue.scheduled_job_registry)
-                )
-
-                # Clear queue and registries
-                queue.empty()
-
-                # Clear job registries (they don't have clear() method in all RQ versions)
-                # So we manually remove all job IDs
-                for job_id in queue.started_job_registry.get_job_ids():
-                    queue.started_job_registry.remove(job_id)
-                for job_id in queue.finished_job_registry.get_job_ids():
-                    queue.finished_job_registry.remove(job_id)
-                for job_id in queue.failed_job_registry.get_job_ids():
-                    queue.failed_job_registry.remove(job_id)
-                for job_id in queue.canceled_job_registry.get_job_ids():
-                    queue.canceled_job_registry.remove(job_id)
-                for job_id in queue.deferred_job_registry.get_job_ids():
-                    queue.deferred_job_registry.remove(job_id)
-                for job_id in queue.scheduled_job_registry.get_job_ids():
-                    queue.scheduled_job_registry.remove(job_id)
-
-                # Only count as successful if cleanup completed without exception
-                successful_jobs += job_count
-                logger.info(f"Cleared {queue_name} queue ({job_count} jobs)")
-
+                q = Queue(qname, connection=self.redis_conn)
+                q.empty()
+                for registry in (
+                    q.started_job_registry,
+                    q.finished_job_registry,
+                    q.failed_job_registry,
+                    q.canceled_job_registry,
+                    q.deferred_job_registry,
+                    q.scheduled_job_registry,
+                ):
+                    for job_id in registry.get_job_ids():
+                        registry.remove(job_id)
             except Exception as e:
-                logger.error(f"Failed to clean {queue_name} queue: {e}", exc_info=True)
-                # job_count might be 0 if counting failed, or partial count if cleanup failed
-                failed_jobs += job_count
-                failed_queues.append(queue_name)
-                # Continue processing remaining queues
+                logger.warning(f"Redis queue {qname} cleanup failed: {e}")
 
-        stats.redis_jobs_count = successful_jobs
-        if failed_queues:
-            logger.warning(
-                f"Cleared {successful_jobs} Redis jobs, failed to clear {failed_jobs} jobs from queues: {', '.join(failed_queues)}"
-            )
-        else:
-            logger.info(f"Cleared total of {successful_jobs} Redis jobs")
-
-    def _cleanup_legacy_wav(self, stats: CleanupStats):
-        """Clean legacy WAV files"""
-        logger.info("Cleaning legacy WAV files...")
-
-        try:
-            wav_dir = Path("/app/data/audio_chunks")
-
-            if not wav_dir.exists():
-                logger.info("Legacy WAV directory does not exist, skipping")
-                return
-
-            wav_files = list(wav_dir.glob("*.wav"))
-            stats.legacy_wav_count = len(wav_files)
-
-            for wav_file in wav_files:
-                wav_file.unlink()
-
-            logger.info(f"Deleted {stats.legacy_wav_count} legacy WAV files")
-
-        except Exception as e:
-            logger.warning(f"Failed to clean legacy WAV files: {e}")
+    def _cleanup_legacy_wav(self, stats: Stats):
+        wav_dir = Path("/app/data/audio_chunks")
+        if not wav_dir.exists():
+            return
+        for f in wav_dir.glob("*.wav"):
+            f.unlink()
 
 
-async def get_current_stats(
-    mongo_db: Any,
-    redis_conn: Any,
-    qdrant_client: Optional[AsyncQdrantClient],
-    neo4j_driver: Any = None,
-) -> CleanupStats:
-    """Get current statistics before cleanup"""
-    stats = CleanupStats()
+# ---------------------------------------------------------------------------
+# Connection setup
+# ---------------------------------------------------------------------------
 
-    # MongoDB counts
-    stats.conversations_count = await Conversation.find_all().count()
-    # Use raw MongoDB count to handle malformed documents
-    stats.audio_chunks_count = await mongo_db["audio_chunks"].count_documents({})
-    stats.waveforms_count = await WaveformData.find_all().count()
-    stats.chat_sessions_count = await mongo_db["chat_sessions"].count_documents({})
-    stats.chat_messages_count = await mongo_db["chat_messages"].count_documents({})
-    stats.users_count = await User.find_all().count()
-
-    # Qdrant count
-    if qdrant_client:
-        try:
-            collection_name = get_qdrant_collection_name()
-            collection_info = await qdrant_client.get_collection(collection_name)
-            stats.memories_count = collection_info.points_count
-        except Exception:
-            stats.memories_count = 0
-
-    # Neo4j count
-    if neo4j_driver:
-        try:
-            with neo4j_driver.session() as session:
-                nodes = session.run("MATCH (n) RETURN count(n) AS count").single()
-                stats.neo4j_nodes_count = nodes["count"] if nodes else 0
-
-                rels = session.run("MATCH ()-[r]->() RETURN count(r) AS count").single()
-                stats.neo4j_relationships_count = rels["count"] if rels else 0
-
-                promises = session.run("MATCH (p:Promise) RETURN count(p) AS count").single()
-                stats.neo4j_promises_count = promises["count"] if promises else 0
-        except Exception:
-            pass
-
-    # Redis count
-    try:
-        queue_names = ["transcription", "memory", "audio", "default"]
-        total_jobs = 0
-        for queue_name in queue_names:
-            queue = Queue(queue_name, connection=redis_conn)
-            total_jobs += (
-                len(queue) +
-                len(queue.started_job_registry) +
-                len(queue.finished_job_registry) +
-                len(queue.failed_job_registry) +
-                len(queue.canceled_job_registry) +
-                len(queue.deferred_job_registry) +
-                len(queue.scheduled_job_registry)
-            )
-        stats.redis_jobs_count = total_jobs
-    except Exception:
-        stats.redis_jobs_count = 0
-
-    # Legacy WAV count
-    wav_dir = Path("/app/data/audio_chunks")
-    if wav_dir.exists():
-        stats.legacy_wav_count = len(list(wav_dir.glob("*.wav")))
-
-    return stats
-
-
-def print_stats(stats: CleanupStats, title: str = "Current State"):
-    """Print statistics in a formatted way"""
-    print(f"\n{'='*60}")
-    print(f"{title:^60}")
-    print(f"{'='*60}")
-    print(f"Conversations:        {stats.conversations_count:>10}")
-    print(f"Audio Chunks:         {stats.audio_chunks_count:>10}")
-    print(f"Waveforms:            {stats.waveforms_count:>10}")
-    print(f"Chat Sessions:        {stats.chat_sessions_count:>10}")
-    print(f"Chat Messages:        {stats.chat_messages_count:>10}")
-    print(f"Memories (Qdrant):    {stats.memories_count:>10}")
-    print(f"Neo4j Nodes:          {stats.neo4j_nodes_count:>10}")
-    print(f"Neo4j Relationships:  {stats.neo4j_relationships_count:>10}")
-    print(f"Neo4j Promises:       {stats.neo4j_promises_count:>10}")
-    print(f"Redis Jobs:           {stats.redis_jobs_count:>10}")
-    print(f"Legacy WAV Files:     {stats.legacy_wav_count:>10}")
-    print(f"Users:                {stats.users_count:>10}")
-    if stats.backup_path:
-        print(f"\nBackup Location:      {stats.backup_path}")
-        if stats.backup_size_bytes > 0:
-            size_mb = stats.backup_size_bytes / (1024**2)
-            print(f"Backup Size:          {size_mb:>10.2f} MB")
-    print(f"{'='*60}\n")
-
-
-def confirm_action(message: str) -> bool:
-    """Ask for user confirmation"""
-    response = input(f"{message} (yes/no): ").strip().lower()
-    return response == 'yes'
-
-
-async def main():
-    parser = argparse.ArgumentParser(
-        description='Clean Chronicle backend state with optional backup',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Dry-run to see what would be deleted
-  python cleanup_state.py --dry-run
-
-  # Safe cleanup with metadata backup
-  python cleanup_state.py --backup
-
-  # Full backup including audio export
-  python cleanup_state.py --backup --export-audio
-
-  # Automated cleanup without confirmation
-  python cleanup_state.py --backup --force
-        """
-    )
-
-    parser.add_argument(
-        '--backup',
-        action='store_true',
-        help='Create backup before cleaning (metadata only by default)'
-    )
-    parser.add_argument(
-        '--export-audio',
-        action='store_true',
-        help='Include audio WAV export in backup (can be large, requires --backup)'
-    )
-    parser.add_argument(
-        '--include-wav',
-        action='store_true',
-        help='Include legacy WAV file cleanup (backward compat)'
-    )
-    parser.add_argument(
-        '--dry-run',
-        action='store_true',
-        help='Show what would be cleaned without deleting'
-    )
-    parser.add_argument(
-        '--force',
-        action='store_true',
-        help='Skip confirmation prompt'
-    )
-    parser.add_argument(
-        '--backup-dir',
-        type=str,
-        default='/app/data/backups',
-        help='Backup directory location (default: /app/data/backups)'
-    )
-    parser.add_argument(
-        '--delete-users',
-        action='store_true',
-        help='DANGEROUS: Also delete user accounts'
-    )
-
-    args = parser.parse_args()
-
-    # Validate arguments
-    if args.export_audio and not args.backup:
-        logger.error("--export-audio requires --backup")
-        sys.exit(1)
-
-    # Initialize connections
-    logger.info("Connecting to services...")
-
+async def connect_services():
+    """Initialize all service connections. Returns (mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client)."""
     # MongoDB
     mongodb_uri = os.getenv("MONGODB_URI", "mongodb://mongo:27017")
     mongodb_database = os.getenv("MONGODB_DATABASE", "chronicle")
     mongo_client = AsyncIOMotorClient(mongodb_uri)
     mongo_db = mongo_client[mongodb_database]
-
-    # Initialize Beanie
     await init_beanie(
         database=mongo_db,
-        document_models=[Conversation, AudioChunkDocument, WaveformData, User]
+        document_models=[Conversation, AudioChunkDocument, WaveformData, User, Annotation],
     )
 
     # Redis
@@ -922,130 +790,270 @@ Examples:
         qdrant_host = os.getenv("QDRANT_BASE_URL", "qdrant")
         qdrant_port = int(os.getenv("QDRANT_PORT", "6333"))
         qdrant_client = AsyncQdrantClient(host=qdrant_host, port=qdrant_port)
-    except Exception as e:
-        logger.warning(f"Qdrant not available: {e}")
+    except Exception:
+        pass
 
-    # Neo4j (optional - knowledge graph)
+    # Neo4j
     neo4j_driver = None
-    try:
-        neo4j_host = os.getenv("NEO4J_HOST")
-        if neo4j_host:
+    neo4j_host = os.getenv("NEO4J_HOST")
+    if neo4j_host:
+        try:
             neo4j_user = os.getenv("NEO4J_USER", "neo4j")
             neo4j_password = os.getenv("NEO4J_PASSWORD", "password")
-            neo4j_uri = f"bolt://{neo4j_host}:7687"
-            neo4j_driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+            neo4j_driver = GraphDatabase.driver(
+                f"bolt://{neo4j_host}:7687", auth=(neo4j_user, neo4j_password)
+            )
             neo4j_driver.verify_connectivity()
-            logger.info(f"Connected to Neo4j at {neo4j_uri}")
-    except Exception as e:
-        logger.warning(f"Neo4j not available: {e}")
-        neo4j_driver = None
+        except Exception:
+            neo4j_driver = None
 
-    # Get current statistics
-    logger.info("Gathering current statistics...")
-    stats = await get_current_stats(mongo_db, redis_conn, qdrant_client, neo4j_driver)
+    # LangFuse
+    langfuse_client = None
+    langfuse_host = os.getenv("LANGFUSE_HOST")
+    langfuse_public = os.getenv("LANGFUSE_PUBLIC_KEY")
+    langfuse_secret = os.getenv("LANGFUSE_SECRET_KEY")
+    if langfuse_host and langfuse_public and langfuse_secret:
+        try:
+            from langfuse import Langfuse
 
-    # Print current state
-    print_stats(stats, "Current Backend State")
+            langfuse_client = Langfuse()
+        except Exception:
+            langfuse_client = None
 
-    # Dry-run mode
-    if args.dry_run:
-        print("\n[DRY-RUN MODE] No actual changes will be made\n")
-        if args.backup:
-            print("Would create backup at:", Path(args.backup_dir) / f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-            if args.export_audio:
-                print("Would include audio WAV export (1-minute chunks)")
-        print("\nWould delete:")
-        print(f"  - {stats.conversations_count} conversations")
-        print(f"  - {stats.audio_chunks_count} audio chunks")
-        print(f"  - {stats.waveforms_count} waveforms")
-        print(f"  - {stats.chat_sessions_count} chat sessions")
-        print(f"  - {stats.chat_messages_count} chat messages")
-        print(f"  - {stats.memories_count} memories")
-        if neo4j_driver:
-            print(f"  - {stats.neo4j_nodes_count} Neo4j nodes")
-            print(f"  - {stats.neo4j_relationships_count} Neo4j relationships")
-            print(f"  - {stats.neo4j_promises_count} Neo4j promises")
-        print(f"  - {stats.redis_jobs_count} Redis jobs")
-        if args.include_wav:
-            print(f"  - {stats.legacy_wav_count} legacy WAV files")
-        if args.delete_users:
-            print(f"  - {stats.users_count} users (DANGEROUS)")
-        else:
-            print(f"  - Users will be preserved ({stats.users_count} users)")
-        print("\nRun without --dry-run to perform actual cleanup")
-        return
+    return mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client
 
-    # Confirmation prompt
-    if not args.force:
-        print("\n⚠️  WARNING: This will permanently delete data!")
-        print(f"  - {stats.conversations_count} conversations")
-        print(f"  - {stats.audio_chunks_count} audio chunks")
-        print(f"  - {stats.waveforms_count} waveforms")
-        print(f"  - {stats.chat_sessions_count} chat sessions")
-        print(f"  - {stats.chat_messages_count} chat messages")
-        print(f"  - {stats.memories_count} memories")
-        if neo4j_driver:
-            print(f"  - {stats.neo4j_nodes_count} Neo4j nodes")
-            print(f"  - {stats.neo4j_relationships_count} Neo4j relationships")
-            print(f"  - {stats.neo4j_promises_count} Neo4j promises")
-        print(f"  - {stats.redis_jobs_count} Redis jobs")
-        if args.include_wav:
-            print(f"  - {stats.legacy_wav_count} legacy WAV files")
-        if args.delete_users:
-            print(f"  - {stats.users_count} users (DANGEROUS)")
-        else:
-            print(f"  - Users will be preserved ({stats.users_count} users)")
 
-        if args.backup:
-            print(f"\n✓ Backup will be created at: {args.backup_dir}")
-            if args.export_audio:
-                print("✓ Audio will be exported as WAV files")
-        else:
-            print("\n✗ No backup will be created")
+# ---------------------------------------------------------------------------
+# Display helpers
+# ---------------------------------------------------------------------------
 
-        print()
-        if not confirm_action("Are you sure you want to proceed?"):
-            logger.info("Cleanup cancelled by user")
-            return
-
-    # Create backup if requested
-    if args.backup:
-        backup_manager = BackupManager(args.backup_dir, args.export_audio, mongo_db, neo4j_driver)
-        success = await backup_manager.create_backup(qdrant_client, stats)
-
-        if not success:
-            logger.error("Backup failed, aborting cleanup")
-            return
-
-        print_stats(stats, "Backup Created")
-
-    # Perform cleanup
-    cleanup_manager = CleanupManager(
-        mongo_db,
-        redis_conn,
-        qdrant_client,
-        args.include_wav,
-        args.delete_users,
-        neo4j_driver,
+def print_header():
+    console.print()
+    console.print(
+        Panel(
+            Text("Chronicle Cleanup & Backup", style="bold white", justify="center"),
+            subtitle=datetime.now().strftime("%Y-%m-%d %H:%M"),
+            border_style="blue",
+            padding=(1, 4),
+        )
     )
 
-    success = await cleanup_manager.perform_cleanup(stats)
 
-    if not success:
-        logger.error("Cleanup failed")
+def print_dry_run(stats: Stats, args):
+    console.print()
+    console.print(Panel("[bold yellow]DRY-RUN MODE[/bold yellow] - no changes will be made", border_style="yellow"))
+    console.print()
+
+    if args.backup or args.backup_only:
+        console.print("[cyan]Would create backup at:[/cyan]", str(Path(args.backup_dir) / f"backup_..."))
+        if args.export_audio:
+            audio_note = f"(from {stats.conversations_with_transcript} conversations with transcripts)"
+            console.print(f"[cyan]Would export audio WAV files[/cyan] {audio_note}")
+        console.print()
+
+    if not args.backup_only:
+        table = Table(title="Would Delete", border_style="red", title_style="bold red")
+        table.add_column("Data", style="white")
+        table.add_column("Count", justify="right", style="bold red")
+
+        table.add_row("Conversations", str(stats.conversations))
+        table.add_row("Audio Chunks", str(stats.audio_chunks))
+        table.add_row("Waveforms", str(stats.waveforms))
+        table.add_row("Chat Sessions", str(stats.chat_sessions))
+        table.add_row("Chat Messages", str(stats.chat_messages))
+        table.add_row("Annotations", str(stats.annotations))
+        table.add_row("Memories (Qdrant)", str(stats.memories))
+        if stats.neo4j_nodes:
+            table.add_row("Neo4j Nodes", str(stats.neo4j_nodes))
+            table.add_row("Neo4j Relationships", str(stats.neo4j_relationships))
+        table.add_row("Redis Jobs", str(stats.redis_jobs))
+        if args.include_wav:
+            table.add_row("Legacy WAV Files", str(stats.legacy_wav))
+        if args.delete_users:
+            table.add_row("[bold red]Users (DANGEROUS)[/bold red]", str(stats.users))
+        else:
+            table.add_row("[green]Users (preserved)[/green]", str(stats.users))
+
+        console.print(table)
+    else:
+        console.print("[green]Backup-only mode[/green] - no data would be deleted")
+
+    console.print()
+    console.print("[dim]Run without --dry-run to proceed[/dim]")
+
+
+def print_confirmation(stats: Stats, args) -> bool:
+    """Show what will happen and ask for confirmation. Returns True if user confirms."""
+    console.print()
+
+    if args.backup or args.backup_only:
+        console.print(Panel(
+            f"[green]Backup will be created at:[/green] {args.backup_dir}\n"
+            + ("[green]Audio WAV export included[/green]" if args.export_audio else "[dim]Audio WAV export: off[/dim]"),
+            title="Backup",
+            border_style="green",
+        ))
+    elif not args.backup_only:
+        console.print(Panel(
+            "[bold red]No backup will be created![/bold red]\nData will be permanently lost.",
+            title="Warning",
+            border_style="red",
+        ))
+
+    if not args.backup_only:
+        items = [
+            f"  {stats.conversations} conversations",
+            f"  {stats.audio_chunks} audio chunks",
+            f"  {stats.waveforms} waveforms",
+            f"  {stats.chat_sessions} chat sessions",
+            f"  {stats.chat_messages} chat messages",
+            f"  {stats.annotations} annotations",
+            f"  {stats.memories} memories",
+        ]
+        if stats.neo4j_nodes:
+            items.append(f"  {stats.neo4j_nodes} Neo4j nodes + {stats.neo4j_relationships} relationships")
+        items.append(f"  {stats.redis_jobs} Redis jobs")
+        if args.include_wav:
+            items.append(f"  {stats.legacy_wav} legacy WAV files")
+        if args.delete_users:
+            items.append(f"  [bold red]{stats.users} users (DANGEROUS)[/bold red]")
+
+        console.print(Panel(
+            "\n".join(items),
+            title="[bold red]Will Delete[/bold red]",
+            border_style="red",
+        ))
+
+    console.print()
+    return Confirm.ask("[bold]Proceed?[/bold]", default=False)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+async def main():
+    parser = argparse.ArgumentParser(
+        description="Chronicle Cleanup & Backup Tool",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  ./cleanup.sh --dry-run                    Preview what would happen
+  ./cleanup.sh --backup-only                Back up everything (no cleanup)
+  ./cleanup.sh --backup-only --export-audio Back up everything including audio WAV
+  ./cleanup.sh --backup                     Back up then clean
+  ./cleanup.sh --backup --export-audio      Back up with audio then clean
+  ./cleanup.sh --backup --force             Skip confirmation prompt
+        """,
+    )
+
+    parser.add_argument("--backup", action="store_true", help="Create backup before cleaning")
+    parser.add_argument("--backup-only", action="store_true", help="Create backup WITHOUT cleaning (safe)")
+    parser.add_argument("--export-audio", action="store_true", help="Include audio WAV export in backup (conversations with transcripts only)")
+    parser.add_argument("--include-wav", action="store_true", help="Include legacy WAV file cleanup")
+    parser.add_argument("--dry-run", action="store_true", help="Preview without making changes")
+    parser.add_argument("--force", action="store_true", help="Skip confirmation prompt")
+    parser.add_argument("--backup-dir", type=str, default="/app/data/backups", help="Backup directory (default: /app/data/backups)")
+    parser.add_argument("--delete-users", action="store_true", help="DANGEROUS: Also delete user accounts")
+
+    args = parser.parse_args()
+
+    # Validation
+    if args.export_audio and not (args.backup or args.backup_only):
+        console.print("[red]--export-audio requires --backup or --backup-only[/red]")
+        sys.exit(1)
+
+    # Header
+    print_header()
+
+    # Connect
+    with console.status("[bold cyan]Connecting to services...", spinner="dots"):
+        mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client = await connect_services()
+
+    # Gather stats
+    with console.status("[bold cyan]Gathering statistics...", spinner="dots"):
+        stats = await gather_stats(mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client)
+
+    console.print()
+    console.print(render_stats_table(stats, "Current Backend State"))
+    console.print()
+
+    # Dry-run
+    if args.dry_run:
+        print_dry_run(stats, args)
         return
 
-    # Verify cleanup
-    logger.info("Verifying cleanup...")
-    final_stats = await get_current_stats(mongo_db, redis_conn, qdrant_client, neo4j_driver)
-    print_stats(final_stats, "Backend State After Cleanup")
+    # Confirmation
+    if not args.force:
+        if not print_confirmation(stats, args):
+            console.print("[yellow]Cancelled.[/yellow]")
+            return
 
-    logger.info("✓ Cleanup completed successfully!")
+    # Backup
+    do_backup = args.backup or args.backup_only
+    if do_backup:
+        console.print()
+        backup_mgr = BackupManager(args.backup_dir, args.export_audio, mongo_db, neo4j_driver, langfuse_client)
+        result = await backup_mgr.run(qdrant_client, stats)
 
-    if args.backup:
-        logger.info(f"✓ Backup saved to: {stats.backup_path}")
+        console.print()
+        console.print(result.render_table())
+        console.print()
+        console.print(
+            f"[bold]Backup size:[/bold] {_human_size(result.total_size)}  "
+            f"[bold]Location:[/bold] {backup_mgr.backup_path}"
+        )
 
-    # Close Neo4j driver
+        if not result.critical_ok:
+            console.print()
+            console.print(Panel(
+                "[bold red]Critical backup exports failed![/bold red]\n"
+                "Conversations or audio metadata could not be exported.\n"
+                "Cleanup will NOT proceed to protect your data.",
+                title="Backup Verification Failed",
+                border_style="red",
+            ))
+            sys.exit(1)
+
+        if not result.all_ok:
+            console.print()
+            console.print("[yellow]Some non-critical exports failed (see table above).[/yellow]")
+
+    # If backup-only, we're done
+    if args.backup_only:
+        console.print()
+        console.print(Panel(
+            "[bold green]Backup completed successfully![/bold green]\n"
+            "No data was deleted.",
+            border_style="green",
+        ))
+        return
+
+    # Cleanup
+    console.print()
+    cleanup_mgr = CleanupManager(
+        mongo_db, redis_conn, qdrant_client, args.include_wav, args.delete_users, neo4j_driver
+    )
+    success = await cleanup_mgr.run(stats)
+
+    if not success:
+        console.print(Panel("[bold red]Cleanup encountered errors![/bold red]", border_style="red"))
+        sys.exit(1)
+
+    # Verify
+    console.print()
+    with console.status("[bold cyan]Verifying cleanup...", spinner="dots"):
+        final_stats = await gather_stats(mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client)
+
+    console.print(render_stats_table(final_stats, "After Cleanup"))
+
+    console.print()
+    msg = "[bold green]Cleanup completed successfully![/bold green]"
+    if do_backup:
+        msg += f"\n[green]Backup saved to:[/green] {backup_mgr.backup_path}"
+    console.print(Panel(msg, border_style="green"))
+
+    # Cleanup Neo4j driver
     if neo4j_driver:
         neo4j_driver.close()
 
@@ -1054,8 +1062,9 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("\nCleanup interrupted by user")
+        console.print("\n[yellow]Interrupted.[/yellow]")
         sys.exit(1)
     except Exception as e:
+        console.print(f"\n[bold red]Fatal error:[/bold red] {e}")
         logger.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)
