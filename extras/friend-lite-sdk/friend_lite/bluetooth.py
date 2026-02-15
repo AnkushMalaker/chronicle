@@ -12,13 +12,19 @@ def print_devices() -> None:
         print(f"{i}. {d.name} [{d.address}]")
 
 
-class OmiConnection:
+class WearableConnection:
+    """Base class for BLE wearable device connections.
+
+    Provides connect/disconnect lifecycle, audio subscription, and
+    disconnect-wait primitives shared by all wearable devices.
+    """
+
     def __init__(self, mac_address: str) -> None:
         self._mac_address = mac_address
         self._client: Optional[BleakClient] = None
         self._disconnected = asyncio.Event()
 
-    async def __aenter__(self) -> "OmiConnection":
+    async def __aenter__(self) -> "WearableConnection":
         await self.connect()
         return self
 
@@ -48,12 +54,9 @@ class OmiConnection:
     async def subscribe_audio(self, callback: Callable[[int, bytearray], None]) -> None:
         await self.subscribe(OMI_AUDIO_CHAR_UUID, callback)
 
-    async def subscribe_button(self, callback: Callable[[int, bytearray], None]) -> None:
-        await self.subscribe(OMI_BUTTON_CHAR_UUID, callback)
-
     async def subscribe(self, uuid: str, callback: Callable[[int, bytearray], None]) -> None:
         if self._client is None:
-            raise RuntimeError("Not connected to OMI device")
+            raise RuntimeError("Not connected to device")
         await self._client.start_notify(uuid, callback)
 
     async def wait_until_disconnected(self, timeout: float | None = None) -> None:
@@ -61,6 +64,13 @@ class OmiConnection:
             await self._disconnected.wait()
         else:
             await asyncio.wait_for(self._disconnected.wait(), timeout=timeout)
+
+
+class OmiConnection(WearableConnection):
+    """OMI device with button support."""
+
+    async def subscribe_button(self, callback: Callable[[int, bytearray], None]) -> None:
+        await self.subscribe(OMI_BUTTON_CHAR_UUID, callback)
 
 
 async def listen_to_omi(mac_address: str, char_uuid: str, data_handler) -> None:
