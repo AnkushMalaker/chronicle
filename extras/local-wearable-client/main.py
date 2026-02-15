@@ -16,8 +16,7 @@ import argparse
 import asyncio
 import logging
 import os
-from asyncio import Queue
-from typing import Any, AsyncGenerator
+from typing import Any
 
 import yaml
 from bleak import BleakScanner
@@ -123,23 +122,32 @@ async def connect_and_stream(device: dict, backend_enabled: bool = True) -> None
     """Connect to a device, subscribe to audio (and buttons for OMI),
     and stream to the Chronicle backend until disconnected."""
 
-    audio_queue: Queue[bytes] = Queue()
     decoder = OmiOpusDecoder()
+    loop = asyncio.get_running_loop()
 
-    def handle_ble_data(_sender: Any, data: bytes) -> None:
-        decoded_pcm = decoder.decode_packet(data)
-        if decoded_pcm:
-            try:
-                audio_queue.put_nowait(decoded_pcm)
-            except Exception as e:
-                logger.error("Queue error: %s", e)
-        # Send Opus payload to backend (strip 3-byte BLE header)
-        # Backend's OmiOpusDecoder uses strip_header=False, expecting headerless data
+    # Raw BLE data queue — written from BLE thread via call_soon_threadsafe
+    ble_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=1000)
+    # Backend Opus queue — written from BLE callback via call_soon_threadsafe
+    backend_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=500)
+
+    def _enqueue_ble(data: bytes) -> None:
+        # Push raw BLE data to local processing queue
+        try:
+            ble_queue.put_nowait(data)
+        except asyncio.QueueFull:
+            logger.warning("BLE queue full, dropping frame")
+        # Push Opus payload directly to backend (decoupled from local file I/O)
         if backend_enabled and len(data) > 3:
             try:
                 backend_queue.put_nowait(data[3:])
             except asyncio.QueueFull:
-                pass  # backend not keeping up, drop — file is saved
+                logger.warning("Backend queue full, dropping frame")
+
+    def handle_ble_data(_sender: Any, data: bytes) -> None:
+        try:
+            loop.call_soon_threadsafe(_enqueue_ble, data)
+        except RuntimeError:
+            pass  # event loop closed
 
     def handle_button_event(_sender: Any, data: bytes) -> None:
         try:
@@ -149,18 +157,10 @@ async def connect_and_stream(device: dict, backend_enabled: bool = True) -> None
             return
         if state != ButtonState.IDLE:
             logger.info("Button event: %s", state.name)
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(send_button_event(state.name))
-            except RuntimeError:
-                logger.debug("No running event loop, cannot send button event")
+            asyncio.run_coroutine_threadsafe(send_button_event(state.name), loop)
 
     device_name = device["name"] or device["type"]
     conn = create_connection(device["mac"], device["type"])
-
-    # Cap at 500 chunks so a dead backend doesn't eat memory
-    # Raw Opus bytes are queued directly from handle_ble_data
-    backend_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=500)
 
     file_sink = RollingFileSink(
         directory="./audio_chunks",
@@ -172,10 +172,13 @@ async def connect_and_stream(device: dict, backend_enabled: bool = True) -> None
     )
 
     async def process_audio() -> None:
-        """Write decoded PCM to local file sink."""
-        async for chunk_bytes in source_bytes(audio_queue):
-            chunk = AudioChunk(audio=chunk_bytes, rate=16000, width=2, channels=1)
-            await file_sink.write(chunk)
+        """Decode BLE data -> PCM for local file sink."""
+        while True:
+            data = await ble_queue.get()
+            decoded_pcm = decoder.decode_packet(data)
+            if decoded_pcm:
+                chunk = AudioChunk(audio=decoded_pcm, rate=16000, width=2, channels=1)
+                await file_sink.write(chunk)
 
     async def backend_stream_wrapper() -> None:
         async def queue_to_stream():
@@ -202,29 +205,40 @@ async def connect_and_stream(device: dict, backend_enabled: bool = True) -> None
                     logger.info("Waking Neo1 device...")
                     await conn.wake()
 
-                tasks = [
-                    conn.wait_until_disconnected(),
-                    process_audio(),
+                worker_tasks = [
+                    asyncio.create_task(process_audio(), name="process_audio"),
                 ]
                 if backend_enabled:
-                    tasks.append(backend_stream_wrapper())
+                    worker_tasks.append(asyncio.create_task(backend_stream_wrapper(), name="backend_stream"))
+
+                disconnect_task = asyncio.create_task(
+                    conn.wait_until_disconnected(), name="disconnect"
+                )
 
                 logger.info("Streaming audio from %s [%s]%s", device_name, device["mac"],
                             "" if backend_enabled else " (local-only, backend disabled)")
-                await asyncio.gather(*tasks)
+
+                # Wait for disconnect or any worker to fail
+                all_tasks = [disconnect_task] + worker_tasks
+                done, pending = await asyncio.wait(all_tasks, return_when=asyncio.FIRST_COMPLETED)
+
+                # Cancel remaining tasks and wait for cleanup
+                for task in pending:
+                    task.cancel()
+                for task in pending:
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+                # Re-raise if a worker failed (not just disconnect)
+                for task in done:
+                    if task is not disconnect_task and task.exception():
+                        raise task.exception()
         except Exception as e:
             logger.error("Error during device session: %s", e, exc_info=True)
         finally:
             await backend_queue.put(None)
-
-
-async def source_bytes(queue: Queue[bytes]) -> AsyncGenerator[bytes, None]:
-    while True:
-        chunk = await queue.get()
-        try:
-            yield chunk
-        finally:
-            queue.task_done()
 
 
 async def run() -> None:

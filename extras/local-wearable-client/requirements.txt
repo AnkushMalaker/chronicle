@@ -1,5 +1,5 @@
 friend-lite-sdk @ file:../friend-lite-sdk
-easy_audio_interfaces
+easy_audio_interfaces>=0.8
 python-dotenv
 httpx
 websockets
