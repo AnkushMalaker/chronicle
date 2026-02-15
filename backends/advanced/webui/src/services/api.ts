@@ -387,6 +387,9 @@ export const queueApi = {
     return api.post(endpoint, body)
   },
 
+  // Clear jobs
+  clearJobs: () => api.delete('/api/queue/jobs'),
+
   // Plugin events
   getEvents: (limit: number = 50, eventType?: string) => api.get('/api/queue/events', {
     params: { limit, ...(eventType && { event_type: eventType }) }

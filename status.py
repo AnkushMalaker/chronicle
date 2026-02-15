@@ -182,6 +182,28 @@ def get_service_health(service_name: str) -> Dict[str, Any]:
     }
 
 
+def get_backend_worker_health() -> Optional[Dict[str, Any]]:
+    """Get internal worker health from the backend /health endpoint.
+
+    Returns worker_count, failed queues, etc. from the Redis section of health data.
+    This catches internal worker crash loops that Docker restart counts miss.
+    """
+    try:
+        response = requests.get('http://localhost:8000/health', timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            redis_info = data.get('services', {}).get('redis', {})
+            return {
+                'worker_count': redis_info.get('worker_count', 0),
+                'active_workers': redis_info.get('active_workers', 0),
+                'idle_workers': redis_info.get('idle_workers', 0),
+                'queues': redis_info.get('queues', {}),
+            }
+    except Exception:
+        pass
+    return None
+
+
 def show_quick_status():
     """Show quick status overview"""
     console.print("\n🏥 [bold]Chronicle Health Status[/bold]\n")
@@ -244,6 +266,19 @@ def show_quick_status():
         )
 
     console.print(table)
+
+    # Worker health note (from backend /health endpoint)
+    worker_health = get_backend_worker_health()
+    if worker_health is not None:
+        wc = worker_health['worker_count']
+        active = worker_health['active_workers']
+        total_failed = sum(q.get('failed_count', 0) for q in worker_health['queues'].values())
+        if wc == 0:
+            console.print("\n[bold red]  ❌ RQ Workers: 0 registered — workers may be crash-looping. Check: docker compose logs workers[/bold red]")
+        elif total_failed > 0:
+            console.print(f"\n  [yellow]⚠️  RQ Workers: {wc} registered ({active} active), {total_failed} failed job(s) in queues[/yellow]")
+        else:
+            console.print(f"\n  [green]✅ RQ Workers: {wc} registered ({active} active)[/green]")
 
     # Legend
     console.print("\n[dim]Legend:[/dim]")

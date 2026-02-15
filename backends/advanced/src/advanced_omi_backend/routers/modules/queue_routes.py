@@ -345,6 +345,47 @@ async def get_events(
         return {"events": [], "total": 0}
 
 
+@router.delete("/jobs")
+async def clear_jobs(
+    current_user: User = Depends(current_active_user),
+):
+    """Clear all finished and failed jobs from all queues (admin only)."""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    try:
+        from rq.registry import FailedJobRegistry, FinishedJobRegistry
+
+        from advanced_omi_backend.controllers.queue_controller import get_queue
+
+        total_removed = 0
+
+        for queue_name in QUEUE_NAMES:
+            queue = get_queue(queue_name)
+
+            for registry_name, registry in [
+                ("finished", FinishedJobRegistry(queue=queue)),
+                ("failed", FailedJobRegistry(queue=queue)),
+            ]:
+                job_ids = list(registry.get_job_ids())
+                for job_id in job_ids:
+                    try:
+                        job = Job.fetch(job_id, connection=redis_conn)
+                        job.delete()
+                        total_removed += 1
+                    except Exception:
+                        try:
+                            registry.remove(job_id)
+                            total_removed += 1
+                        except Exception:
+                            pass
+
+        return {"deleted": total_removed}
+    except Exception as e:
+        logger.error(f"Failed to clear jobs: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to clear jobs: {str(e)}")
+
+
 @router.delete("/events")
 async def clear_events(
     current_user: User = Depends(current_active_user),

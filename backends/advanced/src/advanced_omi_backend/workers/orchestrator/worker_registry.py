@@ -52,8 +52,6 @@ def build_worker_definitions() -> List[WorkerDefinition]:
             WorkerDefinition(
                 name=f"rq-worker-{i}",
                 command=[
-                    "uv",
-                    "run",
                     "python",
                     "-m",
                     "advanced_omi_backend.workers.rq_worker_entry",
@@ -74,8 +72,6 @@ def build_worker_definitions() -> List[WorkerDefinition]:
             WorkerDefinition(
                 name=f"audio-persistence-{i}",
                 command=[
-                    "uv",
-                    "run",
                     "python",
                     "-m",
                     "advanced_omi_backend.workers.rq_worker_entry",
@@ -94,8 +90,6 @@ def build_worker_definitions() -> List[WorkerDefinition]:
         WorkerDefinition(
             name="streaming-stt",
             command=[
-                "uv",
-                "run",
                 "python",
                 "-m",
                 "advanced_omi_backend.workers.audio_stream_worker",

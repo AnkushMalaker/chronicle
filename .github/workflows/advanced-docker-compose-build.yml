@@ -15,12 +15,12 @@ on:
       - "extras/speaker-recognition/**"
       - "extras/openmemory-mcp/**"
       - ".github/workflows/advanced-docker-compose-build.yml"
-    tags:
-      - "v*"
+  release:
+    types: [ published ]
 
 
 permissions:
-  contents: read
+  contents: write
   packages: write
   actions: read
 
@@ -122,12 +122,14 @@ jobs:
         run: |
           if [ -n "${{ github.event.inputs.version }}" ]; then
             VERSION="${{ github.event.inputs.version }}"
+          elif [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${{ github.event.release.tag_name }}"
           elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             VERSION="${GITHUB_REF#refs/tags/}"
           else
             VERSION="sha-${GITHUB_SHA::7}"
           fi
-          
+
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build, tag, and push services sequentially with version
@@ -267,3 +269,53 @@ jobs:
           echo "Built and pushed images with version tag: ${VERSION}"
           echo "Images pushed to: $REGISTRY/$OWNER_LC/"
           echo "::endgroup::"
+
+      - name: Update release notes with Docker images
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          OWNER_LC=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
+
+          DOCKER_SECTION=$(cat <<EOF
+
+          ---
+
+          ## Docker Images
+
+          All images are published to \`ghcr.io/${OWNER_LC}\` with tags \`${VERSION}\` and \`latest\`.
+
+          ### Core Services
+          \`\`\`bash
+          docker pull ghcr.io/${OWNER_LC}/advanced-chronicle-backend:${VERSION}
+          docker pull ghcr.io/${OWNER_LC}/advanced-workers:${VERSION}
+          docker pull ghcr.io/${OWNER_LC}/advanced-webui:${VERSION}
+          docker pull ghcr.io/${OWNER_LC}/openmemory-mcp:${VERSION}
+          \`\`\`
+
+          ### Parakeet ASR (pick your CUDA version)
+          \`\`\`bash
+          docker pull ghcr.io/${OWNER_LC}/parakeet-asr-cu121:${VERSION}
+          docker pull ghcr.io/${OWNER_LC}/parakeet-asr-cu126:${VERSION}
+          docker pull ghcr.io/${OWNER_LC}/parakeet-asr-cu128:${VERSION}
+          \`\`\`
+
+          ### Speaker Recognition (pick your variant)
+          \`\`\`bash
+          docker pull ghcr.io/${OWNER_LC}/speaker-recognition-cpu:${VERSION}
+          docker pull ghcr.io/${OWNER_LC}/speaker-recognition-cu121:${VERSION}
+          docker pull ghcr.io/${OWNER_LC}/speaker-recognition-cu126:${VERSION}
+          docker pull ghcr.io/${OWNER_LC}/speaker-recognition-cu128:${VERSION}
+          \`\`\`
+          EOF
+          )
+
+          EXISTING_BODY=$(gh release view "$TAG_NAME" --json body -q '.body' --repo "$GITHUB_REPOSITORY")
+          UPDATED_BODY="${EXISTING_BODY}${DOCKER_SECTION}"
+          gh release edit "$TAG_NAME" --notes "$UPDATED_BODY" --repo "$GITHUB_REPOSITORY"
+          echo "Release notes updated with Docker image info"
+        working-directory: .

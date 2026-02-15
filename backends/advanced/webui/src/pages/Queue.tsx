@@ -2258,8 +2258,22 @@ const Queue: React.FC = () => {
 
           {/* Jobs Table */}
       <div className="bg-white rounded-lg border overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-200">
+        <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
           <h3 className="text-lg font-medium">Jobs</h3>
+          {jobs.length > 0 && (
+            <button
+              onClick={() => {
+                queueApi.clearJobs().then(() => {
+                  fetchData();
+                });
+              }}
+              className="inline-flex items-center px-2 py-1 rounded text-xs text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors"
+              title="Clear finished and failed jobs"
+            >
+              <Trash2 className="w-3.5 h-3.5 mr-1" />
+              Clear
+            </button>
+          )}
         </div>
 
         <div className="overflow-x-auto">
@@ -2276,7 +2290,14 @@ const Queue: React.FC = () => {
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
-              {jobs.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).map((job) => (
+              {jobs
+                .filter((job) => {
+                  if (filters.status && job.status !== filters.status) return false;
+                  if (filters.job_type && job.job_type !== filters.job_type) return false;
+                  if (filters.priority && job.meta?.priority !== filters.priority) return false;
+                  return true;
+                })
+                .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).map((job) => (
                 <tr key={job.job_id} className="hover:bg-gray-50">
                   <td className="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">
                     {new Date(job.created_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
