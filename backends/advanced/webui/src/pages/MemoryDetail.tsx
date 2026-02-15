@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Calendar, Tag, Trash2, RefreshCw, Edit3, Save, X } from 'lucide-react'
+import { ArrowLeft, Calendar, Tag, Trash2, RefreshCw, Edit3, Save, X, MessageSquare } from 'lucide-react'
 import { annotationsApi } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
 import { useMemoryDetail, useDeleteMemory } from '../hooks/useMemories'
@@ -32,6 +32,12 @@ interface Memory {
   }
   hash?: string
   role?: string
+  source_conversation?: {
+    conversation_id: string
+    title?: string
+    summary?: string
+    created_at?: string
+  }
 }
 
 export default function MemoryDetail() {
@@ -423,18 +429,53 @@ export default function MemoryDetail() {
             </div>
           )}
 
-          {/* Additional Metadata */}
-          {memory.metadata && Object.keys(memory.metadata).filter(key =>
-            !['name', 'timeRanges', 'isPerson', 'isEvent', 'isPlace', 'extractedWith'].includes(key)
-          ).length > 0 && (
-            <div className="bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
-              <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase mb-3">
-                Additional Data
+          {/* Source Conversation */}
+          {memory.source_conversation && (
+            <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
+              <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
+                <MessageSquare className="w-4 h-4" />
+                Source Conversation
               </h3>
-              <dl className="space-y-2 text-sm">
-                {Object.entries(memory.metadata)
-                  .filter(([key]) => !['name', 'timeRanges', 'isPerson', 'isEvent', 'isPlace', 'extractedWith'].includes(key))
-                  .map(([key, value]) => (
+              <div className="space-y-2">
+                <button
+                  onClick={() => navigate(`/conversations/${memory.source_conversation!.conversation_id}`)}
+                  className="text-sm font-medium text-blue-700 dark:text-blue-300 hover:underline text-left"
+                >
+                  {memory.source_conversation.title || 'Untitled Conversation'}
+                </button>
+                {memory.source_conversation.summary && (
+                  <p className="text-xs text-gray-600 dark:text-gray-400 line-clamp-3">
+                    {memory.source_conversation.summary}
+                  </p>
+                )}
+                {memory.source_conversation.created_at && (
+                  <p className="text-xs text-gray-500 dark:text-gray-500">
+                    {formatDate(memory.source_conversation.created_at)}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Additional Metadata */}
+          {(() => {
+            const INTERNAL_KEYS = [
+              'name', 'timeRanges', 'isPerson', 'isEvent', 'isPlace', 'extractedWith',
+              'source_id', 'user_id', 'user_email', 'client_id', 'source', 'timestamp',
+              'extraction_enabled', 'client_name', 'mcp_server', 'chronicle_user_id',
+              'chronicle_user_email',
+            ]
+            const visibleEntries = memory.metadata
+              ? Object.entries(memory.metadata).filter(([key]) => !INTERNAL_KEYS.includes(key))
+              : []
+
+            return visibleEntries.length > 0 ? (
+              <div className="bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+                <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase mb-3">
+                  Additional Data
+                </h3>
+                <dl className="space-y-2 text-sm">
+                  {visibleEntries.map(([key, value]) => (
                     <div key={key} className="flex justify-between items-start gap-2">
                       <dt className="text-gray-600 dark:text-gray-400 capitalize">{key}:</dt>
                       <dd className="text-gray-900 dark:text-gray-100 text-right truncate max-w-[150px]" title={String(value)}>
@@ -442,9 +483,10 @@ export default function MemoryDetail() {
                       </dd>
                     </div>
                   ))}
-              </dl>
-            </div>
-          )}
+                </dl>
+              </div>
+            ) : null
+          })()}
         </div>
       </div>
     </div>

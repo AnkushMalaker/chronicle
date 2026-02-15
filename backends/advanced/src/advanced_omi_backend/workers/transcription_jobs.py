@@ -21,7 +21,7 @@ from rq import get_current_job
 from rq.exceptions import NoSuchJobError
 from rq.job import Job
 
-from advanced_omi_backend.config import get_backend_config
+from advanced_omi_backend.config import get_backend_config, get_transcription_job_timeout
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
     REDIS_URL,
@@ -414,6 +414,8 @@ async def transcribe_full_audio_job(
 
     if segments:
         # Provider returned segments - use them
+        from advanced_omi_backend.utils.segment_utils import classify_segment_text
+
         speaker_segments = []
         for seg in segments:
             raw_speaker = seg.get("speaker")
@@ -423,12 +425,22 @@ async def transcribe_full_audio_job(
                 speaker = f"Speaker {raw_speaker}"
             else:
                 speaker = str(raw_speaker)
+
+            # Classify segment as speech/event based on content
+            text = seg.get("text", "")
+            classification = classify_segment_text(text)
+            seg_type = "speech"
+            if classification == "event":
+                seg_type = "event"
+                speaker = ""  # No speaker for non-speech events
+
             speaker_segments.append(
                 Conversation.SpeakerSegment(
                     speaker=speaker,
                     start=seg.get("start", 0.0),
                     end=seg.get("end", 0.0),
-                    text=seg.get("text", ""),
+                    text=text,
+                    segment_type=seg_type,
                 )
             )
 
@@ -676,7 +688,7 @@ async def create_audio_only_conversation(
 
 @async_job(redis=True, beanie=True)
 async def transcription_fallback_check_job(
-    session_id: str, user_id: str, client_id: str, timeout_seconds: int = 900, *, redis_client=None
+    session_id: str, user_id: str, client_id: str, timeout_seconds: int = None, *, redis_client=None
 ) -> Dict[str, Any]:
     """
     Check if streaming transcription succeeded, fallback to batch if needed.
@@ -695,6 +707,9 @@ async def transcription_fallback_check_job(
     Returns:
         Dict with status (pass_through or batch_fallback_completed) and conversation details
     """
+    if timeout_seconds is None:
+        timeout_seconds = get_transcription_job_timeout()
+
     logger.info(f"🔍 Checking transcription status for session {session_id[:12]}")
 
     # Find conversation by session_id (client_id for streaming sessions)
@@ -859,7 +874,7 @@ async def transcription_fallback_check_job(
         conversation.conversation_id,
         version_id,
         "batch_fallback",
-        job_timeout=900,  # 15 minutes
+        job_timeout=get_transcription_job_timeout(),
         job_id=f"transcribe_{conversation.conversation_id[:12]}",
         description=f"Batch transcription fallback for {session_id[:8]}",
         meta={"session_id": session_id, "client_id": client_id},
@@ -1280,13 +1295,14 @@ async def stream_speech_detection_job(
 
     # Enqueue fallback check job for failed streaming sessions
     # This will attempt batch transcription as a fallback
+    config_timeout = get_transcription_job_timeout()
     fallback_job = transcription_queue.enqueue(
         transcription_fallback_check_job,
         session_id,
         user_id,
         client_id,
-        timeout_seconds=900,  # 15 minutes for batch transcription
-        job_timeout=1200,  # 20 minutes job timeout (includes overhead for fallback check)
+        timeout_seconds=config_timeout,
+        job_timeout=config_timeout + 300,  # Extra 5 min overhead for fallback check
         job_id=f"fallback_check_{session_id[:12]}",
         description=f"Transcription fallback check for {session_id[:8]} (no speech)",
         meta={"session_id": session_id, "client_id": client_id, "no_speech": True},

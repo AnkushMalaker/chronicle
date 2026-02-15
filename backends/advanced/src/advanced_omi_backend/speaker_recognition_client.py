@@ -356,20 +356,13 @@ class SpeakerRecognitionClient:
 
         MAX_SAMPLES_PER_LABEL = 3
 
-        # Detect non-speech segments (e.g. [Music], [Environmental Sounds], [Human Sounds])
-        import re
-        NON_SPEECH_PATTERN = re.compile(r"^\[.*\]$")
+        from advanced_omi_backend.utils.segment_utils import is_non_speech
 
         def _is_non_speech(seg: Dict) -> bool:
-            text = seg.get("text", "").strip()
-            if not text:
-                return True
-            if NON_SPEECH_PATTERN.match(text):
-                return True
-            label = str(seg.get("speaker", ""))
-            if label in ("None", "none", ""):
-                return True
-            return False
+            return is_non_speech(
+                seg.get("text", ""),
+                str(seg.get("speaker", "")),
+            )
 
         # Separate speech and non-speech segments
         speech_segments = []

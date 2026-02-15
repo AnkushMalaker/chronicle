@@ -315,6 +315,36 @@ async def reload_plugins(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/admin/system/restart-workers")
+async def restart_workers(current_user: User = Depends(current_superuser)):
+    """Signal all RQ workers to gracefully restart. Admin only.
+
+    Workers finish their current job before restarting. Safe to run anytime.
+    """
+    try:
+        result = await system_controller.restart_workers()
+        return JSONResponse(content=result, status_code=202)
+    except Exception as e:
+        logger.error(f"Failed to restart workers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/admin/system/restart-backend")
+async def restart_backend(current_user: User = Depends(current_superuser)):
+    """Schedule a backend restart. Admin only.
+
+    Sends SIGTERM to the FastAPI process after a short delay.
+    Docker will automatically restart the container.
+    Active WebSocket connections will be dropped.
+    """
+    try:
+        result = await system_controller.restart_backend()
+        return JSONResponse(content=result, status_code=202)
+    except Exception as e:
+        logger.error(f"Failed to schedule backend restart: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/admin/plugins/health")
 async def get_plugins_health(current_user: User = Depends(current_superuser)):
     """Get plugin health status for all registered plugins. Admin only."""

@@ -169,9 +169,18 @@ async def process_memory_job(conversation_id: str, *, redis_client=None) -> Dict
         for segment in segments:
             text = segment.text.strip()
             speaker = segment.speaker
+            seg_type = getattr(segment, 'segment_type', 'speech')
             if text:
-                dialogue_lines.append(f"{speaker}: {text}")
-            if speaker and speaker != "Unknown":
+                if seg_type == "event":
+                    # Non-speech event: include as context marker without speaker prefix
+                    dialogue_lines.append(f"[{text}]" if not text.startswith("[") else text)
+                elif seg_type == "note":
+                    # User-inserted note: include as distinct context
+                    dialogue_lines.append(f"[Note: {text}]")
+                else:
+                    # Normal speech segment
+                    dialogue_lines.append(f"{speaker}: {text}")
+            if speaker and speaker != "Unknown" and seg_type == "speech":
                 transcript_speakers.add(speaker.strip().lower())
     full_conversation = "\n".join(dialogue_lines)
 

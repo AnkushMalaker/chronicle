@@ -124,6 +124,8 @@ export const conversationsApi = {
     params: { permanent: true }
   }),
 
+  getMemories: (id: string) => api.get(`/api/conversations/${id}/memories`),
+
   // Reprocessing endpoints
   reprocessOrphan: (conversationId: string) => api.post(`/api/conversations/${conversationId}/reprocess-orphan`),
   reprocessTranscript: (conversationId: string) => api.post(`/api/conversations/${conversationId}/reprocess-transcript`),
@@ -207,7 +209,7 @@ export const annotationsApi = {
   applyDiarizationAnnotations: (conversation_id: string) =>
     api.post(`/api/annotations/diarization/${conversation_id}/apply`),
 
-  // Apply ALL pending annotations (diarization + transcript) - creates single new version
+  // Apply ALL pending annotations (diarization + transcript + insert) - creates single new version
   applyAllAnnotations: (conversation_id: string) =>
     api.post(`/api/annotations/${conversation_id}/apply`),
 
@@ -220,6 +222,30 @@ export const annotationsApi = {
 
   getTitleAnnotations: (conversation_id: string) =>
     api.get(`/api/annotations/title/${conversation_id}`),
+
+  // Generic annotation management
+  deleteAnnotation: (annotationId: string) =>
+    api.delete(`/api/annotations/${annotationId}`),
+
+  updateAnnotation: (annotationId: string, data: {
+    corrected_text?: string
+    corrected_speaker?: string
+    insert_text?: string
+    insert_segment_type?: string
+    insert_speaker?: string
+  }) => api.patch(`/api/annotations/${annotationId}`, data),
+
+  // Insert annotations
+  createInsertAnnotation: (data: {
+    conversation_id: string
+    insert_after_index: number
+    insert_text: string
+    insert_segment_type: string
+    insert_speaker?: string
+  }) => api.post('/api/annotations/insert', data),
+
+  getInsertAnnotations: (conversation_id: string) =>
+    api.get(`/api/annotations/insert/${conversation_id}`),
 }
 
 export const finetuningApi = {
@@ -268,7 +294,7 @@ export const systemApi = {
 
   // Miscellaneous Configuration Settings
   getMiscSettings: () => api.get('/api/misc-settings'),
-  saveMiscSettings: (settings: { always_persist_enabled?: boolean; use_provider_segments?: boolean; per_segment_speaker_id?: boolean }) =>
+  saveMiscSettings: (settings: { always_persist_enabled?: boolean; use_provider_segments?: boolean; per_segment_speaker_id?: boolean; transcription_job_timeout_seconds?: number }) =>
     api.post('/api/misc-settings', settings),
   
   // Plugin Configuration Management (YAML-based)
@@ -333,6 +359,10 @@ export const systemApi = {
     api.post('/api/admin/llm-operations', operations),
   testLLMModel: (modelName: string | null) =>
     api.post('/api/admin/llm-operations/test', { model_name: modelName }),
+
+  // System restart operations
+  restartWorkers: () => api.post('/api/admin/system/restart-workers'),
+  restartBackend: () => api.post('/api/admin/system/restart-backend'),
 }
 
 export const queueApi = {
@@ -361,6 +391,7 @@ export const queueApi = {
   getEvents: (limit: number = 50, eventType?: string) => api.get('/api/queue/events', {
     params: { limit, ...(eventType && { event_type: eventType }) }
   }),
+  clearEvents: () => api.delete('/api/queue/events'),
 
   // Legacy endpoints - kept for backward compatibility but not used in Queue page
   // getJobs: (params: URLSearchParams) => api.get(`/api/queue/jobs?${params}`),

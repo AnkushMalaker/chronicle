@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { useNavigate } from 'react-router-dom'
 import { MessageSquare, RefreshCw, Calendar, User, Play, Pause, MoreVertical, RotateCcw, Zap, ChevronDown, ChevronUp, Trash2, Save, X, Check, AlertTriangle, Pencil, Search, Brain } from 'lucide-react'
 import { conversationsApi, annotationsApi, speakerApi, BACKEND_URL } from '../services/api'
 import { useConversations, useDeleteConversation, useReprocessTranscript, useReprocessMemory, useReprocessSpeakers, useReprocessOrphan } from '../hooks/useConversations'
@@ -7,6 +8,7 @@ import ConversationVersionHeader from '../components/ConversationVersionHeader'
 import { getStorageKey } from '../utils/storage'
 import { WaveformDisplay } from '../components/audio/WaveformDisplay'
 import SpeakerNameDropdown from '../components/SpeakerNameDropdown'
+import SpeakerInlineInput from '../components/SpeakerInlineInput'
 
 interface Conversation {
   conversation_id: string
@@ -25,6 +27,7 @@ interface Conversation {
   segments?: Array<{
     text: string
     speaker: string
+    segment_type?: string  // "speech" | "event" | "note"
     start: number
     end: number
     confidence?: number
@@ -59,6 +62,7 @@ const SPEAKER_COLOR_PALETTE = [
 
 export default function Conversations() {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const [debugMode, setDebugMode] = useState(false)
 
   const {
@@ -101,6 +105,19 @@ export default function Conversations() {
 
   // Transcript annotation state
   const [transcriptAnnotations, setTranscriptAnnotations] = useState<Map<string, any[]>>(new Map()) // conversationId -> annotations[]
+
+  // Insert annotation state
+  const [insertAnnotations, setInsertAnnotations] = useState<Map<string, any[]>>(new Map()) // conversationId -> annotations[]
+  const [insertFormOpen, setInsertFormOpen] = useState<string | null>(null) // Format: "conversationId-afterIndex"
+  const [insertText, setInsertText] = useState('')
+  const [insertSegmentType, setInsertSegmentType] = useState<'event' | 'note' | 'speech'>('speech')
+  const [insertSpeaker, setInsertSpeaker] = useState('')
+
+  // Track recently selected speakers in this session (most recent first)
+  const [recentSpeakers, setRecentSpeakers] = useState<string[]>([])
+
+  // Preview mode state
+  const [previewMode, setPreviewMode] = useState<Set<string>>(new Set()) // conversationIds in preview mode
 
   // Unified apply state
   const [applyingAnnotations, setApplyingAnnotations] = useState<Set<string>>(new Set())
@@ -211,32 +228,93 @@ export default function Conversations() {
     }
   }
 
+  const loadInsertAnnotations = async (conversationId: string) => {
+    try {
+      const response = await annotationsApi.getInsertAnnotations(conversationId)
+      setInsertAnnotations(prev => new Map(prev).set(conversationId, response.data))
+    } catch (err: any) {
+      console.error('Failed to load insert annotations:', err)
+    }
+  }
+
+  const handleDeleteAnnotation = async (annotationId: string, conversationId: string) => {
+    try {
+      await annotationsApi.deleteAnnotation(annotationId)
+      // Reload all annotation types for this conversation
+      await Promise.all([
+        loadDiarizationAnnotations(conversationId),
+        loadTranscriptAnnotations(conversationId),
+        loadInsertAnnotations(conversationId),
+      ])
+    } catch (err: any) {
+      console.error('Failed to delete annotation:', err)
+      setActionError('Failed to delete annotation')
+    }
+  }
+
+  const handleCreateInsertAnnotation = async (conversationId: string, afterIndex: number) => {
+    if (!insertText.trim()) return
+    try {
+      await annotationsApi.createInsertAnnotation({
+        conversation_id: conversationId,
+        insert_after_index: afterIndex,
+        insert_text: insertText.trim(),
+        insert_segment_type: insertSegmentType,
+        ...(insertSegmentType === 'speech' && insertSpeaker ? { insert_speaker: insertSpeaker } : {}),
+      })
+      setInsertFormOpen(null)
+      setInsertText('')
+      setInsertSegmentType('speech')
+      setInsertSpeaker('')
+      await loadInsertAnnotations(conversationId)
+    } catch (err: any) {
+      console.error('Failed to create insert annotation:', err)
+      setActionError('Failed to create insert annotation')
+    }
+  }
+
   const handleSpeakerChange = async (conversationId: string, segmentIndex: number, originalSpeaker: string, newSpeaker: string, segmentStartTime: number) => {
     try {
-      await annotationsApi.createDiarizationAnnotation({
-        conversation_id: conversationId,
-        segment_index: segmentIndex,
-        original_speaker: originalSpeaker,
-        corrected_speaker: newSpeaker,
-        segment_start_time: segmentStartTime,
-      })
-      
+      // Check if a pending annotation already exists for this segment
+      const existingAnnotations = diarizationAnnotations.get(conversationId) || []
+      const existingAnnotation = existingAnnotations.find(
+        a => a.segment_index === segmentIndex && !a.processed
+      )
+
+      if (existingAnnotation) {
+        // Update existing annotation instead of creating duplicate
+        await annotationsApi.updateAnnotation(existingAnnotation.id, {
+          corrected_speaker: newSpeaker,
+        })
+      } else {
+        // Create new annotation
+        await annotationsApi.createDiarizationAnnotation({
+          conversation_id: conversationId,
+          segment_index: segmentIndex,
+          original_speaker: originalSpeaker,
+          corrected_speaker: newSpeaker,
+          segment_start_time: segmentStartTime,
+        })
+      }
+
       // Temporarily add new speaker name to enrolledSpeakers if it doesn't exist
       // This makes it immediately available in all dropdowns without requiring a backend reload
       setEnrolledSpeakers(prev => {
         const speakerExists = prev.some(speaker => speaker.name === newSpeaker)
         if (!speakerExists) {
-          // Generate a temporary speaker_id for in-memory use
           const tempSpeakerId = `temp_${Date.now()}_${newSpeaker.replace(/\s+/g, '_')}`
           return [...prev, { speaker_id: tempSpeakerId, name: newSpeaker }]
         }
         return prev
       })
-      
+
+      // Track as recently used speaker (move to front)
+      setRecentSpeakers(prev => [newSpeaker, ...prev.filter(s => s !== newSpeaker)])
+
       // Reload annotations for this conversation
       await loadDiarizationAnnotations(conversationId)
     } catch (err: any) {
-      console.error('Failed to create annotation:', err)
+      console.error('Failed to create/update annotation:', err)
       setActionError('Failed to create speaker annotation')
     }
   }
@@ -257,6 +335,13 @@ export default function Conversations() {
         // Reload annotations (should be empty now)
         await loadDiarizationAnnotations(conversationId)
         await loadTranscriptAnnotations(conversationId)
+        await loadInsertAnnotations(conversationId)
+        // Exit preview mode after applying
+        setPreviewMode(prev => {
+          const newSet = new Set(prev)
+          newSet.delete(conversationId)
+          return newSet
+        })
       } else {
         setActionError(`Failed to apply annotations: ${response.data?.error || 'Unknown error'}`)
       }
@@ -483,13 +568,26 @@ export default function Conversations() {
       setSavingSegment(true)
       setSegmentEditError(null)
 
-      // Create annotation (NOT applied immediately)
-      await annotationsApi.createTranscriptAnnotation({
-        conversation_id: conversationId,
-        segment_index: segmentIndex,
-        original_text: originalText,
-        corrected_text: editedSegmentText
-      })
+      // Check if a pending annotation already exists for this segment
+      const existingAnnotations = transcriptAnnotations.get(conversationId) || []
+      const existingAnnotation = existingAnnotations.find(
+        a => a.segment_index === segmentIndex && !a.processed
+      )
+
+      if (existingAnnotation) {
+        // Update existing annotation instead of creating duplicate
+        await annotationsApi.updateAnnotation(existingAnnotation.id, {
+          corrected_text: editedSegmentText,
+        })
+      } else {
+        // Create annotation (NOT applied immediately)
+        await annotationsApi.createTranscriptAnnotation({
+          conversation_id: conversationId,
+          segment_index: segmentIndex,
+          original_text: originalText,
+          corrected_text: editedSegmentText
+        })
+      }
 
       // Exit edit mode
       setEditingSegment(null)
@@ -678,10 +776,10 @@ export default function Conversations() {
             ),
           }
         })
-        // Load diarization annotations for this conversation
+        // Load all annotation types for this conversation
         await loadDiarizationAnnotations(conversationId)
-        // Load transcript annotations for this conversation
         await loadTranscriptAnnotations(conversationId)
+        await loadInsertAnnotations(conversationId)
         // Expand the transcript
         setExpandedTranscripts(prev => new Set(prev).add(conversationId))
       }
@@ -1034,6 +1132,21 @@ export default function Conversations() {
                         Duration: {Math.floor(conversation.duration_seconds / 60)}:{(conversation.duration_seconds % 60).toFixed(0).padStart(2, '0')}
                       </div>
                     )}
+                    {(conversation.memory_count ?? 0) > 0 && (
+                      <div className="flex items-center space-x-1 text-sm text-purple-600 dark:text-purple-400">
+                        <Brain className="h-4 w-4" />
+                        <span>{conversation.memory_count}</span>
+                      </div>
+                    )}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        navigate(`/conversations/${conversation.conversation_id}`)
+                      }}
+                      className="text-sm text-blue-600 dark:text-blue-400 hover:underline"
+                    >
+                      View Details
+                    </button>
                   </div>
                 </div>
 
@@ -1105,34 +1218,51 @@ export default function Conversations() {
                       {(() => {
                         const diarAnnotations = diarizationAnnotations.get(conversation.conversation_id!) || []
                         const transcriptAnnots = transcriptAnnotations.get(conversation.conversation_id!) || []
+                        const insertAnnots = insertAnnotations.get(conversation.conversation_id!) || []
 
                         const diarPending = diarAnnotations.filter(a => !a.processed).length
                         const transcriptPending = transcriptAnnots.filter(a => !a.processed).length
-                        const totalPending = diarPending + transcriptPending
+                        const insertPending = insertAnnots.filter(a => !a.processed).length
+                        const totalPending = diarPending + transcriptPending + insertPending
 
                         if (totalPending === 0) return null
 
                         return (
-                          <button
-                            onClick={() => handleApplyAllAnnotations(conversation.conversation_id!)}
-                            disabled={!conversation.conversation_id || applyingAnnotations.has(conversation.conversation_id!)}
-                            className="w-full text-left px-4 py-2 text-sm text-blue-700 dark:text-blue-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
-                            title={`Apply ${diarPending} speaker and ${transcriptPending} text corrections`}
-                          >
-                            {conversation.conversation_id && applyingAnnotations.has(conversation.conversation_id!) ? (
-                              <RefreshCw className="h-4 w-4 animate-spin" />
-                            ) : (
-                              <Check className="h-4 w-4" />
-                            )}
-                            <span>
-                              Apply Changes ({totalPending})
-                              {diarPending > 0 && transcriptPending > 0 && (
-                                <span className="text-xs ml-1 text-gray-500">
-                                  ({diarPending} speaker, {transcriptPending} text)
-                                </span>
+                          <>
+                            <button
+                              onClick={() => {
+                                const convId = conversation.conversation_id!
+                                setPreviewMode(prev => {
+                                  const newSet = new Set(prev)
+                                  if (newSet.has(convId)) newSet.delete(convId)
+                                  else newSet.add(convId)
+                                  return newSet
+                                })
+                                setOpenDropdown(null)
+                              }}
+                              className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2"
+                            >
+                              <Search className="h-4 w-4" />
+                              <span>
+                                {previewMode.has(conversation.conversation_id!) ? 'Exit Preview' : 'Preview Changes'}
+                              </span>
+                            </button>
+                            <button
+                              onClick={() => handleApplyAllAnnotations(conversation.conversation_id!)}
+                              disabled={!conversation.conversation_id || applyingAnnotations.has(conversation.conversation_id!)}
+                              className="w-full text-left px-4 py-2 text-sm text-blue-700 dark:text-blue-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+                              title={`Apply ${diarPending} speaker, ${transcriptPending} text, ${insertPending} insert corrections`}
+                            >
+                              {conversation.conversation_id && applyingAnnotations.has(conversation.conversation_id!) ? (
+                                <RefreshCw className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <Check className="h-4 w-4" />
                               )}
-                            </span>
-                          </button>
+                              <span>
+                                Apply Changes ({totalPending})
+                              </span>
+                            </button>
+                          </>
                         )
                       })()}
 
@@ -1260,18 +1390,177 @@ export default function Conversations() {
                                     }
                                   })
 
+                                  const convId = conversation.conversation_id!
+                                  const isPreview = previewMode.has(convId)
+                                  const convDiarAnnotations = diarizationAnnotations.get(convId) || []
+                                  const convTranscriptAnnotations = transcriptAnnotations.get(convId) || []
+                                  const convInsertAnnotations = (insertAnnotations.get(convId) || []).filter(a => !a.processed)
+
+                                  // Build preview segments if in preview mode
+                                  const previewSegments = isPreview ? segments.map((seg, idx) => {
+                                    const diarAnnot = convDiarAnnotations.find(a => a.segment_index === idx && !a.processed)
+                                    const textAnnot = convTranscriptAnnotations.find(a => a.segment_index === idx && !a.processed)
+                                    return {
+                                      ...seg,
+                                      speaker: diarAnnot ? diarAnnot.corrected_speaker : seg.speaker,
+                                      text: textAnnot ? textAnnot.corrected_text : seg.text,
+                                    }
+                                  }) : segments
+
+                                  // Insert divider helper
+                                  const renderInsertDivider = (afterIndex: number) => {
+                                    const insertKey = `${convId}-${afterIndex}`
+                                    const isOpen = insertFormOpen === insertKey
+                                    // Show pending inserts at this position
+                                    const pendingInserts = convInsertAnnotations.filter(a => a.insert_after_index === afterIndex)
+
+                                    return (
+                                      <div key={`insert-${afterIndex}`}>
+                                        {/* Pending insert annotations at this position */}
+                                        {pendingInserts.map(ins => (
+                                          <div
+                                            key={`pending-insert-${ins.id}`}
+                                            className={`text-sm border-l-2 border-purple-400 dark:border-purple-600 pl-3 py-0.5 px-2 flex items-center justify-between bg-purple-50 dark:bg-purple-900/20 rounded-r ${
+                                              ins.insert_segment_type === 'speech' ? 'text-gray-800 dark:text-gray-200' : 'italic text-gray-500 dark:text-gray-400'
+                                            }`}
+                                          >
+                                            <span>
+                                              {ins.insert_segment_type === 'speech'
+                                                ? <><span className="font-medium text-blue-600 dark:text-blue-400">{ins.insert_speaker || 'Speaker'}</span>: {ins.insert_text}</>
+                                                : ins.insert_segment_type === 'note' ? `[Note: ${ins.insert_text}]` : ins.insert_text}
+                                              <span className="text-xs bg-purple-100 dark:bg-purple-900 text-purple-600 dark:text-purple-300 px-2 py-0.5 rounded ml-2">Pending Insert</span>
+                                            </span>
+                                            <button
+                                              onClick={() => handleDeleteAnnotation(ins.id, convId)}
+                                              className="ml-2 text-gray-400 hover:text-red-500 transition-colors"
+                                              title="Remove insert"
+                                            >
+                                              <X className="w-3 h-3" />
+                                            </button>
+                                          </div>
+                                        ))}
+
+                                        {/* Insert form (when open) */}
+                                        {!isPreview && isOpen && (
+                                          <div className="w-full border border-purple-200 dark:border-purple-700 rounded-lg p-2 bg-purple-50 dark:bg-purple-900/20 space-y-2" onClick={e => e.stopPropagation()}>
+                                            {insertSegmentType !== 'speech' && (
+                                              <div className="flex flex-wrap gap-1">
+                                                {['[laughter]', '[music]', '[applause]', '[silence]', '[unintelligible]', '[crosstalk]'].map(tag => (
+                                                  <button
+                                                    key={tag}
+                                                    onClick={() => setInsertText(tag)}
+                                                    className={`px-2 py-0.5 text-xs rounded border transition-colors ${
+                                                      insertText === tag
+                                                        ? 'bg-purple-200 dark:bg-purple-700 border-purple-400 dark:border-purple-500'
+                                                        : 'bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 hover:border-purple-300'
+                                                    }`}
+                                                  >
+                                                    {tag}
+                                                  </button>
+                                                ))}
+                                              </div>
+                                            )}
+                                            {insertSegmentType === 'speech' && (
+                                              <div className="flex items-center gap-2">
+                                                <label className="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">Speaker:</label>
+                                                <SpeakerInlineInput
+                                                  value={insertSpeaker}
+                                                  onChange={setInsertSpeaker}
+                                                  onSelect={(speaker) => {
+                                                    setInsertSpeaker(speaker)
+                                                    setRecentSpeakers(prev => [speaker, ...prev.filter(s => s !== speaker)])
+                                                  }}
+                                                  enrolledSpeakers={allSpeakers}
+                                                  recentSpeakers={recentSpeakers}
+                                                  placeholder="Type or select speaker..."
+                                                />
+                                              </div>
+                                            )}
+                                            <div className="flex items-center gap-2">
+                                              <input
+                                                type="text"
+                                                value={insertText}
+                                                onChange={e => setInsertText(e.target.value)}
+                                                placeholder={insertSegmentType === 'speech' ? "What was said..." : "Custom text..."}
+                                                className="flex-1 px-2 py-1 text-xs border rounded bg-white dark:bg-gray-700 dark:border-gray-600 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                                                onKeyDown={e => { if (e.key === 'Enter') handleCreateInsertAnnotation(convId, afterIndex); if (e.key === 'Escape') setInsertFormOpen(null); }}
+                                                autoFocus
+                                              />
+                                              <select
+                                                value={insertSegmentType}
+                                                onChange={e => setInsertSegmentType(e.target.value as 'event' | 'note' | 'speech')}
+                                                className="px-2 py-1 text-xs border rounded bg-white dark:bg-gray-700 dark:border-gray-600"
+                                              >
+                                                <option value="speech">Speech</option>
+                                                <option value="event">Event Tag</option>
+                                                <option value="note">Note</option>
+                                              </select>
+                                              <button
+                                                onClick={() => handleCreateInsertAnnotation(convId, afterIndex)}
+                                                disabled={!insertText.trim()}
+                                                className="px-2 py-1 text-xs text-white bg-purple-600 rounded hover:bg-purple-700 disabled:opacity-50"
+                                              >
+                                                Insert
+                                              </button>
+                                              <button
+                                                onClick={() => setInsertFormOpen(null)}
+                                                className="px-2 py-1 text-xs text-gray-600 dark:text-gray-300 bg-gray-200 dark:bg-gray-600 rounded hover:bg-gray-300"
+                                              >
+                                                Cancel
+                                              </button>
+                                            </div>
+                                          </div>
+                                        )}
+                                      </div>
+                                    )
+                                  }
+
+                                  // Insert button helper — appears at top/bottom of hovered segment
+                                  const insertBtnClass = (position: 'top' | 'bottom') =>
+                                    `absolute ${position === 'top' ? 'top-0 -translate-y-1/2' : 'bottom-0 translate-y-1/2'} left-1/2 -translate-x-1/2 z-10 opacity-0 group-hover/seg:opacity-30 hover:!opacity-100 transition-opacity px-1.5 py-0 text-xs leading-tight text-gray-400 dark:text-gray-500 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 rounded-full hover:text-purple-500 hover:border-purple-400 dark:hover:text-purple-400 dark:hover:border-purple-500`
+                                  const openInsertForm = (afterIndex: number, e: React.MouseEvent) => {
+                                    e.stopPropagation()
+                                    setInsertFormOpen(`${convId}-${afterIndex}`)
+                                    setInsertText('')
+                                    setInsertSegmentType('speech')
+                                    setInsertSpeaker('')
+                                  }
+
                                   // Render the transcript
-                                  return segments.map((segment, index) => {
+                                  const renderedSegments: JSX.Element[] = []
+
+                                  // Insert divider before first segment
+                                  renderedSegments.push(renderInsertDivider(-1))
+
+                                  previewSegments.forEach((segment, index) => {
                           const speaker = segment.speaker || 'Unknown'
+                          const segType = (segment as any).segment_type || 'speech'
+                          const isNonSpeech = segType === 'event' || segType === 'note'
                           // Use conversation_id for unique segment IDs
                           const segmentId = `${conversation.conversation_id}-${index}`
                           const isPlaying = playingSegment === segmentId
                           const hasAudio = !!conversation.audio_chunks_count && conversation.audio_chunks_count > 0
                           const isEditing = editingSegment === segmentId
 
-                          return (
+                          // Non-speech segment rendering (event/note)
+                          if (isNonSpeech) {
+                            renderedSegments.push(
+                              <div key={index} className="group/seg relative">
+                                {!isPreview && <button onClick={(e) => openInsertForm(index === 0 ? -1 : index - 1, e)} className={insertBtnClass('top')}>+</button>}
+                                <div className="text-sm italic text-gray-500 dark:text-gray-400 border-l-2 border-gray-300 dark:border-gray-600 pl-3 py-0.5 px-2 rounded-r">
+                                  <span>{segType === 'note' ? `[Note: ${segment.text}]` : segment.text}</span>
+                                </div>
+                                {!isPreview && <button onClick={(e) => openInsertForm(index, e)} className={insertBtnClass('bottom')}>+</button>}
+                              </div>
+                            )
+                            renderedSegments.push(renderInsertDivider(index))
+                            return
+                          }
+
+                          renderedSegments.push(
+                            <div key={index} className="group/seg relative">
+                            {!isPreview && <button onClick={(e) => openInsertForm(index === 0 ? -1 : index - 1, e)} className={insertBtnClass('top')}>+</button>}
                             <div
-                              key={index}
                               className={`text-sm leading-relaxed flex items-start space-x-2 py-1 px-2 rounded transition-colors ${
                                 isPlaying ? 'bg-blue-50 dark:bg-blue-900/20' : isEditing ? 'bg-yellow-50 dark:bg-yellow-900/20' : 'hover:bg-gray-50 dark:hover:bg-gray-700'
                               }`}
@@ -1302,23 +1591,33 @@ export default function Conversations() {
                                   </span>
                                 )}
 
-                                {/* Speaker Name - Clickable Dropdown for Annotation */}
-                                {(() => {
-                                  const conversationAnnotations = diarizationAnnotations.get(conversation.conversation_id!) || []
-                                  const annotation = conversationAnnotations.find(a => a.segment_index === index && !a.processed)
+                                {/* Speaker Name - Preview mode shows final result, normal mode shows annotation UI */}
+                                {isPreview ? (
+                                  <span className="inline-flex items-center space-x-1">
+                                    <span className={`font-medium ${speakerColorMap[speaker] || 'text-gray-600'}`}>{speaker}</span>
+                                    <span>:</span>
+                                  </span>
+                                ) : (() => {
+                                  const annotation = convDiarAnnotations.find(a => a.segment_index === index && !a.processed)
                                   const speakerColor = speakerColorMap[speaker]
-
-                                  // Always show dropdown, but use corrected speaker if annotation exists
-                                  // This allows users to edit annotations even after creating them
                                   const currentSpeaker = annotation ? annotation.corrected_speaker : speaker
                                   const originalSpeaker = annotation ? annotation.original_speaker : speaker
 
                                   return (
                                     <span className="inline-flex items-center space-x-1">
                                       {annotation && (
-                                        <span className="text-xs bg-orange-100 dark:bg-orange-900 text-orange-600 dark:text-orange-300 px-2 py-0.5 rounded" title="Pending annotation">
-                                          Pending
-                                        </span>
+                                        <>
+                                          <span className="text-xs bg-orange-100 dark:bg-orange-900 text-orange-600 dark:text-orange-300 px-2 py-0.5 rounded" title="Pending annotation">
+                                            Pending
+                                          </span>
+                                          <button
+                                            onClick={() => handleDeleteAnnotation(annotation.id, convId)}
+                                            className="text-gray-400 hover:text-red-500 transition-colors"
+                                            title="Revert speaker change"
+                                          >
+                                            <X className="w-3 h-3" />
+                                          </button>
+                                        </>
                                       )}
                                       <SpeakerNameDropdown
                                         currentSpeaker={currentSpeaker}
@@ -1329,6 +1628,7 @@ export default function Conversations() {
                                         segmentIndex={index}
                                         conversationId={conversation.conversation_id!}
                                         annotated={!!annotation}
+                                        recentSpeakers={recentSpeakers}
                                         speakerColor={annotation ? 'text-green-600 dark:text-green-400' : speakerColor}
                                       />
                                       <span>:</span>
@@ -1336,15 +1636,15 @@ export default function Conversations() {
                                   )
                                 })()}
 
-                                {/* Segment Text - Show pending edit indicator or editable */}
-                                {(() => {
-                                  const transcriptAnnots = transcriptAnnotations.get(conversation.conversation_id!) || []
-                                  const textAnnotation = transcriptAnnots.find(
+                                {/* Segment Text - Preview mode shows final, normal mode shows annotation UI */}
+                                {isPreview ? (
+                                  <span className="text-gray-900 dark:text-gray-100 ml-1">{segment.text}</span>
+                                ) : (() => {
+                                  const textAnnotation = convTranscriptAnnotations.find(
                                     a => a.segment_index === index && !a.processed
                                   )
 
                                   if (textAnnotation && !isEditing) {
-                                    // Show pending text edit - corrected text is clickable like normal text
                                     return (
                                       <span className="inline-flex items-start space-x-2 ml-1">
                                         <span className="line-through text-gray-400">{textAnnotation.original_text}</span>
@@ -1357,10 +1657,16 @@ export default function Conversations() {
                                           {textAnnotation.corrected_text}
                                         </span>
                                         <span className="text-xs bg-blue-100 dark:bg-blue-900 text-blue-600 dark:text-blue-300 px-2 py-0.5 rounded">Pending</span>
+                                        <button
+                                          onClick={() => handleDeleteAnnotation(textAnnotation.id, convId)}
+                                          className="text-gray-400 hover:text-red-500 transition-colors"
+                                          title="Revert text change"
+                                        >
+                                          <X className="w-3 h-3" />
+                                        </button>
                                       </span>
                                     )
                                   } else if (isEditing) {
-                                    // Show edit textarea
                                     return (
                                       <div className="ml-1 space-y-2">
                                         <textarea
@@ -1395,7 +1701,6 @@ export default function Conversations() {
                                       </div>
                                     )
                                   } else {
-                                    // Show normal text (clickable to edit)
                                     return (
                                       <span
                                         onClick={() => conversation.conversation_id && handleStartSegmentEdit(conversation.conversation_id, index, segment.text)}
@@ -1409,8 +1714,15 @@ export default function Conversations() {
                                 })()}
                               </div>
                             </div>
+                            {!isPreview && <button onClick={(e) => openInsertForm(index, e)} className={insertBtnClass('bottom')}>+</button>}
+                            </div>
                           )
+
+                          // Insert divider after each segment
+                          renderedSegments.push(renderInsertDivider(index))
                           })
+
+                                  return renderedSegments
                                 })()}
                               </div>
                             </div>
@@ -1448,6 +1760,7 @@ export default function Conversations() {
                   </div>
                 ) : null
               })()}
+
 
               {/* Debug info */}
               {debugMode && (

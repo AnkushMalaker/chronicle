@@ -87,7 +87,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: prod  # Use prod stage without test dependencies
-    command: ["uv", "run", "python", "worker_orchestrator.py"]
+    command: ["python", "worker_orchestrator.py"]
     env_file:
       - .env
     volumes:
@@ -135,7 +135,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: prod
-    command: ["uv", "run", "python", "-m", "advanced_omi_backend.cron"]
+    command: ["python", "-m", "advanced_omi_backend.cron"]
     container_name: chronicle-annotation-cron
     env_file:
       - .env

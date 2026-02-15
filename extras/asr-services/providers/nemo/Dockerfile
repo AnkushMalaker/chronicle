@@ -14,10 +14,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential git portaudio19-dev \
     && rm -rf /var/lib/apt/lists/*
 
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
+
 # Dependency manifest first for cache-friendly installs
 COPY pyproject.toml uv.lock ./
-RUN uv sync --no-install-project --group nemo --extra ${PYTORCH_CUDA_VERSION} && \
-    uv cache clean
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --group nemo --extra ${PYTORCH_CUDA_VERSION}
 
 #########################  runtime #################################
 FROM python:3.12-slim-bookworm AS runtime
@@ -28,12 +31,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsndfile1 build-essential portaudio19-dev curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy virtual environment and application
-COPY --from=builder /app /app
+# Copy installed packages from builder's venv to system Python
+COPY --from=builder /app/.venv/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+
+# Copy application code
 COPY common/ ./common/
 COPY providers/nemo/ ./providers/nemo/
-
-ENV PATH="/app/.venv/bin:$PATH"
 
 # Default environment variables
 ENV ASR_MODEL="nvidia/parakeet-tdt-0.6b-v3"

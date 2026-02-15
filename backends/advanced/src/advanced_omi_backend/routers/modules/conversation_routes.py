@@ -61,6 +61,18 @@ async def get_conversation_detail(
     return await conversation_controller.get_conversation(conversation_id, current_user)
 
 
+@router.get("/{conversation_id}/memories")
+async def get_conversation_memories(
+    conversation_id: str,
+    limit: int = Query(100, ge=1, le=500, description="Max memories to return"),
+    current_user: User = Depends(current_active_user),
+):
+    """Get memories extracted from a specific conversation."""
+    return await conversation_controller.get_conversation_memories(
+        conversation_id, current_user, limit
+    )
+
+
 # New reprocessing endpoints
 @router.post("/{conversation_id}/reprocess-orphan")
 async def reprocess_orphan(

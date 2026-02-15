@@ -12,4 +12,4 @@
 #   ./cleanup.sh --backup --force              Skip confirmation prompt
 
 cd "$(dirname "$0")"
-docker compose exec chronicle-backend uv run python src/scripts/cleanup_state.py "$@"
+docker compose exec chronicle-backend python src/scripts/cleanup_state.py "$@"

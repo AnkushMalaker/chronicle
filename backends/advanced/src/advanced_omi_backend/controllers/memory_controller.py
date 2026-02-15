@@ -8,6 +8,7 @@ from typing import Optional
 
 from fastapi.responses import JSONResponse
 
+from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.services.memory.base import MemoryEntry
 from advanced_omi_backend.users import User
@@ -244,6 +245,28 @@ async def get_memory_by_id(memory_id: str, user: User, user_id: Optional[str] = 
         if memory:
             # Convert MemoryEntry to dict for JSON serialization
             memory_dict = memory.to_dict()
+
+            # Enrich with source conversation info if source_id exists in metadata
+            source_id = memory.metadata.get("source_id")
+            if source_id:
+                try:
+                    conversation = await Conversation.find_one(
+                        Conversation.conversation_id == source_id
+                    )
+                    if conversation:
+                        memory_dict["source_conversation"] = {
+                            "conversation_id": conversation.conversation_id,
+                            "title": conversation.title,
+                            "summary": conversation.summary,
+                            "created_at": (
+                                conversation.created_at.isoformat()
+                                if conversation.created_at
+                                else None
+                            ),
+                        }
+                except Exception as e:
+                    logger.warning(f"Failed to fetch source conversation {source_id}: {e}")
+
             return {"memory": memory_dict}
         else:
             return JSONResponse(status_code=404, content={"message": "Memory not found"})

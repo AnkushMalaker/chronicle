@@ -10,10 +10,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential git \
     && rm -rf /var/lib/apt/lists/*
 
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
+
 # Dependency manifest first for cache-friendly installs
 COPY pyproject.toml uv.lock ./
-RUN uv sync --no-install-project --group transformers && \
-    uv cache clean
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --group transformers
 
 #########################  runtime #################################
 FROM python:3.12-slim-bookworm AS runtime
@@ -25,12 +28,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ffmpeg git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy virtual environment and application
-COPY --from=builder /app /app
+# Copy installed packages from builder's venv to system Python
+COPY --from=builder /app/.venv/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+
+# Copy application code
 COPY common/ ./common/
 COPY providers/transformers/ ./providers/transformers/
-
-ENV PATH="/app/.venv/bin:$PATH"
 
 # Default environment variables
 ENV ASR_MODEL="openai/whisper-large-v3"

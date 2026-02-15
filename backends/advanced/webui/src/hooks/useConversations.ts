@@ -13,6 +13,14 @@ export function useConversations(opts: ConversationListOpts = {}) {
   })
 }
 
+export function useConversationMemories(conversationId: string | null) {
+  return useQuery({
+    queryKey: ['conversationMemories', conversationId],
+    queryFn: () => conversationsApi.getMemories(conversationId!).then(r => r.data),
+    enabled: !!conversationId,
+  })
+}
+
 export function useConversationDetail(conversationId: string | null) {
   return useQuery({
     queryKey: ['conversation', conversationId],

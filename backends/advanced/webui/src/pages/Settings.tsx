@@ -43,7 +43,8 @@ export default function Settings() {
   const [miscSettings, setMiscSettings] = useState({
     always_persist_enabled: false,
     use_provider_segments: false,
-    per_segment_speaker_id: false
+    per_segment_speaker_id: false,
+    transcription_job_timeout_seconds: 900
   })
   const [miscLoading, setMiscLoading] = useState(false)
   const [miscMessage, setMiscMessage] = useState('')
@@ -507,6 +508,30 @@ export default function Settings() {
                   Per Segment
                 </span>
               </div>
+            </div>
+
+            {/* Transcription Job Timeout */}
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Transcription Job Timeout
+                </div>
+                <div className="text-sm text-gray-600 dark:text-gray-400">
+                  Max seconds for transcription jobs ({Math.round(miscSettings.transcription_job_timeout_seconds / 60)} min). Increase for slow local STT.
+                </div>
+              </div>
+              <input
+                type="number"
+                min={60}
+                max={7200}
+                step={60}
+                value={miscSettings.transcription_job_timeout_seconds}
+                onChange={(e) => setMiscSettings(prev => ({
+                  ...prev,
+                  transcription_job_timeout_seconds: Math.max(60, Math.min(7200, parseInt(e.target.value) || 60))
+                }))}
+                className="ml-4 w-24 px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
             </div>
 
             {/* Status Message */}

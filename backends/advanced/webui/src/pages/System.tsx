@@ -1,6 +1,8 @@
-import { Activity, RefreshCw, CheckCircle, XCircle, AlertCircle, Users, Database, Server } from 'lucide-react'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { Activity, RefreshCw, CheckCircle, XCircle, AlertCircle, Users, Database, Server, MoreVertical, RotateCcw, Power } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
-import { useSystemData } from '../hooks/useSystem'
+import { useSystemData, useRestartWorkers, useRestartBackend } from '../hooks/useSystem'
+import { systemApi } from '../services/api'
 
 interface ServiceStatus {
   healthy: boolean
@@ -14,6 +16,17 @@ export default function System() {
   // TanStack Query hooks for data fetching
   const { data: systemData, isLoading: loading, error: systemError, refetch: refetchSystem, dataUpdatedAt } = useSystemData(isAdmin)
 
+  // Restart mutations
+  const restartWorkersMutation = useRestartWorkers()
+  const restartBackendMutation = useRestartBackend()
+
+  // UI state
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [confirmModal, setConfirmModal] = useState<'workers' | 'backend' | null>(null)
+  const [restartingBackend, setRestartingBackend] = useState(false)
+  const [workerBanner, setWorkerBanner] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+
   // Derive state from query results
   const healthData = systemData?.healthData ?? null
   const readinessData = systemData?.readinessData ?? null
@@ -25,6 +38,75 @@ export default function System() {
   const lastUpdated = dataUpdatedAt ? new Date(dataUpdatedAt) : null
 
   const loadSystemData = () => refetchSystem()
+
+  // Close menu on click outside
+  useEffect(() => {
+    if (!menuOpen) return
+    const handleClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [menuOpen])
+
+  // Close modal on ESC
+  useEffect(() => {
+    if (!confirmModal) return
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setConfirmModal(null)
+    }
+    document.addEventListener('keydown', handleKey)
+    return () => document.removeEventListener('keydown', handleKey)
+  }, [confirmModal])
+
+  // Poll health during backend restart
+  const pollHealth = useCallback(async () => {
+    setRestartingBackend(true)
+    // Wait for the backend to actually go down
+    await new Promise(r => setTimeout(r, 3000))
+
+    let attempts = 0
+    const maxAttempts = 60
+    const poll = async () => {
+      while (attempts < maxAttempts) {
+        attempts++
+        try {
+          await systemApi.getHealth()
+          // Backend is back
+          setRestartingBackend(false)
+          refetchSystem()
+          return
+        } catch {
+          // Still down, wait and retry
+          await new Promise(r => setTimeout(r, 2000))
+        }
+      }
+      // Timed out
+      setRestartingBackend(false)
+    }
+    await poll()
+  }, [refetchSystem])
+
+  const handleRestartWorkers = () => {
+    setConfirmModal(null)
+    restartWorkersMutation.mutate(undefined, {
+      onSuccess: () => {
+        setWorkerBanner(true)
+        setTimeout(() => setWorkerBanner(false), 8000)
+      },
+    })
+  }
+
+  const handleRestartBackend = () => {
+    setConfirmModal(null)
+    restartBackendMutation.mutate(undefined, {
+      onSuccess: () => {
+        pollHealth()
+      },
+    })
+  }
 
   const getStatusIcon = (healthy: boolean) => {
     return healthy
@@ -80,6 +162,36 @@ export default function System() {
 
   return (
     <div>
+      {/* Backend Restarting Overlay */}
+      {restartingBackend && (
+        <div className="fixed inset-0 z-50 bg-gray-900/80 flex items-center justify-center">
+          <div className="text-center">
+            <RefreshCw className="h-12 w-12 text-blue-400 animate-spin mx-auto mb-4" />
+            <h2 className="text-xl font-semibold text-white mb-2">
+              Backend Restarting
+            </h2>
+            <p className="text-gray-300 text-sm">
+              Waiting for the service to come back online...
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Worker Restart Success Banner */}
+      {workerBanner && (
+        <div className="mb-4 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md p-3 flex items-center justify-between">
+          <div className="flex items-center space-x-2">
+            <CheckCircle className="h-5 w-5 text-green-500" />
+            <span className="text-sm text-green-700 dark:text-green-300">
+              Worker restart signal sent. Workers will restart after finishing current jobs.
+            </span>
+          </div>
+          <button onClick={() => setWorkerBanner(false)} className="text-green-500 hover:text-green-700">
+            <XCircle className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex justify-between items-center mb-6">
         <div className="flex items-center space-x-2">
@@ -102,8 +214,114 @@ export default function System() {
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
             <span>Refresh</span>
           </button>
+
+          {/* Three-dot menu */}
+          <div className="relative" ref={menuRef}>
+            <button
+              onClick={() => setMenuOpen(prev => !prev)}
+              className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+              title="System actions"
+            >
+              <MoreVertical className="h-5 w-5 text-gray-600 dark:text-gray-400" />
+            </button>
+            {menuOpen && (
+              <div className="absolute right-0 mt-1 w-52 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-20 py-1">
+                <button
+                  onClick={() => { setMenuOpen(false); setConfirmModal('workers') }}
+                  className="w-full flex items-center px-4 py-2 text-sm text-blue-600 dark:text-blue-400 hover:bg-gray-50 dark:hover:bg-gray-700"
+                >
+                  <RotateCcw className="h-4 w-4 mr-2" />
+                  Restart Workers
+                </button>
+                <div className="border-t border-gray-200 dark:border-gray-700 my-1" />
+                <button
+                  onClick={() => { setMenuOpen(false); setConfirmModal('backend') }}
+                  className="w-full flex items-center px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-gray-50 dark:hover:bg-gray-700"
+                >
+                  <Power className="h-4 w-4 mr-2" />
+                  Restart Backend
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
+
+      {/* Confirmation Modals */}
+      {confirmModal && (
+        <div className="fixed inset-0 z-40 bg-black/50 flex items-center justify-center" onClick={() => setConfirmModal(null)}>
+          <div
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full mx-4 p-6"
+            onClick={e => e.stopPropagation()}
+          >
+            {confirmModal === 'workers' ? (
+              <>
+                <div className="flex items-center space-x-3 mb-4">
+                  <div className="p-2 rounded-full bg-blue-100 dark:bg-blue-900/30">
+                    <RotateCcw className="h-5 w-5 text-blue-600 dark:text-blue-400" />
+                  </div>
+                  <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+                    Restart Workers
+                  </h3>
+                </div>
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
+                  Workers will finish their current jobs before restarting. This is safe to run at any time.
+                </p>
+                <p className="text-sm text-gray-500 dark:text-gray-500 mb-6">
+                  Use this after changing plugin configuration or config.yml settings.
+                </p>
+                <div className="flex justify-end space-x-3">
+                  <button
+                    onClick={() => setConfirmModal(null)}
+                    className="px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleRestartWorkers}
+                    className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                  >
+                    Restart Workers
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center space-x-3 mb-4">
+                  <div className="p-2 rounded-full bg-red-100 dark:bg-red-900/30">
+                    <Power className="h-5 w-5 text-red-600 dark:text-red-400" />
+                  </div>
+                  <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+                    Restart Backend
+                  </h3>
+                </div>
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
+                  This will restart the entire backend process. The service will be briefly unavailable.
+                </p>
+                <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md p-3 mb-6">
+                  <p className="text-sm text-red-700 dark:text-red-300">
+                    Active WebSocket connections and streaming sessions will be dropped.
+                  </p>
+                </div>
+                <div className="flex justify-end space-x-3">
+                  <button
+                    onClick={() => setConfirmModal(null)}
+                    className="px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleRestartBackend}
+                    className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+                  >
+                    Restart Backend
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Error Message */}
       {error && (

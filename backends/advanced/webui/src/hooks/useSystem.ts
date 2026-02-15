@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { systemApi } from '../services/api'
 
 export function useSystemData(isAdmin: boolean) {
@@ -84,5 +84,23 @@ export function useLLMOperations() {
       return null
     },
     staleTime: 5 * 60_000,
+  })
+}
+
+export function useRestartWorkers() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => systemApi.restartWorkers(),
+    onSuccess: () => {
+      // Workers take a few seconds to restart; refresh system data after delay
+      setTimeout(() => queryClient.invalidateQueries({ queryKey: ['system'] }), 5000)
+    },
+  })
+}
+
+export function useRestartBackend() {
+  return useMutation({
+    mutationFn: () => systemApi.restartBackend(),
+    // No auto-invalidation — the backend is going down
   })
 }

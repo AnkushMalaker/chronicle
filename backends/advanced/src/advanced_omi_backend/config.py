@@ -180,6 +180,22 @@ def get_audio_storage_settings() -> dict:
 
 
 # ============================================================================
+# Transcription Job Timeout (OmegaConf-based)
+# ============================================================================
+
+def get_transcription_job_timeout() -> int:
+    """
+    Get transcription job timeout in seconds from config.
+
+    Returns:
+        Job timeout in seconds (default 900 = 15 minutes)
+    """
+    cfg = get_backend_config('transcription')
+    settings = OmegaConf.to_container(cfg, resolve=True) if cfg else {}
+    return int(settings.get('job_timeout_seconds', 900))
+
+
+# ============================================================================
 # Miscellaneous Settings (OmegaConf-based)
 # ============================================================================
 
@@ -206,6 +222,7 @@ def get_misc_settings() -> dict:
         'always_persist_enabled': audio_settings.get('always_persist_enabled', False),
         'use_provider_segments': transcription_settings.get('use_provider_segments', False),
         'per_segment_speaker_id': speaker_settings.get('per_segment_speaker_id', False),
+        'transcription_job_timeout_seconds': int(transcription_settings.get('job_timeout_seconds', 900)),
     }
 
 
@@ -237,6 +254,12 @@ def save_misc_settings(settings: dict) -> bool:
     if 'per_segment_speaker_id' in settings:
         speaker_settings = {'per_segment_speaker_id': settings['per_segment_speaker_id']}
         if not save_config_section('backend.speaker_recognition', speaker_settings):
+            success = False
+
+    # Save transcription job timeout if provided
+    if 'transcription_job_timeout_seconds' in settings:
+        timeout_settings = {'job_timeout_seconds': settings['transcription_job_timeout_seconds']}
+        if not save_config_section('backend.transcription', timeout_settings):
             success = False
 
     return success

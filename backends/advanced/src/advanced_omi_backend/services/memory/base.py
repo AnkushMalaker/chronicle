@@ -205,6 +205,25 @@ class MemoryServiceBase(ABC):
         """
         return False
 
+    async def get_memories_by_source(
+        self, user_id: str, source_id: str, limit: int = 100
+    ) -> List[MemoryEntry]:
+        """Get all memories extracted from a specific source (conversation).
+
+        This is an optional method that providers can implement for fetching
+        memories linked to a particular conversation/source. Returns empty list
+        by default.
+
+        Args:
+            user_id: User identifier
+            source_id: Source/conversation identifier
+            limit: Maximum number of memories to return
+
+        Returns:
+            List of MemoryEntry objects for the specified source
+        """
+        return []
+
     async def reprocess_memory(
         self,
         transcript: str,

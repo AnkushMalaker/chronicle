@@ -10,7 +10,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: dev  # Use dev stage with test dependencies
-    command: ["./start.sh", "--test"]
+    command: ["./start.sh"]
     ports:
       - "8001:8000"  # Avoid conflict with dev on 8000
     volumes:
@@ -212,7 +212,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: dev  # Use dev stage with test dependencies
-    command: ["uv", "run", "--group", "test", "python", "worker_orchestrator.py"]
+    command: ["python", "worker_orchestrator.py"]
     volumes:
       - ./src:/app/src
       - ./worker_orchestrator.py:/app/worker_orchestrator.py

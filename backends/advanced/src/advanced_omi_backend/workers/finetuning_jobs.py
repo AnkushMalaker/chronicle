@@ -3,15 +3,19 @@ Cron job implementations for the Chronicle scheduler.
 
 Jobs:
   - speaker_finetuning: sends applied diarization annotations to speaker service
+  - asr_finetuning: exports annotated conversations to VibeVoice ASR for LoRA fine-tuning
   - asr_jargon_extraction: extracts jargon from recent memories, caches in Redis
 """
 
+import io
+import json
 import logging
 import os
 import time
 from datetime import datetime, timezone
 from typing import Optional
 
+import httpx
 import redis.asyncio as aioredis
 
 from advanced_omi_backend.llm_client import async_generate
@@ -150,7 +154,178 @@ async def run_speaker_finetuning_job() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Job 2: ASR Jargon Extraction
+# Job 2: ASR Fine-tuning (VibeVoice LoRA)
+# ---------------------------------------------------------------------------
+
+_ASR_TRAINING_MARKER = "asr_training"
+
+
+def _build_vibevoice_label(conversation) -> dict:
+    """Convert Chronicle conversation to VibeVoice training label format.
+
+    Maps SpeakerSegment data to the JSON structure expected by VibeVoice's
+    LoRA fine-tuning scripts: speaker ints, timestamped segments with text.
+    """
+    transcript = conversation.active_transcript
+    if not transcript:
+        return {}
+
+    speaker_map: dict[str, int] = {}
+    segments = []
+    for seg in transcript.segments:
+        speaker_id = speaker_map.setdefault(seg.speaker, len(speaker_map))
+        segments.append({
+            "speaker": speaker_id,
+            "text": seg.text,
+            "start": round(seg.start, 2),
+            "end": round(seg.end, 2),
+        })
+
+    return {
+        "audio_path": f"{conversation.conversation_id}.wav",
+        "audio_duration": conversation.audio_total_duration,
+        "segments": segments,
+    }
+
+
+async def run_asr_finetuning_job() -> dict:
+    """Export annotated conversations to VibeVoice ASR service for LoRA fine-tuning.
+
+    Finds transcript and diarization annotations that have been applied but not
+    yet consumed by ASR training. Groups by conversation, reconstructs WAV audio,
+    builds VibeVoice training labels, and POSTs to the ASR service's /fine-tune endpoint.
+    """
+    from advanced_omi_backend.model_registry import get_models_registry
+    from advanced_omi_backend.models.annotation import Annotation, AnnotationType
+    from advanced_omi_backend.models.conversation import Conversation
+    from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_wav_from_conversation
+
+    # Resolve STT service URL from model registry (same URL used for transcription)
+    registry = get_models_registry()
+    stt_model = registry.get_default("stt") if registry else None
+    if not stt_model or not stt_model.model_url:
+        logger.warning("ASR finetuning: no STT model configured in registry, skipping")
+        return {"conversations_exported": 0, "annotations_consumed": 0, "message": "No STT model configured"}
+
+    vibevoice_url = stt_model.model_url.rstrip("/")
+
+    # Find applied annotations (TRANSCRIPT and DIARIZATION) not yet consumed by ASR training
+    annotations = await Annotation.find(
+        {"annotation_type": {"$in": [AnnotationType.TRANSCRIPT.value, AnnotationType.DIARIZATION.value]}},
+        Annotation.processed == True,
+    ).to_list()
+
+    ready = [
+        a for a in annotations
+        if not a.processed_by or _ASR_TRAINING_MARKER not in a.processed_by
+    ]
+
+    if not ready:
+        logger.info("ASR finetuning: no annotations ready for export")
+        return {"conversations_exported": 0, "annotations_consumed": 0, "message": "No annotations ready"}
+
+    # Group annotations by conversation_id
+    by_conversation: dict[str, list[Annotation]] = {}
+    for a in ready:
+        if a.conversation_id:
+            by_conversation.setdefault(a.conversation_id, []).append(a)
+
+    exported = 0
+    consumed = 0
+    errors = 0
+
+    # Optionally load cached jargon for customized_context
+    redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+
+    try:
+        async with httpx.AsyncClient(timeout=300) as client:
+            for conv_id, conv_annotations in by_conversation.items():
+                try:
+                    conversation = await Conversation.find_one(
+                        Conversation.conversation_id == conv_id
+                    )
+                    if not conversation or not conversation.active_transcript:
+                        logger.warning(f"ASR finetuning: conversation {conv_id} not found or no transcript")
+                        errors += 1
+                        continue
+
+                    if not conversation.active_transcript.segments:
+                        logger.info(f"ASR finetuning: conversation {conv_id} has no segments, skipping")
+                        continue
+
+                    # Reconstruct full WAV audio
+                    wav_data = await reconstruct_wav_from_conversation(conv_id)
+                    if not wav_data:
+                        logger.warning(f"ASR finetuning: no audio for conversation {conv_id}")
+                        errors += 1
+                        continue
+
+                    # Build training label
+                    label = _build_vibevoice_label(conversation)
+                    if not label.get("segments"):
+                        logger.info(f"ASR finetuning: no segments in label for {conv_id}, skipping")
+                        continue
+
+                    # Try to add jargon context from Redis cache
+                    if conversation.user_id:
+                        jargon = await redis_client.get(f"asr:jargon:{conversation.user_id}")
+                        if jargon:
+                            label["customized_context"] = [t.strip() for t in jargon.split(",") if t.strip()]
+
+                    # POST to VibeVoice /fine-tune endpoint
+                    files = {
+                        "audio_files": (f"{conv_id}.wav", io.BytesIO(wav_data), "audio/wav"),
+                    }
+                    data = {"labels": json.dumps([label])}
+
+                    response = await client.post(
+                        f"{vibevoice_url}/fine-tune",
+                        files=files,
+                        data=data,
+                    )
+
+                    if response.status_code == 200:
+                        exported += 1
+                        logger.info(f"ASR finetuning: exported conversation {conv_id}")
+                    else:
+                        logger.error(
+                            f"ASR finetuning: failed to export {conv_id}: "
+                            f"{response.status_code} {response.text[:200]}"
+                        )
+                        errors += 1
+                        continue
+
+                    # Mark annotations as consumed
+                    for ann in conv_annotations:
+                        ann.processed_by = (
+                            f"{ann.processed_by},{_ASR_TRAINING_MARKER}"
+                            if ann.processed_by
+                            else _ASR_TRAINING_MARKER
+                        )
+                        ann.updated_at = datetime.now(timezone.utc)
+                        await ann.save()
+                        consumed += 1
+
+                except Exception as e:
+                    logger.error(f"ASR finetuning: error processing conversation {conv_id}: {e}")
+                    errors += 1
+
+    finally:
+        await redis_client.close()
+
+    logger.info(
+        f"ASR finetuning complete: {exported} conversations exported, "
+        f"{consumed} annotations consumed, {errors} errors"
+    )
+    return {
+        "conversations_exported": exported,
+        "annotations_consumed": consumed,
+        "errors": errors,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Job 3: ASR Jargon Extraction
 # ---------------------------------------------------------------------------
 
 async def run_asr_jargon_extraction_job() -> dict:

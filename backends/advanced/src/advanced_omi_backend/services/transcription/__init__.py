@@ -29,15 +29,19 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_hot_words_to_keyterm(hot_words_str: str) -> str:
-    """Convert comma-separated hot words to Deepgram keyterm format.
+    """Convert hot words string to Deepgram keyterm format.
 
-    Input:  "hey vivi, chronicle, omi"
+    Splits on commas and newlines (context may arrive in either format).
+
+    Input:  "hey vivi\\nchronicle\\nomi"  or  "hey vivi, chronicle, omi"
     Output: "hey vivi Hey Vivi chronicle Chronicle omi Omi"
     """
     if not hot_words_str or not hot_words_str.strip():
         return ""
+    import re
+
     terms = []
-    for word in hot_words_str.split(","):
+    for word in re.split(r"[,\n]+", hot_words_str):
         word = word.strip()
         if not word:
             continue

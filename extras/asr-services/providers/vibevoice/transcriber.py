@@ -130,10 +130,14 @@ class VibeVoiceTranscriber:
             os.getenv("BATCH_OVERLAP_SECONDS") or config.get("batch_overlap_seconds", 30)
         )
 
+        # LoRA adapter path (auto-loaded after base model if set)
+        self.lora_adapter_path = os.getenv("LORA_ADAPTER_PATH") or None
+
         # Model components (initialized in load_model)
         self.model = None
         self.processor = None
         self._is_loaded = False
+        self._has_lora = False
         self._vibevoice_repo_path: Optional[Path] = None
 
         logger.info(
@@ -265,8 +269,39 @@ class VibeVoiceTranscriber:
 
         self.model.eval()
 
+        # Auto-load LoRA adapter if configured
+        if self.lora_adapter_path and Path(self.lora_adapter_path).exists():
+            logger.info(f"Auto-loading LoRA adapter from {self.lora_adapter_path}")
+            self.load_lora_adapter(self.lora_adapter_path)
+
         self._is_loaded = True
         logger.info("VibeVoice model loaded successfully")
+
+    def load_lora_adapter(self, adapter_path: str) -> None:
+        """Load or replace a LoRA adapter on the base model.
+
+        If a LoRA adapter is already loaded, it is merged and unloaded first
+        before applying the new adapter.
+
+        Args:
+            adapter_path: Path to the directory containing the LoRA adapter weights.
+        """
+        from peft import PeftModel
+
+        if self.model is None:
+            raise RuntimeError("Base model not loaded. Call load_model() first.")
+
+        # If already has a LoRA adapter, merge it back into base weights first
+        if self._has_lora:
+            logger.info("Merging existing LoRA adapter before loading new one")
+            self.model = self.model.merge_and_unload()
+            self._has_lora = False
+
+        logger.info(f"Loading LoRA adapter from {adapter_path}")
+        self.model = PeftModel.from_pretrained(self.model, adapter_path)
+        self.model.eval()
+        self._has_lora = True
+        logger.info("LoRA adapter loaded successfully")
 
     def transcribe(
         self,

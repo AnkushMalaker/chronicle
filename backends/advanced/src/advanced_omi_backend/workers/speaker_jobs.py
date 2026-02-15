@@ -322,10 +322,15 @@ async def recognise_speakers_job(
         if transcript_version.segments and not can_run_pyannote:
             # Have existing segments and can't/shouldn't run pyannote - do identification only
             # Covers: provider already diarized, no word timestamps but segments exist, etc.
-            logger.info(f"🎤 Using segment-level speaker identification on {len(transcript_version.segments)} existing segments")
+            # Only send speech segments for identification; skip event/note segments
+            speech_segments = [s for s in transcript_version.segments if getattr(s, 'segment_type', 'speech') == 'speech']
+            logger.info(
+                f"🎤 Using segment-level speaker identification on {len(speech_segments)} speech segments "
+                f"(skipped {len(transcript_version.segments) - len(speech_segments)} non-speech)"
+            )
             segments_data = [
                 {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker}
-                for s in transcript_version.segments
+                for s in speech_segments
             ]
             speaker_result = await speaker_client.identify_provider_segments(
                 conversation_id=conversation_id,
@@ -500,12 +505,18 @@ async def recognise_speakers_job(
                 for w in words_data
             ]
 
+            # Classify segment type from content
+            from advanced_omi_backend.utils.segment_utils import classify_segment_text
+            seg_classification = classify_segment_text(text)
+            seg_type = "event" if seg_classification == "event" else "speech"
+
             updated_segments.append(
                 Conversation.SpeakerSegment(
                     start=seg.get("start", 0),
                     end=seg.get("end", 0),
                     text=text,
-                    speaker=speaker_name,
+                    speaker="" if seg_type == "event" else speaker_name,
+                    segment_type=seg_type,
                     identified_as=seg.get("identified_as"),
                     confidence=seg.get("confidence"),
                     words=segment_words  # Use words from speaker service
@@ -514,6 +525,23 @@ async def recognise_speakers_job(
 
         if empty_segment_count > 0:
             logger.info(f"🔇 Filtered out {empty_segment_count} empty segments from speaker recognition")
+
+        # Re-insert non-speech segments (event/note) that were skipped during identification
+        # They need to be merged back into position based on timestamps
+        non_speech_segments = [
+            s for s in transcript_version.segments
+            if getattr(s, 'segment_type', 'speech') != 'speech'
+        ]
+        if non_speech_segments:
+            for ns_seg in non_speech_segments:
+                # Find correct insertion position based on start time
+                insert_pos = len(updated_segments)
+                for i, seg in enumerate(updated_segments):
+                    if seg.start > ns_seg.start:
+                        insert_pos = i
+                        break
+                updated_segments.insert(insert_pos, ns_seg)
+            logger.info(f"🎤 Re-inserted {len(non_speech_segments)} non-speech segments")
 
         # Update the transcript version
         transcript_version.segments = updated_segments

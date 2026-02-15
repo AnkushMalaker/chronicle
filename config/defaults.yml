@@ -365,6 +365,8 @@ backend:
     # When true: Use segments from transcription provider (e.g., mock provider in tests)
     # When false: Expect speaker service to create segments via diarization (default production behavior)
     use_provider_segments: false
+    # Transcription job timeout in seconds (default 15 min; increase for slow local STT)
+    job_timeout_seconds: 900
 
   # Diarization settings
   diarization:
@@ -409,7 +411,11 @@ cron_jobs:
     description: "Extract jargon from recent memories and cache for ASR context boosting"
     enabled: false
     schedule: "*/30 * * * *"
+  asr_finetuning:
+    description: "Export annotated conversations to VibeVoice for ASR LoRA fine-tuning"
+    enabled: false
+    schedule: "0 3 * * 0"
   prompt_optimization:
     description: "Analyze user annotations and optimize LLM prompts"
     enabled: false
-    schedule: "0 3 * * 0"
+    schedule: "0 4 * * 0"

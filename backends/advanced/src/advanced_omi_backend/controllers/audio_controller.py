@@ -31,6 +31,7 @@ from advanced_omi_backend.utils.audio_utils import (
     convert_any_to_wav,
     validate_and_prepare_audio,
 )
+from advanced_omi_backend.config import get_transcription_job_timeout
 from advanced_omi_backend.workers.transcription_jobs import (
     transcribe_full_audio_job,
 )
@@ -204,7 +205,7 @@ async def upload_and_process_audio_files(
                         conversation_id,
                         version_id,
                         "batch",  # trigger
-                        job_timeout=900,  # 15 minutes
+                        job_timeout=get_transcription_job_timeout(),
                         result_ttl=JOB_RESULT_TTL,
                         job_id=transcribe_job_id,
                         description=f"Transcribe uploaded file {conversation_id[:8]}",

@@ -13,6 +13,7 @@ import { ErrorBoundary, PageErrorBoundary } from './components/ErrorBoundary'
 const Chat = lazy(() => import('./pages/Chat'))
 const ConversationsRouter = lazy(() => import('./pages/ConversationsRouter'))
 const MemoriesRouter = lazy(() => import('./pages/MemoriesRouter'))
+const ConversationDetail = lazy(() => import('./pages/ConversationDetail'))
 const MemoryDetail = lazy(() => import('./pages/MemoryDetail'))
 const Users = lazy(() => import('./pages/Users'))
 const System = lazy(() => import('./pages/System'))
@@ -78,6 +79,13 @@ function App() {
                   <PageErrorBoundary>
                     <Suspense fallback={<PageSkeleton />}>
                       <Chat />
+                    </Suspense>
+                  </PageErrorBoundary>
+                } />
+                <Route path="conversations/:id" element={
+                  <PageErrorBoundary>
+                    <Suspense fallback={<PageSkeleton />}>
+                      <ConversationDetail />
                     </Suspense>
                   </PageErrorBoundary>
                 } />

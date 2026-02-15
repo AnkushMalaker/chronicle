@@ -45,15 +45,90 @@ def _get_plugins_dir() -> Path:
     return repo_root / "plugins"
 
 
-def expand_env_vars(value: Any) -> Any:
+def load_plugin_env(plugin_id: str) -> Dict[str, str]:
+    """Load per-plugin .env file from plugins/{id}/.env.
+
+    Parses KEY=value lines, skipping comments and blank lines.
+    Strips surrounding quotes from values.
+
+    Args:
+        plugin_id: Plugin identifier (directory name)
+
+    Returns:
+        Dict of env var names to values. Empty dict if file doesn't exist.
+    """
+    plugins_dir = _get_plugins_dir()
+    env_path = plugins_dir / plugin_id / ".env"
+
+    if not env_path.exists():
+        return {}
+
+    env_vars: Dict[str, str] = {}
+    try:
+        with open(env_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip()
+                # Strip surrounding quotes
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                    value = value[1:-1]
+                env_vars[key] = value
+    except Exception as e:
+        logger.warning(f"Failed to read plugin .env for '{plugin_id}': {e}")
+
+    return env_vars
+
+
+def save_plugin_env(plugin_id: str, env_vars: Dict[str, str]) -> Path:
+    """Save environment variables to plugins/{id}/.env.
+
+    Merges new values into existing per-plugin .env file.
+    Creates the file if it doesn't exist.
+
+    Args:
+        plugin_id: Plugin identifier (directory name)
+        env_vars: Dict of env var names to values to write
+
+    Returns:
+        Path to the written .env file
+    """
+    plugins_dir = _get_plugins_dir()
+    plugin_dir = plugins_dir / plugin_id
+    env_path = plugin_dir / ".env"
+
+    # Load existing values and merge
+    existing = load_plugin_env(plugin_id)
+    existing.update(env_vars)
+
+    # Ensure plugin directory exists
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write all values
+    with open(env_path, "w") as f:
+        for key, value in existing.items():
+            f.write(f"{key}={value}\n")
+
+    logger.info(f"Saved {len(env_vars)} env var(s) to {env_path}")
+    return env_path
+
+
+def expand_env_vars(value: Any, extra_env: Optional[Dict[str, str]] = None) -> Any:
     """
     Recursively expand environment variables in configuration values.
 
-    Supports ${ENV_VAR} syntax. If the environment variable is not set,
+    Supports ${ENV_VAR} syntax. Checks extra_env first (if provided),
+    then falls back to os.environ. If neither has the variable,
     the original placeholder is kept.
 
     Args:
         value: Configuration value (can be str, dict, list, or other)
+        extra_env: Optional dict of additional env vars to check before os.environ
 
     Returns:
         Value with environment variables expanded
@@ -72,9 +147,14 @@ def expand_env_vars(value: Any) -> Any:
             # Support default values: ${VAR:-default}
             if ":-" in var_expr:
                 var_name, default = var_expr.split(":-", 1)
-                return os.environ.get(var_name.strip(), default.strip())
+                var_name = var_name.strip()
+                if extra_env and var_name in extra_env:
+                    return extra_env[var_name]
+                return os.environ.get(var_name, default.strip())
             else:
                 var_name = var_expr.strip()
+                if extra_env and var_name in extra_env:
+                    return extra_env[var_name]
                 env_value = os.environ.get(var_name)
                 if env_value is None:
                     logger.warning(
@@ -87,10 +167,10 @@ def expand_env_vars(value: Any) -> Any:
         return re.sub(r"\$\{([^}]+)\}", replacer, value)
 
     elif isinstance(value, dict):
-        return {k: expand_env_vars(v) for k, v in value.items()}
+        return {k: expand_env_vars(v, extra_env=extra_env) for k, v in value.items()}
 
     elif isinstance(value, list):
-        return [expand_env_vars(item) for item in value]
+        return [expand_env_vars(item, extra_env=extra_env) for item in value]
 
     else:
         return value
@@ -142,8 +222,9 @@ def load_plugin_config(plugin_id: str, orchestration_config: Dict[str, Any]) -> 
     except Exception as e:
         logger.warning(f"Failed to load config.yml for plugin '{plugin_id}': {e}")
 
-    # 2. Expand environment variables (reads from .env)
-    config = expand_env_vars(config)
+    # 2. Expand environment variables (per-plugin .env first, then os.environ)
+    plugin_env = load_plugin_env(plugin_id)
+    config = expand_env_vars(config, extra_env=plugin_env)
 
     # 3. Merge orchestration settings from config/plugins.yml
     config["enabled"] = orchestration_config.get("enabled", False)
@@ -362,12 +443,17 @@ def infer_schema_from_config(plugin_id: str, config_dict: Dict[str, Any]) -> Dic
     return {"settings": settings_schema, "env_vars": env_vars_schema}
 
 
-def mask_secrets_in_config(config: Dict[str, Any], schema: Dict[str, Any]) -> Dict[str, Any]:
+def mask_secrets_in_config(
+    config: Dict[str, Any],
+    schema: Dict[str, Any],
+    plugin_env: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
     """Mask secret values in configuration for frontend display.
 
     Args:
         config: Configuration dictionary with actual values
         schema: Schema dictionary identifying secret fields
+        plugin_env: Optional per-plugin env vars (checked before os.environ)
 
     Returns:
         Configuration with secrets masked as '••••••••••••'
@@ -392,8 +478,11 @@ def mask_secrets_in_config(config: Dict[str, Any], schema: Dict[str, Any]) -> Di
         if isinstance(value, str):
             env_var = extract_env_var_name(value)
             if env_var and env_var in secret_env_vars:
-                # Check if env var is actually set
-                is_set = bool(os.environ.get(env_var))
+                # Check if env var is set in per-plugin .env or os.environ
+                is_set = bool(
+                    (plugin_env and plugin_env.get(env_var))
+                    or os.environ.get(env_var)
+                )
                 masked_config[key] = "••••••••••••" if is_set else ""
 
     return masked_config
@@ -433,17 +522,21 @@ def get_plugin_metadata(
     plugin_description = getattr(plugin_class, "description", "")
     supports_testing = hasattr(plugin_class, "test_connection")
 
+    # Load per-plugin env vars
+    plugin_env = load_plugin_env(plugin_id)
+
     # Mask secrets in current config
     current_config = load_plugin_config(plugin_id, orchestration_config)
-    masked_config = mask_secrets_in_config(current_config, config_schema)
+    masked_config = mask_secrets_in_config(current_config, config_schema, plugin_env=plugin_env)
 
-    # Mark which env vars are set
+    # Mark which env vars are set (check per-plugin .env first, then os.environ)
     for env_var_name, env_var_schema in config_schema.get("env_vars", {}).items():
-        env_var_schema["is_set"] = bool(os.environ.get(env_var_name))
+        resolved = plugin_env.get(env_var_name) or os.environ.get(env_var_name)
+        env_var_schema["is_set"] = bool(resolved)
         if env_var_schema.get("secret") and env_var_schema["is_set"]:
             env_var_schema["value"] = "••••••••••••"
         else:
-            env_var_schema["value"] = os.environ.get(env_var_name, "")
+            env_var_schema["value"] = resolved or ""
 
     # Determine runtime health status from the live router
     health_status = "unknown"

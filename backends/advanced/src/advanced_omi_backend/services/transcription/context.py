@@ -31,9 +31,21 @@ class TranscriptionContext:
 
     @property
     def combined(self) -> str:
-        """Comma-separated string suitable for passing to ASR providers."""
-        parts = [p.strip() for p in [self.hot_words, self.user_jargon] if p and p.strip()]
-        return ", ".join(parts)
+        """Newline-separated context string for ASR providers.
+
+        VibeVoice training data uses newline-separated ``customized_context``
+        items (proper nouns, domain terms, full contextual sentences).
+        Each comma-separated hot word / jargon term becomes its own line.
+        """
+        items: list[str] = []
+        for source in [self.hot_words, self.user_jargon]:
+            if not source or not source.strip():
+                continue
+            for token in source.split(","):
+                token = token.strip()
+                if token:
+                    items.append(token)
+        return "\n".join(items)
 
     def to_metadata(self) -> dict:
         """Return a dict suitable for Langfuse span metadata."""
@@ -88,7 +100,7 @@ async def get_asr_context(user_id: Optional[str] = None) -> str:
         user_id: If provided, also look up per-user jargon from Redis.
 
     Returns:
-        Comma-separated string of context terms for the ASR provider.
+        Newline-separated context string for ASR providers.
     """
     ctx = await gather_transcription_context(user_id)
     return ctx.combined

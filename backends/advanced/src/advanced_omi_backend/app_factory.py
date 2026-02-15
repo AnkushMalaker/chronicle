@@ -217,6 +217,7 @@ async def lifespan(app: FastAPI):
     try:
         from advanced_omi_backend.cron_scheduler import get_scheduler, register_cron_job
         from advanced_omi_backend.workers.finetuning_jobs import (
+            run_asr_finetuning_job,
             run_asr_jargon_extraction_job,
             run_speaker_finetuning_job,
         )
@@ -225,6 +226,7 @@ async def lifespan(app: FastAPI):
         )
 
         register_cron_job("speaker_finetuning", run_speaker_finetuning_job)
+        register_cron_job("asr_finetuning", run_asr_finetuning_job)
         register_cron_job("asr_jargon_extraction", run_asr_jargon_extraction_job)
         register_cron_job("prompt_optimization", run_prompt_optimization_job)
 

@@ -32,11 +32,13 @@ from advanced_omi_backend.models.job import JobPriority
 from advanced_omi_backend.plugins.events import ConversationCloseReason
 from advanced_omi_backend.users import User
 from advanced_omi_backend.workers.conversation_jobs import generate_title_summary_job
+from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.workers.memory_jobs import (
     enqueue_memory_processing,
     process_memory_job,
 )
 from advanced_omi_backend.workers.speaker_jobs import recognise_speakers_job
+from advanced_omi_backend.config import get_transcription_job_timeout
 
 logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
@@ -155,6 +157,36 @@ async def get_conversation(conversation_id: str, user: User):
     except Exception as e:
         logger.error(f"Error fetching conversation {conversation_id}: {e}")
         return JSONResponse(status_code=500, content={"error": "Error fetching conversation"})
+
+
+async def get_conversation_memories(conversation_id: str, user: User, limit: int = 100):
+    """Get memories extracted from a specific conversation."""
+    try:
+        conversation = await Conversation.find_one(
+            Conversation.conversation_id == conversation_id
+        )
+        if not conversation:
+            return JSONResponse(status_code=404, content={"error": "Conversation not found"})
+
+        if not user.is_superuser and conversation.user_id != str(user.user_id):
+            return JSONResponse(status_code=403, content={"error": "Access forbidden"})
+
+        memory_service = get_memory_service()
+        memories = await memory_service.get_memories_by_source(
+            user_id=str(user.user_id), source_id=conversation_id, limit=limit
+        )
+
+        return {
+            "conversation_id": conversation_id,
+            "memories": [mem.to_dict() for mem in memories],
+            "count": len(memories),
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching memories for conversation {conversation_id}: {e}")
+        return JSONResponse(
+            status_code=500, content={"error": "Error fetching conversation memories"}
+        )
 
 
 def _conversation_to_list_dict(conv: Conversation) -> dict:
@@ -610,7 +642,7 @@ async def reprocess_orphan(conversation_id: str, user: User):
             conversation_id,
             version_id,
             "reprocess_orphan",
-            job_timeout=900,
+            job_timeout=get_transcription_job_timeout(),
             result_ttl=JOB_RESULT_TTL,
             job_id=f"orphan_transcribe_{conversation_id[:8]}",
             description=f"Transcribe orphan audio for {conversation_id[:8]}",
@@ -732,7 +764,7 @@ async def reprocess_transcript(conversation_id: str, user: User):
             conversation_id,
             version_id,
             "reprocess",
-            job_timeout=900,  # 15 minutes
+            job_timeout=get_transcription_job_timeout(),
             result_ttl=JOB_RESULT_TTL,
             job_id=f"reprocess_{conversation_id[:8]}",
             description=f"Transcribe audio for {conversation_id[:8]}",

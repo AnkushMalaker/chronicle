@@ -368,14 +368,13 @@ async def _setup_websocket_connection(
         f"🔌 {connection_type} WebSocket connection accepted - User: {user.user_id} ({user.email}), Client: {client_id}"
     )
 
-    # Send ready message for PCM clients
-    if connection_type == "PCM":
-        try:
-            ready_msg = json.dumps({"type": "ready", "message": "WebSocket connection established"}) + "\n"
-            await ws.send_text(ready_msg)
-            application_logger.debug(f"✅ Sent ready message to {client_id}")
-        except Exception as e:
-            application_logger.error(f"Failed to send ready message to {client_id}: {e}")
+    # Send ready message to confirm connection is established
+    try:
+        ready_msg = json.dumps({"type": "ready", "message": "WebSocket connection established"}) + "\n"
+        await ws.send_text(ready_msg)
+        application_logger.debug(f"✅ Sent ready message to {client_id}")
+    except Exception as e:
+        application_logger.error(f"Failed to send ready message to {client_id}: {e}")
 
     # Create client state
     client_state = await create_client_state(client_id, user, device_name)
@@ -1074,12 +1073,14 @@ async def _process_rolling_batch(
         version_id = str(uuid.uuid4())
         transcribe_job_id = f"transcribe_rolling_{conversation_id[:12]}_{batch_number}"
 
+        from advanced_omi_backend.config import get_transcription_job_timeout
+
         transcription_job = transcription_queue.enqueue(
             transcribe_full_audio_job,
             conversation_id,
             version_id,
             f"rolling_batch_{batch_number}",  # trigger
-            job_timeout=900,  # 15 minutes
+            job_timeout=get_transcription_job_timeout(),
             result_ttl=JOB_RESULT_TTL,
             job_id=transcribe_job_id,
             description=f"Transcribe rolling batch #{batch_number} {conversation_id[:8]}",
@@ -1190,12 +1191,14 @@ async def _process_batch_audio_complete(
         version_id = str(uuid.uuid4())
         transcribe_job_id = f"transcribe_{conversation_id[:12]}"
 
+        from advanced_omi_backend.config import get_transcription_job_timeout
+
         transcription_job = transcription_queue.enqueue(
             transcribe_full_audio_job,
             conversation_id,
             version_id,
             "batch",  # trigger
-            job_timeout=900,  # 15 minutes
+            job_timeout=get_transcription_job_timeout(),
             result_ttl=JOB_RESULT_TTL,
             job_id=transcribe_job_id,
             description=f"Transcribe batch audio {conversation_id[:8]}",

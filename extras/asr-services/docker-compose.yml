@@ -98,6 +98,7 @@ services:
       - ./debug:/app/debug
       - ./results:/app/results
       - ../../config:/app/config:ro
+      - ./lora_adapters:/models/lora_adapters
     deploy:
       resources:
         reservations:
@@ -115,6 +116,8 @@ services:
       - MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-8192}
       # Quantization: "4bit", "8bit", or "" (none). 4bit recommended for <=24GB VRAM.
       - QUANTIZATION=${QUANTIZATION:-4bit}
+      # LoRA adapter: path to pre-trained adapter to auto-load on startup (optional)
+      - LORA_ADAPTER_PATH=${LORA_ADAPTER_PATH:-}
       # Batching config: managed via config/defaults.yml (asr_services.vibevoice)
     restart: unless-stopped
 

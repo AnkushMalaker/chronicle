@@ -345,6 +345,28 @@ async def get_events(
         return {"events": [], "total": 0}
 
 
+@router.delete("/events")
+async def clear_events(
+    current_user: User = Depends(current_active_user),
+):
+    """Clear all system events from the event log (admin only)."""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    try:
+        from advanced_omi_backend.services.plugin_service import get_plugin_router
+
+        router_instance = get_plugin_router()
+        if not router_instance:
+            return {"deleted": 0}
+
+        count = router_instance.clear_events()
+        return {"deleted": count}
+    except Exception as e:
+        logger.error(f"Failed to clear events: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to clear events: {str(e)}")
+
+
 @router.get("/stats")
 async def get_queue_stats_endpoint(
     current_user: User = Depends(current_active_user)

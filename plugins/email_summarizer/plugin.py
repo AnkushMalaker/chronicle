@@ -1,14 +1,13 @@
 """
 Email Summarizer Plugin for Chronicle.
 
-Automatically sends email summaries when conversations complete.
+Automatically sends email summaries after memory extraction.
 """
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.database import get_database
-from advanced_omi_backend.llm_client import async_generate
 from advanced_omi_backend.utils.logging_utils import mask_dict
 
 from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
@@ -20,35 +19,19 @@ logger = logging.getLogger(__name__)
 
 class EmailSummarizerPlugin(BasePlugin):
     """
-    Plugin for sending email summaries when conversations complete.
+    Plugin for sending email summaries after memory extraction.
 
-    Subscribes to conversation.complete events and:
-    1. Retrieves user email from database
-    2. Generates LLM summary of the conversation
+    Subscribes to memory.processed events and:
+    1. Fetches conversation from DB (title, summary, transcript are ready by this point)
+    2. Retrieves user email from event data or database
     3. Formats HTML and plain text emails
     4. Sends email via SMTP
-
-    Configuration (config/plugins.yml):
-        enabled: true
-        events:
-          - conversation.complete
-        condition:
-          type: always
-        smtp_host: smtp.gmail.com
-        smtp_port: 587
-        smtp_username: ${SMTP_USERNAME}
-        smtp_password: ${SMTP_PASSWORD}
-        smtp_use_tls: true
-        from_email: noreply@chronicle.ai
-        from_name: Chronicle AI
-        subject_prefix: "Conversation Summary"
-        summary_max_sentences: 3
     """
 
     SUPPORTED_ACCESS_LEVELS: List[str] = ['conversation']
 
     name = "Email Summarizer"
-    description = "Sends email summaries when conversations complete"
+    description = "Sends email summaries after memory extraction"
 
     def __init__(self, config: Dict[str, Any]):
         """
@@ -60,7 +43,6 @@ class EmailSummarizerPlugin(BasePlugin):
         super().__init__(config)
 
         self.subject_prefix = config.get('subject_prefix', 'Conversation Summary')
-        self.summary_max_sentences = config.get('summary_max_sentences', 3)
         self.include_conversation_id = config.get('include_conversation_id', True)
         self.include_duration = config.get('include_duration', True)
 
@@ -69,23 +51,6 @@ class EmailSummarizerPlugin(BasePlugin):
 
         # MongoDB database handle
         self.db = None
-
-    def register_prompts(self, registry) -> None:
-        """Register email summarizer prompts with the prompt registry."""
-        registry.register_default(
-            "plugin.email_summarizer.summary",
-            template=(
-                "Summarize this conversation in {{summary_max_sentences}} sentences or less. "
-                "Focus on key points, main topics discussed, and any action items or decisions. "
-                "Be concise and clear."
-            ),
-            name="Email Summary",
-            description="Generates a concise email summary of a completed conversation.",
-            category="plugin",
-            plugin_id="email_summarizer",
-            variables=["summary_max_sentences"],
-            is_dynamic=True,
-        )
 
     async def initialize(self):
         """
@@ -136,73 +101,91 @@ class EmailSummarizerPlugin(BasePlugin):
         """Clean up plugin resources."""
         logger.info("Email Summarizer plugin cleanup complete")
 
-    async def on_conversation_complete(self, context: PluginContext) -> Optional[PluginResult]:
+    async def on_memory_processed(self, context: PluginContext) -> Optional[PluginResult]:
         """
-        Send email summary when conversation completes.
+        Send email summary after memory extraction completes.
+
+        By this point the conversation has its title, summary, and transcript
+        already generated in the DB, so no extra LLM call is needed.
 
         Args:
-            context: Plugin context with conversation data
-                - conversation: dict - Full conversation data
-                - transcript: str - Complete transcript
-                - duration: float - Conversation duration
-                - conversation_id: str - Conversation identifier
-
-        Returns:
-            PluginResult with success status and message
+            context: Plugin context with memory event data
+                - conversation_id: str
+                - conversation: dict with conversation_id, user_id, user_email
+                - memories: list of memory IDs
+                - memory_count: int
         """
         try:
-            logger.info(f"Processing conversation complete event for user: {context.user_id}")
-
-            # Extract conversation data
-            conversation = context.data.get('conversation', {})
-            transcript = context.data.get('transcript', '')
-            duration = context.data.get('duration', 0)
             conversation_id = context.data.get('conversation_id', 'unknown')
-            created_at = conversation.get('created_at')
+            memory_count = context.data.get('memory_count', 0)
+            logger.info(
+                f"Processing memory.processed event for user: {context.user_id}, "
+                f"conversation: {conversation_id}, memories: {memory_count}"
+            )
 
-            # Validate transcript exists
-            if not transcript or transcript.strip() == '':
-                logger.warning(f"Empty transcript for conversation {conversation_id}, skipping email")
-                return PluginResult(
-                    success=False,
-                    message="Skipped: Empty transcript"
-                )
+            # Fetch full conversation from DB (has title, summary, transcript by now)
+            conv_doc = await self.db['conversations'].find_one(
+                {"conversation_id": conversation_id}
+            )
+            if not conv_doc:
+                logger.warning(f"Conversation {conversation_id} not found in DB, skipping email")
+                return PluginResult(success=False, message="Conversation not found")
 
-            # Get user email from database
-            user_email = await self._get_user_email(context.user_id)
+            # Get transcript from active version
+            transcript = ""
+            active_version = conv_doc.get("active_transcript_version", 0)
+            for tv in conv_doc.get("transcript_versions", []):
+                if tv.get("version") == active_version:
+                    transcript = tv.get("transcript", "")
+                    break
+
+            if not transcript:
+                logger.warning(f"No transcript for conversation {conversation_id}, skipping email")
+                return PluginResult(success=False, message="Skipped: Empty transcript")
+
+            # Use the DB summary (already generated by this point)
+            summary = conv_doc.get("detailed_summary") or conv_doc.get("summary")
+            if not summary:
+                logger.warning(f"No summary for conversation {conversation_id}, skipping email")
+                return PluginResult(success=False, message="Skipped: No summary available")
+
+            title = conv_doc.get("title") or self.subject_prefix
+
+            # Get user email — prefer event data, fall back to DB lookup
+            user_email = context.data.get('conversation', {}).get('user_email')
             if not user_email:
-                logger.warning(f"No email found for user {context.user_id}, cannot send summary")
+                user_email = await self._get_user_email(context.user_id)
+            if not user_email:
                 return PluginResult(
                     success=False,
-                    message=f"No email configured for user {context.user_id}"
+                    message=f"No email configured for user {context.user_id}",
                 )
 
-            # Generate LLM summary
-            summary = await self._generate_summary(transcript)
+            # Format and send
+            created_at = conv_doc.get("created_at")
+            duration = conv_doc.get("duration", 0)
 
-            # Format email subject and body
             subject = self._format_subject(created_at)
             body_html = format_html_email(
                 summary=summary,
                 transcript=transcript,
                 conversation_id=conversation_id,
                 duration=duration,
-                created_at=created_at
+                created_at=created_at,
             )
             body_text = format_text_email(
                 summary=summary,
                 transcript=transcript,
                 conversation_id=conversation_id,
                 duration=duration,
-                created_at=created_at
+                created_at=created_at,
             )
 
-            # Send email
             success = await self.email_service.send_email(
                 to_email=user_email,
                 subject=subject,
                 body_text=body_text,
-                body_html=body_html
+                body_html=body_html,
             )
 
             if success:
@@ -210,21 +193,20 @@ class EmailSummarizerPlugin(BasePlugin):
                 return PluginResult(
                     success=True,
                     message=f"Email sent to {user_email}",
-                    data={'recipient': user_email, 'conversation_id': conversation_id}
+                    data={
+                        'recipient': user_email,
+                        'conversation_id': conversation_id,
+                        'title': title,
+                        'memory_count': memory_count,
+                    },
                 )
             else:
                 logger.error(f"Failed to send email to {user_email}")
-                return PluginResult(
-                    success=False,
-                    message=f"Failed to send email to {user_email}"
-                )
+                return PluginResult(success=False, message=f"Failed to send email to {user_email}")
 
         except Exception as e:
-            logger.error(f"Error in email summarizer plugin: {e}", exc_info=True)
-            return PluginResult(
-                success=False,
-                message=f"Error: {str(e)}"
-            )
+            logger.error(f"Error in email summarizer (memory.processed): {e}", exc_info=True)
+            return PluginResult(success=False, message=f"Error: {str(e)}")
 
     async def _get_user_email(self, user_id: str) -> Optional[str]:
         """
@@ -258,41 +240,6 @@ class EmailSummarizerPlugin(BasePlugin):
         except Exception as e:
             logger.error(f"Error fetching user email: {e}", exc_info=True)
             return None
-
-    async def _generate_summary(self, transcript: str) -> str:
-        """
-        Generate LLM summary of the conversation.
-
-        Args:
-            transcript: Full conversation transcript
-
-        Returns:
-            Generated summary (2-3 sentences)
-        """
-        try:
-            from advanced_omi_backend.prompt_registry import get_prompt_registry
-
-            registry = get_prompt_registry()
-            instruction = await registry.get_prompt(
-                "plugin.email_summarizer.summary",
-                summary_max_sentences=self.summary_max_sentences,
-            )
-            prompt = f"{instruction}\n\nConversation:\n{transcript}"
-
-            logger.debug("Generating LLM summary...")
-            summary = await async_generate(prompt)
-
-            if not summary or summary.strip() == '':
-                raise ValueError("LLM returned empty summary")
-
-            logger.info("✅ LLM summary generated successfully")
-            return summary.strip()
-
-        except Exception as e:
-            logger.error(f"Failed to generate LLM summary: {e}", exc_info=True)
-            # Fallback: return first 300 characters of transcript
-            logger.warning("Using fallback: truncated transcript")
-            return transcript[:300] + "..." if len(transcript) > 300 else transcript
 
     def _format_subject(self, created_at: Optional[datetime] = None) -> str:
         """

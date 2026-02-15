@@ -212,6 +212,32 @@ async def process_annotations_for_training(
         )
 
 
+@router.post("/export-asr-dataset")
+async def export_asr_dataset(
+    current_user: User = Depends(current_active_user),
+):
+    """
+    Manually trigger ASR fine-tuning data export.
+
+    Finds applied transcript/diarization annotations not yet consumed by ASR training,
+    reconstructs audio, builds VibeVoice training labels, and POSTs to the ASR service.
+
+    Returns:
+        Export job results with counts of conversations exported and annotations consumed.
+    """
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Only administrators can trigger ASR dataset export")
+
+    try:
+        from advanced_omi_backend.workers.finetuning_jobs import run_asr_finetuning_job
+
+        result = await run_asr_finetuning_job()
+        return JSONResponse(content=result)
+    except Exception as e:
+        logger.error(f"ASR dataset export failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"ASR dataset export failed: {str(e)}")
+
+
 @router.get("/status")
 async def get_finetuning_status(
     current_user: User = Depends(current_active_user),

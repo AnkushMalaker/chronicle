@@ -2054,6 +2054,22 @@ const Queue: React.FC = () => {
             </span>
           </div>
           <div className="flex items-center space-x-3">
+            {eventsExpanded && events.length > 0 && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  queueApi.clearEvents().then(() => {
+                    setEvents([]);
+                    setEventFilters({});
+                  });
+                }}
+                className="inline-flex items-center px-2 py-1 rounded text-xs text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors"
+                title="Clear all events"
+              >
+                <Trash2 className="w-3.5 h-3.5 mr-1" />
+                Clear
+              </button>
+            )}
             {eventsExpanded ? <ChevronDown className="w-4 h-4 text-gray-500" /> : <ChevronRight className="w-4 h-4 text-gray-500" />}
           </div>
         </div>

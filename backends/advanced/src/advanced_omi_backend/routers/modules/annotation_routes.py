@@ -18,8 +18,10 @@ from advanced_omi_backend.models.annotation import (
     AnnotationResponse,
     AnnotationStatus,
     AnnotationType,
+    AnnotationUpdate,
     DiarizationAnnotationCreate,
     EntityAnnotationCreate,
+    InsertAnnotationCreate,
     MemoryAnnotationCreate,
     TitleAnnotationCreate,
     TranscriptAnnotationCreate,
@@ -317,6 +319,189 @@ async def update_annotation_status(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to update annotation status: {str(e)}",
+        )
+
+
+# === Generic Annotation Management ===
+
+
+@router.delete("/{annotation_id}")
+async def delete_annotation(
+    annotation_id: str,
+    current_user: User = Depends(current_active_user),
+):
+    """
+    Delete an unprocessed annotation.
+
+    - Only allows deleting annotations that haven't been applied yet (processed=False)
+    - Returns 404 if not found, 400 if already processed
+    """
+    try:
+        annotation = await Annotation.find_one(
+            Annotation.id == annotation_id,
+            Annotation.user_id == current_user.user_id,
+        )
+        if not annotation:
+            raise HTTPException(status_code=404, detail="Annotation not found")
+
+        if annotation.processed:
+            raise HTTPException(status_code=400, detail="Cannot delete a processed annotation")
+
+        await annotation.delete()
+        logger.info(f"Deleted annotation {annotation_id}")
+
+        return {"status": "deleted", "annotation_id": annotation_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting annotation: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete annotation: {str(e)}",
+        )
+
+
+@router.patch("/{annotation_id}", response_model=AnnotationResponse)
+async def update_annotation(
+    annotation_id: str,
+    update_data: AnnotationUpdate,
+    current_user: User = Depends(current_active_user),
+):
+    """
+    Update an unprocessed annotation in-place.
+
+    - Only allows updating annotations that haven't been applied yet (processed=False)
+    - Updates corrected_text, corrected_speaker, insert_text, or insert_segment_type
+    - Replaces creating duplicate annotations when re-editing
+    """
+    try:
+        annotation = await Annotation.find_one(
+            Annotation.id == annotation_id,
+            Annotation.user_id == current_user.user_id,
+        )
+        if not annotation:
+            raise HTTPException(status_code=404, detail="Annotation not found")
+
+        if annotation.processed:
+            raise HTTPException(status_code=400, detail="Cannot update a processed annotation")
+
+        if update_data.corrected_text is not None:
+            annotation.corrected_text = update_data.corrected_text
+        if update_data.corrected_speaker is not None:
+            annotation.corrected_speaker = update_data.corrected_speaker
+        if update_data.insert_text is not None:
+            annotation.insert_text = update_data.insert_text
+        if update_data.insert_segment_type is not None:
+            annotation.insert_segment_type = update_data.insert_segment_type
+        if update_data.insert_speaker is not None:
+            annotation.insert_speaker = update_data.insert_speaker
+
+        annotation.updated_at = datetime.now(timezone.utc)
+        await annotation.save()
+        logger.info(f"Updated annotation {annotation_id}")
+
+        return AnnotationResponse.model_validate(annotation)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating annotation: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update annotation: {str(e)}",
+        )
+
+
+# === Insert Annotation Routes ===
+
+
+@router.post("/insert", response_model=AnnotationResponse)
+async def create_insert_annotation(
+    annotation_data: InsertAnnotationCreate,
+    current_user: User = Depends(current_active_user),
+):
+    """
+    Create an INSERT annotation to add a new segment between existing segments.
+
+    - Validates conversation ownership and index bounds
+    - Creates a pending annotation that will be applied with other annotations
+    - insert_after_index=-1 means insert before the first segment
+    """
+    try:
+        conversation = await Conversation.find_one(
+            Conversation.conversation_id == annotation_data.conversation_id,
+            Conversation.user_id == current_user.user_id,
+        )
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+        active_transcript = conversation.active_transcript
+        if not active_transcript:
+            raise HTTPException(status_code=400, detail="No active transcript found")
+
+        segment_count = len(active_transcript.segments)
+        if annotation_data.insert_after_index < -1 or annotation_data.insert_after_index >= segment_count:
+            raise HTTPException(
+                status_code=400,
+                detail=f"insert_after_index must be between -1 and {segment_count - 1}",
+            )
+
+        if annotation_data.insert_segment_type not in ("event", "note", "speech"):
+            raise HTTPException(
+                status_code=400,
+                detail="insert_segment_type must be 'event', 'note', or 'speech'",
+            )
+
+        annotation = Annotation(
+            annotation_type=AnnotationType.INSERT,
+            user_id=current_user.user_id,
+            conversation_id=annotation_data.conversation_id,
+            insert_after_index=annotation_data.insert_after_index,
+            insert_text=annotation_data.insert_text,
+            insert_segment_type=annotation_data.insert_segment_type,
+            insert_speaker=annotation_data.insert_speaker,
+            status=AnnotationStatus.PENDING,
+            processed=False,
+        )
+        await annotation.save()
+        logger.info(
+            f"Created insert annotation {annotation.id} for conversation "
+            f"{annotation_data.conversation_id} after index {annotation_data.insert_after_index}"
+        )
+
+        return AnnotationResponse.model_validate(annotation)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating insert annotation: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create insert annotation: {str(e)}",
+        )
+
+
+@router.get("/insert/{conversation_id}", response_model=List[AnnotationResponse])
+async def get_insert_annotations(
+    conversation_id: str,
+    current_user: User = Depends(current_active_user),
+):
+    """Get all insert annotations for a conversation."""
+    try:
+        annotations = await Annotation.find(
+            Annotation.annotation_type == AnnotationType.INSERT,
+            Annotation.conversation_id == conversation_id,
+            Annotation.user_id == current_user.user_id,
+        ).to_list()
+
+        return [AnnotationResponse.model_validate(a) for a in annotations]
+
+    except Exception as e:
+        logger.error(f"Error fetching insert annotations: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch insert annotations: {str(e)}",
         )
 
 
@@ -644,13 +829,16 @@ async def apply_diarization_annotations(
 
         new_version_id = str(uuid.uuid4())
 
-        # Copy segments and apply corrections
+        # Copy segments and apply corrections (most recent annotation wins)
         corrected_segments = []
         for segment_idx, segment in enumerate(active_transcript.segments):
-            # Find annotation for this segment index
-            annotation_for_segment = next(
-                (a for a in annotations if a.segment_index == segment_idx), None
+            # Find annotation for this segment index (most recent wins if duplicates)
+            annotations_for_segment = sorted(
+                [a for a in annotations if a.segment_index == segment_idx],
+                key=lambda a: a.updated_at,
+                reverse=True,
             )
+            annotation_for_segment = annotations_for_segment[0] if annotations_for_segment else None
 
             if annotation_for_segment:
                 # Apply correction
@@ -764,6 +952,9 @@ async def apply_all_annotations(
         transcript_annotations = [
             a for a in annotations if a.annotation_type == AnnotationType.TRANSCRIPT
         ]
+        insert_annotations = [
+            a for a in annotations if a.annotation_type == AnnotationType.INSERT
+        ]
 
         # Get active transcript
         active_transcript = conversation.active_transcript
@@ -776,24 +967,58 @@ async def apply_all_annotations(
         new_version_id = str(uuid.uuid4())
         corrected_segments = []
 
+        # For diarization/transcript: if multiple annotations exist for same segment,
+        # pick the most recently updated one
         for segment_idx, segment in enumerate(active_transcript.segments):
             corrected_segment = segment.model_copy()
 
-            # Apply diarization correction (if exists)
-            diar_annotation = next(
-                (a for a in diarization_annotations if a.segment_index == segment_idx), None
+            # Apply diarization correction (most recent wins)
+            diar_for_segment = sorted(
+                [a for a in diarization_annotations if a.segment_index == segment_idx],
+                key=lambda a: a.updated_at,
+                reverse=True,
             )
-            if diar_annotation:
-                corrected_segment.speaker = diar_annotation.corrected_speaker
+            if diar_for_segment:
+                corrected_segment.speaker = diar_for_segment[0].corrected_speaker
 
-            # Apply transcript correction (if exists)
-            transcript_annotation = next(
-                (a for a in transcript_annotations if a.segment_index == segment_idx), None
+            # Apply transcript correction (most recent wins)
+            transcript_for_segment = sorted(
+                [a for a in transcript_annotations if a.segment_index == segment_idx],
+                key=lambda a: a.updated_at,
+                reverse=True,
             )
-            if transcript_annotation:
-                corrected_segment.text = transcript_annotation.corrected_text
+            if transcript_for_segment:
+                corrected_segment.text = transcript_for_segment[0].corrected_text
 
             corrected_segments.append(corrected_segment)
+
+        # Apply inserts from highest index to lowest (stable indexing)
+        if insert_annotations:
+            sorted_inserts = sorted(
+                insert_annotations,
+                key=lambda a: a.insert_after_index,
+                reverse=True,
+            )
+            for ins in sorted_inserts:
+                idx = ins.insert_after_index  # -1 = before first
+                insert_pos = idx + 1  # Convert to list insertion position
+
+                # Calculate timing from surrounding segments
+                if insert_pos > 0 and insert_pos <= len(corrected_segments):
+                    boundary_time = corrected_segments[insert_pos - 1].end
+                elif insert_pos == 0 and corrected_segments:
+                    boundary_time = corrected_segments[0].start
+                else:
+                    boundary_time = 0.0
+
+                new_segment = Conversation.SpeakerSegment(
+                    start=boundary_time,
+                    end=boundary_time,
+                    text=ins.insert_text or "",
+                    speaker=ins.insert_speaker or "",
+                    segment_type=ins.insert_segment_type or "event",
+                )
+                corrected_segments.insert(insert_pos, new_segment)
 
         # Add new version
         conversation.add_transcript_version(
@@ -809,13 +1034,17 @@ async def apply_all_annotations(
                 "trigger": "manual_annotation_apply",
                 "diarization_count": len(diarization_annotations),
                 "transcript_count": len(transcript_annotations),
+                "insert_count": len(insert_annotations),
             },
             set_as_active=True,
         )
 
         await conversation.save()
         logger.info(
-            f"Applied {len(annotations)} annotations (diarization: {len(diarization_annotations)}, transcript: {len(transcript_annotations)})"
+            f"Applied {len(annotations)} annotations "
+            f"(diarization: {len(diarization_annotations)}, "
+            f"transcript: {len(transcript_annotations)}, "
+            f"insert: {len(insert_annotations)})"
         )
 
         # Mark all annotations as processed
@@ -837,10 +1066,15 @@ async def apply_all_annotations(
 
         return JSONResponse(
             content={
-                "message": f"Applied {len(diarization_annotations)} diarization and {len(transcript_annotations)} transcript annotations",
+                "message": (
+                    f"Applied {len(diarization_annotations)} diarization, "
+                    f"{len(transcript_annotations)} transcript, and "
+                    f"{len(insert_annotations)} insert annotations"
+                ),
                 "version_id": new_version_id,
                 "diarization_count": len(diarization_annotations),
                 "transcript_count": len(transcript_annotations),
+                "insert_count": len(insert_annotations),
                 "status": "success",
             }
         )

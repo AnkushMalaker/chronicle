@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { Check, Plus } from 'lucide-react'
+import { useSortedSpeakers } from '../hooks/useSortedSpeakers'
 
 interface SpeakerNameDropdownProps {
   currentSpeaker: string
@@ -7,8 +8,9 @@ interface SpeakerNameDropdownProps {
   onSpeakerChange: (newSpeaker: string) => void
   segmentIndex: number
   conversationId: string
-  annotated?: boolean  // If this segment already has an annotation
-  speakerColor?: string  // Tailwind color classes for this speaker
+  annotated?: boolean
+  speakerColor?: string
+  recentSpeakers?: string[]
 }
 
 export default function SpeakerNameDropdown({
@@ -16,26 +18,16 @@ export default function SpeakerNameDropdown({
   enrolledSpeakers,
   onSpeakerChange,
   annotated = false,
-  speakerColor = 'text-blue-700 dark:text-blue-300'  // Default blue if not provided
+  speakerColor = 'text-blue-700 dark:text-blue-300',
+  recentSpeakers = [],
 }: SpeakerNameDropdownProps) {
   const [isOpen, setIsOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
-  const [filteredSpeakers, setFilteredSpeakers] = useState(enrolledSpeakers)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
-  // Fuzzy search implementation (simple contains match)
-  useEffect(() => {
-    if (searchQuery) {
-      const filtered = enrolledSpeakers.filter(speaker =>
-        speaker.name.toLowerCase().includes(searchQuery.toLowerCase())
-      )
-      setFilteredSpeakers(filtered)
-    } else {
-      setFilteredSpeakers(enrolledSpeakers)
-    }
-  }, [searchQuery, enrolledSpeakers])
+  const sortedSpeakers = useSortedSpeakers(enrolledSpeakers, searchQuery, recentSpeakers)
+  const hasResults = sortedSpeakers.recent.length > 0 || sortedSpeakers.rest.length > 0
 
-  // Close dropdown when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
@@ -67,6 +59,21 @@ export default function SpeakerNameDropdown({
     }
   }
 
+  const renderSpeakerItem = (speaker: { speaker_id: string; name: string }) => (
+    <button
+      key={speaker.speaker_id}
+      onClick={() => handleSpeakerSelect(speaker.name)}
+      className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center justify-between"
+    >
+      <span className="text-gray-900 dark:text-gray-100">{speaker.name}</span>
+      {speaker.name === currentSpeaker && (
+        <Check className="h-4 w-4 text-green-600" />
+      )}
+    </button>
+  )
+
+  const canCreate = searchQuery && !enrolledSpeakers.some(s => s.name.toLowerCase() === searchQuery.toLowerCase())
+
   return (
     <div className="relative inline-block" ref={dropdownRef}>
       {/* Speaker name button */}
@@ -93,8 +100,13 @@ export default function SpeakerNameDropdown({
               className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
               autoFocus
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && searchQuery && filteredSpeakers.length === 0) {
-                  handleCreateNewSpeaker()
+                if (e.key === 'Enter') {
+                  if (hasResults) {
+                    const first = sortedSpeakers.recent[0] || sortedSpeakers.rest[0]
+                    if (first) handleSpeakerSelect(first.name)
+                  } else if (searchQuery) {
+                    handleCreateNewSpeaker()
+                  }
                 }
               }}
             />
@@ -102,19 +114,21 @@ export default function SpeakerNameDropdown({
 
           {/* Speaker list */}
           <div className="max-h-60 overflow-y-auto">
-            {filteredSpeakers.length > 0 ? (
-              filteredSpeakers.map((speaker) => (
-                <button
-                  key={speaker.speaker_id}
-                  onClick={() => handleSpeakerSelect(speaker.name)}
-                  className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center justify-between"
-                >
-                  <span className="text-gray-900 dark:text-gray-100">{speaker.name}</span>
-                  {speaker.name === currentSpeaker && (
-                    <Check className="h-4 w-4 text-green-600" />
-                  )}
-                </button>
-              ))
+            {hasResults ? (
+              <>
+                {sortedSpeakers.recent.length > 0 && (
+                  <>
+                    <div className="px-4 py-1 text-xs text-gray-400 dark:text-gray-500 uppercase tracking-wider bg-gray-50 dark:bg-gray-800/50">
+                      Recent
+                    </div>
+                    {sortedSpeakers.recent.map(renderSpeakerItem)}
+                    {sortedSpeakers.rest.length > 0 && (
+                      <div className="border-t border-gray-200 dark:border-gray-700" />
+                    )}
+                  </>
+                )}
+                {sortedSpeakers.rest.map(renderSpeakerItem)}
+              </>
             ) : (
               <div className="px-4 py-3 text-sm text-gray-500">
                 No matching speakers found
@@ -123,7 +137,7 @@ export default function SpeakerNameDropdown({
           </div>
 
           {/* Create new speaker option */}
-          {searchQuery && filteredSpeakers.length === 0 && (
+          {canCreate && (
             <div className="border-t border-gray-200 dark:border-gray-700">
               <button
                 onClick={handleCreateNewSpeaker}

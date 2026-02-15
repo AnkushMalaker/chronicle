@@ -21,6 +21,7 @@ class AnnotationType(str, Enum):
     DIARIZATION = "diarization"  # Speaker identification corrections
     ENTITY = "entity"  # Knowledge graph entity corrections (name/details edits)
     TITLE = "title"  # Conversation title corrections
+    INSERT = "insert"  # Insert new segment between existing segments
 
 
 class AnnotationSource(str, Enum):
@@ -77,6 +78,12 @@ class Annotation(Document):
     # the ASR should know) and the entity extraction pipeline (corrections improve future accuracy).
     entity_id: Optional[str] = None  # Neo4j entity ID
     entity_field: Optional[str] = None  # Which field was changed ("name" or "details")
+
+    # For INSERT annotations:
+    insert_after_index: Optional[int] = None  # -1 = before first segment
+    insert_text: Optional[str] = None  # e.g., "[laughter]" or "wife laughed"
+    insert_segment_type: Optional[str] = None  # "event", "note", or "speech"
+    insert_speaker: Optional[str] = None  # Speaker label for "speech" type inserts
 
     # Processed tracking (applies to ALL annotation types)
     processed: bool = Field(default=False)  # Whether annotation has been applied/sent to training
@@ -187,6 +194,24 @@ class TitleAnnotationCreate(AnnotationCreateBase):
     corrected_text: str
 
 
+class InsertAnnotationCreate(BaseModel):
+    """Create insert annotation request (new segment between existing segments)."""
+    conversation_id: str
+    insert_after_index: int  # -1 = before first segment
+    insert_text: str
+    insert_segment_type: str  # "event", "note", or "speech"
+    insert_speaker: Optional[str] = None  # Speaker label for "speech" type inserts
+
+
+class AnnotationUpdate(BaseModel):
+    """Update an existing unprocessed annotation."""
+    corrected_text: Optional[str] = None
+    corrected_speaker: Optional[str] = None
+    insert_text: Optional[str] = None
+    insert_segment_type: Optional[str] = None
+    insert_speaker: Optional[str] = None
+
+
 class AnnotationResponse(BaseModel):
     """Annotation response for API."""
     id: str
@@ -202,6 +227,10 @@ class AnnotationResponse(BaseModel):
     segment_start_time: Optional[float] = None
     entity_id: Optional[str] = None
     entity_field: Optional[str] = None
+    insert_after_index: Optional[int] = None
+    insert_text: Optional[str] = None
+    insert_segment_type: Optional[str] = None
+    insert_speaker: Optional[str] = None
     processed: bool = False
     processed_at: Optional[datetime] = None
     processed_by: Optional[str] = None

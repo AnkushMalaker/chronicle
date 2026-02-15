@@ -285,6 +285,42 @@ class OpenMemoryMCPService(MemoryServiceBase):
             memory_logger.error(f"Get all memories failed: {e}")
             return []
 
+    async def get_memories_by_source(
+        self, user_id: str, source_id: str, limit: int = 100
+    ) -> List[MemoryEntry]:
+        """Get all memories extracted from a specific source (conversation).
+
+        Uses client-side filtering on chronicle_user_id and source_id metadata,
+        consistent with how get_all_memories filters by user.
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        try:
+            results = await self.mcp_client.list_memories(limit=limit * 3)
+
+            memory_entries = []
+            for result in results:
+                metadata = result.get("metadata", {})
+                if (
+                    metadata.get("chronicle_user_id") == user_id
+                    and metadata.get("source_id") == source_id
+                ):
+                    memory_entry = self._mcp_result_to_memory_entry(result, user_id)
+                    if memory_entry:
+                        memory_entries.append(memory_entry)
+                        if len(memory_entries) >= limit:
+                            break
+
+            memory_logger.info(
+                f"📚 Retrieved {len(memory_entries)} memories for source {source_id} (user {user_id})"
+            )
+            return memory_entries
+
+        except Exception as e:
+            memory_logger.error(f"Get memories by source failed: {e}")
+            return []
+
     async def get_memory(
         self, memory_id: str, user_id: Optional[str] = None
     ) -> Optional[MemoryEntry]:

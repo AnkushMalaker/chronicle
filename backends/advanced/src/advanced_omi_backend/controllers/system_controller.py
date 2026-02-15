@@ -2,10 +2,12 @@
 System controller for handling system-related business logic.
 """
 
+import asyncio
 import inspect
 import logging
 import os
 import re
+import signal
 import shutil
 import time
 import warnings
@@ -362,7 +364,9 @@ async def save_misc_settings_controller(settings: dict):
     """Save miscellaneous settings."""
     try:
         # Validate settings
-        valid_keys = {"always_persist_enabled", "use_provider_segments", "per_segment_speaker_id"}
+        boolean_keys = {"always_persist_enabled", "use_provider_segments", "per_segment_speaker_id"}
+        integer_keys = {"transcription_job_timeout_seconds"}
+        valid_keys = boolean_keys | integer_keys
 
         # Filter to only valid keys
         filtered_settings = {}
@@ -371,8 +375,12 @@ async def save_misc_settings_controller(settings: dict):
                 continue  # Skip unknown keys
 
             # Type validation
-            if not isinstance(value, bool):
-                raise HTTPException(status_code=400, detail=f"Invalid value for {key}: must be boolean")
+            if key in boolean_keys:
+                if not isinstance(value, bool):
+                    raise HTTPException(status_code=400, detail=f"Invalid value for {key}: must be boolean")
+            elif key == "transcription_job_timeout_seconds":
+                if not isinstance(value, int) or value < 60 or value > 7200:
+                    raise HTTPException(status_code=400, detail=f"Invalid value for {key}: must be integer between 60 and 7200")
 
             filtered_settings[key] = value
 
@@ -1211,6 +1219,46 @@ async def _reload_and_signal(app=None) -> tuple[dict, bool]:
     return reload_result, worker_signal_sent
 
 
+async def restart_workers() -> dict:
+    """Signal all RQ workers to gracefully restart via Redis.
+
+    Workers finish their current job before restarting.
+    Uses the existing plugin-reload worker restart mechanism.
+    """
+    from advanced_omi_backend.services.plugin_service import signal_worker_restart
+
+    try:
+        signal_worker_restart()
+        logger.info("Worker restart signaled via Redis")
+        return {
+            "message": "Worker restart signal sent. Workers will restart after finishing current jobs.",
+            "status": "accepted",
+        }
+    except Exception as e:
+        logger.exception("Failed to signal worker restart")
+        raise e
+
+
+async def restart_backend() -> dict:
+    """Schedule a SIGTERM to the current process after a short delay.
+
+    The delay allows the HTTP response to be sent before the process dies.
+    Docker (or the process supervisor) will automatically restart the container.
+    """
+
+    async def _delayed_kill():
+        await asyncio.sleep(1.5)
+        logger.info("Sending SIGTERM to self (PID %d) for backend restart", os.getpid())
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    asyncio.create_task(_delayed_kill())
+    logger.info("Backend restart scheduled in 1.5s")
+    return {
+        "message": "Backend restart scheduled. The service will be briefly unavailable.",
+        "status": "accepted",
+    }
+
+
 async def reload_plugins_controller(app=None) -> dict:
     """Reload all plugins and signal workers to restart.
 
@@ -1380,55 +1428,24 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
             updated_files.append(str(plugin_config_path))
             logger.info(f"Updated settings for '{plugin_id}' in {plugin_config_path}")
 
-        # 3. Update .env (only changed env vars)
+        # 3. Update per-plugin .env (only changed env vars)
         if 'env_vars' in config and config['env_vars']:
-            env_path = os.path.join(os.getcwd(), ".env")
+            from advanced_omi_backend.services.plugin_service import save_plugin_env
 
-            if not os.path.exists(env_path):
-                raise FileNotFoundError(f".env file not found at {env_path}")
+            # Filter out masked values (unchanged secrets)
+            changed_vars = {
+                k: v for k, v in config['env_vars'].items()
+                if v != '••••••••••••'
+            }
 
-            # Read current .env
-            with open(env_path, 'r') as f:
-                env_lines = f.readlines()
+            if changed_vars:
+                env_path = save_plugin_env(plugin_id, changed_vars)
+                updated_files.append(str(env_path))
+                logger.info(f"Saved {len(changed_vars)} env var(s) to per-plugin .env for '{plugin_id}'")
 
-            # Create backup
-            backup_path = f"{env_path}.backup"
-            shutil.copy2(env_path, backup_path)
-
-            # Update env vars (only if not masked)
-            env_vars = config['env_vars']
-            updated_env_lines = []
-            updated_vars = set()
-
-            for line in env_lines:
-                line_updated = False
-                for env_var, value in env_vars.items():
-                    # Skip if value is masked (not actually changed)
-                    if value == '••••••••••••':
-                        continue
-
-                    if line.strip().startswith(f"{env_var}="):
-                        updated_env_lines.append(f"{env_var}={value}\n")
-                        updated_vars.add(env_var)
-                        line_updated = True
-                        break
-
-                if not line_updated:
-                    updated_env_lines.append(line)
-
-            # Add new env vars that weren't found in file
-            for env_var, value in env_vars.items():
-                if value != '••••••••••••' and env_var not in updated_vars:
-                    updated_env_lines.append(f"{env_var}={value}\n")
-                    updated_vars.add(env_var)
-
-            # Write updated .env
-            if updated_vars:
-                with open(env_path, 'w') as f:
-                    f.writelines(updated_env_lines)
-
-                updated_files.append(env_path)
-                logger.info(f"Updated {len(updated_vars)} environment variables in {env_path}")
+                # Update os.environ so hot-reload picks up changes immediately
+                for k, v in changed_vars.items():
+                    os.environ[k] = v
 
         # Hot-reload plugins and signal worker restart
         reload_result = None
@@ -1471,6 +1488,7 @@ async def test_plugin_connection(plugin_id: str, config: dict) -> dict:
         from advanced_omi_backend.services.plugin_service import (
             discover_plugins,
             expand_env_vars,
+            load_plugin_env,
         )
 
         # Validate plugin exists
@@ -1495,13 +1513,15 @@ async def test_plugin_connection(plugin_id: str, config: dict) -> dict:
         if 'settings' in config:
             test_config.update(config['settings'])
 
+        # Load per-plugin env for resolving masked values
+        plugin_env = load_plugin_env(plugin_id)
+
         # Add env vars (expand any ${ENV_VAR} references with test values)
         if 'env_vars' in config:
             for key, value in config['env_vars'].items():
-                # Skip masked values
+                # For masked values, resolve from per-plugin .env then os.environ
                 if value == '••••••••••••':
-                    # Use actual env var value
-                    value = os.getenv(key, '')
+                    value = plugin_env.get(key) or os.getenv(key, '')
                 test_config[key.lower()] = value
 
         # Expand any remaining env var references

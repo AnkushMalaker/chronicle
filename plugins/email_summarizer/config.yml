@@ -6,7 +6,6 @@
 
 # Email content settings
 subject_prefix: "Conversation Summary"
-summary_max_sentences: 3
 include_conversation_id: true
 include_duration: true
 
