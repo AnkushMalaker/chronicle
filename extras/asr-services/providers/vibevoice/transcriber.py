@@ -133,6 +133,7 @@ class VibeVoiceTranscriber:
         # LoRA adapter path (auto-loaded after base model if set)
         self.lora_adapter_path = os.getenv("LORA_ADAPTER_PATH") or None
 
+
         # Model components (initialized in load_model)
         self.model = None
         self.processor = None
@@ -302,6 +303,7 @@ class VibeVoiceTranscriber:
         self.model.eval()
         self._has_lora = True
         logger.info("LoRA adapter loaded successfully")
+
 
     def transcribe(
         self,

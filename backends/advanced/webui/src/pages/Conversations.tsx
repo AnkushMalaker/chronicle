@@ -360,6 +360,11 @@ export default function Conversations() {
     loadEnrolledSpeakers()
   }, [])
 
+  // Load conversations on mount and when debug mode toggles (to include/exclude orphans)
+  useEffect(() => {
+    loadConversations()
+  }, [debugMode])
+
   // Close dropdown when clicking outside
   useEffect(() => {
     const handleClickOutside = () => setOpenDropdown(null)
@@ -508,6 +513,7 @@ export default function Conversations() {
     if (!conversation.conversation_id) return
 
     setReprocessingOrphan(prev => new Set(prev).add(conversation.conversation_id!))
+
 
     try {
       await reprocessOrphanMutation.mutateAsync(conversation.conversation_id)

@@ -52,6 +52,23 @@ class EmailSummarizerPlugin(BasePlugin):
         # MongoDB database handle
         self.db = None
 
+    def register_prompts(self, registry) -> None:
+        """Register email summarizer prompts with the prompt registry."""
+        registry.register_default(
+            "plugin.email_summarizer.summary",
+            template=(
+                "Summarize this conversation in {{summary_max_sentences}} sentences or less. "
+                "Focus on key points, main topics discussed, and any action items or decisions. "
+                "Be concise and clear."
+            ),
+            name="Email Summary",
+            description="Generates a concise email summary of a completed conversation.",
+            category="plugin",
+            plugin_id="email_summarizer",
+            variables=["summary_max_sentences"],
+            is_dynamic=True,
+        )
+
     async def initialize(self):
         """
         Initialize plugin resources.

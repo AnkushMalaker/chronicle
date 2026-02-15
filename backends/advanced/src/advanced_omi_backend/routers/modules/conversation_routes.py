@@ -41,6 +41,7 @@ async def get_conversations(
     return await conversation_controller.get_conversations(current_user, include_deleted, include_unprocessed, limit, offset)
 
 
+
 @router.get("/search")
 async def search_conversations(
     q: str = Query(..., min_length=1, description="Text search query"),

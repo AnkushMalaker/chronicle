@@ -12,9 +12,7 @@ import os
 import time
 import uuid
 
-from fastapi import UploadFile
-from fastapi.responses import JSONResponse
-
+from advanced_omi_backend.config import get_transcription_job_timeout
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
     start_post_conversation_jobs,
@@ -31,10 +29,11 @@ from advanced_omi_backend.utils.audio_utils import (
     convert_any_to_wav,
     validate_and_prepare_audio,
 )
-from advanced_omi_backend.config import get_transcription_job_timeout
 from advanced_omi_backend.workers.transcription_jobs import (
     transcribe_full_audio_job,
 )
+from fastapi import UploadFile
+from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")

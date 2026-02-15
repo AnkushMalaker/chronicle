@@ -1,0 +1,11 @@
+# Known wearable devices
+devices: []
+  # - mac: "AA:BB:CC:DD:EE:FF"
+  #   name: "my-neo1"
+  #   type: "neo1"          # neo1 or omi
+
+# Auto-discovery: connect to any recognized OMI/Neo device in range
+auto_discover: true
+
+# Seconds between scans when no device is connected
+scan_interval: 10

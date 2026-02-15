@@ -60,6 +60,7 @@ EVENT_DESCRIPTIONS: Dict[str, str] = {
 }
 
 
+
 class ConversationCloseReason(str, Enum):
     """Reasons for requesting a conversation close."""
 

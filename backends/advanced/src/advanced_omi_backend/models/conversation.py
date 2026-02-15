@@ -132,6 +132,12 @@ class Conversation(Document):
         description="Compression ratio (compressed_size / original_size), typically ~0.047 for Opus"
     )
 
+    # Markers (e.g., button events) captured during the session
+    markers: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Markers captured during audio session (button events, bookmarks, etc.)"
+    )
+
     # Creation metadata
     created_at: Indexed(datetime) = Field(default_factory=datetime.utcnow, description="When the conversation was created")
 

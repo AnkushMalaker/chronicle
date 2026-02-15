@@ -305,6 +305,18 @@ async def open_conversation_job(
         conversation_id = conversation.conversation_id
         logger.info(f"✅ Created streaming conversation {conversation_id} for session {session_id}")
 
+    # Attach markers from Redis session (e.g., button events captured during streaming)
+    session_key = f"audio:session:{session_id}"
+    markers_json = await redis_client.hget(session_key, "markers")
+    if markers_json:
+        try:
+            markers_data = markers_json if isinstance(markers_json, str) else markers_json.decode()
+            conversation.markers = json.loads(markers_data)
+            await conversation.save()
+            logger.info(f"📌 Attached {len(conversation.markers)} markers to conversation {conversation_id}")
+        except Exception as marker_err:
+            logger.warning(f"⚠️ Failed to parse markers from Redis: {marker_err}")
+
     # Link job metadata to conversation (cascading updates)
     current_job.meta["conversation_id"] = conversation_id
     current_job.save_meta()

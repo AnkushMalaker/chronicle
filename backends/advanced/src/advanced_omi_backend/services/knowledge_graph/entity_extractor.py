@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.model_registry import get_models_registry
+from advanced_omi_backend.openai_factory import create_openai_client
 
 from .models import (
     EntityType,

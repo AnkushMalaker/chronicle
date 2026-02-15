@@ -174,7 +174,7 @@ class ChatService:
             logger.warning(f"Failed to load chat system prompt from registry: {e}")
 
         # Final fallback
-        logger.error("Using hardcoded default chat system prompt")
+        logger.info("Using hardcoded default chat system prompt")
         return """You are a helpful AI assistant with access to the user's personal memories and conversation history.
 
 Use the provided memories and conversation context to give personalized, contextual responses. If memories are relevant, reference them naturally in your response. Be conversational and helpful.

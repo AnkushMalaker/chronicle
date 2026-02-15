@@ -392,6 +392,7 @@ class PluginRouter:
             logger.debug("Failed to clear events from Redis", exc_info=True)
             return 0
 
+
     def get_recent_events(self, limit: int = 50, event_type: Optional[str] = None) -> List[Dict]:
         """Read recent events from the Redis log."""
         if not self._event_redis:

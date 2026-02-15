@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Optional
 
 import redis.asyncio as aioredis
 
+
 from .base import PluginContext, PluginResult
 from .events import ConversationCloseReason, PluginEvent
 

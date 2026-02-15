@@ -408,6 +408,7 @@ async def clear_events(
         raise HTTPException(status_code=500, detail=f"Failed to clear events: {str(e)}")
 
 
+
 @router.get("/stats")
 async def get_queue_stats_endpoint(
     current_user: User = Depends(current_active_user)
