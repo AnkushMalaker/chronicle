@@ -7,24 +7,34 @@ always references the enum member, never a raw string.
 """
 
 from enum import Enum
-from typing import Dict
+from typing import Dict  # Used by BUTTON_STATE_TO_EVENT
 
 
 class PluginEvent(str, Enum):
-    """All events that can trigger plugins."""
+    """All events that can trigger plugins.
+
+    Each member carries a human-readable ``description`` attribute so event
+    metadata stays in sync with the enum automatically.
+    """
+
+    def __new__(cls, value: str, description: str = ""):
+        obj = str.__new__(cls, value)
+        obj._value_ = value
+        obj.description = description
+        return obj
 
     # Conversation lifecycle
-    CONVERSATION_COMPLETE = "conversation.complete"
-    TRANSCRIPT_STREAMING = "transcript.streaming"
-    TRANSCRIPT_BATCH = "transcript.batch"
-    MEMORY_PROCESSED = "memory.processed"
+    CONVERSATION_COMPLETE = ("conversation.complete", "Fires when conversation processing finishes (transcript ready)")
+    TRANSCRIPT_STREAMING = ("transcript.streaming", "Real-time transcript segments during a live conversation")
+    TRANSCRIPT_BATCH = ("transcript.batch", "Batch transcript from file upload processing")
+    MEMORY_PROCESSED = ("memory.processed", "After memories are extracted from a conversation")
 
     # Button events (from OMI device)
-    BUTTON_SINGLE_PRESS = "button.single_press"
-    BUTTON_DOUBLE_PRESS = "button.double_press"
+    BUTTON_SINGLE_PRESS = ("button.single_press", "OMI device button single press")
+    BUTTON_DOUBLE_PRESS = ("button.double_press", "OMI device button double press")
 
     # Cross-plugin communication (dispatched by PluginServices.call_plugin)
-    PLUGIN_ACTION = "plugin_action"
+    PLUGIN_ACTION = ("plugin_action", "Cross-plugin dispatch via PluginServices.call_plugin()")
 
 
 class ButtonState(str, Enum):
@@ -47,18 +57,6 @@ class ButtonActionType(str, Enum):
 
     CLOSE_CONVERSATION = "close_conversation"
     CALL_PLUGIN = "call_plugin"
-
-
-EVENT_DESCRIPTIONS: Dict[str, str] = {
-    PluginEvent.CONVERSATION_COMPLETE: "Fires when conversation processing finishes (transcript ready)",
-    PluginEvent.TRANSCRIPT_STREAMING: "Real-time transcript segments during a live conversation",
-    PluginEvent.TRANSCRIPT_BATCH: "Batch transcript from file upload processing",
-    PluginEvent.MEMORY_PROCESSED: "After memories are extracted from a conversation",
-    PluginEvent.BUTTON_SINGLE_PRESS: "OMI device button single press",
-    PluginEvent.BUTTON_DOUBLE_PRESS: "OMI device button double press",
-    PluginEvent.PLUGIN_ACTION: "Cross-plugin dispatch via PluginServices.call_plugin()",
-}
-
 
 
 class ConversationCloseReason(str, Enum):

@@ -11,7 +11,7 @@ from typing import AsyncGenerator
 
 from advanced_omi_backend.controllers import system_controller
 from advanced_omi_backend.llm_client import async_chat_with_tools
-from advanced_omi_backend.plugins.events import EVENT_DESCRIPTIONS, PluginEvent
+from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 
 logger = logging.getLogger(__name__)
@@ -322,7 +322,7 @@ async def _exec_tool(name: str, arguments: dict) -> dict:
 
     if name == "get_available_events":
         return {
-            "events": {e.value: desc for e, desc in EVENT_DESCRIPTIONS.items()},
+            "events": {e.value: e.description for e in PluginEvent},
             "status": "success",
         }
 
@@ -366,8 +366,7 @@ async def _build_system_prompt() -> str:
     # Build events list from enum
     events_lines = []
     for event in PluginEvent:
-        desc = EVENT_DESCRIPTIONS.get(event, "")
-        events_lines.append(f"- `{event.value}` — {desc}")
+        events_lines.append(f"- `{event.value}` — {event.description}")
     events_text = "\n".join(events_lines)
 
     registry = get_prompt_registry()
