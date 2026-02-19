@@ -1098,15 +1098,11 @@ async def generate_title_summary_job(
 
         (title, short_summary), detailed_summary = await asyncio.gather(
             generate_title_and_summary(
-                transcript_text,
-                segments=segments,
-                user_id=conversation.user_id,
+                transcript_text, segments=segments, user_id=conversation.user_id,
                 langfuse_session_id=conversation_id,
             ),
             generate_detailed_summary(
-                transcript_text,
-                segments=segments,
-                memory_context=memory_context,
+                transcript_text, segments=segments, memory_context=memory_context,
                 langfuse_session_id=conversation_id,
             ),
         )
