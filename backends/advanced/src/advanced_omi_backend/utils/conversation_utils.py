@@ -164,6 +164,7 @@ async def generate_title_and_summary(
     text: str,
     segments: Optional[list] = None,
     user_id: Optional[str] = None,
+    langfuse_session_id: Optional[str] = None,
 ) -> tuple[str, str]:
     """
     Generate title and short summary in a single LLM call using full conversation context.
@@ -221,7 +222,7 @@ TRANSCRIPT:
 "{conversation_text}"
 """
 
-        response = await async_generate(prompt, operation="title_summary")
+        response = await async_generate(prompt, operation="title_summary", langfuse_session_id=langfuse_session_id)
 
         # Parse response for Title: and Summary: lines
         title = None
@@ -253,6 +254,7 @@ async def generate_detailed_summary(
     text: str,
     segments: Optional[list] = None,
     memory_context: Optional[str] = None,
+    langfuse_session_id: Optional[str] = None,
 ) -> str:
     """
     Generate a comprehensive, detailed summary of the conversation.
@@ -328,7 +330,7 @@ TRANSCRIPT:
 "{conversation_text}"
 """
 
-        summary = await async_generate(prompt, operation="detailed_summary")
+        summary = await async_generate(prompt, operation="detailed_summary", langfuse_session_id=langfuse_session_id)
         return summary.strip().strip('"').strip("'") or "No meaningful content to summarize"
 
     except Exception as e:

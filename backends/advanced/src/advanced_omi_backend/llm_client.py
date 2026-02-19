@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
 from advanced_omi_backend.model_registry import get_models_registry
-from advanced_omi_backend.openai_factory import create_openai_client
+from advanced_omi_backend.openai_factory import create_openai_client, is_langfuse_enabled
 from advanced_omi_backend.services.memory.config import (
     load_config_yml as _load_root_config,
 )
@@ -78,7 +78,8 @@ class OpenAILLMClient(LLMClient):
             raise
 
     def generate(
-        self, prompt: str, model: str | None = None, temperature: float | None = None
+        self, prompt: str, model: str | None = None, temperature: float | None = None,
+        **langfuse_kwargs,
     ) -> str:
         """Generate text completion using OpenAI-compatible API."""
         try:
@@ -90,6 +91,8 @@ class OpenAILLMClient(LLMClient):
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": temp,
             }
+            if is_langfuse_enabled():
+                params.update(langfuse_kwargs)
 
             response = self.client.chat.completions.create(**params)
             return response.choices[0].message.content.strip()
@@ -98,7 +101,8 @@ class OpenAILLMClient(LLMClient):
             raise
 
     def chat_with_tools(
-        self, messages: list, tools: list | None = None, model: str | None = None, temperature: float | None = None
+        self, messages: list, tools: list | None = None, model: str | None = None,
+        temperature: float | None = None, **langfuse_kwargs,
     ):
         """Chat completion with tool/function calling support. Returns raw response object."""
         model_name = model or self.model
@@ -109,6 +113,8 @@ class OpenAILLMClient(LLMClient):
         }
         if tools:
             params["tools"] = tools
+        if is_langfuse_enabled():
+            params.update(langfuse_kwargs)
         return self.client.chat.completions.create(**params)
 
     def health_check(self) -> Dict:
@@ -190,12 +196,20 @@ def reset_llm_client():
     _llm_client = None
 
 
+def _langfuse_metadata(session_id: str | None) -> dict:
+    """Return metadata dict with langfuse_session_id if Langfuse is enabled."""
+    if session_id and is_langfuse_enabled():
+        return {"langfuse_session_id": session_id}
+    return {}
+
+
 # Async wrapper for blocking LLM operations
 async def async_generate(
     prompt: str,
     model: str | None = None,
     temperature: float | None = None,
     operation: str | None = None,
+    langfuse_session_id: str | None = None,
 ) -> str:
     """Async wrapper for LLM text generation.
 
@@ -203,6 +217,10 @@ async def async_generate(
     ``llm_operations`` config section via ``get_llm_operation()``.
     The resolved config determines model, temperature, max_tokens, etc.
     Explicit ``model``/``temperature`` kwargs still override the resolved values.
+
+    When ``langfuse_session_id`` is provided and Langfuse is enabled,
+    the session ID is set on the current Langfuse trace to group all
+    LLM calls for a conversation.
     """
     if operation:
         registry = get_models_registry()
@@ -210,19 +228,21 @@ async def async_generate(
             op = registry.get_llm_operation(operation)
             client = op.get_client(is_async=True)
             api_params = op.to_api_params()
-            # Allow explicit overrides
             if temperature is not None:
                 api_params["temperature"] = temperature
             if model is not None:
                 api_params["model"] = model
             api_params["messages"] = [{"role": "user", "content": prompt}]
+            api_params["metadata"] = _langfuse_metadata(langfuse_session_id)
             response = await client.chat.completions.create(**api_params)
             return response.choices[0].message.content.strip()
 
     # Fallback: use singleton client
     client = get_llm_client()
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, client.generate, prompt, model, temperature)
+    return await loop.run_in_executor(
+        None, lambda: client.generate(prompt, model, temperature)
+    )
 
 
 async def async_chat_with_tools(
@@ -231,6 +251,7 @@ async def async_chat_with_tools(
     model: str | None = None,
     temperature: float | None = None,
     operation: str | None = None,
+    langfuse_session_id: str | None = None,
 ):
     """Async wrapper for chat completion with tool calling.
 
@@ -249,12 +270,15 @@ async def async_chat_with_tools(
             api_params["messages"] = messages
             if tools:
                 api_params["tools"] = tools
+            api_params["metadata"] = _langfuse_metadata(langfuse_session_id)
             return await client.chat.completions.create(**api_params)
 
     # Fallback: use singleton client
     client = get_llm_client()
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, client.chat_with_tools, messages, tools, model, temperature)
+    return await loop.run_in_executor(
+        None, lambda: client.chat_with_tools(messages, tools, model, temperature)
+    )
 
 
 async def async_health_check() -> Dict:

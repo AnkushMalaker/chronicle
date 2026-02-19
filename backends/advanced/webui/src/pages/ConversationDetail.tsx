@@ -4,9 +4,9 @@ import { useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft, Calendar, User, Trash2, RefreshCw, MoreVertical,
   RotateCcw, Zap, Play, Pause,
-  Save, X, Pencil, Brain, Clock, Database, Layers, Star
+  Save, X, Pencil, Brain, Clock, Database, Layers, Star, BarChart3
 } from 'lucide-react'
-import { annotationsApi, speakerApi, BACKEND_URL } from '../services/api'
+import { annotationsApi, speakerApi, systemApi, BACKEND_URL } from '../services/api'
 import {
   useConversationDetail, useConversationMemories,
   useDeleteConversation, useReprocessTranscript, useReprocessMemory, useReprocessSpeakers, useToggleStar
@@ -87,6 +87,17 @@ export default function ConversationDetail() {
 
   // Dropdown menu state
   const [openDropdown, setOpenDropdown] = useState(false)
+
+  // Langfuse observability link
+  const [langfuseSessionUrl, setLangfuseSessionUrl] = useState<string | null>(null)
+  useEffect(() => {
+    systemApi.getObservabilityConfig().then(res => {
+      const cfg = res.data?.langfuse
+      if (cfg?.enabled && cfg?.session_base_url) {
+        setLangfuseSessionUrl(cfg.session_base_url)
+      }
+    }).catch(() => {})
+  }, [])
 
   // Reprocessing state
   const [reprocessingTranscript, setReprocessingTranscript] = useState(false)
@@ -455,6 +466,7 @@ export default function ConversationDetail() {
         })
       }
       setEnrolledSpeakers(prev => {
+        if (newSpeaker === 'Unknown Speaker') return prev
         if (prev.some(s => s.name === newSpeaker)) return prev
         return [...prev, { speaker_id: `temp_${Date.now()}_${newSpeaker}`, name: newSpeaker }]
       })
@@ -589,6 +601,17 @@ export default function ConversationDetail() {
         </button>
 
         <div className="flex items-center space-x-1">
+          {langfuseSessionUrl && conversation.conversation_id && (
+            <a
+              href={`${langfuseSessionUrl}/${conversation.conversation_id}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="p-2 rounded-full hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors"
+              title="View traces in Langfuse"
+            >
+              <BarChart3 className="h-5 w-5 text-gray-400 dark:text-gray-500 hover:text-blue-500 dark:hover:text-blue-400" />
+            </a>
+          )}
           <button
             onClick={handleToggleStar}
             className="p-2 rounded-full hover:bg-yellow-100 dark:hover:bg-yellow-900/30 transition-colors"

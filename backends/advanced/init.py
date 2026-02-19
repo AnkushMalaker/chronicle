@@ -662,9 +662,15 @@ class ChronicleSetup:
             self.config["LANGFUSE_PUBLIC_KEY"] = langfuse_pub
             self.config["LANGFUSE_SECRET_KEY"] = langfuse_sec
             self.config["LANGFUSE_BASE_URL"] = langfuse_host
+
+            # Derive browser-accessible URL for deep-links
+            public_url = getattr(self.args, 'langfuse_public_url', None) or "http://localhost:3002"
+            self._save_langfuse_public_url(public_url)
+
             source = "external" if "langfuse-web" not in langfuse_host else "local"
             self.console.print(f"[green][SUCCESS][/green] LangFuse auto-configured ({source})")
             self.console.print(f"[blue][INFO][/blue] Host: {langfuse_host}")
+            self.console.print(f"[blue][INFO][/blue] Public URL: {public_url}")
             self.console.print(f"[blue][INFO][/blue] Public key: {self.mask_api_key(langfuse_pub)}")
             return
 
@@ -710,9 +716,27 @@ class ChronicleSetup:
             if secret_key:
                 self.config["LANGFUSE_SECRET_KEY"] = secret_key
 
+            # Browser-accessible URL for deep-links (stored in config.yml, not .env)
+            public_url = Prompt.ask(
+                "LangFuse browser URL (for dashboard links)",
+                default="http://localhost:3002",
+            )
+            if public_url:
+                self._save_langfuse_public_url(public_url)
+
             self.console.print("[green][SUCCESS][/green] LangFuse configured")
         else:
             self.console.print("[blue][INFO][/blue] LangFuse disabled")
+
+    def _save_langfuse_public_url(self, public_url: str):
+        """Save the Langfuse browser-accessible URL to config.yml."""
+        full_config = self.config_manager.get_full_config()
+        if "observability" not in full_config:
+            full_config["observability"] = {}
+        if "langfuse" not in full_config["observability"]:
+            full_config["observability"]["langfuse"] = {}
+        full_config["observability"]["langfuse"]["public_url"] = public_url
+        self.config_manager.save_full_config(full_config)
 
     def setup_network(self):
         """Configure network settings"""
@@ -1038,6 +1062,8 @@ def main():
                        help="LangFuse project secret key (from langfuse init or external)")
     parser.add_argument("--langfuse-host",
                        help="LangFuse host URL (default: http://langfuse-web:3000 for local)")
+    parser.add_argument("--langfuse-public-url",
+                       help="LangFuse browser-accessible URL for deep-links (default: http://localhost:3002)")
     parser.add_argument("--streaming-provider",
                        choices=["deepgram", "smallest", "qwen3-asr"],
                        help="Streaming provider when different from batch (enables batch re-transcription)")

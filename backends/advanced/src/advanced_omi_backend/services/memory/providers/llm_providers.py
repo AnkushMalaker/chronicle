@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.model_registry import ModelDef, get_models_registry
-from advanced_omi_backend.openai_factory import create_openai_client
+from advanced_omi_backend.openai_factory import create_openai_client, is_langfuse_enabled
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 
 from ..base import LLMProviderBase
@@ -36,6 +36,13 @@ from ..utils import extract_json_from_text
 
 
 memory_logger = logging.getLogger("memory_service")
+
+
+def _langfuse_metadata(session_id: str | None) -> dict:
+    """Return metadata dict with langfuse_session_id if Langfuse is enabled."""
+    if session_id and is_langfuse_enabled():
+        return {"langfuse_session_id": session_id}
+    return {}
 
 
 def _get_openai_client(api_key: str, base_url: str, is_async: bool = False):
@@ -186,6 +193,7 @@ class OpenAIProvider(LLMProviderBase):
 
     async def extract_memories(
         self, text: str, prompt: str, user_id: Optional[str] = None,
+        langfuse_session_id: Optional[str] = None,
     ) -> List[str]:
         """Extract memories using OpenAI API with the enhanced fact retrieval prompt.
 
@@ -193,6 +201,7 @@ class OpenAIProvider(LLMProviderBase):
             text: Input text to extract memories from
             prompt: System prompt to guide extraction (uses default if empty)
             user_id: Optional user ID for per-user prompt override resolution
+            langfuse_session_id: Optional session ID for Langfuse trace grouping
 
         Returns:
             List of extracted memory strings
@@ -209,12 +218,12 @@ class OpenAIProvider(LLMProviderBase):
                     user_id,
                     current_date=datetime.now().strftime("%Y-%m-%d"),
                 )
-            
+
             # local models can only handle small chunks of input text
             text_chunks = chunk_text_with_spacy(text)
-            
+
             # Process all chunks in sequence, not concurrently
-            results = [await self._process_chunk(system_prompt, chunk, i) for i, chunk in enumerate(text_chunks)]
+            results = [await self._process_chunk(system_prompt, chunk, i, langfuse_session_id=langfuse_session_id) for i, chunk in enumerate(text_chunks)]
             
             # Spread list of list of facts into a single list of facts
             cleaned_facts = []
@@ -228,23 +237,26 @@ class OpenAIProvider(LLMProviderBase):
             memory_logger.error(f"OpenAI memory extraction failed: {e}")
             return []
         
-    async def _process_chunk(self, system_prompt: str, chunk: str, index: int) -> List[str]:
+    async def _process_chunk(
+        self, system_prompt: str, chunk: str, index: int,
+        langfuse_session_id: Optional[str] = None,
+    ) -> List[str]:
         """Process a single text chunk to extract memories using OpenAI API.
-        
+
         This private method handles the LLM interaction for a single chunk of text,
         sending it to OpenAI's chat completion API with the specified system prompt
         to extract structured memory facts.
-        
+
         Args:
-            client: OpenAI async client instance for API communication
             system_prompt: System prompt that guides the memory extraction behavior
             chunk: Individual text chunk to process for memory extraction
             index: Index of the chunk for logging and error tracking purposes
-            
+            langfuse_session_id: Optional session ID for Langfuse trace grouping
+
         Returns:
             List of extracted memory fact strings from the chunk. Returns empty list
             if no facts are found or if an error occurs during processing.
-            
+
         Note:
             Errors are logged but don't propagate to avoid failing the entire
             memory extraction process.
@@ -258,6 +270,7 @@ class OpenAIProvider(LLMProviderBase):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": chunk},
                 ],
+                metadata=_langfuse_metadata(langfuse_session_id),
             )
             facts = (response.choices[0].message.content or "").strip()
             if not facts:
@@ -314,6 +327,7 @@ class OpenAIProvider(LLMProviderBase):
         retrieved_old_memory: List[Dict[str, str]] | List[str],
         new_facts: List[str],
         custom_prompt: Optional[str] = None,
+        langfuse_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Use OpenAI chat completion with enhanced prompt to propose memory actions.
 
@@ -321,6 +335,7 @@ class OpenAIProvider(LLMProviderBase):
             retrieved_old_memory: List of existing memories for context
             new_facts: List of new facts to process
             custom_prompt: Optional custom prompt to override default
+            langfuse_session_id: Optional session ID for Langfuse trace grouping
 
         Returns:
             Dictionary containing proposed memory actions
@@ -340,6 +355,7 @@ class OpenAIProvider(LLMProviderBase):
             response = await client.chat.completions.create(
                 **op.to_api_params(),
                 messages=update_memory_messages,
+                metadata=_langfuse_metadata(langfuse_session_id),
             )
             content = (response.choices[0].message.content or "").strip()
             if not content:
@@ -365,6 +381,7 @@ class OpenAIProvider(LLMProviderBase):
         diff_context: str,
         new_transcript: str,
         custom_prompt: Optional[str] = None,
+        langfuse_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Propose memory updates after speaker re-identification.
 
@@ -427,6 +444,7 @@ class OpenAIProvider(LLMProviderBase):
             response = await client.chat.completions.create(
                 **op.to_api_params(),
                 messages=messages,
+                metadata=_langfuse_metadata(langfuse_session_id),
             )
             content = (response.choices[0].message.content or "").strip()
 

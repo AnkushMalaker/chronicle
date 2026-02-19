@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
-import { Check, Plus } from 'lucide-react'
+import { Check, Plus, UserX } from 'lucide-react'
 import { useSortedSpeakers } from '../hooks/useSortedSpeakers'
+
+const UNKNOWN_SPEAKER = 'Unknown Speaker'
 
 interface SpeakerNameDropdownProps {
   currentSpeaker: string
@@ -111,6 +113,24 @@ export default function SpeakerNameDropdown({
               }}
             />
           </div>
+
+          {/* Unknown Speaker option */}
+          {(!searchQuery || UNKNOWN_SPEAKER.toLowerCase().includes(searchQuery.toLowerCase())) && (
+            <div className="border-b border-gray-200 dark:border-gray-700">
+              <button
+                onClick={() => handleSpeakerSelect(UNKNOWN_SPEAKER)}
+                className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center justify-between"
+              >
+                <span className="flex items-center space-x-2 text-gray-500 dark:text-gray-400">
+                  <UserX className="h-4 w-4" />
+                  <span>{UNKNOWN_SPEAKER}</span>
+                </span>
+                {currentSpeaker === UNKNOWN_SPEAKER && (
+                  <Check className="h-4 w-4 text-green-600" />
+                )}
+              </button>
+            </div>
+          )}
 
           {/* Speaker list */}
           <div className="max-h-60 overflow-y-auto">

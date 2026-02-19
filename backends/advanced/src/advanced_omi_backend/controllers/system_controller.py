@@ -283,6 +283,33 @@ async def get_auth_config():
     }
 
 
+async def get_observability_config():
+    """Get observability configuration for frontend (Langfuse deep-links).
+
+    Returns non-secret data only (enabled status and browser URL).
+    """
+    from advanced_omi_backend.openai_factory import is_langfuse_enabled
+
+    enabled = is_langfuse_enabled()
+    session_base_url = None
+
+    if enabled:
+        from advanced_omi_backend.config_loader import load_config
+
+        cfg = load_config()
+        public_url = cfg.get("observability", {}).get("langfuse", {}).get("public_url", "")
+        if public_url:
+            # Strip trailing slash and build session URL
+            session_base_url = f"{public_url.rstrip('/')}/project/chronicle/sessions"
+
+    return {
+        "langfuse": {
+            "enabled": enabled,
+            "session_base_url": session_base_url,
+        }
+    }
+
+
 # Audio file processing functions moved to audio_controller.py
 
 

@@ -156,6 +156,7 @@ class MemoryService(MemoryServiceBase):
                 fact_memories_text = await asyncio.wait_for(
                     self.llm_provider.extract_memories(
                         transcript, self.config.extraction_prompt, user_id=user_id,
+                        langfuse_session_id=source_id,
                     ),
                     timeout=self.config.timeout_seconds,
                 )
@@ -193,7 +194,8 @@ class MemoryService(MemoryServiceBase):
             if allow_update and fact_memories_text:
                 memory_logger.info(f"🔍 Allowing update for {source_id}")
                 created_ids = await self._process_memory_updates(
-                    fact_memories_text, embeddings, user_id, client_id, source_id, user_email
+                    fact_memories_text, embeddings, user_id, client_id, source_id, user_email,
+                    langfuse_session_id=source_id,
                 )
             else:
                 memory_logger.info(f"🔍 Not allowing update for {source_id}")
@@ -578,6 +580,7 @@ class MemoryService(MemoryServiceBase):
                     existing_memories=existing_memory_dicts,
                     diff_context=diff_text,
                     new_transcript=transcript,
+                    langfuse_session_id=source_id,
                 )
                 memory_logger.info(
                     f"🔄 Reprocess LLM returned actions: {actions_obj}"
@@ -786,6 +789,7 @@ class MemoryService(MemoryServiceBase):
         client_id: str,
         source_id: str,
         user_email: str,
+        langfuse_session_id: Optional[str] = None,
     ) -> List[str]:
         """Process memory updates using LLM-driven action proposals.
 
@@ -848,6 +852,7 @@ class MemoryService(MemoryServiceBase):
                 retrieved_old_memory=retrieved_old_memory,
                 new_facts=memories_text,
                 custom_prompt=None,
+                langfuse_session_id=langfuse_session_id,
             )
             memory_logger.info(f"📝 UpdateMemory LLM returned: {type(actions_obj)} - {actions_obj}")
         except Exception as e_actions:

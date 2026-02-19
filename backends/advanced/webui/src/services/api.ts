@@ -370,6 +370,9 @@ export const systemApi = {
   // System restart operations
   restartWorkers: () => api.post('/api/admin/system/restart-workers'),
   restartBackend: () => api.post('/api/admin/system/restart-backend'),
+
+  // Observability
+  getObservabilityConfig: () => api.get('/api/observability'),
 }
 
 export const queueApi = {

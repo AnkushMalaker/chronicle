@@ -150,7 +150,7 @@ def check_service_configured(service_name):
     else:
         return (service_path / '.env').exists()
 
-def run_compose_command(service_name, command, build=False):
+def run_compose_command(service_name, command, build=False, force_recreate=False):
     """Run docker compose command for a service"""
     service = SERVICES[service_name]
     service_path = Path(service['path'])
@@ -260,6 +260,10 @@ def run_compose_command(service_name, command, build=False):
             return False
 
     # Step 2: Run the actual command (up/down/restart/status)
+    up_flags = ['up', '-d']
+    if force_recreate:
+        up_flags.append('--force-recreate')
+
     cmd = ['docker', 'compose']
 
     # Add profiles for backend service
@@ -282,14 +286,14 @@ def run_compose_command(service_name, command, build=False):
             if command == 'up':
                 https_enabled = env_values.get('REACT_UI_HTTPS', 'false')
                 if https_enabled.lower() == 'true':
-                    cmd.extend(['up', '-d'])
+                    cmd.extend(up_flags)
                 else:
-                    cmd.extend(['up', '-d', 'speaker-service-gpu' if profile == 'gpu' else 'speaker-service-cpu', 'web-ui'])
+                    cmd.extend(up_flags + ['speaker-service-gpu' if profile == 'gpu' else 'speaker-service-cpu', 'web-ui'])
             elif command == 'down':
                 cmd.extend(['down'])
         else:
             if command == 'up':
-                cmd.extend(['up', '-d'])
+                cmd.extend(up_flags)
             elif command == 'down':
                 cmd.extend(['down'])
 
@@ -322,10 +326,10 @@ def run_compose_command(service_name, command, build=False):
                 # Qwen3-ASR also needs the streaming bridge
                 if asr_provider == 'qwen3-asr':
                     services_to_start.append('qwen3-asr-bridge')
-                cmd.extend(['up', '-d'] + services_to_start)
+                cmd.extend(up_flags + services_to_start)
             else:
                 console.print("[yellow]⚠️  No ASR_PROVIDER configured, starting default service[/yellow]")
-                cmd.extend(['up', '-d', 'vibevoice-asr'])
+                cmd.extend(up_flags + ['vibevoice-asr'])
         elif command == 'down':
             cmd.extend(['down'])
         elif command == 'restart':
@@ -340,7 +344,7 @@ def run_compose_command(service_name, command, build=False):
     else:
         # Standard compose commands for other services
         if command == 'up':
-            cmd.extend(['up', '-d'])
+            cmd.extend(up_flags)
         elif command == 'down':
             cmd.extend(['down'])
         elif command == 'restart':
@@ -405,7 +409,7 @@ def ensure_docker_network():
         console.print(f"[red]❌ Error checking/creating network: {e}[/red]")
         return False
 
-def start_services(services, build=False):
+def start_services(services, build=False, force_recreate=False):
     """Start specified services"""
     console.print(f"🚀 [bold]Starting {len(services)} services...[/bold]")
 
@@ -429,7 +433,7 @@ def start_services(services, build=False):
             continue
             
         console.print(f"\n🔧 Starting {service_name}...")
-        if run_compose_command(service_name, 'up', build):
+        if run_compose_command(service_name, 'up', build, force_recreate):
             console.print(f"[green]✅ {service_name} started[/green]")
             success_count += 1
         else:
@@ -460,7 +464,9 @@ def start_services(services, build=False):
 
     # Show LangFuse prompt management tip if langfuse was started
     if 'langfuse' in services and check_service_configured('langfuse'):
-        langfuse_url = "http://localhost:3002/project/chronicle/prompts"
+        backend_env = _get_backend_env_path()
+        langfuse_host = read_env_value(backend_env, "SERVER_IP") or "localhost"
+        langfuse_url = f"http://{langfuse_host}:3002/project/chronicle/prompts"
         console.print(f"   Prompt Mgmt:    {langfuse_url}")
 
 def stop_services(services):
@@ -558,6 +564,7 @@ def main():
                             help='Services to start: backend, speaker-recognition, asr-services, openmemory-mcp (or use --all)')
     start_parser.add_argument('--all', action='store_true', help='Start all configured services')
     start_parser.add_argument('--build', action='store_true', help='Build images before starting')
+    start_parser.add_argument('--force-recreate', action='store_true', help='Force recreate containers even if unchanged')
     
     # Stop command
     stop_parser = subparsers.add_parser('stop', help='Stop services')
@@ -604,7 +611,7 @@ def main():
             console.print("[red]❌ No services specified. Use --all or specify service names.[/red]")
             return
             
-        start_services(services, args.build)
+        start_services(services, args.build, args.force_recreate)
         
     elif args.command == 'stop':
         if args.all:

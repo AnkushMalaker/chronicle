@@ -50,6 +50,16 @@ async def get_auth_config():
     return await system_controller.get_auth_config()
 
 
+@router.get("/observability")
+async def get_observability_config():
+    """Get observability configuration for frontend (Langfuse deep-links).
+
+    Returns non-secret data: enabled status and browser-accessible session URL.
+    No authentication required.
+    """
+    return await system_controller.get_observability_config()
+
+
 @router.get("/diarization-settings")
 async def get_diarization_settings(current_user: User = Depends(current_superuser)):
     """Get current diarization settings. Admin only."""

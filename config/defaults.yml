@@ -503,6 +503,16 @@ backend:
 # ===========================
 # Cron Jobs Configuration
 # ===========================
+# ===========================
+# Observability Configuration
+# ===========================
+observability:
+  langfuse:
+    # Browser-accessible URL for linking to Langfuse sessions.
+    # Distinct from LANGFUSE_HOST which may be an internal Docker URL.
+    # Example: http://localhost:3002
+    public_url: ''
+
 cron_jobs:
   speaker_finetuning:
     description: "Process speaker diarization annotations and send to speaker recognition service for training"

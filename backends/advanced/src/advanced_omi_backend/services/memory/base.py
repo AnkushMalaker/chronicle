@@ -342,6 +342,7 @@ class LLMProviderBase(ABC):
     @abstractmethod
     async def extract_memories(
         self, text: str, prompt: str, user_id: Optional[str] = None,
+        langfuse_session_id: Optional[str] = None,
     ) -> List[str]:
         """Extract meaningful fact memories from text using an LLM.
 
@@ -349,6 +350,7 @@ class LLMProviderBase(ABC):
             text: Input text to extract memories from
             prompt: System prompt to guide the extraction process
             user_id: Optional user ID for per-user prompt override resolution
+            langfuse_session_id: Optional session ID for Langfuse trace grouping
 
         Returns:
             List of extracted fact memory strings
@@ -373,6 +375,7 @@ class LLMProviderBase(ABC):
         retrieved_old_memory: List[Dict[str, str]],
         new_facts: List[str],
         custom_prompt: Optional[str] = None,
+        langfuse_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Propose memory management actions based on existing and new information.
 
@@ -398,6 +401,7 @@ class LLMProviderBase(ABC):
         diff_context: str,
         new_transcript: str,
         custom_prompt: Optional[str] = None,
+        langfuse_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Propose memory updates after transcript reprocessing (e.g., speaker changes).
 
