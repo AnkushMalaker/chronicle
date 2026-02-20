@@ -1,0 +1,17 @@
+[project]
+name = "local-wearable-client"
+version = "0.1.0"
+description = "Background service that auto-scans, connects, and streams audio from OMI/Neo devices to the Chronicle backend"
+requires-python = ">= 3.10"
+dependencies = [
+    "friend-lite-sdk",
+    "easy_audio_interfaces>=0.8",
+    "python-dotenv",
+    "httpx",
+    "websockets",
+    "pyyaml",
+    "rumps",
+]
+
+[tool.uv.sources]
+friend-lite-sdk = { path = "../friend-lite-sdk", editable = true }

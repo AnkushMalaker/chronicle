@@ -50,29 +50,34 @@ def _opus_dyld_path() -> str:
 
 
 def _create_app_bundle() -> None:
-    """Create a minimal .app bundle so Spotlight/Raycast can find it."""
-    contents = APP_BUNDLE / "Contents"
-    macos = contents / "MacOS"
-    macos.mkdir(parents=True, exist_ok=True)
+    """Create a .app bundle via osacompile so Raycast/Spotlight treat it as a real app."""
+    if APP_BUNDLE.exists():
+        shutil.rmtree(APP_BUNDLE)
 
-    # Info.plist
-    info = {
+    # osacompile produces a proper Mach-O app bundle from AppleScript
+    applescript = f'do shell script "launchctl kickstart gui/" & (do shell script "id -u") & "/{LABEL}"'
+    result = subprocess.run(
+        ["osacompile", "-o", str(APP_BUNDLE), "-e", applescript],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"osacompile failed: {result.stderr.strip()}")
+        return
+
+    # Patch Info.plist with our bundle metadata
+    info_plist = APP_BUNDLE / "Contents" / "Info.plist"
+    with open(info_plist, "rb") as f:
+        info = plistlib.load(f)
+    info.update({
         "CFBundleName": "Chronicle Wearable",
+        "CFBundleDisplayName": "Chronicle Wearable",
         "CFBundleIdentifier": LABEL,
         "CFBundleVersion": "1.0",
-        "CFBundleExecutable": "launcher",
+        "CFBundleShortVersionString": "1.0",
         "LSUIElement": True,  # No dock icon
-    }
-    with open(contents / "Info.plist", "wb") as f:
+    })
+    with open(info_plist, "wb") as f:
         plistlib.dump(info, f)
-
-    # Launcher script — kickstarts the launchd agent
-    launcher = macos / "launcher"
-    launcher.write_text(
-        f"#!/bin/bash\n"
-        f"launchctl kickstart gui/$(id -u)/{LABEL}\n"
-    )
-    launcher.chmod(0o755)
 
 
 def _remove_app_bundle() -> None:
@@ -104,7 +109,7 @@ def _build_plist() -> dict:
         "Label": LABEL,
         "ProgramArguments": [
             uv, "run",
-            "--with-requirements", str(PROJECT_DIR / "requirements.txt"),
+            "--project", str(PROJECT_DIR),
             "python", str(PROJECT_DIR / "main.py"), "menu",
         ],
         "WorkingDirectory": str(PROJECT_DIR),

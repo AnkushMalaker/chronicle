@@ -2,8 +2,21 @@
 name = "friend-lite-sdk"
 version = "0.3.0"
 description = "Python SDK for OMI/Neo1 BLE wearable devices — audio streaming, button events, and device control"
+readme = "README.md"
 requires-python = ">= 3.10"
 license = "MIT"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: System :: Hardware",
+]
+keywords = ["ble", "bluetooth", "wearable", "omi", "audio", "streaming"]
 dependencies = [
     "bleak>=0.22.3",
     "numpy>=1.26",
@@ -12,7 +25,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/AnkushMalaker/chronicle"
+Homepage = "https://github.com/SimpleOpenSoftware/chronicle"
+Repository = "https://github.com/SimpleOpenSoftware/chronicle"
 "Original Project" = "https://github.com/BasedHardware/omi"
 
 [project.optional-dependencies]

@@ -6,6 +6,7 @@ CLI usage:
     ./start.sh run          # Headless mode (for launchd)
     ./start.sh menu         # Menu bar mode
     ./start.sh scan         # One-shot scan, print nearby devices
+    ./start.sh wifi-sync    # Download stored audio via WiFi sync
     ./start.sh install      # Install launchd agent
     ./start.sh uninstall    # Remove launchd agent
     ./start.sh kickstart    # Relaunch after quit
@@ -18,17 +19,26 @@ import asyncio
 import logging
 import os
 import shutil
+import socket
+import time
 from typing import Any, Callable
 
 import yaml
+from backend_sender import send_button_event, stream_to_backend
 from bleak import BleakScanner
 from dotenv import load_dotenv
 from easy_audio_interfaces.filesystem import RollingFileSink
-from friend_lite import ButtonState, Neo1Connection, OmiConnection, WearableConnection, parse_button_event
+from friend_lite import (
+    ButtonState,
+    Neo1Connection,
+    OmiConnection,
+    WearableConnection,
+    parse_button_event,
+)
 from friend_lite.decoder import OmiOpusDecoder
+from wifi_join import get_current_wifi, join_wifi_ap
+from wifi_receiver import WifiAudioReceiver
 from wyoming.audio import AudioChunk
-
-from backend_sender import send_button_event, stream_to_backend
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -255,11 +265,18 @@ async def connect_and_stream(
                     logger.info("Battery level: %d%%", battery)
                     if on_battery_level:
                         on_battery_level(battery)
+                last_battery = [battery]  # mutable container for closure
+
+                def _on_battery(level: int) -> None:
+                    if level == last_battery[0]:
+                        return
+                    last_battery[0] = level
+                    logger.info("Battery level: %d%%", level)
+                    if on_battery_level:
+                        on_battery_level(level)
+
                 try:
-                    await conn.subscribe_battery(lambda level: (
-                        logger.info("Battery level: %d%%", level),
-                        on_battery_level(level) if on_battery_level else None,
-                    ))
+                    await conn.subscribe_battery(_on_battery)
                 except Exception:
                     logger.debug("Battery notifications not supported by this device")
 
@@ -278,7 +295,15 @@ async def connect_and_stream(
 
                 # Wait for disconnect or any worker to fail
                 all_tasks = [disconnect_task] + worker_tasks
-                done, pending = await asyncio.wait(all_tasks, return_when=asyncio.FIRST_COMPLETED)
+                try:
+                    done, pending = await asyncio.wait(all_tasks, return_when=asyncio.FIRST_COMPLETED)
+                except asyncio.CancelledError:
+                    # External cancellation (e.g. user disconnect) — clean up all workers
+                    for task in all_tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*all_tasks, return_exceptions=True)
+                    raise
 
                 # Cancel remaining tasks and wait for cleanup
                 for task in pending:
@@ -297,6 +322,216 @@ async def connect_and_stream(
             logger.error("Error during device session: %s", e, exc_info=True)
         finally:
             await backend_queue.put(None)
+
+
+async def wifi_sync(
+    target_mac: str | None = None,
+    ssid: str = "Friend",
+    password: str = "12345678",
+    interface: str | None = None,
+    output_dir: str = "./wifi_audio",
+) -> None:
+    """Download stored audio from an OMI device over WiFi sync."""
+    from friend_lite.wifi import WifiErrorCode
+
+    config = load_config()
+
+    # --- Find and connect to device via BLE ---
+    if target_mac:
+        devices = await scan_all_devices(config)
+        device = next(
+            (d for d in devices if d["mac"].casefold() == target_mac.casefold()),
+            None,
+        )
+        if not device:
+            logger.error("Device %s not found", target_mac)
+            return
+    else:
+        devices = await scan_all_devices(config)
+        if not devices:
+            logger.error("No devices found")
+            return
+        if len(devices) == 1:
+            device = devices[0]
+        else:
+            device = prompt_device_selection(devices)
+            if device is None:
+                return
+
+    conn = OmiConnection(device["mac"])
+    original_wifi: str | None = None
+    output_file = None
+    receiver: WifiAudioReceiver | None = None
+
+    try:
+        async with conn:
+            logger.info("Connected to %s [%s]", device["name"], device["mac"])
+
+            # Check WiFi support
+            if not await conn.is_wifi_supported():
+                logger.error("Device does not support WiFi sync")
+                return
+
+            # Read storage info
+            file_size, offset = await conn.get_storage_info()
+            logger.info("Storage: %d bytes available, offset %d", file_size, offset)
+            if file_size == 0:
+                logger.info("No stored audio to download")
+                return
+
+            # Remember current WiFi so we can restore it later
+            original_wifi = get_current_wifi(interface)
+            if original_wifi:
+                logger.info("Current WiFi: %s (will restore after sync)", original_wifi)
+
+            # Send WiFi credentials to device
+            logger.info("Configuring device WiFi AP (SSID=%s)...", ssid)
+            rc = await conn.setup_wifi(ssid, password)
+            if rc != WifiErrorCode.SUCCESS:
+                error_name = WifiErrorCode(rc).name if rc in WifiErrorCode._value2member_map_ else f"0x{rc:02X}"
+                logger.error("WiFi setup failed: %s", error_name)
+                return
+
+            # Prepare output
+            os.makedirs(output_dir, exist_ok=True)
+            output_path = os.path.join(output_dir, f"wifi_sync_{int(time.time())}.raw")
+            output_file = open(output_path, "wb")
+            bytes_written = [0]
+
+            def on_tcp_data(data: bytes) -> None:
+                output_file.write(data)
+                bytes_written[0] += len(data)
+                # Progress update every ~1MB
+                if bytes_written[0] % (1024 * 1024) < len(data):
+                    logger.info("Received %d / %d bytes (%.1f%%)",
+                                bytes_written[0], file_size,
+                                bytes_written[0] / file_size * 100 if file_size else 0)
+
+            # Tell device to start WiFi AP (creates the network)
+            logger.info("Starting device WiFi AP...")
+            rc = await conn.start_wifi()
+            if rc == WifiErrorCode.SESSION_ALREADY_RUNNING:
+                logger.info("WiFi AP already running, continuing...")
+            elif rc != WifiErrorCode.SUCCESS:
+                error_name = WifiErrorCode(rc).name if rc in WifiErrorCode._value2member_map_ else f"0x{rc:02X}"
+                logger.error("WiFi start failed: %s", error_name)
+                output_file.close()
+                return
+
+            # Start TCP server (on all interfaces, before WiFi switch)
+            receiver = WifiAudioReceiver(
+                host="0.0.0.0", port=12345, on_data=on_tcp_data
+            )
+            await receiver.start()
+
+            # Wait for AP to stabilize
+            logger.info("Waiting for AP to stabilize...")
+            await asyncio.sleep(3)
+
+            # Join device WiFi AP
+            logger.info("Joining WiFi AP '%s'...", ssid)
+            join_wifi_ap(ssid, password, interface)
+
+            # Wait for the device's AP subnet (192.168.1.x)
+            local_ip = None
+            prompted_manual = False
+            for attempt in range(60):
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    s.settimeout(0.5)
+                    s.connect(("192.168.1.1", 80))
+                    local_ip = s.getsockname()[0]
+                    s.close()
+                except Exception:
+                    local_ip = None
+                if local_ip and local_ip.startswith("192.168.1."):
+                    break
+                if attempt == 10 and not prompted_manual:
+                    prompted_manual = True
+                    logger.info(">>> Auto-join may have failed. Please manually join WiFi '%s' (password: %s) <<<", ssid, password)
+                elif attempt % 10 == 0:
+                    logger.info("Waiting for connection to '%s' AP... (current IP: %s)", ssid, local_ip)
+                await asyncio.sleep(1)
+
+            if not local_ip or not local_ip.startswith("192.168.1."):
+                logger.error("Failed to get IP on device AP network (got: %s). Is your WiFi connected to '%s'?", local_ip, ssid)
+                await receiver.stop()
+                output_file.close()
+                if original_wifi:
+                    join_wifi_ap(original_wifi, "", interface)
+                return
+            logger.info("Connected to AP network with IP %s", local_ip)
+
+            # Wait for device to connect to our TCP server
+            logger.info("Waiting for device TCP connection...")
+            try:
+                await asyncio.wait_for(receiver.connected.wait(), timeout=30)
+            except asyncio.TimeoutError:
+                logger.error("Device did not connect to TCP server within 30s")
+                await receiver.stop()
+                output_file.close()
+                if original_wifi:
+                    join_wifi_ap(original_wifi, "", interface)
+                return
+            logger.info("Device connected via TCP")
+
+            # Reconnect BLE (WiFi switch may have invalidated service cache)
+            logger.info("Reconnecting BLE for storage read command...")
+            await conn.disconnect()
+            await asyncio.sleep(1)
+            await conn.connect()
+
+            # Send BLE read command — MUST be after WiFi+TCP are up,
+            # otherwise firmware sees no BLE + no WiFi and aborts transfer
+            logger.info("Sending storage read command (offset=%d)...", offset)
+            await conn.start_storage_read(file_num=0, offset=offset)
+
+            # Wait for firmware to process the read command before disconnecting
+            # (response=False means write is fire-and-forget, need time to transmit)
+            await asyncio.sleep(2)
+
+            # Disconnect BLE to free shared radio for WiFi data transfer
+            logger.info("Disconnecting BLE (freeing radio for WiFi)...")
+            await conn.disconnect()
+
+            # Wait for transfer to complete or user interrupt
+            logger.info("Receiving audio data... (Ctrl+C to stop)")
+            try:
+                await receiver.finished.wait()
+            except asyncio.CancelledError:
+                pass
+
+            logger.info("Transfer complete: %d bytes written to %s", bytes_written[0], output_path)
+
+            # Reconnect BLE to send cleanup commands
+            logger.info("Reconnecting BLE for cleanup...")
+            try:
+                await conn.connect()
+                await conn.stop_wifi()
+                logger.info("Device WiFi stopped")
+            except Exception as e:
+                logger.warning("BLE cleanup failed (non-fatal): %s", e)
+
+    except Exception as e:
+        logger.error("WiFi sync error: %s", e, exc_info=True)
+    finally:
+        if output_file:
+            try:
+                output_file.close()
+            except Exception:
+                pass
+
+        # Restore original WiFi
+        if original_wifi:
+            logger.info("Restoring WiFi to '%s'...", original_wifi)
+            join_wifi_ap(original_wifi, "", interface)
+
+        # Clean up TCP server
+        if receiver:
+            try:
+                await receiver.stop()
+            except Exception:
+                pass
 
 
 async def run(target_mac: str | None = None) -> None:
@@ -388,6 +623,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = sub.add_parser("run", help="Headless mode — scan, connect, and stream (for launchd)")
     run_parser.add_argument("--device", metavar="MAC", help="Connect to a specific device by MAC address")
     sub.add_parser("scan", help="One-shot scan — print nearby devices and exit")
+    wifi_parser = sub.add_parser("wifi-sync", help="Download stored audio from device via WiFi sync")
+    wifi_parser.add_argument("--device", metavar="MAC", help="Connect to a specific device by MAC address")
+    wifi_parser.add_argument("--ssid", default="Friend", help="WiFi AP SSID (default: Friend)")
+    wifi_parser.add_argument("--password", default="12345678", help="WiFi AP password (default: 12345678)")
+    wifi_parser.add_argument("--interface", metavar="IFACE", help="WiFi interface to use (e.g. en1 for USB adapter)")
+    wifi_parser.add_argument("--output-dir", default="./wifi_audio", help="Output directory (default: ./wifi_audio)")
+
     sub.add_parser("install", help="Install macOS launchd agent (auto-start on login)")
     sub.add_parser("uninstall", help="Remove macOS launchd agent")
     sub.add_parser("kickstart", help="Relaunch the menu bar app (after quit)")
@@ -402,7 +644,16 @@ def main() -> None:
     args = parser.parse_args()
     command = args.command or "menu"  # Default to menu mode
 
-    if command == "run":
+    if command == "wifi-sync":
+        asyncio.run(wifi_sync(
+            target_mac=getattr(args, "device", None),
+            ssid=args.ssid,
+            password=args.password,
+            interface=args.interface,
+            output_dir=args.output_dir,
+        ))
+
+    elif command == "run":
         asyncio.run(run(target_mac=getattr(args, "device", None)))
 
     elif command == "menu":
