@@ -9,4 +9,4 @@ if [ "$(uname)" = "Darwin" ] && command -v brew &>/dev/null; then
     fi
 fi
 
-uv run --with-requirements requirements.txt python main.py "$@"
+uv run python main.py "$@"

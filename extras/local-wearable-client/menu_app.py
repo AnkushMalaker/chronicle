@@ -92,8 +92,14 @@ class BLEManager:
         self.config = load_config()
         self.backend_enabled = check_config()
         self._scan_interval = self.config.get("scan_interval", 10)
-        self._disconnect_event: Optional[asyncio.Event] = None
+        self._connecting = False  # Guard against concurrent _connect() calls
         self._running_task: Optional[asyncio.Task] = None
+
+        # Backoff state for connection failures
+        self._backoff_seconds: float = 0  # 0 = no backoff active
+        self._BACKOFF_INITIAL: float = 10.0
+        self._BACKOFF_MAX: float = 300.0  # 5 minutes
+        self._MIN_HEALTHY_DURATION: float = 30.0  # connections shorter than this trigger backoff
 
         # Restore last connected device for auto-connect
         last = self.config.get("last_connected")
@@ -129,19 +135,21 @@ class BLEManager:
                 logger.error("Scan error: %s", e, exc_info=True)
                 self.state.update(status="error", error=str(e))
 
-            # If we have a target, try connecting
-            if self._target_mac:
+            # If we have a target and not already connecting/connected, try connecting
+            if self._target_mac and not self._connecting:
                 snap = self.state.snapshot()
                 match = next((d for d in snap["nearby_devices"] if d["mac"] == self._target_mac), None)
                 if match:
                     await self._connect(match)
 
-            await asyncio.sleep(self._scan_interval)
+            sleep_time = max(self._scan_interval, self._backoff_seconds)
+            await asyncio.sleep(sleep_time)
 
     async def _do_scan(self) -> None:
         """Run a single BLE scan and update shared state."""
-        if self.state.snapshot()["status"] == "connected":
-            return  # Don't scan while connected
+        status = self.state.snapshot()["status"]
+        if status in ("connected", "connecting"):
+            return  # Don't scan while connected or connecting
 
         self.state.update(status="scanning")
         config = self.config
@@ -187,31 +195,64 @@ class BLEManager:
         logger.info("Scan found %d device(s)", len(devices))
 
     async def _connect(self, device: dict) -> None:
-        """Connect to a device and stream audio."""
+        """Connect to a device and stream audio.
+
+        Creates a dedicated task for the connection so that cancelling it
+        (via request_disconnect) does not kill the calling scan loop.
+        """
+        if self._connecting or self.state.snapshot()["status"] == "connected":
+            return  # Already connecting or connected — skip
+
+        self._connecting = True
         self.state.update(status="connecting", error=None)
         logger.info("Connecting to %s [%s]", device["name"], device["mac"])
 
-        self._disconnect_event = asyncio.Event()
-        # Wrap in a task so request_disconnect can cancel it
-        self._running_task = asyncio.current_task()
+        # Create a dedicated task so request_disconnect cancels only it
+        task = asyncio.create_task(self._run_connection(device), name="ble_connection")
+        self._running_task = task
+
+        start_time = asyncio.get_event_loop().time()
+        user_cancelled = False
         try:
-            self.state.update(status="connected", connected_device=device, battery_level=-1)
-            self._save_last_connected(device["mac"])
-            await connect_and_stream(
-                device,
-                backend_enabled=self.backend_enabled,
-                on_battery_level=lambda level: self.state.update(battery_level=level),
-            )
+            await task
         except asyncio.CancelledError:
             logger.info("Connection cancelled by user")
+            user_cancelled = True
         except Exception as e:
             logger.error("Connection error: %s", e, exc_info=True)
             self.state.update(status="error", error=str(e))
         finally:
             self._running_task = None
+            self._connecting = False
             self.state.update(status="idle", connected_device=None, battery_level=-1)
-            self._disconnect_event = None
             logger.info("Disconnected from %s", device["name"])
+
+            # Backoff logic: if connection was very short, it likely failed
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if user_cancelled:
+                # User-initiated disconnect — reset backoff
+                self._backoff_seconds = 0
+            elif elapsed < self._MIN_HEALTHY_DURATION:
+                # Quick failure — apply exponential backoff
+                if self._backoff_seconds == 0:
+                    self._backoff_seconds = self._BACKOFF_INITIAL
+                else:
+                    self._backoff_seconds = min(self._backoff_seconds * 2, self._BACKOFF_MAX)
+                logger.info("Connection lasted %.1fs (< %.0fs), backoff %.0fs before next attempt",
+                            elapsed, self._MIN_HEALTHY_DURATION, self._backoff_seconds)
+            else:
+                # Healthy connection — reset backoff
+                self._backoff_seconds = 0
+
+    async def _run_connection(self, device: dict) -> None:
+        """Run the actual device connection. Executed as a dedicated task."""
+        self.state.update(status="connected", connected_device=device, battery_level=-1)
+        self._save_last_connected(device["mac"])
+        await connect_and_stream(
+            device,
+            backend_enabled=self.backend_enabled,
+            on_battery_level=lambda level: self.state.update(battery_level=level),
+        )
 
     def request_connect(self, mac: str) -> None:
         """Request connection to a device (called from UI thread)."""
@@ -221,6 +262,9 @@ class BLEManager:
 
     async def _immediate_connect(self, mac: str) -> None:
         """Scan once and connect immediately if device is found."""
+        if self._connecting:
+            logger.debug("Already connecting, skipping immediate connect")
+            return
         await self._do_scan()
         snap = self.state.snapshot()
         match = next((d for d in snap["nearby_devices"] if d["mac"] == mac), None)
@@ -232,8 +276,9 @@ class BLEManager:
     def request_disconnect(self) -> None:
         """Request disconnection (called from UI thread)."""
         self._target_mac = None
+        self._backoff_seconds = 0  # Reset backoff on user-initiated disconnect
         self._save_last_connected(None)
-        # Cancel the running connection task on the asyncio thread
+        # Cancel the dedicated connection task on the asyncio thread
         task = self._running_task
         if task and self.bg.loop:
             self.bg.loop.call_soon_threadsafe(task.cancel)
