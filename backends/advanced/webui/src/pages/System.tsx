@@ -22,7 +22,7 @@ export default function System() {
 
   // UI state
   const [menuOpen, setMenuOpen] = useState(false)
-  const [confirmModal, setConfirmModal] = useState<'workers' | 'backend' | null>(null)
+  const [confirmModal, setConfirmModal] = useState<'workers' | 'backend' | 'both' | null>(null)
   const [restartingBackend, setRestartingBackend] = useState(false)
   const [workerBanner, setWorkerBanner] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -104,6 +104,19 @@ export default function System() {
     restartBackendMutation.mutate(undefined, {
       onSuccess: () => {
         pollHealth()
+      },
+    })
+  }
+
+  const handleRestartBoth = () => {
+    setConfirmModal(null)
+    restartWorkersMutation.mutate(undefined, {
+      onSuccess: () => {
+        restartBackendMutation.mutate(undefined, {
+          onSuccess: () => {
+            pollHealth()
+          },
+        })
       },
     })
   }
@@ -233,13 +246,20 @@ export default function System() {
                   <RotateCcw className="h-4 w-4 mr-2" />
                   Restart Workers
                 </button>
-                <div className="border-t border-gray-200 dark:border-gray-700 my-1" />
                 <button
                   onClick={() => { setMenuOpen(false); setConfirmModal('backend') }}
                   className="w-full flex items-center px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-gray-50 dark:hover:bg-gray-700"
                 >
                   <Power className="h-4 w-4 mr-2" />
                   Restart Backend
+                </button>
+                <div className="border-t border-gray-200 dark:border-gray-700 my-1" />
+                <button
+                  onClick={() => { setMenuOpen(false); setConfirmModal('both') }}
+                  className="w-full flex items-center px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-gray-50 dark:hover:bg-gray-700"
+                >
+                  <RefreshCw className="h-4 w-4 mr-2" />
+                  Restart Both
                 </button>
               </div>
             )}
@@ -285,7 +305,7 @@ export default function System() {
                   </button>
                 </div>
               </>
-            ) : (
+            ) : confirmModal === 'backend' ? (
               <>
                 <div className="flex items-center space-x-3 mb-4">
                   <div className="p-2 rounded-full bg-red-100 dark:bg-red-900/30">
@@ -315,6 +335,39 @@ export default function System() {
                     className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
                   >
                     Restart Backend
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center space-x-3 mb-4">
+                  <div className="p-2 rounded-full bg-red-100 dark:bg-red-900/30">
+                    <RefreshCw className="h-5 w-5 text-red-600 dark:text-red-400" />
+                  </div>
+                  <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+                    Restart Both
+                  </h3>
+                </div>
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
+                  This will restart workers and then the backend. The service will be briefly unavailable.
+                </p>
+                <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md p-3 mb-6">
+                  <p className="text-sm text-red-700 dark:text-red-300">
+                    Active WebSocket connections and streaming sessions will be dropped.
+                  </p>
+                </div>
+                <div className="flex justify-end space-x-3">
+                  <button
+                    onClick={() => setConfirmModal(null)}
+                    className="px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleRestartBoth}
+                    className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+                  >
+                    Restart Both
                   </button>
                 </div>
               </>

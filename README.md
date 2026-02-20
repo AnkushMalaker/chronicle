@@ -22,9 +22,11 @@ For step-by-step instructions, see the [setup guide](quickstart.md).
 
 ![Memory Search](.assets/memory-dashboard.png)
 
-*[Mobile App - Screenshot coming soon]*
+### Desktop Menu Bar Client
 
-![Mobile App](screenshots/mobile-app.png)
+![Menu Bar Client](.assets/menu-bar-client.png)
+
+*[Mobile App - Screenshot coming soon]*
 
 ## What's Included
 

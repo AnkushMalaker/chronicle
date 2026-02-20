@@ -23,7 +23,7 @@ COPY pyproject.toml uv.lock ./
 # Export locked deps to requirements.txt (handles extras, git sources, custom indexes)
 # Install to system Python (no venv) - container IS the isolation
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv export --frozen --no-dev --extra deepgram --no-emit-project -o requirements.txt && \
+    uv export --frozen --no-dev --extra deepgram --extra galileo --no-emit-project -o requirements.txt && \
     uv pip install --system -r requirements.txt
 
 
@@ -79,7 +79,7 @@ WORKDIR /app
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv export --frozen --extra deepgram --group test --no-emit-project -o requirements.txt && \
+    uv export --frozen --extra deepgram --extra galileo --group test --no-emit-project -o requirements.txt && \
     uv pip install --system -r requirements.txt && \
     rm /bin/uv /bin/uvx
 

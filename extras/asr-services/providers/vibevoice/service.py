@@ -102,6 +102,24 @@ class VibeVoiceService(BaseASRService):
             "long_form",
         ]
 
+    def supports_batch_progress(self, audio_duration: float) -> bool:
+        """Return True if audio is long enough for batched transcription with progress."""
+        if self.transcriber is None:
+            return False
+        return self.transcriber.supports_batch_progress(audio_duration)
+
+    def transcribe_with_progress(self, audio_file_path: str, context_info=None):
+        """Yield progress counters then final result for long audio.
+
+        Delegates to the transcriber's _transcribe_batched_with_progress() generator.
+        Runs synchronously (called via run_in_executor by the endpoint).
+        """
+        if self.transcriber is None:
+            raise RuntimeError("Service not initialized")
+        yield from self.transcriber._transcribe_batched_with_progress(
+            audio_file_path, hotwords=context_info,
+        )
+
 
 def _run_lora_training(
     data_dir: str,

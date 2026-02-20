@@ -4,10 +4,12 @@ Abstract base class for ASR services.
 Provides a common interface and FastAPI app setup for all ASR providers.
 """
 
+import json
 import logging
 import os
 import tempfile
 import time
+import wave
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -17,7 +19,7 @@ from common.response_models import (
     TranscriptionResult,
 )
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 logger = logging.getLogger(__name__)
 
@@ -97,10 +99,45 @@ class BaseASRService(ABC):
         """
         return None
 
+    def supports_batch_progress(self, audio_duration: float) -> bool:
+        """Return True if this provider reports progress for long audio.
+
+        Providers that batch long audio into windows can override this to
+        return True when the audio exceeds their batching threshold.  The
+        ``/transcribe`` endpoint uses this to decide whether to return an
+        NDJSON streaming response with progress counters.
+
+        Default implementation returns False (no progress reporting).
+        """
+        return False
+
+    def transcribe_with_progress(self, audio_file_path: str, context_info=None):
+        """Generator that yields progress counters then a final result.
+
+        Only called when ``supports_batch_progress()`` returns True.
+        Subclasses that support batch progress must override this.
+
+        Yields:
+            {"type": "progress", "current": i, "total": n}
+            {"type": "result", ...}  (TranscriptionResult.to_dict())
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement transcribe_with_progress"
+        )
+
     @property
     def is_ready(self) -> bool:
         """Return True if service is ready to handle requests."""
         return self._is_ready
+
+
+def _get_audio_duration(file_path: str) -> Optional[float]:
+    """Return audio duration in seconds, or None if unreadable."""
+    try:
+        with wave.open(file_path, "rb") as wf:
+            return wf.getnframes() / wf.getframerate()
+    except Exception:
+        return None
 
 
 def create_asr_app(service: BaseASRService) -> FastAPI:
@@ -165,6 +202,7 @@ def create_asr_app(service: BaseASRService) -> FastAPI:
         logger.info(f"Transcription request started")
 
         tmp_filename = None
+        streaming_response = False
         try:
             # Read uploaded file
             file_read_start = time.time()
@@ -186,7 +224,33 @@ def create_asr_app(service: BaseASRService) -> FastAPI:
                 tmp_file.write(audio_content)
                 tmp_filename = tmp_file.name
 
-            # Transcribe
+            # Check if provider supports batch progress for this audio
+            audio_duration = _get_audio_duration(tmp_filename)
+            if audio_duration and service.supports_batch_progress(audio_duration):
+                logger.info(
+                    f"Audio is {audio_duration:.1f}s, using batch progress reporting"
+                )
+                streaming_response = True
+
+                def _ndjson_generator():
+                    """Wrap sync generator as NDJSON lines, clean up temp file when done."""
+                    try:
+                        for event in service.transcribe_with_progress(
+                            tmp_filename, context_info=context_info,
+                        ):
+                            yield json.dumps(event) + "\n"
+                    finally:
+                        try:
+                            os.unlink(tmp_filename)
+                        except Exception as e:
+                            logger.warning(f"Failed to delete temp file {tmp_filename}: {e}")
+
+                return StreamingResponse(
+                    _ndjson_generator(),
+                    media_type="application/x-ndjson",
+                )
+
+            # Normal path: single JSON response
             transcribe_start = time.time()
             result = await service.transcribe(
                 tmp_filename,
@@ -208,8 +272,9 @@ def create_asr_app(service: BaseASRService) -> FastAPI:
             raise HTTPException(status_code=500, detail=f"Transcription failed: {e}")
 
         finally:
-            # Cleanup temporary file
-            if tmp_filename:
+            # Streaming path owns its own cleanup via the generator's finally block.
+            # Only clean up here for the normal (non-streaming) path.
+            if tmp_filename and not streaming_response:
                 try:
                     os.unlink(tmp_filename)
                 except Exception as e:

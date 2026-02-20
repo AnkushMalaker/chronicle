@@ -8,7 +8,6 @@ This module provides:
 - Beanie initialization for workers
 """
 
-import asyncio
 import logging
 import os
 import uuid
@@ -21,8 +20,6 @@ from rq.job import Job, JobStatus
 from rq.registry import DeferredJobRegistry, ScheduledJobRegistry
 
 from advanced_omi_backend.config_loader import get_service_config
-from advanced_omi_backend.models.conversation import Conversation
-from advanced_omi_backend.models.job import JobPriority
 
 logger = logging.getLogger(__name__)
 
@@ -230,8 +227,8 @@ def get_jobs(
                         "completed_at": job.ended_at.isoformat() if job.ended_at else None,
                         "retry_count": job.retries_left if hasattr(job, 'retries_left') else 0,
                         "max_retries": 3,  # Default max retries
-                        "progress_percent": 0,  # RQ doesn't track progress by default
-                        "progress_message": "",
+                        "progress_percent": (job.meta or {}).get("batch_progress", {}).get("percent", 0),
+                        "progress_message": (job.meta or {}).get("batch_progress", {}).get("message", ""),
                     })
                 except Exception as e:
                     logger.error(f"Error fetching job {job_id}: {e}")
