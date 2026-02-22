@@ -5,7 +5,7 @@
         containers-start containers-stop containers-restart containers-rebuild \
         containers-start-rebuild containers-clean containers-status containers-logs \
         start stop restart rebuild start-rebuild status logs \
-        test test-quick test-slow test-sdk test-no-api test-with-api-keys test-all-with-slow-and-sdk clean-all \
+        test test-quick test-custom test-slow test-sdk test-no-api test-with-api-keys test-all-with-slow-and-sdk clean-all \
         test-asr test-asr-gpu \
         results results-path results-detailed
 
@@ -55,6 +55,11 @@ help:
 	@echo "ASR Tests:"
 	@echo "  make test-asr      - Run ASR protocol tests (no GPU required)"
 	@echo "  make test-asr-gpu  - Run ASR GPU tests (requires NVIDIA GPU)"
+	@echo ""
+	@echo "Running Specific Tests:"
+	@echo "  make test-custom T=\"Test Name\"     - Run a single test by name"
+	@echo "  make test-custom TAG=audio-streaming - Run tests by tag"
+	@echo "  make test-custom F=integration/foo.robot - Run a specific file"
 	@echo ""
 	@echo "Special Test Tags:"
 	@echo "  make test-slow                    - Run ONLY slow tests (backend restarts)"
@@ -231,6 +236,14 @@ test:
 
 # Quick workflow: run tests on existing containers (ignores CONFIG changes)
 test-quick: all
+
+# Run specific test by name, tag, or file
+# Usage:
+#   make test-custom T="Chunk Count Increments In Redis Session"
+#   make test-custom TAG=audio-streaming
+#   make test-custom F=integration/audio_streaming_integration_tests.robot
+test-custom:
+	@./run-custom.sh $(if $(T),--test "$(T)") $(if $(TAG),--tag $(TAG)) $(if $(F),$(F))
 
 # Run ONLY slow tests (backend restarts, long timeouts)
 test-slow:

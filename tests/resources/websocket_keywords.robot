@@ -158,6 +158,12 @@ Close Audio Stream
     Log    Stopped stream ${stream_id}, total chunks: ${total_chunks}
     RETURN    ${total_chunks}
 
+Send Button Event To Stream
+    [Documentation]    Send a button event (SINGLE_PRESS, DOUBLE_PRESS) to an open stream
+    [Arguments]    ${stream_id}    ${button_state}=SINGLE_PRESS
+    Send Button Event    ${stream_id}    ${button_state}
+    Log    Sent button event ${button_state} to stream ${stream_id}
+
 Close Audio Stream Without Stop Event
     [Documentation]    Close WebSocket connection without sending audio-stop event.
     ...                This simulates abrupt disconnection (network failure, client crash)

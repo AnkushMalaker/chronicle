@@ -122,8 +122,9 @@ help: ## Show detailed help for all targets
 setup-dev: ## Setup development environment (git hooks, pre-commit)
 	@echo "🛠️  Setting up development environment..."
 	@echo ""
+	@bash scripts/check_uv.sh
 	@echo "📦 Installing pre-commit..."
-	@pip install pre-commit 2>/dev/null || pip3 install pre-commit
+	@uv tool install pre-commit
 	@echo ""
 	@echo "🔧 Installing git hooks..."
 	@pre-commit install --hook-type pre-push

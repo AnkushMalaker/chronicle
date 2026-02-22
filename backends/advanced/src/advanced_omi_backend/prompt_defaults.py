@@ -524,7 +524,7 @@ Only return valid JSON, no additional text.""",
     # ------------------------------------------------------------------
     registry.register_default(
         "asr.hot_words",
-        template="hey vivi, chronicle, omi",
+        template="vivi, chronicle, omi",
         name="ASR Hot Words",
         description="Comma-separated hot words for speech recognition. "
         "For Deepgram: boosts keyword recognition via keyterm. "

@@ -34,12 +34,12 @@ Streaming jobs created on stream start
     Sleep     2s
     # Check speech detection job
     ${jobs}=    Get Jobs By Type    speech_detection
-    Should Not Be Empty    ${jobs} 
+    Should Not Be Empty    ${jobs}
     ${speech_job}=    Find Job For Client    ${jobs}    ${device_name}
     Should Not Be Equal    ${speech_job}    ${None}    Speech detection job not created
 
     # Check audio persistence job
-    ${persist_job}=    Find Job For Client    ${jobs}    ${device_name}   
+    ${persist_job}=    Find Job For Client    ${jobs}    ${device_name}
     Should Not Be Equal    ${persist_job}    ${None}    Audio persistence job not created
 
     Log    Both jobs active during streaming
@@ -101,6 +101,40 @@ Conversation Job Created After Speech Detection
     ${total_chunks}=    Close Audio Stream    ${stream_id}
     Log    Closed stream, sent ${total_chunks} total chunks
 
+
+Button Press Should Close Active Conversation
+    [Documentation]    Verify that a button single press during an active conversation
+    ...                closes it with end_reason=close_requested and triggers post-processing
+    [Tags]    audio-streaming	conversation
+    [Timeout]    120s
+
+    # Arrange: Open stream and get enough speech to start a conversation
+    ${device_name}=    Set Variable    ws-button-close
+    ${stream_id}=    Open Audio Stream    device_name=${device_name}
+    ${client_id}=    Get Client ID From Device Name    ${device_name}
+
+    # Get baseline conversation jobs
+    ${baseline_jobs}=    Get Jobs By Type And Client    open_conversation    ${client_id}
+    ${baseline_count}=    Get Length    ${baseline_jobs}
+
+    # Send audio with speech (realtime pacing for Deepgram to finalize segments)
+    Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=200    realtime_pacing=True
+
+    # Wait for open_conversation_job to start (speech detected -> conversation opened)
+    ${jobs}=    Wait Until Keyword Succeeds    60s    3s
+    ...    Wait For New Job To Appear    open_conversation    ${client_id}    ${baseline_count}
+    ${conversation_id}=    Evaluate    $jobs[0]['meta'].get('conversation_id', '')
+    Should Not Be Empty    ${conversation_id}    msg=Conversation ID not found in job meta
+
+    # Act: Send button press to close the conversation
+    Send Button Event To Stream    ${stream_id}    SINGLE_PRESS
+
+    # Assert: Conversation should close with end_reason=close_requested
+    Wait Until Keyword Succeeds    30s    2s
+    ...    Conversation Should Have End Reason    ${conversation_id}    close_requested
+
+    # Cleanup
+    [Teardown]    Run Keyword And Ignore Error    Close Audio Stream    ${stream_id}
 
 Conversation Closes On Inactivity Timeout And Restarts Speech Detection
     [Documentation]    Verify that after SPEECH_INACTIVITY_THRESHOLD_SECONDS of silence (audio time),
@@ -168,6 +202,3 @@ Conversation Closes On Inactivity Timeout And Restarts Speech Detection
     # Memory extraction job should be created
     ${memory_jobs}=    Get Jobs By Type And Conversation    process_memory_job    ${conversation_id}
     Log To Console    Memory jobs found: ${memory_jobs.__len__()}
-
-
-

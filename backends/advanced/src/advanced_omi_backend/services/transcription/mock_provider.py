@@ -33,7 +33,15 @@ class MockTranscriptionProvider(BatchTranscriptionProvider):
         """Return the provider name for logging."""
         return "mock"
 
-    async def transcribe(self, audio_data: bytes, sample_rate: int, diarize: bool = False) -> dict:
+    async def transcribe(
+        self,
+        audio_data: bytes,
+        sample_rate: int,
+        diarize: bool = False,
+        context_info=None,
+        progress_callback=None,
+        **kwargs,
+    ) -> dict:
         """
         Return a predefined mock transcript or raise exception in fail mode.
 
@@ -41,6 +49,9 @@ class MockTranscriptionProvider(BatchTranscriptionProvider):
             audio_data: Raw audio bytes (ignored in mock)
             sample_rate: Audio sample rate (ignored in mock)
             diarize: Whether to enable speaker diarization (ignored in mock)
+            context_info: Optional ASR context (ignored in mock)
+            progress_callback: Optional callback for batch progress (ignored in mock)
+            **kwargs: Additional parameters (ignored in mock)
 
         Returns:
             Dictionary containing predefined transcript with words and segments
@@ -88,20 +99,9 @@ class MockTranscriptionProvider(BatchTranscriptionProvider):
         ]
 
         # Mock segments (single speaker for simplicity)
-        segments = [
-            {
-                "speaker": 0,
-                "start": 0.0,
-                "end": 6.5,
-                "text": mock_transcript
-            }
-        ]
+        segments = [{"speaker": 0, "start": 0.0, "end": 6.5, "text": mock_transcript}]
 
-        return {
-            "text": mock_transcript,
-            "words": words,
-            "segments": segments if diarize else []
-        }
+        return {"text": mock_transcript, "words": words, "segments": segments if diarize else []}
 
     async def connect(self, client_id: Optional[str] = None):
         """Initialize the mock provider (no-op)."""

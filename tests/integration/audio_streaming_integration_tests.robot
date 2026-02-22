@@ -65,29 +65,33 @@ Redis Session Schema Contains All Required Fields
 
 
 Chunk Count Increments In Redis Session
-    [Documentation]    Verify chunk count is tracked in Redis (not ClientState)
+    [Documentation]    Verify chunk count is tracked in Redis (not ClientState).
+    ...                Note: The producer re-chunks client audio into 250ms fixed-size chunks
+    ...                (8000 bytes at 16kHz/16-bit/mono). Client sends 100ms chunks (3200 bytes).
+    ...                So N client chunks produce floor(N * 3200 / 8000) published chunks.
     [Tags]    infra	audio-streaming
 
     ${device_name}=    Set Variable    chunk-count-test
     ${stream_id}=    Open Audio Stream    device_name=${device_name}
     ${client_id}=    Get Client ID From Device Name    ${device_name}
 
-    # Send chunks and verify count increases
-    Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=3
+    # Send first batch: 10 client chunks (10 * 3200 = 32000 bytes → 4 published chunks)
+    Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=10
     Sleep    1s    # Allow chunk counter to update
     ${session1}=    Get Redis Session Data    ${client_id}
     ${count1}=    Convert To Integer    ${session1}[chunks_published]
+    Should Be True    ${count1} > 0    First batch should produce at least 1 published chunk
 
-    Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=5
+    # Send second batch: 10 more client chunks
+    Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=10
     Sleep    1s    # Allow chunk counter to update
     ${session2}=    Get Redis Session Data    ${client_id}
     ${count2}=    Convert To Integer    ${session2}[chunks_published]
 
-    # Verify count increased (should be at least 8)
-    Should Be True    ${count2} > ${count1}
-    Should Be True    ${count2} >= 8
+    # Verify count increased between batches
+    Should Be True    ${count2} > ${count1}    Chunk count should increase after sending more audio (${count1} → ${count2})
 
-    Log    ✅ Chunk count tracked in Redis: ${count1} → ${count2}
+    Log    Chunk count tracked in Redis: ${count1} → ${count2}
 
     # Close stream after test completes
     ${total_chunks}=    Close Audio Stream    ${stream_id}

@@ -53,16 +53,13 @@ WebSocket Stream Produces Final Transcripts In Redis
     Log    Closing stream - should trigger: end_marker → CloseStream → final results
     Close Audio Stream    ${stream_id}
 
-    # Allow time for streaming consumer to process end_marker and get final results
-    Sleep    5s
-
-    # Verify Redis stream transcription:results:{client_id} has entries
+    # Wait for streaming consumer to process end_marker and write final results to Redis
+    # Use retry loop instead of fixed sleep - consumer processing time varies
     ${stream_name}=    Set Variable    transcription:results:${client_id}
+    Wait Until Keyword Succeeds    30s    2s
+    ...    Redis Stream Should Not Be Empty    ${stream_name}
+
     ${stream_length}=    Redis Command    XLEN    ${stream_name}
-
-    Should Be True    ${stream_length} > 0
-    ...    Redis stream ${stream_name} is empty - no final transcripts received! This means end_marker was not sent or CloseStream failed.
-
     Log    ✅ Redis stream has ${stream_length} final transcript(s)
 
 
@@ -387,3 +384,13 @@ Streaming Completion Signal Is Set Before Transcript Read
     Log    ✅ Completion signal ${completion_key} = ${signal_value} (consumer completed before job reads)
 
 
+*** Keywords ***
+
+Redis Stream Should Not Be Empty
+    [Documentation]    Assert that a Redis stream has at least one entry.
+    ...                Used with Wait Until Keyword Succeeds for retry-based checks.
+    [Arguments]    ${stream_name}
+
+    ${stream_length}=    Redis Command    XLEN    ${stream_name}
+    Should Be True    ${stream_length} > 0
+    ...    Redis stream ${stream_name} is empty - no final transcripts received! This means end_marker was not sent or CloseStream failed.

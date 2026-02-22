@@ -1,42 +1,22 @@
 repos:
-  # Local hooks (project-specific checks)
-  - repo: local
-    hooks:
-      # Run Robot Framework endpoint tests before push
-      - id: robot-framework-tests
-        name: Robot Framework Tests (Endpoints)
-        entry: bash -c 'cd tests && make endpoints OUTPUTDIR=.pre-commit-results'
-        language: system
-        pass_filenames: false
-        stages: [push]
-        verbose: true
-
-      # Clean up test results after hook runs
-      - id: cleanup-test-results
-        name: Cleanup Test Results
-        entry: bash -c 'cd tests && rm -rf .pre-commit-results'
-        language: system
-        pass_filenames: false
-        stages: [push]
-        always_run: true
-
   # Code formatting
   - repo: https://github.com/psf/black
     rev: 24.4.2
     hooks:
       - id: black
-        files: ^backends/advanced-backend/src/.*\.py$
+        exclude: \.venv/
   - repo: https://github.com/PyCQA/isort
     rev: 5.13.2
     hooks:
       - id: isort
-        files: ^backends/advanced-backend/src/.*\.py$
+        args: ["--profile", "black"]
+        exclude: \.venv/
 
   # File hygiene
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.5.0
     hooks:
       - id: trailing-whitespace
-        files: ^backends/advanced-backend/src/.*
+        exclude: \.venv/
       - id: end-of-file-fixer
-        files: ^backends/advanced-backend/src/.* 
+        exclude: \.venv/

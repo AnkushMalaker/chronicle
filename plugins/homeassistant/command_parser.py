@@ -51,16 +51,16 @@ ACTIONS (choose one):
 - set_color: Set color
 
 TARGET_TYPE (choose one):
-- area: Targeting all entities of a type in an area (e.g., "study lights")
-- all_in_area: Targeting ALL entities in an area (e.g., "everything in study")
-- entity: Targeting a specific entity by name (e.g., "desk lamp")
+- area: Target entities in a specific area OR label. Labels are groups of areas (e.g., "hall" label might cover dining_room + living_room). Both areas and labels are valid targets.
+- all: Target entities across ALL areas (e.g., "all lights", "every light")
+- entity: Target a specific entity by name (e.g., "desk lamp")
 
 ENTITY_TYPE (optional, use null if not specified):
 - light: Light entities
 - switch: Switch entities
 - fan: Fan entities
 - cover: Covers/blinds
-- null: All entity types (when target_type is "all_in_area")
+- null: All entity types
 
 PARAMETERS (optional, empty dict if none):
 - brightness_pct: Brightness percentage (0-100)
@@ -71,8 +71,8 @@ EXAMPLES:
 Command: "turn off study lights"
 Response: {"action": "turn_off", "target_type": "area", "target": "study", "entity_type": "light", "parameters": {}}
 
-Command: "turn off everything in study"
-Response: {"action": "turn_off", "target_type": "all_in_area", "target": "study", "entity_type": null, "parameters": {}}
+Command: "turn off hall lights"
+Response: {"action": "turn_off", "target_type": "area", "target": "hall", "entity_type": "light", "parameters": {}}
 
 Command: "turn on desk lamp"
 Response: {"action": "turn_on", "target_type": "entity", "target": "desk lamp", "entity_type": null, "parameters": {}}
@@ -80,11 +80,11 @@ Response: {"action": "turn_on", "target_type": "entity", "target": "desk lamp", 
 Command: "set study lights to 50%"
 Response: {"action": "set_brightness", "target_type": "area", "target": "study", "entity_type": "light", "parameters": {"brightness_pct": 50}}
 
-Command: "turn on living room fan"
-Response: {"action": "turn_on", "target_type": "area", "target": "living room", "entity_type": "fan", "parameters": {}}
-
 Command: "turn off all lights"
-Response: {"action": "turn_off", "target_type": "entity", "target": "all", "entity_type": "light", "parameters": {}}
+Response: {"action": "turn_off", "target_type": "all", "target": "all", "entity_type": "light", "parameters": {}}
+
+Command: "turn off everything"
+Response: {"action": "turn_off", "target_type": "all", "target": "all", "entity_type": null, "parameters": {}}
 
 Command: "toggle hallway light"
 Response: {"action": "toggle", "target_type": "entity", "target": "hallway light", "entity_type": null, "parameters": {}}
@@ -94,4 +94,6 @@ Remember:
 2. Use lowercase for action, target_type, target, entity_type
 3. Use null (not "null" string) for missing entity_type
 4. Always include all 5 fields: action, target_type, target, entity_type, parameters
+5. The "target" for target_type "area" MUST be an area name or label name from the provided context
+6. Use target_type "all" when the user says "all lights", "every light", "all the lights", etc.
 """

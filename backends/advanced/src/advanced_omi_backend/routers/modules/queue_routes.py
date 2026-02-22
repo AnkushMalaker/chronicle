@@ -32,11 +32,17 @@ async def list_jobs(
     queue_name: str = Query(None, description="Filter by queue name"),
     job_type: str = Query(None, description="Filter by job type (matches func_name)"),
     client_id: str = Query(None, description="Filter by client_id in meta"),
-    current_user: User = Depends(current_active_user)
+    current_user: User = Depends(current_active_user),
 ):
     """List jobs with pagination and filtering."""
     try:
-        result = get_jobs(limit=limit, offset=offset, queue_name=queue_name, job_type=job_type, client_id=client_id)
+        result = get_jobs(
+            limit=limit,
+            offset=offset,
+            queue_name=queue_name,
+            job_type=job_type,
+            client_id=client_id,
+        )
 
         # Filter jobs by user if not admin
         if not current_user.is_superuser:
@@ -54,14 +60,20 @@ async def list_jobs(
 
     except Exception as e:
         logger.error(f"Failed to list jobs: {e}")
-        return {"error": "Failed to list jobs", "jobs": [], "pagination": {"total": 0, "limit": limit, "offset": offset, "has_more": False}}
+        return {
+            "error": "Failed to list jobs",
+            "jobs": [],
+            "pagination": {
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "has_more": False,
+            },
+        }
 
 
 @router.get("/jobs/{job_id}/status")
-async def get_job_status(
-    job_id: str,
-    current_user: User = Depends(current_active_user)
-):
+async def get_job_status(job_id: str, current_user: User = Depends(current_active_user)):
     """Get just the status of a specific job (lightweight endpoint)."""
     try:
         job = Job.fetch(job_id, connection=redis_conn)
@@ -79,10 +91,7 @@ async def get_job_status(
             logger.error(f"Failed to determine status for job {job_id}: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
-        response = {
-            "job_id": job.id,
-            "status": status
-        }
+        response = {"job_id": job.id, "status": status}
 
         # Include error information for failed jobs
         if status == "failed" and job.exc_info:
@@ -100,10 +109,7 @@ async def get_job_status(
 
 
 @router.get("/jobs/{job_id}")
-async def get_job(
-    job_id: str,
-    current_user: User = Depends(current_active_user)
-):
+async def get_job(job_id: str, current_user: User = Depends(current_active_user)):
     """Get detailed job information including result."""
     try:
         job = Job.fetch(job_id, connection=redis_conn)
@@ -128,7 +134,7 @@ async def get_job(
             "started_at": job.started_at.isoformat() if job.started_at else None,
             "ended_at": job.ended_at.isoformat() if job.ended_at else None,
             "description": job.description or "",
-            "func_name": job.func_name if hasattr(job, 'func_name') else "",
+            "func_name": job.func_name if hasattr(job, "func_name") else "",
             "args": job.args,
             "kwargs": job.kwargs,
             "meta": job.meta if job.meta else {},
@@ -145,10 +151,7 @@ async def get_job(
 
 
 @router.delete("/jobs/{job_id}")
-async def cancel_job(
-    job_id: str,
-    current_user: User = Depends(current_active_user)
-):
+async def cancel_job(job_id: str, current_user: User = Depends(current_active_user)):
     """Cancel or delete a job."""
     try:
         job = Job.fetch(job_id, connection=redis_conn)
@@ -167,7 +170,7 @@ async def cancel_job(
             return {
                 "job_id": job_id,
                 "action": "canceled",
-                "message": f"Job {job_id} has been canceled"
+                "message": f"Job {job_id} has been canceled",
             }
         else:
             # Delete finished/failed jobs
@@ -176,7 +179,7 @@ async def cancel_job(
             return {
                 "job_id": job_id,
                 "action": "deleted",
-                "message": f"Job {job_id} has been deleted"
+                "message": f"Job {job_id} has been deleted",
             }
 
     except HTTPException:
@@ -184,14 +187,13 @@ async def cancel_job(
         raise
     except Exception as e:
         logger.error(f"Failed to cancel/delete job {job_id}: {e}")
-        raise HTTPException(status_code=404, detail=f"Job not found or could not be canceled: {str(e)}")
+        raise HTTPException(
+            status_code=404, detail=f"Job not found or could not be canceled: {str(e)}"
+        )
 
 
 @router.get("/jobs/by-client/{client_id}")
-async def get_jobs_by_client(
-    client_id: str,
-    current_user: User = Depends(current_active_user)
-):
+async def get_jobs_by_client(client_id: str, current_user: User = Depends(current_active_user)):
     """Get all jobs associated with a specific client device."""
     try:
         from rq.registry import (
@@ -237,27 +239,31 @@ async def get_jobs_by_client(
             status = get_job_status(job, {})
 
             # Add this job to results
-            all_jobs.append({
-                "job_id": job.id,
-                "job_type": job.func_name.split('.')[-1] if job.func_name else "unknown",
-                "queue": queue_name,
-                "status": status,
-                "created_at": job.created_at.isoformat() if job.created_at else None,
-                "started_at": job.started_at.isoformat() if job.started_at else None,
-                "ended_at": job.ended_at.isoformat() if job.ended_at else None,
-                "description": job.description or "",
-                "result": job.result,
-                "meta": job.meta if job.meta else {},
-                "args": job.args,
-                "kwargs": job.kwargs if job.kwargs else {},
-                "error_message": str(job.exc_info) if job.exc_info else None,
-            })
+            all_jobs.append(
+                {
+                    "job_id": job.id,
+                    "job_type": (job.func_name.split(".")[-1] if job.func_name else "unknown"),
+                    "queue": queue_name,
+                    "status": status,
+                    "created_at": (job.created_at.isoformat() if job.created_at else None),
+                    "started_at": (job.started_at.isoformat() if job.started_at else None),
+                    "ended_at": job.ended_at.isoformat() if job.ended_at else None,
+                    "description": job.description or "",
+                    "result": job.result,
+                    "meta": job.meta if job.meta else {},
+                    "args": job.args,
+                    "kwargs": job.kwargs if job.kwargs else {},
+                    "error_message": str(job.exc_info) if job.exc_info else None,
+                }
+            )
 
             # Check for dependent jobs (jobs that depend on this one)
             try:
                 dependent_ids = job.dependent_ids
                 if dependent_ids:
-                    logger.debug(f"Job {job.id} has {len(dependent_ids)} dependents: {dependent_ids}")
+                    logger.debug(
+                        f"Job {job.id} has {len(dependent_ids)} dependents: {dependent_ids}"
+                    )
 
                     for dep_id in dependent_ids:
                         try:
@@ -276,12 +282,21 @@ async def get_jobs_by_client(
             # Check all registries (using RQ standard status names)
             registries = [
                 ("queued", queue.job_ids),
-                ("started", StartedJobRegistry(queue=queue).get_job_ids()),  # RQ standard
-                ("finished", FinishedJobRegistry(queue=queue).get_job_ids()),  # RQ standard
+                (
+                    "started",
+                    StartedJobRegistry(queue=queue).get_job_ids(),
+                ),  # RQ standard
+                (
+                    "finished",
+                    FinishedJobRegistry(queue=queue).get_job_ids(),
+                ),  # RQ standard
                 ("failed", FailedJobRegistry(queue=queue).get_job_ids()),
-                ("canceled", CanceledJobRegistry(queue=queue).get_job_ids()),  # RQ standard (US spelling)
+                (
+                    "canceled",
+                    CanceledJobRegistry(queue=queue).get_job_ids(),
+                ),  # RQ standard (US spelling)
                 ("deferred", DeferredJobRegistry(queue=queue).get_job_ids()),
-                ("scheduled", ScheduledJobRegistry(queue=queue).get_job_ids())
+                ("scheduled", ScheduledJobRegistry(queue=queue).get_job_ids()),
             ]
 
             for status_name, job_ids in registries:
@@ -293,8 +308,8 @@ async def get_jobs_by_client(
                         matches_client = False
 
                         # Check job.meta for client_id (current standard)
-                        if job.meta and 'client_id' in job.meta:
-                            if job.meta['client_id'] == client_id:
+                        if job.meta and "client_id" in job.meta:
+                            if job.meta["client_id"] == client_id:
                                 matches_client = True
 
                         if matches_client:
@@ -310,11 +325,7 @@ async def get_jobs_by_client(
 
         logger.info(f"Found {len(all_jobs)} jobs for client {client_id} (including dependents)")
 
-        return {
-            "client_id": client_id,
-            "jobs": all_jobs,
-            "total": len(all_jobs)
-        }
+        return {"client_id": client_id, "jobs": all_jobs, "total": len(all_jobs)}
 
     except Exception as e:
         logger.error(f"Failed to get jobs for client {client_id}: {e}")
@@ -408,11 +419,8 @@ async def clear_events(
         raise HTTPException(status_code=500, detail=f"Failed to clear events: {str(e)}")
 
 
-
 @router.get("/stats")
-async def get_queue_stats_endpoint(
-    current_user: User = Depends(current_active_user)
-):
+async def get_queue_stats_endpoint(current_user: User = Depends(current_active_user)):
     """Get queue statistics."""
     try:
         stats = get_job_stats()
@@ -420,13 +428,19 @@ async def get_queue_stats_endpoint(
 
     except Exception as e:
         logger.error(f"Failed to get queue stats: {e}")
-        return {"total_jobs": 0, "queued_jobs": 0, "started_jobs": 0, "finished_jobs": 0, "failed_jobs": 0, "canceled_jobs": 0, "deferred_jobs": 0}
+        return {
+            "total_jobs": 0,
+            "queued_jobs": 0,
+            "started_jobs": 0,
+            "finished_jobs": 0,
+            "failed_jobs": 0,
+            "canceled_jobs": 0,
+            "deferred_jobs": 0,
+        }
 
 
 @router.get("/worker-details")
-async def get_queue_worker_details(
-    current_user: User = Depends(current_active_user)
-):
+async def get_queue_worker_details(current_user: User = Depends(current_active_user)):
     """Get detailed queue and worker status including task manager health."""
     try:
         import time
@@ -443,10 +457,10 @@ async def get_queue_worker_details(
                 "total": queue_health.get("total_workers", 0),
                 "active": queue_health.get("active_workers", 0),
                 "idle": queue_health.get("idle_workers", 0),
-                "details": queue_health.get("workers", [])
+                "details": queue_health.get("workers", []),
             },
             "queues": queue_health.get("queues", {}),
-            "redis_connection": queue_health.get("redis_connection", "unknown")
+            "redis_connection": queue_health.get("redis_connection", "unknown"),
         }
 
         return status
@@ -459,18 +473,16 @@ async def get_queue_worker_details(
 @router.get("/streams")
 async def get_stream_stats(
     limit: int = Query(default=10, ge=1, le=100),  # Max 100 streams to prevent timeouts
-    current_user: User = Depends(current_active_user)
+    current_user: User = Depends(current_active_user),
 ):
     """Get Redis Streams statistics with consumer group information."""
     try:
         from advanced_omi_backend.services.audio_service import get_audio_stream_service
+
         audio_service = get_audio_stream_service()
 
         if not audio_service.redis:
-            return {
-                "error": "Audio stream service not connected",
-                "streams": []
-            }
+            return {"error": "Audio stream service not connected", "streams": []}
 
         # Get audio streams with limit
         stream_keys = []
@@ -479,7 +491,7 @@ async def get_stream_stats(
             cursor, keys = await audio_service.redis.scan(
                 cursor, match=f"{audio_service.audio_stream_prefix}*", count=limit
             )
-            stream_keys.extend(keys[:limit - len(stream_keys)])
+            stream_keys.extend(keys[: limit - len(stream_keys)])
 
         # Use asyncio.gather to fetch stream info in parallel
         import asyncio
@@ -499,9 +511,13 @@ async def get_stream_stats(
                         group_dict = {}
                         # Parse group info (alternating key-value pairs)
                         for i in range(0, len(group), 2):
-                            if i+1 < len(group):
-                                key = group[i].decode() if isinstance(group[i], bytes) else str(group[i])
-                                value = group[i+1]
+                            if i + 1 < len(group):
+                                key = (
+                                    group[i].decode()
+                                    if isinstance(group[i], bytes)
+                                    else str(group[i])
+                                )
+                                value = group[i + 1]
                                 if isinstance(value, bytes):
                                     try:
                                         value = value.decode()
@@ -512,13 +528,19 @@ async def get_stream_stats(
                         # Get consumers for this group
                         consumers = []
                         try:
-                            consumers_raw = await audio_service.redis.xinfo_consumers(stream_name, group_dict.get('name', ''))
+                            consumers_raw = await audio_service.redis.xinfo_consumers(
+                                stream_name, group_dict.get("name", "")
+                            )
                             for consumer in consumers_raw:
                                 consumer_dict = {}
                                 for i in range(0, len(consumer), 2):
-                                    if i+1 < len(consumer):
-                                        key = consumer[i].decode() if isinstance(consumer[i], bytes) else str(consumer[i])
-                                        value = consumer[i+1]
+                                    if i + 1 < len(consumer):
+                                        key = (
+                                            consumer[i].decode()
+                                            if isinstance(consumer[i], bytes)
+                                            else str(consumer[i])
+                                        )
+                                        value = consumer[i + 1]
                                         if isinstance(value, bytes):
                                             try:
                                                 value = value.decode()
@@ -527,24 +549,32 @@ async def get_stream_stats(
                                         consumer_dict[key] = value
                                 consumers.append(consumer_dict)
                         except Exception as ce:
-                            logger.debug(f"Could not fetch consumers for group {group_dict.get('name')}: {ce}")
+                            logger.debug(
+                                f"Could not fetch consumers for group {group_dict.get('name')}: {ce}"
+                            )
 
-                        groups_info.append({
-                            "name": group_dict.get('name', 'unknown'),
-                            "consumers": group_dict.get('consumers', 0),
-                            "pending": group_dict.get('pending', 0),
-                            "last_delivered_id": group_dict.get('last-delivered-id', 'N/A'),
-                            "consumer_details": consumers
-                        })
+                        groups_info.append(
+                            {
+                                "name": group_dict.get("name", "unknown"),
+                                "consumers": group_dict.get("consumers", 0),
+                                "pending": group_dict.get("pending", 0),
+                                "last_delivered_id": group_dict.get("last-delivered-id", "N/A"),
+                                "consumer_details": consumers,
+                            }
+                        )
                 except Exception as ge:
                     logger.debug(f"No consumer groups for stream {stream_name}: {ge}")
 
                 return {
                     "stream_name": stream_name,
                     "length": info[b"length"],
-                    "first_entry_id": info[b"first-entry"][0].decode() if info[b"first-entry"] else None,
-                    "last_entry_id": info[b"last-entry"][0].decode() if info[b"last-entry"] else None,
-                    "groups": groups_info
+                    "first_entry_id": (
+                        info[b"first-entry"][0].decode() if info[b"first-entry"] else None
+                    ),
+                    "last_entry_id": (
+                        info[b"last-entry"][0].decode() if info[b"last-entry"] else None
+                    ),
+                    "groups": groups_info,
                 }
             except Exception as e:
                 logger.error(f"Error getting info for stream {stream_key}: {e}")
@@ -557,16 +587,12 @@ async def get_stream_stats(
         return {
             "total_streams": len(streams_info),
             "streams": streams_info,
-            "limited": len(stream_keys) >= limit
+            "limited": len(stream_keys) >= limit,
         }
 
     except Exception as e:
         logger.error(f"Failed to get stream stats: {e}", exc_info=True)
-        return {
-            "error": str(e),
-            "total_streams": 0,
-            "streams": []
-        }
+        return {"error": str(e), "total_streams": 0, "streams": []}
 
 
 class FlushJobsRequest(BaseModel):
@@ -581,10 +607,7 @@ class FlushAllJobsRequest(BaseModel):
 
 
 @router.post("/flush")
-async def flush_jobs(
-    request: FlushJobsRequest,
-    current_user: User = Depends(current_active_user)
-):
+async def flush_jobs(request: FlushJobsRequest, current_user: User = Depends(current_active_user)):
     """Flush old inactive jobs based on age and status."""
     if not current_user.is_superuser:
         raise HTTPException(status_code=403, detail="Admin access required")
@@ -646,7 +669,7 @@ async def flush_jobs(
         return {
             "total_removed": total_removed,
             "cutoff_time": cutoff_time.isoformat(),
-            "statuses": request.statuses
+            "statuses": request.statuses,
         }
 
     except Exception as e:
@@ -656,8 +679,7 @@ async def flush_jobs(
 
 @router.post("/flush-all")
 async def flush_all_jobs(
-    request: FlushAllJobsRequest,
-    current_user: User = Depends(current_active_user)
+    request: FlushAllJobsRequest, current_user: User = Depends(current_active_user)
 ):
     """
     Flush jobs from queues and registries.
@@ -696,10 +718,16 @@ async def flush_all_jobs(
 
             # Build list of registries to flush based on request parameters
             registries = [
-                ("started", StartedJobRegistry(queue=queue)),  # Always flush in-progress
+                (
+                    "started",
+                    StartedJobRegistry(queue=queue),
+                ),  # Always flush in-progress
                 ("deferred", DeferredJobRegistry(queue=queue)),  # Always flush deferred
-                ("scheduled", ScheduledJobRegistry(queue=queue)),  # Always flush scheduled
-                ("canceled", CanceledJobRegistry(queue=queue))  # Always flush canceled
+                (
+                    "scheduled",
+                    ScheduledJobRegistry(queue=queue),
+                ),  # Always flush scheduled
+                ("canceled", CanceledJobRegistry(queue=queue)),  # Always flush canceled
             ]
 
             # Conditionally add failed and finished registries
@@ -729,13 +757,16 @@ async def flush_all_jobs(
                             # This lets the worker clean up gracefully and prevents deadlock
                             try:
                                 from rq.command import send_stop_job_command
+
                                 send_stop_job_command(redis_conn, job_id)
                                 logger.info(f"Sent stop command to worker for job {job_id}")
                                 # Don't delete yet - let worker move it to canceled/failed registry
                                 # It will be cleaned up on next flush or by worker cleanup
                                 continue
                             except Exception as stop_error:
-                                logger.warning(f"Could not send stop command to job {job_id}: {stop_error}")
+                                logger.warning(
+                                    f"Could not send stop command to job {job_id}: {stop_error}"
+                                )
                                 # If stop fails, try to cancel it (may already be finishing)
                                 try:
                                     job.cancel()
@@ -752,7 +783,9 @@ async def flush_all_jobs(
                         logger.warning(f"Error deleting job {job_id}: {e}")
                         try:
                             registry.remove(job_id)
-                            logger.info(f"Removed stale job reference {job_id} from {registry_name} registry")
+                            logger.info(
+                                f"Removed stale job reference {job_id} from {registry_name} registry"
+                            )
                         except Exception as reg_error:
                             logger.error(f"Could not remove {job_id} from registry: {reg_error}")
 
@@ -761,6 +794,7 @@ async def flush_all_jobs(
 
         # Get async Redis connection for scanning
         from advanced_omi_backend.controllers.queue_controller import REDIS_URL
+
         async_redis = await aioredis.from_url(REDIS_URL)
 
         try:
@@ -793,13 +827,15 @@ async def flush_all_jobs(
             preserved.append("finished jobs")
 
         preserved_msg = f" (preserved {', '.join(preserved)})" if preserved else ""
-        logger.info(f"Flushed {total_removed} jobs and {deleted_keys} Redis keys from all queues{preserved_msg}")
+        logger.info(
+            f"Flushed {total_removed} jobs and {deleted_keys} Redis keys from all queues{preserved_msg}"
+        )
 
         return {
             "total_removed": total_removed,
             "deleted_keys": deleted_keys,
             "preserved": preserved,
-            "message": f"Flushed {total_removed} jobs{preserved_msg}"
+            "message": f"Flushed {total_removed} jobs{preserved_msg}",
         }
 
     except Exception as e:
@@ -810,7 +846,7 @@ async def flush_all_jobs(
 @router.get("/sessions")
 async def get_redis_sessions(
     limit: int = Query(default=20, ge=1, le=100),
-    current_user: User = Depends(current_active_user)
+    current_user: User = Depends(current_active_user),
 ):
     """Get Redis session tracking information."""
     try:
@@ -819,51 +855,54 @@ async def get_redis_sessions(
         from advanced_omi_backend.controllers.queue_controller import REDIS_URL
 
         redis_client = aioredis.from_url(REDIS_URL)
+        try:
+            # Get session keys
+            session_keys = []
+            cursor = b"0"
+            while cursor and len(session_keys) < limit:
+                cursor, keys = await redis_client.scan(cursor, match="audio:session:*", count=limit)
+                session_keys.extend(keys[: limit - len(session_keys)])
 
-        # Get session keys
-        session_keys = []
-        cursor = b"0"
-        while cursor and len(session_keys) < limit:
-            cursor, keys = await redis_client.scan(
-                cursor, match="audio:session:*", count=limit
-            )
-            session_keys.extend(keys[:limit - len(session_keys)])
+            # Get session info
+            sessions = []
+            for key in session_keys:
+                try:
+                    session_data = await redis_client.hgetall(key)
+                    if session_data:
+                        session_id = key.decode().replace("audio:session:", "")
 
-        # Get session info
-        sessions = []
-        for key in session_keys:
-            try:
-                session_data = await redis_client.hgetall(key)
-                if session_data:
-                    session_id = key.decode().replace("audio:session:", "")
+                        # Get conversation count for this session
+                        conversation_count_key = f"session:conversation_count:{session_id}"
+                        conversation_count_bytes = await redis_client.get(conversation_count_key)
+                        conversation_count = (
+                            int(conversation_count_bytes.decode())
+                            if conversation_count_bytes
+                            else 0
+                        )
 
-                    # Get conversation count for this session
-                    conversation_count_key = f"session:conversation_count:{session_id}"
-                    conversation_count_bytes = await redis_client.get(conversation_count_key)
-                    conversation_count = int(conversation_count_bytes.decode()) if conversation_count_bytes else 0
+                        sessions.append(
+                            {
+                                "session_id": session_id,
+                                "user_id": session_data.get(b"user_id", b"").decode(),
+                                "client_id": session_data.get(b"client_id", b"").decode(),
+                                "stream_name": session_data.get(b"stream_name", b"").decode(),
+                                "provider": session_data.get(b"provider", b"").decode(),
+                                "mode": session_data.get(b"mode", b"").decode(),
+                                "status": session_data.get(b"status", b"").decode(),
+                                "started_at": session_data.get(b"started_at", b"").decode(),
+                                "chunks_published": int(
+                                    session_data.get(b"chunks_published", b"0").decode() or 0
+                                ),
+                                "last_chunk_at": session_data.get(b"last_chunk_at", b"").decode(),
+                                "conversation_count": conversation_count,
+                            }
+                        )
+                except Exception as e:
+                    logger.error(f"Error getting session info for {key}: {e}")
 
-                    sessions.append({
-                        "session_id": session_id,
-                        "user_id": session_data.get(b"user_id", b"").decode(),
-                        "client_id": session_data.get(b"client_id", b"").decode(),
-                        "stream_name": session_data.get(b"stream_name", b"").decode(),
-                        "provider": session_data.get(b"provider", b"").decode(),
-                        "mode": session_data.get(b"mode", b"").decode(),
-                        "status": session_data.get(b"status", b"").decode(),
-                        "started_at": session_data.get(b"started_at", b"").decode(),
-                        "chunks_published": int(session_data.get(b"chunks_published", b"0").decode() or 0),
-                        "last_chunk_at": session_data.get(b"last_chunk_at", b"").decode(),
-                        "conversation_count": conversation_count
-                    })
-            except Exception as e:
-                logger.error(f"Error getting session info for {key}: {e}")
-
-        await redis_client.close()
-
-        return {
-            "total_sessions": len(sessions),
-            "sessions": sessions
-        }
+            return {"total_sessions": len(sessions), "sessions": sessions}
+        finally:
+            await redis_client.aclose()
 
     except Exception as e:
         logger.error(f"Failed to get sessions: {e}", exc_info=True)
@@ -872,8 +911,10 @@ async def get_redis_sessions(
 
 @router.post("/sessions/clear")
 async def clear_old_sessions(
-    older_than_seconds: int = Query(default=3600, description="Clear sessions older than N seconds"),
-    current_user: User = Depends(current_active_user)
+    older_than_seconds: int = Query(
+        default=3600, description="Clear sessions older than N seconds"
+    ),
+    current_user: User = Depends(current_active_user),
 ):
     """Clear old Redis sessions that are stuck or inactive."""
     if not current_user.is_superuser:
@@ -887,38 +928,36 @@ async def clear_old_sessions(
         from advanced_omi_backend.controllers.queue_controller import REDIS_URL
 
         redis_client = aioredis.from_url(REDIS_URL)
-        current_time = time.time()
-        cutoff_time = current_time - older_than_seconds
+        try:
+            current_time = time.time()
+            cutoff_time = current_time - older_than_seconds
 
-        # Get all session keys
-        session_keys = []
-        cursor = b"0"
-        while cursor:
-            cursor, keys = await redis_client.scan(cursor, match="audio:session:*", count=100)
-            session_keys.extend(keys)
+            # Get all session keys
+            session_keys = []
+            cursor = b"0"
+            while cursor:
+                cursor, keys = await redis_client.scan(cursor, match="audio:session:*", count=100)
+                session_keys.extend(keys)
 
-        # Check each session and delete if old
-        deleted_count = 0
-        for key in session_keys:
-            try:
-                session_data = await redis_client.hgetall(key)
-                if session_data:
-                    last_chunk_at = session_data.get(b"last_chunk_at", b"").decode()
-                    if last_chunk_at:
-                        last_chunk_time = float(last_chunk_at)
-                        if last_chunk_time < cutoff_time:
-                            await redis_client.delete(key)
-                            deleted_count += 1
-                            logger.info(f"Deleted old session: {key.decode()}")
-            except Exception as e:
-                logger.error(f"Error processing session {key}: {e}")
+            # Check each session and delete if old
+            deleted_count = 0
+            for key in session_keys:
+                try:
+                    session_data = await redis_client.hgetall(key)
+                    if session_data:
+                        last_chunk_at = session_data.get(b"last_chunk_at", b"").decode()
+                        if last_chunk_at:
+                            last_chunk_time = float(last_chunk_at)
+                            if last_chunk_time < cutoff_time:
+                                await redis_client.delete(key)
+                                deleted_count += 1
+                                logger.info(f"Deleted old session: {key.decode()}")
+                except Exception as e:
+                    logger.error(f"Error processing session {key}: {e}")
 
-        await redis_client.close()
-
-        return {
-            "deleted_count": deleted_count,
-            "cutoff_seconds": older_than_seconds
-        }
+            return {"deleted_count": deleted_count, "cutoff_seconds": older_than_seconds}
+        finally:
+            await redis_client.aclose()
 
     except Exception as e:
         logger.error(f"Failed to clear sessions: {e}", exc_info=True)
@@ -928,8 +967,10 @@ async def clear_old_sessions(
 @router.get("/dashboard")
 async def get_dashboard_data(
     request: Request,
-    expanded_clients: str = Query(default="", description="Comma-separated list of client IDs to fetch jobs for"),
-    current_user: User = Depends(current_active_user)
+    expanded_clients: str = Query(
+        default="", description="Comma-separated list of client IDs to fetch jobs for"
+    ),
+    current_user: User = Depends(current_active_user),
 ):
     """Get all data needed for the Queue dashboard in a single API call.
 
@@ -950,7 +991,11 @@ async def get_dashboard_data(
         from advanced_omi_backend.controllers.queue_controller import get_queue
 
         # Parse expanded clients list
-        expanded_client_ids = [c.strip() for c in expanded_clients.split(",") if c.strip()] if expanded_clients else []
+        expanded_client_ids = (
+            [c.strip() for c in expanded_clients.split(",") if c.strip()]
+            if expanded_clients
+            else []
+        )
 
         # Fetch all data in parallel
         import asyncio
@@ -988,26 +1033,40 @@ async def get_dashboard_data(
                                     continue
 
                             # Add job with metadata
-                            all_jobs.append({
-                                "job_id": job.id,
-                                "job_type": job.func_name.split('.')[-1] if job.func_name else "unknown",
-                                "user_id": job.kwargs.get("user_id") if job.kwargs else None,
-                                "status": status_name,
-                                "priority": "normal",  # RQ doesn't have priority concept
-                                "data": {"description": job.description or ""},
-                                "result": job.result,
-                                "meta": job.meta if job.meta else {},
-                                "kwargs": job.kwargs if job.kwargs else {},
-                                "error_message": str(job.exc_info) if job.exc_info else None,
-                                "created_at": job.created_at.isoformat() if job.created_at else None,
-                                "started_at": job.started_at.isoformat() if job.started_at else None,
-                                "ended_at": job.ended_at.isoformat() if job.ended_at else None,
-                                "retry_count": 0,  # RQ doesn't track this by default
-                                "max_retries": 0,
-                                "progress_percent": 0,
-                                "progress_message": "",
-                                "queue": queue_name
-                            })
+                            all_jobs.append(
+                                {
+                                    "job_id": job.id,
+                                    "job_type": (
+                                        job.func_name.split(".")[-1] if job.func_name else "unknown"
+                                    ),
+                                    "user_id": (job.kwargs.get("user_id") if job.kwargs else None),
+                                    "status": status_name,
+                                    "priority": "normal",  # RQ doesn't have priority concept
+                                    "data": {"description": job.description or ""},
+                                    "result": job.result,
+                                    "meta": job.meta if job.meta else {},
+                                    "kwargs": job.kwargs if job.kwargs else {},
+                                    "error_message": (str(job.exc_info) if job.exc_info else None),
+                                    "created_at": (
+                                        job.created_at.isoformat() if job.created_at else None
+                                    ),
+                                    "started_at": (
+                                        job.started_at.isoformat() if job.started_at else None
+                                    ),
+                                    "ended_at": (
+                                        job.ended_at.isoformat() if job.ended_at else None
+                                    ),
+                                    "retry_count": 0,  # RQ doesn't track this by default
+                                    "max_retries": 0,
+                                    "progress_percent": (job.meta or {})
+                                    .get("batch_progress", {})
+                                    .get("percent", 0),
+                                    "progress_message": (job.meta or {})
+                                    .get("batch_progress", {})
+                                    .get("message", ""),
+                                    "queue": queue_name,
+                                }
+                            )
                         except Exception as e:
                             logger.debug(f"Error fetching job {job_id}: {e}")
                             continue
@@ -1023,7 +1082,13 @@ async def get_dashboard_data(
                 return get_job_stats()
             except Exception as e:
                 logger.error(f"Error fetching stats: {e}")
-                return {"total_jobs": 0, "queued_jobs": 0, "started_jobs": 0, "finished_jobs": 0, "failed_jobs": 0}
+                return {
+                    "total_jobs": 0,
+                    "queued_jobs": 0,
+                    "started_jobs": 0,
+                    "finished_jobs": 0,
+                    "failed_jobs": 0,
+                }
 
         async def fetch_streaming_status():
             """Fetch streaming status."""
@@ -1072,9 +1137,15 @@ async def get_dashboard_data(
 
                     registries = [
                         ("queued", queue.job_ids),
-                        ("started", StartedJobRegistry(queue=queue).get_job_ids()),  # RQ standard
-                        ("finished", FinishedJobRegistry(queue=queue).get_job_ids()),  # RQ standard
-                        ("failed", FailedJobRegistry(queue=queue).get_job_ids())
+                        (
+                            "started",
+                            StartedJobRegistry(queue=queue).get_job_ids(),
+                        ),  # RQ standard
+                        (
+                            "finished",
+                            FinishedJobRegistry(queue=queue).get_job_ids(),
+                        ),  # RQ standard
+                        ("failed", FailedJobRegistry(queue=queue).get_job_ids()),
                     ]
 
                     for status_name, job_ids in registries:
@@ -1087,7 +1158,11 @@ async def get_dashboard_data(
 
                                 # Check if job belongs to this client
                                 matches_client = False
-                                if job.meta and 'client_id' in job.meta and job.meta['client_id'] == client_id:
+                                if (
+                                    job.meta
+                                    and "client_id" in job.meta
+                                    and job.meta["client_id"] == client_id
+                                ):
                                     matches_client = True
 
                                 if not matches_client:
@@ -1100,19 +1175,33 @@ async def get_dashboard_data(
                                         continue
 
                                 processed_job_ids.add(job_id)
-                                all_jobs.append({
-                                    "job_id": job.id,
-                                    "job_type": job.func_name.split('.')[-1] if job.func_name else "unknown",
-                                    "queue": queue_name,
-                                    "status": get_job_status(job),
-                                    "created_at": job.created_at.isoformat() if job.created_at else None,
-                                    "started_at": job.started_at.isoformat() if job.started_at else None,
-                                    "ended_at": job.ended_at.isoformat() if job.ended_at else None,
-                                    "description": job.description or "",
-                                    "result": job.result,
-                                    "meta": job.meta if job.meta else {},
-                                    "error_message": str(job.exc_info) if job.exc_info else None
-                                })
+                                all_jobs.append(
+                                    {
+                                        "job_id": job.id,
+                                        "job_type": (
+                                            job.func_name.split(".")[-1]
+                                            if job.func_name
+                                            else "unknown"
+                                        ),
+                                        "queue": queue_name,
+                                        "status": get_job_status(job),
+                                        "created_at": (
+                                            job.created_at.isoformat() if job.created_at else None
+                                        ),
+                                        "started_at": (
+                                            job.started_at.isoformat() if job.started_at else None
+                                        ),
+                                        "ended_at": (
+                                            job.ended_at.isoformat() if job.ended_at else None
+                                        ),
+                                        "description": job.description or "",
+                                        "result": job.result,
+                                        "meta": job.meta if job.meta else {},
+                                        "error_message": (
+                                            str(job.exc_info) if job.exc_info else None
+                                        ),
+                                    }
+                                )
                             except Exception as e:
                                 logger.debug(f"Error fetching job {job_id}: {e}")
                                 continue
@@ -1127,7 +1216,9 @@ async def get_dashboard_data(
             if not current_user.is_superuser:
                 return []
             try:
-                from advanced_omi_backend.services.plugin_service import get_plugin_router
+                from advanced_omi_backend.services.plugin_service import (
+                    get_plugin_router,
+                )
 
                 router_instance = get_plugin_router()
                 if not router_instance:
@@ -1139,8 +1230,12 @@ async def get_dashboard_data(
 
         # Execute all fetches in parallel (using RQ standard status names)
         queued_jobs_task = fetch_jobs_by_status("queued", limit=100)
-        started_jobs_task = fetch_jobs_by_status("started", limit=100)  # RQ standard, not "processing"
-        finished_jobs_task = fetch_jobs_by_status("finished", limit=50)  # RQ standard, not "completed"
+        started_jobs_task = fetch_jobs_by_status(
+            "started", limit=100
+        )  # RQ standard, not "processing"
+        finished_jobs_task = fetch_jobs_by_status(
+            "finished", limit=50
+        )  # RQ standard, not "completed"
         failed_jobs_task = fetch_jobs_by_status("failed", limit=50)
         stats_task = fetch_stats()
         streaming_status_task = fetch_streaming_status()
@@ -1156,7 +1251,7 @@ async def get_dashboard_data(
             streaming_status_task,
             events_task,
             *client_jobs_tasks,
-            return_exceptions=True
+            return_exceptions=True,
         )
 
         queued_jobs = results[0] if not isinstance(results[0], Exception) else []
@@ -1164,7 +1259,9 @@ async def get_dashboard_data(
         finished_jobs = results[2] if not isinstance(results[2], Exception) else []  # RQ standard
         failed_jobs = results[3] if not isinstance(results[3], Exception) else []
         stats = results[4] if not isinstance(results[4], Exception) else {"total_jobs": 0}
-        streaming_status = results[5] if not isinstance(results[5], Exception) else {"active_sessions": []}
+        streaming_status = (
+            results[5] if not isinstance(results[5], Exception) else {"active_sessions": []}
+        )
         events = results[6] if not isinstance(results[6], Exception) else []
         recent_conversations = []
         client_jobs_results = results[7:] if len(results) > 7 else []
@@ -1178,28 +1275,34 @@ async def get_dashboard_data(
         # Convert conversations to dict format for frontend
         conversations_list = []
         for conv in recent_conversations:
-            conversations_list.append({
-                "conversation_id": conv.conversation_id,
-                "user_id": str(conv.user_id) if conv.user_id else None,
-                "created_at": conv.created_at.isoformat() if conv.created_at else None,
-                "title": conv.title,
-                "summary": conv.summary,
-                "transcript_text": conv.get_active_transcript_text() if hasattr(conv, 'get_active_transcript_text') else None,
-            })
+            conversations_list.append(
+                {
+                    "conversation_id": conv.conversation_id,
+                    "user_id": str(conv.user_id) if conv.user_id else None,
+                    "created_at": (conv.created_at.isoformat() if conv.created_at else None),
+                    "title": conv.title,
+                    "summary": conv.summary,
+                    "transcript_text": (
+                        conv.get_active_transcript_text()
+                        if hasattr(conv, "get_active_transcript_text")
+                        else None
+                    ),
+                }
+            )
 
         return {
             "jobs": {
                 "queued": queued_jobs,
                 "started": started_jobs,  # RQ standard status name
                 "finished": finished_jobs,  # RQ standard status name
-                "failed": failed_jobs
+                "failed": failed_jobs,
             },
             "stats": stats,
             "streaming_status": streaming_status,
             "recent_conversations": conversations_list,
             "client_jobs": client_jobs,
             "events": events,
-            "timestamp": asyncio.get_event_loop().time()
+            "timestamp": asyncio.get_event_loop().time(),
         }
 
     except Exception as e:

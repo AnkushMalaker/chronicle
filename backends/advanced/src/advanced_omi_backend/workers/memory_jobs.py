@@ -22,6 +22,10 @@ from advanced_omi_backend.controllers.queue_controller import (
     memory_queue,
 )
 from advanced_omi_backend.models.job import JobPriority, async_job
+from advanced_omi_backend.observability.otel_setup import (
+    clear_otel_session,
+    set_otel_session,
+)
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.services.plugin_service import ensure_plugin_router
 
@@ -110,7 +114,9 @@ def compute_speaker_diff(
 
 
 @async_job(redis=True, beanie=True)
-async def process_memory_job(conversation_id: str, *, redis_client=None) -> Dict[str, Any]:
+async def process_memory_job(
+    conversation_id: str, *, redis_client=None
+) -> Dict[str, Any]:
     """
     RQ job function for memory extraction and processing from conversations.
 
@@ -135,6 +141,7 @@ async def process_memory_job(conversation_id: str, *, redis_client=None) -> Dict
     from advanced_omi_backend.services.memory import get_memory_service
     from advanced_omi_backend.users import get_user_by_id
 
+    set_otel_session(conversation_id)
     start_time = time.time()
     logger.info(f"🔄 Starting memory processing for conversation {conversation_id}")
 
@@ -169,11 +176,13 @@ async def process_memory_job(conversation_id: str, *, redis_client=None) -> Dict
         for segment in segments:
             text = segment.text.strip()
             speaker = segment.speaker
-            seg_type = getattr(segment, 'segment_type', 'speech')
+            seg_type = getattr(segment, "segment_type", "speech")
             if text:
                 if seg_type == "event":
                     # Non-speech event: include as context marker without speaker prefix
-                    dialogue_lines.append(f"[{text}]" if not text.startswith("[") else text)
+                    dialogue_lines.append(
+                        f"[{text}]" if not text.startswith("[") else text
+                    )
                 elif seg_type == "note":
                     # User-inserted note: include as distinct context
                     dialogue_lines.append(f"[Note: {text}]")
@@ -197,14 +206,20 @@ async def process_memory_job(conversation_id: str, *, redis_client=None) -> Dict
         full_conversation = conversation_model.transcript
 
     if len(full_conversation) < MIN_CONVERSATION_LENGTH:
-        logger.warning(f"Conversation too short for memory processing: {conversation_id}")
+        logger.warning(
+            f"Conversation too short for memory processing: {conversation_id}"
+        )
         return {"success": False, "error": "Conversation too short"}
 
     # Check primary speakers filter (reuse `user` from above — no duplicate DB call)
     if user and user.primary_speakers:
-        primary_speaker_names = {ps["name"].strip().lower() for ps in user.primary_speakers}
+        primary_speaker_names = {
+            ps["name"].strip().lower() for ps in user.primary_speakers
+        }
 
-        if transcript_speakers and not transcript_speakers.intersection(primary_speaker_names):
+        if transcript_speakers and not transcript_speakers.intersection(
+            primary_speaker_names
+        ):
             logger.info(
                 f"Skipping memory - no primary speakers found in conversation {conversation_id}"
             )
@@ -301,11 +316,18 @@ async def process_memory_job(conversation_id: str, *, redis_client=None) -> Dict
                     # Fetch memory details to display in UI
                     memory_details = []
                     try:
-                        for memory_id in created_memory_ids[:5]:  # Limit to first 5 for display
-                            memory_entry = await memory_service.get_memory(memory_id, user_id)
+                        for memory_id in created_memory_ids[
+                            :5
+                        ]:  # Limit to first 5 for display
+                            memory_entry = await memory_service.get_memory(
+                                memory_id, user_id
+                            )
                             if memory_entry:
                                 memory_details.append(
-                                    {"memory_id": memory_id, "text": memory_entry.content[:200]}
+                                    {
+                                        "memory_id": memory_id,
+                                        "text": memory_entry.content[:200],
+                                    }
                                 )
                     except Exception as e:
                         logger.warning(f"Failed to fetch memory details for UI: {e}")
@@ -335,7 +357,9 @@ async def process_memory_job(conversation_id: str, *, redis_client=None) -> Dict
 
                 config = get_config()
                 kg_enabled = (
-                    config.get("memory", {}).get("knowledge_graph", {}).get("enabled", False)
+                    config.get("memory", {})
+                    .get("knowledge_graph", {})
+                    .get("enabled", False)
                 )
 
                 if kg_enabled:
@@ -379,7 +403,9 @@ async def process_memory_job(conversation_id: str, *, redis_client=None) -> Dict
                             "user_id": user_id,
                             "user_email": user_email,
                         },
-                        "memory_count": len(created_memory_ids) if created_memory_ids else 0,
+                        "memory_count": (
+                            len(created_memory_ids) if created_memory_ids else 0
+                        ),
                         "conversation_id": conversation_id,
                     }
 
@@ -403,7 +429,9 @@ async def process_memory_job(conversation_id: str, *, redis_client=None) -> Dict
                     )
 
                     if plugin_results:
-                        logger.info(f"📌 Triggered {len(plugin_results)} memory-level plugins")
+                        logger.info(
+                            f"📌 Triggered {len(plugin_results)} memory-level plugins"
+                        )
                         for result in plugin_results:
                             if result.message:
                                 logger.info(f"  Plugin result: {result.message}")
@@ -413,7 +441,9 @@ async def process_memory_job(conversation_id: str, *, redis_client=None) -> Dict
 
             return {
                 "success": True,
-                "memories_created": len(created_memory_ids) if created_memory_ids else 0,
+                "memories_created": (
+                    len(created_memory_ids) if created_memory_ids else 0
+                ),
                 "processing_time": processing_time,
             }
         else:
@@ -461,7 +491,11 @@ async def _process_speaker_reprocess(
             f"falling back to normal extraction"
         )
         return await memory_service.add_memory(
-            full_conversation, client_id, conversation_id, user_id, user_email,
+            full_conversation,
+            client_id,
+            conversation_id,
+            user_id,
+            user_email,
             allow_update=True,
         )
 
@@ -474,7 +508,11 @@ async def _process_speaker_reprocess(
             f"for {conversation_id}, falling back to normal extraction"
         )
         return await memory_service.add_memory(
-            full_conversation, client_id, conversation_id, user_id, user_email,
+            full_conversation,
+            client_id,
+            conversation_id,
+            user_id,
+            user_email,
             allow_update=True,
         )
 
@@ -491,7 +529,11 @@ async def _process_speaker_reprocess(
             f"for {conversation_id}, falling back to normal extraction"
         )
         return await memory_service.add_memory(
-            full_conversation, client_id, conversation_id, user_id, user_email,
+            full_conversation,
+            client_id,
+            conversation_id,
+            user_id,
+            user_email,
             allow_update=True,
         )
 
@@ -507,7 +549,11 @@ async def _process_speaker_reprocess(
             f"for {conversation_id}, falling back to normal extraction"
         )
         return await memory_service.add_memory(
-            full_conversation, client_id, conversation_id, user_id, user_email,
+            full_conversation,
+            client_id,
+            conversation_id,
+            user_id,
+            user_email,
             allow_update=True,
         )
 
@@ -564,5 +610,7 @@ def enqueue_memory_processing(
         description=f"Process memory for conversation {conversation_id[:8]}",
     )
 
-    logger.info(f"📥 RQ: Enqueued memory job {job.id} for conversation {conversation_id}")
+    logger.info(
+        f"📥 RQ: Enqueued memory job {job.id} for conversation {conversation_id}"
+    )
     return job

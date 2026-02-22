@@ -114,7 +114,11 @@ class AudioStreamClient:
         if wait_for_ready and "codec=pcm" in self.endpoint:
             # PCM codec sends "ready" message after auth (line 261-268 in websocket_controller.py)
             ready_msg = await self.ws.recv()
-            ready = json.loads(ready_msg.strip() if isinstance(ready_msg, str) else ready_msg.decode().strip())
+            ready = json.loads(
+                ready_msg.strip()
+                if isinstance(ready_msg, str)
+                else ready_msg.decode().strip()
+            )
             if ready.get("type") != "ready":
                 raise RuntimeError(f"Expected 'ready' message, got: {ready}")
             logger.info("Received ready message from server")
@@ -154,10 +158,8 @@ class AudioStreamClient:
             },
             "payload_length": None,
         }
-        print(f"🔵 CLIENT: Sending audio-start message: {header}")
         logger.info(f"🔵 CLIENT: Sending audio-start message: {header}")
         await self.ws.send(json.dumps(header) + "\n")
-        print(f"✅ CLIENT: Sent audio-start with mode={recording_mode}")
         logger.info(f"✅ CLIENT: Sent audio-start with mode={recording_mode}")
 
     async def send_audio_chunk_wyoming(
@@ -197,7 +199,9 @@ class AudioStreamClient:
         self.total_bytes += len(audio_data)
 
         if self.chunk_count <= 3 or self.chunk_count % 100 == 0:
-            logger.debug(f"Sent audio chunk #{self.chunk_count}: {len(audio_data)} bytes")
+            logger.debug(
+                f"Sent audio chunk #{self.chunk_count}: {len(audio_data)} bytes"
+            )
 
     async def send_audio_chunk_raw(self, audio_data: bytes) -> None:
         """Send raw binary audio without Wyoming header (legacy mode).
@@ -222,7 +226,22 @@ class AudioStreamClient:
 
         header = {"type": "audio-stop"}
         await self.ws.send(json.dumps(header) + "\n")
-        logger.info(f"Sent audio-stop (total: {self.chunk_count} chunks, {self.total_bytes} bytes)")
+        logger.info(
+            f"Sent audio-stop (total: {self.chunk_count} chunks, {self.total_bytes} bytes)"
+        )
+
+    async def send_button_event(self, button_state: str = "SINGLE_PRESS") -> None:
+        """Send button event via Wyoming protocol.
+
+        Args:
+            button_state: Button state ("SINGLE_PRESS" or "DOUBLE_PRESS")
+        """
+        if not self.ws:
+            raise RuntimeError("Not connected. Call connect() first.")
+
+        header = {"type": "button-event", "data": {"state": button_state}}
+        await self.ws.send(json.dumps(header) + "\n")
+        logger.info(f"Sent button event: {button_state}")
 
     async def send_ping(self) -> None:
         """Send keepalive ping."""
@@ -305,7 +324,9 @@ class AudioStreamClient:
             # Send audio-stop
             await self.send_audio_stop()
 
-            logger.info(f"Finished streaming: {self.chunk_count} chunks, {self.total_bytes} bytes")
+            logger.info(
+                f"Finished streaming: {self.chunk_count} chunks, {self.total_bytes} bytes"
+            )
             return self.chunk_count
 
     async def close(self) -> None:
@@ -318,7 +339,7 @@ class AudioStreamClient:
             except asyncio.TimeoutError:
                 logger.warning("WebSocket close timed out after 2s, forcing close")
                 # Force close without waiting for handshake
-                if hasattr(self.ws, 'transport') and self.ws.transport:
+                if hasattr(self.ws, "transport") and self.ws.transport:
                     self.ws.transport.close()
             except Exception as e:
                 logger.error(f"Error during WebSocket close: {e}")
@@ -448,10 +469,14 @@ class StreamManager:
         # Connect and send audio-start
         async def _connect_and_start():
             try:
-                logger.info(f"🔵 CLIENT: Stream {stream_id} connecting for {device_name}...")
+                logger.info(
+                    f"🔵 CLIENT: Stream {stream_id} connecting for {device_name}..."
+                )
                 await client.connect()
                 session.connected = True
-                logger.info(f"✅ CLIENT: Stream {stream_id} connected, sending audio-start...")
+                logger.info(
+                    f"✅ CLIENT: Stream {stream_id} connected, sending audio-start..."
+                )
                 await client.send_audio_start(recording_mode=recording_mode)
                 session.audio_started = True
                 logger.info(f"✅ CLIENT: Stream {stream_id} started for {device_name}")
@@ -595,8 +620,29 @@ class StreamManager:
         total_chunks = session.chunk_count
         del self._sessions[stream_id]
 
-        logger.info(f"Stream {stream_id} closed abruptly (no audio-stop), sent {total_chunks} chunks")
+        logger.info(
+            f"Stream {stream_id} closed abruptly (no audio-stop), sent {total_chunks} chunks"
+        )
         return total_chunks
+
+    def send_button_event(
+        self, stream_id: str, button_state: str = "SINGLE_PRESS"
+    ) -> None:
+        """Send a button event to an open stream.
+
+        Args:
+            stream_id: Stream session ID
+            button_state: Button state ("SINGLE_PRESS" or "DOUBLE_PRESS")
+        """
+        session = self._sessions.get(stream_id)
+        if not session:
+            raise ValueError(f"Unknown stream_id: {stream_id}")
+
+        async def _send():
+            await session.client.send_button_event(button_state)
+
+        future = asyncio.run_coroutine_threadsafe(_send(), session.loop)
+        future.result(timeout=5)
 
     def get_session(self, stream_id: str) -> Optional[StreamSession]:
         """Get session info for a stream."""

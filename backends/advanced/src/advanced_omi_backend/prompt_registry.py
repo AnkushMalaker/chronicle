@@ -39,6 +39,7 @@ class PromptRegistry:
         if self._langfuse is None:
             try:
                 from langfuse import Langfuse
+
                 self._langfuse = Langfuse()
             except Exception as e:
                 logger.warning(f"LangFuse client init failed: {e}")
@@ -77,9 +78,10 @@ class PromptRegistry:
         return template_text
 
     async def seed_prompts(self) -> None:
-        """Create prompts in LangFuse if they don't already exist.
+        """Create or update prompts in LangFuse, skipping unchanged ones.
 
         Called once at startup after all defaults have been registered.
+        Only creates a new version when the prompt text has actually changed.
         """
         client = self._get_client()
         if client is None:
@@ -90,6 +92,19 @@ class PromptRegistry:
         skipped = 0
         for prompt_id, template_text in self._defaults.items():
             try:
+                # Check if the prompt already exists with the same text
+                existing = None
+                try:
+                    existing = client.get_prompt(prompt_id)
+                except Exception:
+                    pass  # Prompt doesn't exist yet
+
+                if existing is not None:
+                    existing_text = getattr(existing, "prompt", None)
+                    if existing_text == template_text:
+                        skipped += 1
+                        continue
+
                 client.create_prompt(
                     name=prompt_id,
                     type="text",
@@ -98,13 +113,9 @@ class PromptRegistry:
                 )
                 seeded += 1
             except Exception as e:
-                err_msg = str(e).lower()
-                if "already exists" in err_msg or "409" in err_msg:
-                    skipped += 1
-                else:
-                    logger.warning(f"Failed to seed prompt '{prompt_id}': {e}")
+                logger.warning(f"Failed to seed prompt '{prompt_id}': {e}")
 
-        logger.info(f"Prompt seeding complete: {seeded} created, {skipped} already existed")
+        logger.info(f"Prompt seeding complete: {seeded} created, {skipped} unchanged")
 
 
 # ---------------------------------------------------------------------------

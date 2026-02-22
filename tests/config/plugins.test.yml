@@ -12,3 +12,14 @@ plugins:
     condition:
       type: always  # Capture all events without filtering
     db_path: /app/debug/test_plugin_events.db
+
+  test_button_actions:
+    enabled: true
+    events:
+      - button.single_press
+      - button.double_press
+    condition:
+      type: always
+    actions:
+      single_press:
+        type: close_conversation
