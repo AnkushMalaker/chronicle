@@ -1,4 +1,3 @@
-
 """
 WebSocket controller for Chronicle backend.
 
@@ -32,7 +31,6 @@ from advanced_omi_backend.services.audio_stream import AudioStreamProducer
 from advanced_omi_backend.services.audio_stream.producer import (
     get_audio_stream_producer,
 )
-from advanced_omi_backend.utils.audio_utils import process_audio_chunk
 
 # Thread pool executors for audio decoding
 _DEC_IO_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
@@ -82,29 +80,34 @@ async def subscribe_to_interim_results(websocket: WebSocket, session_id: str) ->
         # Listen for messages
         while True:
             try:
-                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                message = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=1.0
+                )
 
-                if message and message['type'] == 'message':
+                if message and message["type"] == "message":
                     # Parse result data
                     try:
-                        result_data = json.loads(message['data'])
+                        result_data = json.loads(message["data"])
 
                         # Forward to client WebSocket
-                        await websocket.send_json({
-                            "type": "interim_transcript",
-                            "data": result_data
-                        })
+                        await websocket.send_json(
+                            {"type": "interim_transcript", "data": result_data}
+                        )
 
                         # Log for debugging
                         is_final = result_data.get("is_final", False)
                         text_preview = result_data.get("text", "")[:50]
                         result_type = "FINAL" if is_final else "interim"
-                        logger.debug(f"✉️ Forwarded {result_type} result to client {session_id}: {text_preview}...")
+                        logger.debug(
+                            f"✉️ Forwarded {result_type} result to client {session_id}: {text_preview}..."
+                        )
 
                     except json.JSONDecodeError as e:
                         logger.error(f"Failed to parse interim result JSON: {e}")
                     except Exception as send_error:
-                        logger.error(f"Failed to send interim result to client {session_id}: {send_error}")
+                        logger.error(
+                            f"Failed to send interim result to client {session_id}: {send_error}"
+                        )
                         # WebSocket might be closed, exit loop
                         break
 
@@ -112,14 +115,22 @@ async def subscribe_to_interim_results(websocket: WebSocket, session_id: str) ->
                 # No message received, continue waiting
                 continue
             except asyncio.CancelledError:
-                logger.info(f"Interim results subscriber cancelled for session {session_id}")
+                logger.info(
+                    f"Interim results subscriber cancelled for session {session_id}"
+                )
                 break
             except Exception as e:
-                logger.error(f"Error in interim results subscriber for {session_id}: {e}", exc_info=True)
+                logger.error(
+                    f"Error in interim results subscriber for {session_id}: {e}",
+                    exc_info=True,
+                )
                 break
 
     except Exception as e:
-        logger.error(f"Failed to initialize interim results subscriber for {session_id}: {e}", exc_info=True)
+        logger.error(
+            f"Failed to initialize interim results subscriber for {session_id}: {e}",
+            exc_info=True,
+        )
     finally:
         try:
             # Unsubscribe and close connections
@@ -128,7 +139,9 @@ async def subscribe_to_interim_results(websocket: WebSocket, session_id: str) ->
             await redis_client.aclose()
             logger.info(f"🔕 Unsubscribed from interim results channel: {channel}")
         except Exception as cleanup_error:
-            logger.error(f"Error cleaning up interim results subscriber: {cleanup_error}")
+            logger.error(
+                f"Error cleaning up interim results subscriber: {cleanup_error}"
+            )
 
 
 async def parse_wyoming_protocol(ws: WebSocket) -> tuple[dict, Optional[bytes]]:
@@ -140,14 +153,18 @@ async def parse_wyoming_protocol(ws: WebSocket) -> tuple[dict, Optional[bytes]]:
     # Read data from WebSocket
     logger.debug(f"parse_wyoming_protocol: About to call ws.receive()")
     message = await ws.receive()
-    logger.debug(f"parse_wyoming_protocol: Received message with keys: {message.keys() if message else 'None'}")
+    logger.debug(
+        f"parse_wyoming_protocol: Received message with keys: {message.keys() if message else 'None'}"
+    )
 
     # Handle WebSocket close frame
     if "type" in message and message["type"] == "websocket.disconnect":
         # This is a normal WebSocket close event
         code = message.get("code", 1000)
         reason = message.get("reason", "")
-        logger.info(f"📴 WebSocket disconnect received in parse_wyoming_protocol. Code: {code}, Reason: {reason}")
+        logger.info(
+            f"📴 WebSocket disconnect received in parse_wyoming_protocol. Code: {code}, Reason: {reason}"
+        )
         raise WebSocketDisconnect(code=code, reason=reason)
 
     # Handle text message (JSON header)
@@ -190,7 +207,10 @@ async def create_client_state(client_id: str, user, device_name: Optional[str] =
 
     # Directory where WAV chunks are written
     from pathlib import Path
-    CHUNK_DIR = Path("./audio_chunks")  # This will be mounted to ./data/audio_chunks by Docker
+
+    CHUNK_DIR = Path(
+        "./audio_chunks"
+    )  # This will be mounted to ./data/audio_chunks by Docker
 
     # Use ClientManager for atomic client creation and registration
     client_state = client_manager.create_client(
@@ -199,10 +219,12 @@ async def create_client_state(client_id: str, user, device_name: Optional[str] =
 
     # Also track in persistent mapping (for database queries + cross-container Redis)
     from advanced_omi_backend.client_manager import track_client_user_relationship_async
+
     await track_client_user_relationship_async(client_id, user.user_id)
 
     # Register client in user model (persistent)
     from advanced_omi_backend.users import register_client_to_user
+
     await register_client_to_user(user, client_id, device_name)
 
     return client_state
@@ -224,7 +246,9 @@ async def cleanup_client_state(client_id: str):
     # The speech detection job now monitors session status and completes naturally.
     import redis.asyncio as redis
 
-    logger.info(f"🔄 Letting speech detection job complete naturally for client {client_id} (if running)")
+    logger.info(
+        f"🔄 Letting speech detection job complete naturally for client {client_id} (if running)"
+    )
 
     # Mark all active sessions for this client as complete AND delete Redis streams
     try:
@@ -236,6 +260,7 @@ async def cleanup_client_state(client_id: str):
         from advanced_omi_backend.services.audio_stream.producer import (
             get_audio_stream_producer,
         )
+
         audio_stream_producer = get_audio_stream_producer()
 
         # Find all session keys for this client and mark them complete
@@ -258,18 +283,26 @@ async def cleanup_client_state(client_id: str):
 
                     # If session is still active, finalize it first (sets status + completion_reason atomically)
                     if status in ["active", None]:
-                        logger.info(f"📊 Finalizing active session {session_id[:12]} due to WebSocket disconnect")
-                        await audio_stream_producer.finalize_session(session_id, completion_reason="websocket_disconnect")
+                        logger.info(
+                            f"📊 Finalizing active session {session_id[:12]} due to WebSocket disconnect"
+                        )
+                        await audio_stream_producer.finalize_session(
+                            session_id, completion_reason="websocket_disconnect"
+                        )
 
                     # Mark session as complete (WebSocket disconnected)
-                    await mark_session_complete(async_redis, session_id, "websocket_disconnect")
+                    await mark_session_complete(
+                        async_redis, session_id, "websocket_disconnect"
+                    )
                     sessions_closed += 1
 
             if cursor == 0:
                 break
 
         if sessions_closed > 0:
-            logger.info(f"✅ Closed {sessions_closed} active session(s) for client {client_id}")
+            logger.info(
+                f"✅ Closed {sessions_closed} active session(s) for client {client_id}"
+            )
 
         # Set TTL on Redis Streams for this client (allows consumer groups to finish processing)
         stream_pattern = f"audio:stream:{client_id}"
@@ -282,9 +315,11 @@ async def cleanup_client_state(client_id: str):
             pending_count = 0
             try:
                 # Check streaming-transcription consumer group for pending messages
-                pending_info = await async_redis.xpending(stream_pattern, "streaming-transcription")
+                pending_info = await async_redis.xpending(
+                    stream_pattern, "streaming-transcription"
+                )
                 if pending_info:
-                    pending_count = pending_info.get('pending', 0)
+                    pending_count = pending_info.get("pending", 0)
             except Exception as e:
                 # Consumer group might not exist yet - that's ok
                 logger.debug(f"No consumer group for {stream_pattern}: {e}")
@@ -295,7 +330,9 @@ async def cleanup_client_state(client_id: str):
                     f"{stream_length} messages in stream, {pending_count} pending in consumer group"
                 )
 
-            await async_redis.expire(stream_pattern, 60)  # 60 second TTL for consumer group fan-out
+            await async_redis.expire(
+                stream_pattern, 60
+            )  # 60 second TTL for consumer group fan-out
             logger.info(f"⏰ Set 60s TTL on Redis stream: {stream_pattern}")
         else:
             logger.debug(f"No Redis stream found for client {client_id}")
@@ -303,7 +340,9 @@ async def cleanup_client_state(client_id: str):
         await async_redis.close()
 
     except Exception as session_error:
-        logger.warning(f"⚠️ Error marking sessions complete for client {client_id}: {session_error}")
+        logger.warning(
+            f"⚠️ Error marking sessions complete for client {client_id}: {session_error}"
+        )
 
     # Use ClientManager for atomic client removal with cleanup
     client_manager = get_client_manager()
@@ -321,7 +360,7 @@ async def _setup_websocket_connection(
     token: Optional[str],
     device_name: Optional[str],
     pending_client_id: str,
-    connection_type: str
+    connection_type: str,
 ) -> tuple[Optional[str], Optional[object], Optional[object]]:
     """
     Setup WebSocket connection: accept, authenticate, create client state.
@@ -344,12 +383,17 @@ async def _setup_websocket_connection(
     if not user:
         # Send error message to client before closing
         try:
-            error_msg = json.dumps({
-                "type": "error",
-                "error": "authentication_failed",
-                "message": "Authentication failed. Please log in again and ensure your token is valid.",
-                "code": 1008
-            }) + "\n"
+            error_msg = (
+                json.dumps(
+                    {
+                        "type": "error",
+                        "error": "authentication_failed",
+                        "message": "Authentication failed. Please log in again and ensure your token is valid.",
+                        "code": 1008,
+                    }
+                )
+                + "\n"
+            )
             await ws.send_text(error_msg)
             application_logger.info("Sent authentication error message to client")
         except Exception as send_error:
@@ -370,7 +414,10 @@ async def _setup_websocket_connection(
 
     # Send ready message to confirm connection is established
     try:
-        ready_msg = json.dumps({"type": "ready", "message": "WebSocket connection established"}) + "\n"
+        ready_msg = (
+            json.dumps({"type": "ready", "message": "WebSocket connection established"})
+            + "\n"
+        )
         await ws.send_text(ready_msg)
         application_logger.debug(f"✅ Sent ready message to {client_id}")
     except Exception as e:
@@ -389,7 +436,7 @@ async def _initialize_streaming_session(
     user_email: str,
     client_id: str,
     audio_format: dict,
-    websocket: Optional[WebSocket] = None
+    websocket: Optional[WebSocket] = None,
 ) -> Optional[asyncio.Task]:
     """
     Initialize streaming session with Redis and enqueue processing jobs.
@@ -410,30 +457,38 @@ async def _initialize_streaming_session(
         f"🔴 BACKEND: _initialize_streaming_session called for {client_id}"
     )
 
-    if hasattr(client_state, 'stream_session_id'):
+    if hasattr(client_state, "stream_session_id"):
         application_logger.debug(f"Session already initialized for {client_id}")
         return None
 
     # Initialize stream session - use client_id as session_id for predictable lookup
     # All other session metadata goes to Redis (single source of truth)
     client_state.stream_session_id = client_state.client_id
-    application_logger.info(f"🆔 Created stream session: {client_state.stream_session_id}")
+    application_logger.info(
+        f"🆔 Created stream session: {client_state.stream_session_id}"
+    )
 
     # Determine transcription provider from config.yml
     from advanced_omi_backend.model_registry import get_models_registry
 
     registry = get_models_registry()
     if not registry:
-        raise ValueError("config.yml not found - cannot determine transcription provider")
+        raise ValueError(
+            "config.yml not found - cannot determine transcription provider"
+        )
 
     stt_model = registry.get_default("stt")
     if not stt_model:
         raise ValueError("No default STT model configured in config.yml (defaults.stt)")
 
     # Use model_provider for session tracking (generic, not validated against hardcoded list)
-    provider = stt_model.model_provider.lower() if stt_model.model_provider else stt_model.name
+    provider = (
+        stt_model.model_provider.lower() if stt_model.model_provider else stt_model.name
+    )
 
-    application_logger.info(f"📋 Using STT provider: {provider} (model: {stt_model.name})")
+    application_logger.info(
+        f"📋 Using STT provider: {provider} (model: {stt_model.name})"
+    )
 
     # Initialize session tracking in Redis (SINGLE SOURCE OF TRUTH for session metadata)
     # This includes user_email, connection info, audio format, chunk counters, job IDs, etc.
@@ -445,7 +500,7 @@ async def _initialize_streaming_session(
         user_email=user_email,
         connection_id=connection_id,
         mode="streaming",
-        provider=provider
+        provider=provider,
     )
 
     # Store audio format in Redis session (not in ClientState)
@@ -454,6 +509,7 @@ async def _initialize_streaming_session(
     from advanced_omi_backend.services.audio_stream.producer import (
         get_audio_stream_producer,
     )
+
     session_key = f"audio:session:{client_state.stream_session_id}"
     redis_client = audio_stream_producer.redis_client
     await redis_client.hset(session_key, "audio_format", json.dumps(audio_format))
@@ -462,16 +518,14 @@ async def _initialize_streaming_session(
     from advanced_omi_backend.controllers.queue_controller import start_streaming_jobs
 
     job_ids = start_streaming_jobs(
-        session_id=client_state.stream_session_id,
-        user_id=user_id,
-        client_id=client_id
+        session_id=client_state.stream_session_id, user_id=user_id, client_id=client_id
     )
 
     # Store job IDs in Redis session (not in ClientState)
     await audio_stream_producer.update_session_job_ids(
         session_id=client_state.stream_session_id,
-        speech_detection_job_id=job_ids['speech_detection'],
-        audio_persistence_job_id=job_ids['audio_persistence']
+        speech_detection_job_id=job_ids["speech_detection"],
+        audio_persistence_job_id=job_ids["audio_persistence"],
     )
 
     # Note: Placeholder conversation creation is handled by the audio persistence job,
@@ -483,17 +537,15 @@ async def _initialize_streaming_session(
         subscriber_task = asyncio.create_task(
             subscribe_to_interim_results(websocket, client_state.stream_session_id)
         )
-        application_logger.info(f"📡 Launched interim results subscriber for session {client_state.stream_session_id}")
+        application_logger.info(
+            f"📡 Launched interim results subscriber for session {client_state.stream_session_id}"
+        )
 
     return subscriber_task
 
 
 async def _finalize_streaming_session(
-    client_state,
-    audio_stream_producer,
-    user_id: str,
-    user_email: str,
-    client_id: str
+    client_state, audio_stream_producer, user_id: str, user_email: str, client_id: str
 ) -> None:
     """
     Finalize streaming session: flush buffer, signal workers, enqueue finalize job, cleanup.
@@ -505,7 +557,7 @@ async def _finalize_streaming_session(
         user_email: User email
         client_id: Client ID
     """
-    if not hasattr(client_state, 'stream_session_id'):
+    if not hasattr(client_state, "stream_session_id"):
         application_logger.debug(f"No active session to finalize for {client_id}")
         return
 
@@ -513,19 +565,21 @@ async def _finalize_streaming_session(
 
     try:
         # Flush any remaining buffered audio
-        audio_format = getattr(client_state, 'stream_audio_format', {})
+        audio_format = getattr(client_state, "stream_audio_format", {})
         await audio_stream_producer.flush_session_buffer(
             session_id=session_id,
             sample_rate=audio_format.get("rate", 16000),
             channels=audio_format.get("channels", 1),
-            sample_width=audio_format.get("width", 2)
+            sample_width=audio_format.get("width", 2),
         )
 
         # Send end-of-session signal to workers
         await audio_stream_producer.send_session_end_signal(session_id)
 
         # Mark session as finalizing with user_stopped reason (audio-stop event)
-        await audio_stream_producer.finalize_session(session_id, completion_reason="user_stopped")
+        await audio_stream_producer.finalize_session(
+            session_id, completion_reason="user_stopped"
+        )
 
         # Store markers in Redis so open_conversation_job can persist them
         if client_state.markers:
@@ -556,13 +610,12 @@ async def _finalize_streaming_session(
 
         # Clear session state from ClientState (only stream_session_id is stored there now)
         # All other session metadata lives in Redis (single source of truth)
-        if hasattr(client_state, 'stream_session_id'):
-            delattr(client_state, 'stream_session_id')
+        if hasattr(client_state, "stream_session_id"):
+            delattr(client_state, "stream_session_id")
 
     except Exception as finalize_error:
         application_logger.error(
-            f"❌ Failed to finalize streaming session: {finalize_error}",
-            exc_info=True
+            f"❌ Failed to finalize streaming session: {finalize_error}", exc_info=True
         )
 
 
@@ -574,7 +627,7 @@ async def _publish_audio_to_stream(
     client_id: str,
     sample_rate: int,
     channels: int,
-    sample_width: int
+    sample_width: int,
 ) -> None:
     """
     Publish audio chunk to Redis Stream with chunk tracking.
@@ -589,28 +642,23 @@ async def _publish_audio_to_stream(
         channels: Number of channels
         sample_width: Bytes per sample
     """
-    if not hasattr(client_state, 'stream_session_id'):
-        application_logger.warning(f"⚠️ Received audio chunk before session initialized for {client_id}")
+    if not hasattr(client_state, "stream_session_id"):
+        application_logger.warning(
+            f"⚠️ Received audio chunk before session initialized for {client_id}"
+        )
         return
 
     session_id = client_state.stream_session_id
 
-    # Increment chunk count in Redis (single source of truth) and format chunk ID
-    session_key = f"audio:session:{session_id}"
-    redis_client = audio_stream_producer.redis_client
-    chunk_count = await redis_client.hincrby(session_key, "chunks_published", 1)
-    chunk_id = f"{chunk_count:05d}"
-
-    # Publish to Redis Stream using producer
+    # Publish to Redis Stream using producer (producer owns chunk counting)
     await audio_stream_producer.add_audio_chunk(
         audio_data=audio_data,
         session_id=session_id,
-        chunk_id=chunk_id,
         user_id=user_id,
         client_id=client_id,
         sample_rate=sample_rate,
         channels=channels,
-        sample_width=sample_width
+        sample_width=sample_width,
     )
 
 
@@ -621,7 +669,7 @@ async def _handle_omi_audio_chunk(
     decode_packet_fn,
     user_id: str,
     client_id: str,
-    packet_count: int
+    packet_count: int,
 ) -> None:
     """
     Handle OMI audio chunk: decode Opus to PCM, then publish to stream.
@@ -638,7 +686,9 @@ async def _handle_omi_audio_chunk(
     # Decode Opus to PCM
     start_time = time.time()
     loop = asyncio.get_running_loop()
-    pcm_data = await loop.run_in_executor(_DEC_IO_EXECUTOR, decode_packet_fn, opus_payload)
+    pcm_data = await loop.run_in_executor(
+        _DEC_IO_EXECUTOR, decode_packet_fn, opus_payload
+    )
     decode_time = time.time() - start_time
 
     if pcm_data:
@@ -657,7 +707,7 @@ async def _handle_omi_audio_chunk(
             client_id,
             OMI_SAMPLE_RATE,
             OMI_CHANNELS,
-            OMI_SAMPLE_WIDTH
+            OMI_SAMPLE_WIDTH,
         )
     else:
         # Log decode failures for first 5 packets
@@ -675,7 +725,7 @@ async def _handle_streaming_mode_audio(
     user_id: str,
     user_email: str,
     client_id: str,
-    websocket: Optional[WebSocket] = None
+    websocket: Optional[WebSocket] = None,
 ) -> Optional[asyncio.Task]:
     """
     Handle audio chunk in streaming mode.
@@ -695,7 +745,7 @@ async def _handle_streaming_mode_audio(
     """
     # Initialize session if needed
     subscriber_task = None
-    if not hasattr(client_state, 'stream_session_id'):
+    if not hasattr(client_state, "stream_session_id"):
         subscriber_task = await _initialize_streaming_session(
             client_state,
             audio_stream_producer,
@@ -703,7 +753,7 @@ async def _handle_streaming_mode_audio(
             user_email,
             client_id,
             audio_format,
-            websocket=websocket  # Pass WebSocket to launch interim results subscriber
+            websocket=websocket,  # Pass WebSocket to launch interim results subscriber
         )
 
     # Publish to Redis Stream
@@ -715,17 +765,14 @@ async def _handle_streaming_mode_audio(
         client_id,
         audio_format.get("rate", 16000),
         audio_format.get("channels", 1),
-        audio_format.get("width", 2)
+        audio_format.get("width", 2),
     )
 
     return subscriber_task
 
 
 async def _handle_batch_mode_audio(
-    client_state,
-    audio_data: bytes,
-    audio_format: dict,
-    client_id: str
+    client_state, audio_data: bytes, audio_format: dict, client_id: str
 ) -> None:
     """
     Handle audio chunk in batch mode with rolling 30-minute limit.
@@ -737,7 +784,7 @@ async def _handle_batch_mode_audio(
         client_id: Client ID
     """
     # Initialize batch accumulator if needed
-    if not hasattr(client_state, 'batch_audio_chunks'):
+    if not hasattr(client_state, "batch_audio_chunks"):
         client_state.batch_audio_chunks = []
         client_state.batch_audio_format = audio_format
         client_state.batch_audio_bytes = 0  # Track total bytes
@@ -774,7 +821,7 @@ async def _handle_batch_mode_audio(
             user_id=client_state.user_id,  # Need to store these on session start
             user_email=client_state.user_email,
             client_id=client_state.client_id,
-            batch_number=client_state.batch_chunks_processed + 1
+            batch_number=client_state.batch_chunks_processed + 1,
         )
 
         # Clear buffer for next batch
@@ -796,7 +843,7 @@ async def _handle_audio_chunk(
     user_id: str,
     user_email: str,
     client_id: str,
-    websocket: Optional[WebSocket] = None
+    websocket: Optional[WebSocket] = None,
 ) -> Optional[asyncio.Task]:
     """
     Route audio chunk to appropriate mode handler (streaming or batch).
@@ -814,13 +861,18 @@ async def _handle_audio_chunk(
     Returns:
         Interim results subscriber task if websocket provided and streaming mode, None otherwise
     """
-    recording_mode = getattr(client_state, 'recording_mode', 'batch')
+    recording_mode = getattr(client_state, "recording_mode", "batch")
 
     if recording_mode == "streaming":
         return await _handle_streaming_mode_audio(
-            client_state, audio_stream_producer, audio_data,
-            audio_format, user_id, user_email, client_id,
-            websocket=websocket
+            client_state,
+            audio_stream_producer,
+            audio_data,
+            audio_format,
+            user_id,
+            user_email,
+            client_id,
+            websocket=websocket,
         )
     else:
         await _handle_batch_mode_audio(
@@ -833,7 +885,7 @@ async def _handle_audio_session_start(
     client_state,
     audio_format: dict,
     client_id: str,
-    websocket: Optional[WebSocket] = None
+    websocket: Optional[WebSocket] = None,
 ) -> tuple[bool, str]:
     """
     Handle audio-start event - validate mode and set recording mode.
@@ -878,14 +930,20 @@ async def _handle_audio_session_start(
                         "type": "error",
                         "error": "streaming_not_configured",
                         "message": error_msg,
-                        "code": 400
+                        "code": 400,
                     }
                     await websocket.send_json(error_response)
-                    application_logger.info(f"📤 Sent streaming error to WebUI client {client_id}")
+                    application_logger.info(
+                        f"📤 Sent streaming error to WebUI client {client_id}"
+                    )
 
                     # Close the websocket connection after sending error
-                    await websocket.close(code=1008, reason="Streaming transcription not configured")
-                    application_logger.info(f"🔌 Closed WebSocket connection for {client_id} due to streaming config error")
+                    await websocket.close(
+                        code=1008, reason="Streaming transcription not configured"
+                    )
+                    application_logger.info(
+                        f"🔌 Closed WebSocket connection for {client_id} due to streaming config error"
+                    )
 
                     # Raise ValueError to exit the handler completely
                     raise ValueError(error_msg)
@@ -917,11 +975,7 @@ async def _handle_audio_session_start(
 
 
 async def _handle_audio_session_stop(
-    client_state,
-    audio_stream_producer,
-    user_id: str,
-    user_email: str,
-    client_id: str
+    client_state, audio_stream_producer, user_id: str, user_email: str, client_id: str
 ) -> bool:
     """
     Handle audio-stop event - finalize session based on mode.
@@ -936,13 +990,14 @@ async def _handle_audio_session_stop(
     Returns:
         False to switch back to control mode
     """
-    recording_mode = getattr(client_state, 'recording_mode', 'batch')
-    application_logger.info(f"🛑 Audio session stopped for {client_id} (mode: {recording_mode})")
+    recording_mode = getattr(client_state, "recording_mode", "batch")
+    application_logger.info(
+        f"🛑 Audio session stopped for {client_id} (mode: {recording_mode})"
+    )
 
     if recording_mode == "streaming":
         await _finalize_streaming_session(
-            client_state, audio_stream_producer,
-            user_id, user_email, client_id
+            client_state, audio_stream_producer, user_id, user_email, client_id
         )
     else:
         await _process_batch_audio_complete(
@@ -969,10 +1024,7 @@ async def _handle_button_event(
         user_id: User ID
         client_id: Client ID
     """
-    from advanced_omi_backend.plugins.events import (
-        BUTTON_STATE_TO_EVENT,
-        ButtonState,
-    )
+    from advanced_omi_backend.plugins.events import BUTTON_STATE_TO_EVENT, ButtonState
     from advanced_omi_backend.services.plugin_service import get_plugin_router
 
     timestamp = time.time()
@@ -992,7 +1044,6 @@ async def _handle_button_event(
         "client_id": client_id,
     }
     client_state.add_marker(marker)
-
 
     # Map device button state to typed plugin event
     try:
@@ -1016,18 +1067,14 @@ async def _handle_button_event(
                 "state": button_state_enum.value,
                 "timestamp": timestamp,
                 "audio_uuid": audio_uuid,
-                "session_id": getattr(client_state, 'stream_session_id', None),
+                "session_id": getattr(client_state, "stream_session_id", None),
                 "client_id": client_id,
             },
         )
 
 
 async def _process_rolling_batch(
-    client_state,
-    user_id: str,
-    user_email: str,
-    client_id: str,
-    batch_number: int
+    client_state, user_id: str, user_email: str, client_id: str, batch_number: int
 ) -> None:
     """
     Process accumulated batch audio as a rolling segment.
@@ -1041,7 +1088,10 @@ async def _process_rolling_batch(
         client_id: Client ID
         batch_number: Sequential batch number (1, 2, 3...)
     """
-    if not hasattr(client_state, 'batch_audio_chunks') or not client_state.batch_audio_chunks:
+    if (
+        not hasattr(client_state, "batch_audio_chunks")
+        or not client_state.batch_audio_chunks
+    ):
         application_logger.warning(f"⚠️ No audio chunks to process for rolling batch")
         return
 
@@ -1050,14 +1100,14 @@ async def _process_rolling_batch(
         from advanced_omi_backend.utils.audio_chunk_utils import convert_audio_to_chunks
 
         # Combine chunks
-        complete_audio = b''.join(client_state.batch_audio_chunks)
+        complete_audio = b"".join(client_state.batch_audio_chunks)
         application_logger.info(
             f"📦 Rolling batch #{batch_number}: Combined {len(client_state.batch_audio_chunks)} chunks "
             f"into {len(complete_audio)} bytes"
         )
 
         # Get audio format
-        audio_format = getattr(client_state, 'batch_audio_format', {})
+        audio_format = getattr(client_state, "batch_audio_format", {})
         sample_rate = audio_format.get("rate", 16000)
         width = audio_format.get("width", 2)
         channels = audio_format.get("channels", 1)
@@ -1067,7 +1117,7 @@ async def _process_rolling_batch(
             user_id=user_id,
             client_id=client_id,
             title=f"Recording Part {batch_number}",
-            summary="Rolling batch processing..."
+            summary="Rolling batch processing...",
         )
         await conversation.insert()
         conversation_id = conversation.conversation_id  # Get the auto-generated ID
@@ -1078,7 +1128,7 @@ async def _process_rolling_batch(
             audio_data=complete_audio,
             sample_rate=sample_rate,
             channels=channels,
-            sample_width=width
+            sample_width=width,
         )
 
         # Enqueue transcription job
@@ -1104,7 +1154,11 @@ async def _process_rolling_batch(
             result_ttl=JOB_RESULT_TTL,
             job_id=transcribe_job_id,
             description=f"Transcribe rolling batch #{batch_number} {conversation_id[:8]}",
-            meta={'conversation_id': conversation_id, 'client_id': client_id, 'batch_number': batch_number}
+            meta={
+                "conversation_id": conversation_id,
+                "client_id": client_id,
+                "batch_number": batch_number,
+            },
         )
 
         application_logger.info(
@@ -1114,16 +1168,12 @@ async def _process_rolling_batch(
 
     except Exception as e:
         application_logger.error(
-            f"❌ Failed to process rolling batch #{batch_number}: {e}",
-            exc_info=True
+            f"❌ Failed to process rolling batch #{batch_number}: {e}", exc_info=True
         )
 
 
 async def _process_batch_audio_complete(
-    client_state,
-    user_id: str,
-    user_email: str,
-    client_id: str
+    client_state, user_id: str, user_email: str, client_id: str
 ) -> None:
     """
     Process completed batch audio: write file, create conversation, enqueue jobs.
@@ -1134,8 +1184,13 @@ async def _process_batch_audio_complete(
         user_email: User email
         client_id: Client ID
     """
-    if not hasattr(client_state, 'batch_audio_chunks') or not client_state.batch_audio_chunks:
-        application_logger.warning(f"⚠️ Batch mode: No audio chunks accumulated for {client_id}")
+    if (
+        not hasattr(client_state, "batch_audio_chunks")
+        or not client_state.batch_audio_chunks
+    ):
+        application_logger.warning(
+            f"⚠️ Batch mode: No audio chunks accumulated for {client_id}"
+        )
         return
 
     try:
@@ -1143,7 +1198,7 @@ async def _process_batch_audio_complete(
         from advanced_omi_backend.utils.audio_chunk_utils import convert_audio_to_chunks
 
         # Combine all chunks
-        complete_audio = b''.join(client_state.batch_audio_chunks)
+        complete_audio = b"".join(client_state.batch_audio_chunks)
         application_logger.info(
             f"📦 Batch mode: Combined {len(client_state.batch_audio_chunks)} chunks into {len(complete_audio)} bytes"
         )
@@ -1152,17 +1207,15 @@ async def _process_batch_audio_complete(
         timestamp = int(time.time() * 1000)
 
         # Get audio format from batch metadata (set during audio-start)
-        audio_format = getattr(client_state, 'batch_audio_format', {})
-        sample_rate = audio_format.get('rate', OMI_SAMPLE_RATE)
-        sample_width = audio_format.get('width', OMI_SAMPLE_WIDTH)
-        channels = audio_format.get('channels', OMI_CHANNELS)
+        audio_format = getattr(client_state, "batch_audio_format", {})
+        sample_rate = audio_format.get("rate", OMI_SAMPLE_RATE)
+        sample_width = audio_format.get("width", OMI_SAMPLE_WIDTH)
+        channels = audio_format.get("channels", OMI_CHANNELS)
 
         # Calculate audio duration
         duration = len(complete_audio) / (sample_rate * sample_width * channels)
 
-        application_logger.info(
-            f"✅ Batch mode: Processing audio ({duration:.1f}s)"
-        )
+        application_logger.info(f"✅ Batch mode: Processing audio ({duration:.1f}s)")
 
         # Create conversation immediately for batch audio (conversation_id auto-generated)
         version_id = str(uuid.uuid4())
@@ -1171,7 +1224,7 @@ async def _process_batch_audio_complete(
             user_id=user_id,
             client_id=client_id,
             title="Batch Recording",
-            summary="Processing batch audio..."
+            summary="Processing batch audio...",
         )
         # Attach any markers (e.g., button events) captured during the session
         if client_state.markers:
@@ -1180,7 +1233,9 @@ async def _process_batch_audio_complete(
         await conversation.insert()
         conversation_id = conversation.conversation_id  # Get the auto-generated ID
 
-        application_logger.info(f"📝 Batch mode: Created conversation {conversation_id}")
+        application_logger.info(
+            f"📝 Batch mode: Created conversation {conversation_id}"
+        )
 
         # Convert audio directly to MongoDB chunks (no disk intermediary)
         try:
@@ -1197,8 +1252,7 @@ async def _process_batch_audio_complete(
             )
         except Exception as chunk_error:
             application_logger.error(
-                f"Failed to convert batch audio to chunks: {chunk_error}",
-                exc_info=True
+                f"Failed to convert batch audio to chunks: {chunk_error}", exc_info=True
             )
             # Continue anyway - transcription job will handle it
 
@@ -1226,17 +1280,19 @@ async def _process_batch_audio_complete(
             result_ttl=JOB_RESULT_TTL,
             job_id=transcribe_job_id,
             description=f"Transcribe batch audio {conversation_id[:8]}",
-            meta={'conversation_id': conversation_id, 'client_id': client_id}
+            meta={"conversation_id": conversation_id, "client_id": client_id},
         )
 
-        application_logger.info(f"📥 Batch mode: Enqueued transcription job {transcription_job.id}")
+        application_logger.info(
+            f"📥 Batch mode: Enqueued transcription job {transcription_job.id}"
+        )
 
         # Enqueue post-conversation processing job chain (depends on transcription)
         job_ids = start_post_conversation_jobs(
             conversation_id=conversation_id,
             user_id=None,  # Will be read from conversation in DB by jobs
             depends_on_job=transcription_job,  # Wait for transcription to complete
-            client_id=client_id  # Pass client_id for UI tracking
+            client_id=client_id,  # Pass client_id for UI tracking
         )
 
         application_logger.info(
@@ -1251,9 +1307,52 @@ async def _process_batch_audio_complete(
 
     except Exception as batch_error:
         application_logger.error(
-            f"❌ Batch mode processing failed: {batch_error}",
-            exc_info=True
+            f"❌ Batch mode processing failed: {batch_error}", exc_info=True
         )
+
+
+async def _cleanup_websocket_connection(
+    client_id: Optional[str],
+    pending_client_id: str,
+    interim_subscriber_task: Optional[asyncio.Task],
+) -> None:
+    """
+    Shared cleanup for WebSocket handlers (OMI and PCM).
+
+    Cancels the interim results subscriber, removes the pending connection
+    tracking entry, and tears down client state.
+
+    Args:
+        client_id: Actual client ID (may be None if auth failed)
+        pending_client_id: Temporary tracking ID to discard
+        interim_subscriber_task: Background task forwarding interim transcripts
+    """
+    # Cancel interim results subscriber task if running
+    if interim_subscriber_task and not interim_subscriber_task.done():
+        interim_subscriber_task.cancel()
+        try:
+            await interim_subscriber_task
+        except asyncio.CancelledError:
+            application_logger.info(
+                f"Interim subscriber task cancelled for {client_id}"
+            )
+        except Exception as task_error:
+            application_logger.error(
+                f"Error cancelling interim subscriber task: {task_error}"
+            )
+
+    # Clean up pending connection tracking
+    pending_connections.discard(pending_client_id)
+
+    # Ensure cleanup happens even if client_id is None
+    if client_id:
+        try:
+            await cleanup_client_state(client_id)
+        except Exception as cleanup_error:
+            application_logger.error(
+                f"Error during cleanup for client {client_id}: {cleanup_error}",
+                exc_info=True,
+            )
 
 
 async def handle_omi_websocket(
@@ -1294,7 +1393,9 @@ async def handle_omi_websocket(
 
             if header["type"] == "audio-start":
                 # Handle audio session start
-                application_logger.info(f"🔴 BACKEND: Received audio-start in OMI MODE for {client_id} (header={header})")
+                application_logger.info(
+                    f"🔴 BACKEND: Received audio-start in OMI MODE for {client_id} (header={header})"
+                )
                 application_logger.info(f"🎙️ OMI audio session started for {client_id}")
 
                 # Store user context on client state
@@ -1308,8 +1409,15 @@ async def handle_omi_websocket(
                     user.user_id,
                     user.email,
                     client_id,
-                    header.get("data", {"rate": OMI_SAMPLE_RATE, "width": OMI_SAMPLE_WIDTH, "channels": OMI_CHANNELS}),
-                    websocket=ws  # Pass WebSocket to launch interim results subscriber
+                    header.get(
+                        "data",
+                        {
+                            "rate": OMI_SAMPLE_RATE,
+                            "width": OMI_SAMPLE_WIDTH,
+                            "channels": OMI_CHANNELS,
+                        },
+                    ),
+                    websocket=ws,  # Pass WebSocket to launch interim results subscriber
                 )
 
             elif header["type"] == "audio-chunk" and payload:
@@ -1330,7 +1438,7 @@ async def handle_omi_websocket(
                     _decode_packet,
                     user.user_id,
                     client_id,
-                    packet_count
+                    packet_count,
                 )
 
                 # Log progress every 1000th packet
@@ -1352,7 +1460,7 @@ async def handle_omi_websocket(
                     audio_stream_producer,
                     user.user_id,
                     user.email,
-                    client_id
+                    client_id,
                 )
 
                 # Reset counters for next session
@@ -1377,36 +1485,17 @@ async def handle_omi_websocket(
             f"🔌 WebSocket disconnected - Client: {client_id}, Packets: {packet_count}, Total bytes: {total_bytes}"
         )
     except Exception as e:
-        application_logger.error(f"❌ WebSocket error for client {client_id}: {e}", exc_info=True)
+        application_logger.error(
+            f"❌ WebSocket error for client {client_id}: {e}", exc_info=True
+        )
     finally:
-        # Cancel interim results subscriber task if running
-        if interim_subscriber_task and not interim_subscriber_task.done():
-            interim_subscriber_task.cancel()
-            try:
-                await interim_subscriber_task
-            except asyncio.CancelledError:
-                application_logger.info(f"Interim subscriber task cancelled for {client_id}")
-            except Exception as task_error:
-                application_logger.error(f"Error cancelling interim subscriber task: {task_error}")
-
-        # Clean up pending connection tracking
-        pending_connections.discard(pending_client_id)
-
-        # Ensure cleanup happens even if client_id is None
-        if client_id:
-            try:
-                # Clean up client state
-                await cleanup_client_state(client_id)
-            except Exception as cleanup_error:
-                application_logger.error(
-                    f"Error during cleanup for client {client_id}: {cleanup_error}", exc_info=True
-                )
+        await _cleanup_websocket_connection(
+            client_id, pending_client_id, interim_subscriber_task
+        )
 
 
 async def handle_pcm_websocket(
-    ws: WebSocket,
-    token: Optional[str] = None,
-    device_name: Optional[str] = None
+    ws: WebSocket, token: Optional[str] = None, device_name: Optional[str] = None
 ):
     """Handle PCM WebSocket connections with batch and streaming mode support."""
     # Generate pending client_id to track connection even if auth fails
@@ -1436,14 +1525,24 @@ async def handle_pcm_websocket(
             try:
                 if not audio_streaming:
                     # Control message mode - parse Wyoming protocol
-                    application_logger.debug(f"🔄 Control mode for {client_id}, WebSocket state: {ws.client_state if hasattr(ws, 'client_state') else 'unknown'}")
-                    application_logger.debug(f"📨 About to receive control message for {client_id}")
+                    application_logger.debug(
+                        f"🔄 Control mode for {client_id}, WebSocket state: {ws.client_state if hasattr(ws, 'client_state') else 'unknown'}"
+                    )
+                    application_logger.debug(
+                        f"📨 About to receive control message for {client_id}"
+                    )
                     header, payload = await parse_wyoming_protocol(ws)
-                    application_logger.debug(f"✅ Received message type: {header.get('type')} for {client_id}")
+                    application_logger.debug(
+                        f"✅ Received message type: {header.get('type')} for {client_id}"
+                    )
 
                     if header["type"] == "audio-start":
-                        application_logger.info(f"🔴 BACKEND: Received audio-start in CONTROL MODE for {client_id}")
-                        application_logger.debug(f"🎙️ Processing audio-start for {client_id}")
+                        application_logger.info(
+                            f"🔴 BACKEND: Received audio-start in CONTROL MODE for {client_id}"
+                        )
+                        application_logger.debug(
+                            f"🎙️ Processing audio-start for {client_id}"
+                        )
 
                         # Store user context on client state for rolling batch processing
                         client_state.user_id = user.user_id
@@ -1451,28 +1550,34 @@ async def handle_pcm_websocket(
                         client_state.client_id = client_id
 
                         # Handle audio session start using helper function (pass websocket for error handling)
-                        audio_streaming, recording_mode = await _handle_audio_session_start(
-                            client_state,
-                            header.get("data", {}),
-                            client_id,
-                            websocket=ws  # Pass websocket for WebUI error display
+                        audio_streaming, recording_mode = (
+                            await _handle_audio_session_start(
+                                client_state,
+                                header.get("data", {}),
+                                client_id,
+                                websocket=ws,  # Pass websocket for WebUI error display
+                            )
                         )
 
                         # Initialize streaming session
                         if recording_mode == "streaming":
-                            application_logger.info(f"🔴 BACKEND: Initializing streaming session for {client_id}")
-                            interim_subscriber_task = await _initialize_streaming_session(
-                                client_state,
-                                audio_stream_producer,
-                                user.user_id,
-                                user.email,
-                                client_id,
-                                header.get("data", {}),
-                                websocket=ws
+                            application_logger.info(
+                                f"🔴 BACKEND: Initializing streaming session for {client_id}"
+                            )
+                            interim_subscriber_task = (
+                                await _initialize_streaming_session(
+                                    client_state,
+                                    audio_stream_producer,
+                                    user.user_id,
+                                    user.email,
+                                    client_id,
+                                    header.get("data", {}),
+                                    websocket=ws,
+                                )
                             )
 
                         continue  # Continue to audio streaming mode
-                    
+
                     elif header["type"] == "ping":
                         # Handle keepalive ping from frontend
                         application_logger.debug(f"🏓 Received ping from {client_id}")
@@ -1492,23 +1597,29 @@ async def handle_pcm_websocket(
                             f"Ignoring Wyoming control event type '{header['type']}' for {client_id}"
                         )
                         continue
-                        
+
                 else:
                     # Audio streaming mode - receive raw bytes (like speaker recognition)
-                    application_logger.debug(f"🎵 Audio streaming mode for {client_id} - waiting for audio data")
-                    
+                    application_logger.debug(
+                        f"🎵 Audio streaming mode for {client_id} - waiting for audio data"
+                    )
+
                     try:
                         # Receive raw audio bytes or check for control messages
                         message = await ws.receive()
-                        
-                        
+
                         # Check if it's a disconnect
-                        if "type" in message and message["type"] == "websocket.disconnect":
+                        if (
+                            "type" in message
+                            and message["type"] == "websocket.disconnect"
+                        ):
                             code = message.get("code", 1000)
                             reason = message.get("reason", "")
-                            application_logger.info(f"🔌 WebSocket disconnect during audio streaming for {client_id}. Code: {code}, Reason: {reason}")
+                            application_logger.info(
+                                f"🔌 WebSocket disconnect during audio streaming for {client_id}. Code: {code}, Reason: {reason}"
+                            )
                             break
-                        
+
                         # Check if it's a text message (control message like audio-stop)
                         if "text" in message:
                             try:
@@ -1520,22 +1631,28 @@ async def handle_pcm_websocket(
                                         audio_stream_producer,
                                         user.user_id,
                                         user.email,
-                                        client_id
+                                        client_id,
                                     )
                                     # Reset counters for next session
                                     packet_count = 0
                                     total_bytes = 0
                                     continue
                                 elif control_header.get("type") == "ping":
-                                    application_logger.debug(f"🏓 Received ping during streaming from {client_id}")
+                                    application_logger.debug(
+                                        f"🏓 Received ping during streaming from {client_id}"
+                                    )
                                     continue
                                 elif control_header.get("type") == "audio-start":
                                     # Handle duplicate audio-start messages gracefully (idempotent behavior)
-                                    application_logger.info(f"🔄 Ignoring duplicate audio-start message during streaming for {client_id}")
+                                    application_logger.info(
+                                        f"🔄 Ignoring duplicate audio-start message during streaming for {client_id}"
+                                    )
                                     continue
                                 elif control_header.get("type") == "audio-chunk":
                                     # Handle Wyoming protocol audio-chunk with binary payload
-                                    payload_length = control_header.get("payload_length")
+                                    payload_length = control_header.get(
+                                        "payload_length"
+                                    )
                                     if payload_length and payload_length > 0:
                                         # Receive the binary audio data
                                         payload_msg = await ws.receive()
@@ -1544,10 +1661,14 @@ async def handle_pcm_websocket(
                                             packet_count += 1
                                             total_bytes += len(audio_data)
 
-                                            application_logger.debug(f"🎵 Received audio chunk #{packet_count}: {len(audio_data)} bytes")
+                                            application_logger.debug(
+                                                f"🎵 Received audio chunk #{packet_count}: {len(audio_data)} bytes"
+                                            )
 
                                             # Route to appropriate mode handler
-                                            audio_format = control_header.get("data", {})
+                                            audio_format = control_header.get(
+                                                "data", {}
+                                            )
                                             task = await _handle_audio_chunk(
                                                 client_state,
                                                 audio_stream_producer,
@@ -1556,31 +1677,42 @@ async def handle_pcm_websocket(
                                                 user.user_id,
                                                 user.email,
                                                 client_id,
-                                                websocket=ws
+                                                websocket=ws,
                                             )
                                             # Store subscriber task if it was created (first streaming chunk)
                                             if task and not interim_subscriber_task:
                                                 interim_subscriber_task = task
                                         else:
-                                            application_logger.warning(f"Expected binary payload for audio-chunk, got: {payload_msg.keys()}")
+                                            application_logger.warning(
+                                                f"Expected binary payload for audio-chunk, got: {payload_msg.keys()}"
+                                            )
                                     else:
-                                        application_logger.warning(f"audio-chunk missing payload_length: {payload_length}")
+                                        application_logger.warning(
+                                            f"audio-chunk missing payload_length: {payload_length}"
+                                        )
                                     continue
                                 elif control_header.get("type") == "button-event":
                                     button_data = control_header.get("data", {})
                                     button_state = button_data.get("state", "unknown")
                                     await _handle_button_event(
-                                        client_state, button_state, user.user_id, client_id
+                                        client_state,
+                                        button_state,
+                                        user.user_id,
+                                        client_id,
                                     )
                                     continue
                                 else:
-                                    application_logger.warning(f"Unknown control message during streaming: {control_header.get('type')}")
+                                    application_logger.warning(
+                                        f"Unknown control message during streaming: {control_header.get('type')}"
+                                    )
                                     continue
 
                             except json.JSONDecodeError:
-                                application_logger.warning(f"Invalid control message during streaming for {client_id}")
+                                application_logger.warning(
+                                    f"Invalid control message during streaming for {client_id}"
+                                )
                                 continue
-                        
+
                         # Check if it's binary data (raw audio without Wyoming protocol)
                         elif "bytes" in message:
                             # Raw binary audio data (legacy support)
@@ -1588,7 +1720,9 @@ async def handle_pcm_websocket(
                             packet_count += 1
                             total_bytes += len(audio_data)
 
-                            application_logger.debug(f"🎵 Received raw audio chunk #{packet_count}: {len(audio_data)} bytes")
+                            application_logger.debug(
+                                f"🎵 Received raw audio chunk #{packet_count}: {len(audio_data)} bytes"
+                            )
 
                             # Route to appropriate mode handler with default format
                             default_format = {"rate": 16000, "width": 2, "channels": 1}
@@ -1600,18 +1734,22 @@ async def handle_pcm_websocket(
                                 user.user_id,
                                 user.email,
                                 client_id,
-                                websocket=ws
+                                websocket=ws,
                             )
                             # Store subscriber task if it was created (first streaming chunk)
                             if task and not interim_subscriber_task:
                                 interim_subscriber_task = task
-                        
+
                         else:
-                            application_logger.warning(f"Unexpected message format in streaming mode: {message.keys()}")
+                            application_logger.warning(
+                                f"Unexpected message format in streaming mode: {message.keys()}"
+                            )
                             continue
-                            
+
                     except Exception as streaming_error:
-                        application_logger.error(f"Error in audio streaming mode: {streaming_error}")
+                        application_logger.error(
+                            f"Error in audio streaming mode: {streaming_error}"
+                        )
                         if "disconnect" in str(streaming_error).lower():
                             break
                         continue
@@ -1628,9 +1766,7 @@ async def handle_pcm_websocket(
                 )
                 continue  # Skip this message but don't disconnect
             except ValueError as e:
-                application_logger.error(
-                    f"❌ Protocol error for {client_id}: {e}"
-                )
+                application_logger.error(f"❌ Protocol error for {client_id}: {e}")
                 continue  # Skip this message but don't disconnect
             except RuntimeError as e:
                 # Handle "Cannot call receive once a disconnect message has been received"
@@ -1646,18 +1782,23 @@ async def handle_pcm_websocket(
                     continue
             except Exception as e:
                 application_logger.error(
-                    f"❌ Unexpected error processing message for {client_id}: {e}", exc_info=True
+                    f"❌ Unexpected error processing message for {client_id}: {e}",
+                    exc_info=True,
                 )
                 # Check if it's a connection-related error
                 error_msg = str(e).lower()
-                if "disconnect" in error_msg or "closed" in error_msg or "receive" in error_msg:
+                if (
+                    "disconnect" in error_msg
+                    or "closed" in error_msg
+                    or "receive" in error_msg
+                ):
                     application_logger.info(
                         f"🔌 Connection issue detected for {client_id}, exiting loop"
                     )
                     break
                 else:
                     continue  # Skip this message for other errors
-                
+
     except WebSocketDisconnect:
         application_logger.info(
             f"🔌 PCM WebSocket disconnected - Client: {client_id}, Packets: {packet_count}, Total bytes: {total_bytes}"
@@ -1667,25 +1808,6 @@ async def handle_pcm_websocket(
             f"❌ PCM WebSocket error for client {client_id}: {e}", exc_info=True
         )
     finally:
-        # Cancel interim results subscriber task if running
-        if interim_subscriber_task and not interim_subscriber_task.done():
-            interim_subscriber_task.cancel()
-            try:
-                await interim_subscriber_task
-            except asyncio.CancelledError:
-                application_logger.info(f"Interim subscriber task cancelled for {client_id}")
-            except Exception as task_error:
-                application_logger.error(f"Error cancelling interim subscriber task: {task_error}")
-
-        # Clean up pending connection tracking
-        pending_connections.discard(pending_client_id)
-
-        # Ensure cleanup happens even if client_id is None
-        if client_id:
-            try:
-                # Clean up client state
-                await cleanup_client_state(client_id)
-            except Exception as cleanup_error:
-                application_logger.error(
-                    f"Error during cleanup for client {client_id}: {cleanup_error}", exc_info=True
-                )
+        await _cleanup_websocket_connection(
+            client_id, pending_client_id, interim_subscriber_task
+        )

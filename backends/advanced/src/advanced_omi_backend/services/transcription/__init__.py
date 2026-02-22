@@ -42,13 +42,10 @@ def _parse_hot_words_to_keyterm(hot_words_str: str) -> str:
 
     terms = []
     for word in re.split(r"[,\n]+", hot_words_str):
-        word = word.strip()
+        word = word.strip().lower()
         if not word:
             continue
         terms.append(word)
-        capitalized = word.title()
-        if capitalized != word:
-            terms.append(capitalized)
     return " ".join(terms)
 
 
@@ -61,11 +58,11 @@ def _dotted_get(d: dict | list | None, dotted: Optional[str]):
     if d is None or not dotted:
         return None
     cur = d
-    for part in dotted.split('.'):
+    for part in dotted.split("."):
         if not part:
             continue
-        if '[' in part and part.endswith(']'):
-            name, idx_str = part[:-1].split('[', 1)
+        if "[" in part and part.endswith("]"):
+            name, idx_str = part[:-1].split("[", 1)
             if name:
                 cur = cur.get(name, {}) if isinstance(cur, dict) else {}
             try:
@@ -81,6 +78,40 @@ def _dotted_get(d: dict | list | None, dotted: Optional[str]):
         if cur is None:
             return None
     return cur
+
+
+def _normalize_provider_segments(segments: list) -> list:
+    """Normalize provider-specific segment formats to a standard shape.
+
+    Handles Deepgram paragraph format where:
+    - text is nested in ``sentences[].text`` instead of a top-level ``text`` field
+    - ``speaker`` is an integer (0, 1) instead of a string ("Speaker 0")
+
+    After normalization every segment dict will have:
+    - ``text`` (str): combined sentence text
+    - ``speaker`` (str): "Speaker N" label
+    - ``start`` / ``end`` (float): time span (preserved from original)
+    """
+    if not segments:
+        return segments
+
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+
+        # Deepgram paragraphs: text lives inside sentences[], not top-level
+        if "text" not in seg and "sentences" in seg:
+            sentences = seg.get("sentences", [])
+            seg["text"] = " ".join(
+                s.get("text", "") for s in sentences if isinstance(s, dict)
+            )
+
+        # Normalise integer speaker IDs to "Speaker N" strings
+        speaker = seg.get("speaker")
+        if isinstance(speaker, (int, float)):
+            seg["speaker"] = f"Speaker {int(speaker)}"
+
+    return segments
 
 
 class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
@@ -124,24 +155,33 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
         """
         return {cap: True for cap in self._capabilities}
 
-    async def transcribe(self, audio_data: bytes, sample_rate: int, diarize: bool = False, context_info: Optional[str] = None, **kwargs) -> dict:
+    async def transcribe(
+        self,
+        audio_data: bytes,
+        sample_rate: int,
+        diarize: bool = False,
+        context_info: Optional[str] = None,
+        progress_callback=None,
+        **kwargs,
+    ) -> dict:
         # Special handling for mock provider (no HTTP server needed)
         if self.model.model_provider == "mock":
             from .mock_provider import MockTranscriptionProvider
+
             mock = MockTranscriptionProvider(fail_mode=False)
             return await mock.transcribe(audio_data, sample_rate, diarize)
 
         op = (self.model.operations or {}).get("stt_transcribe") or {}
         method = (op.get("method") or "POST").upper()
-        path = (op.get("path") or "/listen")
+        path = op.get("path") or "/listen"
         # Build URL
         base = self.model.model_url.rstrip("/")
         url = base + ("/" + path.lstrip("/"))
-        
+
         # Check if we should use multipart file upload (for Parakeet)
         content_type = op.get("content_type", "audio/raw")
         use_multipart = content_type == "multipart/form-data"
-        
+
         # Build headers (skip Content-Type for multipart as httpx will set it)
         headers = {}
         if not use_multipart:
@@ -152,7 +192,7 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
                 headers["Content-Type"] = "audio/wav"
             else:
                 headers["Content-Type"] = "audio/raw"
-            
+
         if self.model.api_key:
             # Allow templated header, otherwise fallback to Bearer/Token conventions by config
             hdrs = op.get("headers") or {}
@@ -167,7 +207,10 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
             hdrs = op.get("headers") or {}
             for k, v in hdrs.items():
                 # Skip Authorization headers with empty/invalid values
-                if k.lower() == "authorization" and (not v or v.strip().lower() in ["token", "token ", "bearer", "bearer "]):
+                if k.lower() == "authorization" and (
+                    not v
+                    or v.strip().lower() in ["token", "token ", "bearer", "bearer "]
+                ):
                     continue
                 headers[k] = v
 
@@ -196,24 +239,72 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
             if keyterm:
                 query["keyterm"] = keyterm
 
+        # NOTE: PULSE (smallest.ai) does NOT support keywords on WebSocket or
+        # batch HTTP — any `keywords` query param causes 0 responses or HTTP 400.
+        # Hot-word boosting for PULSE is not injected here.
+
         timeout = op.get("timeout", 300)
+        # Use a longer read timeout for NDJSON progress responses — each
+        # batch window can take minutes but the service keeps sending
+        # progress lines between windows.
+        read_timeout = op.get("read_timeout", timeout)
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            timeouts = httpx.Timeout(timeout, read=read_timeout)
+            async with httpx.AsyncClient(timeout=timeouts) as client:
                 if method == "POST":
                     if use_multipart:
                         # Send as multipart file upload (for Parakeet/VibeVoice)
                         files = {"file": ("audio.wav", audio_data, "audio/wav")}
-                        data = {}
+                        form_data = {}
                         if hot_words_str and hot_words_str.strip():
-                            data["context_info"] = hot_words_str.strip()
-                        resp = await client.post(url, headers=headers, params=query, files=files, data=data)
+                            form_data["context_info"] = hot_words_str.strip()
+
+                        # Use streaming to handle NDJSON progress responses
+                        async with client.stream(
+                            "POST",
+                            url,
+                            headers=headers,
+                            params=query,
+                            files=files,
+                            data=form_data,
+                        ) as resp:
+                            resp.raise_for_status()
+                            content_type = resp.headers.get("content-type", "")
+
+                            if "application/x-ndjson" in content_type:
+                                # Batch progress: read events line by line
+                                data = None
+                                async for line in resp.aiter_lines():
+                                    line = line.strip()
+                                    if not line:
+                                        continue
+                                    event = json.loads(line)
+                                    if (
+                                        event.get("type") == "progress"
+                                        and progress_callback
+                                    ):
+                                        progress_callback(event)
+                                    elif event.get("type") == "result":
+                                        data = event
+                                if data is None:
+                                    raise RuntimeError(
+                                        f"NDJSON stream from '{self._name}' ended without a result event"
+                                    )
+                            else:
+                                # Normal JSON response
+                                await resp.aread()
+                                data = resp.json()
                     else:
                         # Send as raw audio data (for Deepgram)
-                        resp = await client.post(url, headers=headers, params=query, content=audio_data)
+                        resp = await client.post(
+                            url, headers=headers, params=query, content=audio_data
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
                 else:
                     resp = await client.get(url, headers=headers, params=query)
-                resp.raise_for_status()
-                data = resp.json()
+                    resp.raise_for_status()
+                    data = resp.json()
         except httpx.ConnectError as e:
             raise ConnectionError(
                 f"Cannot reach transcription service '{self._name}' at {url}. "
@@ -233,7 +324,9 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
                 channels = data["results"]["channels"]
                 if channels and "alternatives" in channels[0]:
                     alt = channels[0]["alternatives"][0]
-                    logger.debug(f"DEBUG Registry: Deepgram alternative keys: {list(alt.keys())}")
+                    logger.debug(
+                        f"DEBUG Registry: Deepgram alternative keys: {list(alt.keys())}"
+                    )
 
         # Extract normalized shape
         text, words, segments = "", [], []
@@ -242,18 +335,26 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
             text = _dotted_get(data, extract.get("text")) or ""
             words = _dotted_get(data, extract.get("words")) or []
             segments = _dotted_get(data, extract.get("segments")) or []
+            segments = _normalize_provider_segments(segments)
 
             # Check config to decide whether to keep or discard provider segments
             transcription_config = get_backend_config("transcription")
-            use_provider_segments = transcription_config.get("use_provider_segments", False)
+            use_provider_segments = transcription_config.get(
+                "use_provider_segments", False
+            )
 
             if not use_provider_segments:
                 segments = []
-                logger.debug(f"Transcription: Extracted {len(words)} words, ignoring provider segments (use_provider_segments=false)")
+                logger.debug(
+                    f"Transcription: Extracted {len(words)} words, ignoring provider segments (use_provider_segments=false)"
+                )
             else:
-                logger.debug(f"Transcription: Extracted {len(words)} words, keeping {len(segments)} provider segments (use_provider_segments=true)")
+                logger.debug(
+                    f"Transcription: Extracted {len(words)} words, keeping {len(segments)} provider segments (use_provider_segments=true)"
+                )
 
         return {"text": text, "words": words, "segments": segments}
+
 
 class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
     """Streaming transcription provider using a config-driven WebSocket template."""
@@ -261,7 +362,9 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
     def __init__(self):
         registry = get_models_registry()
         if not registry:
-            raise RuntimeError("config.yml not found; cannot configure streaming STT provider")
+            raise RuntimeError(
+                "config.yml not found; cannot configure streaming STT provider"
+            )
         model = registry.get_default("stt_stream")
         if not model:
             raise RuntimeError("No default stt_stream model defined in config.yml")
@@ -281,9 +384,13 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
 
     async def transcribe(self, audio_data: bytes, sample_rate: int, **kwargs) -> dict:
         """Not used for streaming providers - use start_stream/process_audio_chunk/end_stream instead."""
-        raise NotImplementedError("Streaming providers do not support batch transcription")
+        raise NotImplementedError(
+            "Streaming providers do not support batch transcription"
+        )
 
-    async def start_stream(self, client_id: str, sample_rate: int = 16000, diarize: bool = False):
+    async def start_stream(
+        self, client_id: str, sample_rate: int = 16000, diarize: bool = False
+    ):
         base_url = self.model.model_url
         ops = self.model.operations or {}
 
@@ -308,6 +415,9 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
                         query_dict["keyterm"] = keyterm
             except Exception as e:
                 logger.debug(f"Failed to fetch asr.hot_words for streaming: {e}")
+
+        # NOTE: PULSE/wave (smallest.ai) does NOT support keywords on WebSocket —
+        # any `keywords` query param causes 0 responses or HTTP 400.
 
         # Normalize boolean values to lowercase strings (Deepgram expects "true"/"false", not "True"/"False")
         normalized_query = {}
@@ -351,9 +461,16 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
             except Exception:
                 pass
 
-        self._streams[client_id] = {"ws": ws, "sample_rate": sample_rate, "final": None, "interim": []}
+        self._streams[client_id] = {
+            "ws": ws,
+            "sample_rate": sample_rate,
+            "final": None,
+            "interim": [],
+        }
 
-    async def process_audio_chunk(self, client_id: str, audio_chunk: bytes) -> dict | None:
+    async def process_audio_chunk(
+        self, client_id: str, audio_chunk: bytes
+    ) -> dict | None:
         if client_id not in self._streams:
             return None
         ws = self._streams[client_id]["ws"]
@@ -372,7 +489,7 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
         await ws.send(audio_chunk)
 
         # Non-blocking read for results
-        expect = (ops.get("expect", {}) or {})
+        expect = ops.get("expect", {}) or {}
         extract = expect.get("extract", {})
         interim_type = expect.get("interim_type")
         final_type = expect.get("final_type")
@@ -392,16 +509,33 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
                 # Fallback: check is_final directly (for providers that don't use a type field)
                 is_final = data.get("is_final", False)
 
-            # Extract result data
-            text = _dotted_get(data, extract.get("text")) if extract.get("text") else data.get("text", "")
-            words = _dotted_get(data, extract.get("words")) if extract.get("words") else data.get("words", [])
-            segments = _dotted_get(data, extract.get("segments")) if extract.get("segments") else data.get("segments", [])
+            # Extract result data (guard against None from _dotted_get)
+            text = (
+                _dotted_get(data, extract.get("text"))
+                if extract.get("text")
+                else data.get("text", "")
+            ) or ""
+            words = (
+                _dotted_get(data, extract.get("words"))
+                if extract.get("words")
+                else data.get("words", [])
+            ) or []
+            segments = (
+                _dotted_get(data, extract.get("segments"))
+                if extract.get("segments")
+                else data.get("segments", [])
+            ) or []
+            segments = _normalize_provider_segments(segments)
 
             # Calculate confidence if available
             confidence = data.get("confidence", 0.0)
             if not confidence and words and isinstance(words, list):
                 # Calculate average word confidence
-                confidences = [w.get("confidence", 0.0) for w in words if isinstance(w, dict) and "confidence" in w]
+                confidences = [
+                    w.get("confidence", 0.0)
+                    for w in words
+                    if isinstance(w, dict) and "confidence" in w
+                ]
                 if confidences:
                     confidence = sum(confidences) / len(confidences)
 
@@ -412,7 +546,7 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
                 "words": words,
                 "segments": segments,
                 "is_final": is_final,
-                "confidence": confidence
+                "confidence": confidence,
             }
 
         except asyncio.TimeoutError:
@@ -430,7 +564,7 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
         end_msg = (ops.get("end", {}) or {}).get("message", {"type": "stop"})
         await ws.send(json.dumps(end_msg))
 
-        expect = (ops.get("expect", {}) or {})
+        expect = ops.get("expect", {}) or {}
         final_type = expect.get("final_type")
         extract = expect.get("extract", {})
 
@@ -457,14 +591,29 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
 
         if not isinstance(final, dict):
             return {"text": "", "words": [], "segments": []}
+        segments = (
+            _dotted_get(final, extract.get("segments"))
+            if extract
+            else final.get("segments", [])
+        ) or []
         return {
-            "text": _dotted_get(final, extract.get("text")) if extract else final.get("text", ""),
-            "words": _dotted_get(final, extract.get("words")) if extract else final.get("words", []),
-            "segments": _dotted_get(final, extract.get("segments")) if extract else final.get("segments", []),
+            "text": (
+                _dotted_get(final, extract.get("text"))
+                if extract
+                else final.get("text", "")
+            ),
+            "words": (
+                _dotted_get(final, extract.get("words"))
+                if extract
+                else final.get("words", [])
+            ),
+            "segments": _normalize_provider_segments(segments),
         }
 
 
-def get_transcription_provider(provider_name: Optional[str] = None, mode: Optional[str] = None) -> Optional[BaseTranscriptionProvider]:
+def get_transcription_provider(
+    provider_name: Optional[str] = None, mode: Optional[str] = None
+) -> Optional[BaseTranscriptionProvider]:
     """Return a registry-driven transcription provider.
 
     - mode="batch": HTTP-based STT (default)
@@ -503,7 +652,9 @@ def is_transcription_available(mode: str = "batch") -> bool:
     return provider is not None
 
 
-def get_mock_transcription_provider(fail_mode: bool = False) -> BaseTranscriptionProvider:
+def get_mock_transcription_provider(
+    fail_mode: bool = False,
+) -> BaseTranscriptionProvider:
     """Return a mock transcription provider (for testing only).
 
     Args:
@@ -513,6 +664,7 @@ def get_mock_transcription_provider(fail_mode: bool = False) -> BaseTranscriptio
         MockTranscriptionProvider instance
     """
     from .mock_provider import MockTranscriptionProvider
+
     return MockTranscriptionProvider(fail_mode=fail_mode)
 
 

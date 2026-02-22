@@ -26,7 +26,7 @@ def get_config_dir() -> Path:
 def get_plugins_yml_path() -> Path:
     """
     Get path to plugins.yml file (single source of truth).
-    
+
     Returns:
         Path to plugins.yml
     """
@@ -86,20 +86,34 @@ def load_config(force_reload: bool = False) -> DictConfig:
     # OmegaConf.merge replaces lists entirely, so we need custom merge
     # for the 'models' list: merge by name so defaults models that aren't
     # in user config are still available.
-    default_models = OmegaConf.to_container(defaults.get("models", []) or [], resolve=False) if defaults else []
-    user_models = OmegaConf.to_container(user_config.get("models", []) or [], resolve=False) if user_config else []
+    default_models = (
+        OmegaConf.to_container(defaults.get("models", []) or [], resolve=False)
+        if defaults
+        else []
+    )
+    user_models = (
+        OmegaConf.to_container(user_config.get("models", []) or [], resolve=False)
+        if user_config
+        else []
+    )
 
     merged = OmegaConf.merge(defaults, user_config)
 
     # Name-based merge: user models override defaults, but default-only models are kept
     if default_models and user_models:
         user_model_names = {m.get("name") for m in user_models if isinstance(m, dict)}
-        extra_defaults = [m for m in default_models if isinstance(m, dict) and m.get("name") not in user_model_names]
+        extra_defaults = [
+            m
+            for m in default_models
+            if isinstance(m, dict) and m.get("name") not in user_model_names
+        ]
         if extra_defaults:
             all_models = user_models + extra_defaults
             merged["models"] = OmegaConf.create(all_models)
-            logger.info(f"Merged {len(extra_defaults)} default-only models into config: "
-                        f"{[m.get('name') for m in extra_defaults]}")
+            logger.info(
+                f"Merged {len(extra_defaults)} default-only models into config: "
+                f"{[m.get('name') for m in extra_defaults]}"
+            )
 
     # Cache result
     _config_cache = merged
@@ -126,7 +140,7 @@ def get_backend_config(section: Optional[str] = None) -> DictConfig:
         DictConfig for backend section or subsection
     """
     cfg = load_config()
-    if 'backend' not in cfg:
+    if "backend" not in cfg:
         return OmegaConf.create({})
 
     backend_cfg = cfg.backend
@@ -153,6 +167,9 @@ def save_config_section(section_path: str, values: dict) -> bool:
     """
     Update a config section and save to config.yml.
 
+    Also updates the in-memory config cache so changes take effect immediately,
+    even when CONFIG_FILE points to a different file (e.g., in test environments).
+
     Args:
         section_path: Dot-separated path (e.g., 'backend.diarization')
         values: Dict with new values
@@ -174,8 +191,13 @@ def save_config_section(section_path: str, values: dict) -> bool:
         # Save back to file
         OmegaConf.save(existing_config, config_path)
 
-        # Invalidate cache
-        reload_config()
+        # Reload config from the primary config file (CONFIG_FILE env var)
+        merged = reload_config()
+
+        # Also apply the values to the in-memory cache directly.
+        # This is needed when CONFIG_FILE points to a different file than config.yml
+        # (e.g., test configs), so the saved values still take effect at runtime.
+        OmegaConf.update(merged, section_path, values, merge=True)
 
         logger.info(f"Saved config section '{section_path}' to {config_path}")
         return True

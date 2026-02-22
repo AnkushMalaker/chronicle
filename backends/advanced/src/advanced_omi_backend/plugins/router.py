@@ -37,11 +37,57 @@ def normalize_text_for_wake_word(text: str) -> str:
     # Lowercase
     text = text.lower()
     # Replace punctuation with spaces (instead of removing, to preserve word boundaries)
-    text = text.translate(str.maketrans(string.punctuation, ' ' * len(string.punctuation)))
+    text = text.translate(
+        str.maketrans(string.punctuation, " " * len(string.punctuation))
+    )
     # Normalize whitespace (collapse multiple spaces to single space)
-    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r"\s+", " ", text)
     # Strip leading/trailing whitespace
     return text.strip()
+
+
+def extract_command_around_keyword(transcript: str, keyword: str) -> str:
+    """
+    Extract command by removing a keyword from anywhere in the transcript.
+
+    Handles punctuation and spacing around the keyword gracefully.
+
+    Example:
+        transcript: "Turn off the lights, Vivi"
+        keyword: "vivi"
+        -> "Turn off the lights"
+
+        transcript: "Vivi, turn off the lights in the hall"
+        keyword: "vivi"
+        -> "turn off the lights in the hall"
+
+        transcript: "Turn off the hall lights, Vivi, please"
+        keyword: "vivi"
+        -> "Turn off the hall lights, please"
+
+    Args:
+        transcript: Original transcript text
+        keyword: Keyword to remove (will be normalized)
+
+    Returns:
+        Command text with keyword removed
+    """
+    keyword_parts = normalize_text_for_wake_word(keyword).split()
+    if not keyword_parts:
+        return transcript.strip()
+
+    pattern_parts = [re.escape(part) for part in keyword_parts]
+    # Match keyword with optional surrounding punctuation/whitespace
+    kw_pattern = r"[\s,.\-!?;:]*".join(pattern_parts)
+    # Consume adjacent punctuation/whitespace on both sides
+    full_pattern = r"[\s,.\-!?;:]*" + kw_pattern + r"[\s,.\-!?;:]*"
+
+    command = re.sub(
+        full_pattern, " ", transcript, count=1, flags=re.IGNORECASE
+    ).strip()
+    # Collapse any doubled spaces left behind
+    command = re.sub(r"\s{2,}", " ", command)
+    return command
 
 
 def extract_command_after_wake_word(transcript: str, wake_word: str) -> str:
@@ -73,25 +119,28 @@ def extract_command_after_wake_word(transcript: str, wake_word: str) -> str:
     # The pattern matches the wake word parts with optional punctuation/whitespace between and after
     pattern_parts = [re.escape(part) for part in wake_word_parts]
     # Allow optional punctuation/whitespace between parts
-    pattern = r'[\s,.\-!?;:]*'.join(pattern_parts)
+    pattern = r"[\s,.\-!?;:]*".join(pattern_parts)
     # Add trailing punctuation/whitespace consumption after last wake word part
-    pattern = '^' + pattern + r'[\s,.\-!?;:]*'
+    pattern = "^" + pattern + r"[\s,.\-!?;:]*"
 
     # Try to match wake word at start of transcript (case-insensitive)
     match = re.match(pattern, transcript, re.IGNORECASE)
 
     if match:
         # Extract everything after the matched wake word (including trailing punctuation)
-        command = transcript[match.end():].strip()
+        command = transcript[match.end() :].strip()
         return command
     else:
         # Fallback: couldn't find wake word boundary, return full transcript
-        logger.warning(f"Could not find wake word boundary for '{wake_word}' in '{transcript}', using full transcript")
+        logger.warning(
+            f"Could not find wake word boundary for '{wake_word}' in '{transcript}', using full transcript"
+        )
         return transcript.strip()
 
 
 class ConditionResult(NamedTuple):
     """Result of a plugin condition check."""
+
     execute: bool
     extra: Dict[str, Any] = {}
 
@@ -100,9 +149,9 @@ class PluginHealth:
     """Health status for a single plugin."""
 
     # Possible status values
-    REGISTERED = "registered"     # Registered but not yet initialized
-    INITIALIZED = "initialized"   # Successfully initialized
-    FAILED = "failed"             # initialize() raised an exception
+    REGISTERED = "registered"  # Registered but not yet initialized
+    INITIALIZED = "initialized"  # Successfully initialized
+    FAILED = "failed"  # initialize() raised an exception
 
     def __init__(self, plugin_id: str):
         self.plugin_id = plugin_id
@@ -182,11 +231,7 @@ class PluginRouter:
         }
 
     async def dispatch_event(
-        self,
-        event: str,
-        user_id: str,
-        data: Dict,
-        metadata: Optional[Dict] = None
+        self, event: str, user_id: str, data: Dict, metadata: Optional[Dict] = None
     ) -> List[PluginResult]:
         """
         Dispatch event to all subscribed plugins.
@@ -212,7 +257,9 @@ class PluginRouter:
         if not plugin_ids:
             logger.info(f"🔌 ROUTER: No plugins subscribed to event '{event}'")
         else:
-            logger.info(f"🔌 ROUTER: Found {len(plugin_ids)} subscribed plugin(s): {plugin_ids}")
+            logger.info(
+                f"🔌 ROUTER: Found {len(plugin_ids)} subscribed plugin(s): {plugin_ids}"
+            )
 
         for plugin_id in plugin_ids:
             plugin = self.plugins[plugin_id]
@@ -251,22 +298,34 @@ class PluginRouter:
                         f"success={result.success}, message={result.message}"
                     )
                     results.append(result)
-                    executed.append({"plugin_id": plugin_id, "success": result.success, "message": result.message})
+                    executed.append(
+                        {
+                            "plugin_id": plugin_id,
+                            "success": result.success,
+                            "message": result.message,
+                        }
+                    )
 
                     # If plugin says stop processing, break
                     if not result.should_continue:
-                        logger.info(f"   ⊗ Plugin '{plugin_id}' stopped further processing")
+                        logger.info(
+                            f"   ⊗ Plugin '{plugin_id}' stopped further processing"
+                        )
                         break
                 else:
-                    logger.info(f"   ⊘ Plugin '{plugin_id}' returned no result for '{event}'")
+                    logger.info(
+                        f"   ⊘ Plugin '{plugin_id}' returned no result for '{event}'"
+                    )
 
             except Exception as e:
                 # CRITICAL: Log exception details
                 logger.error(
                     f"   ✗ Plugin '{plugin_id}' FAILED with exception: {e}",
-                    exc_info=True
+                    exc_info=True,
                 )
-                executed.append({"plugin_id": plugin_id, "success": False, "message": str(e)})
+                executed.append(
+                    {"plugin_id": plugin_id, "success": False, "message": str(e)}
+                )
 
         # Add at end
         logger.info(
@@ -287,7 +346,9 @@ class PluginRouter:
     _SKIP = ConditionResult(execute=False)
     _PASS = ConditionResult(execute=True)
 
-    async def _should_execute(self, plugin: BasePlugin, data: Dict, event: Optional[str] = None) -> ConditionResult:
+    async def _should_execute(
+        self, plugin: BasePlugin, data: Dict, event: Optional[str] = None
+    ) -> ConditionResult:
         """Check if plugin should be executed based on condition configuration.
 
         Returns a ConditionResult. The ``extra`` dict contains per-plugin data
@@ -297,53 +358,85 @@ class PluginRouter:
         Button events bypass transcript-based conditions (wake_word) since they
         have no transcript to match against.
         """
-        condition_type = plugin.condition.get('type', 'always')
+        condition_type = plugin.condition.get("type", "always")
 
-        if condition_type == 'always':
+        if condition_type == "always":
             return self._PASS
 
         # Button and starred events bypass transcript-based conditions (no transcript to match)
-        if event and event in (PluginEvent.BUTTON_SINGLE_PRESS, PluginEvent.BUTTON_DOUBLE_PRESS, PluginEvent.CONVERSATION_STARRED):
+        if event and event in (
+            PluginEvent.BUTTON_SINGLE_PRESS,
+            PluginEvent.BUTTON_DOUBLE_PRESS,
+            PluginEvent.CONVERSATION_STARRED,
+        ):
             return self._PASS
 
-        elif condition_type == 'wake_word':
+        elif condition_type == "wake_word":
             # Normalize transcript for matching (handles punctuation and spacing)
-            transcript = data.get('transcript', '')
+            transcript = data.get("transcript", "")
             normalized_transcript = normalize_text_for_wake_word(transcript)
 
             # Support both singular 'wake_word' and plural 'wake_words' (list)
-            wake_words = plugin.condition.get('wake_words', [])
+            wake_words = plugin.condition.get("wake_words", [])
             if not wake_words:
                 # Fallback to singular wake_word for backward compatibility
-                wake_word = plugin.condition.get('wake_word', '')
+                wake_word = plugin.condition.get("wake_word", "")
                 if wake_word:
                     wake_words = [wake_word]
 
             # Check if transcript starts with any wake word (after normalization)
             for wake_word in wake_words:
                 normalized_wake_word = normalize_text_for_wake_word(wake_word)
-                if normalized_wake_word and normalized_transcript.startswith(normalized_wake_word):
+                if normalized_wake_word and normalized_transcript.startswith(
+                    normalized_wake_word
+                ):
                     # Smart extraction: find where wake word actually ends in original text
                     command = extract_command_after_wake_word(transcript, wake_word)
-                    logger.debug(f"Wake word '{wake_word}' detected. Original: '{transcript}', Command: '{command}'")
+                    logger.debug(
+                        f"Wake word '{wake_word}' detected. Original: '{transcript}', Command: '{command}'"
+                    )
                     return ConditionResult(
                         execute=True,
-                        extra={'command': command, 'original_transcript': transcript},
+                        extra={"command": command, "original_transcript": transcript},
                     )
 
             return self._SKIP
 
-        elif condition_type == 'conditional':
+        elif condition_type == "keyword_anywhere":
+            # Trigger when keyword appears anywhere in the transcript.
+            # Command is the transcript with the keyword removed.
+            transcript = data.get("transcript", "")
+            normalized_transcript = normalize_text_for_wake_word(transcript)
+
+            keywords = plugin.condition.get("keywords", [])
+            if not keywords:
+                keyword = plugin.condition.get("keyword", "")
+                if keyword:
+                    keywords = [keyword]
+
+            for keyword in keywords:
+                normalized_keyword = normalize_text_for_wake_word(keyword)
+                if normalized_keyword and normalized_keyword in normalized_transcript:
+                    command = extract_command_around_keyword(transcript, keyword)
+                    logger.debug(
+                        f"Keyword '{keyword}' found in transcript. "
+                        f"Original: '{transcript}', Command: '{command}'"
+                    )
+                    return ConditionResult(
+                        execute=True,
+                        extra={"command": command, "original_transcript": transcript},
+                    )
+
+            return self._SKIP
+
+        elif condition_type == "conditional":
             # Future: Custom condition checking
             return self._PASS
 
         return self._SKIP
 
     async def _execute_plugin(
-        self,
-        plugin: BasePlugin,
-        event: str,
-        context: PluginContext
+        self, plugin: BasePlugin, event: str, context: PluginContext
     ) -> Optional[PluginResult]:
         """Execute plugin method for specified event"""
         # Map events to plugin callback methods using enums
@@ -356,7 +449,10 @@ class PluginRouter:
             return await plugin.on_memory_processed(context)
         elif event == PluginEvent.CONVERSATION_STARRED:
             return await plugin.on_conversation_starred(context)
-        elif event in (PluginEvent.BUTTON_SINGLE_PRESS, PluginEvent.BUTTON_DOUBLE_PRESS):
+        elif event in (
+            PluginEvent.BUTTON_SINGLE_PRESS,
+            PluginEvent.BUTTON_DOUBLE_PRESS,
+        ):
             return await plugin.on_button_event(context)
         elif event == PluginEvent.PLUGIN_ACTION:
             return await plugin.on_plugin_action(context)
@@ -377,14 +473,16 @@ class PluginRouter:
         if not self._event_redis:
             return
         try:
-            record = json.dumps({
-                "timestamp": time.time(),
-                "event": event,
-                "user_id": user_id,
-                "plugins_subscribed": plugins_subscribed,
-                "plugins_executed": plugins_executed,
-                "metadata": metadata or {},
-            })
+            record = json.dumps(
+                {
+                    "timestamp": time.time(),
+                    "event": event,
+                    "user_id": user_id,
+                    "plugins_subscribed": plugins_subscribed,
+                    "plugins_executed": plugins_executed,
+                    "metadata": metadata or {},
+                }
+            )
             pipe = self._event_redis.pipeline()
             pipe.lpush(self._EVENT_LOG_KEY, record)
             pipe.ltrim(self._EVENT_LOG_KEY, 0, self._EVENT_LOG_MAX - 1)
@@ -404,8 +502,9 @@ class PluginRouter:
             logger.debug("Failed to clear events from Redis", exc_info=True)
             return 0
 
-
-    def get_recent_events(self, limit: int = 50, event_type: Optional[str] = None) -> List[Dict]:
+    def get_recent_events(
+        self, limit: int = 50, event_type: Optional[str] = None
+    ) -> List[Dict]:
         """Read recent events from the Redis log."""
         if not self._event_redis:
             return []
@@ -439,9 +538,15 @@ class PluginRouter:
                 result = await asyncio.wait_for(plugin.health_check(), timeout=10.0)
                 results[plugin_id] = result
             except asyncio.TimeoutError:
-                results[plugin_id] = {"ok": False, "message": "Health check timed out (10s)"}
+                results[plugin_id] = {
+                    "ok": False,
+                    "message": "Health check timed out (10s)",
+                }
             except Exception as e:
-                results[plugin_id] = {"ok": False, "message": f"Health check error: {e}"}
+                results[plugin_id] = {
+                    "ok": False,
+                    "message": f"Health check error: {e}",
+                }
 
         return results
 

@@ -14,7 +14,7 @@ import sys
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    stream=sys.stdout
+    stream=sys.stdout,
 )
 
 logger = logging.getLogger(__name__)
@@ -22,14 +22,24 @@ logger = logging.getLogger(__name__)
 
 def main():
     """Start RQ worker with proper logging configuration."""
+    # Initialize OTEL/Galileo if configured (patches OpenAI before any job imports)
+    try:
+        from advanced_omi_backend.observability.otel_setup import init_otel
+
+        init_otel()
+    except Exception:
+        pass  # Optional — don't block workers
+
     from redis import Redis
     from rq import Worker
 
     # Get Redis URL from environment
-    redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
     # Get queue names from command line arguments
-    queue_names = sys.argv[1:] if len(sys.argv) > 1 else ['transcription', 'memory', 'default']
+    queue_names = (
+        sys.argv[1:] if len(sys.argv) > 1 else ["transcription", "memory", "default"]
+    )
 
     logger.info(f"🚀 Starting RQ worker for queues: {', '.join(queue_names)}")
     logger.info(f"📡 Redis URL: {redis_url}")
@@ -38,16 +48,12 @@ def main():
     redis_conn = Redis.from_url(redis_url)
 
     # Create and start worker
-    worker = Worker(
-        queue_names,
-        connection=redis_conn,
-        log_job_description=True
-    )
+    worker = Worker(queue_names, connection=redis_conn, log_job_description=True)
 
     logger.info("✅ RQ worker ready")
 
     # This blocks until worker is stopped
-    worker.work(logging_level='INFO')
+    worker.work(logging_level="INFO")
 
 
 if __name__ == "__main__":

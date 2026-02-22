@@ -2,13 +2,11 @@
 Audio stream producer - publishes audio chunks to Redis Streams.
 """
 
+import json
 import logging
 import time
-import json
 
 import redis.asyncio as redis
-
-from advanced_omi_backend.services.transcription.base import TranscriptionProvider
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +43,7 @@ class AudioStreamProducer:
         user_email: str = "",
         connection_id: str = "",
         mode: str = "streaming",
-        provider: str = "deepgram"
+        provider: str = "deepgram",
     ):
         """
         Initialize session tracking metadata in Redis.
@@ -66,35 +64,32 @@ class AudioStreamProducer:
         stream_name = f"audio:stream:{client_id}"
         session_key = f"audio:session:{session_id}"
 
-        await self.redis_client.hset(session_key, mapping={
-            # User & Client tracking
-            "user_id": user_id,
-            "user_email": user_email,
-            "client_id": client_id,
-            "connection_id": connection_id,
-
-            # Stream configuration
-            "stream_name": stream_name,
-            "provider": provider,
-            "mode": mode,
-
-            # Timestamps
-            "started_at": str(time.time()),
-            "last_chunk_at": str(time.time()),
-
-            # Counters
-            "chunks_published": "0",
-
-            # Job tracking (populated by queue_controller when jobs start)
-            "speech_detection_job_id": "",
-            "audio_persistence_job_id": "",
-
-            # Connection state
-            "websocket_connected": "true",
-
-            # Session status
-            "status": "active"
-        })
+        await self.redis_client.hset(
+            session_key,
+            mapping={
+                # User & Client tracking
+                "user_id": user_id,
+                "user_email": user_email,
+                "client_id": client_id,
+                "connection_id": connection_id,
+                # Stream configuration
+                "stream_name": stream_name,
+                "provider": provider,
+                "mode": mode,
+                # Timestamps
+                "started_at": str(time.time()),
+                "last_chunk_at": str(time.time()),
+                # Counters
+                "chunks_published": "0",
+                # Job tracking (populated by queue_controller when jobs start)
+                "speech_detection_job_id": "",
+                "audio_persistence_job_id": "",
+                # Connection state
+                "websocket_connected": "true",
+                # Session status
+                "status": "active",
+            },
+        )
 
         # Set TTL of 1 hour
         await self.redis_client.expire(session_key, 3600)
@@ -106,10 +101,12 @@ class AudioStreamProducer:
             "user_id": user_id,
             "client_id": client_id,
             "stream_name": stream_name,
-            "provider": provider
+            "provider": provider,
         }
 
-        logger.info(f"📊 Initialized session {session_id} → stream {stream_name} (provider: {provider})")
+        logger.info(
+            f"📊 Initialized session {session_id} → stream {stream_name} (provider: {provider})"
+        )
 
     async def update_session_chunk_count(self, session_id: str):
         """
@@ -166,10 +163,7 @@ class AudioStreamProducer:
         }
 
         await self.redis_client.xadd(
-            stream_name,
-            end_signal,
-            maxlen=25000,
-            approximate=True
+            stream_name, end_signal, maxlen=25000, approximate=True
         )
         logger.info(f"📡 Sent end-of-session signal for {session_id} to {stream_name}")
 
@@ -187,14 +181,22 @@ class AudioStreamProducer:
         session_data = await self.redis_client.hgetall(session_key)
 
         # Convert bytes to strings for easier handling
-        return {k.decode() if isinstance(k, bytes) else k: v.decode() if isinstance(v, bytes) else v
-                for k, v in session_data.items()} if session_data else {}
+        return (
+            {
+                k.decode() if isinstance(k, bytes) else k: (
+                    v.decode() if isinstance(v, bytes) else v
+                )
+                for k, v in session_data.items()
+            }
+            if session_data
+            else {}
+        )
 
     async def update_session_job_ids(
         self,
         session_id: str,
         speech_detection_job_id: str = None,
-        audio_persistence_job_id: str = None
+        audio_persistence_job_id: str = None,
     ):
         """
         Update job IDs in session metadata.
@@ -224,10 +226,13 @@ class AudioStreamProducer:
             session_id: Session identifier
         """
         session_key = f"audio:session:{session_id}"
-        await self.redis_client.hset(session_key, mapping={
-            "websocket_connected": "false",
-            "disconnected_at": str(time.time())
-        })
+        await self.redis_client.hset(
+            session_key,
+            mapping={
+                "websocket_connected": "false",
+                "disconnected_at": str(time.time()),
+            },
+        )
         logger.info(f"🔌 Marked websocket disconnected for session {session_id}")
 
     async def finalize_session(self, session_id: str, completion_reason: str = None):
@@ -242,15 +247,14 @@ class AudioStreamProducer:
         session_key = f"audio:session:{session_id}"
 
         # Build mapping with status and optional completion_reason
-        mapping = {
-            "status": "finalizing",
-            "finalized_at": str(time.time())
-        }
+        mapping = {"status": "finalizing", "finalized_at": str(time.time())}
 
         # Set completion_reason atomically with status to prevent race conditions
         if completion_reason:
             mapping["completion_reason"] = completion_reason
-            logger.info(f"📊 Finalizing session {session_id} with reason: {completion_reason}")
+            logger.info(
+                f"📊 Finalizing session {session_id} with reason: {completion_reason}"
+            )
 
         await self.redis_client.hset(session_key, mapping=mapping)
 
@@ -269,10 +273,7 @@ class AudioStreamProducer:
             }
 
             await self.redis_client.xadd(
-                stream_name,
-                end_marker_data,
-                maxlen=25000,
-                approximate=True
+                stream_name, end_marker_data, maxlen=25000, approximate=True
             )
             logger.info(f"📡 Sent end_marker to {stream_name} for session {session_id}")
 
@@ -286,12 +287,11 @@ class AudioStreamProducer:
         self,
         audio_data: bytes,
         session_id: str,
-        chunk_id: str,
         user_id: str,
         client_id: str,
         sample_rate: int = 16000,
         channels: int = 1,
-        sample_width: int = 2
+        sample_width: int = 2,
     ) -> list[str]:
         """
         Add audio data to session buffer and publish fixed-size chunks.
@@ -302,7 +302,6 @@ class AudioStreamProducer:
         Args:
             audio_data: Raw PCM audio bytes (arbitrary size from WebSocket)
             session_id: Session identifier
-            chunk_id: Base chunk identifier (will increment for multiple chunks)
             user_id: User identifier
             client_id: Client identifier (used for stream naming)
             sample_rate: Audio sample rate (Hz)
@@ -321,7 +320,7 @@ class AudioStreamProducer:
                 "user_id": user_id,
                 "client_id": client_id,
                 "stream_name": stream_name,
-                "provider": "deepgram"
+                "provider": "deepgram",
             }
 
         session_buffer = self.session_buffers[session_id]
@@ -366,7 +365,7 @@ class AudioStreamProducer:
                 stream_name,
                 chunk_data,
                 maxlen=25000,  # Keep max 25k chunks (~104 minutes at 250ms/chunk)
-                approximate=True
+                approximate=True,
             )
             message_ids.append(message_id.decode())
 
@@ -374,7 +373,10 @@ class AudioStreamProducer:
             await self.update_session_chunk_count(session_id)
 
             # Log every 10th chunk to avoid spam
-            if session_buffer["chunk_count"] % 10 == 0 or session_buffer["chunk_count"] <= 5:
+            if (
+                session_buffer["chunk_count"] % 10 == 0
+                or session_buffer["chunk_count"] <= 5
+            ):
                 logger.debug(
                     f"📤 Added fixed-size chunk {chunk_id_formatted} to {stream_name} "
                     f"({len(chunk_audio)} bytes = {len(chunk_audio)/bytes_per_second:.3f}s, "
@@ -396,7 +398,7 @@ class AudioStreamProducer:
         session_id: str,
         sample_rate: int = 16000,
         channels: int = 1,
-        sample_width: int = 2
+        sample_width: int = 2,
     ) -> str | None:
         """
         Flush any remaining audio in session buffer.
@@ -443,10 +445,7 @@ class AudioStreamProducer:
 
             # Add to stream with MAXLEN limit
             message_id = await self.redis_client.xadd(
-                stream_name,
-                chunk_data,
-                maxlen=25000,
-                approximate=True
+                stream_name, chunk_data, maxlen=25000, approximate=True
             )
 
             # Update session tracking
@@ -461,7 +460,6 @@ class AudioStreamProducer:
             return message_id.decode()
 
         return None
-
 
 
 # Singleton instance
@@ -486,12 +484,12 @@ def get_audio_stream_producer() -> AudioStreamProducer:
 
         # Create async Redis client (synchronous call, connection happens on first use)
         redis_client = redis_async.from_url(
-            redis_url,
-            encoding="utf-8",
-            decode_responses=False
+            redis_url, encoding="utf-8", decode_responses=False
         )
 
         _producer_instance = AudioStreamProducer(redis_client)
-        logger.info(f"Created AudioStreamProducer singleton with Redis URL: {redis_url}")
+        logger.info(
+            f"Created AudioStreamProducer singleton with Redis URL: {redis_url}"
+        )
 
     return _producer_instance
