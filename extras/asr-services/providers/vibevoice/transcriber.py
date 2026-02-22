@@ -37,7 +37,11 @@ from typing import Optional
 
 import torch
 from common.audio_utils import STANDARD_SAMPLE_RATE, load_audio_file
-from common.batching import split_audio_file, stitch_transcription_results
+from common.batching import (
+    extract_context_tail,
+    split_audio_file,
+    stitch_transcription_results,
+)
 from common.response_models import Segment, Speaker, TranscriptionResult
 from omegaconf import OmegaConf
 
@@ -544,6 +548,55 @@ class VibeVoiceTranscriber:
         final = stitch_transcription_results(
             batch_results, overlap_seconds=self.batch_overlap
         )
+        yield {"type": "result", **final.to_dict()}
+
+    def supports_batch_progress(self, audio_duration: float) -> bool:
+        """Return True if this audio is long enough to use batched transcription with progress."""
+        return audio_duration > self.batch_threshold
+
+    def _transcribe_batched_with_progress(
+        self,
+        audio_file_path: str,
+        hotwords: Optional[str] = None,
+    ):
+        """
+        Transcribe a long audio file with progress reporting.
+
+        Same logic as _transcribe_batched() but yields progress counters
+        between windows so callers can report how far along the batch is.
+
+        Yields:
+            {"type": "progress", "current": i, "total": n} after each window
+            {"type": "result", ...} as the final item (TranscriptionResult.to_dict())
+        """
+        windows = split_audio_file(
+            audio_file_path,
+            batch_duration=self.batch_duration,
+            overlap=self.batch_overlap,
+        )
+
+        batch_results = []
+
+        for i, (temp_path, start_time, end_time) in enumerate(windows):
+            try:
+                logger.info(
+                    f"Batch {i+1}/{len(windows)}: [{start_time:.0f}s - {end_time:.0f}s]"
+                )
+
+                # No inter-window context — see note in _transcribe_batched()
+                result = self._transcribe_single(temp_path, context_info=hotwords)
+                batch_results.append((result, start_time, end_time))
+                logger.info(
+                    f"Batch {i+1} done: {len(result.segments)} segments, "
+                    f"{len(result.text)} chars"
+                )
+
+            finally:
+                os.unlink(temp_path)
+
+            yield {"type": "progress", "current": i + 1, "total": len(windows)}
+
+        final = stitch_transcription_results(batch_results, overlap_seconds=self.batch_overlap)
         yield {"type": "result", **final.to_dict()}
 
     def supports_batch_progress(self, audio_duration: float) -> bool:

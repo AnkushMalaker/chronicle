@@ -316,6 +316,8 @@ async def transcribe_full_audio_job(
                 f"⚠️ Error triggering transcript plugins in batch mode: {e}"
             )
 
+    logger.info(f"🔍 DEBUG: Plugin processing complete, moving to speech validation")
+
     # Validate meaningful speech BEFORE any further processing
     transcript_data = {"text": transcript_text, "words": words}
     speech_analysis = analyze_speech(transcript_data)

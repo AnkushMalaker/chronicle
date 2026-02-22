@@ -1093,7 +1093,6 @@ async def reprocess_memory(
         )
         if error:
             return error
-
         # Resolve transcript version ID (handle "active" special case)
         error, transcript_version_id, transcript_version = _resolve_transcript_version(
             conversation_model, transcript_version_id
@@ -1149,7 +1148,6 @@ async def reprocess_speakers(
         )
         if error:
             return error
-
         # 2-3. Resolve source transcript version ID and find version object
         error, source_version_id, source_version = _resolve_transcript_version(
             conversation_model, transcript_version_id
