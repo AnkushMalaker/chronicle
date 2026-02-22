@@ -10,10 +10,8 @@ import json
 import logging
 import os
 import time
-import uuid
 import wave
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict
 
 from beanie.operators import In
@@ -21,20 +19,15 @@ from rq import get_current_job
 from rq.exceptions import NoSuchJobError
 from rq.job import Job
 
-from advanced_omi_backend.config import (
-    get_backend_config,
-    get_transcription_job_timeout,
-)
+from advanced_omi_backend.config import get_transcription_job_timeout
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
-    REDIS_URL,
-    redis_conn,
     start_post_conversation_jobs,
     transcription_queue,
 )
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
-from advanced_omi_backend.models.job import BaseRQJob, JobPriority, async_job
+from advanced_omi_backend.models.job import async_job
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggregator
 from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
