@@ -76,11 +76,9 @@ jobs:
 
     - name: Run Robot Framework tests (No API Keys)
       working-directory: tests
-      env:
-        CLEANUP_CONTAINERS: "false"  # Don't cleanup in CI - handled by workflow
       run: |
-        # Use the no-API test script (excludes tests tagged with requires-api-keys)
-        ./run-no-api-tests.sh
+        # Use Makefile target (starts containers with mock config, excludes api-keys/slow/sdk/gpu tests)
+        make test-no-api OUTPUTDIR=results-no-api
         TEST_EXIT_CODE=$?
         echo "test_exit_code=$TEST_EXIT_CODE" >> $GITHUB_ENV
         exit 0  # Don't fail here, we'll fail at the end after uploading artifacts

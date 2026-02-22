@@ -32,7 +32,7 @@ on:
 - **No secrets required** - Works for external contributors
 - **Excludes**: Tests tagged with `requires-api-keys`
 - **Config**: `tests/configs/mock-services.yml`
-- **Test Script**: `./run-no-api-tests.sh`
+- **Makefile Target**: `make test-no-api OUTPUTDIR=results-no-api`
 - **Results**: `results-no-api/`
 - **Time**: ~10-15 minutes
 - **Coverage**: ~70% of test suite
@@ -312,7 +312,7 @@ runs-on: ubuntu-latest
     CLEANUP_CONTAINERS: "false"  # Handled by workflow
     # API keys if needed
   run: |
-    ./run-{no-api|robot}-tests.sh
+    make test-no-api  # or ./run-robot-tests.sh for full suite
     TEST_EXIT_CODE=$?
     echo "test_exit_code=$TEST_EXIT_CODE" >> $GITHUB_ENV
     exit 0  # Don't fail yet

@@ -266,7 +266,7 @@ Full Pipeline Integration Test
 ```bash
 # Excludes tests tagged with requires-api-keys
 cd tests
-./run-no-api-tests.sh
+make test-no-api
 ```
 - Uses `configs/mock-services.yml`
 - No external API calls
@@ -375,7 +375,7 @@ Audio Upload Produces Quality Transcript
 **Running Tests Locally Without API Keys**:
 ```bash
 cd tests
-./run-no-api-tests.sh
+make test-no-api
 ```
 - Works without any API key configuration
 - Fast feedback for most development
