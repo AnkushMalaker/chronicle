@@ -37,13 +37,9 @@ from typing import Optional
 
 import torch
 from common.audio_utils import STANDARD_SAMPLE_RATE, load_audio_file
-from omegaconf import OmegaConf
-from common.batching import (
-    extract_context_tail,
-    split_audio_file,
-    stitch_transcription_results,
-)
+from common.batching import split_audio_file, stitch_transcription_results
 from common.response_models import Segment, Speaker, TranscriptionResult
+from omegaconf import OmegaConf
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +62,9 @@ def load_vibevoice_config() -> dict:
     user_config = OmegaConf.load(config_path) if config_path.exists() else {}
     merged = OmegaConf.merge(defaults, user_config)
 
-    asr_config = merged.get("asr_services", {}).get("vibevoice", {})
+    asr_config = OmegaConf.select(
+        merged, "asr_services.vibevoice", default=OmegaConf.create({})
+    )
     resolved = OmegaConf.to_container(asr_config, resolve=True)
     logger.info(f"Loaded vibevoice config: {resolved}")
     return resolved
@@ -103,7 +101,9 @@ class VibeVoiceTranscriber:
         self.model_id = model_id or os.getenv("ASR_MODEL", "microsoft/VibeVoice-ASR")
         self.llm_model = os.getenv("VIBEVOICE_LLM_MODEL", "Qwen/Qwen2.5-7B")
         self.attn_impl = os.getenv("VIBEVOICE_ATTN_IMPL", "sdpa")
-        self.device = os.getenv("DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
+        self.device = os.getenv(
+            "DEVICE", "cuda" if torch.cuda.is_available() else "cpu"
+        )
         self.max_new_tokens = int(os.getenv("MAX_NEW_TOKENS", "8192"))
 
         # Quantization config: "4bit", "8bit", or "" (none)
@@ -121,18 +121,20 @@ class VibeVoiceTranscriber:
         # Batching config: config.yml > env vars > hardcoded defaults
         config = load_vibevoice_config()
         self.batch_threshold = float(
-            os.getenv("BATCH_THRESHOLD_SECONDS") or config.get("batch_threshold_seconds", 300)
+            os.getenv("BATCH_THRESHOLD_SECONDS")
+            or config.get("batch_threshold_seconds", 300)
         )
         self.batch_duration = float(
-            os.getenv("BATCH_DURATION_SECONDS") or config.get("batch_duration_seconds", 240)
+            os.getenv("BATCH_DURATION_SECONDS")
+            or config.get("batch_duration_seconds", 240)
         )
         self.batch_overlap = float(
-            os.getenv("BATCH_OVERLAP_SECONDS") or config.get("batch_overlap_seconds", 30)
+            os.getenv("BATCH_OVERLAP_SECONDS")
+            or config.get("batch_overlap_seconds", 30)
         )
 
         # LoRA adapter path (auto-loaded after base model if set)
         self.lora_adapter_path = os.getenv("LORA_ADAPTER_PATH") or None
-
 
         # Model components (initialized in load_model)
         self.model = None
@@ -204,7 +206,9 @@ class VibeVoiceTranscriber:
             logger.info("Using 8-bit quantization (bitsandbytes)")
             return BitsAndBytesConfig(load_in_8bit=True)
         else:
-            logger.warning(f"Unknown quantization '{self.quantization}', loading without quantization")
+            logger.warning(
+                f"Unknown quantization '{self.quantization}', loading without quantization"
+            )
             return None
 
     def load_model(self) -> None:
@@ -304,7 +308,6 @@ class VibeVoiceTranscriber:
         self._has_lora = True
         logger.info("LoRA adapter loaded successfully")
 
-
     def transcribe(
         self,
         audio_file_path: str,
@@ -330,7 +333,9 @@ class VibeVoiceTranscriber:
 
         # Check duration to decide whether to batch
 
-        audio_array, sr = load_audio_file(audio_file_path, target_rate=STANDARD_SAMPLE_RATE)
+        audio_array, sr = load_audio_file(
+            audio_file_path, target_rate=STANDARD_SAMPLE_RATE
+        )
         duration = len(audio_array) / sr
 
         if duration > self.batch_threshold:
@@ -346,7 +351,10 @@ class VibeVoiceTranscriber:
             return self._transcribe_single(audio_file_path, context_info=context_info)
 
     def _transcribe_single(
-        self, audio_file_path: str, context: Optional[str] = None, context_info: Optional[str] = None
+        self,
+        audio_file_path: str,
+        context: Optional[str] = None,
+        context_info: Optional[str] = None,
     ) -> TranscriptionResult:
         """
         Transcribe a single audio file (or batch window).
@@ -363,7 +371,9 @@ class VibeVoiceTranscriber:
         """
         logger.info(f"Transcribing: {audio_file_path}")
         if context:
-            logger.info(f"With batch context ({len(context)} chars): ...{context[-80:]}")
+            logger.info(
+                f"With batch context ({len(context)} chars): ...{context[-80:]}"
+            )
         if context_info:
             logger.info(f"With hot words context: {context_info[:120]}")
 
@@ -417,7 +427,9 @@ class VibeVoiceTranscriber:
         generated_ids = output_ids[0, input_length:]
 
         # Remove eos tokens
-        eos_positions = (generated_ids == self.processor.tokenizer.eos_token_id).nonzero(as_tuple=True)[0]
+        eos_positions = (
+            generated_ids == self.processor.tokenizer.eos_token_id
+        ).nonzero(as_tuple=True)[0]
         if len(eos_positions) > 0:
             generated_ids = generated_ids[: eos_positions[0] + 1]
 
@@ -483,7 +495,9 @@ class VibeVoiceTranscriber:
             finally:
                 os.unlink(temp_path)
 
-        return stitch_transcription_results(batch_results, overlap_seconds=self.batch_overlap)
+        return stitch_transcription_results(
+            batch_results, overlap_seconds=self.batch_overlap
+        )
 
     def _transcribe_batched_with_progress(
         self,
@@ -527,7 +541,9 @@ class VibeVoiceTranscriber:
 
             yield {"type": "progress", "current": i + 1, "total": len(windows)}
 
-        final = stitch_transcription_results(batch_results, overlap_seconds=self.batch_overlap)
+        final = stitch_transcription_results(
+            batch_results, overlap_seconds=self.batch_overlap
+        )
         yield {"type": "result", **final.to_dict()}
 
     def supports_batch_progress(self, audio_duration: float) -> bool:
@@ -555,13 +571,17 @@ class VibeVoiceTranscriber:
         # Extract JSON array from assistant response
         # Strategy: Find the outermost [ ] that contains valid JSON
         # Look for array starting with [{ which indicates segment objects
-        json_match = re.search(r'\[\s*\{.*\}\s*\]', raw_output, re.DOTALL)
+        json_match = re.search(r"\[\s*\{.*\}\s*\]", raw_output, re.DOTALL)
 
         if not json_match:
-            logger.warning("Could not find JSON array in output, returning raw text only")
-            logger.warning(f"Output does not match pattern [{{...}}], checking for other formats...")
+            logger.warning(
+                "Could not find JSON array in output, returning raw text only"
+            )
+            logger.warning(
+                f"Output does not match pattern [{{...}}], checking for other formats..."
+            )
             # Try alternate pattern: just find any array
-            json_match = re.search(r'\[.*\]', raw_output, re.DOTALL)
+            json_match = re.search(r"\[.*\]", raw_output, re.DOTALL)
 
         if not json_match:
             logger.warning("No JSON array found in output")
@@ -574,12 +594,14 @@ class VibeVoiceTranscriber:
             # Convert to our expected format
             segments = []
             for seg in segments_raw:
-                segments.append({
-                    "text": seg.get("Content", ""),
-                    "start": float(seg.get("Start", 0.0)),
-                    "end": float(seg.get("End", 0.0)),
-                    "speaker": seg.get("Speaker", 0),
-                })
+                segments.append(
+                    {
+                        "text": seg.get("Content", ""),
+                        "start": float(seg.get("Start", 0.0)),
+                        "end": float(seg.get("End", 0.0)),
+                        "speaker": seg.get("Speaker", 0),
+                    }
+                )
 
             return {"raw_text": raw_output, "segments": segments}
 
@@ -644,7 +666,11 @@ class VibeVoiceTranscriber:
         ]
 
         # Use raw text if no segments parsed
-        full_text = " ".join(text_parts) if text_parts else processed.get("raw_text", raw_output)
+        full_text = (
+            " ".join(text_parts)
+            if text_parts
+            else processed.get("raw_text", raw_output)
+        )
 
         # Calculate total duration
         duration = None

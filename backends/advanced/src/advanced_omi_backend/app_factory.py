@@ -7,6 +7,7 @@ and service initializations.
 
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -122,9 +123,13 @@ async def initialize_openmemory_user() -> None:
 async def lifespan(app: FastAPI):
     """Manage application lifespan events."""
     config = get_app_config()
+    startup_start = time.monotonic()
 
     # Startup
     application_logger.info("Starting application...")
+
+    # ── Phase 1 (sequential — dependencies) ──────────────────────────
+    phase_start = time.monotonic()
 
     # Initialize Beanie for all document models
     try:
@@ -151,200 +156,258 @@ async def lifespan(app: FastAPI):
         application_logger.error(f"Failed to initialize Beanie: {e}")
         raise
 
-    # Create admin user if needed
+    # Create admin user if needed (requires Beanie)
     try:
         await create_admin_user_if_needed()
     except Exception as e:
         application_logger.error(f"Failed to create admin user: {e}")
-        # Don't raise here as this is not critical for startup
 
-    # Initialize Redis connection for RQ
-    try:
-        from advanced_omi_backend.controllers.queue_controller import redis_conn
+    application_logger.info(
+        f"Phase 1 (Beanie + admin) completed in {time.monotonic() - phase_start:.2f}s"
+    )
 
-        redis_conn.ping()
-        application_logger.info("Redis connection established for RQ")
-        application_logger.info(
-            "RQ workers can be started with: rq worker transcription memory default"
-        )
-    except Exception as e:
-        application_logger.error(f"Failed to connect to Redis for RQ: {e}")
+    # ── Phase 2 (parallel — all independent) ─────────────────────────
+    phase_start = time.monotonic()
+
+    async def _init_redis_rq():
+        try:
+            from advanced_omi_backend.controllers.queue_controller import redis_conn
+
+            redis_conn.ping()
+            application_logger.info("Redis connection established for RQ")
+        except Exception as e:
+            application_logger.error(f"Failed to connect to Redis for RQ: {e}")
+            application_logger.warning(
+                "RQ queue system will not be available - check Redis connection"
+            )
+
+    async def _init_task_manager():
+        try:
+            tm = init_task_manager()
+            await tm.start()
+            application_logger.info("BackgroundTaskManager initialized and started")
+        except Exception as e:
+            application_logger.error(f"Failed to initialize task manager: {e}")
+            raise  # Task manager is essential
+
+    async def _init_client_manager():
+        get_client_manager()
+        application_logger.info("ClientManager initialized")
+
+    async def _init_otel():
+        try:
+            from advanced_omi_backend.observability.otel_setup import init_otel
+
+            init_otel()
+        except Exception as e:
+            application_logger.warning(f"OTEL initialization skipped: {e}")
+
+    async def _init_prompt_registry():
+        try:
+            from advanced_omi_backend.prompt_defaults import register_all_defaults
+            from advanced_omi_backend.prompt_registry import get_prompt_registry
+
+            registry = get_prompt_registry()
+            register_all_defaults(registry)
+            application_logger.info(
+                f"Prompt registry initialized with {len(registry._defaults)} defaults"
+            )
+        except Exception as e:
+            application_logger.warning(f"Prompt registry initialization failed: {e}")
+
+    await asyncio.gather(
+        _init_redis_rq(),
+        _init_task_manager(),
+        _init_client_manager(),
+        _init_otel(),
+        _init_prompt_registry(),
+    )
+
+    application_logger.info(
+        f"Phase 2 (Redis/TaskMgr/ClientMgr/OTEL/Prompts) completed in {time.monotonic() - phase_start:.2f}s"
+    )
+
+    # ── Phase 3 (parallel — OTEL done, safe for LLM patching) ────────
+    phase_start = time.monotonic()
+
+    async def _init_llm_client():
+        try:
+            from advanced_omi_backend.llm_client import get_llm_client
+
+            get_llm_client()
+            application_logger.info("LLM client initialized from config.yml")
+        except Exception as e:
+            application_logger.warning(f"LLM client initialization deferred: {e}")
+
+    async def _init_audio_stream_service():
+        try:
+            audio_service = get_audio_stream_service()
+            await audio_service.connect()
+            application_logger.info("Audio stream service connected to Redis Streams")
+        except Exception as e:
+            application_logger.error(f"Failed to connect audio stream service: {e}")
+            application_logger.warning(
+                "Redis Streams audio processing will not be available"
+            )
+
+    async def _init_redis_audio_producer():
+        try:
+            app.state.redis_audio_stream = await redis.from_url(
+                config.redis_url, encoding="utf-8", decode_responses=False
+            )
+            from advanced_omi_backend.services.audio_stream import AudioStreamProducer
+
+            app.state.audio_stream_producer = AudioStreamProducer(
+                app.state.redis_audio_stream
+            )
+            application_logger.info(
+                "Redis client for audio streaming producer initialized"
+            )
+
+            from advanced_omi_backend.client_manager import (
+                initialize_redis_for_client_manager,
+            )
+
+            initialize_redis_for_client_manager(config.redis_url)
+        except Exception as e:
+            application_logger.error(
+                f"Failed to initialize Redis client for audio streaming: {e}",
+                exc_info=True,
+            )
+            application_logger.warning("Audio streaming producer will not be available")
+
+    async def _deferred_prompt_seed():
+        """Seed prompts into Langfuse with retry backoff."""
+        try:
+            from advanced_omi_backend.prompt_registry import get_prompt_registry
+
+            registry = get_prompt_registry()
+        except Exception:
+            return
+
+        backoff_delays = [0, 2, 4, 8, 16, 32]
+        for delay in backoff_delays:
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                await registry.seed_prompts()
+                application_logger.info("Prompt seeding to Langfuse completed")
+                return
+            except Exception as e:
+                application_logger.debug(
+                    f"Prompt seeding attempt failed (next retry in {delay}s): {e}"
+                )
         application_logger.warning(
-            "RQ queue system will not be available - check Redis connection"
+            "Prompt seeding to Langfuse failed after all retries"
         )
 
-    # Initialize BackgroundTaskManager (must happen before any code path uses it)
-    try:
-        task_manager = init_task_manager()
-        await task_manager.start()
-        application_logger.info("BackgroundTaskManager initialized and started")
-    except Exception as e:
-        application_logger.error(f"Failed to initialize task manager: {e}")
-        raise  # Task manager is essential
+    await asyncio.gather(
+        _init_llm_client(),
+        _init_audio_stream_service(),
+        _init_redis_audio_producer(),
+    )
 
-    # Initialize ClientManager eagerly (prevents lazy race on first WebSocket connect)
-    get_client_manager()
-    application_logger.info("ClientManager initialized")
+    # Launch deferred prompt seeding as a fire-and-forget background task
+    asyncio.create_task(_deferred_prompt_seed())
 
-    # Initialize OTEL/Galileo if configured (before LLM client so instrumentor patches OpenAI first)
-    try:
-        from advanced_omi_backend.observability.otel_setup import init_otel
+    application_logger.info(
+        f"Phase 3 (LLM/AudioStream/RedisProducer) completed in {time.monotonic() - phase_start:.2f}s"
+    )
 
-        init_otel()
-    except Exception as e:
-        application_logger.warning(f"OTEL initialization skipped: {e}")
+    # ── Phase 4 (parallel — all independent) ─────────────────────────
+    phase_start = time.monotonic()
 
-    # Initialize prompt registry with defaults; seed into LangFuse in background
-    try:
-        from advanced_omi_backend.prompt_defaults import register_all_defaults
-        from advanced_omi_backend.prompt_registry import get_prompt_registry
-
-        prompt_registry = get_prompt_registry()
-        register_all_defaults(prompt_registry)
-        application_logger.info(
-            f"Prompt registry initialized with {len(prompt_registry._defaults)} defaults"
-        )
-
-        # Seed prompts in background — Langfuse may not be ready at startup
-        async def _deferred_seed():
-            await asyncio.sleep(10)
-            await prompt_registry.seed_prompts()
-
-        asyncio.create_task(_deferred_seed())
-    except Exception as e:
-        application_logger.warning(f"Prompt registry initialization failed: {e}")
-
-    # Initialize LLM client eagerly (catch config errors at startup, not on first request)
-    try:
-        from advanced_omi_backend.llm_client import get_llm_client
-
-        get_llm_client()
-        application_logger.info("LLM client initialized from config.yml")
-    except Exception as e:
-        application_logger.warning(f"LLM client initialization deferred: {e}")
-
-    # Initialize audio stream service for Redis Streams
-    try:
-        audio_service = get_audio_stream_service()
-        await audio_service.connect()
-        application_logger.info("Audio stream service connected to Redis Streams")
-        application_logger.info(
-            "Audio stream workers can be started with: python -m advanced_omi_backend.workers.audio_stream_worker"
-        )
-    except Exception as e:
-        application_logger.error(f"Failed to connect audio stream service: {e}")
-        application_logger.warning(
-            "Redis Streams audio processing will not be available"
-        )
-
-    # Initialize Redis client for audio streaming producer (used by WebSocket handlers)
-    try:
-        app.state.redis_audio_stream = await redis.from_url(
-            config.redis_url, encoding="utf-8", decode_responses=False
-        )
-        from advanced_omi_backend.services.audio_stream import AudioStreamProducer
-
-        app.state.audio_stream_producer = AudioStreamProducer(
-            app.state.redis_audio_stream
-        )
-        application_logger.info(
-            "✅ Redis client for audio streaming producer initialized"
-        )
-
-        # Initialize ClientManager Redis for cross-container client→user mapping
-        from advanced_omi_backend.client_manager import (
-            initialize_redis_for_client_manager,
-        )
-
-        initialize_redis_for_client_manager(config.redis_url)
-
-    except Exception as e:
-        application_logger.error(
-            f"Failed to initialize Redis client for audio streaming: {e}", exc_info=True
-        )
-        application_logger.warning("Audio streaming producer will not be available")
-
-    # Skip memory service pre-initialization to avoid blocking FastAPI startup
-    # Memory service will be lazily initialized when first used
     application_logger.info(
         "Memory service will be initialized on first use (lazy loading)"
     )
 
-    # Register OpenMemory user if using openmemory_mcp provider
-    await initialize_openmemory_user()
+    async def _init_openmemory():
+        await initialize_openmemory_user()
 
-    # Start cron scheduler (requires Redis to be available)
-    try:
-        from advanced_omi_backend.cron_scheduler import get_scheduler, register_cron_job
-        from advanced_omi_backend.workers.finetuning_jobs import (
-            run_asr_finetuning_job,
-            run_asr_jargon_extraction_job,
-            run_speaker_finetuning_job,
-        )
-        from advanced_omi_backend.workers.prompt_optimization_jobs import (
-            run_prompt_optimization_job,
-        )
-
-        register_cron_job("speaker_finetuning", run_speaker_finetuning_job)
-        register_cron_job("asr_finetuning", run_asr_finetuning_job)
-        register_cron_job("asr_jargon_extraction", run_asr_jargon_extraction_job)
-        register_cron_job("prompt_optimization", run_prompt_optimization_job)
-
-        scheduler = get_scheduler()
-        await scheduler.start()
-        application_logger.info("Cron scheduler started")
-    except Exception as e:
-        application_logger.warning(f"Cron scheduler failed to start: {e}")
-
-    # SystemTracker is used for monitoring and debugging
-    application_logger.info("Using SystemTracker for monitoring and debugging")
-
-    # Initialize plugins using plugin service
-    try:
-        from advanced_omi_backend.services.plugin_service import (
-            init_plugin_router,
-            set_plugin_router,
-        )
-
-        plugin_router = init_plugin_router()
-
-        if plugin_router:
-            # Initialize async resources for each enabled plugin
-            for plugin_id, plugin in plugin_router.plugins.items():
-                if plugin.enabled:
-                    try:
-                        await plugin.initialize()
-                        plugin_router.mark_plugin_initialized(plugin_id)
-                        application_logger.info(f"✅ Plugin '{plugin_id}' initialized")
-                    except Exception as e:
-                        plugin_router.mark_plugin_failed(plugin_id, str(e))
-                        application_logger.error(
-                            f"Failed to initialize plugin '{plugin_id}': {e}",
-                            exc_info=True,
-                        )
-
-            health = plugin_router.get_health_summary()
-            application_logger.info(
-                f"Plugins initialized: {health['initialized']}/{health['total']} active"
-                + (f", {health['failed']} failed" if health["failed"] else "")
+    async def _init_cron_scheduler():
+        try:
+            from advanced_omi_backend.cron_scheduler import (
+                get_scheduler,
+                register_cron_job,
+            )
+            from advanced_omi_backend.workers.annotation_jobs import (
+                surface_error_suggestions,
+            )
+            from advanced_omi_backend.workers.finetuning_jobs import (
+                run_asr_finetuning_job,
+                run_asr_jargon_extraction_job,
+                run_speaker_finetuning_job,
+            )
+            from advanced_omi_backend.workers.prompt_optimization_jobs import (
+                run_prompt_optimization_job,
             )
 
-            # Store in app state for API access
-            app.state.plugin_router = plugin_router
-            # Register with plugin service for worker access
-            set_plugin_router(plugin_router)
-        else:
-            application_logger.info("No plugins configured")
+            register_cron_job("speaker_finetuning", run_speaker_finetuning_job)
+            register_cron_job("asr_finetuning", run_asr_finetuning_job)
+            register_cron_job("asr_jargon_extraction", run_asr_jargon_extraction_job)
+            register_cron_job("prompt_optimization", run_prompt_optimization_job)
+            register_cron_job("annotation_suggestions", surface_error_suggestions)
+
+            scheduler = get_scheduler()
+            await scheduler.start()
+            application_logger.info("Cron scheduler started")
+        except Exception as e:
+            application_logger.warning(f"Cron scheduler failed to start: {e}")
+
+    async def _init_plugins():
+        try:
+            from advanced_omi_backend.services.plugin_service import (
+                init_plugin_router,
+                set_plugin_router,
+            )
+
+            plugin_router = init_plugin_router()
+
+            if plugin_router:
+                for plugin_id, plugin in plugin_router.plugins.items():
+                    if plugin.enabled:
+                        try:
+                            await plugin.initialize()
+                            plugin_router.mark_plugin_initialized(plugin_id)
+                            application_logger.info(f"Plugin '{plugin_id}' initialized")
+                        except Exception as e:
+                            plugin_router.mark_plugin_failed(plugin_id, str(e))
+                            application_logger.error(
+                                f"Failed to initialize plugin '{plugin_id}': {e}",
+                                exc_info=True,
+                            )
+
+                health = plugin_router.get_health_summary()
+                application_logger.info(
+                    f"Plugins initialized: {health['initialized']}/{health['total']} active"
+                    + (f", {health['failed']} failed" if health["failed"] else "")
+                )
+
+                app.state.plugin_router = plugin_router
+                set_plugin_router(plugin_router)
+            else:
+                application_logger.info("No plugins configured")
+                app.state.plugin_router = None
+
+        except Exception as e:
+            application_logger.error(
+                f"Failed to initialize plugin system: {e}", exc_info=True
+            )
             app.state.plugin_router = None
 
-    except Exception as e:
-        application_logger.error(
-            f"Failed to initialize plugin system: {e}", exc_info=True
-        )
-        app.state.plugin_router = None
+    await asyncio.gather(
+        _init_openmemory(),
+        _init_cron_scheduler(),
+        _init_plugins(),
+    )
 
     application_logger.info(
-        "Application ready - using application-level processing architecture."
+        f"Phase 4 (OpenMemory/Cron/Plugins) completed in {time.monotonic() - phase_start:.2f}s"
+    )
+
+    total_startup = time.monotonic() - startup_start
+    application_logger.info(
+        f"Application ready in {total_startup:.2f}s - using application-level processing architecture."
     )
 
     logger.info("App ready")

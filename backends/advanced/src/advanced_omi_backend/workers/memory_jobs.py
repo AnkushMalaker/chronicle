@@ -27,7 +27,7 @@ from advanced_omi_backend.observability.otel_setup import (
     set_otel_session,
 )
 from advanced_omi_backend.plugins.events import PluginEvent
-from advanced_omi_backend.services.plugin_service import ensure_plugin_router
+from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
 
 logger = logging.getLogger(__name__)
 
@@ -391,11 +391,12 @@ async def process_memory_job(
                 logger.warning(f"⚠️ Knowledge graph extraction failed (non-fatal): {e}")
 
             # Trigger memory-level plugins (ALWAYS dispatch when success, even with 0 new memories)
+            memory_count = len(created_memory_ids) if created_memory_ids else 0
             try:
-                plugin_router = await ensure_plugin_router()
-
-                if plugin_router:
-                    plugin_data = {
+                await dispatch_plugin_event(
+                    event=PluginEvent.MEMORY_PROCESSED,
+                    user_id=user_id,
+                    data={
                         "memories": created_memory_ids or [],
                         "conversation": {
                             "conversation_id": conversation_id,
@@ -403,39 +404,15 @@ async def process_memory_job(
                             "user_id": user_id,
                             "user_email": user_email,
                         },
-                        "memory_count": (
-                            len(created_memory_ids) if created_memory_ids else 0
-                        ),
+                        "memory_count": memory_count,
                         "conversation_id": conversation_id,
-                    }
-
-                    logger.info(
-                        f"🔌 DISPATCH: memory.processed event "
-                        f"(conversation={conversation_id[:12]}, memories={len(created_memory_ids) if created_memory_ids else 0})"
-                    )
-
-                    plugin_results = await plugin_router.dispatch_event(
-                        event=PluginEvent.MEMORY_PROCESSED,
-                        user_id=user_id,
-                        data=plugin_data,
-                        metadata={
-                            "processing_time": processing_time,
-                            "memory_provider": memory_provider,
-                        },
-                    )
-
-                    logger.info(
-                        f"🔌 RESULT: memory.processed dispatched to {len(plugin_results) if plugin_results else 0} plugins"
-                    )
-
-                    if plugin_results:
-                        logger.info(
-                            f"📌 Triggered {len(plugin_results)} memory-level plugins"
-                        )
-                        for result in plugin_results:
-                            if result.message:
-                                logger.info(f"  Plugin result: {result.message}")
-
+                    },
+                    metadata={
+                        "processing_time": processing_time,
+                        "memory_provider": memory_provider,
+                    },
+                    description=f"conversation={conversation_id[:12]}, memories={memory_count}",
+                )
             except Exception as e:
                 logger.warning(f"⚠️ Error triggering memory-level plugins: {e}")
 

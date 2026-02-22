@@ -25,7 +25,9 @@ router = APIRouter(prefix="/finetuning", tags=["finetuning"])
 @router.post("/process-annotations")
 async def process_annotations_for_training(
     current_user: User = Depends(current_active_user),
-    annotation_type: Optional[str] = Query("diarization", description="Type of annotations to process"),
+    annotation_type: Optional[str] = Query(
+        "diarization", description="Type of annotations to process"
+    ),
 ):
     """
     Send processed annotations to speaker recognition service for training.
@@ -44,8 +46,7 @@ async def process_annotations_for_training(
         # Only admins can trigger training for now (can expand to per-user later)
         if not current_user.is_superuser:
             raise HTTPException(
-                status_code=403,
-                detail="Only administrators can trigger model training"
+                status_code=403, detail="Only administrators can trigger model training"
             )
 
         # Find annotations ready for training
@@ -57,15 +58,18 @@ async def process_annotations_for_training(
 
         # Filter out already trained annotations (processed_by contains "training")
         ready_for_training = [
-            a for a in annotations
+            a
+            for a in annotations
             if not a.processed_by or "training" not in a.processed_by
         ]
 
         if not ready_for_training:
-            return JSONResponse(content={
-                "message": "No annotations ready for training",
-                "processed_count": 0
-            })
+            return JSONResponse(
+                content={
+                    "message": "No annotations ready for training",
+                    "processed_count": 0,
+                }
+            )
 
         # Import required modules
         from advanced_omi_backend.models.conversation import Conversation
@@ -78,13 +82,16 @@ async def process_annotations_for_training(
 
         # Initialize speaker client
         speaker_client = SpeakerRecognitionClient()
-        
+
         if not speaker_client.enabled:
-            return JSONResponse(content={
-                "message": "Speaker recognition service is not enabled",
-                "processed_count": 0,
-                "status": "error"
-            }, status_code=503)
+            return JSONResponse(
+                content={
+                    "message": "Speaker recognition service is not enabled",
+                    "processed_count": 0,
+                    "status": "error",
+                },
+                status_code=503,
+            )
 
         # Track processing statistics
         enrolled_count = 0
@@ -101,27 +108,33 @@ async def process_annotations_for_training(
 
                 if not conversation or not conversation.active_transcript:
                     failed_count += 1
-                    errors.append(f"Conversation {annotation.conversation_id[:8]} not found")
+                    errors.append(
+                        f"Conversation {annotation.conversation_id[:8]} not found"
+                    )
                     continue
 
                 # Validate segment index
-                if annotation.segment_index >= len(conversation.active_transcript.segments):
+                if annotation.segment_index >= len(
+                    conversation.active_transcript.segments
+                ):
                     failed_count += 1
                     errors.append(f"Invalid segment index {annotation.segment_index}")
                     continue
 
-                segment = conversation.active_transcript.segments[annotation.segment_index]
+                segment = conversation.active_transcript.segments[
+                    annotation.segment_index
+                ]
 
                 # 2. Extract audio segment from MongoDB
                 logger.info(
                     f"Extracting audio for conversation {annotation.conversation_id[:8]}... "
                     f"segment {annotation.segment_index} ({segment.start:.2f}s - {segment.end:.2f}s)"
                 )
-                
+
                 wav_bytes = await reconstruct_audio_segment(
                     conversation_id=annotation.conversation_id,
                     start_time=segment.start,
-                    end_time=segment.end
+                    end_time=segment.end,
                 )
 
                 if not wav_bytes:
@@ -135,42 +148,49 @@ async def process_annotations_for_training(
                 # 3. Check if speaker exists
                 existing_speaker = await speaker_client.get_speaker_by_name(
                     speaker_name=annotation.corrected_speaker,
-                    user_id=1  # TODO: Map Chronicle user_id to speaker service user_id
+                    user_id=1,  # TODO: Map Chronicle user_id to speaker service user_id
                 )
 
                 if existing_speaker:
                     # APPEND to existing speaker
-                    logger.info(f"Appending to existing speaker: {annotation.corrected_speaker}")
-                    result = await speaker_client.append_to_speaker(
-                        speaker_id=existing_speaker["id"],
-                        audio_data=wav_bytes
+                    logger.info(
+                        f"Appending to existing speaker: {annotation.corrected_speaker}"
                     )
-                    
+                    result = await speaker_client.append_to_speaker(
+                        speaker_id=existing_speaker["id"], audio_data=wav_bytes
+                    )
+
                     if "error" in result:
                         logger.error(f"Failed to append to speaker: {result}")
                         failed_count += 1
                         errors.append(f"Append failed: {result.get('error')}")
                         continue
-                    
+
                     appended_count += 1
-                    logger.info(f"✅ Successfully appended to speaker '{annotation.corrected_speaker}'")
+                    logger.info(
+                        f"✅ Successfully appended to speaker '{annotation.corrected_speaker}'"
+                    )
                 else:
                     # ENROLL new speaker
-                    logger.info(f"Enrolling new speaker: {annotation.corrected_speaker}")
+                    logger.info(
+                        f"Enrolling new speaker: {annotation.corrected_speaker}"
+                    )
                     result = await speaker_client.enroll_new_speaker(
                         speaker_name=annotation.corrected_speaker,
                         audio_data=wav_bytes,
-                        user_id=1  # TODO: Map Chronicle user_id to speaker service user_id
+                        user_id=1,  # TODO: Map Chronicle user_id to speaker service user_id
                     )
-                    
+
                     if "error" in result:
                         logger.error(f"Failed to enroll speaker: {result}")
                         failed_count += 1
                         errors.append(f"Enroll failed: {result.get('error')}")
                         continue
-                    
+
                     enrolled_count += 1
-                    logger.info(f"✅ Successfully enrolled new speaker '{annotation.corrected_speaker}'")
+                    logger.info(
+                        f"✅ Successfully enrolled new speaker '{annotation.corrected_speaker}'"
+                    )
 
                 # 4. Mark annotation as trained
                 if annotation.processed_by:
@@ -181,7 +201,9 @@ async def process_annotations_for_training(
                 await annotation.save()
 
             except Exception as e:
-                logger.error(f"Error processing annotation {annotation.id}: {e}", exc_info=True)
+                logger.error(
+                    f"Error processing annotation {annotation.id}: {e}", exc_info=True
+                )
                 failed_count += 1
                 errors.append(f"Exception: {str(e)[:50]}")
                 continue
@@ -192,15 +214,17 @@ async def process_annotations_for_training(
             f"({enrolled_count} new, {appended_count} appended, {failed_count} failed)"
         )
 
-        return JSONResponse(content={
-            "message": "Training complete",
-            "enrolled_new_speakers": enrolled_count,
-            "appended_to_existing": appended_count,
-            "total_processed": total_processed,
-            "failed_count": failed_count,
-            "errors": errors[:10] if errors else [],
-            "status": "success" if total_processed > 0 else "partial_failure"
-        })
+        return JSONResponse(
+            content={
+                "message": "Training complete",
+                "enrolled_new_speakers": enrolled_count,
+                "appended_to_existing": appended_count,
+                "total_processed": total_processed,
+                "failed_count": failed_count,
+                "errors": errors[:10] if errors else [],
+                "status": "success" if total_processed > 0 else "partial_failure",
+            }
+        )
 
     except HTTPException:
         raise
@@ -226,7 +250,9 @@ async def export_asr_dataset(
         Export job results with counts of conversations exported and annotations consumed.
     """
     if not current_user.is_superuser:
-        raise HTTPException(status_code=403, detail="Only administrators can trigger ASR dataset export")
+        raise HTTPException(
+            status_code=403, detail="Only administrators can trigger ASR dataset export"
+        )
 
     try:
         from advanced_omi_backend.workers.finetuning_jobs import run_asr_finetuning_job
@@ -235,7 +261,9 @@ async def export_asr_dataset(
         return JSONResponse(content=result)
     except Exception as e:
         logger.error(f"ASR dataset export failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"ASR dataset export failed: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"ASR dataset export failed: {str(e)}"
+        )
 
 
 @router.get("/status")
@@ -269,7 +297,11 @@ async def get_finetuning_status(
             ).to_list()
 
         # Batch-check which conversation_ids still exist
-        conv_annotation_types = {AnnotationType.DIARIZATION, AnnotationType.TRANSCRIPT}
+        conv_annotation_types = {
+            AnnotationType.DIARIZATION,
+            AnnotationType.TRANSCRIPT,
+            AnnotationType.SPEECH_SUGGESTION_CORRECTION,
+        }
         all_conv_ids: set[str] = set()
         for ann_type in conv_annotation_types:
             for a in all_annotations_by_type.get(ann_type, []):
@@ -291,8 +323,12 @@ async def get_finetuning_status(
 
             # Identify orphaned annotations for conversation-based types
             if ann_type in conv_annotation_types:
-                orphaned = [a for a in annotations if a.conversation_id in orphaned_conv_ids]
-                non_orphaned = [a for a in annotations if a.conversation_id not in orphaned_conv_ids]
+                orphaned = [
+                    a for a in annotations if a.conversation_id in orphaned_conv_ids
+                ]
+                non_orphaned = [
+                    a for a in annotations if a.conversation_id not in orphaned_conv_ids
+                ]
             else:
                 # Memory/entity orphan detection is placeholder for now
                 orphaned = []
@@ -300,9 +336,12 @@ async def get_finetuning_status(
 
             pending = [a for a in non_orphaned if not a.processed]
             processed = [a for a in non_orphaned if a.processed]
-            trained = [a for a in processed if a.processed_by and "training" in a.processed_by]
+            trained = [
+                a for a in processed if a.processed_by and "training" in a.processed_by
+            ]
             applied_not_trained = [
-                a for a in processed
+                a
+                for a in processed
                 if not a.processed_by or "training" not in a.processed_by
             ]
 
@@ -333,9 +372,17 @@ async def get_finetuning_status(
         if trained_diarization_list:
             latest_trained = max(
                 trained_diarization_list,
-                key=lambda a: a.updated_at if a.updated_at else datetime.min.replace(tzinfo=timezone.utc)
+                key=lambda a: (
+                    a.updated_at
+                    if a.updated_at
+                    else datetime.min.replace(tzinfo=timezone.utc)
+                ),
             )
-            last_training_run = latest_trained.updated_at.isoformat() if latest_trained.updated_at else None
+            last_training_run = (
+                latest_trained.updated_at.isoformat()
+                if latest_trained.updated_at
+                else None
+            )
 
         # Get cron job status from scheduler
         try:
@@ -344,7 +391,9 @@ async def get_finetuning_status(
             scheduler = get_scheduler()
             all_jobs = await scheduler.get_all_jobs_status()
             # Find speaker finetuning job for backward compat
-            speaker_job = next((j for j in all_jobs if j["job_id"] == "speaker_finetuning"), None)
+            speaker_job = next(
+                (j for j in all_jobs if j["job_id"] == "speaker_finetuning"), None
+            )
             cron_status = {
                 "enabled": speaker_job["enabled"] if speaker_job else False,
                 "schedule": speaker_job["schedule"] if speaker_job else "0 2 * * *",
@@ -359,15 +408,17 @@ async def get_finetuning_status(
                 "next_run": None,
             }
 
-        return JSONResponse(content={
-            "pending_annotation_count": pending_count,
-            "applied_annotation_count": applied_count,
-            "trained_annotation_count": trained_count,
-            "last_training_run": last_training_run,
-            "cron_status": cron_status,
-            "annotation_counts": annotation_counts,
-            "orphaned_annotation_count": total_orphaned,
-        })
+        return JSONResponse(
+            content={
+                "pending_annotation_count": pending_count,
+                "applied_annotation_count": applied_count,
+                "trained_annotation_count": trained_count,
+                "last_training_run": last_training_run,
+                "cron_status": cron_status,
+                "annotation_counts": annotation_counts,
+                "orphaned_annotation_count": total_orphaned,
+            }
+        )
 
     except Exception as e:
         logger.error(f"Error fetching fine-tuning status: {e}", exc_info=True)
@@ -385,7 +436,9 @@ async def get_finetuning_status(
 @router.delete("/orphaned-annotations")
 async def delete_orphaned_annotations(
     current_user: User = Depends(current_active_user),
-    annotation_type: Optional[str] = Query(None, description="Filter by annotation type (e.g. 'diarization')"),
+    annotation_type: Optional[str] = Query(
+        None, description="Filter by annotation type (e.g. 'diarization')"
+    ),
 ):
     """
     Find and delete orphaned annotations whose referenced conversation no longer exists.
@@ -404,9 +457,17 @@ async def delete_orphaned_annotations(
         try:
             requested_type = AnnotationType(annotation_type)
         except ValueError:
-            raise HTTPException(status_code=400, detail=f"Unknown annotation type: {annotation_type}")
+            raise HTTPException(
+                status_code=400, detail=f"Unknown annotation type: {annotation_type}"
+            )
         if requested_type not in conv_annotation_types:
-            return JSONResponse(content={"deleted_count": 0, "by_type": {}, "message": "Orphan detection not supported for this type"})
+            return JSONResponse(
+                content={
+                    "deleted_count": 0,
+                    "by_type": {},
+                    "message": "Orphan detection not supported for this type",
+                }
+            )
         types_to_check = {requested_type}
     else:
         types_to_check = conv_annotation_types
@@ -448,10 +509,12 @@ async def delete_orphaned_annotations(
             total_deleted += len(orphaned)
 
     logger.info(f"Deleted {total_deleted} orphaned annotations: {deleted_by_type}")
-    return JSONResponse(content={
-        "deleted_count": total_deleted,
-        "by_type": deleted_by_type,
-    })
+    return JSONResponse(
+        content={
+            "deleted_count": total_deleted,
+            "by_type": deleted_by_type,
+        }
+    )
 
 
 @router.post("/orphaned-annotations/reattach")

@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Zap, RefreshCw, AlertCircle, AlertTriangle, CheckCircle, Clock, Play, ToggleLeft, ToggleRight, Edit3, X, Check } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { Zap, RefreshCw, AlertCircle, AlertTriangle, CheckCircle, Clock, Play, ToggleLeft, ToggleRight, Edit3, X, Check, Eye } from 'lucide-react'
 import cronstrue from 'cronstrue'
 import { finetuningApi } from '../services/api'
 import { useFinetuningStatus, useCronJobs, useToggleCronJob, useUpdateCronSchedule, useRunCronJob, useProcessAnnotations, useDeleteOrphanedAnnotations } from '../hooks/useFinetuning'
@@ -28,6 +28,7 @@ function formatTimestamp(iso: string | null): string {
 const JOB_DISPLAY_NAMES: Record<string, string> = {
   speaker_finetuning: 'Speaker Fine-tuning',
   asr_jargon_extraction: 'ASR Jargon Extraction',
+  annotation_suggestions: 'Transcript Suggestion Detection',
 }
 
 const ANNOTATION_TYPE_DISPLAY: Record<string, { label: string; description: string }> = {
@@ -36,6 +37,7 @@ const ANNOTATION_TYPE_DISPLAY: Record<string, { label: string; description: stri
   transcript: { label: 'Transcript', description: 'Transcript text corrections' },
   memory: { label: 'Memory', description: 'Memory content corrections' },
   title: { label: 'Title', description: 'Conversation title corrections' },
+  speech_suggestion_correction: { label: 'Speech Suggestion Correction', description: 'User-refined model suggestions (ASR training signal)' },
 }
 
 function getAnnotationDisplay(key: string): { label: string; description: string } {
@@ -81,6 +83,13 @@ export default function Finetuning() {
   const [cleaningType, setCleaningType] = useState<string | null>(null)
   const [editingSchedule, setEditingSchedule] = useState<string | null>(null)
   const [scheduleInput, setScheduleInput] = useState('')
+  const [autoShowSwipe, setAutoShowSwipe] = useState(() => {
+    try { return localStorage.getItem('userloop-auto-show') === 'true' } catch { return false }
+  })
+
+  useEffect(() => {
+    try { localStorage.setItem('userloop-auto-show', String(autoShowSwipe)) } catch {}
+  }, [autoShowSwipe])
 
   const toggleJob = useToggleCronJob()
   const updateSchedule = useUpdateCronSchedule()
@@ -317,24 +326,51 @@ export default function Finetuning() {
               </div>
             )}
 
-            {/* Run Now Button */}
-            <button
-              onClick={() => handleRunNow(job.job_id)}
-              disabled={runningJobId === job.job_id || job.running}
-              className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-            >
-              {runningJobId === job.job_id || job.running ? (
+            {/* Action Buttons */}
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => handleRunNow(job.job_id)}
+                disabled={runningJobId === job.job_id || job.running}
+                className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+              >
+                {runningJobId === job.job_id || job.running ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                    <span>Running...</span>
+                  </>
+                ) : (
+                  <>
+                    <Play className="h-4 w-4" />
+                    <span>Run Now</span>
+                  </>
+                )}
+              </button>
+
+              {/* Review Suggestions button + auto-show toggle for annotation_suggestions job */}
+              {job.job_id === 'annotation_suggestions' && (
                 <>
-                  <RefreshCw className="h-4 w-4 animate-spin" />
-                  <span>Running...</span>
-                </>
-              ) : (
-                <>
-                  <Play className="h-4 w-4" />
-                  <span>Run Now</span>
+                  <button
+                    onClick={() => window.dispatchEvent(new Event('open-swipe-ui'))}
+                    className="flex items-center space-x-2 px-4 py-2 bg-purple-600 text-white text-sm rounded-lg hover:bg-purple-700 transition-colors"
+                  >
+                    <Eye className="h-4 w-4" />
+                    <span>Review</span>
+                  </button>
+                  <button
+                    onClick={() => setAutoShowSwipe(!autoShowSwipe)}
+                    className="flex items-center space-x-1.5 px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
+                    title={autoShowSwipe ? 'Auto-show enabled: modal opens automatically when suggestions exist' : 'Auto-show disabled: use Review button to open'}
+                  >
+                    {autoShowSwipe ? (
+                      <ToggleRight className="h-5 w-5 text-purple-500" />
+                    ) : (
+                      <ToggleLeft className="h-5 w-5 text-gray-400" />
+                    )}
+                    <span className="text-xs">Auto</span>
+                  </button>
                 </>
               )}
-            </button>
+            </div>
           </div>
         ))}
       </div>

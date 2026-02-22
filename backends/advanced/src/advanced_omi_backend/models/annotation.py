@@ -16,22 +16,26 @@ from pydantic import BaseModel, Field
 
 class AnnotationType(str, Enum):
     """Type of content being annotated."""
+
     MEMORY = "memory"
     TRANSCRIPT = "transcript"
     DIARIZATION = "diarization"  # Speaker identification corrections
     ENTITY = "entity"  # Knowledge graph entity corrections (name/details edits)
     TITLE = "title"  # Conversation title corrections
     INSERT = "insert"  # Insert new segment between existing segments
+    SPEECH_SUGGESTION_CORRECTION = "speech_suggestion_correction"  # User-refined model suggestion (training signal triple)
 
 
 class AnnotationSource(str, Enum):
     """Origin of the annotation."""
+
     USER = "user"  # User-created edit
     MODEL_SUGGESTION = "model_suggestion"  # AI-generated suggestion
 
 
 class AnnotationStatus(str, Enum):
     """Lifecycle status of annotation."""
+
     PENDING = "pending"  # Waiting for user review (suggestions)
     ACCEPTED = "accepted"  # Applied to content
     REJECTED = "rejected"  # User dismissed suggestion
@@ -79,6 +83,11 @@ class Annotation(Document):
     entity_id: Optional[str] = None  # Neo4j entity ID
     entity_field: Optional[str] = None  # Which field was changed ("name" or "details")
 
+    # For SPEECH_SUGGESTION_CORRECTION annotations:
+    model_suggested_text: Optional[str] = (
+        None  # What AI originally suggested before user edited
+    )
+
     # For INSERT annotations:
     insert_after_index: Optional[int] = None  # -1 = before first segment
     insert_text: Optional[str] = None  # e.g., "[laughter]" or "wife laughed"
@@ -86,17 +95,17 @@ class Annotation(Document):
     insert_speaker: Optional[str] = None  # Speaker label for "speech" type inserts
 
     # Processed tracking (applies to ALL annotation types)
-    processed: bool = Field(default=False)  # Whether annotation has been applied/sent to training
+    processed: bool = Field(
+        default=False
+    )  # Whether annotation has been applied/sent to training
     processed_at: Optional[datetime] = None  # When annotation was processed
-    processed_by: Optional[str] = None  # What processed it (manual, cron, apply, training, etc.)
+    processed_by: Optional[str] = (
+        None  # What processed it (manual, cron, apply, training, etc.)
+    )
 
     # Timestamps (Python 3.12+ compatible)
-    created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
-    updated_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     class Settings:
         name = "annotations"
@@ -132,6 +141,10 @@ class Annotation(Document):
         """Check if this is a title annotation."""
         return self.annotation_type == AnnotationType.TITLE
 
+    def is_speech_suggestion_correction(self) -> bool:
+        """Check if this is a user-refined model suggestion."""
+        return self.annotation_type == AnnotationType.SPEECH_SUGGESTION_CORRECTION
+
     def is_pending_suggestion(self) -> bool:
         """Check if this is a pending AI suggestion."""
         return (
@@ -145,6 +158,7 @@ class Annotation(Document):
 
 class AnnotationCreateBase(BaseModel):
     """Base model for annotation creation."""
+
     original_text: str = ""  # Optional for diarization
     corrected_text: str = ""  # Optional for diarization
     status: AnnotationStatus = AnnotationStatus.ACCEPTED
@@ -152,6 +166,7 @@ class AnnotationCreateBase(BaseModel):
 
 class MemoryAnnotationCreate(AnnotationCreateBase):
     """Create memory annotation request."""
+
     memory_id: str
     original_text: str  # Required for memory annotations
     corrected_text: str  # Required for memory annotations
@@ -159,6 +174,7 @@ class MemoryAnnotationCreate(AnnotationCreateBase):
 
 class TranscriptAnnotationCreate(AnnotationCreateBase):
     """Create transcript annotation request."""
+
     conversation_id: str
     segment_index: int
     original_text: str  # Required for transcript annotations
@@ -167,6 +183,7 @@ class TranscriptAnnotationCreate(AnnotationCreateBase):
 
 class DiarizationAnnotationCreate(BaseModel):
     """Create diarization annotation request."""
+
     conversation_id: str
     segment_index: int
     original_speaker: str
@@ -181,6 +198,7 @@ class EntityAnnotationCreate(BaseModel):
     Dual purpose: feeds both the jargon pipeline (entity name corrections = domain vocabulary
     the ASR should know) and the entity extraction pipeline (corrections improve future accuracy).
     """
+
     entity_id: str
     entity_field: str  # "name" or "details"
     original_text: str
@@ -189,6 +207,7 @@ class EntityAnnotationCreate(BaseModel):
 
 class TitleAnnotationCreate(AnnotationCreateBase):
     """Create title annotation request."""
+
     conversation_id: str
     original_text: str
     corrected_text: str
@@ -196,6 +215,7 @@ class TitleAnnotationCreate(AnnotationCreateBase):
 
 class InsertAnnotationCreate(BaseModel):
     """Create insert annotation request (new segment between existing segments)."""
+
     conversation_id: str
     insert_after_index: int  # -1 = before first segment
     insert_text: str
@@ -205,8 +225,10 @@ class InsertAnnotationCreate(BaseModel):
 
 class AnnotationUpdate(BaseModel):
     """Update an existing unprocessed annotation."""
+
     corrected_text: Optional[str] = None
     corrected_speaker: Optional[str] = None
+    model_suggested_text: Optional[str] = None
     insert_text: Optional[str] = None
     insert_segment_type: Optional[str] = None
     insert_speaker: Optional[str] = None
@@ -214,6 +236,7 @@ class AnnotationUpdate(BaseModel):
 
 class AnnotationResponse(BaseModel):
     """Annotation response for API."""
+
     id: str
     annotation_type: AnnotationType
     user_id: str
@@ -227,6 +250,7 @@ class AnnotationResponse(BaseModel):
     segment_start_time: Optional[float] = None
     entity_id: Optional[str] = None
     entity_field: Optional[str] = None
+    model_suggested_text: Optional[str] = None
     insert_after_index: Optional[int] = None
     insert_text: Optional[str] = None
     insert_segment_type: Optional[str] = None

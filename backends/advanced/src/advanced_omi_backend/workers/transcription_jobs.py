@@ -37,7 +37,7 @@ from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import BaseRQJob, JobPriority, async_job
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggregator
-from advanced_omi_backend.services.plugin_service import ensure_plugin_router
+from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
 from advanced_omi_backend.services.transcription import (
     get_transcription_provider,
     is_transcription_available,
@@ -50,6 +50,7 @@ from advanced_omi_backend.utils.conversation_utils import (
     analyze_speech,
     mark_conversation_deleted,
 )
+from advanced_omi_backend.utils.job_utils import update_job_meta
 
 logger = logging.getLogger(__name__)
 
@@ -295,54 +296,25 @@ async def transcribe_full_audio_job(
 
     # Trigger transcript-level plugins BEFORE speech validation
     # This ensures wake-word commands execute even if conversation gets deleted
-    logger.info(
-        f"🔍 DEBUG: About to trigger plugins - transcript_text exists: {bool(transcript_text)}"
-    )
     if transcript_text:
         try:
-            plugin_router = await ensure_plugin_router()
-
-            if plugin_router:
-                logger.info(
-                    f"🔍 DEBUG: Preparing to trigger transcript plugins for conversation {conversation_id}"
-                )
-                plugin_data = {
+            await dispatch_plugin_event(
+                event=PluginEvent.TRANSCRIPT_BATCH,
+                user_id=user_id,
+                data={
                     "transcript": transcript_text,
                     "segment_id": f"{conversation_id}_batch",
                     "conversation_id": conversation_id,
                     "segments": segments,
                     "word_count": len(words),
-                }
-
-                logger.info(
-                    f"🔌 DISPATCH: transcript.batch event "
-                    f"(conversation={conversation_id[:12]}, words={len(words)})"
-                )
-
-                plugin_results = await plugin_router.dispatch_event(
-                    event=PluginEvent.TRANSCRIPT_BATCH,
-                    user_id=user_id,
-                    data=plugin_data,
-                    metadata={"client_id": client_id},
-                )
-
-                logger.info(
-                    f"🔌 RESULT: transcript.batch dispatched to {len(plugin_results) if plugin_results else 0} plugins"
-                )
-
-                if plugin_results:
-                    logger.info(
-                        f"✅ Triggered {len(plugin_results)} transcript plugins in batch mode"
-                    )
-                    for result in plugin_results:
-                        if result.message:
-                            logger.info(f"  Plugin: {result.message}")
+                },
+                metadata={"client_id": client_id},
+                description=f"conversation={conversation_id[:12]}, words={len(words)}",
+            )
         except Exception as e:
             logger.exception(
                 f"⚠️ Error triggering transcript plugins in batch mode: {e}"
             )
-
-    logger.info(f"🔍 DEBUG: Plugin processing complete, moving to speech validation")
 
     # Validate meaningful speech BEFORE any further processing
     transcript_data = {"text": transcript_text, "words": words}
@@ -573,21 +545,14 @@ async def transcribe_full_audio_job(
     )
 
     # Update job metadata with title and summary for UI display
-    current_job = get_current_job()
-    if current_job:
-        if not current_job.meta:
-            current_job.meta = {}
-        current_job.meta.update(
-            {
-                "conversation_id": conversation_id,
-                "title": conversation.title,
-                "summary": conversation.summary,
-                "transcript_length": len(transcript_text),
-                "word_count": len(words),
-                "processing_time": processing_time,
-            }
-        )
-        current_job.save_meta()
+    update_job_meta(
+        conversation_id=conversation_id,
+        title=conversation.title,
+        summary=conversation.summary,
+        transcript_length=len(transcript_text),
+        word_count=len(words),
+        processing_time=processing_time,
+    )
 
     return {
         "success": True,
@@ -972,18 +937,12 @@ async def stream_speech_detection_job(
     )
 
     # Update job metadata to show status
-    if current_job:
-        if not current_job.meta:
-            current_job.meta = {}
-        current_job.meta.update(
-            {
-                "status": "listening_for_speech",
-                "session_id": session_id,
-                "client_id": client_id,
-                "session_level": True,  # Mark as session-level job
-            }
-        )
-        current_job.save_meta()
+    update_job_meta(
+        status="listening_for_speech",
+        session_id=session_id,
+        client_id=client_id,
+        session_level=True,  # Mark as session-level job
+    )
 
     # Track when session closes for graceful shutdown
     session_closed_at = None

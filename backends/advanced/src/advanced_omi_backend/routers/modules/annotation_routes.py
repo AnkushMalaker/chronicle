@@ -9,13 +9,14 @@ import logging
 from datetime import datetime, timezone
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from advanced_omi_backend.auth import current_active_user
 from advanced_omi_backend.models.annotation import (
     Annotation,
     AnnotationResponse,
+    AnnotationSource,
     AnnotationStatus,
     AnnotationType,
     AnnotationUpdate,
@@ -34,6 +35,103 @@ from advanced_omi_backend.users import User
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/annotations", tags=["annotations"])
+
+
+@router.get("/suggestions")
+async def get_pending_suggestions(
+    current_user: User = Depends(current_active_user),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """
+    Get pending AI-generated suggestions for the current user.
+
+    Returns MODEL_SUGGESTION annotations with PENDING status,
+    enriched with conversation context (title, transcript snippet,
+    audio path) for the swipe review UI.
+    """
+    try:
+        annotations = (
+            await Annotation.find(
+                Annotation.user_id == current_user.user_id,
+                Annotation.source == AnnotationSource.MODEL_SUGGESTION,
+                Annotation.status == AnnotationStatus.PENDING,
+            )
+            .sort("-created_at")
+            .limit(limit)
+            .to_list()
+        )
+
+        if not annotations:
+            return []
+
+        # Batch-fetch conversations for context
+        conversation_ids = list(
+            {a.conversation_id for a in annotations if a.conversation_id}
+        )
+        conversations = await Conversation.find(
+            {"conversation_id": {"$in": conversation_ids}},
+        ).to_list()
+        conv_map = {c.conversation_id: c for c in conversations}
+
+        results = []
+        for a in annotations:
+            conv = conv_map.get(a.conversation_id)
+
+            segment_start = None
+            segment_end = None
+            if conv and a.segment_index is not None:
+                transcript = conv.active_transcript
+                if (
+                    transcript
+                    and transcript.segments
+                    and a.segment_index < len(transcript.segments)
+                ):
+                    seg = transcript.segments[a.segment_index]
+                    segment_start = seg.start
+                    segment_end = seg.end
+
+            results.append(
+                {
+                    "id": a.id,
+                    "annotation_type": a.annotation_type,
+                    "conversation_id": a.conversation_id,
+                    "segment_index": a.segment_index,
+                    "original_text": a.original_text,
+                    "corrected_text": a.corrected_text,
+                    "created_at": a.created_at.isoformat(),
+                    "conversation_title": conv.title if conv else None,
+                    "transcript_snippet": _get_segment_context(conv, a.segment_index),
+                    "segment_start": segment_start,
+                    "segment_end": segment_end,
+                }
+            )
+
+        return results
+
+    except Exception as e:
+        logger.error(f"Error fetching suggestions: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to fetch suggestions: {str(e)}"
+        )
+
+
+def _get_segment_context(
+    conversation, segment_index: int | None, context_size: int = 1
+) -> str | None:
+    """Get a snippet of transcript around the flagged segment for context."""
+    if not conversation or segment_index is None:
+        return None
+    transcript = conversation.active_transcript
+    if not transcript or not transcript.segments:
+        return None
+    start = max(0, segment_index - context_size)
+    end = min(len(transcript.segments), segment_index + context_size + 1)
+    lines = []
+    for i in range(start, end):
+        seg = transcript.segments[i]
+        prefix = ">>> " if i == segment_index else "    "
+        lines.append(f"{prefix}{seg.speaker}: {seg.text}")
+    return "\n".join(lines)
 
 
 @router.post("/memory", response_model=AnnotationResponse)
@@ -85,11 +183,15 @@ async def create_memory_annotation(
                     content=annotation_data.corrected_text,
                     user_id=current_user.user_id,
                 )
-                logger.info(f"Updated memory {annotation_data.memory_id} with corrected text")
+                logger.info(
+                    f"Updated memory {annotation_data.memory_id} with corrected text"
+                )
             except Exception as e:
                 logger.error(f"Error updating memory: {e}")
                 # Annotation is saved, but memory update failed - log but don't fail the request
-                logger.warning(f"Memory annotation {annotation.id} saved but memory update failed")
+                logger.warning(
+                    f"Memory annotation {annotation.id} saved but memory update failed"
+                )
 
         return AnnotationResponse.model_validate(annotation)
 
@@ -237,7 +339,22 @@ async def update_annotation_status(
         annotation.updated_at = datetime.now(timezone.utc)
 
         # If accepting a pending suggestion, apply the correction
-        if status == AnnotationStatus.ACCEPTED and old_status == AnnotationStatus.PENDING:
+        if (
+            status == AnnotationStatus.ACCEPTED
+            and old_status == AnnotationStatus.PENDING
+        ):
+            # Promote to SPEECH_SUGGESTION_CORRECTION if user edited the AI suggestion
+            if (
+                annotation.source == AnnotationSource.MODEL_SUGGESTION
+                and annotation.model_suggested_text is not None
+                and annotation.is_transcript_annotation()
+            ):
+                annotation.annotation_type = AnnotationType.SPEECH_SUGGESTION_CORRECTION
+                logger.info(
+                    f"Promoted annotation {annotation_id} to SPEECH_SUGGESTION_CORRECTION "
+                    f"(AI suggested: {annotation.model_suggested_text!r}, user decided: {annotation.corrected_text!r})"
+                )
+
             if annotation.is_memory_annotation():
                 # Update memory
                 try:
@@ -251,8 +368,11 @@ async def update_annotation_status(
                 except Exception as e:
                     logger.error(f"Error applying memory suggestion: {e}")
                     # Don't fail the status update if memory update fails
-            elif annotation.is_transcript_annotation():
-                # Update transcript segment
+            elif (
+                annotation.is_transcript_annotation()
+                or annotation.is_speech_suggestion_correction()
+            ):
+                # Update transcript segment (same logic for both TRANSCRIPT and SPEECH_SUGGESTION_CORRECTION)
                 try:
                     conversation = await Conversation.find_one(
                         Conversation.conversation_id == annotation.conversation_id,
@@ -260,7 +380,9 @@ async def update_annotation_status(
                     )
                     if conversation:
                         transcript = conversation.active_transcript
-                        if transcript and annotation.segment_index < len(transcript.segments):
+                        if transcript and annotation.segment_index < len(
+                            transcript.segments
+                        ):
                             transcript.segments[annotation.segment_index].text = (
                                 annotation.corrected_text
                             )
@@ -286,7 +408,9 @@ async def update_annotation_status(
                             user_id=annotation.user_id,
                             **update_kwargs,
                         )
-                        logger.info(f"Applied entity suggestion to entity {annotation.entity_id}")
+                        logger.info(
+                            f"Applied entity suggestion to entity {annotation.entity_id}"
+                        )
                 except Exception as e:
                     logger.error(f"Error applying entity suggestion: {e}")
                     # Don't fail the status update if entity update fails
@@ -310,7 +434,11 @@ async def update_annotation_status(
         await annotation.save()
         logger.info(f"Updated annotation {annotation_id} status to {status}")
 
-        return {"status": "updated", "annotation_id": annotation_id, "new_status": status}
+        return {
+            "status": "updated",
+            "annotation_id": annotation_id,
+            "new_status": status,
+        }
 
     except HTTPException:
         raise
@@ -345,7 +473,9 @@ async def delete_annotation(
             raise HTTPException(status_code=404, detail="Annotation not found")
 
         if annotation.processed:
-            raise HTTPException(status_code=400, detail="Cannot delete a processed annotation")
+            raise HTTPException(
+                status_code=400, detail="Cannot delete a processed annotation"
+            )
 
         await annotation.delete()
         logger.info(f"Deleted annotation {annotation_id}")
@@ -384,10 +514,22 @@ async def update_annotation(
             raise HTTPException(status_code=404, detail="Annotation not found")
 
         if annotation.processed:
-            raise HTTPException(status_code=400, detail="Cannot update a processed annotation")
+            raise HTTPException(
+                status_code=400, detail="Cannot update a processed annotation"
+            )
 
         if update_data.corrected_text is not None:
+            # Auto-capture AI's original suggestion before user overwrites it
+            if (
+                annotation.source == AnnotationSource.MODEL_SUGGESTION
+                and annotation.model_suggested_text is None
+                and annotation.corrected_text
+                and update_data.corrected_text != annotation.corrected_text
+            ):
+                annotation.model_suggested_text = annotation.corrected_text
             annotation.corrected_text = update_data.corrected_text
+        if update_data.model_suggested_text is not None:
+            annotation.model_suggested_text = update_data.model_suggested_text
         if update_data.corrected_speaker is not None:
             annotation.corrected_speaker = update_data.corrected_speaker
         if update_data.insert_text is not None:
@@ -441,7 +583,10 @@ async def create_insert_annotation(
             raise HTTPException(status_code=400, detail="No active transcript found")
 
         segment_count = len(active_transcript.segments)
-        if annotation_data.insert_after_index < -1 or annotation_data.insert_after_index >= segment_count:
+        if (
+            annotation_data.insert_after_index < -1
+            or annotation_data.insert_after_index >= segment_count
+        ):
             raise HTTPException(
                 status_code=400,
                 detail=f"insert_after_index must be between -1 and {segment_count - 1}",
@@ -572,7 +717,9 @@ async def create_entity_annotation(
                 user_id=current_user.user_id,
                 **update_kwargs,
             )
-            logger.info(f"Applied entity correction to Neo4j for entity {annotation_data.entity_id}")
+            logger.info(
+                f"Applied entity correction to Neo4j for entity {annotation_data.entity_id}"
+            )
         except Exception as e:
             logger.error(f"Error applying entity correction to Neo4j: {e}")
             # Annotation is saved but Neo4j update failed — log but don't fail the request
@@ -657,7 +804,9 @@ async def create_title_annotation(
         try:
             conversation.title = annotation_data.corrected_text
             await conversation.save()
-            logger.info(f"Updated title for conversation {annotation_data.conversation_id}")
+            logger.info(
+                f"Updated title for conversation {annotation_data.conversation_id}"
+            )
         except Exception as e:
             logger.error(f"Error updating conversation title: {e}")
             # Annotation is saved but title update failed — log but don't fail the request
@@ -695,7 +844,6 @@ async def get_title_annotations(
             status_code=500,
             detail=f"Failed to fetch title annotations: {str(e)}",
         )
-
 
 
 # === Diarization Annotation Routes ===
@@ -817,7 +965,10 @@ async def apply_diarization_annotations(
 
         if not annotations:
             return JSONResponse(
-                content={"message": "No pending annotations to apply", "applied_count": 0}
+                content={
+                    "message": "No pending annotations to apply",
+                    "applied_count": 0,
+                }
             )
 
         # Get active transcript version
@@ -839,7 +990,9 @@ async def apply_diarization_annotations(
                 key=lambda a: a.updated_at,
                 reverse=True,
             )
-            annotation_for_segment = annotations_for_segment[0] if annotations_for_segment else None
+            annotation_for_segment = (
+                annotations_for_segment[0] if annotations_for_segment else None
+            )
 
             if annotation_for_segment:
                 # Apply correction
@@ -951,7 +1104,10 @@ async def apply_all_annotations(
             a for a in annotations if a.annotation_type == AnnotationType.DIARIZATION
         ]
         transcript_annotations = [
-            a for a in annotations if a.annotation_type == AnnotationType.TRANSCRIPT
+            a
+            for a in annotations
+            if a.annotation_type
+            in (AnnotationType.TRANSCRIPT, AnnotationType.SPEECH_SUGGESTION_CORRECTION)
         ]
         insert_annotations = [
             a for a in annotations if a.annotation_type == AnnotationType.INSERT

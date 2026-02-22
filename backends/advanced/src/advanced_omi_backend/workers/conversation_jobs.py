@@ -24,7 +24,7 @@ from advanced_omi_backend.models.job import async_job
 from advanced_omi_backend.observability.otel_setup import set_otel_session
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.services.plugin_service import (
-    ensure_plugin_router,
+    dispatch_plugin_event,
     get_plugin_router,
 )
 from advanced_omi_backend.utils.conversation_utils import (
@@ -35,6 +35,7 @@ from advanced_omi_backend.utils.conversation_utils import (
     track_speech_activity,
     update_job_progress_metadata,
 )
+from advanced_omi_backend.utils.job_utils import update_job_meta
 
 logger = logging.getLogger(__name__)
 
@@ -1161,27 +1162,16 @@ async def generate_title_summary_job(
     processing_time = time.time() - start_time
 
     # Update job metadata
-    from rq import get_current_job
-
-    current_job = get_current_job()
-    if current_job:
-        if not current_job.meta:
-            current_job.meta = {}
-        current_job.meta.update(
-            {
-                "conversation_id": conversation_id,
-                "title": conversation.title,
-                "summary": conversation.summary,
-                "detailed_summary_length": (
-                    len(conversation.detailed_summary)
-                    if conversation.detailed_summary
-                    else 0
-                ),
-                "segment_count": len(segments),
-                "processing_time": processing_time,
-            }
-        )
-        current_job.save_meta()
+    update_job_meta(
+        conversation_id=conversation_id,
+        title=conversation.title,
+        summary=conversation.summary,
+        detailed_summary_length=(
+            len(conversation.detailed_summary) if conversation.detailed_summary else 0
+        ),
+        segment_count=len(segments),
+        processing_time=processing_time,
+    )
 
     logger.info(
         f"✅ Title/summary generation completed for {conversation_id} in {processing_time:.2f}s"
@@ -1264,63 +1254,24 @@ async def dispatch_conversation_complete_event_job(
     user_email = user.email if user else ""
 
     # Prepare plugin event data (same format as open_conversation_job)
+    actual_end_reason = end_reason or "file_upload"
     try:
-        plugin_router = await ensure_plugin_router()
-
-        # CRITICAL CHECK: Fail loudly if no router
-        if not plugin_router:
-            error_msg = (
-                f"❌ Plugin router could not be initialized in worker process. "
-                f"conversation.complete event for {conversation_id[:12]} will NOT be dispatched!"
-            )
-            logger.error(error_msg)
-
-            return {
-                "success": False,
-                "skipped": True,
-                "reason": "No plugin router",
-                "conversation_id": conversation_id,
-                "error": error_msg,
-            }
-
-        plugin_data = {
-            "conversation": {
-                "client_id": client_id,
-                "user_id": user_id,
-            },
-            "transcript": conversation.transcript if conversation else "",
-            "duration": 0,  # Duration not tracked for file uploads
-            "conversation_id": conversation_id,
-        }
-
-        # Use provided end_reason or default to 'file_upload' for backward compatibility
-        actual_end_reason = end_reason or "file_upload"
-
-        logger.info(
-            f"🔌 DISPATCH: conversation.complete event for {conversation_id[:12]} "
-            f"(end_reason={actual_end_reason}, user={user_id}, client={client_id})"
-        )
-
-        plugin_results = await plugin_router.dispatch_event(
+        plugin_results = await dispatch_plugin_event(
             event=PluginEvent.CONVERSATION_COMPLETE,
             user_id=user_id,
-            data=plugin_data,
+            data={
+                "conversation": {
+                    "client_id": client_id,
+                    "user_id": user_id,
+                },
+                "transcript": conversation.transcript if conversation else "",
+                "duration": 0,  # Duration not tracked for file uploads
+                "conversation_id": conversation_id,
+            },
             metadata={"end_reason": actual_end_reason},
+            description=f"conversation={conversation_id[:12]}, end_reason={actual_end_reason}",
+            require_router=True,
         )
-
-        logger.info(
-            f"🔌 RESULT: conversation.complete dispatched to {len(plugin_results) if plugin_results else 0} plugins"
-        )
-        if plugin_results:
-            logger.info(
-                f"📌 Triggered {len(plugin_results)} conversation-level plugins"
-            )
-            for result in plugin_results:
-                logger.info(
-                    f"   Plugin result: success={result.success}, message={result.message}"
-                )
-                if result.message:
-                    logger.info(f"  Plugin result: {result.message}")
 
         processing_time = time.time() - start_time
         logger.info(
@@ -1334,6 +1285,15 @@ async def dispatch_conversation_complete_event_job(
             "processing_time_seconds": processing_time,
         }
 
+    except RuntimeError as e:
+        logger.error(f"❌ {e}")
+        return {
+            "success": False,
+            "skipped": True,
+            "reason": "No plugin router",
+            "conversation_id": conversation_id,
+            "error": str(e),
+        }
     except Exception as e:
         logger.warning(f"⚠️ Error dispatching conversation complete event: {e}")
         return {

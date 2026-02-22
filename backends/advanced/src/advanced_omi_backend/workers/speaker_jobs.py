@@ -12,22 +12,17 @@ from typing import Any, Dict
 from advanced_omi_backend.auth import generate_jwt_for_user
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import async_job
-from advanced_omi_backend.services.audio_stream import (
-    TranscriptionResultsAggregator,
-)
+from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggregator
 from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 from advanced_omi_backend.users import get_user_by_id
+from advanced_omi_backend.utils.job_utils import update_job_meta
 
 logger = logging.getLogger(__name__)
 
 
 @async_job(redis=True, beanie=True)
 async def check_enrolled_speakers_job(
-    session_id: str,
-    user_id: str,
-    client_id: str,
-    *,
-    redis_client=None
+    session_id: str, user_id: str, client_id: str, *, redis_client=None
 ) -> Dict[str, Any]:
     """
     Check if any enrolled speakers are present in the current audio stream.
@@ -54,19 +49,23 @@ async def check_enrolled_speakers_job(
 
     # Check for enrolled speakers
     speaker_client = SpeakerRecognitionClient()
-    enrolled_present, speaker_result = await speaker_client.check_if_enrolled_speaker_present(
-        redis_client=redis_client,
-        client_id=client_id,
-        session_id=session_id,
-        user_id=user_id,
-        transcription_results=raw_results
+    enrolled_present, speaker_result = (
+        await speaker_client.check_if_enrolled_speaker_present(
+            redis_client=redis_client,
+            client_id=client_id,
+            session_id=session_id,
+            user_id=user_id,
+            transcription_results=raw_results,
+        )
     )
 
     # Check for errors from speaker service
     if speaker_result and speaker_result.get("error"):
         error_type = speaker_result.get("error")
         error_message = speaker_result.get("message", "Unknown error")
-        logger.error(f"🎤 [SPEAKER CHECK] Speaker service error: {error_type} - {error_message}")
+        logger.error(
+            f"🎤 [SPEAKER CHECK] Speaker service error: {error_type} - {error_message}"
+        )
 
         # For connection failures, assume no enrolled speakers but allow conversation to proceed
         # Speaker filtering is optional - if service is down, conversation should still be created
@@ -82,7 +81,7 @@ async def check_enrolled_speakers_job(
                 "enrolled_present": False,
                 "identified_speakers": [],
                 "skip_reason": f"Speaker service unavailable: {error_type}",
-                "processing_time_seconds": time.time() - start_time
+                "processing_time_seconds": time.time() - start_time,
             }
 
         # For other processing errors, also assume no enrolled speakers
@@ -93,7 +92,7 @@ async def check_enrolled_speakers_job(
             "error_details": error_message,
             "enrolled_present": False,
             "identified_speakers": [],
-            "processing_time_seconds": time.time() - start_time
+            "processing_time_seconds": time.time() - start_time,
         }
 
     # Extract identified speakers
@@ -101,31 +100,31 @@ async def check_enrolled_speakers_job(
     if speaker_result and "segments" in speaker_result:
         for seg in speaker_result["segments"]:
             identified_as = seg.get("identified_as")
-            if identified_as and identified_as != "Unknown" and identified_as not in identified_speakers:
+            if (
+                identified_as
+                and identified_as != "Unknown"
+                and identified_as not in identified_speakers
+            ):
                 identified_speakers.append(identified_as)
 
     processing_time = time.time() - start_time
 
     if enrolled_present:
-        logger.info(f"✅ Enrolled speaker(s) found: {', '.join(identified_speakers)} ({processing_time:.2f}s)")
+        logger.info(
+            f"✅ Enrolled speaker(s) found: {', '.join(identified_speakers)} ({processing_time:.2f}s)"
+        )
     else:
         logger.info(f"⏭️ No enrolled speakers found ({processing_time:.2f}s)")
 
     # Update job metadata for timeline tracking
-    from rq import get_current_job
-    current_job = get_current_job()
-    if current_job:
-        if not current_job.meta:
-            current_job.meta = {}
-        current_job.meta.update({
-            "session_id": session_id,
-            "client_id": client_id,
-            "enrolled_present": enrolled_present,
-            "identified_speakers": identified_speakers,
-            "speaker_count": len(identified_speakers),
-            "processing_time": processing_time
-        })
-        current_job.save_meta()
+    update_job_meta(
+        session_id=session_id,
+        client_id=client_id,
+        enrolled_present=enrolled_present,
+        identified_speakers=identified_speakers,
+        speaker_count=len(identified_speakers),
+        processing_time=processing_time,
+    )
 
     return {
         "success": True,
@@ -133,7 +132,7 @@ async def check_enrolled_speakers_job(
         "enrolled_present": enrolled_present,
         "identified_speakers": identified_speakers,
         "speaker_result": speaker_result,
-        "processing_time_seconds": processing_time
+        "processing_time_seconds": processing_time,
     }
 
 
@@ -144,7 +143,7 @@ async def recognise_speakers_job(
     transcript_text: str = "",
     words: list = None,
     *,
-    redis_client=None
+    redis_client=None,
 ) -> Dict[str, Any]:
     """
     RQ job function for identifying speakers in a transcribed conversation.
@@ -168,12 +167,16 @@ async def recognise_speakers_job(
         Dict with processing results
     """
 
-    logger.info(f"🎤 RQ: Starting speaker recognition for conversation {conversation_id}")
+    logger.info(
+        f"🎤 RQ: Starting speaker recognition for conversation {conversation_id}"
+    )
 
     start_time = time.time()
 
     # Get the conversation
-    conversation = await Conversation.find_one(Conversation.conversation_id == conversation_id)
+    conversation = await Conversation.find_one(
+        Conversation.conversation_id == conversation_id
+    )
     if not conversation:
         logger.error(f"Conversation {conversation_id} not found")
         return {"success": False, "error": "Conversation not found"}
@@ -201,7 +204,7 @@ async def recognise_speakers_job(
             "conversation_id": conversation_id,
             "version_id": version_id,
             "speaker_recognition_enabled": False,
-            "processing_time_seconds": 0
+            "processing_time_seconds": 0,
         }
 
     # Get provider capabilities from metadata
@@ -222,7 +225,9 @@ async def recognise_speakers_job(
 
         # If we have existing segments from provider, proceed to identification
         if transcript_version.segments:
-            logger.info(f"🎤 Using {len(transcript_version.segments)} segments from provider")
+            logger.info(
+                f"🎤 Using {len(transcript_version.segments)} segments from provider"
+            )
             # Continue to speaker identification below (after this block)
         else:
             logger.warning(f"🎤 Provider claimed diarization but no segments found")
@@ -237,32 +242,35 @@ async def recognise_speakers_job(
     if not actual_words and transcript_version.words:
         # Convert Word objects to dicts for speaker service API
         actual_words = [
-            {
-                "word": w.word,
-                "start": w.start,
-                "end": w.end,
-                "confidence": w.confidence
-            }
+            {"word": w.word, "start": w.start, "end": w.end, "confidence": w.confidence}
             for w in transcript_version.words
         ]
-        logger.info(f"🔤 Loaded {len(actual_words)} words from transcript version.words field")
+        logger.info(
+            f"🔤 Loaded {len(actual_words)} words from transcript version.words field"
+        )
     # Backward compatibility: Fall back to metadata if words field is empty (old data)
     elif not actual_words and transcript_version.metadata.get("words"):
         actual_words = transcript_version.metadata.get("words", [])
-        logger.info(f"🔤 Loaded {len(actual_words)} words from transcript version metadata (legacy)")
+        logger.info(
+            f"🔤 Loaded {len(actual_words)} words from transcript version metadata (legacy)"
+        )
     # Backward compatibility: Extract from segments if that's all we have (old streaming data)
     elif not actual_words and transcript_version.segments:
         for segment in transcript_version.segments:
             if segment.words:
                 for w in segment.words:
-                    actual_words.append({
-                        "word": w.word,
-                        "start": w.start,
-                        "end": w.end,
-                        "confidence": w.confidence
-                    })
+                    actual_words.append(
+                        {
+                            "word": w.word,
+                            "start": w.start,
+                            "end": w.end,
+                            "confidence": w.confidence,
+                        }
+                    )
         if actual_words:
-            logger.info(f"🔤 Extracted {len(actual_words)} words from segments (legacy)")
+            logger.info(
+                f"🔤 Extracted {len(actual_words)} words from segments (legacy)"
+            )
 
     if not actual_transcript_text:
         logger.warning(f"🎤 No transcript text found in version {version_id}")
@@ -271,7 +279,7 @@ async def recognise_speakers_job(
             "conversation_id": conversation_id,
             "version_id": version_id,
             "error": "No transcript text available",
-            "processing_time_seconds": 0
+            "processing_time_seconds": 0,
         }
 
     # Check if we can run pyannote diarization
@@ -290,7 +298,7 @@ async def recognise_speakers_job(
                 "conversation_id": conversation_id,
                 "version_id": version_id,
                 "error": "No word timestamps and no segments available",
-                "processing_time_seconds": time.time() - start_time
+                "processing_time_seconds": time.time() - start_time,
             }
         # Has existing segments - fall through to run identification on them
         logger.info(
@@ -303,6 +311,7 @@ async def recognise_speakers_job(
     # 1. Config toggle (per_segment_speaker_id) enables per-segment globally
     # 2. Manual reprocess trigger also enables per-segment for that run
     from advanced_omi_backend.config import get_misc_settings
+
     misc_config = get_misc_settings()
     per_segment_config = misc_config.get("per_segment_speaker_id", False)
 
@@ -323,7 +332,11 @@ async def recognise_speakers_job(
             # Have existing segments and can't/shouldn't run pyannote - do identification only
             # Covers: provider already diarized, no word timestamps but segments exist, etc.
             # Only send speech segments for identification; skip event/note segments
-            speech_segments = [s for s in transcript_version.segments if getattr(s, 'segment_type', 'speech') == 'speech']
+            speech_segments = [
+                s
+                for s in transcript_version.segments
+                if getattr(s, "segment_type", "speech") == "speech"
+            ]
             logger.info(
                 f"🎤 Using segment-level speaker identification on {len(speech_segments)} speech segments "
                 f"(skipped {len(transcript_version.segments) - len(speech_segments)} non-speech)"
@@ -341,10 +354,7 @@ async def recognise_speakers_job(
             )
         else:
             # Standard path: full diarization + identification via speaker service
-            transcript_data = {
-                "text": actual_transcript_text,
-                "words": actual_words
-            }
+            transcript_data = {"text": actual_transcript_text, "words": actual_words}
 
             # Generate backend token for speaker service to fetch audio
             try:
@@ -356,35 +366,41 @@ async def recognise_speakers_job(
                         "conversation_id": conversation_id,
                         "version_id": version_id,
                         "error": "User not found",
-                        "processing_time_seconds": time.time() - start_time
+                        "processing_time_seconds": time.time() - start_time,
                     }
 
                 backend_token = generate_jwt_for_user(user_id, user.email)
                 logger.info(f"🔐 Generated backend token for speaker service")
 
             except Exception as token_error:
-                logger.error(f"Failed to generate backend token: {token_error}", exc_info=True)
+                logger.error(
+                    f"Failed to generate backend token: {token_error}", exc_info=True
+                )
                 return {
                     "success": False,
                     "conversation_id": conversation_id,
                     "version_id": version_id,
                     "error": f"Token generation failed: {token_error}",
-                    "processing_time_seconds": time.time() - start_time
+                    "processing_time_seconds": time.time() - start_time,
                 }
 
-            logger.info(f"🎤 Calling speaker recognition service with conversation_id...")
+            logger.info(
+                f"🎤 Calling speaker recognition service with conversation_id..."
+            )
             speaker_result = await speaker_client.diarize_identify_match(
                 conversation_id=conversation_id,
                 backend_token=backend_token,
                 transcript_data=transcript_data,
-                user_id=user_id
+                user_id=user_id,
             )
 
         # Check for errors from speaker service
         if speaker_result.get("error"):
             error_type = speaker_result.get("error")
             error_message = speaker_result.get("message", "Unknown error")
-            logger.error(f"🎤 Speaker recognition service error: {error_type} - {error_message}")
+            logger.error(
+                f"🎤 Speaker recognition service error: {error_type} - {error_message}"
+            )
 
             # Connection/timeout errors → skip gracefully (existing behavior)
             if error_type in ("connection_failed", "timeout", "client_error"):
@@ -401,7 +417,7 @@ async def recognise_speakers_job(
                     "identified_speakers": [],
                     "skip_reason": f"Speaker service unavailable: {error_type}",
                     "error_type": error_type,
-                    "processing_time_seconds": time.time() - start_time
+                    "processing_time_seconds": time.time() - start_time,
                 }
 
             # Validation errors → fail job, don't retry
@@ -414,7 +430,7 @@ async def recognise_speakers_job(
                     "error": f"Validation error: {error_message}",
                     "error_type": error_type,
                     "retryable": False,  # Don't retry validation errors
-                    "processing_time_seconds": time.time() - start_time
+                    "processing_time_seconds": time.time() - start_time,
                 }
 
             # Resource errors → fail job, can retry later
@@ -427,7 +443,7 @@ async def recognise_speakers_job(
                     "error": f"Resource error: {error_message}",
                     "error_type": error_type,
                     "retryable": True,  # Can retry later when resources available
-                    "processing_time_seconds": time.time() - start_time
+                    "processing_time_seconds": time.time() - start_time,
                 }
 
             # Unknown errors → fail job
@@ -439,11 +455,15 @@ async def recognise_speakers_job(
                     "error": f"Speaker recognition failed: {error_type}",
                     "error_details": error_message,
                     "error_type": error_type,
-                    "processing_time_seconds": time.time() - start_time
+                    "processing_time_seconds": time.time() - start_time,
                 }
 
         # Service worked but found no segments (legitimate empty result)
-        if not speaker_result or "segments" not in speaker_result or not speaker_result["segments"]:
+        if (
+            not speaker_result
+            or "segments" not in speaker_result
+            or not speaker_result["segments"]
+        ):
             logger.warning(f"🎤 Speaker recognition returned no segments")
             return {
                 "success": True,
@@ -451,7 +471,7 @@ async def recognise_speakers_job(
                 "version_id": version_id,
                 "speaker_recognition_enabled": True,
                 "identified_speakers": [],
-                "processing_time_seconds": time.time() - start_time
+                "processing_time_seconds": time.time() - start_time,
             }
 
         speaker_segments = speaker_result["segments"]
@@ -486,12 +506,16 @@ async def recognise_speakers_job(
                 continue
 
             # Skip segments with invalid structure
-            if not isinstance(seg.get("start"), (int, float)) or not isinstance(seg.get("end"), (int, float)):
+            if not isinstance(seg.get("start"), (int, float)) or not isinstance(
+                seg.get("end"), (int, float)
+            ):
                 empty_segment_count += 1
                 logger.debug(f"Filtered segment with invalid timing: {seg}")
                 continue
 
-            speaker_name = seg.get("identified_as") or unknown_label_map.get(seg.get("speaker", "Unknown"), "Unknown Speaker")
+            speaker_name = seg.get("identified_as") or unknown_label_map.get(
+                seg.get("speaker", "Unknown"), "Unknown Speaker"
+            )
 
             # Extract words from speaker service response (already matched to this segment)
             words_data = seg.get("words", [])
@@ -500,13 +524,14 @@ async def recognise_speakers_job(
                     word=w.get("word", ""),
                     start=w.get("start", 0.0),
                     end=w.get("end", 0.0),
-                    confidence=w.get("confidence")
+                    confidence=w.get("confidence"),
                 )
                 for w in words_data
             ]
 
             # Classify segment type from content
             from advanced_omi_backend.utils.segment_utils import classify_segment_text
+
             seg_classification = classify_segment_text(text)
             seg_type = "event" if seg_classification == "event" else "speech"
 
@@ -519,18 +544,21 @@ async def recognise_speakers_job(
                     segment_type=seg_type,
                     identified_as=seg.get("identified_as"),
                     confidence=seg.get("confidence"),
-                    words=segment_words  # Use words from speaker service
+                    words=segment_words,  # Use words from speaker service
                 )
             )
 
         if empty_segment_count > 0:
-            logger.info(f"🔇 Filtered out {empty_segment_count} empty segments from speaker recognition")
+            logger.info(
+                f"🔇 Filtered out {empty_segment_count} empty segments from speaker recognition"
+            )
 
         # Re-insert non-speech segments (event/note) that were skipped during identification
         # They need to be merged back into position based on timestamps
         non_speech_segments = [
-            s for s in transcript_version.segments
-            if getattr(s, 'segment_type', 'speech') != 'speech'
+            s
+            for s in transcript_version.segments
+            if getattr(s, "segment_type", "speech") != "speech"
         ]
         if non_speech_segments:
             for ns_seg in non_speech_segments:
@@ -541,7 +569,9 @@ async def recognise_speakers_job(
                         insert_pos = i
                         break
                 updated_segments.insert(insert_pos, ns_seg)
-            logger.info(f"🎤 Re-inserted {len(non_speech_segments)} non-speech segments")
+            logger.info(
+                f"🎤 Re-inserted {len(non_speech_segments)} non-speech segments"
+            )
 
         # Update the transcript version
         transcript_version.segments = updated_segments
@@ -559,24 +589,31 @@ async def recognise_speakers_job(
 
         sr_metadata = {
             "enabled": True,
-            "identification_mode": "per_segment" if use_per_segment else "majority_vote",
+            "identification_mode": (
+                "per_segment" if use_per_segment else "majority_vote"
+            ),
             "identified_speakers": list(identified_speakers),
             "speaker_count": len(identified_speakers),
             "total_segments": len(speaker_segments),
-            "processing_time_seconds": time.time() - start_time
+            "processing_time_seconds": time.time() - start_time,
         }
         if speaker_result.get("partial_errors"):
             sr_metadata["partial_errors"] = speaker_result["partial_errors"]
         transcript_version.metadata["speaker_recognition"] = sr_metadata
 
         # Set diarization source if pyannote ran (provider didn't do diarization)
-        if not provider_has_diarization and transcript_version.diarization_source != "provider":
+        if (
+            not provider_has_diarization
+            and transcript_version.diarization_source != "provider"
+        ):
             transcript_version.diarization_source = "pyannote"
 
         await conversation.save()
 
         processing_time = time.time() - start_time
-        logger.info(f"✅ Speaker recognition completed for {conversation_id} in {processing_time:.2f}s")
+        logger.info(
+            f"✅ Speaker recognition completed for {conversation_id} in {processing_time:.2f}s"
+        )
 
         return {
             "success": True,
@@ -585,22 +622,18 @@ async def recognise_speakers_job(
             "speaker_recognition_enabled": True,
             "identified_speakers": list(identified_speakers),
             "segment_count": len(updated_segments),
-            "processing_time_seconds": processing_time
+            "processing_time_seconds": processing_time,
         }
 
     except asyncio.TimeoutError as e:
         logger.error(f"❌ Speaker recognition timeout: {e}")
 
         # Add timeout metadata to job
-        from rq import get_current_job
-        current_job = get_current_job()
-        if current_job:
-            current_job.meta.update({
-                "error_type": "timeout",
-                "audio_duration": conversation.audio_total_duration if conversation else None,
-                "timeout_occurred_at": time.time()
-            })
-            current_job.save_meta()
+        update_job_meta(
+            error_type="timeout",
+            audio_duration=conversation.audio_total_duration if conversation else None,
+            timeout_occurred_at=time.time(),
+        )
 
         return {
             "success": False,
@@ -608,13 +641,16 @@ async def recognise_speakers_job(
             "version_id": version_id,
             "error": "Speaker recognition timeout",
             "error_type": "timeout",
-            "audio_duration": conversation.audio_total_duration if conversation else None,
-            "processing_time_seconds": time.time() - start_time
+            "audio_duration": (
+                conversation.audio_total_duration if conversation else None
+            ),
+            "processing_time_seconds": time.time() - start_time,
         }
 
     except Exception as speaker_error:
         logger.error(f"❌ Speaker recognition failed: {speaker_error}")
         import traceback
+
         logger.debug(traceback.format_exc())
 
         return {
@@ -622,5 +658,5 @@ async def recognise_speakers_job(
             "conversation_id": conversation_id,
             "version_id": version_id,
             "error": str(speaker_error),
-            "processing_time_seconds": time.time() - start_time
+            "processing_time_seconds": time.time() - start_time,
         }

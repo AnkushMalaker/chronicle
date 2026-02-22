@@ -534,3 +534,7 @@ cron_jobs:
     description: "Analyze user annotations and optimize LLM prompts"
     enabled: false
     schedule: "0 4 * * 0"
+  annotation_suggestions:
+    description: "Use LLM to surface potential transcript errors for user review"
+    enabled: false
+    schedule: "0 5 * * *"

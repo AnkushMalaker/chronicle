@@ -10,7 +10,31 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-async def check_job_alive(redis_client, current_job, session_id: Optional[str] = None) -> bool:
+def update_job_meta(**kwargs) -> None:
+    """Update the current RQ job's metadata with the given key-value pairs.
+
+    Handles the common boilerplate of: get_current_job() -> null check ->
+    meta init -> update -> save_meta.
+
+    Args:
+        **kwargs: Key-value pairs to merge into job.meta
+
+    Example:
+        update_job_meta(conversation_id="abc", processing_time=1.5)
+    """
+    from rq import get_current_job
+
+    current_job = get_current_job()
+    if current_job:
+        if not current_job.meta:
+            current_job.meta = {}
+        current_job.meta.update(kwargs)
+        current_job.save_meta()
+
+
+async def check_job_alive(
+    redis_client, current_job, session_id: Optional[str] = None
+) -> bool:
     """
     Check if current RQ job still exists in Redis.
 
@@ -44,12 +68,19 @@ async def check_job_alive(redis_client, current_job, session_id: Optional[str] =
             if session_id:
                 session_key = f"audio:session:{session_id}"
                 session_status = await redis_client.hget(session_key, "status")
-                if session_status and session_status.decode() in ["finalizing", "finished"]:
+                if session_status and session_status.decode() in [
+                    "finalizing",
+                    "finished",
+                ]:
                     # Session ended naturally - not a zombie, just natural cleanup
-                    logger.debug(f"📋 Job {current_job.id} ending naturally (session closed)")
+                    logger.debug(
+                        f"📋 Job {current_job.id} ending naturally (session closed)"
+                    )
                     return False
 
             # True zombie - job deleted while session still active
-            logger.error(f"🧟 Zombie job detected - job {current_job.id} deleted from Redis while session still active, exiting")
+            logger.error(
+                f"🧟 Zombie job detected - job {current_job.id} deleted from Redis while session still active, exiting"
+            )
             return False
     return True

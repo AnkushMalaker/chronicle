@@ -4,14 +4,14 @@ Background jobs for annotation-based AI suggestions.
 These jobs run periodically via the cron scheduler to:
 1. Surface potential errors in transcripts and memories for user review
 2. Fine-tune error detection models using accepted/rejected annotations
-
-TODO: Implement actual LLM-based error detection and model training logic.
 """
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import List
 
+from advanced_omi_backend.llm_client import async_generate
 from advanced_omi_backend.models.annotation import (
     Annotation,
     AnnotationSource,
@@ -20,98 +20,180 @@ from advanced_omi_backend.models.annotation import (
 )
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.user import User
+from advanced_omi_backend.prompt_registry import get_prompt_registry
 
 logger = logging.getLogger(__name__)
+
+LOOKBACK_DAYS = 7
+MAX_SEGMENTS_PER_PROMPT = 30
+MAX_SUGGESTIONS_PER_RUN = 50
+
+PROMPT_ID = "annotation.transcript_error_detection"
 
 
 async def surface_error_suggestions():
     """
-    Generate AI suggestions for potential transcript/memory errors.
-    Runs daily, creates PENDING annotations for user review.
+    Generate AI suggestions for potential transcript errors.
 
-    This is a PLACEHOLDER implementation. To fully implement:
-    1. Query recent transcripts and memories (last N days)
-    2. Use LLM to analyze content for potential errors:
-       - Hallucinations (made-up facts)
-       - Misheard words (audio transcription errors)
-       - Grammar/spelling issues
-       - Inconsistencies with other memories
-    3. For each potential error:
-       - Create PENDING annotation with MODEL_SUGGESTION source
-       - Store original_text and suggested corrected_text
-    4. Users can review suggestions in UI (accept/reject)
-    5. Accepted suggestions improve future model accuracy
-
-    TODO: Implement LLM-based error detection logic.
+    Runs daily via cron. For each user, queries recent conversations
+    and uses the LLM to identify potential transcription errors.
+    Creates PENDING annotations with MODEL_SUGGESTION source for
+    user review in the swipe UI.
     """
-    logger.info("📝 Checking for annotation suggestions (placeholder)...")
+    logger.info("Checking for annotation suggestions...")
+    total_created = 0
 
     try:
-        # Get all users
         users = await User.find_all().to_list()
-        logger.info(f"   Found {len(users)} users to analyze")
+        logger.info(f"Found {len(users)} users to analyze")
 
         for user in users:
-            # TODO: Query recent conversations for this user (last 7 days)
-            # recent_conversations = await Conversation.find(
-            #     Conversation.user_id == str(user.id),
-            #     Conversation.created_at >= datetime.now(timezone.utc) - timedelta(days=7)
-            # ).to_list()
+            user_id = str(user.id)
+            cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
 
-            # TODO: For each conversation, analyze transcripts
-            # for conversation in recent_conversations:
-            #     active_transcript = conversation.get_active_transcript()
-            #     if not active_transcript:
-            #         continue
-            #
-            #     # TODO: Use LLM to identify potential errors
-            #     # suggestions = await llm_provider.analyze_transcript_for_errors(
-            #     #     segments=active_transcript.segments,
-            #     #     context=conversation.summary
-            #     # )
-            #
-            #     # TODO: Create PENDING annotations for each suggestion
-            #     # for suggestion in suggestions:
-            #     #     annotation = Annotation(
-            #     #         annotation_type=AnnotationType.TRANSCRIPT,
-            #     #         user_id=str(user.id),
-            #     #         conversation_id=conversation.conversation_id,
-            #     #         segment_index=suggestion.segment_index,
-            #     #         original_text=suggestion.original_text,
-            #     #         corrected_text=suggestion.suggested_text,
-            #     #         source=AnnotationSource.MODEL_SUGGESTION,
-            #     #         status=AnnotationStatus.PENDING
-            #     #     )
-            #     #     await annotation.save()
+            recent_conversations = await Conversation.find(
+                Conversation.user_id == user_id,
+                Conversation.created_at >= cutoff,
+                Conversation.deleted != True,
+            ).to_list()
 
-            # TODO: Query recent memories for this user
-            # recent_memories = await memory_service.get_recent_memories(
-            #     user_id=str(user.id),
-            #     days=7
-            # )
+            if not recent_conversations:
+                logger.info(
+                    f"User {user.email or user_id}: no recent conversations, skipping"
+                )
+                continue
 
-            # TODO: Use LLM to identify potential errors in memories
-            # for memory in recent_memories:
-            #     # TODO: Analyze memory content for hallucinations/errors
-            #     # suggestions = await llm_provider.analyze_memory_for_errors(
-            #     #     content=memory.content,
-            #     #     metadata=memory.metadata
-            #     # )
-            #
-            #     # TODO: Create PENDING annotations
-            #     # ...
+            logger.info(
+                f"User {user.email or user_id}: {len(recent_conversations)} conversations in last {LOOKBACK_DAYS} days"
+            )
 
-            # Placeholder logging
-            logger.debug(f"   Analyzed user {user.id} (placeholder)")
+            # Get conversation IDs that already have pending model suggestions
+            existing = await Annotation.find(
+                Annotation.user_id == user_id,
+                Annotation.source == AnnotationSource.MODEL_SUGGESTION,
+                Annotation.status == AnnotationStatus.PENDING,
+            ).to_list()
+            skip_conversation_ids = {
+                a.conversation_id for a in existing if a.conversation_id
+            }
+            if skip_conversation_ids:
+                logger.info(
+                    f"  Skipping {len(skip_conversation_ids)} conversations with existing pending suggestions"
+                )
 
-        logger.info("✅ Suggestion check complete (placeholder implementation)")
-        logger.info(
-            "   ℹ️  TODO: Implement LLM-based error detection to create actual suggestions"
-        )
+            created_for_user = 0
+            for conversation in recent_conversations:
+                if total_created >= MAX_SUGGESTIONS_PER_RUN:
+                    logger.info(
+                        f"  Reached max suggestions per run ({MAX_SUGGESTIONS_PER_RUN}), stopping"
+                    )
+                    break
+                if conversation.conversation_id in skip_conversation_ids:
+                    continue
+
+                active_transcript = conversation.active_transcript
+                if not active_transcript or not active_transcript.segments:
+                    logger.debug(
+                        f"  Conversation '{conversation.title or conversation.conversation_id}': no transcript/segments, skipping"
+                    )
+                    continue
+
+                seg_count = len(active_transcript.segments)
+                logger.info(
+                    f"  Analyzing '{conversation.title or 'Untitled'}' "
+                    f"({seg_count} segments, id={conversation.conversation_id[:8]}...)"
+                )
+
+                suggestions = await _analyze_transcript(conversation, active_transcript)
+
+                if not suggestions:
+                    logger.info(f"    No issues found")
+                else:
+                    logger.info(f"    LLM found {len(suggestions)} potential issues")
+
+                for suggestion in suggestions:
+                    if total_created >= MAX_SUGGESTIONS_PER_RUN:
+                        break
+
+                    seg_idx = suggestion.get("segment_index")
+                    if seg_idx is None or seg_idx >= len(active_transcript.segments):
+                        logger.debug(f"    Skipping invalid segment_index={seg_idx}")
+                        continue
+
+                    annotation = Annotation(
+                        annotation_type=AnnotationType.TRANSCRIPT,
+                        user_id=user_id,
+                        conversation_id=conversation.conversation_id,
+                        segment_index=seg_idx,
+                        original_text=suggestion.get("original_text", ""),
+                        corrected_text=suggestion.get("corrected_text", ""),
+                        source=AnnotationSource.MODEL_SUGGESTION,
+                        status=AnnotationStatus.PENDING,
+                    )
+                    await annotation.save()
+                    total_created += 1
+                    created_for_user += 1
+                    logger.info(
+                        f"    Created suggestion: segment {seg_idx} - "
+                        f"'{suggestion.get('reason', 'unknown')}'"
+                    )
+
+            logger.info(
+                f"User {user.email or user_id}: {created_for_user} suggestions created"
+            )
+
+        logger.info(f"Suggestion check complete: {total_created} annotations created")
 
     except Exception as e:
-        logger.error(f"❌ Error in surface_error_suggestions: {e}", exc_info=True)
+        logger.error(f"Error in surface_error_suggestions: {e}", exc_info=True)
         raise
+
+
+async def _analyze_transcript(conversation, transcript) -> list[dict]:
+    """Use LLM to analyze a transcript for potential errors."""
+    segments = transcript.segments[:MAX_SEGMENTS_PER_PROMPT]
+    segments_text = "\n".join(
+        f"{i}: {seg.speaker} - {seg.text}"
+        for i, seg in enumerate(segments)
+        if seg.text.strip()
+    )
+
+    if not segments_text:
+        logger.debug(f"    No non-empty segments to analyze")
+        return []
+
+    registry = get_prompt_registry()
+    prompt = await registry.get_prompt(
+        PROMPT_ID,
+        title=conversation.title or "Untitled",
+        segments_text=segments_text,
+    )
+
+    try:
+        logger.debug(f"    Sending {len(segments)} segments to LLM for analysis...")
+        response = await async_generate(prompt)
+        logger.debug(f"    LLM response length: {len(response)} chars")
+        # Parse JSON from response, handling markdown code blocks
+        text = response.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+            text = text.rsplit("```", 1)[0]
+        suggestions = json.loads(text)
+        if not isinstance(suggestions, list):
+            logger.warning(f"    LLM returned non-list response, ignoring")
+            return []
+        return suggestions
+    except json.JSONDecodeError as e:
+        logger.warning(
+            f"    Failed to parse LLM JSON for '{conversation.title or conversation.conversation_id}': {e}"
+        )
+        logger.debug(f"    Raw LLM response: {response[:500]}")
+        return []
+    except Exception as e:
+        logger.warning(
+            f"    LLM call failed for '{conversation.title or conversation.conversation_id}': {e}"
+        )
+        return []
 
 
 async def finetune_hallucination_model():
@@ -199,15 +281,11 @@ async def finetune_hallucination_model():
 
         # Calculate acceptance rate
         if accepted_count + rejected_count > 0:
-            acceptance_rate = (
-                accepted_count / (accepted_count + rejected_count)
-            ) * 100
+            acceptance_rate = (accepted_count / (accepted_count + rejected_count)) * 100
             logger.info(f"   Suggestion acceptance rate: {acceptance_rate:.1f}%")
 
         logger.info("✅ Training check complete (placeholder implementation)")
-        logger.info(
-            "   ℹ️  TODO: Implement model fine-tuning using user feedback data"
-        )
+        logger.info("   ℹ️  TODO: Implement model fine-tuning using user feedback data")
 
     except Exception as e:
         logger.error(f"❌ Error in finetune_hallucination_model: {e}", exc_info=True)
@@ -215,6 +293,7 @@ async def finetune_hallucination_model():
 
 
 # Additional helper functions for future implementation
+
 
 async def analyze_common_error_patterns() -> List[dict]:
     """

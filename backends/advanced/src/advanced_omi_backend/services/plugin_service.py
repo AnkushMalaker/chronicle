@@ -18,6 +18,7 @@ import yaml
 
 from advanced_omi_backend.config_loader import get_plugins_yml_path
 from advanced_omi_backend.plugins import BasePlugin, PluginRouter
+from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.plugins.services import PluginServices
 
 logger = logging.getLogger(__name__)
@@ -176,7 +177,9 @@ def expand_env_vars(value: Any, extra_env: Optional[Dict[str, str]] = None) -> A
         return value
 
 
-def load_plugin_config(plugin_id: str, orchestration_config: Dict[str, Any]) -> Dict[str, Any]:
+def load_plugin_config(
+    plugin_id: str, orchestration_config: Dict[str, Any]
+) -> Dict[str, Any]:
     """
     Load complete plugin configuration from multiple sources.
 
@@ -215,9 +218,13 @@ def load_plugin_config(plugin_id: str, orchestration_config: Dict[str, Any]) -> 
             with open(plugin_config_path, "r") as f:
                 plugin_config = yaml.safe_load(f) or {}
                 config.update(plugin_config)
-                logger.debug(f"Loaded {len(plugin_config)} config keys for '{plugin_id}'")
+                logger.debug(
+                    f"Loaded {len(plugin_config)} config keys for '{plugin_id}'"
+                )
         else:
-            logger.debug(f"No config.yml found for plugin '{plugin_id}' at {plugin_config_path}")
+            logger.debug(
+                f"No config.yml found for plugin '{plugin_id}' at {plugin_config_path}"
+            )
 
     except Exception as e:
         logger.warning(f"Failed to load config.yml for plugin '{plugin_id}': {e}")
@@ -398,7 +405,9 @@ def load_schema_yml(plugin_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def infer_schema_from_config(plugin_id: str, config_dict: Dict[str, Any]) -> Dict[str, Any]:
+def infer_schema_from_config(
+    plugin_id: str, config_dict: Dict[str, Any]
+) -> Dict[str, Any]:
     """Infer configuration schema from plugin config.yml.
 
     This function analyzes the config.yml file to generate a JSON schema
@@ -480,8 +489,7 @@ def mask_secrets_in_config(
             if env_var and env_var in secret_env_vars:
                 # Check if env var is set in per-plugin .env or os.environ
                 is_set = bool(
-                    (plugin_env and plugin_env.get(env_var))
-                    or os.environ.get(env_var)
+                    (plugin_env and plugin_env.get(env_var)) or os.environ.get(env_var)
                 )
                 masked_config[key] = "••••••••••••" if is_set else ""
 
@@ -527,7 +535,9 @@ def get_plugin_metadata(
 
     # Mask secrets in current config
     current_config = load_plugin_config(plugin_id, orchestration_config)
-    masked_config = mask_secrets_in_config(current_config, config_schema, plugin_env=plugin_env)
+    masked_config = mask_secrets_in_config(
+        current_config, config_schema, plugin_env=plugin_env
+    )
 
     # Mark which env vars are set (check per-plugin .env first, then os.environ)
     for env_var_name, env_var_schema in config_schema.get("env_vars", {}).items():
@@ -727,17 +737,24 @@ def _build_plugin_router() -> Optional[PluginRouter]:
 
                     # Let plugin register its prompts with the prompt registry
                     try:
-                        from advanced_omi_backend.prompt_registry import get_prompt_registry
+                        from advanced_omi_backend.prompt_registry import (
+                            get_prompt_registry,
+                        )
+
                         plugin.register_prompts(get_prompt_registry())
                     except Exception as e:
-                        logger.debug(f"Plugin '{plugin_id}' prompt registration skipped: {e}")
+                        logger.debug(
+                            f"Plugin '{plugin_id}' prompt registration skipped: {e}"
+                        )
 
                     # Note: async initialization happens in app_factory lifespan or reload_plugins
                     router.register_plugin(plugin_id, plugin)
                     logger.info(f"Plugin '{plugin_id}' registered successfully")
 
                 except Exception as e:
-                    logger.error(f"Failed to register plugin '{plugin_id}': {e}", exc_info=True)
+                    logger.error(
+                        f"Failed to register plugin '{plugin_id}': {e}", exc_info=True
+                    )
 
             logger.info(
                 f"Plugin registration complete: {len(router.plugins)} plugin(s) registered"
@@ -804,6 +821,62 @@ async def ensure_plugin_router() -> Optional[PluginRouter]:
                 plugin_router.mark_plugin_failed(plugin_id, str(e))
                 logger.error(f"Failed to initialize plugin '{plugin_id}': {e}")
     return plugin_router
+
+
+async def dispatch_plugin_event(
+    event: PluginEvent,
+    user_id: str,
+    data: dict,
+    metadata: dict = None,
+    description: str = "",
+    require_router: bool = False,
+) -> Optional[list]:
+    """Dispatch an event to the plugin system with standard logging.
+
+    Handles the common pattern of: ensure router -> dispatch event -> log results.
+
+    Args:
+        event: Plugin event to dispatch
+        user_id: User ID for the event
+        data: Event-specific data dict
+        metadata: Optional metadata dict
+        description: Log context (e.g., "conversation=abc123, memories=5")
+        require_router: If True and no router, raise RuntimeError instead of returning None
+
+    Returns:
+        List of plugin results, or None if no router available
+
+    Raises:
+        RuntimeError: If require_router=True and no plugin router is available
+    """
+    plugin_router = await ensure_plugin_router()
+
+    if not plugin_router:
+        if require_router:
+            raise RuntimeError(
+                f"Plugin router could not be initialized in worker process. "
+                f"{event.value} event will NOT be dispatched!"
+            )
+        return None
+
+    logger.info(f"🔌 DISPATCH: {event.value} event ({description})")
+
+    plugin_results = await plugin_router.dispatch_event(
+        event=event,
+        user_id=user_id,
+        data=data,
+        metadata=metadata or {},
+    )
+
+    result_count = len(plugin_results) if plugin_results else 0
+    logger.info(f"🔌 RESULT: {event.value} dispatched to {result_count} plugins")
+
+    if plugin_results:
+        for result in plugin_results:
+            if result.message:
+                logger.info(f"  Plugin result: {result.message}")
+
+    return plugin_results
 
 
 async def cleanup_plugin_router() -> None:
@@ -934,7 +1007,9 @@ def signal_worker_restart() -> None:
         try:
             timestamp = time.strftime("%Y-%m-%dT%H:%M:%S")
             client.set(WORKER_RESTART_KEY, timestamp)
-            logger.info(f"Worker restart signal sent via Redis key '{WORKER_RESTART_KEY}'")
+            logger.info(
+                f"Worker restart signal sent via Redis key '{WORKER_RESTART_KEY}'"
+            )
         finally:
             client.close()
     except Exception as e:
