@@ -127,7 +127,7 @@ Button Press Should Close Active Conversation
     Should Not Be Empty    ${conversation_id}    msg=Conversation ID not found in job meta
 
     # Act: Send button press to close the conversation
-    Send Button Event To Stream    ${stream_id}    SINGLE_TAP
+    Send Button Event To Stream    ${stream_id}    SINGLE_PRESS
 
     # Assert: Conversation should close with end_reason=close_requested
     Wait Until Keyword Succeeds    30s    2s

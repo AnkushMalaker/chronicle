@@ -24,32 +24,50 @@ class PluginEvent(str, Enum):
         return obj
 
     # Conversation lifecycle
-    CONVERSATION_COMPLETE = ("conversation.complete", "Fires when conversation processing finishes (transcript ready)")
-    TRANSCRIPT_STREAMING = ("transcript.streaming", "Real-time transcript segments during a live conversation")
-    TRANSCRIPT_BATCH = ("transcript.batch", "Batch transcript from file upload processing")
-    MEMORY_PROCESSED = ("memory.processed", "After memories are extracted from a conversation")
-    CONVERSATION_STARRED = ("conversation.starred", "Fires when a conversation is starred or unstarred")
+    CONVERSATION_COMPLETE = (
+        "conversation.complete",
+        "Fires when conversation processing finishes (transcript ready)",
+    )
+    TRANSCRIPT_STREAMING = (
+        "transcript.streaming",
+        "Real-time transcript segments during a live conversation",
+    )
+    TRANSCRIPT_BATCH = (
+        "transcript.batch",
+        "Batch transcript from file upload processing",
+    )
+    MEMORY_PROCESSED = (
+        "memory.processed",
+        "After memories are extracted from a conversation",
+    )
+    CONVERSATION_STARRED = (
+        "conversation.starred",
+        "Fires when a conversation is starred or unstarred",
+    )
 
     # Button events (from OMI device)
     BUTTON_SINGLE_PRESS = ("button.single_press", "OMI device button single press")
     BUTTON_DOUBLE_PRESS = ("button.double_press", "OMI device button double press")
 
     # Cross-plugin communication (dispatched by PluginServices.call_plugin)
-    PLUGIN_ACTION = ("plugin_action", "Cross-plugin dispatch via PluginServices.call_plugin()")
+    PLUGIN_ACTION = (
+        "plugin_action",
+        "Cross-plugin dispatch via PluginServices.call_plugin()",
+    )
 
 
 class ButtonState(str, Enum):
     """Raw button states from OMI device firmware."""
 
-    SINGLE_TAP = "SINGLE_TAP"
-    DOUBLE_TAP = "DOUBLE_TAP"
+    SINGLE_PRESS = "SINGLE_PRESS"
+    DOUBLE_PRESS = "DOUBLE_PRESS"
     LONG_PRESS = "LONG_PRESS"
 
 
 # Maps device button states to plugin events
 BUTTON_STATE_TO_EVENT: Dict[ButtonState, PluginEvent] = {
-    ButtonState.SINGLE_TAP: PluginEvent.BUTTON_SINGLE_PRESS,
-    ButtonState.DOUBLE_TAP: PluginEvent.BUTTON_DOUBLE_PRESS,
+    ButtonState.SINGLE_PRESS: PluginEvent.BUTTON_SINGLE_PRESS,
+    ButtonState.DOUBLE_PRESS: PluginEvent.BUTTON_DOUBLE_PRESS,
 }
 
 

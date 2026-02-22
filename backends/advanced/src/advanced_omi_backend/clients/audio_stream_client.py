@@ -626,13 +626,13 @@ class StreamManager:
         return total_chunks
 
     def send_button_event(
-        self, stream_id: str, button_state: str = "SINGLE_TAP"
+        self, stream_id: str, button_state: str = "SINGLE_PRESS"
     ) -> None:
         """Send a button event to an open stream.
 
         Args:
             stream_id: Stream session ID
-            button_state: Button state ("SINGLE_TAP" or "DOUBLE_TAP")
+            button_state: Button state ("SINGLE_PRESS" or "DOUBLE_PRESS")
         """
         session = self._sessions.get(stream_id)
         if not session:

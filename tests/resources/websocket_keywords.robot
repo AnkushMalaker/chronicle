@@ -159,8 +159,8 @@ Close Audio Stream
     RETURN    ${total_chunks}
 
 Send Button Event To Stream
-    [Documentation]    Send a button event (SINGLE_TAP, DOUBLE_TAP) to an open stream
-    [Arguments]    ${stream_id}    ${button_state}=SINGLE_TAP
+    [Documentation]    Send a button event (SINGLE_PRESS, DOUBLE_PRESS) to an open stream
+    [Arguments]    ${stream_id}    ${button_state}=SINGLE_PRESS
     Send Button Event    ${stream_id}    ${button_state}
     Log    Sent button event ${button_state} to stream ${stream_id}
 

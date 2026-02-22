@@ -1,10 +1,23 @@
-"""OpenTelemetry setup with Galileo span processor."""
+"""OpenTelemetry setup and session management.
 
+Uses OpenInference semantic conventions (session.id) so that any
+compatible observability backend (Galileo, Arize Phoenix, Langfuse, etc.)
+can group traces by session.
+"""
+
+import contextvars
 import logging
 import os
 from functools import lru_cache
 
 logger = logging.getLogger(__name__)
+
+_otel_initialised = False
+
+# Per-task/thread token so concurrent conversations don't clobber each other.
+_session_token_var: contextvars.ContextVar[object | None] = contextvars.ContextVar(
+    "_otel_session_token", default=None
+)
 
 
 @lru_cache(maxsize=1)
@@ -13,34 +26,43 @@ def is_galileo_enabled() -> bool:
     return bool(os.getenv("GALILEO_API_KEY"))
 
 
-_session_token = None
+def is_otel_enabled() -> bool:
+    """Check if any OTel exporter has been initialised."""
+    return _otel_initialised
 
 
-def set_galileo_session(session_id: str) -> None:
-    """Set Galileo session ID so subsequent traces are grouped together."""
-    global _session_token
-    if not is_galileo_enabled():
+def set_otel_session(session_id: str) -> None:
+    """Attach *session_id* to the OTel context (OpenInference ``session.id``).
+
+    All subsequent spans on this thread/context will carry the session ID,
+    regardless of which observability backend is consuming them.
+    Safe to call concurrently from different asyncio tasks or threads.
+    """
+    if not is_otel_enabled():
         return
     try:
-        from galileo.otel import _session_id_context
+        from openinference.semconv.trace import SpanAttributes
+        from opentelemetry.context import attach, get_current, set_value
 
-        _session_token = _session_id_context.set(session_id)
+        clear_otel_session()
+        ctx = set_value(SpanAttributes.SESSION_ID, session_id, get_current())
+        _session_token_var.set(attach(ctx))
     except ImportError:
         pass
 
 
-def clear_galileo_session() -> None:
-    """Clear the Galileo session ID."""
-    global _session_token
-    if _session_token is None:
+def clear_otel_session() -> None:
+    """Detach the current session from the OTel context."""
+    token = _session_token_var.get()
+    if token is None:
         return
     try:
-        from galileo.otel import _session_id_context
+        from opentelemetry.context import detach
 
-        _session_id_context.reset(_session_token)
-        _session_token = None
-    except ImportError:
-        pass
+        detach(token)
+        _session_token_var.set(None)
+    except Exception:
+        _session_token_var.set(None)
 
 
 def init_otel() -> None:
@@ -95,6 +117,8 @@ def init_otel() -> None:
         # Auto-instrument all OpenAI SDK calls
         OpenAIInstrumentor().instrument(tracer_provider=tracer_provider)
 
+        global _otel_initialised
+        _otel_initialised = True
         logger.info("OTEL initialized with Galileo exporter + OpenAI instrumentor")
     except ImportError:
         logger.warning(

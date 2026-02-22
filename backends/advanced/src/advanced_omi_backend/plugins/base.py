@@ -6,6 +6,7 @@ Provides:
 - PluginResult: Result from plugin execution
 - BasePlugin: Abstract base class for all plugins
 """
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -14,16 +15,20 @@ from typing import Any, Dict, List, Optional
 @dataclass
 class PluginContext:
     """Context passed to plugin execution"""
+
     user_id: str
     event: str  # Event name (e.g., "transcript.streaming", "conversation.complete")
     data: Dict[str, Any]  # Event-specific data
     metadata: Dict[str, Any] = field(default_factory=dict)
-    services: Optional[Any] = None  # PluginServices instance for system/cross-plugin calls
+    services: Optional[Any] = (
+        None  # PluginServices instance for system/cross-plugin calls
+    )
 
 
 @dataclass
 class PluginResult:
     """Result from plugin execution"""
+
     success: bool
     data: Optional[Dict[str, Any]] = None
     message: Optional[str] = None
@@ -58,9 +63,9 @@ class BasePlugin(ABC):
                    Contains: enabled, events, condition, and plugin-specific config
         """
         self.config = config
-        self.enabled = config.get('enabled', False)
-        self.events = config.get('events', [])
-        self.condition = config.get('condition', {'type': 'always'})
+        self.enabled = config.get("enabled", False)
+        self.events = config.get("events", [])
+        self.condition = config.get("condition", {"type": "always"})
 
     def register_prompts(self, registry) -> None:
         """Register plugin prompts with the prompt registry.
@@ -122,7 +127,9 @@ class BasePlugin(ABC):
         """
         pass
 
-    async def on_conversation_complete(self, context: PluginContext) -> Optional[PluginResult]:
+    async def on_conversation_complete(
+        self, context: PluginContext
+    ) -> Optional[PluginResult]:
         """
         Called when conversation processing completes.
 
@@ -137,7 +144,9 @@ class BasePlugin(ABC):
         """
         pass
 
-    async def on_memory_processed(self, context: PluginContext) -> Optional[PluginResult]:
+    async def on_memory_processed(
+        self, context: PluginContext
+    ) -> Optional[PluginResult]:
         """
         Called after memory extraction finishes.
 
@@ -152,7 +161,9 @@ class BasePlugin(ABC):
         """
         pass
 
-    async def on_conversation_starred(self, context: PluginContext) -> Optional[PluginResult]:
+    async def on_conversation_starred(
+        self, context: PluginContext
+    ) -> Optional[PluginResult]:
         """
         Called when a conversation is starred or unstarred.
 
@@ -172,7 +183,7 @@ class BasePlugin(ABC):
         Called when a device button event is received.
 
         Context data contains:
-            - state: str - Button state (e.g., "SINGLE_TAP", "DOUBLE_TAP", "LONG_PRESS")
+            - state: str - Button state (e.g., "SINGLE_PRESS", "DOUBLE_PRESS", "LONG_PRESS")
             - timestamp: float - Unix timestamp of the event
             - audio_uuid: str - Current audio session UUID (may be None)
 

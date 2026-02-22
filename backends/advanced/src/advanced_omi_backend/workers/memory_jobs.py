@@ -23,8 +23,8 @@ from advanced_omi_backend.controllers.queue_controller import (
 )
 from advanced_omi_backend.models.job import JobPriority, async_job
 from advanced_omi_backend.observability.otel_setup import (
-    clear_galileo_session,
-    set_galileo_session,
+    clear_otel_session,
+    set_otel_session,
 )
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.services.plugin_service import ensure_plugin_router
@@ -141,7 +141,7 @@ async def process_memory_job(
     from advanced_omi_backend.services.memory import get_memory_service
     from advanced_omi_backend.users import get_user_by_id
 
-    set_galileo_session(conversation_id)
+    set_otel_session(conversation_id)
     start_time = time.time()
     logger.info(f"🔄 Starting memory processing for conversation {conversation_id}")
 

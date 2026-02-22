@@ -2,7 +2,7 @@
 Home Assistant plugin for Chronicle.
 
 Enables control of Home Assistant devices through natural language commands
-triggered by a wake word.
+triggered by a keyword anywhere in the transcript.
 """
 
 import json
@@ -10,6 +10,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
+
 from .entity_cache import EntityCache
 from .mcp_client import HAMCPClient, MCPError
 
@@ -18,20 +19,20 @@ logger = logging.getLogger(__name__)
 
 class HomeAssistantPlugin(BasePlugin):
     """
-    Plugin for controlling Home Assistant devices via wake word commands.
+    Plugin for controlling Home Assistant devices via keyword commands.
 
     Example:
-        User says: "Vivi, turn off the hall lights"
-        -> Wake word "vivi" detected by router
-        -> Command "turn off the hall lights" passed to on_transcript()
-        -> Plugin parses command and calls HA MCP to execute
+        User says: "Turn off the hall lights, VV"
+        -> Keyword "vv" detected anywhere in transcript by router
+        -> Command "Turn off the hall lights" passed to on_transcript()
+        -> Plugin parses command and calls HA to execute
         -> Returns: PluginResult with "I've turned off the hall light"
     """
 
     SUPPORTED_ACCESS_LEVELS: List[str] = ["transcript", "button"]
 
     name = "Home Assistant"
-    description = "Wake word device control with Home Assistant integration"
+    description = "Keyword-triggered device control with Home Assistant integration"
 
     def __init__(self, config: Dict[str, Any]):
         """
@@ -155,7 +156,9 @@ class HomeAssistantPlugin(BasePlugin):
         command = context.data.get("command", "")
 
         if not command:
-            return PluginResult(success=False, message="No command provided", should_continue=True)
+            return PluginResult(
+                success=False, message="No command provided", should_continue=True
+            )
 
         if not self.mcp_client:
             logger.error("MCP client not initialized")
@@ -166,9 +169,21 @@ class HomeAssistantPlugin(BasePlugin):
             )
 
         try:
+            conversation_id = context.data.get("conversation_id")
+
+            # Step 0: Extract just the HA command from mixed transcript
+            extracted = await self._extract_ha_command(
+                command, conversation_id=conversation_id
+            )
+            if extracted:
+                logger.info(f"Extracted HA command: '{extracted}' (from: '{command}')")
+                command = extracted
+
             # Step 1: Parse command using hybrid LLM + fallback parsing
             logger.info(f"Processing HA command: '{command}'")
-            parsed = await self._parse_command_hybrid(command)
+            parsed = await self._parse_command_hybrid(
+                command, conversation_id=conversation_id
+            )
 
             if not parsed:
                 return PluginResult(
@@ -199,15 +214,25 @@ class HomeAssistantPlugin(BasePlugin):
             service = service_map.get(parsed.action, "turn_on")
 
             # Step 4: Call Home Assistant service
-            logger.info(f"Calling {domain}.{service} for {len(entity_ids)} entities: {entity_ids}")
+            logger.info(
+                f"Calling {domain}.{service} for {len(entity_ids)} entities: {entity_ids}"
+            )
 
             result = await self.mcp_client.call_service(
-                domain=domain, service=service, entity_ids=entity_ids, **parsed.parameters
+                domain=domain,
+                service=service,
+                entity_ids=entity_ids,
+                **parsed.parameters,
             )
 
             # Step 5: Format user-friendly response
             entity_type_name = parsed.entity_type or domain
-            if parsed.target_type == "area":
+            if parsed.target_type == "all":
+                message = (
+                    f"I've {parsed.action.replace('_', ' ')} {len(entity_ids)} "
+                    f"{entity_type_name}{'s' if len(entity_ids) != 1 else ''} everywhere"
+                )
+            elif parsed.target_type == "area":
                 message = (
                     f"I've {parsed.action.replace('_', ' ')} {len(entity_ids)} "
                     f"{entity_type_name}{'s' if len(entity_ids) != 1 else ''} "
@@ -339,8 +364,9 @@ class HomeAssistantPlugin(BasePlugin):
         using the button_actions config. Reuses the same entity resolution and
         service call logic as on_plugin_action().
         """
-        from .command_parser import ParsedCommand
         from advanced_omi_backend.plugins.events import PluginEvent
+
+        from .command_parser import ParsedCommand
 
         # Map event to config key
         if context.event == PluginEvent.BUTTON_DOUBLE_PRESS:
@@ -369,7 +395,9 @@ class HomeAssistantPlugin(BasePlugin):
             entity_type = action_config.get("entity_type", "light")
 
             if not target:
-                return PluginResult(success=False, message="No target in button_actions config")
+                return PluginResult(
+                    success=False, message="No target in button_actions config"
+                )
 
             parsed = ParsedCommand(
                 action=service,
@@ -430,7 +458,11 @@ class HomeAssistantPlugin(BasePlugin):
             latency_ms = int((time.time() - start) * 1000)
             if str(result).strip() == "2":
                 return {"ok": True, "message": "Connected", "latency_ms": latency_ms}
-            return {"ok": False, "message": f"Unexpected result: {result}", "latency_ms": latency_ms}
+            return {
+                "ok": False,
+                "message": f"Unexpected result: {result}",
+                "latency_ms": latency_ms,
+            }
         except Exception as e:
             return {"ok": False, "message": str(e)}
 
@@ -503,14 +535,96 @@ class HomeAssistantPlugin(BasePlugin):
             )
 
             logger.info(
-                f"Entity cache refreshed: {len(areas)} areas, " f"{len(entity_details)} entities"
+                f"Entity cache refreshed: {len(areas)} areas, "
+                f"{len(entity_details)} entities"
             )
 
         except Exception as e:
             logger.error(f"Failed to refresh entity cache: {e}", exc_info=True)
             raise
 
-    async def _parse_command_with_llm(self, command: str) -> Optional["ParsedCommand"]:
+    async def _extract_ha_command(
+        self, transcript: str, *, conversation_id: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        Use a lightweight LLM call to extract only the Home Assistant command
+        from a transcript that may contain mixed conversation.
+
+        When the keyword (e.g. "vivi") is detected anywhere in a long transcript,
+        the surrounding text often includes unrelated speech. This method asks the
+        LLM to return just the smart-home command portion.
+
+        Args:
+            transcript: Transcript text with keyword already stripped.
+            conversation_id: Optional conversation ID for Langfuse session grouping.
+
+        Returns:
+            Extracted command string, or None to fall back to the raw text.
+        """
+        # Short transcripts are likely already just the command
+        if len(transcript.split()) <= 8:
+            return None
+
+        try:
+            from advanced_omi_backend.llm_client import get_llm_client
+            from advanced_omi_backend.openai_factory import is_langfuse_enabled
+
+            llm_client = get_llm_client()
+
+            system_prompt = (
+                "Extract ONLY the smart home / home assistant command from the "
+                "transcript below. The transcript is from a conversation and may "
+                "contain unrelated speech mixed in. Return ONLY the command text, "
+                "nothing else. If no smart home command is found, return NONE.\n\n"
+                "Examples:\n"
+                'Input: "so anyway I was saying turn off the hall lights and then we went to dinner"\n'
+                "Output: turn off the hall lights\n\n"
+                'Input: "turn on bedroom lights"\n'
+                "Output: turn on bedroom lights\n\n"
+                'Input: "yeah the meeting was great oh and set living room brightness '
+                'to 50 percent and also the deadline is tomorrow"\n'
+                "Output: set living room brightness to 50 percent\n\n"
+                'Input: "so I told him about the project and then toggle the kitchen fan '
+                'and after that we discussed lunch plans"\n'
+                "Output: toggle the kitchen fan"
+            )
+
+            params = {
+                "model": llm_client.model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": transcript},
+                ],
+                "temperature": 0.0,
+                "max_tokens": 100,
+            }
+            if is_langfuse_enabled():
+                params["name"] = "ha-command-extraction"
+                params["metadata"] = {
+                    "plugin": "homeassistant",
+                    "step": "extract_command",
+                }
+                if conversation_id:
+                    params["langfuse_session_id"] = conversation_id
+
+            response = llm_client.client.chat.completions.create(**params)
+
+            result = response.choices[0].message.content.strip()
+
+            if not result or result.upper() == "NONE":
+                logger.info("LLM extraction found no HA command in transcript")
+                return None
+
+            logger.info(f"LLM extracted HA command: '{result}'")
+            return result
+
+        except Exception as e:
+            logger.warning(f"LLM command extraction failed: {e}, using raw text")
+            return None
+
+    async def _parse_command_with_llm(
+        self, command: str, *, conversation_id: Optional[str] = None
+    ) -> Optional["ParsedCommand"]:
         """
         Parse command using LLM with structured system prompt.
 
@@ -532,26 +646,60 @@ class HomeAssistantPlugin(BasePlugin):
         """
         try:
             from advanced_omi_backend.llm_client import get_llm_client
+            from advanced_omi_backend.openai_factory import is_langfuse_enabled
             from advanced_omi_backend.prompt_registry import get_prompt_registry
 
             from .command_parser import ParsedCommand
 
             llm_client = get_llm_client()
             registry = get_prompt_registry()
-            system_prompt = await registry.get_prompt("plugin.homeassistant.command_parser")
+            system_prompt = await registry.get_prompt(
+                "plugin.homeassistant.command_parser"
+            )
 
             logger.debug(f"Parsing command with LLM: '{command}'")
 
+            # Build context from entity cache so the LLM knows valid targets
+            entity_context = ""
+            await self._ensure_cache_initialized()
+            if self.entity_cache:
+                areas = (
+                    ", ".join(self.entity_cache.areas)
+                    if self.entity_cache.areas
+                    else "none"
+                )
+                labels = ""
+                if self.entity_cache.label_areas:
+                    label_parts = [
+                        f"{lbl} (covers: {', '.join(areas_list)})"
+                        for lbl, areas_list in self.entity_cache.label_areas.items()
+                    ]
+                    labels = "\nAvailable labels: " + ", ".join(label_parts)
+                entity_context = f"\n\nAvailable areas: {areas}{labels}\nUse target_type 'area' with an area/label name above, or target_type 'all' for everything."
+
             # Use OpenAI chat format with system + user messages
-            response = llm_client.client.chat.completions.create(
-                model=llm_client.model,
-                messages=[
+            params = {
+                "model": llm_client.model,
+                "messages": [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f'Command: "{command}"\n\nReturn JSON only.'},
+                    {
+                        "role": "user",
+                        "content": f'Command: "{command}"{entity_context}\n\nReturn JSON only.',
+                    },
                 ],
-                temperature=0.1,
-                max_tokens=150,
-            )
+                "temperature": 0.1,
+                "max_tokens": 150,
+            }
+            if is_langfuse_enabled():
+                params["name"] = "ha-command-parser"
+                params["metadata"] = {
+                    "plugin": "homeassistant",
+                    "step": "parse_command",
+                }
+                if conversation_id:
+                    params["langfuse_session_id"] = conversation_id
+
+            response = llm_client.client.chat.completions.create(**params)
 
             result_text = response.choices[0].message.content.strip()
             logger.debug(f"LLM response: {result_text}")
@@ -588,7 +736,9 @@ class HomeAssistantPlugin(BasePlugin):
             return parsed
 
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse LLM JSON response: {e}\nResponse: {result_text}")
+            logger.error(
+                f"Failed to parse LLM JSON response: {e}\nResponse: {result_text}"
+            )
             return None
         except Exception as e:
             logger.error(f"LLM command parsing failed: {e}", exc_info=True)
@@ -631,8 +781,12 @@ class HomeAssistantPlugin(BasePlugin):
             )
 
             if not entities:
-                entity_desc = f"{parsed.entity_type}s" if parsed.entity_type else "entities"
-                available = list(self.entity_cache.areas) + list(self.entity_cache.label_areas.keys())
+                entity_desc = (
+                    f"{parsed.entity_type}s" if parsed.entity_type else "entities"
+                )
+                available = list(self.entity_cache.areas) + list(
+                    self.entity_cache.label_areas.keys()
+                )
                 raise ValueError(
                     f"No {entity_desc} found in area/label '{parsed.target}'. "
                     f"Available: {', '.join(available)}"
@@ -644,9 +798,33 @@ class HomeAssistantPlugin(BasePlugin):
             )
             return entities
 
+        elif parsed.target_type == "all":
+            # Get entities across ALL areas, optionally filtered by type
+            entities = []
+            for area in self.entity_cache.areas:
+                entities.extend(
+                    self.entity_cache.get_entities_in_area(
+                        area=area, entity_type=parsed.entity_type
+                    )
+                )
+
+            if not entities:
+                entity_desc = (
+                    f"{parsed.entity_type}s" if parsed.entity_type else "entities"
+                )
+                raise ValueError(f"No {entity_desc} found in any area")
+
+            logger.info(
+                f"Resolved 'all' to {len(entities)} "
+                f"{parsed.entity_type or 'entity'}(s) across {len(self.entity_cache.areas)} areas"
+            )
+            return entities
+
         elif parsed.target_type == "all_in_area":
             # Get ALL entities in area (no filter)
-            entities = self.entity_cache.get_entities_in_area(area=parsed.target, entity_type=None)
+            entities = self.entity_cache.get_entities_in_area(
+                area=parsed.target, entity_type=None
+            )
 
             if not entities:
                 raise ValueError(
@@ -654,7 +832,9 @@ class HomeAssistantPlugin(BasePlugin):
                     f"Available areas: {', '.join(self.entity_cache.areas)}"
                 )
 
-            logger.info(f"Resolved 'all in {parsed.target}' to {len(entities)} entities")
+            logger.info(
+                f"Resolved 'all in {parsed.target}' to {len(entities)} entities"
+            )
             return entities
 
         elif parsed.target_type == "entity":
@@ -726,7 +906,9 @@ class HomeAssistantPlugin(BasePlugin):
             "action_desc": action_desc,
         }
 
-    async def _parse_command_hybrid(self, command: str) -> Optional["ParsedCommand"]:
+    async def _parse_command_hybrid(
+        self, command: str, *, conversation_id: Optional[str] = None
+    ) -> Optional["ParsedCommand"]:
         """
         Hybrid command parser: Try LLM first, fallback to keywords.
 
@@ -736,6 +918,7 @@ class HomeAssistantPlugin(BasePlugin):
 
         Args:
             command: Natural language command
+            conversation_id: Optional conversation ID for Langfuse session grouping.
 
         Returns:
             ParsedCommand if successful, None otherwise
@@ -751,7 +934,10 @@ class HomeAssistantPlugin(BasePlugin):
         # Try LLM parsing with timeout
         try:
             logger.debug("Attempting LLM-based command parsing...")
-            parsed = await asyncio.wait_for(self._parse_command_with_llm(command), timeout=5.0)
+            parsed = await asyncio.wait_for(
+                self._parse_command_with_llm(command, conversation_id=conversation_id),
+                timeout=5.0,
+            )
 
             if parsed:
                 logger.info("LLM parsing succeeded")
@@ -823,7 +1009,9 @@ class HomeAssistantPlugin(BasePlugin):
         try:
             # Validate required config fields
             required_fields = ["ha_url", "ha_token"]
-            missing_fields = [field for field in required_fields if not config.get(field)]
+            missing_fields = [
+                field for field in required_fields if not config.get(field)
+            ]
 
             if missing_fields:
                 return {

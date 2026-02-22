@@ -1020,7 +1020,7 @@ async def _handle_button_event(
 
     Args:
         client_state: Client state object
-        button_state: Button state string (e.g., "SINGLE_TAP", "DOUBLE_TAP")
+        button_state: Button state string (e.g., "SINGLE_PRESS", "DOUBLE_PRESS")
         user_id: User ID
         client_id: Client ID
     """
@@ -1073,21 +1073,127 @@ async def _handle_button_event(
         )
 
 
-async def _process_rolling_batch(
-    client_state, user_id: str, user_email: str, client_id: str, batch_number: int
-) -> None:
-    """
-    Process accumulated batch audio as a rolling segment.
-
-    Creates conversation titled "Recording Part {batch_number}" and enqueues transcription.
+async def _create_batch_conversation_and_enqueue(
+    client_state,
+    user_id: str,
+    client_id: str,
+    title: str,
+    trigger: str,
+    job_id_prefix: str,
+    enqueue_post_jobs: bool = False,
+    attach_markers: bool = False,
+) -> Optional[str]:
+    """Create conversation from batch audio, store chunks, enqueue transcription.
 
     Args:
         client_state: Client state with batch_audio_chunks
         user_id: User ID
-        user_email: User email
         client_id: Client ID
-        batch_number: Sequential batch number (1, 2, 3...)
+        title: Conversation title
+        trigger: Trigger string for transcription job
+        job_id_prefix: Prefix for the transcription job ID
+        enqueue_post_jobs: If True, chain post-conversation jobs after transcription
+        attach_markers: If True, copy client_state.markers to conversation
+
+    Returns:
+        conversation_id on success, None on failure.
     """
+    from advanced_omi_backend.config import get_transcription_job_timeout
+    from advanced_omi_backend.controllers.queue_controller import (
+        JOB_RESULT_TTL,
+        transcription_queue,
+    )
+    from advanced_omi_backend.models.conversation import create_conversation
+    from advanced_omi_backend.utils.audio_chunk_utils import convert_audio_to_chunks
+    from advanced_omi_backend.workers.transcription_jobs import (
+        transcribe_full_audio_job,
+    )
+
+    complete_audio = b"".join(client_state.batch_audio_chunks)
+    audio_format = getattr(client_state, "batch_audio_format", {})
+    sample_rate = audio_format.get("rate", 16000)
+    sample_width = audio_format.get("width", 2)
+    channels = audio_format.get("channels", 1)
+
+    application_logger.info(
+        f"📦 Batch: Combined {len(client_state.batch_audio_chunks)} chunks "
+        f"into {len(complete_audio)} bytes (title={title})"
+    )
+
+    # Create conversation
+    conversation = create_conversation(
+        user_id=user_id,
+        client_id=client_id,
+        title=title,
+        summary="Processing batch audio...",
+    )
+    if attach_markers and client_state.markers:
+        conversation.markers = list(client_state.markers)
+        client_state.markers.clear()
+    await conversation.insert()
+    conversation_id = conversation.conversation_id
+
+    # Convert audio to MongoDB chunks
+    try:
+        num_chunks = await convert_audio_to_chunks(
+            conversation_id=conversation_id,
+            audio_data=complete_audio,
+            sample_rate=sample_rate,
+            channels=channels,
+            sample_width=sample_width,
+        )
+        application_logger.info(
+            f"📦 Batch: Converted to {num_chunks} MongoDB chunks ({conversation_id[:12]})"
+        )
+    except Exception as chunk_error:
+        application_logger.error(
+            f"Failed to convert batch audio to chunks: {chunk_error}", exc_info=True
+        )
+
+    # Enqueue transcription job
+    version_id = str(uuid.uuid4())
+    transcription_job = transcription_queue.enqueue(
+        transcribe_full_audio_job,
+        conversation_id,
+        version_id,
+        trigger,
+        job_timeout=get_transcription_job_timeout(),
+        result_ttl=JOB_RESULT_TTL,
+        job_id=f"{job_id_prefix}_{conversation_id[:12]}",
+        description=f"Transcribe {title.lower()} {conversation_id[:8]}",
+        meta={"conversation_id": conversation_id, "client_id": client_id},
+    )
+
+    application_logger.info(
+        f"📥 Batch: Enqueued transcription job {transcription_job.id}"
+    )
+
+    # Optionally chain post-conversation jobs
+    if enqueue_post_jobs:
+        from advanced_omi_backend.controllers.queue_controller import (
+            start_post_conversation_jobs,
+        )
+
+        job_ids = start_post_conversation_jobs(
+            conversation_id=conversation_id,
+            user_id=None,
+            depends_on_job=transcription_job,
+            client_id=client_id,
+        )
+        application_logger.info(
+            f"✅ Batch: Enqueued job chain for {conversation_id} — "
+            f"transcription ({transcription_job.id}) → "
+            f"speaker ({job_ids['speaker_recognition']}) → "
+            f"memory ({job_ids['memory']})"
+        )
+
+    return conversation_id
+
+
+async def _process_rolling_batch(
+    client_state, user_id: str, user_email: str, client_id: str, batch_number: int
+) -> None:
+    """Process accumulated batch audio as a rolling segment."""
     if (
         not hasattr(client_state, "batch_audio_chunks")
         or not client_state.batch_audio_chunks
@@ -1096,76 +1202,14 @@ async def _process_rolling_batch(
         return
 
     try:
-        from advanced_omi_backend.models.conversation import create_conversation
-        from advanced_omi_backend.utils.audio_chunk_utils import convert_audio_to_chunks
-
-        # Combine chunks
-        complete_audio = b"".join(client_state.batch_audio_chunks)
-        application_logger.info(
-            f"📦 Rolling batch #{batch_number}: Combined {len(client_state.batch_audio_chunks)} chunks "
-            f"into {len(complete_audio)} bytes"
-        )
-
-        # Get audio format
-        audio_format = getattr(client_state, "batch_audio_format", {})
-        sample_rate = audio_format.get("rate", 16000)
-        width = audio_format.get("width", 2)
-        channels = audio_format.get("channels", 1)
-
-        # Create conversation with batch number in title
-        conversation = create_conversation(
+        await _create_batch_conversation_and_enqueue(
+            client_state,
             user_id=user_id,
             client_id=client_id,
             title=f"Recording Part {batch_number}",
-            summary="Rolling batch processing...",
+            trigger=f"rolling_batch_{batch_number}",
+            job_id_prefix=f"transcribe_rolling_{batch_number}",
         )
-        await conversation.insert()
-        conversation_id = conversation.conversation_id  # Get the auto-generated ID
-
-        # Convert to MongoDB chunks
-        num_chunks = await convert_audio_to_chunks(
-            conversation_id=conversation_id,
-            audio_data=complete_audio,
-            sample_rate=sample_rate,
-            channels=channels,
-            sample_width=width,
-        )
-
-        # Enqueue transcription job
-        from advanced_omi_backend.controllers.queue_controller import (
-            JOB_RESULT_TTL,
-            transcription_queue,
-        )
-        from advanced_omi_backend.workers.transcription_jobs import (
-            transcribe_full_audio_job,
-        )
-
-        version_id = str(uuid.uuid4())
-        transcribe_job_id = f"transcribe_rolling_{conversation_id[:12]}_{batch_number}"
-
-        from advanced_omi_backend.config import get_transcription_job_timeout
-
-        transcription_job = transcription_queue.enqueue(
-            transcribe_full_audio_job,
-            conversation_id,
-            version_id,
-            f"rolling_batch_{batch_number}",  # trigger
-            job_timeout=get_transcription_job_timeout(),
-            result_ttl=JOB_RESULT_TTL,
-            job_id=transcribe_job_id,
-            description=f"Transcribe rolling batch #{batch_number} {conversation_id[:8]}",
-            meta={
-                "conversation_id": conversation_id,
-                "client_id": client_id,
-                "batch_number": batch_number,
-            },
-        )
-
-        application_logger.info(
-            f"✅ Rolling batch #{batch_number} created conversation {conversation_id}, "
-            f"enqueued transcription job {transcription_job.id}"
-        )
-
     except Exception as e:
         application_logger.error(
             f"❌ Failed to process rolling batch #{batch_number}: {e}", exc_info=True
@@ -1175,15 +1219,7 @@ async def _process_rolling_batch(
 async def _process_batch_audio_complete(
     client_state, user_id: str, user_email: str, client_id: str
 ) -> None:
-    """
-    Process completed batch audio: write file, create conversation, enqueue jobs.
-
-    Args:
-        client_state: Client state with batch_audio_chunks
-        user_id: User ID
-        user_email: User email
-        client_id: Client ID
-    """
+    """Process completed batch audio: create conversation, enqueue full job chain."""
     if (
         not hasattr(client_state, "batch_audio_chunks")
         or not client_state.batch_audio_chunks
@@ -1194,117 +1230,17 @@ async def _process_batch_audio_complete(
         return
 
     try:
-        from advanced_omi_backend.models.conversation import create_conversation
-        from advanced_omi_backend.utils.audio_chunk_utils import convert_audio_to_chunks
-
-        # Combine all chunks
-        complete_audio = b"".join(client_state.batch_audio_chunks)
-        application_logger.info(
-            f"📦 Batch mode: Combined {len(client_state.batch_audio_chunks)} chunks into {len(complete_audio)} bytes"
-        )
-
-        # Timestamp for logging
-        timestamp = int(time.time() * 1000)
-
-        # Get audio format from batch metadata (set during audio-start)
-        audio_format = getattr(client_state, "batch_audio_format", {})
-        sample_rate = audio_format.get("rate", OMI_SAMPLE_RATE)
-        sample_width = audio_format.get("width", OMI_SAMPLE_WIDTH)
-        channels = audio_format.get("channels", OMI_CHANNELS)
-
-        # Calculate audio duration
-        duration = len(complete_audio) / (sample_rate * sample_width * channels)
-
-        application_logger.info(f"✅ Batch mode: Processing audio ({duration:.1f}s)")
-
-        # Create conversation immediately for batch audio (conversation_id auto-generated)
-        version_id = str(uuid.uuid4())
-
-        conversation = create_conversation(
+        await _create_batch_conversation_and_enqueue(
+            client_state,
             user_id=user_id,
             client_id=client_id,
             title="Batch Recording",
-            summary="Processing batch audio...",
+            trigger="batch",
+            job_id_prefix="transcribe",
+            enqueue_post_jobs=True,
+            attach_markers=True,
         )
-        # Attach any markers (e.g., button events) captured during the session
-        if client_state.markers:
-            conversation.markers = list(client_state.markers)
-            client_state.markers.clear()
-        await conversation.insert()
-        conversation_id = conversation.conversation_id  # Get the auto-generated ID
-
-        application_logger.info(
-            f"📝 Batch mode: Created conversation {conversation_id}"
-        )
-
-        # Convert audio directly to MongoDB chunks (no disk intermediary)
-        try:
-            num_chunks = await convert_audio_to_chunks(
-                conversation_id=conversation_id,
-                audio_data=complete_audio,
-                sample_rate=sample_rate,
-                channels=channels,
-                sample_width=sample_width,
-            )
-            application_logger.info(
-                f"📦 Batch mode: Converted to {num_chunks} MongoDB chunks "
-                f"(conversation {conversation_id[:12]})"
-            )
-        except Exception as chunk_error:
-            application_logger.error(
-                f"Failed to convert batch audio to chunks: {chunk_error}", exc_info=True
-            )
-            # Continue anyway - transcription job will handle it
-
-        # Enqueue batch transcription job first (file uploads need transcription)
-        from advanced_omi_backend.controllers.queue_controller import (
-            JOB_RESULT_TTL,
-            start_post_conversation_jobs,
-            transcription_queue,
-        )
-        from advanced_omi_backend.workers.transcription_jobs import (
-            transcribe_full_audio_job,
-        )
-
-        version_id = str(uuid.uuid4())
-        transcribe_job_id = f"transcribe_{conversation_id[:12]}"
-
-        from advanced_omi_backend.config import get_transcription_job_timeout
-
-        transcription_job = transcription_queue.enqueue(
-            transcribe_full_audio_job,
-            conversation_id,
-            version_id,
-            "batch",  # trigger
-            job_timeout=get_transcription_job_timeout(),
-            result_ttl=JOB_RESULT_TTL,
-            job_id=transcribe_job_id,
-            description=f"Transcribe batch audio {conversation_id[:8]}",
-            meta={"conversation_id": conversation_id, "client_id": client_id},
-        )
-
-        application_logger.info(
-            f"📥 Batch mode: Enqueued transcription job {transcription_job.id}"
-        )
-
-        # Enqueue post-conversation processing job chain (depends on transcription)
-        job_ids = start_post_conversation_jobs(
-            conversation_id=conversation_id,
-            user_id=None,  # Will be read from conversation in DB by jobs
-            depends_on_job=transcription_job,  # Wait for transcription to complete
-            client_id=client_id,  # Pass client_id for UI tracking
-        )
-
-        application_logger.info(
-            f"✅ Batch mode: Enqueued job chain for {conversation_id} - "
-            f"transcription ({transcription_job.id}) → "
-            f"speaker ({job_ids['speaker_recognition']}) → "
-            f"memory ({job_ids['memory']})"
-        )
-
-        # Clear accumulated chunks
         client_state.batch_audio_chunks = []
-
     except Exception as batch_error:
         application_logger.error(
             f"❌ Batch mode processing failed: {batch_error}", exc_info=True
@@ -1355,34 +1291,69 @@ async def _cleanup_websocket_connection(
             )
 
 
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def _websocket_session(ws, token, device_name, connection_type):
+    """Lifecycle wrapper: pending tracking, auth, client setup, cleanup.
+
+    Yields (client_id, client_state, user, audio_stream_producer, interim_holder)
+    on success, or None if auth failed.
+    interim_holder is a mutable list — the inner loop sets interim_holder[0] = task.
+    """
+    pending_client_id = f"pending_{uuid.uuid4()}"
+    pending_connections.add(pending_client_id)
+
+    client_id = None
+    interim_holder = [None]  # mutable so inner loop can update
+
+    try:
+        client_id, client_state, user = await _setup_websocket_connection(
+            ws, token, device_name, pending_client_id, connection_type
+        )
+        if not user:
+            yield None
+            return
+
+        # Store user context on client state up front (shared by all handlers)
+        client_state.user_id = user.user_id
+        client_state.user_email = user.email
+        client_state.client_id = client_id
+
+        audio_stream_producer = get_audio_stream_producer()
+
+        yield (client_id, client_state, user, audio_stream_producer, interim_holder)
+
+    except WebSocketDisconnect:
+        application_logger.info(
+            f"🔌 {connection_type} WebSocket disconnected — Client: {client_id}"
+        )
+    except Exception as e:
+        application_logger.error(
+            f"❌ {connection_type} WebSocket error for client {client_id}: {e}",
+            exc_info=True,
+        )
+    finally:
+        await _cleanup_websocket_connection(
+            client_id, pending_client_id, interim_holder[0]
+        )
+
+
 async def handle_omi_websocket(
     ws: WebSocket,
     token: Optional[str] = None,
     device_name: Optional[str] = None,
 ):
     """Handle OMI WebSocket connections with Opus decoding."""
-    # Generate pending client_id to track connection even if auth fails
-    pending_client_id = f"pending_{uuid.uuid4()}"
-    pending_connections.add(pending_client_id)
-
-    client_id = None
-    client_state = None
-    interim_subscriber_task = None
-
-    try:
-        # Setup connection (accept, auth, create client state)
-        client_id, client_state, user = await _setup_websocket_connection(
-            ws, token, device_name, pending_client_id, "OMI"
-        )
-        if not user:
+    async with _websocket_session(ws, token, device_name, "OMI") as session:
+        if session is None:
             return
+        client_id, client_state, user, audio_stream_producer, interim_holder = session
 
         # OMI-specific: Setup Opus decoder
         decoder = OmiOpusDecoder()
         _decode_packet = partial(decoder.decode_packet, strip_header=False)
-
-        # Get singleton audio stream producer
-        audio_stream_producer = get_audio_stream_producer()
 
         packet_count = 0
         total_bytes = 0
@@ -1392,18 +1363,12 @@ async def handle_omi_websocket(
             header, payload = await parse_wyoming_protocol(ws)
 
             if header["type"] == "audio-start":
-                # Handle audio session start
                 application_logger.info(
                     f"🔴 BACKEND: Received audio-start in OMI MODE for {client_id} (header={header})"
                 )
                 application_logger.info(f"🎙️ OMI audio session started for {client_id}")
 
-                # Store user context on client state
-                client_state.user_id = user.user_id
-                client_state.user_email = user.email
-                client_state.client_id = client_id
-
-                interim_subscriber_task = await _initialize_streaming_session(
+                interim_holder[0] = await _initialize_streaming_session(
                     client_state,
                     audio_stream_producer,
                     user.user_id,
@@ -1417,20 +1382,18 @@ async def handle_omi_websocket(
                             "channels": OMI_CHANNELS,
                         },
                     ),
-                    websocket=ws,  # Pass WebSocket to launch interim results subscriber
+                    websocket=ws,
                 )
 
             elif header["type"] == "audio-chunk" and payload:
                 packet_count += 1
                 total_bytes += len(payload)
 
-                # Log progress
                 if packet_count <= 5 or packet_count % 1000 == 0:
                     application_logger.info(
                         f"🎵 Received OMI audio chunk #{packet_count}: {len(payload)} bytes"
                     )
 
-                # Handle OMI audio chunk (Opus decode + publish to stream)
                 await _handle_omi_audio_chunk(
                     client_state,
                     audio_stream_producer,
@@ -1441,20 +1404,17 @@ async def handle_omi_websocket(
                     packet_count,
                 )
 
-                # Log progress every 1000th packet
                 if packet_count % 1000 == 0:
                     application_logger.info(
                         f"📊 Processed {packet_count} OMI packets ({total_bytes} bytes total)"
                     )
 
             elif header["type"] == "audio-stop":
-                # Handle audio session stop
                 application_logger.info(
                     f"🛑 OMI audio session stopped for {client_id} - "
                     f"Total chunks: {packet_count}, Total bytes: {total_bytes}"
                 )
 
-                # Finalize session using helper function
                 await _finalize_streaming_session(
                     client_state,
                     audio_stream_producer,
@@ -1463,7 +1423,6 @@ async def handle_omi_websocket(
                     client_id,
                 )
 
-                # Reset counters for next session
                 packet_count = 0
                 total_bytes = 0
 
@@ -1475,51 +1434,23 @@ async def handle_omi_websocket(
                 )
 
             else:
-                # Unknown event type
                 application_logger.debug(
                     f"Ignoring Wyoming event type '{header['type']}' for OMI client {client_id}"
                 )
-
-    except WebSocketDisconnect:
-        application_logger.info(
-            f"🔌 WebSocket disconnected - Client: {client_id}, Packets: {packet_count}, Total bytes: {total_bytes}"
-        )
-    except Exception as e:
-        application_logger.error(
-            f"❌ WebSocket error for client {client_id}: {e}", exc_info=True
-        )
-    finally:
-        await _cleanup_websocket_connection(
-            client_id, pending_client_id, interim_subscriber_task
-        )
 
 
 async def handle_pcm_websocket(
     ws: WebSocket, token: Optional[str] = None, device_name: Optional[str] = None
 ):
     """Handle PCM WebSocket connections with batch and streaming mode support."""
-    # Generate pending client_id to track connection even if auth fails
-    pending_client_id = f"pending_{uuid.uuid4()}"
-    pending_connections.add(pending_client_id)
-
-    client_id = None
-    client_state = None
-    interim_subscriber_task = None
-
-    try:
-        # Setup connection (accept, auth, create client state)
-        client_id, client_state, user = await _setup_websocket_connection(
-            ws, token, device_name, pending_client_id, "PCM"
-        )
-        if not user:
+    async with _websocket_session(ws, token, device_name, "PCM") as session:
+        if session is None:
             return
-
-        # Get singleton audio stream producer
-        audio_stream_producer = get_audio_stream_producer()
+        client_id, client_state, user, audio_stream_producer, interim_holder = session
 
         packet_count = 0
         total_bytes = 0
-        audio_streaming = False  # Track if audio session is active
+        audio_streaming = False
 
         while True:
             try:
@@ -1544,18 +1475,13 @@ async def handle_pcm_websocket(
                             f"🎙️ Processing audio-start for {client_id}"
                         )
 
-                        # Store user context on client state for rolling batch processing
-                        client_state.user_id = user.user_id
-                        client_state.user_email = user.email
-                        client_state.client_id = client_id
-
-                        # Handle audio session start using helper function (pass websocket for error handling)
+                        # Handle audio session start (pass websocket for error handling)
                         audio_streaming, recording_mode = (
                             await _handle_audio_session_start(
                                 client_state,
                                 header.get("data", {}),
                                 client_id,
-                                websocket=ws,  # Pass websocket for WebUI error display
+                                websocket=ws,
                             )
                         )
 
@@ -1564,22 +1490,19 @@ async def handle_pcm_websocket(
                             application_logger.info(
                                 f"🔴 BACKEND: Initializing streaming session for {client_id}"
                             )
-                            interim_subscriber_task = (
-                                await _initialize_streaming_session(
-                                    client_state,
-                                    audio_stream_producer,
-                                    user.user_id,
-                                    user.email,
-                                    client_id,
-                                    header.get("data", {}),
-                                    websocket=ws,
-                                )
+                            interim_holder[0] = await _initialize_streaming_session(
+                                client_state,
+                                audio_stream_producer,
+                                user.user_id,
+                                user.email,
+                                client_id,
+                                header.get("data", {}),
+                                websocket=ws,
                             )
 
-                        continue  # Continue to audio streaming mode
+                        continue
 
                     elif header["type"] == "ping":
-                        # Handle keepalive ping from frontend
                         application_logger.debug(f"🏓 Received ping from {client_id}")
                         continue
 
@@ -1592,23 +1515,20 @@ async def handle_pcm_websocket(
                         continue
 
                     else:
-                        # Unknown control message type
                         application_logger.debug(
                             f"Ignoring Wyoming control event type '{header['type']}' for {client_id}"
                         )
                         continue
 
                 else:
-                    # Audio streaming mode - receive raw bytes (like speaker recognition)
+                    # Audio streaming mode
                     application_logger.debug(
                         f"🎵 Audio streaming mode for {client_id} - waiting for audio data"
                     )
 
                     try:
-                        # Receive raw audio bytes or check for control messages
                         message = await ws.receive()
 
-                        # Check if it's a disconnect
                         if (
                             "type" in message
                             and message["type"] == "websocket.disconnect"
@@ -1620,12 +1540,10 @@ async def handle_pcm_websocket(
                             )
                             break
 
-                        # Check if it's a text message (control message like audio-stop)
                         if "text" in message:
                             try:
                                 control_header = json.loads(message["text"].strip())
                                 if control_header.get("type") == "audio-stop":
-                                    # Handle audio session stop using helper function
                                     audio_streaming = await _handle_audio_session_stop(
                                         client_state,
                                         audio_stream_producer,
@@ -1633,7 +1551,6 @@ async def handle_pcm_websocket(
                                         user.email,
                                         client_id,
                                     )
-                                    # Reset counters for next session
                                     packet_count = 0
                                     total_bytes = 0
                                     continue
@@ -1643,18 +1560,15 @@ async def handle_pcm_websocket(
                                     )
                                     continue
                                 elif control_header.get("type") == "audio-start":
-                                    # Handle duplicate audio-start messages gracefully (idempotent behavior)
                                     application_logger.info(
                                         f"🔄 Ignoring duplicate audio-start message during streaming for {client_id}"
                                     )
                                     continue
                                 elif control_header.get("type") == "audio-chunk":
-                                    # Handle Wyoming protocol audio-chunk with binary payload
                                     payload_length = control_header.get(
                                         "payload_length"
                                     )
                                     if payload_length and payload_length > 0:
-                                        # Receive the binary audio data
                                         payload_msg = await ws.receive()
                                         if "bytes" in payload_msg:
                                             audio_data = payload_msg["bytes"]
@@ -1665,7 +1579,6 @@ async def handle_pcm_websocket(
                                                 f"🎵 Received audio chunk #{packet_count}: {len(audio_data)} bytes"
                                             )
 
-                                            # Route to appropriate mode handler
                                             audio_format = control_header.get(
                                                 "data", {}
                                             )
@@ -1679,9 +1592,8 @@ async def handle_pcm_websocket(
                                                 client_id,
                                                 websocket=ws,
                                             )
-                                            # Store subscriber task if it was created (first streaming chunk)
-                                            if task and not interim_subscriber_task:
-                                                interim_subscriber_task = task
+                                            if task and not interim_holder[0]:
+                                                interim_holder[0] = task
                                         else:
                                             application_logger.warning(
                                                 f"Expected binary payload for audio-chunk, got: {payload_msg.keys()}"
@@ -1713,9 +1625,7 @@ async def handle_pcm_websocket(
                                 )
                                 continue
 
-                        # Check if it's binary data (raw audio without Wyoming protocol)
                         elif "bytes" in message:
-                            # Raw binary audio data (legacy support)
                             audio_data = message["bytes"]
                             packet_count += 1
                             total_bytes += len(audio_data)
@@ -1724,7 +1634,6 @@ async def handle_pcm_websocket(
                                 f"🎵 Received raw audio chunk #{packet_count}: {len(audio_data)} bytes"
                             )
 
-                            # Route to appropriate mode handler with default format
                             default_format = {"rate": 16000, "width": 2, "channels": 1}
                             task = await _handle_audio_chunk(
                                 client_state,
@@ -1736,9 +1645,8 @@ async def handle_pcm_websocket(
                                 client_id,
                                 websocket=ws,
                             )
-                            # Store subscriber task if it was created (first streaming chunk)
-                            if task and not interim_subscriber_task:
-                                interim_subscriber_task = task
+                            if task and not interim_holder[0]:
+                                interim_holder[0] = task
 
                         else:
                             application_logger.warning(
@@ -1759,22 +1667,21 @@ async def handle_pcm_websocket(
                     f"🔌 WebSocket disconnected during message processing for {client_id}. "
                     f"Code: {e.code}, Reason: {e.reason}"
                 )
-                break  # Exit the loop on disconnect
+                break
             except json.JSONDecodeError as e:
                 application_logger.error(
                     f"❌ JSON decode error in Wyoming protocol for {client_id}: {e}"
                 )
-                continue  # Skip this message but don't disconnect
+                continue
             except ValueError as e:
                 application_logger.error(f"❌ Protocol error for {client_id}: {e}")
-                continue  # Skip this message but don't disconnect
+                continue
             except RuntimeError as e:
-                # Handle "Cannot call receive once a disconnect message has been received"
                 if "disconnect" in str(e).lower():
                     application_logger.info(
                         f"🔌 WebSocket already disconnected for {client_id}: {e}"
                     )
-                    break  # Exit the loop on disconnect
+                    break
                 else:
                     application_logger.error(
                         f"❌ Runtime error for {client_id}: {e}", exc_info=True
@@ -1785,7 +1692,6 @@ async def handle_pcm_websocket(
                     f"❌ Unexpected error processing message for {client_id}: {e}",
                     exc_info=True,
                 )
-                # Check if it's a connection-related error
                 error_msg = str(e).lower()
                 if (
                     "disconnect" in error_msg
@@ -1797,17 +1703,4 @@ async def handle_pcm_websocket(
                     )
                     break
                 else:
-                    continue  # Skip this message for other errors
-
-    except WebSocketDisconnect:
-        application_logger.info(
-            f"🔌 PCM WebSocket disconnected - Client: {client_id}, Packets: {packet_count}, Total bytes: {total_bytes}"
-        )
-    except Exception as e:
-        application_logger.error(
-            f"❌ PCM WebSocket error for client {client_id}: {e}", exc_info=True
-        )
-    finally:
-        await _cleanup_websocket_connection(
-            client_id, pending_client_id, interim_subscriber_task
-        )
+                    continue

@@ -206,7 +206,7 @@ async def on_memory_processed(self, context: PluginContext):
 
 **When**: OMI device button is pressed
 **Context Data**:
-- `state` (str): Button state (`SINGLE_TAP`, `DOUBLE_TAP`)
+- `state` (str): Button state (`SINGLE_PRESS`, `DOUBLE_PRESS`)
 - `timestamp` (float): Unix timestamp of the event
 - `audio_uuid` (str): Current audio session UUID (may be None)
 - `session_id` (str): Streaming session ID (for conversation close)
@@ -222,7 +222,7 @@ friend-lite-sdk (extras/friend-lite-sdk/)
   → parse_button_event() converts payload → ButtonState IntEnum
   ↓
 BLE Client (extras/local-wearable-client/ or mobile app)
-  → Formats as Wyoming protocol: {"type": "button-event", "data": {"state": "SINGLE_TAP"}}
+  → Formats as Wyoming protocol: {"type": "button-event", "data": {"state": "SINGLE_PRESS"}}
   → Sends over WebSocket
   ↓
 Backend (websocket_controller.py)

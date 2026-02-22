@@ -150,12 +150,12 @@ def close_audio_stream_without_stop(stream_id: str) -> int:
     return _manager.close_stream_without_stop(stream_id)
 
 
-def send_button_event(stream_id: str, button_state: str = "SINGLE_TAP") -> None:
+def send_button_event(stream_id: str, button_state: str = "SINGLE_PRESS") -> None:
     """Send a button event to an open stream.
 
     Args:
         stream_id: Stream session ID
-        button_state: Button state ("SINGLE_TAP" or "DOUBLE_TAP")
+        button_state: Button state ("SINGLE_PRESS" or "DOUBLE_PRESS")
     """
     _manager.send_button_event(stream_id, button_state)
 

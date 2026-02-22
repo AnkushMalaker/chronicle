@@ -21,7 +21,7 @@ from advanced_omi_backend.controllers.queue_controller import (
 )
 from advanced_omi_backend.controllers.session_controller import mark_session_complete
 from advanced_omi_backend.models.job import async_job
-from advanced_omi_backend.observability.otel_setup import set_galileo_session
+from advanced_omi_backend.observability.otel_setup import set_otel_session
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.services.plugin_service import (
     ensure_plugin_router,
@@ -1034,7 +1034,7 @@ async def generate_title_summary_job(
         generate_title_and_summary,
     )
 
-    set_galileo_session(conversation_id)
+    set_otel_session(conversation_id)
     logger.info(
         f"📝 Starting title/summary generation for conversation {conversation_id}"
     )

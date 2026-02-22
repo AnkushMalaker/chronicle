@@ -6,8 +6,8 @@ from enum import IntEnum
 
 class ButtonState(IntEnum):
     IDLE = 0
-    SINGLE_TAP = 1
-    DOUBLE_TAP = 2
+    SINGLE_PRESS = 1
+    DOUBLE_PRESS = 2
     LONG_PRESS = 3
     PRESS = 4
     RELEASE = 5
