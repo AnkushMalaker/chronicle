@@ -90,6 +90,8 @@ services:
     build:
       context: .
       dockerfile: providers/vibevoice/Dockerfile
+      args:
+        PYTORCH_CUDA_VERSION: ${PYTORCH_CUDA_VERSION:-cu126}
     image: chronicle-asr-vibevoice:latest
     ports:
       - "${ASR_PORT:-8767}:8765"
@@ -119,6 +121,9 @@ services:
       # LoRA adapter: path to pre-trained adapter to auto-load on startup (optional)
       - LORA_ADAPTER_PATH=${LORA_ADAPTER_PATH:-}
       # Batching config: managed via config/defaults.yml (asr_services.vibevoice)
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     restart: unless-stopped
 
   # ============================================================================

@@ -40,7 +40,9 @@ _yaml.preserve_quotes = True
 class ConfigManager:
     """Manages Chronicle configuration across config.yml and .env files."""
 
-    def __init__(self, service_path: Optional[str] = None, repo_root: Optional[Path] = None):
+    def __init__(
+        self, service_path: Optional[str] = None, repo_root: Optional[Path] = None
+    ):
         """
         Initialize ConfigManager.
 
@@ -63,8 +65,10 @@ class ConfigManager:
         self.config_yml_path = self.repo_root / "config" / "config.yml"
         self.env_path = self.service_path / ".env" if self.service_path else None
 
-        logger.debug(f"ConfigManager initialized: repo_root={self.repo_root}, "
-                    f"service_path={self.service_path}, config_yml={self.config_yml_path}")
+        logger.debug(
+            f"ConfigManager initialized: repo_root={self.repo_root}, "
+            f"service_path={self.service_path}, config_yml={self.config_yml_path}"
+        )
 
     def _find_repo_root(self) -> Path:
         """Find repository root using __file__ location (config_manager.py is always at repo root)."""
@@ -99,7 +103,7 @@ class ConfigManager:
             )
 
         try:
-            with open(self.config_yml_path, 'r') as f:
+            with open(self.config_yml_path, "r") as f:
                 config = _yaml.load(f)
                 if config is None:
                     raise RuntimeError(
@@ -120,12 +124,14 @@ class ConfigManager:
             # Create backup
             if self.config_yml_path.exists():
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                backup_path = self.config_yml_path.parent / f"config.yml.backup.{timestamp}"
+                backup_path = (
+                    self.config_yml_path.parent / f"config.yml.backup.{timestamp}"
+                )
                 shutil.copy2(self.config_yml_path, backup_path)
                 logger.info(f"Backed up config.yml to {backup_path.name}")
 
             # Write updated config
-            with open(self.config_yml_path, 'w') as f:
+            with open(self.config_yml_path, "w") as f:
                 _yaml.dump(config, f)
 
             logger.info(f"Saved config.yml to {self.config_yml_path}")
@@ -146,7 +152,7 @@ class ConfigManager:
 
         try:
             # Read current .env
-            with open(self.env_path, 'r') as f:
+            with open(self.env_path, "r") as f:
                 lines = f.readlines()
 
             # Update or add line
@@ -162,7 +168,9 @@ class ConfigManager:
 
             # If key wasn't found, add it
             if not key_found:
-                updated_lines.append(f"\n# Auto-updated by ConfigManager\n{key}={value}\n")
+                updated_lines.append(
+                    f"\n# Auto-updated by ConfigManager\n{key}={value}\n"
+                )
 
             # Create backup
             backup_path = f"{self.env_path}.bak"
@@ -170,7 +178,7 @@ class ConfigManager:
             logger.debug(f"Backed up .env to {backup_path}")
 
             # Write updated file
-            with open(self.env_path, 'w') as f:
+            with open(self.env_path, "w") as f:
                 f.writelines(updated_lines)
 
             # Update environment variable for current process
@@ -248,7 +256,7 @@ class ConfigManager:
             "config_yml_path": str(self.config_yml_path),
             "env_path": str(self.env_path) if self.env_path else None,
             "requires_restart": True,
-            "status": "success"
+            "status": "success",
         }
 
     def get_memory_config(self) -> Dict[str, Any]:
@@ -324,6 +332,25 @@ class ConfigManager:
         # Update defaults
         config["defaults"].update(updates)
 
+        self._save_config_yml(config)
+
+    def add_or_update_model(self, model_def: Dict[str, Any]):
+        """
+        Add or update a model in the models list by name.
+
+        Args:
+            model_def: Model definition dict with at least a 'name' key.
+        """
+        config = self._load_config_yml()
+        if "models" not in config:
+            config["models"] = []
+        # Update existing or append
+        for i, m in enumerate(config["models"]):
+            if m.get("name") == model_def["name"]:
+                config["models"][i] = model_def
+                break
+        else:
+            config["models"].append(model_def)
         self._save_config_yml(config)
 
     def get_full_config(self) -> Dict[str, Any]:

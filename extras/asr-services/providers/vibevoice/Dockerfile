@@ -8,6 +8,8 @@
 #########################  builder #################################
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 
+ARG PYTORCH_CUDA_VERSION=cu126
+
 WORKDIR /app
 
 # Install system dependencies for building
@@ -21,7 +23,7 @@ ENV UV_LINK_MODE=copy
 # Dependency manifest first for cache-friendly installs
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --group vibevoice
+    uv sync --frozen --no-install-project --group vibevoice --extra ${PYTORCH_CUDA_VERSION}
 
 #########################  runtime #################################
 FROM python:3.12-slim-bookworm AS runtime
