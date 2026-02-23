@@ -8,7 +8,7 @@ Vibevoice Url Without Http Prefix
     [Documentation]  Test that VIBEVOICE_ASR_URL without http:// prefix works correctly.
     ${config_template}=  Create Dictionary  model_url=http://\${oc.env:VIBEVOICE_ASR_URL,host.docker.internal:8767}
     ${env_vars}=  Create Dictionary  VIBEVOICE_ASR_URL=host.docker.internal:8767
-    
+
     ${resolved}=  Resolve Omega Config  ${config_template}  ${env_vars}
     Should Be Equal  ${resolved["model_url"]}  http://host.docker.internal:8767
     Should Not Contain  ${resolved["model_url"]}  http://http://
@@ -17,7 +17,7 @@ Vibevoice Url With Http Prefix Causes Double Prefix
     [Documentation]  Test that VIBEVOICE_ASR_URL WITH http:// causes double prefix (bug scenario).
     ${config_template}=  Create Dictionary  model_url=http://\${oc.env:VIBEVOICE_ASR_URL,host.docker.internal:8767}
     ${env_vars}=  Create Dictionary  VIBEVOICE_ASR_URL=http://host.docker.internal:8767
-    
+
     ${resolved}=  Resolve Omega Config  ${config_template}  ${env_vars}
     Should Be Equal  ${resolved["model_url"]}  http://http://host.docker.internal:8767
     Should Contain  ${resolved["model_url"]}  http://http://
@@ -26,7 +26,7 @@ Vibevoice Url Default Fallback
     [Documentation]  Test that default fallback works when VIBEVOICE_ASR_URL is not set.
     ${config_template}=  Create Dictionary  model_url=http://\${oc.env:VIBEVOICE_ASR_URL,host.docker.internal:8767}
     ${env_vars}=  Create Dictionary
-    
+
     ${resolved}=  Resolve Omega Config  ${config_template}  ${env_vars}
     Should Be Equal  ${resolved["model_url"]}  http://host.docker.internal:8767
 
@@ -34,14 +34,14 @@ Parakeet Url Configuration
     [Documentation]  Test that PARAKEET_ASR_URL follows same pattern.
     ${config_template}=  Create Dictionary  model_url=http://\${oc.env:PARAKEET_ASR_URL,172.17.0.1:8767}
     ${env_vars}=  Create Dictionary  PARAKEET_ASR_URL=host.docker.internal:8767
-    
+
     ${resolved}=  Resolve Omega Config  ${config_template}  ${env_vars}
     Should Be Equal  ${resolved["model_url"]}  http://host.docker.internal:8767
     Should Not Contain  ${resolved["model_url"]}  http://http://
 
 Url Parsing Removes Double Slashes
     [Documentation]  Test that URL with double http:// causes connection failures (simulated by parsing check).
-    
+
     # Valid URL
     ${valid_url}=  Set Variable  http://host.docker.internal:8767/transcribe
     ${parsed_valid}=  Check Url Parsing  ${valid_url}
@@ -62,7 +62,7 @@ Use Provider Segments Default False
     ${backend}=  Create Dictionary  transcription=${transcription}
     ${config_template}=  Create Dictionary  backend=${backend}
     ${env_vars}=  Create Dictionary
-    
+
     ${resolved}=  Resolve Omega Config  ${config_template}  ${env_vars}
     ${val}=  Evaluate  $resolved.get('backend', {}).get('transcription', {}).get('use_provider_segments', False)
     Should Be Equal  ${val}  ${FALSE}
@@ -94,13 +94,13 @@ Model Registry Url Resolution With Env Var
     ...  model_type=stt
     ...  model_provider=vibevoice
     ...  model_url=http://\${oc.env:VIBEVOICE_ASR_URL,host.docker.internal:8767}
-    
+
     ${models}=  Create List  ${model_def}
     ${defaults}=  Create Dictionary  stt=stt-vibevoice
     ${config_template}=  Create Dictionary  defaults=${defaults}  models=${models}
-    
+
     ${env_vars}=  Create Dictionary  VIBEVOICE_ASR_URL=host.docker.internal:8767
-    
+
     ${resolved}=  Resolve Omega Config  ${config_template}  ${env_vars}
     ${resolved_models}=  Get From Dictionary  ${resolved}  models
     Should Be Equal  ${resolved_models[0]["model_url"]}  http://host.docker.internal:8767
@@ -110,17 +110,17 @@ Multiple Asr Providers Url Resolution
     ${m1}=  Create Dictionary  name=stt-vibevoice  model_url=http://\${oc.env:VIBEVOICE_ASR_URL,host.docker.internal:8767}
     ${m2}=  Create Dictionary  name=stt-parakeet  model_url=http://\${oc.env:PARAKEET_ASR_URL,172.17.0.1:8767}
     ${m3}=  Create Dictionary  name=stt-deepgram  model_url=https://api.deepgram.com/v1
-    
+
     ${models}=  Create List  ${m1}  ${m2}  ${m3}
     ${config_template}=  Create Dictionary  models=${models}
-    
+
     ${env_vars}=  Create Dictionary
     ...  VIBEVOICE_ASR_URL=host.docker.internal:8767
     ...  PARAKEET_ASR_URL=localhost:8080
-    
+
     ${resolved}=  Resolve Omega Config  ${config_template}  ${env_vars}
     ${resolved_models}=  Get From Dictionary  ${resolved}  models
-    
+
     Should Be Equal  ${resolved_models[0]["model_url"]}  http://host.docker.internal:8767
     Should Be Equal  ${resolved_models[1]["model_url"]}  http://localhost:8080
     Should Be Equal  ${resolved_models[2]["model_url"]}  https://api.deepgram.com/v1

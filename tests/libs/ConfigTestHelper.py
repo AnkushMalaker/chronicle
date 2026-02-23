@@ -1,14 +1,16 @@
 import os
 import sys
-import yaml
 from pathlib import Path
-from typing import Dict, Any, Optional, List
-from omegaconf import OmegaConf
+from typing import Any, Dict, List, Optional
 from unittest.mock import patch
+
+import yaml
+from omegaconf import OmegaConf
 
 # Add repo root to path to import config_manager
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from config_manager import ConfigManager
+
 
 class ConfigTestHelper:
     """Helper library for testing configuration logic."""
@@ -21,14 +23,16 @@ class ConfigTestHelper:
             return [self._to_dict(v) for v in obj]
         return obj
 
-    def resolve_omega_config(self, config_template: Dict[str, Any], env_vars: Dict[str, str]) -> Dict[str, Any]:
+    def resolve_omega_config(
+        self, config_template: Dict[str, Any], env_vars: Dict[str, str]
+    ) -> Dict[str, Any]:
         """
         Resolves an OmegaConf configuration template with provided environment variables.
         """
         config_template = self._to_dict(config_template)
         # We need to ensure values are strings for os.environ
         str_env_vars = {k: str(v) for k, v in env_vars.items()}
-        
+
         with patch.dict(os.environ, str_env_vars):
             conf = OmegaConf.create(config_template)
             resolved = OmegaConf.to_container(conf, resolve=True)
@@ -39,14 +43,13 @@ class ConfigTestHelper:
         Parses a URL and returns its components to verify correct parsing.
         """
         from urllib.parse import urlparse
-        parsed = urlparse(url)
-        return {
-            "scheme": parsed.scheme,
-            "netloc": parsed.netloc,
-            "path": parsed.path
-        }
 
-    def create_temp_config_structure(self, base_path: str, content: Dict[str, Any]) -> str:
+        parsed = urlparse(url)
+        return {"scheme": parsed.scheme, "netloc": parsed.netloc, "path": parsed.path}
+
+    def create_temp_config_structure(
+        self, base_path: str, content: Dict[str, Any]
+    ) -> str:
         """
         Creates the config folder structure and config.yml within the given base path.
         """
@@ -67,7 +70,9 @@ class ConfigTestHelper:
         model_def = self._to_dict(model_def)
         cm.add_or_update_model(model_def)
 
-    def update_defaults_in_config_manager(self, cm: ConfigManager, updates: Dict[str, str]):
+    def update_defaults_in_config_manager(
+        self, cm: ConfigManager, updates: Dict[str, str]
+    ):
         """Wrapper for update_config_defaults that converts arguments."""
         updates = self._to_dict(updates)
         cm.update_config_defaults(updates)

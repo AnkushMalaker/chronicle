@@ -7,8 +7,9 @@ different CUDA versions (cu121, cu126, cu128) for different GPU architectures.
 
 import os
 import re
-import pytest
 from pathlib import Path
+
+import pytest
 
 
 class TestDockerfileCUDASupport:
@@ -34,33 +35,42 @@ class TestDockerfileCUDASupport:
         content = vibevoice_dockerfile_path.read_text()
 
         # Should have ARG declaration
-        assert re.search(r"ARG\s+PYTORCH_CUDA_VERSION", content), \
-            "Dockerfile must declare PYTORCH_CUDA_VERSION build arg"
+        assert re.search(
+            r"ARG\s+PYTORCH_CUDA_VERSION", content
+        ), "Dockerfile must declare PYTORCH_CUDA_VERSION build arg"
 
         # Should have default value
         arg_match = re.search(r"ARG\s+PYTORCH_CUDA_VERSION=(\w+)", content)
         assert arg_match, "PYTORCH_CUDA_VERSION should have default value"
         default_version = arg_match.group(1)
-        assert default_version in ["cu121", "cu126", "cu128"], \
-            f"Default CUDA version {default_version} should be cu121, cu126, or cu128"
+        assert default_version in [
+            "cu121",
+            "cu126",
+            "cu128",
+        ], f"Default CUDA version {default_version} should be cu121, cu126, or cu128"
 
-    def test_vibevoice_dockerfile_uses_cuda_arg_in_uv_sync(self, vibevoice_dockerfile_path):
+    def test_vibevoice_dockerfile_uses_cuda_arg_in_uv_sync(
+        self, vibevoice_dockerfile_path
+    ):
         """Test that VibeVoice Dockerfile uses CUDA arg in uv sync command."""
         content = vibevoice_dockerfile_path.read_text()
 
         # Should use --extra ${PYTORCH_CUDA_VERSION}
-        assert re.search(r"uv\s+sync.*--extra\s+\$\{PYTORCH_CUDA_VERSION\}", content), \
-            "uv sync command must include --extra ${PYTORCH_CUDA_VERSION}"
+        assert re.search(
+            r"uv\s+sync.*--extra\s+\$\{PYTORCH_CUDA_VERSION\}", content
+        ), "uv sync command must include --extra ${PYTORCH_CUDA_VERSION}"
 
     def test_nemo_dockerfile_has_cuda_support(self, nemo_dockerfile_path):
         """Test that NeMo Dockerfile (reference implementation) has CUDA support."""
         content = nemo_dockerfile_path.read_text()
 
-        assert re.search(r"ARG\s+PYTORCH_CUDA_VERSION", content), \
-            "NeMo Dockerfile should have PYTORCH_CUDA_VERSION arg"
+        assert re.search(
+            r"ARG\s+PYTORCH_CUDA_VERSION", content
+        ), "NeMo Dockerfile should have PYTORCH_CUDA_VERSION arg"
 
-        assert re.search(r"uv\s+sync.*--extra\s+\$\{PYTORCH_CUDA_VERSION\}", content), \
-            "NeMo Dockerfile should use CUDA version in uv sync"
+        assert re.search(
+            r"uv\s+sync.*--extra\s+\$\{PYTORCH_CUDA_VERSION\}", content
+        ), "NeMo Dockerfile should use CUDA version in uv sync"
 
     def test_docker_compose_passes_cuda_arg_to_vibevoice(self, docker_compose_path):
         """Test that docker-compose.yml passes PYTORCH_CUDA_VERSION to vibevoice service."""
@@ -68,22 +78,20 @@ class TestDockerfileCUDASupport:
 
         # Find vibevoice-asr service section
         vibevoice_section = re.search(
-            r"vibevoice-asr:.*?(?=^\S|\Z)",
-            content,
-            re.MULTILINE | re.DOTALL
+            r"vibevoice-asr:.*?(?=^\S|\Z)", content, re.MULTILINE | re.DOTALL
         )
         assert vibevoice_section, "docker-compose.yml must have vibevoice-asr service"
 
         section_text = vibevoice_section.group(0)
 
         # Should have build args section
-        assert re.search(r"args:", section_text), \
-            "vibevoice-asr service should have build args section"
+        assert re.search(
+            r"args:", section_text
+        ), "vibevoice-asr service should have build args section"
 
         # Should pass PYTORCH_CUDA_VERSION
         assert re.search(
-            r"PYTORCH_CUDA_VERSION:\s*\$\{PYTORCH_CUDA_VERSION:-cu126\}",
-            section_text
+            r"PYTORCH_CUDA_VERSION:\s*\$\{PYTORCH_CUDA_VERSION:-cu126\}", section_text
         ), "vibevoice-asr should pass PYTORCH_CUDA_VERSION build arg with cu126 default"
 
     def test_docker_compose_cuda_arg_consistency(self, docker_compose_path):
@@ -95,9 +103,7 @@ class TestDockerfileCUDASupport:
 
         for service_name in gpu_services:
             service_match = re.search(
-                rf"{service_name}:.*?(?=^\S|\Z)",
-                content,
-                re.MULTILINE | re.DOTALL
+                rf"{service_name}:.*?(?=^\S|\Z)", content, re.MULTILINE | re.DOTALL
             )
 
             if service_match:
@@ -108,7 +114,7 @@ class TestDockerfileCUDASupport:
                     # Should have PYTORCH_CUDA_VERSION arg
                     assert re.search(
                         r"PYTORCH_CUDA_VERSION:\s*\$\{PYTORCH_CUDA_VERSION:-cu\d+\}",
-                        service_text
+                        service_text,
                     ), f"{service_name} with GPU should have PYTORCH_CUDA_VERSION build arg"
 
 
@@ -120,8 +126,9 @@ class TestCUDAVersionEnvironmentVariable:
         valid_versions = ["cu121", "cu126", "cu128"]
 
         for version in valid_versions:
-            assert re.match(r"^cu\d{3}$", version), \
-                f"{version} should match pattern cu### (e.g., cu121, cu126)"
+            assert re.match(
+                r"^cu\d{3}$", version
+            ), f"{version} should match pattern cu### (e.g., cu121, cu126)"
 
     def test_cuda_version_from_env(self):
         """Test reading CUDA version from environment."""
@@ -161,13 +168,14 @@ class TestGPUArchitectureCUDAMapping:
         # Map GPU architecture to minimum CUDA version
         arch_to_cuda = {
             "sm_120": "cu128",  # RTX 5090, RTX 50 series
-            "sm_90": "cu126",   # RTX 4090, H100
-            "sm_89": "cu121",   # RTX 4090
-            "sm_86": "cu121",   # RTX 3090, A6000
+            "sm_90": "cu126",  # RTX 4090, H100
+            "sm_89": "cu121",  # RTX 4090
+            "sm_86": "cu121",  # RTX 3090, A6000
         }
 
-        assert arch_to_cuda.get(gpu_arch) == required_cuda, \
-            f"GPU architecture {gpu_arch} requires CUDA version {required_cuda}"
+        assert (
+            arch_to_cuda.get(gpu_arch) == required_cuda
+        ), f"GPU architecture {gpu_arch} requires CUDA version {required_cuda}"
 
     def test_older_gpus_work_with_cu121(self):
         """Test that older GPUs (sm_86, sm_80) work with cu121."""
@@ -175,8 +183,11 @@ class TestGPUArchitectureCUDAMapping:
 
         for arch in older_archs:
             # cu121 supports these architectures
-            assert arch in ["sm_75", "sm_80", "sm_86"], \
-                f"{arch} should be supported by CUDA 12.1"
+            assert arch in [
+                "sm_75",
+                "sm_80",
+                "sm_86",
+            ], f"{arch} should be supported by CUDA 12.1"
 
 
 class TestPyProjectCUDAExtras:
@@ -199,8 +210,9 @@ class TestPyProjectCUDAExtras:
 
         for version in cuda_versions:
             # Look for the CUDA version as an extra
-            assert re.search(rf'["\']?{version}["\']?\s*=', content), \
-                f"pyproject.toml should define {version} extra"
+            assert re.search(
+                rf'["\']?{version}["\']?\s*=', content
+            ), f"pyproject.toml should define {version} extra"
 
     def test_pyproject_cuda_extras_have_pytorch(self, pyproject_path):
         """Test that CUDA extras include torch/torchaudio dependencies."""
@@ -211,9 +223,9 @@ class TestPyProjectCUDAExtras:
 
         # Each CUDA extra should reference torch with the appropriate index
         # e.g., { extra = "cu128" } or { index = "pytorch-cu128" }
-        assert re.search(r'extra\s*=\s*["\']cu\d{3}["\']', content) or \
-               re.search(r'index\s*=\s*["\']pytorch-cu\d{3}["\']', content), \
-            "CUDA extras should reference PyTorch with CUDA version"
+        assert re.search(r'extra\s*=\s*["\']cu\d{3}["\']', content) or re.search(
+            r'index\s*=\s*["\']pytorch-cu\d{3}["\']', content
+        ), "CUDA extras should reference PyTorch with CUDA version"
 
 
 if __name__ == "__main__":

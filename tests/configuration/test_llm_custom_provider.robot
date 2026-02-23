@@ -11,7 +11,7 @@ Setup Temp Config
     ${random_suffix}=  Generate Random String  8  [NUMBERS]
     ${temp_path}=  Join Path  ${OUTPUT DIR}  temp_config_${random_suffix}
     Create Directory  ${temp_path}
-    
+
     # Create initial default config content
     ${defaults}=  Create Dictionary  llm=openai-llm  embedding=openai-embed  stt=stt-deepgram
     ${model1_params}=  Create Dictionary  temperature=${0.2}  max_tokens=${2000}
@@ -73,7 +73,7 @@ Add New Model To Config
 
     ${config}=  Call Method  ${cm}  get_full_config
     ${models}=  Get From Dictionary  ${config}  models
-    
+
     ${target_model}=  Set Variable  ${None}
     FOR  ${m}  IN  @{models}
         Run Keyword If  '${m["name"]}' == 'custom-llm'  Set Test Variable  ${target_model}  ${m}
@@ -101,7 +101,7 @@ Update Existing Model
 
     ${config}=  Call Method  ${cm}  get_full_config
     ${models}=  Get From Dictionary  ${config}  models
-    
+
     ${count}=  Set Variable  0
     ${target_model}=  Set Variable  ${None}
     FOR  ${m}  IN  @{models}
@@ -245,14 +245,14 @@ Existing Models Preserved After Adding Custom
     ${models_after}=  Get From Dictionary  ${config_after}  models
     ${new_count}=  Get Length  ${models_after}
     ${expected_count}=  Evaluate  ${original_count} + 1
-    
+
     Should Be Equal As Integers  ${new_count}  ${expected_count}
 
     ${model_names}=  Create List
     FOR  ${m}  IN  @{models_after}
         Append To List  ${model_names}  ${m["name"]}
     END
-    
+
     List Should Contain Value  ${model_names}  openai-llm
     List Should Contain Value  ${model_names}  local-embed
     List Should Contain Value  ${model_names}  custom-llm
