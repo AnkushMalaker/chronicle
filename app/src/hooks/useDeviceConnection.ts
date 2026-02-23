@@ -1,6 +1,7 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { Alert } from 'react-native';
 import { OmiConnection, BleAudioCodec, OmiDevice } from 'friend-lite-react-native';
+import { useConnectionLog } from '../contexts/ConnectionLogContext';
 
 interface UseDeviceConnection {
   connectedDevice: OmiDevice | null;
@@ -11,6 +12,7 @@ interface UseDeviceConnection {
   disconnectFromDevice: () => Promise<void>;
   getAudioCodec: () => Promise<void>;
   getBatteryLevel: () => Promise<void>;
+  getRawBatteryLevel: () => Promise<number>;
   connectedDeviceId: string | null;
 }
 
@@ -24,6 +26,11 @@ export const useDeviceConnection = (
   const [currentCodec, setCurrentCodec] = useState<BleAudioCodec | null>(null);
   const [batteryLevel, setBatteryLevel] = useState<number>(-1);
   const [connectedDeviceId, setConnectedDeviceId] = useState<string | null>(null);
+  const { addEvent } = useConnectionLog();
+
+  // Debounce guards
+  const lastConnectAttemptRef = useRef<number>(0);
+  const disconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const handleConnectionStateChange = useCallback((id: string, state: string) => {
     console.log(`Device ${id} connection state: ${state}`);
@@ -31,20 +38,38 @@ export const useDeviceConnection = (
     setIsConnecting(false);
 
     if (isNowConnected) {
+        // Cancel any pending disconnect timer (handles BLE flapping)
+        if (disconnectTimerRef.current) {
+          clearTimeout(disconnectTimerRef.current);
+          disconnectTimerRef.current = null;
+        }
         setConnectedDeviceId(id);
-        // Potentially fetch the device details from omiConnection if needed to set connectedDevice
-        // For now, we'll assume the app manages the full OmiDevice object elsewhere or doesn't need it here.
+        addEvent('connect_success', `Connected to ${id}`, { deviceId: id });
         if (onConnect) onConnect();
     } else {
-        setConnectedDeviceId(null);
-        setConnectedDevice(null);
-        setCurrentCodec(null);
-        setBatteryLevel(-1);
-        if (onDisconnect) onDisconnect(); 
+        // Debounce disconnect by 500ms to handle BLE flapping
+        if (disconnectTimerRef.current) clearTimeout(disconnectTimerRef.current);
+        disconnectTimerRef.current = setTimeout(() => {
+          disconnectTimerRef.current = null;
+          setConnectedDeviceId(null);
+          setConnectedDevice(null);
+          setCurrentCodec(null);
+          setBatteryLevel(-1);
+          addEvent('disconnect', `Disconnected from ${id}`, { deviceId: id });
+          if (onDisconnect) onDisconnect();
+        }, 500);
     }
   }, [onDisconnect, onConnect]);
 
   const connectToDevice = useCallback(async (deviceId: string) => {
+    // Connect debounce: ignore rapid double-taps within 100ms
+    const now = Date.now();
+    if (now - lastConnectAttemptRef.current < 100) {
+      console.log('[Connection] Debounced rapid connect attempt');
+      return;
+    }
+    lastConnectAttemptRef.current = now;
+
     if (connectedDeviceId && connectedDeviceId !== deviceId) {
       console.log('Disconnecting from previous device before connecting to new one.');
       await disconnectFromDevice();
@@ -55,17 +80,18 @@ export const useDeviceConnection = (
     }
 
     setIsConnecting(true);
-    setConnectedDevice(null); // Clear previous device details
+    setConnectedDevice(null);
     setCurrentCodec(null);
     setBatteryLevel(-1);
+    addEvent('connect_start', `Connecting to ${deviceId}`, { deviceId });
 
     try {
       const success = await omiConnection.connect(deviceId, handleConnectionStateChange);
       if (success) {
         console.log('Successfully initiated connection to device:', deviceId);
-        // Note: actual connected state is set by handleConnectionStateChange callback
       } else {
         setIsConnecting(false);
+        addEvent('connect_fail', `Connection failed to ${deviceId}`, { deviceId });
         Alert.alert('Connection Failed', 'Could not connect to the device. Please try again.');
       }
     } catch (error) {
@@ -73,6 +99,7 @@ export const useDeviceConnection = (
       setIsConnecting(false);
       setConnectedDevice(null);
       setConnectedDeviceId(null);
+      addEvent('connect_fail', `Connection error: ${error}`, { deviceId });
       Alert.alert('Connection Error', String(error));
     }
   }, [omiConnection, handleConnectionStateChange, connectedDeviceId]); // Added connectedDeviceId
@@ -144,6 +171,12 @@ export const useDeviceConnection = (
     }
   }, [omiConnection, connectedDeviceId]);
 
+  const getRawBatteryLevel = useCallback(async (): Promise<number> => {
+    const level = await omiConnection.getBatteryLevel();
+    setBatteryLevel(level);
+    return level;
+  }, [omiConnection]);
+
   return {
     connectedDevice,
     isConnecting,
@@ -153,6 +186,7 @@ export const useDeviceConnection = (
     disconnectFromDevice,
     getAudioCodec,
     getBatteryLevel,
+    getRawBatteryLevel,
     connectedDeviceId
   };
 }; 

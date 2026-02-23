@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { BleManager, State as BluetoothState } from 'react-native-ble-plx';
-import { OmiConnection, OmiDevice } from 'friend-lite-react-native'; // Assuming this is the correct import for Omi types
+import { OmiConnection, OmiDevice } from 'friend-lite-react-native';
+import { useConnectionLog } from '../contexts/ConnectionLogContext';
 
 interface UseDeviceScanning {
   devices: OmiDevice[];
@@ -20,8 +21,9 @@ export const useDeviceScanning = (
   const [devices, setDevices] = useState<OmiDevice[]>([]);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const stopScanFunctionRef = useRef<(() => void) | null>(null); // To store the stop function from omiConnection.scanForDevices
-  const scanTimeoutRef = useRef<NodeJS.Timeout | null>(null); // For an explicit scan timeout
+  const stopScanFunctionRef = useRef<(() => void) | null>(null);
+  const scanTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const { addEvent } = useConnectionLog();
 
   const handleStopScan = useCallback(() => {
     console.log('[Scanner] handleStopScan called');
@@ -39,7 +41,8 @@ export const useDeviceScanning = (
       }
       stopScanFunctionRef.current = null; // Clear it after stopping
     }
-    setScanning(false); // Explicitly set scanning to false
+    setScanning(false);
+    addEvent('scan_stop', 'BLE scan stopped');
     console.log('[Scanner] Scan stopped, scanning state set to false.');
   }, []);
 
@@ -87,22 +90,22 @@ export const useDeviceScanning = (
 
     console.log('[Scanner] Starting device scan with omiConnection');
     setScanning(true);
+    addEvent('scan_start', 'BLE scan started');
 
     try {
       stopScanFunctionRef.current = omiConnection.scanForDevices(
         (device: OmiDevice) => { // Single callback for found devices
           console.log(`[Scanner] Device found: ${device.name} (${device.id}), RSSI: ${device.rssi}`);
           setDevices((prevDevices) => {
-            // Check if device already exists, update if new, or if RSSI is stronger (optional)
             const existingDeviceIndex = prevDevices.findIndex((d) => d.id === device.id);
             if (existingDeviceIndex === -1) {
+              addEvent('scan_result', `Found: ${device.name || 'Unknown'}`, { deviceId: device.id, deviceName: device.name || undefined, rssi: device.rssi ?? undefined });
               return [...prevDevices, device];
             } else {
-              // Optionally update existing device info, e.g., if RSSI is part of OmiDevice and useful
-              // const updatedDevices = [...prevDevices];
-              // updatedDevices[existingDeviceIndex] = device; 
-              // return updatedDevices;
-              return prevDevices; // Or just keep the first instance found
+              // Update existing device with fresh RSSI
+              const updatedDevices = [...prevDevices];
+              updatedDevices[existingDeviceIndex] = device;
+              return updatedDevices;
             }
           });
         }

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Platform, PermissionsAndroid, Permission as ReactNativePermission } from 'react-native';
 import { BleManager, State as BluetoothState } from 'react-native-ble-plx';
+import { useConnectionLog } from '../contexts/ConnectionLogContext';
 
 // Define a constant for the minimum Android SDK version requiring runtime permissions
 // const MIN_ANDROID_SDK_FOR_PERMISSIONS = 31; // Android 12 (S) - Will use Platform.Version
@@ -10,13 +11,14 @@ export const useBluetoothManager = () => {
   const [bluetoothState, setBluetoothState] = useState<BluetoothState>(BluetoothState.Unknown);
   const [permissionGranted, setPermissionGranted] = useState(false);
   const [isPermissionsLoading, setIsPermissionsLoading] = useState(true);
+  const { addEvent } = useConnectionLog();
 
   useEffect(() => {
     console.log('[BTManager] Initializing Bluetooth Manager');
     const subscription = bleManager.onStateChange((state) => {
       console.log(`[BTManager] Bluetooth state changed: ${state}`);
       setBluetoothState(state);
-      // No automatic permission re-check here, handled by initial check and explicit calls
+      addEvent('bt_state_change', `Bluetooth state: ${state}`);
     }, true);
     return () => {
       console.log('[BTManager] Cleaning up Bluetooth Manager state change subscription');

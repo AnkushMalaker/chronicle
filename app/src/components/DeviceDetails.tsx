@@ -1,35 +1,26 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, TextInput } from 'react-native';
 import { BleAudioCodec } from 'friend-lite-react-native';
+import { useTheme, ThemeColors } from '../theme';
 
 interface DeviceDetailsProps {
-  // Device Info
   connectedDeviceId: string | null;
   onGetAudioCodec: () => void;
   currentCodec: BleAudioCodec | null;
-  onGetBatteryLevel: () => void;
   batteryLevel: number;
-
-  // Audio Listener
+  isLowBattery: boolean;
+  onRefreshBattery: () => void;
   isListeningAudio: boolean;
   onStartAudioListener: () => void;
   onStopAudioListener: () => void;
   audioPacketsReceived: number;
-
-  // WebSocket URL for custom backend
   webSocketUrl: string;
   onSetWebSocketUrl: (url: string) => void;
-
-  // Custom Audio Streamer Status
   isAudioStreaming: boolean;
   isConnectingAudioStreamer: boolean;
   audioStreamerError: string | null;
-
-  // User ID Management  
   userId: string;
   onSetUserId: (userId: string) => void;
-
-  // Audio Listener Retry State
   isAudioListenerRetrying?: boolean;
   audioListenerRetryAttempts?: number;
 }
@@ -38,8 +29,9 @@ export const DeviceDetails: React.FC<DeviceDetailsProps> = ({
   connectedDeviceId,
   onGetAudioCodec,
   currentCodec,
-  onGetBatteryLevel,
   batteryLevel,
+  isLowBattery,
+  onRefreshBattery,
   isListeningAudio,
   onStartAudioListener,
   onStopAudioListener,
@@ -54,131 +46,133 @@ export const DeviceDetails: React.FC<DeviceDetailsProps> = ({
   isAudioListenerRetrying,
   audioListenerRetryAttempts
 }) => {
+  const { colors } = useTheme();
+  const s = createStyles(colors);
+
   if (!connectedDeviceId) return null;
 
-
   return (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Device Functions</Text>
+    <View style={s.section}>
+      <Text style={s.sectionTitle}>Device Functions</Text>
 
-      {/* Audio Codec */}
-      <TouchableOpacity style={styles.button} onPress={onGetAudioCodec}>
-        <Text style={styles.buttonText}>Get Audio Codec</Text>
+      <TouchableOpacity style={s.button} onPress={onGetAudioCodec}>
+        <Text style={s.buttonText}>Get Audio Codec</Text>
       </TouchableOpacity>
       {currentCodec && (
-        <View style={styles.infoContainerSM}>
-          <Text style={styles.infoTitle}>Current Audio Codec:</Text>
-          <Text style={styles.infoValue}>{currentCodec}</Text>
+        <View style={s.infoContainerSM}>
+          <Text style={s.infoTitle}>Current Audio Codec:</Text>
+          <Text style={s.infoValue}>{currentCodec}</Text>
         </View>
       )}
 
-      {/* Battery Level */}
-      <TouchableOpacity style={[styles.button, { marginTop: 15 }]} onPress={onGetBatteryLevel}>
-        <Text style={styles.buttonText}>Get Battery Level</Text>
-      </TouchableOpacity>
-      {batteryLevel >= 0 && (
-        <View style={styles.batteryContainer}>
-          <Text style={styles.infoTitle}>Battery Level:</Text>
-          <View style={styles.batteryLevelDisplayContainer}>
-            <View style={[styles.batteryLevelBar, { width: `${batteryLevel}%` }]} />
-            <Text style={styles.batteryLevelText}>{batteryLevel}%</Text>
+      {batteryLevel >= 0 ? (
+        <View style={[s.batteryContainer, isLowBattery ? { borderLeftColor: colors.danger } : null]}>
+          <View style={s.batteryHeaderRow}>
+            <Text style={s.infoTitle}>Battery Level:</Text>
+            <TouchableOpacity onPress={onRefreshBattery} style={s.refreshButton}>
+              <Text style={s.refreshButtonText}>Refresh</Text>
+            </TouchableOpacity>
           </View>
+          <View style={s.batteryLevelDisplayContainer}>
+            <View style={[s.batteryLevelBar, { width: `${batteryLevel}%`, backgroundColor: isLowBattery ? colors.danger : colors.success }]} />
+            <Text style={s.batteryLevelText}>{batteryLevel}%</Text>
+          </View>
+          {isLowBattery && <Text style={s.lowBatteryText}>Low battery</Text>}
+        </View>
+      ) : (
+        <View style={s.batteryContainer}>
+          <Text style={s.infoTitle}>Battery: reading...</Text>
         </View>
       )}
 
-      {/* User ID Management */}
-      <View style={styles.subSection}>
-        <Text style={styles.subSectionTitle}>User ID (optional)</Text>
-        <Text style={styles.inputLabel}>Enter User ID (for device identification):</Text>
+      <View style={s.subSection}>
+        <Text style={s.subSectionTitle}>User ID (optional)</Text>
+        <Text style={s.inputLabel}>Enter User ID (for device identification):</Text>
         <TextInput
-          style={styles.textInput}
+          style={s.textInput}
           value={userId}
           onChangeText={onSetUserId}
           placeholder="e.g., device_name, user_identifier"
+          placeholderTextColor={colors.textTertiary}
           autoCapitalize="none"
           returnKeyType="done"
           autoCorrect={false}
           editable={!isListeningAudio && !isAudioStreaming}
         />
-        
-        
         {userId && (
-          <View style={styles.infoContainerSM}>
-            <Text style={styles.infoTitle}>Current User ID:</Text>
-            <Text style={styles.infoValue}>{userId}</Text>
+          <View style={s.infoContainerSM}>
+            <Text style={s.infoTitle}>Current User ID:</Text>
+            <Text style={s.infoValue}>{userId}</Text>
           </View>
         )}
       </View>
 
-      {/* Audio Controls */}
-      <View style={styles.subSection}>
+      <View style={s.subSection}>
         <TouchableOpacity
           style={[
-            styles.button, 
-            isListeningAudio || isAudioListenerRetrying ? styles.buttonWarning : null, 
+            s.button,
+            isListeningAudio || isAudioListenerRetrying ? { backgroundColor: colors.warning } : null,
             { marginTop: 15 }
           ]}
           onPress={isListeningAudio || isAudioListenerRetrying ? onStopAudioListener : onStartAudioListener}
         >
-          <Text style={styles.buttonText}>
-            {isListeningAudio ? "Stop Audio Listener" : 
+          <Text style={s.buttonText}>
+            {isListeningAudio ? "Stop Audio Listener" :
              isAudioListenerRetrying ? "Stop Retry" : "Start Audio Listener"}
           </Text>
         </TouchableOpacity>
-        
+
         {isAudioListenerRetrying && (
-          <View style={styles.retryContainer}>
-            <Text style={styles.retryText}>
-              🔄 Retrying audio listener... (Attempt {audioListenerRetryAttempts || 0}/10)
+          <View style={s.retryContainer}>
+            <Text style={s.retryText}>
+              Retrying audio listener... (Attempt {audioListenerRetryAttempts || 0}/10)
             </Text>
           </View>
         )}
-        
+
         {isListeningAudio && (
-          <View style={styles.infoContainerSM}>
-            <Text style={styles.infoTitle}>Audio Packets Received:</Text>
-            <Text style={styles.infoValueLg}>{audioPacketsReceived}</Text>
+          <View style={s.infoContainerSM}>
+            <Text style={s.infoTitle}>Audio Packets Received:</Text>
+            <Text style={s.infoValueLg}>{audioPacketsReceived}</Text>
           </View>
         )}
       </View>
 
-      {/* Transcription Controls - Entire section REMOVED and replaced by WebSocket URL input */}
-      <View style={styles.customStreamerSection}>
-        <Text style={styles.subSectionTitle}>Custom Audio Streaming</Text>
-        <Text style={styles.inputLabel}>Backend WebSocket URL:</Text>
+      <View style={s.customStreamerSection}>
+        <Text style={s.subSectionTitle}>Custom Audio Streaming</Text>
+        <Text style={s.inputLabel}>Backend WebSocket URL:</Text>
         <TextInput
-          style={styles.textInput}
+          style={s.textInput}
           value={webSocketUrl}
           onChangeText={onSetWebSocketUrl}
           placeholder="wss://your-backend.com/ws/audio"
+          placeholderTextColor={colors.textTertiary}
           autoCapitalize="none"
           keyboardType="url"
           returnKeyType="done"
           autoCorrect={false}
-          editable={!isListeningAudio && !isAudioStreaming} // Prevent edit while listening/streaming
+          editable={!isListeningAudio && !isAudioStreaming}
         />
 
-        {/* Display Streamer Status */}
         {isConnectingAudioStreamer && (
-          <Text style={styles.statusText}>Connecting to WebSocket...</Text>
+          <Text style={s.statusText}>Connecting to WebSocket...</Text>
         )}
         {isAudioStreaming && (
-          <Text style={[styles.statusText, styles.statusStreaming]}>Streaming audio to WebSocket...</Text>
+          <Text style={[s.statusText, { color: colors.success }]}>Streaming audio to WebSocket...</Text>
         )}
         {audioStreamerError && (
-          <Text style={[styles.statusText, styles.statusError]}>Error: {audioStreamerError}</Text>
+          <Text style={[s.statusText, { color: colors.danger, fontWeight: 'bold' }]}>Error: {audioStreamerError}</Text>
         )}
       </View>
-
     </View>
   );
 };
 
-const styles = StyleSheet.create({
+const createStyles = (colors: ThemeColors) => StyleSheet.create({
   section: {
     marginBottom: 25,
     padding: 15,
-    backgroundColor: 'white',
+    backgroundColor: colors.card,
     borderRadius: 10,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
@@ -190,7 +184,7 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '600',
     marginBottom: 15,
-    color: '#333',
+    color: colors.text,
   },
   subSection: {
     marginTop: 20,
@@ -199,28 +193,15 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     marginBottom: 12,
-    color: '#444',
+    color: colors.textSecondary,
   },
   button: {
-    backgroundColor: '#007AFF',
+    backgroundColor: colors.primary,
     paddingVertical: 12,
     paddingHorizontal: 20,
     borderRadius: 8,
     alignItems: 'center',
     elevation: 2,
-  },
-  buttonWarning: {
-    backgroundColor: '#FF9500',
-  },
-  buttonDisabled: {
-    backgroundColor: '#A0A0A0',
-    opacity: 0.7,
-  },
-  buttonSecondary: {
-    backgroundColor: '#8E8E93',
-  },
-  buttonSecondaryText: {
-    color: 'white',
   },
   buttonText: {
     color: 'white',
@@ -230,40 +211,63 @@ const styles = StyleSheet.create({
   infoContainerSM: {
     marginTop: 10,
     padding: 10,
-    backgroundColor: '#f0f0f0',
+    backgroundColor: colors.inputBackground,
     borderRadius: 8,
     alignItems: 'center',
   },
   infoTitle: {
     fontSize: 14,
     fontWeight: '500',
-    color: '#555',
+    color: colors.textSecondary,
   },
   infoValue: {
     fontSize: 16,
     fontWeight: 'bold',
-    color: '#007AFF',
+    color: colors.primary,
     marginTop: 5,
   },
   infoValueLg: {
     fontSize: 18,
     fontWeight: 'bold',
-    color: '#FF9500',
+    color: colors.warning,
     marginTop: 5,
   },
   batteryContainer: {
-    marginTop: 10,
+    marginTop: 15,
     padding: 12,
-    backgroundColor: '#f0f0f0',
+    backgroundColor: colors.inputBackground,
     borderRadius: 8,
-    alignItems: 'center',
     borderLeftWidth: 4,
-    borderLeftColor: '#4CD964',
+    borderLeftColor: colors.success,
+  },
+  batteryHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  refreshButton: {
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 4,
+    backgroundColor: colors.separator,
+  },
+  refreshButtonText: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    fontWeight: '500',
+  },
+  lowBatteryText: {
+    marginTop: 6,
+    fontSize: 12,
+    color: colors.danger,
+    fontWeight: '600',
+    textAlign: 'center',
   },
   batteryLevelDisplayContainer: {
     width: '100%',
     height: 24,
-    backgroundColor: '#e0e0e0',
+    backgroundColor: colors.separator,
     borderRadius: 12,
     marginTop: 8,
     overflow: 'hidden',
@@ -271,7 +275,7 @@ const styles = StyleSheet.create({
   },
   batteryLevelBar: {
     height: '100%',
-    backgroundColor: '#4CD964',
+    backgroundColor: colors.success,
     borderRadius: 12,
     position: 'absolute',
     left: 0,
@@ -284,60 +288,51 @@ const styles = StyleSheet.create({
     lineHeight: 24,
     fontSize: 12,
     fontWeight: 'bold',
-    color: '#333',
+    color: colors.text,
   },
-  // Transcription Specific Styles - Some can be repurposed or removed
   customStreamerSection: {
     marginTop: 20,
     paddingTop: 15,
     borderTopWidth: 1,
-    borderTopColor: '#e0e0e0',
-    // alignItems: 'center', // No longer centering checkbox etc.
+    borderTopColor: colors.separator,
   },
   inputLabel: {
     fontSize: 14,
-    color: '#333',
+    color: colors.text,
     marginBottom: 5,
     fontWeight: '500',
   },
   textInput: {
-    backgroundColor: '#f0f0f0',
+    backgroundColor: colors.inputBackground,
     borderWidth: 1,
-    borderColor: '#ddd',
+    borderColor: colors.inputBorder,
     borderRadius: 6,
     padding: 10,
     fontSize: 14,
-    width: '100%', // Ensure input takes full width of its container
+    width: '100%',
     marginBottom: 10,
-    color: '#333',
+    color: colors.text,
   },
-  statusText: { // New style for status messages
+  statusText: {
     marginTop: 8,
     fontSize: 13,
-    color: '#555',
+    color: colors.textSecondary,
     textAlign: 'left',
-  },
-  statusStreaming: {
-    color: 'green',
-  },
-  statusError: {
-    color: 'red',
-    fontWeight: 'bold',
   },
   retryContainer: {
     marginTop: 10,
     padding: 12,
-    backgroundColor: '#FFF3CD',
+    backgroundColor: colors.inputBackground,
     borderRadius: 8,
     borderLeftWidth: 4,
-    borderLeftColor: '#FF9500',
+    borderLeftColor: colors.warning,
   },
   retryText: {
     fontSize: 14,
-    color: '#856404',
+    color: colors.warning,
     fontWeight: '500',
     textAlign: 'center',
   },
 });
 
-export default DeviceDetails; 
+export default DeviceDetails;

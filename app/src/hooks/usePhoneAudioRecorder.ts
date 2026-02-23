@@ -8,6 +8,7 @@ import {
   ExpoAudioStreamModule,
 } from '@siteed/expo-audio-studio';
 import type { AudioDataEvent } from '@siteed/expo-audio-studio';
+// @ts-ignore - no type declarations available
 import base64 from 'react-native-base64';
 
 
@@ -140,8 +141,8 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
       // EXACT config from 2025 guide + processing for audio levels
       const config = {
         interval: 100,
-        sampleRate: 16000,
-        channels: 1,
+        sampleRate: 16000 as const,
+        channels: 1 as const,
         encoding: "pcm_16bit" as const,
         enableProcessing: true,        // Enable audio analysis for live RMS
         intervalAnalysis: 500,         // Analysis every 500ms
@@ -149,7 +150,7 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
           // EXACT payload handling from guide
           const payload = typeof event.data === "string" 
             ? event.data 
-            : Buffer.from(event.data as ArrayBuffer).toString("base64");
+            : Buffer.from(event.data as unknown as ArrayBuffer).toString("base64");
           
           // Convert to our expected format
           if (onAudioDataRef.current && mountedRef.current) {

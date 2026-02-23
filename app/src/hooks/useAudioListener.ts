@@ -1,7 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { Alert } from 'react-native';
 import { OmiConnection } from 'friend-lite-react-native';
-import { Subscription, ConnectionPriority } from 'react-native-ble-plx'; // OmiConnection might use this type for subscriptions
+import { Subscription, ConnectionPriority } from 'react-native-ble-plx';
+import { useConnectionLog } from '../contexts/ConnectionLogContext';
 
 interface UseAudioListener {
   isListeningAudio: boolean;
@@ -20,6 +21,7 @@ export const useAudioListener = (
   const [audioPacketsReceived, setAudioPacketsReceived] = useState<number>(0);
   const [isRetrying, setIsRetrying] = useState<boolean>(false);
   const [retryAttempts, setRetryAttempts] = useState<number>(0);
+  const { addEvent } = useConnectionLog();
   
   const audioSubscriptionRef = useRef<Subscription | null>(null);
   const uiUpdateIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -59,6 +61,7 @@ export const useAudioListener = (
         setIsListeningAudio(false);
         localPacketCounterRef.current = 0; // Reset local counter
         // setAudioPacketsReceived(0); // Optionally reset global counter on stop, or keep cumulative
+        addEvent('audio_stop', 'Audio listener stopped');
         console.log('Audio listener stopped.');
       } catch (error) {
         console.error('Stop audio listener error:', error);
@@ -107,6 +110,7 @@ export const useAudioListener = (
         setIsListeningAudio(true);
         setIsRetrying(false);
         setRetryAttempts(0);
+        addEvent('audio_start', 'Audio listener started');
         console.log('[AudioListener] Audio listener started successfully');
         return true;
       } else {

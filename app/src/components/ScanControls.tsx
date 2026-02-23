@@ -1,11 +1,12 @@
 import React from 'react';
 import { TouchableOpacity, Text, StyleSheet, View } from 'react-native';
+import { useTheme, ThemeColors } from '../theme';
 
 interface ScanControlsProps {
   scanning: boolean;
   onScanPress: () => void;
   onStopScanPress: () => void;
-  canScan: boolean; // To disable button if permissions not granted or BT is off
+  canScan: boolean;
 }
 
 export const ScanControls: React.FC<ScanControlsProps> = ({
@@ -14,29 +15,32 @@ export const ScanControls: React.FC<ScanControlsProps> = ({
   onStopScanPress,
   canScan,
 }) => {
+  const { colors } = useTheme();
+  const s = createStyles(colors);
+
   return (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Bluetooth Connection</Text>
+    <View style={s.section}>
+      <Text style={s.sectionTitle}>Bluetooth Connection</Text>
       <TouchableOpacity
         style={[
-          styles.button,
-          scanning ? styles.buttonWarning : null,
-          !canScan && !scanning ? styles.buttonDisabled : null, // Disable if cannot scan and not already scanning
+          s.button,
+          scanning ? { backgroundColor: colors.warning } : null,
+          !canScan && !scanning ? s.buttonDisabled : null,
         ]}
         onPress={scanning ? onStopScanPress : onScanPress}
         disabled={!canScan && !scanning}
       >
-        <Text style={styles.buttonText}>{scanning ? "Stop Scan" : "Scan for Devices"}</Text>
+        <Text style={s.buttonText}>{scanning ? "Stop Scan" : "Scan for Devices"}</Text>
       </TouchableOpacity>
     </View>
   );
 };
 
-const styles = StyleSheet.create({
+const createStyles = (colors: ThemeColors) => StyleSheet.create({
   section: {
     marginBottom: 25,
     padding: 15,
-    backgroundColor: 'white',
+    backgroundColor: colors.card,
     borderRadius: 10,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
@@ -48,10 +52,10 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '600',
     marginBottom: 15,
-    color: '#333',
+    color: colors.text,
   },
   button: {
-    backgroundColor: '#007AFF',
+    backgroundColor: colors.primary,
     paddingVertical: 12,
     paddingHorizontal: 20,
     borderRadius: 8,
@@ -62,11 +66,8 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 2,
   },
-  buttonWarning: {
-    backgroundColor: '#FF9500',
-  },
   buttonDisabled: {
-    backgroundColor: '#A0A0A0',
+    backgroundColor: colors.disabled,
     opacity: 0.7,
   },
   buttonText: {
@@ -76,4 +77,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default ScanControls; 
+export default ScanControls;

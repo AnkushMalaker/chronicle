@@ -240,7 +240,7 @@ export const useAudioStreamer = (): UseAudioStreamer => {
     }
 
     // Ensure Foreground Service is up so the JS VM isn’t killed when backgrounded
-    await startForegroundServiceNotification('Streaming active', 'Keeping WebSocket connection alive');
+    await startForegroundServiceNotification('Chronicle - Streaming', 'Keeping WebSocket connection alive');
 
     console.log(`[AudioStreamer] Initializing WebSocket: ${trimmed}`);
     if (websocketRef.current) await stopStreaming(); // close any existing
