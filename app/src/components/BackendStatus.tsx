@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, ActivityIndicator } from 'react-native';
 import { useTheme, ThemeColors } from '../theme';
+import { QRScanner } from './QRScanner';
+import { httpUrlToWebSocketUrl } from '../utils/urlConversion';
 
 interface BackendStatusProps {
   backendUrl: string;
@@ -26,6 +28,7 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
     status: 'unknown',
     message: 'Not checked',
   });
+  const [showQRScanner, setShowQRScanner] = useState(false);
 
   const checkBackendHealth = async (showAlert: boolean = false) => {
     if (!backendUrl.trim()) {
@@ -131,6 +134,13 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
       </View>
 
       <TouchableOpacity
+        style={s.qrButton}
+        onPress={() => setShowQRScanner(true)}
+      >
+        <Text style={s.qrButtonText}>Scan QR Code</Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity
         style={[s.button, healthStatus.status === 'checking' ? s.buttonDisabled : null]}
         onPress={() => checkBackendHealth(true)}
         disabled={healthStatus.status === 'checking'}
@@ -139,8 +149,17 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
       </TouchableOpacity>
 
       <Text style={s.helpText}>
-        Enter the WebSocket URL of your backend server. Status is automatically checked.
+        Enter the WebSocket URL or scan a QR code from the Chronicle dashboard.
       </Text>
+
+      <QRScanner
+        visible={showQRScanner}
+        onScanned={(httpUrl) => {
+          const wsUrl = httpUrlToWebSocketUrl(httpUrl);
+          onBackendUrlChange(wsUrl);
+        }}
+        onClose={() => setShowQRScanner(false)}
+      />
     </View>
   );
 };
@@ -214,6 +233,21 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     marginTop: 5,
     textAlign: 'center',
     fontStyle: 'italic',
+  },
+  qrButton: {
+    backgroundColor: colors.card,
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: colors.primary,
+  },
+  qrButtonText: {
+    color: colors.primary,
+    fontSize: 16,
+    fontWeight: '600',
   },
   button: {
     backgroundColor: colors.primary,

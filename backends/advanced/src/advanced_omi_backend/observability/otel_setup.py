@@ -69,7 +69,6 @@ def init_otel() -> None:
     """Initialize OTEL with Galileo exporter and OpenAI instrumentor.
 
     Call once at app startup. Safe to call if Galileo is not configured (no-op).
-    Filters out embedding spans — only LLM (chat completion) calls are exported.
     """
     if not is_galileo_enabled():
         logger.info("Galileo not configured, skipping OTEL initialization")
@@ -78,41 +77,16 @@ def init_otel() -> None:
     try:
         from galileo import otel
         from openinference.instrumentation.openai import OpenAIInstrumentor
-        from opentelemetry import context
         from opentelemetry.sdk import trace as trace_sdk
-        from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor
 
         project = os.getenv("GALILEO_PROJECT", "chronicle")
         logstream = os.getenv("GALILEO_LOG_STREAM", "default")
-
-        class _LLMOnlyProcessor(SpanProcessor):
-            """Wraps GalileoSpanProcessor, dropping EMBEDDING spans."""
-
-            def __init__(self, inner: SpanProcessor):
-                self._inner = inner
-
-            def on_start(
-                self, span: Span, parent_context: context.Context | None = None
-            ) -> None:
-                self._inner.on_start(span, parent_context)
-
-            def on_end(self, span: ReadableSpan) -> None:
-                kind = span.attributes.get("openinference.span.kind", "")
-                if kind == "EMBEDDING":
-                    return  # drop
-                self._inner.on_end(span)
-
-            def shutdown(self) -> None:
-                self._inner.shutdown()
-
-            def force_flush(self, timeout_millis: int = 30000) -> bool:
-                return self._inner.force_flush(timeout_millis)
 
         tracer_provider = trace_sdk.TracerProvider()
         galileo_processor = otel.GalileoSpanProcessor(
             project=project, logstream=logstream
         )
-        tracer_provider.add_span_processor(_LLMOnlyProcessor(galileo_processor))
+        tracer_provider.add_span_processor(galileo_processor)
 
         # Auto-instrument all OpenAI SDK calls
         OpenAIInstrumentor().instrument(tracer_provider=tracer_provider)

@@ -73,7 +73,9 @@ Conversation Job Created After Speech Detection
 
     # Wait for open_conversation job to be created (transcription + speech analysis takes time)
     # Deepgram/OpenAI API calls + job started can take 30-60s with queue
-    Wait Until Keyword Succeeds    60s    3s
+    # Use 120s timeout: previous test's stream cleanup can trigger post-conversation jobs
+    # that occupy workers, delaying this test's speech detection pipeline
+    Wait Until Keyword Succeeds    120s    3s
     ...    Job Type Exists For Client    open_conversation    ${client_id}
 
     Log To Console    Open conversation job created after speech detection

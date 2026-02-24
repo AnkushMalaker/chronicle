@@ -4,8 +4,9 @@ interface OrchestrationConfig {
   enabled: boolean
   events: string[]
   condition: {
-    type: 'always' | 'wake_word'
+    type: 'always' | 'wake_word' | 'keyword_anywhere'
     wake_words?: string[]
+    keywords?: string[]
   }
 }
 
@@ -41,12 +42,13 @@ export default function OrchestrationSection({
     onChange({ ...config, events })
   }
 
-  const handleConditionTypeChange = (type: 'always' | 'wake_word') => {
+  const handleConditionTypeChange = (type: 'always' | 'wake_word' | 'keyword_anywhere') => {
     onChange({
       ...config,
       condition: {
         type,
-        wake_words: type === 'wake_word' ? config.condition.wake_words || [] : undefined
+        wake_words: type === 'wake_word' ? config.condition.wake_words || [] : undefined,
+        keywords: type === 'keyword_anywhere' ? config.condition.keywords || [] : undefined
       }
     })
   }
@@ -58,6 +60,17 @@ export default function OrchestrationSection({
       condition: {
         ...config.condition,
         wake_words
+      }
+    })
+  }
+
+  const handleKeywordsChange = (value: string) => {
+    const keywords = value.split(',').map((w) => w.trim()).filter(Boolean)
+    onChange({
+      ...config,
+      condition: {
+        ...config.condition,
+        keywords
       }
     })
   }
@@ -182,7 +195,7 @@ export default function OrchestrationSection({
                 Always
               </span>
               <p className="text-xs text-gray-500 dark:text-gray-400">
-                Execute on every matching event
+                Execute on every matching event, no filtering
               </p>
             </div>
           </label>
@@ -209,10 +222,40 @@ export default function OrchestrationSection({
             />
             <div className="flex-1">
               <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                Wake Word
+                Wake Word (start of sentence)
               </span>
               <p className="text-xs text-gray-500 dark:text-gray-400">
-                Execute only when specific wake words are detected
+                Triggers when the transcript starts with the wake word
+              </p>
+            </div>
+          </label>
+
+          <label
+            className={`
+              flex items-center space-x-3 p-3 border rounded-lg cursor-pointer transition-colors
+              ${
+                config.condition.type === 'keyword_anywhere'
+                  ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
+                  : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'
+              }
+              ${disabled ? 'opacity-50 cursor-not-allowed' : ''}
+            `}
+          >
+            <input
+              type="radio"
+              name="condition"
+              value="keyword_anywhere"
+              checked={config.condition.type === 'keyword_anywhere'}
+              onChange={() => !disabled && handleConditionTypeChange('keyword_anywhere')}
+              disabled={disabled}
+              className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
+            />
+            <div className="flex-1">
+              <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                Keyword Anywhere
+              </span>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Triggers when keyword appears anywhere in the transcript
               </p>
             </div>
           </label>
@@ -239,7 +282,32 @@ export default function OrchestrationSection({
             className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
           />
           <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-            Comma-separated list of wake words (case-insensitive)
+            Comma-separated list of wake words. The transcript must start with one of these words (case-insensitive).
+          </p>
+        </div>
+      )}
+
+      {/* Keywords Input (conditional) */}
+      {config.condition.type === 'keyword_anywhere' && (
+        <div className="pl-7">
+          <label
+            htmlFor="keywords"
+            className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
+          >
+            Keywords
+            <span className="text-red-500 ml-1">*</span>
+          </label>
+          <input
+            type="text"
+            id="keywords"
+            value={config.condition.keywords?.join(', ') || ''}
+            onChange={(e) => !disabled && handleKeywordsChange(e.target.value)}
+            placeholder="e.g., vivi, hey chronicle"
+            disabled={disabled}
+            className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+          />
+          <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+            Comma-separated list of keywords. Triggers when any keyword appears anywhere in the transcript (case-insensitive).
           </p>
         </div>
       )}

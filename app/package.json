@@ -30,7 +30,9 @@
     "setimmediate": "^1.0.5",
     "webidl-conversions": "^7.0.0",
     "react-native-screens": "~4.11.1",
-    "react-native-safe-area-context": "5.4.0"
+    "react-native-safe-area-context": "5.4.0",
+    "expo-camera": "~16.1.11",
+    "expo-image-picker": "~16.1.4"
   },
   "devDependencies": {
     "@babel/core": "^7.20.0",

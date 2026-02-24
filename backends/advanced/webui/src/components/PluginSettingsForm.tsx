@@ -15,8 +15,9 @@ interface PluginMetadata {
     enabled: boolean
     events: string[]
     condition: {
-      type: 'always' | 'wake_word'
+      type: 'always' | 'wake_word' | 'keyword_anywhere'
       wake_words?: string[]
+      keywords?: string[]
     }
   }
   config_schema: {
@@ -30,8 +31,9 @@ interface PluginConfig {
     enabled: boolean
     events: string[]
     condition: {
-      type: 'always' | 'wake_word'
+      type: 'always' | 'wake_word' | 'keyword_anywhere'
       wake_words?: string[]
+      keywords?: string[]
     }
   }
   settings: Record<string, any>

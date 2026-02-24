@@ -9,7 +9,7 @@ from rq import get_current_job
 from rq.job import Job
 
 from advanced_omi_backend.models.job import async_job
-from advanced_omi_backend.services.obsidian_service import obsidian_service
+from advanced_omi_backend.services.obsidian_service import get_obsidian_service
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ def count_markdown_files(vault_path: str) -> int:
 
 
 @async_job(redis=True, beanie=False)
-async def ingest_obsidian_vault_job(job_id: str, vault_path: str, redis_client=None) -> dict: # type: ignore
+async def ingest_obsidian_vault_job(job_id: str, vault_path: str, redis_client=None) -> dict:  # type: ignore
     """
     Long-running ingestion job enqueued on the default RQ queue.
     """
@@ -42,7 +42,7 @@ async def ingest_obsidian_vault_job(job_id: str, vault_path: str, redis_client=N
     job.save_meta()
 
     try:
-        obsidian_service.setup_database()
+        get_obsidian_service().setup_database()
     except Exception as exc:
         logger.exception("Database setup failed for job %s: %s", job.id, exc)
         job.meta["status"] = "failed"
@@ -80,16 +80,17 @@ async def ingest_obsidian_vault_job(job_id: str, vault_path: str, redis_client=N
                 return {"status": "canceled"}
 
             try:
-                note_data = obsidian_service.parse_obsidian_note(root, filename, vault_path)
-                chunks = await obsidian_service.chunking_and_embedding(note_data)
+                svc = get_obsidian_service()
+                note_data = svc.parse_obsidian_note(root, filename, vault_path)
+                chunks = await svc.chunking_and_embedding(note_data)
                 if chunks:
-                    obsidian_service.ingest_note_and_chunks(note_data, chunks)
-                
+                    svc.ingest_note_and_chunks(note_data, chunks)
+
                 processed += 1
                 job.meta["processed"] = processed
                 job.meta["last_file"] = os.path.join(root, filename)
                 job.save_meta()
-                
+
             except Exception as exc:
                 logger.error("Processing %s failed: %s", filename, exc)
                 errors.append(f"{filename}: {exc}")
@@ -103,5 +104,5 @@ async def ingest_obsidian_vault_job(job_id: str, vault_path: str, redis_client=N
         "status": "finished",
         "processed": processed,
         "total": total,
-        "errors": errors
+        "errors": errors,
     }

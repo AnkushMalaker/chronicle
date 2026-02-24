@@ -15,8 +15,12 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.model_registry import ModelDef, get_models_registry
-from advanced_omi_backend.openai_factory import create_openai_client, is_langfuse_enabled
+from advanced_omi_backend.openai_factory import (
+    create_openai_client,
+    is_langfuse_enabled,
+)
 from advanced_omi_backend.prompt_registry import get_prompt_registry
+from advanced_omi_backend.utils.text_chunking import semantic_chunk_text
 
 from ..base import LLMProviderBase
 from ..prompts import (
@@ -77,6 +81,7 @@ async def generate_openai_embeddings(
     )
     return [data.embedding for data in response.data]
 
+
 # TODO: Re-enable spacy when Docker build is fixed
 # try:
 #     nlp = spacy.load("en_core_web_sm")
@@ -86,6 +91,7 @@ async def generate_openai_embeddings(
 #     nlp = None
 nlp = None  # Temporarily disabled
 
+
 def chunk_text_with_spacy(text: str, max_tokens: int = 100) -> List[str]:
     """Split text into chunks using spaCy sentence segmentation.
     max_tokens is the maximum number of words in a chunk.
@@ -93,14 +99,14 @@ def chunk_text_with_spacy(text: str, max_tokens: int = 100) -> List[str]:
     # Fallback chunking when spacy is not available
     if nlp is None:
         # Simple sentence-based chunking
-        sentences = text.replace('\n', ' ').split('. ')
+        sentences = text.replace("\n", " ").split(". ")
         chunks = []
         current_chunk = ""
         current_tokens = 0
-        
+
         for sentence in sentences:
             sentence_tokens = len(sentence.split())
-            
+
             if current_tokens + sentence_tokens > max_tokens and current_chunk:
                 chunks.append(current_chunk.strip())
                 current_chunk = sentence
@@ -111,23 +117,23 @@ def chunk_text_with_spacy(text: str, max_tokens: int = 100) -> List[str]:
                 else:
                     current_chunk = sentence
                 current_tokens += sentence_tokens
-        
+
         if current_chunk.strip():
             chunks.append(current_chunk.strip())
-        
+
         return chunks if chunks else [text]
-    
+
     # Original spacy implementation when available
     doc = nlp(text)
-    
+
     chunks = []
     current_chunk = ""
     current_tokens = 0
-    
+
     for sent in doc.sents:
         sent_text = sent.text.strip()
         sent_tokens = len(sent_text.split())  # Simple word count
-        
+
         if current_tokens + sent_tokens > max_tokens and current_chunk:
             chunks.append(current_chunk.strip())
             current_chunk = sent_text
@@ -135,11 +141,12 @@ def chunk_text_with_spacy(text: str, max_tokens: int = 100) -> List[str]:
         else:
             current_chunk += " " + sent_text if current_chunk else sent_text
             current_tokens += sent_tokens
-    
+
     if current_chunk.strip():
         chunks.append(current_chunk.strip())
-    
+
     return chunks
+
 
 class OpenAIProvider(LLMProviderBase):
     """Config-driven LLM provider using OpenAI SDK (OpenAI-compatible).
@@ -153,7 +160,9 @@ class OpenAIProvider(LLMProviderBase):
         # Ignore provider-specific envs; use registry as single source of truth
         registry = get_models_registry()
         if not registry:
-            raise RuntimeError("config.yml not found or invalid; cannot initialize model registry")
+            raise RuntimeError(
+                "config.yml not found or invalid; cannot initialize model registry"
+            )
 
         self._registry = registry
 
@@ -170,9 +179,15 @@ class OpenAIProvider(LLMProviderBase):
         self.model = self.llm_def.model_name
 
         # Store parameters for embeddings (use separate config if available)
-        self.embedding_model = (self.embed_def.model_name if self.embed_def else self.llm_def.model_name)
-        self.embedding_api_key = (self.embed_def.api_key if self.embed_def else self.api_key)
-        self.embedding_base_url = (self.embed_def.model_url if self.embed_def else self.base_url)
+        self.embedding_model = (
+            self.embed_def.model_name if self.embed_def else self.llm_def.model_name
+        )
+        self.embedding_api_key = (
+            self.embed_def.api_key if self.embed_def else self.api_key
+        )
+        self.embedding_base_url = (
+            self.embed_def.model_url if self.embed_def else self.base_url
+        )
 
         # CRITICAL: Validate API keys are present - fail fast instead of hanging
         if not self.api_key or self.api_key.strip() == "":
@@ -182,7 +197,9 @@ class OpenAIProvider(LLMProviderBase):
                 f"Cannot proceed without valid API credentials."
             )
 
-        if self.embed_def and (not self.embedding_api_key or self.embedding_api_key.strip() == ""):
+        if self.embed_def and (
+            not self.embedding_api_key or self.embedding_api_key.strip() == ""
+        ):
             raise RuntimeError(
                 f"API key is missing or empty for embedding provider '{self.embed_def.model_provider}' (model: {self.embedding_model}). "
                 f"Please set the API key in config.yml or environment variables."
@@ -192,7 +209,10 @@ class OpenAIProvider(LLMProviderBase):
         self._client = None
 
     async def extract_memories(
-        self, text: str, prompt: str, user_id: Optional[str] = None,
+        self,
+        text: str,
+        prompt: str,
+        user_id: Optional[str] = None,
         langfuse_session_id: Optional[str] = None,
     ) -> List[str]:
         """Extract memories using OpenAI API with the enhanced fact retrieval prompt.
@@ -219,26 +239,56 @@ class OpenAIProvider(LLMProviderBase):
                     current_date=datetime.now().strftime("%Y-%m-%d"),
                 )
 
-            # local models can only handle small chunks of input text
-            text_chunks = chunk_text_with_spacy(text)
+            # Semantic chunking: split dialogue into turns, then group by topic
+            async def _embed_for_chunking(texts: List[str]) -> List[List[float]]:
+                return await generate_openai_embeddings(
+                    texts,
+                    api_key=self.embedding_api_key,
+                    base_url=self.embedding_base_url,
+                    model=self.embedding_model,
+                )
+
+            chunking_config = self._registry.memory.get("extraction", {}).get(
+                "chunking", {}
+            )
+            dialogue_turns = [line for line in text.split("\n") if line.strip()]
+            text_chunks = await semantic_chunk_text(
+                text,
+                embed_fn=_embed_for_chunking,
+                sentences=dialogue_turns,
+                join_str="\n",
+                buffer_size=int(chunking_config.get("buffer_size", 1)),
+                breakpoint_percentile_threshold=float(
+                    chunking_config.get("breakpoint_percentile_threshold", 90.0)
+                ),
+                max_chunk_words=int(chunking_config.get("max_chunk_words", 500)),
+            )
 
             # Process all chunks in sequence, not concurrently
-            results = [await self._process_chunk(system_prompt, chunk, i, langfuse_session_id=langfuse_session_id) for i, chunk in enumerate(text_chunks)]
-            
+            results = [
+                await self._process_chunk(
+                    system_prompt, chunk, i, langfuse_session_id=langfuse_session_id
+                )
+                for i, chunk in enumerate(text_chunks)
+            ]
+
             # Spread list of list of facts into a single list of facts
             cleaned_facts = []
             for result in results:
                 memory_logger.info(f"Cleaned facts: {result}")
                 cleaned_facts.extend(result)
-            
+
             return cleaned_facts
-                
+
         except Exception as e:
             memory_logger.error(f"OpenAI memory extraction failed: {e}")
             return []
-        
+
     async def _process_chunk(
-        self, system_prompt: str, chunk: str, index: int,
+        self,
+        system_prompt: str,
+        chunk: str,
+        index: int,
         langfuse_session_id: Optional[str] = None,
     ) -> List[str]:
         """Process a single text chunk to extract memories using OpenAI API.
@@ -312,11 +362,15 @@ class OpenAIProvider(LLMProviderBase):
         try:
             # Add 10-second timeout to prevent hanging on API calls
             async with asyncio.timeout(10):
-                client = _get_openai_client(api_key=self.api_key, base_url=self.base_url, is_async=True)
+                client = _get_openai_client(
+                    api_key=self.api_key, base_url=self.base_url, is_async=True
+                )
                 await client.models.list()
                 return True
         except asyncio.TimeoutError:
-            memory_logger.error(f"OpenAI connection test timed out after 10s - check network connectivity and API endpoint")
+            memory_logger.error(
+                f"OpenAI connection test timed out after 10s - check network connectivity and API endpoint"
+            )
             return False
         except Exception as e:
             memory_logger.error(f"OpenAI connection test failed: {e}")
@@ -344,11 +398,11 @@ class OpenAIProvider(LLMProviderBase):
             # Generate the complete prompt using the helper function
             memory_logger.debug(f"🧠 Facts passed to prompt builder: {new_facts}")
             update_memory_messages = build_update_memory_messages(
-                retrieved_old_memory,
-                new_facts,
-                custom_prompt
+                retrieved_old_memory, new_facts, custom_prompt
             )
-            memory_logger.debug(f"🧠 Generated prompt user content: {update_memory_messages[1]['content'][:200]}...")
+            memory_logger.debug(
+                f"🧠 Generated prompt user content: {update_memory_messages[1]['content'][:200]}..."
+            )
 
             op = self._registry.get_llm_operation("memory_update")
             client = op.get_client(is_async=True)
@@ -373,7 +427,6 @@ class OpenAIProvider(LLMProviderBase):
         except Exception as e:
             memory_logger.error(f"OpenAI propose_memory_actions failed: {e}")
             return {}
-
 
     async def propose_reprocess_actions(
         self,
@@ -466,20 +519,22 @@ class OpenAIProvider(LLMProviderBase):
 
 class OllamaProvider(LLMProviderBase):
     """Ollama LLM provider implementation.
-    
+
     Provides memory extraction, embedding generation, and memory action
     proposals using Ollama's GPT and embedding models.
-    
-    
+
+
     Use the openai provider for ollama with different environment variables
-    
-    os.environ["OPENAI_API_KEY"] = "ollama"  
+
+    os.environ["OPENAI_API_KEY"] = "ollama"
     os.environ["OPENAI_BASE_URL"] = "http://localhost:11434/v1"
     os.environ["QDRANT_BASE_URL"] = "localhost"
     os.environ["OPENAI_EMBEDDER_MODEL"] = "erwan2/DeepSeek-R1-Distill-Qwen-1.5B:latest"
-    
+
     """
+
     pass
+
 
 def _parse_memories_content(content: str) -> List[str]:
     """

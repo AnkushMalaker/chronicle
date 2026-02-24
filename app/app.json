@@ -19,6 +19,7 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.cupbearer5517.chronicle",
       "infoPlist": {
+        "NSCameraUsageDescription": "Chronicle uses the camera to scan QR codes for backend connection setup.",
         "NSMicrophoneUsageDescription": "Chronicle needs access to your microphone to stream audio to the backend for processing.",
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": true,
@@ -40,7 +41,8 @@
         "android.permission.FOREGROUND_SERVICE",
         "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
         "android.permission.POST_NOTIFICATIONS",
-        "android.permission.RECORD_AUDIO"
+        "android.permission.RECORD_AUDIO",
+        "android.permission.CAMERA"
       ],
       "usesCleartextTraffic": true
     },
@@ -96,6 +98,13 @@
           }
         }
       ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Chronicle uses the camera to scan QR codes for backend connection setup."
+        }
+      ],
+      "expo-image-picker",
       "./plugins/with-ats"
     ],
     "extra": {

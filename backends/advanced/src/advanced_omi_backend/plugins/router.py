@@ -550,6 +550,48 @@ class PluginRouter:
 
         return results
 
+    def get_asr_keywords(self) -> list[str]:
+        """Collect all wake words and keywords from enabled plugins.
+
+        These are meant to be injected into STT providers as keyword
+        boosting hints (e.g. Deepgram ``keyterm``, VibeVoice ``context_info``)
+        so that the transcription engine is more likely to correctly
+        recognise them.
+
+        Returns:
+            Deduplicated list of keyword strings.
+        """
+        seen: set[str] = set()
+        result: list[str] = []
+
+        for plugin in self.plugins.values():
+            if not plugin.enabled:
+                continue
+            condition = plugin.condition or {}
+            condition_type = condition.get("type", "always")
+
+            words: list[str] = []
+            if condition_type == "wake_word":
+                words = condition.get("wake_words", [])
+                if not words:
+                    w = condition.get("wake_word", "")
+                    if w:
+                        words = [w]
+            elif condition_type == "keyword_anywhere":
+                words = condition.get("keywords", [])
+                if not words:
+                    w = condition.get("keyword", "")
+                    if w:
+                        words = [w]
+
+            for w in words:
+                normalised = w.strip().lower()
+                if normalised and normalised not in seen:
+                    seen.add(normalised)
+                    result.append(normalised)
+
+        return result
+
     async def cleanup_all(self):
         """Clean up all registered plugins"""
         for plugin_id, plugin in self.plugins.items():

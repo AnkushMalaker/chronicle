@@ -28,6 +28,47 @@ from .base import (
 logger = logging.getLogger(__name__)
 
 
+def _get_plugin_keywords() -> list[str]:
+    """Collect ASR keyword hints from all enabled plugins.
+
+    Returns an empty list if the plugin system is not initialised yet.
+    """
+    try:
+        from advanced_omi_backend.services.plugin_service import get_plugin_router
+
+        router = get_plugin_router()
+        if router:
+            return router.get_asr_keywords()
+    except Exception:
+        pass
+    return []
+
+
+def _merge_hot_words(prompt_hot_words: str, plugin_keywords: list[str]) -> str:
+    """Merge prompt-registry hot words with plugin keywords (deduplicated)."""
+    import re
+
+    parts: list[str] = []
+    seen: set[str] = set()
+
+    # Parse prompt registry hot words first
+    if prompt_hot_words and prompt_hot_words.strip():
+        for word in re.split(r"[,\n]+", prompt_hot_words):
+            word = word.strip().lower()
+            if word and word not in seen:
+                seen.add(word)
+                parts.append(word)
+
+    # Add plugin keywords
+    for kw in plugin_keywords:
+        kw = kw.strip().lower()
+        if kw and kw not in seen:
+            seen.add(kw)
+            parts.append(kw)
+
+    return "\n".join(parts) if parts else ""
+
+
 def _parse_hot_words_to_keyterm(hot_words_str: str) -> str:
     """Convert hot words string to Deepgram keyterm format.
 
@@ -222,7 +263,8 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
         if "diarize" in query:
             query["diarize"] = "true" if diarize else "false"
 
-        # Use caller-provided context or fall back to LangFuse prompt store
+        # Use caller-provided context or fall back to LangFuse prompt store,
+        # then merge with plugin wake words / keywords for ASR boosting.
         if context_info:
             hot_words_str = context_info
         else:
@@ -232,6 +274,8 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
                 hot_words_str = await registry.get_prompt("asr.hot_words")
             except Exception as e:
                 logger.debug(f"Failed to fetch asr.hot_words prompt: {e}")
+
+        hot_words_str = _merge_hot_words(hot_words_str, _get_plugin_keywords())
 
         # For Deepgram: inject as keyterm query param
         if self.model.model_provider == "deepgram" and hot_words_str.strip():
@@ -404,17 +448,20 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
         if diarize and "diarize" in query_dict:
             query_dict["diarize"] = "true"
 
-        # Inject hot words for streaming (Deepgram only)
-        if self.model.model_provider == "deepgram":
-            try:
-                registry = get_prompt_registry()
-                hot_words_str = await registry.get_prompt("asr.hot_words")
-                if hot_words_str and hot_words_str.strip():
-                    keyterm = _parse_hot_words_to_keyterm(hot_words_str)
-                    if keyterm:
-                        query_dict["keyterm"] = keyterm
-            except Exception as e:
-                logger.debug(f"Failed to fetch asr.hot_words for streaming: {e}")
+        # Inject hot words for streaming — merge prompt registry + plugin keywords
+        prompt_hot_words = ""
+        try:
+            registry = get_prompt_registry()
+            prompt_hot_words = await registry.get_prompt("asr.hot_words")
+        except Exception as e:
+            logger.debug(f"Failed to fetch asr.hot_words for streaming: {e}")
+
+        merged_hot_words = _merge_hot_words(prompt_hot_words, _get_plugin_keywords())
+
+        if self.model.model_provider == "deepgram" and merged_hot_words:
+            keyterm = _parse_hot_words_to_keyterm(merged_hot_words)
+            if keyterm:
+                query_dict["keyterm"] = keyterm
 
         # NOTE: PULSE/wave (smallest.ai) does NOT support keywords on WebSocket —
         # any `keywords` query param causes 0 responses or HTTP 400.

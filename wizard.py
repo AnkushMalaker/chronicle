@@ -1022,12 +1022,16 @@ def main():
         )
         console.print()
 
-        # Always prompt for Neo4j password (masked input)
+        # Prompt for Neo4j password (remembers previous value on re-run)
         try:
-            console.print(
-                "Neo4j password (min 8 chars) [leave empty for default: neo4jpassword]"
+            neo4j_password = prompt_with_existing_masked(
+                "Neo4j password (min 8 chars)",
+                env_file_path="backends/advanced/.env",
+                env_key="NEO4J_PASSWORD",
+                placeholders=["", "your-neo4j-password"],
+                is_password=True,
+                default="neo4jpassword",
             )
-            neo4j_password = prompt_password("Neo4j password", min_length=8)
         except (EOFError, KeyboardInterrupt):
             neo4j_password = "neo4jpassword"
             console.print("Using default password")

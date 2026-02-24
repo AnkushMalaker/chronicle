@@ -192,22 +192,19 @@ Stream Close Sends End Marker To Redis Stream
     # Close stream - this MUST send end_marker
     Close Audio Stream    ${stream_id}
 
-    # Allow time for end_marker to be written
-    Sleep    2s
+    # The audio stream is intentionally deleted ~1.2s after close by _try_delete_finished_stream(),
+    # so we can't rely on XRANGE to find end_marker. Instead, verify via transcription:complete
+    # which is a durable key (5-min TTL) set by StreamingTranscriptionConsumer.end_session_stream()
+    # only AFTER it processes the end_marker.
+    ${completion_key}=    Set Variable    transcription:complete:${client_id}
+    Wait Until Keyword Succeeds    30s    1s
+    ...    Verify Redis Key Exists    ${completion_key}
 
-    # Read all messages from audio stream to find end_marker
-    # Note: Redis Command returns string output from redis-cli, not a list
-    ${xrange_output}=    Redis Command    XRANGE    ${audio_stream_name}    -    +
+    ${signal_value}=    Redis Command    GET    ${completion_key}
+    Should Be Equal As Strings    ${signal_value}    1
+    ...    Completion signal should be "1" (clean close), got: ${signal_value}
 
-    # Search for end_marker in the redis-cli output string
-    # redis-cli XRANGE returns text with field names, so we just check if end_marker appears
-    ${found_end_marker}=    Run Keyword And Return Status
-    ...    Should Contain    ${xrange_output}    end_marker
-    ...    ignore_case=True
-
-    Should Be True    ${found_end_marker}    end_marker NOT found in Redis stream ${audio_stream_name}! Producer.finalize_session() did not send end_marker. XRANGE output: ${xrange_output}
-
-    Log    ✅ end_marker successfully sent to Redis stream
+    Log    ✅ end_marker was processed by streaming consumer (transcription:complete=${signal_value})
 
 
 Streaming Consumer Closes Deepgram Connection On End Marker

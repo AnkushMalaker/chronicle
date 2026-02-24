@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft, Calendar, User, Trash2, RefreshCw, MoreVertical,
-  RotateCcw, Zap, Play, Pause,
+  RotateCcw, Zap, Play, Pause, Download,
   Save, X, Pencil, Brain, Clock, Database, Layers, Star, BarChart3
 } from 'lucide-react'
 import { annotationsApi, speakerApi, systemApi, BACKEND_URL } from '../services/api'
@@ -333,6 +333,27 @@ export default function ConversationDetail() {
   }
 
   // Action handlers
+  const handleDownloadAudio = async () => {
+    if (!id) return
+    setOpenDropdown(false)
+    try {
+      const token = localStorage.getItem(getStorageKey('token')) || ''
+      const resp = await fetch(`${BACKEND_URL}/api/audio/get_audio/${id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!resp.ok) throw new Error(`Download failed: ${resp.status}`)
+      const blob = await resp.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${conversation?.title || id}.wav`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (err: any) {
+      setActionError(`Failed to download audio: ${err.message || 'Unknown error'}`)
+    }
+  }
+
   const handleDelete = async () => {
     if (!id) return
     const confirmed = window.confirm('Are you sure you want to delete this conversation?')
@@ -658,6 +679,15 @@ export default function ConversationDetail() {
                 {reprocessingSpeakers ? <RefreshCw className="h-4 w-4 animate-spin" /> : <User className="h-4 w-4" />}
                 <span>Reprocess Speakers</span>
               </button>
+              {conversation.audio_chunks_count && conversation.audio_chunks_count > 0 && (
+                <button
+                  onClick={handleDownloadAudio}
+                  className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2"
+                >
+                  <Download className="h-4 w-4" />
+                  <span>Download Audio</span>
+                </button>
+              )}
               <div className="border-t border-gray-200 dark:border-gray-600 my-1"></div>
               <button
                 onClick={handleDelete}

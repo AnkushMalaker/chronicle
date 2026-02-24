@@ -35,7 +35,13 @@ try:
     from qdrant_client.models import Distance, VectorParams
     from rich.console import Console
     from rich.panel import Panel
-    from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeElapsedColumn,
+    )
     from rich.prompt import Confirm
     from rich.table import Table
     from rich.text import Text
@@ -62,12 +68,18 @@ console = Console()
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def get_qdrant_collection_name() -> str:
     """Get Qdrant collection name from memory service configuration."""
     try:
         memory_config = build_memory_config_from_env()
-        if hasattr(memory_config, "vector_store_config") and memory_config.vector_store_config:
-            return memory_config.vector_store_config.get("collection_name", "chronicle_memories")
+        if (
+            hasattr(memory_config, "vector_store_config")
+            and memory_config.vector_store_config
+        ):
+            return memory_config.vector_store_config.get(
+                "collection_name", "chronicle_memories"
+            )
     except Exception:
         pass
     return "chronicle_memories"
@@ -92,6 +104,7 @@ def _human_size(nbytes: int) -> str:
 # ---------------------------------------------------------------------------
 # Stats
 # ---------------------------------------------------------------------------
+
 
 class Stats:
     """Track counts across the system."""
@@ -176,8 +189,10 @@ async def gather_stats(
     # LangFuse prompts
     if langfuse_client:
         try:
-            prompts_response = langfuse_client.prompts.list(limit=100)
-            s.langfuse_prompts = len(prompts_response.data) if hasattr(prompts_response, "data") else 0
+            prompts_response = langfuse_client.api.prompts.list(limit=100)
+            s.langfuse_prompts = (
+                len(prompts_response.data) if hasattr(prompts_response, "data") else 0
+            )
         except Exception:
             pass
 
@@ -205,13 +220,21 @@ def render_stats_table(stats: Stats, title: str = "Current State") -> Table:
     def row(label, value, style="white"):
         table.add_row(label, f"[{style}]{value}[/{style}]")
 
-    row("Conversations", str(stats.conversations), "green" if stats.conversations else "dim")
+    row(
+        "Conversations",
+        str(stats.conversations),
+        "green" if stats.conversations else "dim",
+    )
     row(
         "  with transcripts",
         str(stats.conversations_with_transcript),
         "green" if stats.conversations_with_transcript else "dim",
     )
-    row("Audio Chunks", str(stats.audio_chunks), "green" if stats.audio_chunks else "dim")
+    row(
+        "Audio Chunks",
+        str(stats.audio_chunks),
+        "green" if stats.audio_chunks else "dim",
+    )
     row("Waveforms", str(stats.waveforms), "dim")
     row("Chat Sessions", str(stats.chat_sessions), "dim")
     row("Chat Messages", str(stats.chat_messages), "dim")
@@ -220,7 +243,11 @@ def render_stats_table(stats: Stats, title: str = "Current State") -> Table:
     row("Memories (Qdrant)", str(stats.memories), "yellow" if stats.memories else "dim")
     row("Neo4j Nodes", str(stats.neo4j_nodes), "dim")
     row("Neo4j Relationships", str(stats.neo4j_relationships), "dim")
-    row("LangFuse Prompts", str(stats.langfuse_prompts), "yellow" if stats.langfuse_prompts else "dim")
+    row(
+        "LangFuse Prompts",
+        str(stats.langfuse_prompts),
+        "yellow" if stats.langfuse_prompts else "dim",
+    )
     table.add_section()
     row("Redis Jobs", str(stats.redis_jobs), "dim")
     row("Legacy WAV Files", str(stats.legacy_wav), "dim")
@@ -234,6 +261,7 @@ def render_stats_table(stats: Stats, title: str = "Current State") -> Table:
 # Backup
 # ---------------------------------------------------------------------------
 
+
 class BackupResult:
     """Track which backup exports succeeded or failed."""
 
@@ -241,7 +269,13 @@ class BackupResult:
         self.exports: dict[str, dict] = {}  # name -> {ok, path, size, sha256, error}
 
     def record(self, name: str, path: Optional[Path], ok: bool, error: str = ""):
-        entry = {"ok": ok, "error": error, "path": str(path) if path else None, "size": 0, "sha256": ""}
+        entry = {
+            "ok": ok,
+            "error": error,
+            "path": str(path) if path else None,
+            "size": 0,
+            "sha256": "",
+        }
         if ok and path and path.exists():
             entry["size"] = path.stat().st_size
             entry["sha256"] = _file_sha256(path)
@@ -255,10 +289,16 @@ class BackupResult:
     def critical_ok(self) -> bool:
         """conversations, audio_metadata, and annotations are critical."""
         critical = ("conversations", "audio_metadata", "annotations")
-        return all(self.exports.get(n, {}).get("ok", False) for n in critical if n in self.exports)
+        return all(
+            self.exports.get(n, {}).get("ok", False)
+            for n in critical
+            if n in self.exports
+        )
 
     def render_table(self) -> Table:
-        table = Table(title="Backup Verification", border_style="dim", title_style="bold white")
+        table = Table(
+            title="Backup Verification", border_style="dim", title_style="bold white"
+        )
         table.add_column("Export", style="white", min_width=24)
         table.add_column("Status", justify="center", min_width=8)
         table.add_column("Size", justify="right", min_width=10)
@@ -285,7 +325,14 @@ class BackupResult:
 class BackupManager:
     """Export data to a timestamped backup directory."""
 
-    def __init__(self, backup_dir: str, export_audio: bool, mongo_db: Any, neo4j_driver: Any = None, langfuse_client: Any = None):
+    def __init__(
+        self,
+        backup_dir: str,
+        export_audio: bool,
+        mongo_db: Any,
+        neo4j_driver: Any = None,
+        langfuse_client: Any = None,
+    ):
         self.backup_dir = Path(backup_dir)
         self.export_audio = export_audio
         self.mongo_db = mongo_db
@@ -323,7 +370,9 @@ class BackupManager:
                 steps.append(("audio_wav", self._export_audio_wav))
 
             if qdrant_client:
-                steps.append(("memories", lambda r: self._export_memories(qdrant_client, r)))
+                steps.append(
+                    ("memories", lambda r: self._export_memories(qdrant_client, r))
+                )
 
             if self.neo4j_driver:
                 steps.append(("neo4j_graph", self._export_neo4j))
@@ -336,7 +385,8 @@ class BackupManager:
             for name, func in steps:
                 progress.update(task, description=f"Exporting {name}...")
                 try:
-                    path = await func(result) if asyncio.iscoroutinefunction(func) else func(result)
+                    ret = func(result)
+                    path = await ret if asyncio.iscoroutine(ret) else ret
                     if not result.exports.get(name):
                         # func didn't record itself - record success
                         result.record(name, path, True)
@@ -384,19 +434,21 @@ class BackupManager:
         cursor = collection.find({})
         data = []
         async for chunk in cursor:
-            data.append({
-                "conversation_id": chunk.get("conversation_id"),
-                "chunk_index": chunk.get("chunk_index"),
-                "start_time": chunk.get("start_time"),
-                "end_time": chunk.get("end_time"),
-                "duration": chunk.get("duration"),
-                "original_size": chunk.get("original_size"),
-                "compressed_size": chunk.get("compressed_size"),
-                "sample_rate": chunk.get("sample_rate", 16000),
-                "channels": chunk.get("channels", 1),
-                "has_speech": chunk.get("has_speech"),
-                "created_at": str(chunk.get("created_at", "")),
-            })
+            data.append(
+                {
+                    "conversation_id": chunk.get("conversation_id"),
+                    "chunk_index": chunk.get("chunk_index"),
+                    "start_time": chunk.get("start_time"),
+                    "end_time": chunk.get("end_time"),
+                    "duration": chunk.get("duration"),
+                    "original_size": chunk.get("original_size"),
+                    "compressed_size": chunk.get("compressed_size"),
+                    "sample_rate": chunk.get("sample_rate", 16000),
+                    "channels": chunk.get("channels", 1),
+                    "has_speech": chunk.get("has_speech"),
+                    "created_at": str(chunk.get("created_at", "")),
+                }
+            )
         path = self.backup_path / "audio_chunks_metadata.json"
         with open(path, "w") as f:
             json.dump(data, f, indent=2, default=str)
@@ -417,14 +469,16 @@ class BackupManager:
         cursor = collection.find({})
         data = []
         async for session in cursor:
-            data.append({
-                "session_id": session.get("session_id"),
-                "user_id": session.get("user_id"),
-                "title": session.get("title"),
-                "created_at": str(session.get("created_at", "")),
-                "updated_at": str(session.get("updated_at", "")),
-                "metadata": session.get("metadata", {}),
-            })
+            data.append(
+                {
+                    "session_id": session.get("session_id"),
+                    "user_id": session.get("user_id"),
+                    "title": session.get("title"),
+                    "created_at": str(session.get("created_at", "")),
+                    "updated_at": str(session.get("updated_at", "")),
+                    "metadata": session.get("metadata", {}),
+                }
+            )
         path = self.backup_path / "chat_sessions.json"
         with open(path, "w") as f:
             json.dump(data, f, indent=2, default=str)
@@ -436,16 +490,18 @@ class BackupManager:
         cursor = collection.find({})
         data = []
         async for msg in cursor:
-            data.append({
-                "message_id": msg.get("message_id"),
-                "session_id": msg.get("session_id"),
-                "user_id": msg.get("user_id"),
-                "role": msg.get("role"),
-                "content": msg.get("content"),
-                "timestamp": str(msg.get("timestamp", "")),
-                "memories_used": msg.get("memories_used", []),
-                "metadata": msg.get("metadata", {}),
-            })
+            data.append(
+                {
+                    "message_id": msg.get("message_id"),
+                    "session_id": msg.get("session_id"),
+                    "user_id": msg.get("user_id"),
+                    "role": msg.get("role"),
+                    "content": msg.get("content"),
+                    "timestamp": str(msg.get("timestamp", "")),
+                    "memories_used": msg.get("memories_used", []),
+                    "metadata": msg.get("metadata", {}),
+                }
+            )
         path = self.backup_path / "chat_messages.json"
         with open(path, "w") as f:
             json.dump(data, f, indent=2, default=str)
@@ -479,7 +535,9 @@ class BackupManager:
 
         for conv in conversations:
             try:
-                ok = await self._export_conversation_audio(conv.conversation_id, audio_dir)
+                ok = await self._export_conversation_audio(
+                    conv.conversation_id, audio_dir
+                )
                 if ok:
                     exported += 1
             except Exception as e:
@@ -491,11 +549,19 @@ class BackupManager:
         result.record("audio_wav", audio_dir, ok, error)
         return audio_dir
 
-    async def _export_conversation_audio(self, conversation_id: str, audio_dir: Path) -> bool:
+    async def _export_conversation_audio(
+        self, conversation_id: str, audio_dir: Path
+    ) -> bool:
         """Decode Opus chunks to WAV for a single conversation. Returns True if audio was exported."""
-        chunks = await AudioChunkDocument.find(
-            AudioChunkDocument.conversation_id == conversation_id
-        ).sort("+chunk_index").to_list()
+        from advanced_omi_backend.utils.audio_chunk_utils import decode_opus_to_pcm
+
+        chunks = (
+            await AudioChunkDocument.find(
+                AudioChunkDocument.conversation_id == conversation_id
+            )
+            .sort("+chunk_index")
+            .to_list()
+        )
 
         if not chunks:
             return False
@@ -506,44 +572,49 @@ class BackupManager:
         sample_rate = chunks[0].sample_rate
         channels = chunks[0].channels
 
-        # Try opuslib, fall back gracefully
-        try:
-            import opuslib
+        # Decode all chunks using FFmpeg (same path as UI playback)
+        pcm_buffer = bytearray()
+        for chunk in chunks:
+            try:
+                pcm_data = await decode_opus_to_pcm(
+                    opus_data=bytes(chunk.audio_data),
+                    sample_rate=sample_rate,
+                    channels=channels,
+                )
+                pcm_buffer.extend(pcm_data)
+            except Exception as e:
+                logger.warning(
+                    f"Opus decode error for {conversation_id} chunk {chunk.chunk_index}: {e}"
+                )
+                continue
 
-            decoder = opuslib.Decoder(sample_rate, channels)
-            pcm_parts = []
-            for chunk in chunks:
-                frame_size = int(sample_rate * chunk.duration / channels)
-                decoded = decoder.decode(bytes(chunk.audio_data), frame_size)
-                pcm_parts.append(decoded)
-        except ImportError:
-            logger.warning("opuslib not available, skipping audio export")
+        if not pcm_buffer:
             return False
-        except Exception as e:
-            logger.warning(f"Opus decode error for {conversation_id}: {e}")
-            return False
-
-        all_pcm = b"".join(pcm_parts)
-        samples = struct.unpack(f"<{len(all_pcm) // 2}h", all_pcm)
 
         # Split into 1-minute WAV files
-        samples_per_minute = sample_rate * 60 * channels
         import wave
 
+        bytes_per_minute = (
+            sample_rate * channels * 2 * 60
+        )  # 16-bit = 2 bytes per sample
+        all_pcm = bytes(pcm_buffer)
         chunk_num = 1
-        for start in range(0, len(samples), samples_per_minute):
+
+        for start in range(0, len(all_pcm), bytes_per_minute):
             wav_path = conv_dir / f"chunk_{chunk_num:03d}.wav"
-            segment = samples[start : start + samples_per_minute]
+            segment_pcm = all_pcm[start : start + bytes_per_minute]
             with wave.open(str(wav_path), "wb") as wf:
                 wf.setnchannels(channels)
                 wf.setsampwidth(2)
                 wf.setframerate(sample_rate)
-                wf.writeframes(struct.pack(f"<{len(segment)}h", *segment))
+                wf.writeframes(segment_pcm)
             chunk_num += 1
 
         return True
 
-    async def _export_memories(self, qdrant_client: AsyncQdrantClient, result: BackupResult) -> Path:
+    async def _export_memories(
+        self, qdrant_client: AsyncQdrantClient, result: BackupResult
+    ) -> Path:
         collection_name = get_qdrant_collection_name()
         collections = await qdrant_client.get_collections()
         exists = any(c.name == collection_name for c in collections.collections)
@@ -568,7 +639,9 @@ class BackupManager:
             if not points:
                 break
             for pt in points:
-                data.append({"id": str(pt.id), "vector": pt.vector, "payload": pt.payload})
+                data.append(
+                    {"id": str(pt.id), "vector": pt.vector, "payload": pt.payload}
+                )
             if next_offset is None:
                 break
             offset = next_offset
@@ -583,7 +656,9 @@ class BackupManager:
         try:
             with self.neo4j_driver.session() as session:
                 nodes_data = []
-                for record in session.run("MATCH (n) RETURN n, labels(n) AS labels, elementId(n) AS eid"):
+                for record in session.run(
+                    "MATCH (n) RETURN n, labels(n) AS labels, elementId(n) AS eid"
+                ):
                     node = dict(record["n"])
                     node["_labels"] = record["labels"]
                     node["_element_id"] = record["eid"]
@@ -594,15 +669,24 @@ class BackupManager:
                     "MATCH (a)-[r]->(b) RETURN elementId(a) AS src, type(r) AS rel_type, "
                     "properties(r) AS props, elementId(b) AS dst"
                 ):
-                    rels_data.append({
-                        "source": record["src"],
-                        "type": record["rel_type"],
-                        "properties": dict(record["props"]) if record["props"] else {},
-                        "target": record["dst"],
-                    })
+                    rels_data.append(
+                        {
+                            "source": record["src"],
+                            "type": record["rel_type"],
+                            "properties": (
+                                dict(record["props"]) if record["props"] else {}
+                            ),
+                            "target": record["dst"],
+                        }
+                    )
 
             with open(path, "w") as f:
-                json.dump({"nodes": nodes_data, "relationships": rels_data}, f, indent=2, default=str)
+                json.dump(
+                    {"nodes": nodes_data, "relationships": rels_data},
+                    f,
+                    indent=2,
+                    default=str,
+                )
             result.record("neo4j_graph", path, True)
         except Exception as e:
             result.record("neo4j_graph", None, False, str(e))
@@ -617,7 +701,7 @@ class BackupManager:
         try:
             # Discover all prompt names via list API
             prompt_names = []
-            prompts_response = self.langfuse_client.prompts.list(limit=100)
+            prompts_response = self.langfuse_client.api.prompts.list(limit=100)
             if hasattr(prompts_response, "data"):
                 for p in prompts_response.data:
                     prompt_names.append(p.name)
@@ -653,6 +737,7 @@ class BackupManager:
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
+
 
 class CleanupManager:
     """Delete data across all services."""
@@ -768,6 +853,7 @@ class CleanupManager:
 # Connection setup
 # ---------------------------------------------------------------------------
 
+
 async def connect_services():
     """Initialize all service connections. Returns (mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client)."""
     # MongoDB
@@ -777,7 +863,13 @@ async def connect_services():
     mongo_db = mongo_client[mongodb_database]
     await init_beanie(
         database=mongo_db,
-        document_models=[Conversation, AudioChunkDocument, WaveformData, User, Annotation],
+        document_models=[
+            Conversation,
+            AudioChunkDocument,
+            WaveformData,
+            User,
+            Annotation,
+        ],
     )
 
     # Redis
@@ -827,6 +919,7 @@ async def connect_services():
 # Display helpers
 # ---------------------------------------------------------------------------
 
+
 def print_header():
     console.print()
     console.print(
@@ -841,11 +934,19 @@ def print_header():
 
 def print_dry_run(stats: Stats, args):
     console.print()
-    console.print(Panel("[bold yellow]DRY-RUN MODE[/bold yellow] - no changes will be made", border_style="yellow"))
+    console.print(
+        Panel(
+            "[bold yellow]DRY-RUN MODE[/bold yellow] - no changes will be made",
+            border_style="yellow",
+        )
+    )
     console.print()
 
     if args.backup or args.backup_only:
-        console.print("[cyan]Would create backup at:[/cyan]", str(Path(args.backup_dir) / f"backup_..."))
+        console.print(
+            "[cyan]Would create backup at:[/cyan]",
+            str(Path(args.backup_dir) / f"backup_..."),
+        )
         if args.export_audio:
             audio_note = f"(from {stats.conversations_with_transcript} conversations with transcripts)"
             console.print(f"[cyan]Would export audio WAV files[/cyan] {audio_note}")
@@ -887,18 +988,26 @@ def print_confirmation(stats: Stats, args) -> bool:
     console.print()
 
     if args.backup or args.backup_only:
-        console.print(Panel(
-            f"[green]Backup will be created at:[/green] {args.backup_dir}\n"
-            + ("[green]Audio WAV export included[/green]" if args.export_audio else "[dim]Audio WAV export: off[/dim]"),
-            title="Backup",
-            border_style="green",
-        ))
+        console.print(
+            Panel(
+                f"[green]Backup will be created at:[/green] {args.backup_dir}\n"
+                + (
+                    "[green]Audio WAV export included[/green]"
+                    if args.export_audio
+                    else "[dim]Audio WAV export: off[/dim]"
+                ),
+                title="Backup",
+                border_style="green",
+            )
+        )
     elif not args.backup_only:
-        console.print(Panel(
-            "[bold red]No backup will be created![/bold red]\nData will be permanently lost.",
-            title="Warning",
-            border_style="red",
-        ))
+        console.print(
+            Panel(
+                "[bold red]No backup will be created![/bold red]\nData will be permanently lost.",
+                title="Warning",
+                border_style="red",
+            )
+        )
 
     if not args.backup_only:
         items = [
@@ -911,18 +1020,22 @@ def print_confirmation(stats: Stats, args) -> bool:
             f"  {stats.memories} memories",
         ]
         if stats.neo4j_nodes:
-            items.append(f"  {stats.neo4j_nodes} Neo4j nodes + {stats.neo4j_relationships} relationships")
+            items.append(
+                f"  {stats.neo4j_nodes} Neo4j nodes + {stats.neo4j_relationships} relationships"
+            )
         items.append(f"  {stats.redis_jobs} Redis jobs")
         if args.include_wav:
             items.append(f"  {stats.legacy_wav} legacy WAV files")
         if args.delete_users:
             items.append(f"  [bold red]{stats.users} users (DANGEROUS)[/bold red]")
 
-        console.print(Panel(
-            "\n".join(items),
-            title="[bold red]Will Delete[/bold red]",
-            border_style="red",
-        ))
+        console.print(
+            Panel(
+                "\n".join(items),
+                title="[bold red]Will Delete[/bold red]",
+                border_style="red",
+            )
+        )
 
     console.print()
     return Confirm.ask("[bold]Proceed?[/bold]", default=False)
@@ -931,6 +1044,7 @@ def print_confirmation(stats: Stats, args) -> bool:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 async def main():
     parser = argparse.ArgumentParser(
@@ -947,14 +1061,37 @@ Examples:
         """,
     )
 
-    parser.add_argument("--backup", action="store_true", help="Create backup before cleaning")
-    parser.add_argument("--backup-only", action="store_true", help="Create backup WITHOUT cleaning (safe)")
-    parser.add_argument("--export-audio", action="store_true", help="Include audio WAV export in backup (conversations with transcripts only)")
-    parser.add_argument("--include-wav", action="store_true", help="Include legacy WAV file cleanup")
-    parser.add_argument("--dry-run", action="store_true", help="Preview without making changes")
+    parser.add_argument(
+        "--backup", action="store_true", help="Create backup before cleaning"
+    )
+    parser.add_argument(
+        "--backup-only",
+        action="store_true",
+        help="Create backup WITHOUT cleaning (safe)",
+    )
+    parser.add_argument(
+        "--export-audio",
+        action="store_true",
+        help="Include audio WAV export in backup (conversations with transcripts only)",
+    )
+    parser.add_argument(
+        "--include-wav", action="store_true", help="Include legacy WAV file cleanup"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Preview without making changes"
+    )
     parser.add_argument("--force", action="store_true", help="Skip confirmation prompt")
-    parser.add_argument("--backup-dir", type=str, default="/app/data/backups", help="Backup directory (default: /app/data/backups)")
-    parser.add_argument("--delete-users", action="store_true", help="DANGEROUS: Also delete user accounts")
+    parser.add_argument(
+        "--backup-dir",
+        type=str,
+        default="/app/data/backups",
+        help="Backup directory (default: /app/data/backups)",
+    )
+    parser.add_argument(
+        "--delete-users",
+        action="store_true",
+        help="DANGEROUS: Also delete user accounts",
+    )
 
     args = parser.parse_args()
 
@@ -968,11 +1105,15 @@ Examples:
 
     # Connect
     with console.status("[bold cyan]Connecting to services...", spinner="dots"):
-        mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client = await connect_services()
+        mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client = (
+            await connect_services()
+        )
 
     # Gather stats
     with console.status("[bold cyan]Gathering statistics...", spinner="dots"):
-        stats = await gather_stats(mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client)
+        stats = await gather_stats(
+            mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client
+        )
 
     console.print()
     console.print(render_stats_table(stats, "Current Backend State"))
@@ -993,7 +1134,9 @@ Examples:
     do_backup = args.backup or args.backup_only
     if do_backup:
         console.print()
-        backup_mgr = BackupManager(args.backup_dir, args.export_audio, mongo_db, neo4j_driver, langfuse_client)
+        backup_mgr = BackupManager(
+            args.backup_dir, args.export_audio, mongo_db, neo4j_driver, langfuse_client
+        )
         result = await backup_mgr.run(qdrant_client, stats)
 
         console.print()
@@ -1006,44 +1149,61 @@ Examples:
 
         if not result.critical_ok:
             console.print()
-            console.print(Panel(
-                "[bold red]Critical backup exports failed![/bold red]\n"
-                "Conversations or audio metadata could not be exported.\n"
-                "Cleanup will NOT proceed to protect your data.",
-                title="Backup Verification Failed",
-                border_style="red",
-            ))
+            console.print(
+                Panel(
+                    "[bold red]Critical backup exports failed![/bold red]\n"
+                    "Conversations or audio metadata could not be exported.\n"
+                    "Cleanup will NOT proceed to protect your data.",
+                    title="Backup Verification Failed",
+                    border_style="red",
+                )
+            )
             sys.exit(1)
 
         if not result.all_ok:
             console.print()
-            console.print("[yellow]Some non-critical exports failed (see table above).[/yellow]")
+            console.print(
+                "[yellow]Some non-critical exports failed (see table above).[/yellow]"
+            )
 
     # If backup-only, we're done
     if args.backup_only:
         console.print()
-        console.print(Panel(
-            "[bold green]Backup completed successfully![/bold green]\n"
-            "No data was deleted.",
-            border_style="green",
-        ))
+        console.print(
+            Panel(
+                "[bold green]Backup completed successfully![/bold green]\n"
+                "No data was deleted.",
+                border_style="green",
+            )
+        )
         return
 
     # Cleanup
     console.print()
     cleanup_mgr = CleanupManager(
-        mongo_db, redis_conn, qdrant_client, args.include_wav, args.delete_users, neo4j_driver
+        mongo_db,
+        redis_conn,
+        qdrant_client,
+        args.include_wav,
+        args.delete_users,
+        neo4j_driver,
     )
     success = await cleanup_mgr.run(stats)
 
     if not success:
-        console.print(Panel("[bold red]Cleanup encountered errors![/bold red]", border_style="red"))
+        console.print(
+            Panel(
+                "[bold red]Cleanup encountered errors![/bold red]", border_style="red"
+            )
+        )
         sys.exit(1)
 
     # Verify
     console.print()
     with console.status("[bold cyan]Verifying cleanup...", spinner="dots"):
-        final_stats = await gather_stats(mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client)
+        final_stats = await gather_stats(
+            mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client
+        )
 
     console.print(render_stats_table(final_stats, "After Cleanup"))
 

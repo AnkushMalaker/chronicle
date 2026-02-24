@@ -300,7 +300,7 @@ export const systemApi = {
   getMiscSettings: () => api.get('/api/misc-settings'),
   saveMiscSettings: (settings: { always_persist_enabled?: boolean; use_provider_segments?: boolean; per_segment_speaker_id?: boolean; transcription_job_timeout_seconds?: number }) =>
     api.post('/api/misc-settings', settings),
-  
+
   // Plugin Configuration Management (YAML-based)
   getPluginsConfigRaw: () => api.get('/api/admin/plugins/config'),
   updatePluginsConfigRaw: (configYaml: string) =>
@@ -318,7 +318,7 @@ export const systemApi = {
     orchestration?: {
       enabled: boolean
       events: string[]
-      condition: { type: string; wake_words?: string[] }
+      condition: { type: string; wake_words?: string[]; keywords?: string[] }
     }
     settings?: Record<string, any>
     env_vars?: Record<string, string>
@@ -327,7 +327,7 @@ export const systemApi = {
     orchestration?: {
       enabled: boolean
       events: string[]
-      condition: { type: string; wake_words?: string[] }
+      condition: { type: string; wake_words?: string[]; keywords?: string[] }
     }
     settings?: Record<string, any>
     env_vars?: Record<string, string>
@@ -464,19 +464,19 @@ export const chatApi = {
   getSession: (sessionId: string) => api.get(`/api/chat/sessions/${sessionId}`),
   updateSession: (sessionId: string, title: string) => api.put(`/api/chat/sessions/${sessionId}`, { title }),
   deleteSession: (sessionId: string) => api.delete(`/api/chat/sessions/${sessionId}`),
-  
+
   // Messages
   getMessages: (sessionId: string, limit = 100) => api.get(`/api/chat/sessions/${sessionId}/messages`, { params: { limit } }),
-  
+
   // Memory extraction
   extractMemories: (sessionId: string) => api.post(`/api/chat/sessions/${sessionId}/extract-memories`),
-  
+
   // Statistics
   getStatistics: () => api.get('/api/chat/statistics'),
-  
+
   // Health check
   getHealth: () => api.get('/api/chat/health'),
-  
+
   // Streaming chat — OpenAI-compatible completions endpoint
   sendMessage: (message: string, sessionId?: string, includeObsidianMemory?: boolean) => {
     const requestBody: Record<string, unknown> = {

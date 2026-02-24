@@ -16,14 +16,12 @@ import hashlib
 import logging
 import os
 import re
-from pathlib import Path
 from typing import List, Literal, Optional, TypedDict
 
 from advanced_omi_backend.services.memory.config import (
     load_config_yml as load_root_config,
 )
 from advanced_omi_backend.services.memory.providers.llm_providers import (
-    chunk_text_with_spacy,
     generate_openai_embeddings,
 )
 from advanced_omi_backend.services.neo4j_client import (
@@ -33,6 +31,7 @@ from advanced_omi_backend.services.neo4j_client import (
 )
 from advanced_omi_backend.utils.config_utils import resolve_value
 from advanced_omi_backend.utils.model_utils import get_model_config
+from advanced_omi_backend.utils.text_chunking import semantic_chunk_text
 
 logger = logging.getLogger(__name__)
 
@@ -64,44 +63,11 @@ class ObsidianSearchError(Exception):
         self.stage = stage
 
 
-def load_env_file(filepath: Path) -> dict[str, str]:
-    """Load environment variables from a .env file.
-
-    Args:
-        filepath: Path to the .env file to load.
-
-    Returns:
-        Dictionary of key-value pairs from the .env file.
-    """
-    env_vars = {}
-    if filepath.exists():
-        with open(filepath, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" in line:
-                    parts = line.split("=", 1)
-                    key = parts[0].strip()
-                    value = parts[1].strip() if len(parts) > 1 else ""
-                    # Handle quotes
-                    if (value.startswith("'") and value.endswith("'")) or (
-                        value.startswith('"') and value.endswith('"')
-                    ):
-                        value = value[1:-1]
-                    env_vars[key] = value
-    return env_vars
-
-
 class ObsidianService:
     """Service for ingesting Obsidian vaults into Neo4j graph database."""
 
     def __init__(self):
         """Initialize the Obsidian service with configuration from config.yml and environment."""
-        # Resolve paths relative to this file
-        # backends/advanced/src/advanced_omi_backend/services/obsidian_service.py
-        self.CURRENT_DIR = Path(__file__).parent.resolve()
-
         # Load configuration strictly from standard locations
         # Prefer /app/config.yml inside containers (mounted by docker-compose)
         # Fallbacks handled by shared utility
@@ -114,46 +80,36 @@ class ObsidianService:
 
         embed_config = get_model_config(config_data, "embedding")
         if not embed_config:
-            raise ValueError("Configuration for 'defaults.embedding' not found in config.yml")
+            raise ValueError(
+                "Configuration for 'defaults.embedding' not found in config.yml"
+            )
 
-        # Neo4j Connection - Prefer environment variables passed by Docker Compose
-        neo4j_host = os.getenv("NEO4J_HOST")
-        # Load .env file as fallback (for local dev or if env vars not set)
-        candidate_env_files = [
-            Path("/app/.env"),
-            self.CURRENT_DIR.parent.parent.parent.parent
-            / ".env",  # Project root .env file ToDo cleanup needed after k8s is migrated and there is no .env file in the project root.
-            self.CURRENT_DIR.parent.parent.parent.parent
-            / "backends"
-            / "advanced"
-            / ".env",  # repo path
-        ]
-        env_data = {}
-        for p in candidate_env_files:
-            if p.exists():
-                env_data.update(load_env_file(p))
-
-        # Use env var first, then fallback to .env file
-        if not neo4j_host:
-            neo4j_host = env_data.get("NEO4J_HOST")
-
-        if not neo4j_host:
-            raise KeyError("NEO4J_HOST not found in environment or .env")
-
+        # Neo4j Connection - environment variables passed by Docker Compose
+        neo4j_host = os.getenv("NEO4J_HOST", "neo4j")
         self.neo4j_uri = f"bolt://{neo4j_host}:7687"
-        self.neo4j_user = os.getenv("NEO4J_USER") or env_data.get("NEO4J_USER", "neo4j")
-        self.neo4j_password = os.getenv("NEO4J_PASSWORD") or env_data.get("NEO4J_PASSWORD", "")
+        self.neo4j_user = os.getenv("NEO4J_USER", "neo4j")
+        self.neo4j_password = os.getenv("NEO4J_PASSWORD", "password")
 
         # Models / API - Loaded strictly from config.yml
         self.embedding_model = str(resolve_value(embed_config["model_name"]))
-        self.embedding_dimensions = int(resolve_value(embed_config["embedding_dimensions"]))
+        self.embedding_dimensions = int(
+            resolve_value(embed_config["embedding_dimensions"])
+        )
         self.openai_base_url = str(resolve_value(llm_config["model_url"]))
         self.openai_api_key = str(resolve_value(llm_config["api_key"]))
 
-        # Chunking - uses shared spaCy/text fallback utility
-        self.chunk_word_limit = 120
+        # Semantic chunking configuration (from config.yml with defaults)
+        obsidian_config = config_data.get("memory", {}).get("obsidian", {})
+        chunking_config = obsidian_config.get("chunking", {})
+        self.semantic_buffer_size = int(chunking_config.get("buffer_size", 1))
+        self.semantic_breakpoint_percentile = float(
+            chunking_config.get("breakpoint_percentile_threshold", 95.0)
+        )
+        self.max_chunk_words = int(chunking_config.get("max_chunk_words", 300))
 
-        self.neo4j_client = Neo4jClient(self.neo4j_uri, self.neo4j_user, self.neo4j_password)
+        self.neo4j_client = Neo4jClient(
+            self.neo4j_uri, self.neo4j_user, self.neo4j_password
+        )
         self.read_interface = Neo4jReadInterface(self.neo4j_client)
         self.write_interface = Neo4jWriteInterface(self.neo4j_client)
 
@@ -191,7 +147,9 @@ class ObsidianService:
         """Normalize whitespace for embedding inputs."""
         return re.sub(r"\s+", " ", text).strip()
 
-    def parse_obsidian_note(self, root: str, filename: str, vault_path: str) -> NoteData:
+    def parse_obsidian_note(
+        self, root: str, filename: str, vault_path: str
+    ) -> NoteData:
         """Parse an Obsidian markdown file and extract metadata.
 
         Args:
@@ -225,14 +183,8 @@ class ObsidianService:
         fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw_text, re.DOTALL)
         content = raw_text[fm_match.end() :] if fm_match else raw_text
 
-        """
-        Pattern breakdown:
-        \[\[ matches [[
-        ([^\]|]+) captures the link name (one or more chars except ] or |)
-        (?:\|[^\]]+)? optionally matches |display text
-        \]\] matches ]]
-        Matches: [[note]] and [[note|display text]]
-        """
+        # Pattern: \[\[ matches [[, ([^\]|]+) captures link name,
+        # (?:\|[^\]]+)? optionally matches |display text, \]\] matches ]]
         links = re.findall(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]", content)
         tags = re.findall(r"#([a-zA-Z0-9_\-/]+)", content)
 
@@ -247,7 +199,10 @@ class ObsidianService:
         }
 
     async def chunking_and_embedding(self, note_data: NoteData) -> List[ChunkPayload]:
-        """Chunk note content and generate embeddings for each chunk.
+        """Chunk note content semantically and generate embeddings for each chunk.
+
+        Uses embedding-similarity-based semantic chunking to find natural topic
+        boundaries, then embeds the resulting chunks for vector storage.
 
         Args:
             note_data: Parsed note data to process.
@@ -255,9 +210,21 @@ class ObsidianService:
         Returns:
             List of chunk payloads with text and embedding vectors.
         """
-        text_chunks = chunk_text_with_spacy(
+        api_key = self.openai_api_key
+        base_url = self.openai_base_url
+        model = self.embedding_model
+
+        async def embed_fn(texts: List[str]) -> List[List[float]]:
+            return await generate_openai_embeddings(
+                texts, api_key=api_key, base_url=base_url, model=model
+            )
+
+        text_chunks = await semantic_chunk_text(
             note_data["content"],
-            max_tokens=self.chunk_word_limit,
+            embed_fn=embed_fn,
+            buffer_size=self.semantic_buffer_size,
+            breakpoint_percentile_threshold=self.semantic_breakpoint_percentile,
+            max_chunk_words=self.max_chunk_words,
         )
         logger.info(
             f"Processing: {note_data['path']} ({len(note_data['content'])} chars -> {len(text_chunks)} chunks)"
@@ -284,7 +251,9 @@ class ObsidianService:
                 model=self.embedding_model,
             )
         except Exception as e:
-            logger.exception(f"Embedding generation failed for {note_data['path']}: {e}")
+            logger.exception(
+                f"Embedding generation failed for {note_data['path']}: {e}"
+            )
             return []
 
         chunk_payloads: List[ChunkPayload] = []
@@ -296,7 +265,9 @@ class ObsidianService:
 
         return chunk_payloads
 
-    def ingest_note_and_chunks(self, note_data: NoteData, chunks: List[ChunkPayload]) -> None:
+    def ingest_note_and_chunks(
+        self, note_data: NoteData, chunks: List[ChunkPayload]
+    ) -> None:
         """Store note and chunks in Neo4j with relationships to folders, tags, and links.
 
         Args:
@@ -416,15 +387,15 @@ class ObsidianService:
         cypher_query = """
         CALL db.index.vector.queryNodes('chunk_embeddings', $limit, $vector)
         YIELD node AS chunk, score
-        
+
         // Find the parent Note
         MATCH (note:Note)-[:HAS_CHUNK]->(chunk)
-        
+
         // Get graph context: What tags and linked files are around this note?
         OPTIONAL MATCH (note)-[:HAS_TAG]->(t:Tag)
         OPTIONAL MATCH (note)-[:LINKS_TO]->(linked:Note)
-        
-        RETURN 
+
+        RETURN
             note.name AS source,
             chunk.text AS content,
             collect(DISTINCT t.name) AS tags,
@@ -470,15 +441,3 @@ def get_obsidian_service() -> ObsidianService:
     if _obsidian_service is None:
         _obsidian_service = ObsidianService()
     return _obsidian_service
-
-
-# Backward compatibility: module-level access uses lazy initialization
-# This property-like access ensures the service is only created when first used
-class _ObsidianServiceProxy:
-    """Proxy for lazy access to obsidian_service."""
-
-    def __getattr__(self, name):
-        return getattr(get_obsidian_service(), name)
-
-
-obsidian_service = _ObsidianServiceProxy()

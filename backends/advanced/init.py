@@ -837,7 +837,13 @@ class ChronicleSetup:
                 "Neo4j is used for Knowledge Graph (entity/relationship extraction)"
             )
             self.console.print()
-            neo4j_password = self.prompt_password("Neo4j password (min 8 chars)")
+            neo4j_password = self.prompt_with_existing_masked(
+                "Neo4j password (min 8 chars)",
+                env_key="NEO4J_PASSWORD",
+                placeholders=["", "your-neo4j-password"],
+                is_password=True,
+                default="neo4jpassword",
+            )
 
         self.config["NEO4J_HOST"] = "neo4j"
         self.config["NEO4J_USER"] = "neo4j"
