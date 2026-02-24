@@ -1,8 +1,41 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Activity, RefreshCw, CheckCircle, XCircle, AlertCircle, Users, Database, Server, MoreVertical, RotateCcw, Power } from 'lucide-react'
+import { Activity, RefreshCw, CheckCircle, XCircle, AlertCircle, Users, Database, Server, MoreVertical, RotateCcw, Power, Smartphone, Copy, Check } from 'lucide-react'
+import { QRCodeSVG } from 'qrcode.react'
 import { useAuth } from '../contexts/AuthContext'
+import { useTheme } from '../contexts/ThemeContext'
 import { useSystemData, useRestartWorkers, useRestartBackend } from '../hooks/useSystem'
 import { systemApi } from '../services/api'
+
+function getBackendHttpUrl(): string {
+  const { protocol, hostname, port } = window.location
+
+  const isStandardPort =
+    (protocol === 'https:' && (port === '' || port === '443')) ||
+    (protocol === 'http:' && (port === '' || port === '80'))
+
+  const basePath = import.meta.env.BASE_URL
+  if (isStandardPort && basePath && basePath !== '/') {
+    return `${protocol}//${hostname}`
+  }
+
+  if (import.meta.env.VITE_BACKEND_URL) {
+    const url = import.meta.env.VITE_BACKEND_URL as string
+    if (url.startsWith('/') || url === '') {
+      return `${protocol}//${hostname}${port ? `:${port}` : ''}`
+    }
+    return url
+  }
+
+  if (isStandardPort) {
+    return `${protocol}//${hostname}`
+  }
+
+  if (port === '5173') {
+    return `${protocol}//${hostname}:8000`
+  }
+
+  return `${protocol}//${hostname}${port ? `:${port}` : ''}`
+}
 
 interface ServiceStatus {
   healthy: boolean
@@ -12,6 +45,26 @@ interface ServiceStatus {
 
 export default function System() {
   const { isAdmin } = useAuth()
+  const { isDark } = useTheme()
+  const [copied, setCopied] = useState(false)
+  const backendUrl = getBackendHttpUrl()
+
+  const handleCopyUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(backendUrl)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      const textArea = document.createElement('textarea')
+      textArea.value = backendUrl
+      document.body.appendChild(textArea)
+      textArea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textArea)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    }
+  }
 
   // TanStack Query hooks for data fetching
   const { data: systemData, isLoading: loading, error: systemError, refetch: refetchSystem, dataUpdatedAt } = useSystemData(isAdmin)
@@ -690,6 +743,44 @@ export default function System() {
             </div>
           </div>
         )}
+      </div>
+
+      {/* Connect App */}
+      <div className="mt-6 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+        <div className="flex items-center space-x-3 mb-3">
+          <Smartphone className="h-5 w-5 text-blue-600" />
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Connect App</h3>
+        </div>
+        <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+          Scan this QR code with the Chronicle mobile app to connect it to your backend.
+        </p>
+        <div className="flex flex-col items-center space-y-4">
+          <div className="p-4 bg-white rounded-xl shadow-sm border border-gray-200 dark:border-gray-600">
+            <QRCodeSVG
+              value={backendUrl}
+              size={200}
+              level="M"
+              fgColor={isDark ? '#1f2937' : '#111827'}
+              bgColor="#ffffff"
+            />
+          </div>
+          <div className="flex items-center space-x-2">
+            <code className="px-3 py-1.5 bg-gray-100 dark:bg-gray-700 rounded text-sm text-gray-800 dark:text-gray-200 font-mono">
+              {backendUrl}
+            </code>
+            <button
+              onClick={handleCopyUrl}
+              className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors text-gray-600 dark:text-gray-300"
+              title="Copy URL"
+            >
+              {copied ? (
+                <Check className="h-4 w-4 text-green-500" />
+              ) : (
+                <Copy className="h-4 w-4" />
+              )}
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* Raw Data (Debug) */}
