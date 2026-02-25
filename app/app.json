@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "chronicle",
-    "slug": "chronicle",
+    "slug": "friend-lite-app",
     "version": "1.0.0",
     "scheme": "chronicle",
     "orientation": "portrait",
@@ -24,7 +24,8 @@
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": true,
           "NSAllowsLocalNetworking": true
-        }
+        },
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
@@ -55,7 +56,9 @@
           "enableNotifications": true,
           "enableBackgroundAudio": true,
           "enableDeviceDetection": true,
-          "iosBackgroundModes": { "useProcessing": true },
+          "iosBackgroundModes": {
+            "useProcessing": true
+          },
           "iosConfig": {
             "microphoneUsageDescription": "We use the mic for live audio streaming"
           }
@@ -107,6 +110,7 @@
       "expo-image-picker",
       "./plugins/with-ats"
     ],
+    "owner": "cupbearer5517",
     "extra": {
       "eas": {
         "projectId": "05d8598e-6fe7-4373-81e4-1654f3d8e181"

@@ -3,6 +3,7 @@ import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { OmiDevice } from 'friend-lite-react-native';
 import { useTheme, ThemeColors } from '../theme';
 import SignalStrength from './SignalStrength';
+import { detectDeviceType } from '../utils/deviceType';
 
 interface DeviceListItemProps {
   device: OmiDevice;
@@ -23,12 +24,18 @@ export const DeviceListItem: React.FC<DeviceListItemProps> = ({
   const s = createStyles(colors);
   const isThisDeviceConnected = connectedDeviceId === device.id;
   const isAnotherDeviceConnected = connectedDeviceId !== null && connectedDeviceId !== device.id;
+  const deviceType = detectDeviceType(device.name);
 
   return (
     <View style={s.deviceItem}>
       <View style={s.deviceInfoContainer}>
         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
           <Text style={s.deviceName}>{device.name || 'Unknown Device'}</Text>
+          {deviceType !== 'unknown' && (
+            <View style={[s.deviceTypeBadge, { backgroundColor: deviceType === 'neo' ? colors.warning : colors.primary }]}>
+              <Text style={s.deviceTypeBadgeText}>{deviceType === 'neo' ? 'Neo' : 'OMI'}</Text>
+            </View>
+          )}
           <SignalStrength rssi={device.rssi} />
         </View>
         <Text style={s.deviceInfo}>ID: {device.id}</Text>
@@ -84,6 +91,17 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     fontSize: 12,
     color: colors.textSecondary,
     marginTop: 2,
+  },
+  deviceTypeBadge: {
+    marginLeft: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  deviceTypeBadgeText: {
+    color: 'white',
+    fontSize: 10,
+    fontWeight: '700',
   },
   button: {
     backgroundColor: colors.primary,

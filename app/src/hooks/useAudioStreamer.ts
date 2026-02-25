@@ -27,6 +27,7 @@ const AUDIO_FORMAT = {
   rate: 16000,
   width: 2,
   channels: 1,
+  mode: 'streaming',
 };
 
 /** -------------------- Foreground Service helpers (NEW) -------------------- */

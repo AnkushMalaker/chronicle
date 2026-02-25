@@ -24,6 +24,7 @@ export type ConnectionEventType =
   | 'error'
   | 'health_ping'
   | 'reconnect_attempt'
+  | 'reconnect_backoff'
   | 'bt_state_change';
 
 const MAX_EVENTS = 200;

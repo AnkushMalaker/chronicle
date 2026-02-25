@@ -17,6 +17,7 @@ const EVENT_BADGE_COLORS: Record<ConnectionEventType, string> = {
   error: '#FF3B30',
   health_ping: '#34C759',
   reconnect_attempt: '#FF9500',
+  reconnect_backoff: '#FF9500',
   bt_state_change: '#5856D6',
 };
 

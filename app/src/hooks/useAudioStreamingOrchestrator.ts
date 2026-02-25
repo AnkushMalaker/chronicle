@@ -46,8 +46,14 @@ export const useAudioStreamingOrchestrator = ({
 
   const buildWebSocketUrl = useCallback((baseUrl: string): string => {
     let url = baseUrl.trim();
-    const isAdvanced = settings.jwtToken && settings.isAuthenticated;
+    url = url.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
+    if (!url.includes('/ws')) url = url.replace(/\/$/, '') + '/ws';
+    if (!url.includes('codec=')) {
+      const sep = url.includes('?') ? '&' : '?';
+      url = url + sep + 'codec=opus';
+    }
 
+    const isAdvanced = settings.jwtToken && settings.isAuthenticated;
     if (isAdvanced) {
       const params = new URLSearchParams();
       params.append('token', settings.jwtToken!);

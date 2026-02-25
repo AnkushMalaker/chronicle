@@ -117,16 +117,17 @@ export default function App() {
 
   const canScan = React.useMemo(() => (
     permissionGranted && bluetoothState === BluetoothState.PoweredOn &&
-    !autoReconnect.isAttemptingAutoReconnect && !deviceConnection.isConnecting &&
+    !autoReconnect.isAttemptingAutoReconnect && !autoReconnect.isRetryingConnection &&
+    !deviceConnection.isConnecting &&
     !deviceConnection.connectedDeviceId &&
     (autoReconnect.triedAutoReconnectForCurrentId || !autoReconnect.lastKnownDeviceId)
-  ), [permissionGranted, bluetoothState, autoReconnect.isAttemptingAutoReconnect, deviceConnection.isConnecting, deviceConnection.connectedDeviceId, autoReconnect.triedAutoReconnectForCurrentId, autoReconnect.lastKnownDeviceId]);
+  ), [permissionGranted, bluetoothState, autoReconnect.isAttemptingAutoReconnect, autoReconnect.isRetryingConnection, deviceConnection.isConnecting, deviceConnection.connectedDeviceId, autoReconnect.triedAutoReconnectForCurrentId, autoReconnect.lastKnownDeviceId]);
 
   const filteredDevices = React.useMemo(() => {
     if (!showOnlyOmi) return scannedDevices;
     return scannedDevices.filter(d => {
       const name = d.name?.toLowerCase() || '';
-      return name.includes('omi') || name.includes('friend');
+      return name.includes('omi') || name.includes('friend') || name.includes('neo');
     });
   }, [scannedDevices, showOnlyOmi]);
 
@@ -190,6 +191,21 @@ export default function App() {
           <BluetoothStatusBanner bluetoothState={bluetoothState} isPermissionsLoading={isPermissionsLoading} permissionGranted={permissionGranted} onRequestPermission={requestBluetoothPermission} />
           <ScanControls scanning={scanning} onScanPress={startScan} onStopScanPress={stopDeviceScanAction} canScan={canScan} />
 
+          {autoReconnect.isRetryingConnection && (
+            <View style={s.retryBanner}>
+              <ActivityIndicator size="small" color={colors.warning} />
+              <Text style={s.retryBannerText}>
+                Reconnecting in {autoReconnect.retryBackoffSeconds}s... (attempt {autoReconnect.connectionRetryCount})
+              </Text>
+              <TouchableOpacity
+                style={[s.button, { backgroundColor: colors.danger, paddingVertical: 6, paddingHorizontal: 10 }]}
+                onPress={autoReconnect.handleCancelAutoReconnect}
+              >
+                <Text style={s.buttonText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
           {!settings.isAuthenticated && (
             <View style={s.authWarning}>
               <Text style={s.authWarningText}>Login is required for advanced backend features. Simple backend can be used without authentication.</Text>
@@ -201,7 +217,7 @@ export default function App() {
               <View style={s.sectionHeaderWithFilter}>
                 <Text style={s.sectionTitle}>Found Devices</Text>
                 <View style={s.filterContainer}>
-                  <Text style={s.filterText}>Show only OMI/Friend</Text>
+                  <Text style={s.filterText}>Show only OMI/Friend/Neo</Text>
                   <Switch
                     trackColor={{ false: colors.disabled, true: colors.primary }}
                     thumbColor={showOnlyOmi ? colors.warning : colors.card}
@@ -222,7 +238,7 @@ export default function App() {
               ) : (
                 <View style={s.noDevicesContainer}>
                   <Text style={s.noDevicesText}>
-                    {showOnlyOmi ? `No OMI/Friend devices found. ${scannedDevices.length} other device(s) hidden by filter.` : 'No devices found.'}
+                    {showOnlyOmi ? `No OMI/Friend/Neo devices found. ${scannedDevices.length} other device(s) hidden by filter.` : 'No devices found.'}
                   </Text>
                 </View>
               )}
@@ -407,6 +423,23 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     color: colors.textTertiary,
     textAlign: 'center',
     fontStyle: 'italic',
+  },
+  retryBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    marginBottom: 15,
+    backgroundColor: colors.card,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.warning,
+  },
+  retryBannerText: {
+    flex: 1,
+    marginLeft: 10,
+    fontSize: 14,
+    color: colors.warning,
+    fontWeight: '500',
   },
   authWarning: {
     marginBottom: 20,
