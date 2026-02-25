@@ -26,6 +26,16 @@ def is_galileo_enabled() -> bool:
     return bool(os.getenv("GALILEO_API_KEY"))
 
 
+@lru_cache(maxsize=1)
+def is_langfuse_enabled() -> bool:
+    """Check if Langfuse OTEL is configured."""
+    return bool(
+        os.getenv("LANGFUSE_PUBLIC_KEY")
+        and os.getenv("LANGFUSE_SECRET_KEY")
+        and os.getenv("LANGFUSE_HOST")
+    )
+
+
 def is_otel_enabled() -> bool:
     """Check if any OTel exporter has been initialised."""
     return _otel_initialised
@@ -66,38 +76,83 @@ def clear_otel_session() -> None:
 
 
 def init_otel() -> None:
-    """Initialize OTEL with Galileo exporter and OpenAI instrumentor.
+    """Initialize OTEL with configured exporters and OpenAI instrumentor.
 
-    Call once at app startup. Safe to call if Galileo is not configured (no-op).
+    Supports multiple backends simultaneously:
+    - Galileo: if GALILEO_API_KEY is set
+    - Langfuse: if LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST are set
+
+    Call once at app startup. No-op if no backends are configured.
     """
-    if not is_galileo_enabled():
-        logger.info("Galileo not configured, skipping OTEL initialization")
+    galileo = is_galileo_enabled()
+    langfuse = is_langfuse_enabled()
+
+    if not galileo and not langfuse:
+        logger.info("No OTEL backends configured (Galileo/Langfuse), skipping initialization")
         return
 
     try:
-        from galileo import otel
-        from openinference.instrumentation.openai import OpenAIInstrumentor
         from opentelemetry.sdk import trace as trace_sdk
 
-        project = os.getenv("GALILEO_PROJECT", "chronicle")
-        logstream = os.getenv("GALILEO_LOG_STREAM", "default")
-
         tracer_provider = trace_sdk.TracerProvider()
-        galileo_processor = otel.GalileoSpanProcessor(
-            project=project, logstream=logstream
-        )
-        tracer_provider.add_span_processor(galileo_processor)
+        backends = []
 
-        # Auto-instrument all OpenAI SDK calls
-        OpenAIInstrumentor().instrument(tracer_provider=tracer_provider)
+        # --- Galileo backend ---
+        if galileo:
+            try:
+                from galileo import otel
+
+                project = os.getenv("GALILEO_PROJECT", "chronicle")
+                logstream = os.getenv("GALILEO_LOG_STREAM", "default")
+                galileo_processor = otel.GalileoSpanProcessor(project=project, logstream=logstream)
+                tracer_provider.add_span_processor(galileo_processor)
+                backends.append("Galileo")
+            except ImportError:
+                logger.warning(
+                    "Galileo packages not installed. " "Install with: uv pip install '.[galileo]'"
+                )
+            except Exception as e:
+                logger.error(f"Failed to add Galileo span processor: {e}")
+
+        # --- Langfuse backend ---
+        if langfuse:
+            try:
+                from langfuse.opentelemetry import LangfuseSpanProcessor
+
+                langfuse_processor = LangfuseSpanProcessor()
+                tracer_provider.add_span_processor(langfuse_processor)
+                backends.append("Langfuse")
+            except ImportError:
+                logger.warning(
+                    "Langfuse OTEL packages not installed. " "Ensure langfuse>=3.13.0 is installed."
+                )
+            except Exception as e:
+                logger.error(f"Failed to add Langfuse span processor: {e}")
+
+        if not backends:
+            logger.warning("No OTEL span processors were successfully added")
+            return
+
+        # Auto-instrument all OpenAI SDK calls (backend-agnostic)
+        try:
+            from openinference.instrumentation.openai import OpenAIInstrumentor
+
+            OpenAIInstrumentor().instrument(tracer_provider=tracer_provider)
+        except ImportError:
+            logger.warning(
+                "OpenAI OTEL instrumentor not installed. "
+                "Install with: uv pip install '.[galileo]'"
+            )
+            return
 
         global _otel_initialised
         _otel_initialised = True
-        logger.info("OTEL initialized with Galileo exporter + OpenAI instrumentor")
+        logger.info(
+            f"OTEL initialized with {' + '.join(backends)} exporter(s) + OpenAI instrumentor"
+        )
     except ImportError:
         logger.warning(
-            "Galileo/OTEL packages not installed. "
-            "Install with: uv pip install '.[galileo]'"
+            "OTEL SDK packages not installed. " "Install opentelemetry-api and opentelemetry-sdk."
         )
     except Exception as e:
         logger.error(f"Failed to initialize OTEL: {e}")

@@ -7,30 +7,29 @@ import inspect
 import logging
 import os
 import re
-import signal
 import shutil
+import signal
 import time
 import warnings
 from datetime import UTC, datetime
+from io import StringIO
 from pathlib import Path
 from typing import Optional
 
-from io import StringIO
-
-from ruamel.yaml import YAML
 from fastapi import HTTPException
+from ruamel.yaml import YAML
 
 from advanced_omi_backend.config import (
     get_diarization_settings as load_diarization_settings,
 )
 from advanced_omi_backend.config import get_misc_settings as load_misc_settings
-from advanced_omi_backend.config import (
-    save_diarization_settings,
-    save_misc_settings,
+from advanced_omi_backend.config import save_diarization_settings, save_misc_settings
+from advanced_omi_backend.config_loader import get_plugins_yml_path, save_config_section
+from advanced_omi_backend.model_registry import (
+    _find_config_path,
+    get_models_registry,
+    load_models_config,
 )
-from advanced_omi_backend.config_loader import get_plugins_yml_path
-from advanced_omi_backend.config_loader import save_config_section
-from advanced_omi_backend.model_registry import _find_config_path, get_models_registry, load_models_config
 from advanced_omi_backend.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -43,7 +42,7 @@ _yaml.preserve_quotes = True
 async def get_config_diagnostics():
     """
     Get comprehensive configuration diagnostics.
-    
+
     Returns warnings, errors, and status for all configuration components.
     """
     diagnostics = {
@@ -52,9 +51,9 @@ async def get_config_diagnostics():
         "issues": [],
         "warnings": [],
         "info": [],
-        "components": {}
+        "components": {},
     }
-    
+
     # Test OmegaConf configuration loading
     try:
         from advanced_omi_backend.config_loader import load_config
@@ -63,7 +62,7 @@ async def get_config_diagnostics():
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             config = load_config(force_reload=True)
-            
+
             # Check for OmegaConf warnings
             for warning in w:
                 warning_msg = str(warning.message)
@@ -71,148 +70,168 @@ async def get_config_diagnostics():
                     # Extract the variable name from warning
                     if "variable '" in warning_msg.lower():
                         var_name = warning_msg.split("'")[1]
-                        diagnostics["warnings"].append({
-                            "component": "OmegaConf",
-                            "severity": "warning",
-                            "message": f"Environment variable '{var_name}' not set (using empty default)",
-                            "resolution": f"Set {var_name} in .env file if needed"
-                        })
-        
+                        diagnostics["warnings"].append(
+                            {
+                                "component": "OmegaConf",
+                                "severity": "warning",
+                                "message": f"Environment variable '{var_name}' not set (using empty default)",
+                                "resolution": f"Set {var_name} in .env file if needed",
+                            }
+                        )
+
         diagnostics["components"]["omegaconf"] = {
             "status": "healthy",
-            "message": "Configuration loaded successfully"
+            "message": "Configuration loaded successfully",
         }
     except Exception as e:
         diagnostics["overall_status"] = "unhealthy"
-        diagnostics["issues"].append({
-            "component": "OmegaConf",
-            "severity": "error",
-            "message": f"Failed to load configuration: {str(e)}",
-            "resolution": "Check config/defaults.yml and config/config.yml syntax"
-        })
-        diagnostics["components"]["omegaconf"] = {
-            "status": "unhealthy",
-            "message": str(e)
-        }
-    
+        diagnostics["issues"].append(
+            {
+                "component": "OmegaConf",
+                "severity": "error",
+                "message": f"Failed to load configuration: {str(e)}",
+                "resolution": "Check config/defaults.yml and config/config.yml syntax",
+            }
+        )
+        diagnostics["components"]["omegaconf"] = {"status": "unhealthy", "message": str(e)}
+
     # Test model registry
     try:
         from advanced_omi_backend.model_registry import get_models_registry
-        
+
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             registry = get_models_registry()
-            
+
             # Capture model loading warnings
             for warning in w:
                 warning_msg = str(warning.message)
-                diagnostics["warnings"].append({
-                    "component": "Model Registry",
-                    "severity": "warning",
-                    "message": warning_msg,
-                    "resolution": "Check model definitions in config/defaults.yml"
-                })
-        
+                diagnostics["warnings"].append(
+                    {
+                        "component": "Model Registry",
+                        "severity": "warning",
+                        "message": warning_msg,
+                        "resolution": "Check model definitions in config/defaults.yml",
+                    }
+                )
+
         if registry:
             diagnostics["components"]["model_registry"] = {
                 "status": "healthy",
                 "message": f"Loaded {len(registry.models)} models",
                 "details": {
                     "total_models": len(registry.models),
-                    "defaults": dict(registry.defaults) if registry.defaults else {}
-                }
+                    "defaults": dict(registry.defaults) if registry.defaults else {},
+                },
             }
-            
+
             # Check critical models
             stt = registry.get_default("stt")
             stt_stream = registry.get_default("stt_stream")
             llm = registry.get_default("llm")
-            
+
             # STT check
             if stt:
                 if stt.api_key:
-                    diagnostics["info"].append({
-                        "component": "STT (Batch)",
-                        "message": f"Configured: {stt.name} ({stt.model_provider}) - API key present"
-                    })
+                    diagnostics["info"].append(
+                        {
+                            "component": "STT (Batch)",
+                            "message": f"Configured: {stt.name} ({stt.model_provider}) - API key present",
+                        }
+                    )
                 else:
-                    diagnostics["warnings"].append({
-                        "component": "STT (Batch)",
-                        "severity": "warning",
-                        "message": f"{stt.name} ({stt.model_provider}) - No API key configured",
-                        "resolution": "Transcription can fail without API key"
-                    })
+                    diagnostics["warnings"].append(
+                        {
+                            "component": "STT (Batch)",
+                            "severity": "warning",
+                            "message": f"{stt.name} ({stt.model_provider}) - No API key configured",
+                            "resolution": "Transcription can fail without API key",
+                        }
+                    )
             else:
-                diagnostics["issues"].append({
-                    "component": "STT (Batch)",
-                    "severity": "error",
-                    "message": "No batch STT model configured",
-                    "resolution": "Set defaults.stt in config.yml"
-                })
+                diagnostics["issues"].append(
+                    {
+                        "component": "STT (Batch)",
+                        "severity": "error",
+                        "message": "No batch STT model configured",
+                        "resolution": "Set defaults.stt in config.yml",
+                    }
+                )
                 diagnostics["overall_status"] = "partial"
-            
+
             # Streaming STT check
             if stt_stream:
                 if stt_stream.api_key:
-                    diagnostics["info"].append({
-                        "component": "STT (Streaming)",
-                        "message": f"Configured: {stt_stream.name} ({stt_stream.model_provider}) - API key present"
-                    })
+                    diagnostics["info"].append(
+                        {
+                            "component": "STT (Streaming)",
+                            "message": f"Configured: {stt_stream.name} ({stt_stream.model_provider}) - API key present",
+                        }
+                    )
                 else:
-                    diagnostics["warnings"].append({
+                    diagnostics["warnings"].append(
+                        {
+                            "component": "STT (Streaming)",
+                            "severity": "warning",
+                            "message": f"{stt_stream.name} ({stt_stream.model_provider}) - No API key configured",
+                            "resolution": "Real-time transcription can fail without API key",
+                        }
+                    )
+            else:
+                diagnostics["warnings"].append(
+                    {
                         "component": "STT (Streaming)",
                         "severity": "warning",
-                        "message": f"{stt_stream.name} ({stt_stream.model_provider}) - No API key configured",
-                        "resolution": "Real-time transcription can fail without API key"
-                    })
-            else:
-                diagnostics["warnings"].append({
-                    "component": "STT (Streaming)",
-                    "severity": "warning",
-                    "message": "No streaming STT model configured - streaming worker disabled",
-                    "resolution": "Set defaults.stt_stream in config.yml for WebSocket transcription"
-                })
-            
+                        "message": "No streaming STT model configured - streaming worker disabled",
+                        "resolution": "Set defaults.stt_stream in config.yml for WebSocket transcription",
+                    }
+                )
+
             # LLM check
             if llm:
                 if llm.api_key:
-                    diagnostics["info"].append({
-                        "component": "LLM",
-                        "message": f"Configured: {llm.name} ({llm.model_provider}) - API key present"
-                    })
+                    diagnostics["info"].append(
+                        {
+                            "component": "LLM",
+                            "message": f"Configured: {llm.name} ({llm.model_provider}) - API key present",
+                        }
+                    )
                 else:
-                    diagnostics["warnings"].append({
-                        "component": "LLM",
-                        "severity": "warning",
-                        "message": f"{llm.name} ({llm.model_provider}) - No API key configured",
-                        "resolution": "Memory extraction can fail without API key"
-                    })
-            
+                    diagnostics["warnings"].append(
+                        {
+                            "component": "LLM",
+                            "severity": "warning",
+                            "message": f"{llm.name} ({llm.model_provider}) - No API key configured",
+                            "resolution": "Memory extraction can fail without API key",
+                        }
+                    )
+
         else:
             diagnostics["overall_status"] = "unhealthy"
-            diagnostics["issues"].append({
-                "component": "Model Registry",
-                "severity": "error",
-                "message": "Failed to load model registry",
-                "resolution": "Check config/defaults.yml for syntax errors"
-            })
+            diagnostics["issues"].append(
+                {
+                    "component": "Model Registry",
+                    "severity": "error",
+                    "message": "Failed to load model registry",
+                    "resolution": "Check config/defaults.yml for syntax errors",
+                }
+            )
             diagnostics["components"]["model_registry"] = {
                 "status": "unhealthy",
-                "message": "Registry failed to load"
+                "message": "Registry failed to load",
             }
     except Exception as e:
         diagnostics["overall_status"] = "partial"
-        diagnostics["issues"].append({
-            "component": "Model Registry",
-            "severity": "error",
-            "message": f"Error loading registry: {str(e)}",
-            "resolution": "Check logs for detailed error information"
-        })
-        diagnostics["components"]["model_registry"] = {
-            "status": "unhealthy",
-            "message": str(e)
-        }
-    
+        diagnostics["issues"].append(
+            {
+                "component": "Model Registry",
+                "severity": "error",
+                "message": f"Error loading registry: {str(e)}",
+                "resolution": "Check logs for detailed error information",
+            }
+        )
+        diagnostics["components"]["model_registry"] = {"status": "unhealthy", "message": str(e)}
+
     # Check environment variables (only warn about keys relevant to configured providers)
     env_checks = [
         ("AUTH_SECRET_KEY", "Required for authentication"),
@@ -235,18 +254,22 @@ async def get_config_diagnostics():
             if provider == "deepgram":
                 env_checks.append(("DEEPGRAM_API_KEY", "Required for Deepgram transcription"))
             elif provider == "smallest":
-                env_checks.append(("SMALLEST_API_KEY", "Required for Smallest.ai Pulse transcription"))
-    
+                env_checks.append(
+                    ("SMALLEST_API_KEY", "Required for Smallest.ai Pulse transcription")
+                )
+
     for env_var, description in env_checks:
         value = os.getenv(env_var)
         if not value or value == "":
-            diagnostics["warnings"].append({
-                "component": "Environment Variables",
-                "severity": "warning",
-                "message": f"{env_var} not set - {description}",
-                "resolution": f"Set {env_var} in .env file"
-            })
-    
+            diagnostics["warnings"].append(
+                {
+                    "component": "Environment Variables",
+                    "severity": "warning",
+                    "message": f"{env_var} not set - {description}",
+                    "resolution": f"Set {env_var} in .env file",
+                }
+            )
+
     return diagnostics
 
 
@@ -288,7 +311,7 @@ async def get_observability_config():
 
     Returns non-secret data only (enabled status and browser URL).
     """
-    from advanced_omi_backend.openai_factory import is_langfuse_enabled
+    from advanced_omi_backend.observability.otel_setup import is_langfuse_enabled
 
     enabled = is_langfuse_enabled()
     session_base_url = None
@@ -321,10 +344,7 @@ async def get_diarization_settings():
     try:
         # Get settings using OmegaConf
         settings = load_diarization_settings()
-        return {
-            "settings": settings,
-            "status": "success"
-        }
+        return {"settings": settings, "status": "success"}
     except Exception as e:
         logger.exception("Error getting diarization settings")
         raise e
@@ -335,8 +355,13 @@ async def save_diarization_settings_controller(settings: dict):
     try:
         # Validate settings
         valid_keys = {
-            "diarization_source", "similarity_threshold", "min_duration", "collar",
-            "min_duration_off", "min_speakers", "max_speakers"
+            "diarization_source",
+            "similarity_threshold",
+            "min_duration",
+            "collar",
+            "min_duration_off",
+            "min_speakers",
+            "max_speakers",
         }
 
         # Filter to only valid keys (allow round-trip GET→POST)
@@ -348,13 +373,20 @@ async def save_diarization_settings_controller(settings: dict):
             # Type validation for known keys only
             if key in ["min_speakers", "max_speakers"]:
                 if not isinstance(value, int) or value < 1 or value > 20:
-                    raise HTTPException(status_code=400, detail=f"Invalid value for {key}: must be integer 1-20")
+                    raise HTTPException(
+                        status_code=400, detail=f"Invalid value for {key}: must be integer 1-20"
+                    )
             elif key == "diarization_source":
                 if not isinstance(value, str) or value not in ["pyannote", "deepgram"]:
-                    raise HTTPException(status_code=400, detail=f"Invalid value for {key}: must be 'pyannote' or 'deepgram'")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid value for {key}: must be 'pyannote' or 'deepgram'",
+                    )
             else:
                 if not isinstance(value, (int, float)) or value < 0:
-                    raise HTTPException(status_code=400, detail=f"Invalid value for {key}: must be positive number")
+                    raise HTTPException(
+                        status_code=400, detail=f"Invalid value for {key}: must be positive number"
+                    )
 
             filtered_settings[key] = value
 
@@ -373,14 +405,14 @@ async def save_diarization_settings_controller(settings: dict):
             return {
                 "message": "Diarization settings saved successfully",
                 "settings": current_settings,
-                "status": "success"
+                "status": "success",
             }
         else:
             logger.warning("Settings save failed")
             return {
                 "message": "Settings save failed",
                 "settings": current_settings,
-                "status": "error"
+                "status": "error",
             }
 
     except Exception as e:
@@ -393,10 +425,7 @@ async def get_misc_settings():
     try:
         # Get settings using OmegaConf
         settings = load_misc_settings()
-        return {
-            "settings": settings,
-            "status": "success"
-        }
+        return {"settings": settings, "status": "success"}
     except Exception as e:
         logger.exception("Error getting misc settings")
         raise e
@@ -406,7 +435,12 @@ async def save_misc_settings_controller(settings: dict):
     """Save miscellaneous settings."""
     try:
         # Validate settings
-        boolean_keys = {"always_persist_enabled", "use_provider_segments", "per_segment_speaker_id", "always_batch_retranscribe"}
+        boolean_keys = {
+            "always_persist_enabled",
+            "use_provider_segments",
+            "per_segment_speaker_id",
+            "always_batch_retranscribe",
+        }
         integer_keys = {"transcription_job_timeout_seconds"}
         valid_keys = boolean_keys | integer_keys
 
@@ -419,10 +453,15 @@ async def save_misc_settings_controller(settings: dict):
             # Type validation
             if key in boolean_keys:
                 if not isinstance(value, bool):
-                    raise HTTPException(status_code=400, detail=f"Invalid value for {key}: must be boolean")
+                    raise HTTPException(
+                        status_code=400, detail=f"Invalid value for {key}: must be boolean"
+                    )
             elif key == "transcription_job_timeout_seconds":
                 if not isinstance(value, int) or value < 60 or value > 7200:
-                    raise HTTPException(status_code=400, detail=f"Invalid value for {key}: must be integer between 60 and 7200")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid value for {key}: must be integer between 60 and 7200",
+                    )
 
             filtered_settings[key] = value
 
@@ -439,14 +478,14 @@ async def save_misc_settings_controller(settings: dict):
             return {
                 "message": "Miscellaneous settings saved successfully",
                 "settings": updated_settings,
-                "status": "success"
+                "status": "success",
             }
         else:
             logger.warning("Settings save failed")
             return {
                 "message": "Settings save failed",
                 "settings": load_misc_settings(),
-                "status": "error"
+                "status": "error",
             }
 
     except HTTPException:
@@ -472,9 +511,7 @@ async def get_cleanup_settings_controller(user: User) -> dict:
 
 
 async def save_cleanup_settings_controller(
-    auto_cleanup_enabled: bool,
-    retention_days: int,
-    user: User
+    auto_cleanup_enabled: bool, retention_days: int, user: User
 ) -> dict:
     """
     Save cleanup settings (admin only).
@@ -504,19 +541,20 @@ async def save_cleanup_settings_controller(
 
     # Create settings object
     settings = CleanupSettings(
-        auto_cleanup_enabled=auto_cleanup_enabled,
-        retention_days=retention_days
+        auto_cleanup_enabled=auto_cleanup_enabled, retention_days=retention_days
     )
 
     # Save using OmegaConf
     save_cleanup_settings(settings)
 
-    logger.info(f"Admin {user.email} updated cleanup settings: auto_cleanup={auto_cleanup_enabled}, retention={retention_days}d")
+    logger.info(
+        f"Admin {user.email} updated cleanup settings: auto_cleanup={auto_cleanup_enabled}, retention={retention_days}d"
+    )
 
     return {
         "auto_cleanup_enabled": settings.auto_cleanup_enabled,
         "retention_days": settings.retention_days,
-        "message": "Cleanup settings saved successfully"
+        "message": "Cleanup settings saved successfully",
     }
 
 
@@ -526,7 +564,7 @@ async def get_speaker_configuration(user: User):
         return {
             "primary_speakers": user.primary_speakers,
             "user_id": user.user_id,
-            "status": "success"
+            "status": "success",
         }
     except Exception as e:
         logger.exception(f"Error getting speaker configuration for user {user.user_id}")
@@ -540,30 +578,32 @@ async def update_speaker_configuration(user: User, primary_speakers: list[dict])
         for speaker in primary_speakers:
             if not isinstance(speaker, dict):
                 raise ValueError("Each speaker must be a dictionary")
-            
+
             required_fields = ["speaker_id", "name", "user_id"]
             for field in required_fields:
                 if field not in speaker:
                     raise ValueError(f"Missing required field: {field}")
-        
+
         # Enforce server-side user_id and add timestamp to each speaker
         for speaker in primary_speakers:
             speaker["user_id"] = user.user_id  # Override client-supplied user_id
             speaker["selected_at"] = datetime.now(UTC).isoformat()
-        
+
         # Update user model
         user.primary_speakers = primary_speakers
         await user.save()
-        
-        logger.info(f"Updated primary speakers configuration for user {user.user_id}: {len(primary_speakers)} speakers")
-        
+
+        logger.info(
+            f"Updated primary speakers configuration for user {user.user_id}: {len(primary_speakers)} speakers"
+        )
+
         return {
             "message": "Primary speakers configuration updated successfully",
             "primary_speakers": primary_speakers,
             "count": len(primary_speakers),
-            "status": "success"
+            "status": "success",
         }
-        
+
     except Exception as e:
         logger.exception(f"Error updating speaker configuration for user {user.user_id}")
         raise e
@@ -578,25 +618,25 @@ async def get_enrolled_speakers(user: User):
 
         # Initialize speaker recognition client
         speaker_client = SpeakerRecognitionClient()
-        
+
         if not speaker_client.enabled:
             return {
                 "speakers": [],
                 "service_available": False,
                 "message": "Speaker recognition service is not configured or disabled",
-                "status": "success"
+                "status": "success",
             }
-        
+
         # Get enrolled speakers - using hardcoded user_id=1 for now (as noted in speaker_recognition_client.py)
         speakers = await speaker_client.get_enrolled_speakers(user_id="1")
-        
+
         return {
             "speakers": speakers.get("speakers", []) if speakers else [],
             "service_available": True,
             "message": "Successfully retrieved enrolled speakers",
-            "status": "success"
+            "status": "success",
         }
-        
+
     except Exception as e:
         logger.exception(f"Error getting enrolled speakers for user {user.user_id}")
         raise e
@@ -611,25 +651,25 @@ async def get_speaker_service_status():
 
         # Initialize speaker recognition client
         speaker_client = SpeakerRecognitionClient()
-        
+
         if not speaker_client.enabled:
             return {
                 "service_available": False,
                 "healthy": False,
                 "message": "Speaker recognition service is not configured or disabled",
-                "status": "disabled"
+                "status": "disabled",
             }
-        
+
         # Perform health check
         health_result = await speaker_client.health_check()
-        
+
         if health_result:
             return {
                 "service_available": True,
                 "healthy": True,
                 "message": "Speaker recognition service is healthy",
                 "service_url": speaker_client.service_url,
-                "status": "healthy"
+                "status": "healthy",
             }
         else:
             return {
@@ -637,16 +677,16 @@ async def get_speaker_service_status():
                 "healthy": False,
                 "message": "Speaker recognition service is not responding",
                 "service_url": speaker_client.service_url,
-                "status": "unhealthy"
+                "status": "unhealthy",
             }
-        
+
     except Exception as e:
         logger.exception("Error checking speaker service status")
         raise e
 
 
-
 # Memory Configuration Management Functions
+
 
 async def get_memory_config_raw():
     """Get current memory configuration (memory section of config.yml) as YAML."""
@@ -655,7 +695,7 @@ async def get_memory_config_raw():
         if not os.path.exists(cfg_path):
             raise FileNotFoundError(f"Config file not found: {cfg_path}")
 
-        with open(cfg_path, 'r') as f:
+        with open(cfg_path, "r") as f:
             data = _yaml.load(f) or {}
         memory_section = data.get("memory", {})
         stream = StringIO()
@@ -691,10 +731,10 @@ async def update_memory_config_raw(config_yaml: str):
         shutil.copy2(cfg_path, backup_path)
 
         # Update memory section and write file
-        with open(cfg_path, 'r') as f:
+        with open(cfg_path, "r") as f:
             data = _yaml.load(f) or {}
         data["memory"] = new_mem
-        with open(cfg_path, 'w') as f:
+        with open(cfg_path, "w") as f:
             _yaml.dump(data, f)
 
         # Reload registry
@@ -736,7 +776,11 @@ async def reload_memory_config():
     try:
         cfg_path = _find_config_path()
         load_models_config(force_reload=True)
-        return {"message": "Configuration reloaded", "config_path": str(cfg_path), "status": "success"}
+        return {
+            "message": "Configuration reloaded",
+            "config_path": str(cfg_path),
+            "status": "success",
+        }
     except Exception as e:
         logger.exception("Error reloading config")
         raise e
@@ -758,7 +802,7 @@ async def delete_all_user_memories(user: User):
             "message": f"Successfully deleted {deleted_count} memories",
             "deleted_count": deleted_count,
             "user_id": user.user_id,
-            "status": "success"
+            "status": "success",
         }
 
     except Exception as e:
@@ -767,6 +811,7 @@ async def delete_all_user_memories(user: User):
 
 
 # Memory Provider Configuration Functions
+
 
 async def get_memory_provider():
     """Get current memory provider configuration."""
@@ -782,7 +827,7 @@ async def get_memory_provider():
         return {
             "current_provider": current_provider,
             "available_providers": available_providers,
-            "status": "success"
+            "status": "success",
         }
 
     except Exception as e:
@@ -798,7 +843,9 @@ async def set_memory_provider(provider: str):
         valid_providers = ["chronicle", "openmemory_mcp"]
 
         if provider not in valid_providers:
-            raise ValueError(f"Invalid provider '{provider}'. Valid providers: {', '.join(valid_providers)}")
+            raise ValueError(
+                f"Invalid provider '{provider}'. Valid providers: {', '.join(valid_providers)}"
+            )
 
         # Path to .env file (assuming we're running from backends/advanced/)
         env_path = os.path.join(os.getcwd(), ".env")
@@ -807,7 +854,7 @@ async def set_memory_provider(provider: str):
             raise FileNotFoundError(f".env file not found at {env_path}")
 
         # Read current .env file
-        with open(env_path, 'r') as file:
+        with open(env_path, "r") as file:
             lines = file.readlines()
 
         # Update or add MEMORY_PROVIDER line
@@ -831,7 +878,7 @@ async def set_memory_provider(provider: str):
         logger.info(f"Created .env backup at {backup_path}")
 
         # Write updated .env file
-        with open(env_path, 'w') as file:
+        with open(env_path, "w") as file:
             file.writelines(updated_lines)
 
         # Update environment variable for current process
@@ -845,7 +892,7 @@ async def set_memory_provider(provider: str):
             "env_path": env_path,
             "backup_created": True,
             "requires_restart": True,
-            "status": "success"
+            "status": "success",
         }
 
     except Exception as e:
@@ -854,6 +901,7 @@ async def set_memory_provider(provider: str):
 
 
 # LLM Operations Configuration Functions
+
 
 async def get_llm_operations():
     """Get LLM operation configurations and available models."""
@@ -906,25 +954,36 @@ async def save_llm_operations(operations: dict):
 
             extra_keys = set(op_value.keys()) - valid_keys
             if extra_keys:
-                raise HTTPException(status_code=400, detail=f"Invalid keys for '{op_name}': {extra_keys}")
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid keys for '{op_name}': {extra_keys}"
+                )
 
             if "temperature" in op_value and op_value["temperature"] is not None:
                 t = op_value["temperature"]
                 if not isinstance(t, (int, float)) or t < 0 or t > 2:
-                    raise HTTPException(status_code=400, detail=f"Invalid temperature for '{op_name}': must be 0-2")
+                    raise HTTPException(
+                        status_code=400, detail=f"Invalid temperature for '{op_name}': must be 0-2"
+                    )
 
             if "max_tokens" in op_value and op_value["max_tokens"] is not None:
                 mt = op_value["max_tokens"]
                 if not isinstance(mt, int) or mt <= 0:
-                    raise HTTPException(status_code=400, detail=f"Invalid max_tokens for '{op_name}': must be positive int")
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid max_tokens for '{op_name}': must be positive int",
+                    )
 
             if "model" in op_value and op_value["model"] is not None:
                 if not registry.get_by_name(op_value["model"]):
-                    raise HTTPException(status_code=400, detail=f"Model '{op_value['model']}' not found in registry")
+                    raise HTTPException(
+                        status_code=400, detail=f"Model '{op_value['model']}' not found in registry"
+                    )
 
             if "response_format" in op_value and op_value["response_format"] is not None:
                 if op_value["response_format"] != "json":
-                    raise HTTPException(status_code=400, detail=f"response_format must be 'json' or null")
+                    raise HTTPException(
+                        status_code=400, detail=f"response_format must be 'json' or null"
+                    )
 
         if save_config_section("llm_operations", operations):
             load_models_config(force_reload=True)
@@ -958,11 +1017,21 @@ async def test_llm_model(model_name: Optional[str]):
         if model_name:
             model_def = registry.get_by_name(model_name)
             if not model_def:
-                return {"success": False, "model_name": model_name, "error": f"Model '{model_name}' not found", "status": "error"}
+                return {
+                    "success": False,
+                    "model_name": model_name,
+                    "error": f"Model '{model_name}' not found",
+                    "status": "error",
+                }
         else:
             model_def = registry.get_default("llm")
             if not model_def:
-                return {"success": False, "model_name": None, "error": "No default LLM configured", "status": "error"}
+                return {
+                    "success": False,
+                    "model_name": None,
+                    "error": "No default LLM configured",
+                    "status": "error",
+                }
 
         client = create_openai_client(
             api_key=model_def.api_key or "",
@@ -998,6 +1067,7 @@ async def test_llm_model(model_name: Optional[str]):
 
 # Chat Configuration Management Functions
 
+
 async def get_chat_config_yaml() -> str:
     """Get chat system prompt as plain text."""
     try:
@@ -1012,11 +1082,11 @@ If no relevant memories are available, respond normally based on the conversatio
         if not os.path.exists(config_path):
             return default_prompt
 
-        with open(config_path, 'r') as f:
+        with open(config_path, "r") as f:
             full_config = _yaml.load(f) or {}
 
-        chat_config = full_config.get('chat', {})
-        system_prompt = chat_config.get('system_prompt', default_prompt)
+        chat_config = full_config.get("chat", {})
+        system_prompt = chat_config.get("system_prompt", default_prompt)
 
         # Return just the prompt text, not the YAML structure
         return system_prompt
@@ -1042,26 +1112,26 @@ async def save_chat_config_yaml(prompt_text: str) -> dict:
             raise ValueError("Prompt too long (maximum 10000 characters)")
 
         # Create chat config dict
-        chat_config = {'system_prompt': prompt_text}
+        chat_config = {"system_prompt": prompt_text}
 
         # Load full config
         if os.path.exists(config_path):
-            with open(config_path, 'r') as f:
+            with open(config_path, "r") as f:
                 full_config = _yaml.load(f) or {}
         else:
             full_config = {}
 
         # Backup existing config
         if os.path.exists(config_path):
-            backup_path = str(config_path) + '.backup'
+            backup_path = str(config_path) + ".backup"
             shutil.copy2(config_path, backup_path)
             logger.info(f"Created config backup at {backup_path}")
 
         # Update chat section
-        full_config['chat'] = chat_config
+        full_config["chat"] = chat_config
 
         # Save
-        with open(config_path, 'w') as f:
+        with open(config_path, "w") as f:
             _yaml.dump(full_config, f)
 
         # Reload config in memory (hot-reload)
@@ -1098,6 +1168,7 @@ async def validate_chat_config_yaml(prompt_text: str) -> dict:
 
 # Plugin Configuration Management Functions
 
+
 async def get_plugins_config_yaml() -> str:
     """Get plugins configuration as YAML text."""
     try:
@@ -1120,7 +1191,7 @@ async def get_plugins_config_yaml() -> str:
         if not plugins_yml_path.exists():
             return default_config
 
-        with open(plugins_yml_path, 'r') as f:
+        with open(plugins_yml_path, "r") as f:
             yaml_content = f.read()
 
         return yaml_content
@@ -1142,7 +1213,7 @@ async def save_plugins_config_yaml(yaml_content: str) -> dict:
                 raise ValueError("Configuration must be a YAML dictionary")
 
             # Validate has 'plugins' key
-            if 'plugins' not in parsed_config:
+            if "plugins" not in parsed_config:
                 raise ValueError("Configuration must contain 'plugins' key")
 
         except ValueError:
@@ -1155,12 +1226,12 @@ async def save_plugins_config_yaml(yaml_content: str) -> dict:
 
         # Backup existing config
         if plugins_yml_path.exists():
-            backup_path = str(plugins_yml_path) + '.backup'
+            backup_path = str(plugins_yml_path) + ".backup"
             shutil.copy2(plugins_yml_path, backup_path)
             logger.info(f"Created plugins config backup at {backup_path}")
 
         # Save new config
-        with open(plugins_yml_path, 'w') as f:
+        with open(plugins_yml_path, "w") as f:
             f.write(yaml_content)
 
         # Hot-reload plugins and signal worker restart
@@ -1201,35 +1272,50 @@ async def validate_plugins_config_yaml(yaml_content: str) -> dict:
         if not isinstance(parsed_config, dict):
             return {"valid": False, "error": "Configuration must be a YAML dictionary"}
 
-        if 'plugins' not in parsed_config:
+        if "plugins" not in parsed_config:
             return {"valid": False, "error": "Configuration must contain 'plugins' key"}
 
-        plugins = parsed_config['plugins']
+        plugins = parsed_config["plugins"]
         if not isinstance(plugins, dict):
             return {"valid": False, "error": "'plugins' must be a dictionary"}
 
         # Validate each plugin
-        valid_access_levels = ['transcript', 'conversation', 'memory']
-        valid_trigger_types = ['wake_word', 'always', 'conditional']
+        valid_access_levels = ["transcript", "conversation", "memory"]
+        valid_trigger_types = ["wake_word", "always", "conditional"]
 
         for plugin_id, plugin_config in plugins.items():
             if not isinstance(plugin_config, dict):
-                return {"valid": False, "error": f"Plugin '{plugin_id}' config must be a dictionary"}
+                return {
+                    "valid": False,
+                    "error": f"Plugin '{plugin_id}' config must be a dictionary",
+                }
 
             # Check required fields
-            if 'enabled' in plugin_config and not isinstance(plugin_config['enabled'], bool):
+            if "enabled" in plugin_config and not isinstance(plugin_config["enabled"], bool):
                 return {"valid": False, "error": f"Plugin '{plugin_id}': 'enabled' must be boolean"}
 
-            if 'access_level' in plugin_config and plugin_config['access_level'] not in valid_access_levels:
-                return {"valid": False, "error": f"Plugin '{plugin_id}': invalid access_level (must be one of {valid_access_levels})"}
+            if (
+                "access_level" in plugin_config
+                and plugin_config["access_level"] not in valid_access_levels
+            ):
+                return {
+                    "valid": False,
+                    "error": f"Plugin '{plugin_id}': invalid access_level (must be one of {valid_access_levels})",
+                }
 
-            if 'trigger' in plugin_config:
-                trigger = plugin_config['trigger']
+            if "trigger" in plugin_config:
+                trigger = plugin_config["trigger"]
                 if not isinstance(trigger, dict):
-                    return {"valid": False, "error": f"Plugin '{plugin_id}': 'trigger' must be a dictionary"}
+                    return {
+                        "valid": False,
+                        "error": f"Plugin '{plugin_id}': 'trigger' must be a dictionary",
+                    }
 
-                if 'type' in trigger and trigger['type'] not in valid_trigger_types:
-                    return {"valid": False, "error": f"Plugin '{plugin_id}': invalid trigger type (must be one of {valid_trigger_types})"}
+                if "type" in trigger and trigger["type"] not in valid_trigger_types:
+                    return {
+                        "valid": False,
+                        "error": f"Plugin '{plugin_id}': invalid trigger type (must be one of {valid_trigger_types})",
+                    }
 
         return {"valid": True, "message": "Configuration is valid"}
 
@@ -1314,15 +1400,18 @@ async def reload_plugins_controller(app=None) -> dict:
 
     return {
         "success": reload_result.get("success", False),
-        "message": "Plugins reloaded and worker restart signaled"
-        if worker_signal_sent
-        else "Plugins reloaded but worker restart signal failed",
+        "message": (
+            "Plugins reloaded and worker restart signaled"
+            if worker_signal_sent
+            else "Plugins reloaded but worker restart signal failed"
+        ),
         "reload": reload_result,
         "worker_signal_sent": worker_signal_sent,
     }
 
 
 # Structured Plugin Configuration Management Functions (Form-based UI)
+
 
 async def get_plugins_metadata() -> dict:
     """Get plugin metadata for form-based configuration UI.
@@ -1350,19 +1439,17 @@ async def get_plugins_metadata() -> dict:
         orchestration_configs = {}
 
         if plugins_yml_path.exists():
-            with open(plugins_yml_path, 'r') as f:
+            with open(plugins_yml_path, "r") as f:
                 plugins_data = _yaml.load(f) or {}
-                orchestration_configs = plugins_data.get('plugins', {})
+                orchestration_configs = plugins_data.get("plugins", {})
 
         # Build metadata for each plugin
         plugins_metadata = []
         for plugin_id, plugin_class in discovered_plugins.items():
             # Get orchestration config (or empty dict if not configured)
-            orchestration_config = orchestration_configs.get(plugin_id, {
-                'enabled': False,
-                'events': [],
-                'condition': {'type': 'always'}
-            })
+            orchestration_config = orchestration_configs.get(
+                plugin_id, {"enabled": False, "events": [], "condition": {"type": "always"}}
+            )
 
             # Get complete metadata including schema
             metadata = get_plugin_metadata(plugin_id, plugin_class, orchestration_config)
@@ -1370,10 +1457,7 @@ async def get_plugins_metadata() -> dict:
 
         logger.info(f"Retrieved metadata for {len(plugins_metadata)} plugins")
 
-        return {
-            "plugins": plugins_metadata,
-            "status": "success"
-        }
+        return {"plugins": plugins_metadata, "status": "success"}
 
     except Exception as e:
         logger.exception("Error getting plugins metadata")
@@ -1396,7 +1480,10 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
         Success message with list of updated files
     """
     try:
-        from advanced_omi_backend.services.plugin_service import _get_plugins_dir, discover_plugins
+        from advanced_omi_backend.services.plugin_service import (
+            _get_plugins_dir,
+            discover_plugins,
+        )
 
         # Validate plugin exists
         discovered_plugins = discover_plugins()
@@ -1406,84 +1493,83 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
         updated_files = []
 
         # 1. Update config/plugins.yml (orchestration)
-        if 'orchestration' in config:
+        if "orchestration" in config:
             plugins_yml_path = get_plugins_yml_path()
 
             # Load current plugins.yml
             if plugins_yml_path.exists():
-                with open(plugins_yml_path, 'r') as f:
+                with open(plugins_yml_path, "r") as f:
                     plugins_data = _yaml.load(f) or {}
             else:
                 plugins_data = {}
 
-            if 'plugins' not in plugins_data:
-                plugins_data['plugins'] = {}
+            if "plugins" not in plugins_data:
+                plugins_data["plugins"] = {}
 
             # Update orchestration config
-            orchestration = config['orchestration']
-            plugins_data['plugins'][plugin_id] = {
-                'enabled': orchestration.get('enabled', False),
-                'events': orchestration.get('events', []),
-                'condition': orchestration.get('condition', {'type': 'always'})
+            orchestration = config["orchestration"]
+            plugins_data["plugins"][plugin_id] = {
+                "enabled": orchestration.get("enabled", False),
+                "events": orchestration.get("events", []),
+                "condition": orchestration.get("condition", {"type": "always"}),
             }
 
             # Create backup
             if plugins_yml_path.exists():
-                backup_path = str(plugins_yml_path) + '.backup'
+                backup_path = str(plugins_yml_path) + ".backup"
                 shutil.copy2(plugins_yml_path, backup_path)
 
             # Create config directory if needed
             plugins_yml_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Write updated plugins.yml
-            with open(plugins_yml_path, 'w') as f:
+            with open(plugins_yml_path, "w") as f:
                 _yaml.dump(plugins_data, f)
 
             updated_files.append(str(plugins_yml_path))
             logger.info(f"Updated orchestration config for '{plugin_id}' in {plugins_yml_path}")
 
         # 2. Update plugins/{plugin_id}/config.yml (settings with env var references)
-        if 'settings' in config:
+        if "settings" in config:
             plugins_dir = _get_plugins_dir()
             plugin_config_path = plugins_dir / plugin_id / "config.yml"
 
             # Load current config.yml
             if plugin_config_path.exists():
-                with open(plugin_config_path, 'r') as f:
+                with open(plugin_config_path, "r") as f:
                     plugin_config_data = _yaml.load(f) or {}
             else:
                 plugin_config_data = {}
 
             # Update settings (preserve ${ENV_VAR} references)
-            settings = config['settings']
+            settings = config["settings"]
             plugin_config_data.update(settings)
 
             # Create backup
             if plugin_config_path.exists():
-                backup_path = str(plugin_config_path) + '.backup'
+                backup_path = str(plugin_config_path) + ".backup"
                 shutil.copy2(plugin_config_path, backup_path)
 
             # Write updated config.yml
-            with open(plugin_config_path, 'w') as f:
+            with open(plugin_config_path, "w") as f:
                 _yaml.dump(plugin_config_data, f)
 
             updated_files.append(str(plugin_config_path))
             logger.info(f"Updated settings for '{plugin_id}' in {plugin_config_path}")
 
         # 3. Update per-plugin .env (only changed env vars)
-        if 'env_vars' in config and config['env_vars']:
+        if "env_vars" in config and config["env_vars"]:
             from advanced_omi_backend.services.plugin_service import save_plugin_env
 
             # Filter out masked values (unchanged secrets)
-            changed_vars = {
-                k: v for k, v in config['env_vars'].items()
-                if v != '••••••••••••'
-            }
+            changed_vars = {k: v for k, v in config["env_vars"].items() if v != "••••••••••••"}
 
             if changed_vars:
                 env_path = save_plugin_env(plugin_id, changed_vars)
                 updated_files.append(str(env_path))
-                logger.info(f"Saved {len(changed_vars)} env var(s) to per-plugin .env for '{plugin_id}'")
+                logger.info(
+                    f"Saved {len(changed_vars)} env var(s) to per-plugin .env for '{plugin_id}'"
+                )
 
                 # Update os.environ so hot-reload picks up changes immediately
                 for k, v in changed_vars.items():
@@ -1505,7 +1591,7 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
             "message": message,
             "updated_files": updated_files,
             "reload": reload_result,
-            "status": "success"
+            "status": "success",
         }
 
     except Exception as e:
@@ -1541,29 +1627,29 @@ async def test_plugin_connection(plugin_id: str, config: dict) -> dict:
         plugin_class = discovered_plugins[plugin_id]
 
         # Check if plugin supports testing
-        if not hasattr(plugin_class, 'test_connection'):
+        if not hasattr(plugin_class, "test_connection"):
             return {
                 "success": False,
                 "message": f"Plugin '{plugin_id}' does not support connection testing",
-                "status": "unsupported"
+                "status": "unsupported",
             }
 
         # Build complete config from provided data
         test_config = {}
 
         # Merge settings
-        if 'settings' in config:
-            test_config.update(config['settings'])
+        if "settings" in config:
+            test_config.update(config["settings"])
 
         # Load per-plugin env for resolving masked values
         plugin_env = load_plugin_env(plugin_id)
 
         # Add env vars (expand any ${ENV_VAR} references with test values)
-        if 'env_vars' in config:
-            for key, value in config['env_vars'].items():
+        if "env_vars" in config:
+            for key, value in config["env_vars"].items():
                 # For masked values, resolve from per-plugin .env then os.environ
-                if value == '••••••••••••':
-                    value = plugin_env.get(key) or os.getenv(key, '')
+                if value == "••••••••••••":
+                    value = plugin_env.get(key) or os.getenv(key, "")
                 test_config[key.lower()] = value
 
         # Expand any remaining env var references
@@ -1578,14 +1664,11 @@ async def test_plugin_connection(plugin_id: str, config: dict) -> dict:
 
     except Exception as e:
         logger.exception(f"Error testing connection for plugin '{plugin_id}'")
-        return {
-            "success": False,
-            "message": f"Connection test failed: {str(e)}",
-            "status": "error"
-        }
+        return {"success": False, "message": f"Connection test failed: {str(e)}", "status": "error"}
 
 
 # Plugin Lifecycle Management Functions (create / write-code / delete)
+
 
 def _snake_to_pascal(snake_str: str) -> str:
     """Convert snake_case to PascalCase."""
@@ -1615,14 +1698,20 @@ async def create_plugin(
     Returns:
         Success dict with plugin_id and created_files list
     """
-    from advanced_omi_backend.services.plugin_service import _get_plugins_dir, discover_plugins
+    from advanced_omi_backend.services.plugin_service import (
+        _get_plugins_dir,
+        discover_plugins,
+    )
 
     # Validate name
     if not plugin_name.replace("_", "").isalnum():
         return {"success": False, "error": "Plugin name must be alphanumeric with underscores only"}
 
     if not re.match(r"^[a-z][a-z0-9_]*$", plugin_name):
-        return {"success": False, "error": "Plugin name must be lowercase snake_case starting with a letter"}
+        return {
+            "success": False,
+            "error": "Plugin name must be lowercase snake_case starting with a letter",
+        }
 
     plugins_dir = _get_plugins_dir()
     plugin_dir = plugins_dir / plugin_name
@@ -1650,8 +1739,12 @@ async def create_plugin(
             (plugin_dir / "plugin.py").write_text(plugin_code, encoding="utf-8")
         else:
             # Write standard boilerplate
-            events_str = ", ".join(f'"{e}"' for e in events) if events else '"conversation.complete"'
-            boilerplate = inspect.cleandoc(f'''
+            events_str = (
+                ", ".join(f'"{e}"' for e in events) if events else '"conversation.complete"'
+            )
+            boilerplate = (
+                inspect.cleandoc(
+                    f'''
                 """
                 {class_name} implementation.
 
@@ -1688,7 +1781,10 @@ async def create_plugin(
                     async def on_conversation_complete(self, context: PluginContext) -> Optional[PluginResult]:
                         logger.info(f"Processing conversation for user: {{context.user_id}}")
                         return PluginResult(success=True, message="OK")
-            ''') + "\n"
+            '''
+                )
+                + "\n"
+            )
             (plugin_dir / "plugin.py").write_text(boilerplate, encoding="utf-8")
         created_files.append("plugin.py")
 
@@ -1699,7 +1795,7 @@ async def create_plugin(
 
         # config.yml
         config_yml = {"description": description}
-        with open(plugin_dir / "config.yml", 'w', encoding="utf-8") as f:
+        with open(plugin_dir / "config.yml", "w", encoding="utf-8") as f:
             _yaml.dump(config_yml, f)
         created_files.append("config.yml")
 
@@ -1848,7 +1944,10 @@ async def delete_plugin(plugin_id: str, remove_files: bool = False) -> dict:
         logger.info(f"Removed plugin directory: {plugin_dir}")
 
     if not removed_from_yml and not files_removed:
-        return {"success": False, "error": f"Plugin '{plugin_id}' not found in plugins.yml or on disk"}
+        return {
+            "success": False,
+            "error": f"Plugin '{plugin_id}' not found in plugins.yml or on disk",
+        }
 
     logger.info(f"Deleted plugin '{plugin_id}' (yml={removed_from_yml}, files={files_removed})")
     return {

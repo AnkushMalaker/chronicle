@@ -150,6 +150,9 @@ export const conversationsApi = {
   activateTranscriptVersion: (conversationId: string, versionId: string) => api.post(`/api/conversations/${conversationId}/activate-transcript/${versionId}`),
   activateMemoryVersion: (conversationId: string, versionId: string) => api.post(`/api/conversations/${conversationId}/activate-memory/${versionId}`),
   getVersionHistory: (conversationId: string) => api.get(`/api/conversations/${conversationId}/versions`),
+
+  // Active conversation management
+  closeActiveConversation: (clientId: string) => api.post(`/api/conversations/${clientId}/close`),
 }
 
 export const memoriesApi = {

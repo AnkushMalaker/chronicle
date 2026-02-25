@@ -73,6 +73,7 @@ def get_job_status_from_rq(job: Job) -> str:
 
     return status_str
 
+
 # Queue name constants
 TRANSCRIPTION_QUEUE = "transcription"
 MEMORY_QUEUE = "memory"
@@ -86,9 +87,13 @@ QUEUE_NAMES = [DEFAULT_QUEUE, TRANSCRIPTION_QUEUE, MEMORY_QUEUE, AUDIO_QUEUE]
 JOB_RESULT_TTL = int(os.getenv("RQ_RESULT_TTL", 86400))  # 24 hour default
 
 # Create queues with custom result TTL
-transcription_queue = Queue(TRANSCRIPTION_QUEUE, connection=redis_conn, default_timeout=86400)  # 24 hours for streaming jobs
+transcription_queue = Queue(
+    TRANSCRIPTION_QUEUE, connection=redis_conn, default_timeout=86400
+)  # 24 hours for streaming jobs
 memory_queue = Queue(MEMORY_QUEUE, connection=redis_conn, default_timeout=300)
-audio_queue = Queue(AUDIO_QUEUE, connection=redis_conn, default_timeout=86400)  # 24 hours for all-day sessions
+audio_queue = Queue(
+    AUDIO_QUEUE, connection=redis_conn, default_timeout=86400
+)  # 24 hours for all-day sessions
 default_queue = Queue(DEFAULT_QUEUE, connection=redis_conn, default_timeout=300)
 
 
@@ -123,7 +128,9 @@ def get_job_stats() -> Dict[str, Any]:
         canceled_jobs += len(queue.canceled_job_registry)
         deferred_jobs += len(queue.deferred_job_registry)
 
-    total_jobs = queued_jobs + started_jobs + finished_jobs + failed_jobs + canceled_jobs + deferred_jobs
+    total_jobs = (
+        queued_jobs + started_jobs + finished_jobs + failed_jobs + canceled_jobs + deferred_jobs
+    )
 
     return {
         "total_jobs": total_jobs,
@@ -133,7 +140,7 @@ def get_job_stats() -> Dict[str, Any]:
         "failed_jobs": failed_jobs,
         "canceled_jobs": canceled_jobs,
         "deferred_jobs": deferred_jobs,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.utcnow().isoformat(),
     }
 
 
@@ -142,7 +149,7 @@ def get_jobs(
     offset: int = 0,
     queue_name: str = None,
     job_type: str = None,
-    client_id: str = None
+    client_id: str = None,
 ) -> Dict[str, Any]:
     """
     Get jobs from a specific queue or all queues with optional filtering.
@@ -157,7 +164,9 @@ def get_jobs(
     Returns:
         Dict with jobs list and pagination metadata matching frontend expectations
     """
-    logger.info(f"🔍 DEBUG get_jobs: Filtering - queue_name={queue_name}, job_type={job_type}, client_id={client_id}")
+    logger.info(
+        f"🔍 DEBUG get_jobs: Filtering - queue_name={queue_name}, job_type={job_type}, client_id={client_id}"
+    )
     all_jobs = []
     seen_job_ids = set()  # Track which job IDs we've already processed to avoid duplicates
 
@@ -173,7 +182,10 @@ def get_jobs(
             (queue.started_job_registry.get_job_ids(), "started"),  # RQ standard, not "processing"
             (queue.finished_job_registry.get_job_ids(), "finished"),  # RQ standard, not "completed"
             (queue.failed_job_registry.get_job_ids(), "failed"),
-            (queue.deferred_job_registry.get_job_ids(), "deferred"),  # Jobs waiting for dependencies
+            (
+                queue.deferred_job_registry.get_job_ids(),
+                "deferred",
+            ),  # Jobs waiting for dependencies
         ]
 
         for job_ids, status in registries:
@@ -190,46 +202,58 @@ def get_jobs(
                     user_id = job.kwargs.get("user_id", "") if job.kwargs else ""
 
                     # Extract just the function name (e.g., "listen_for_speech_job" from "module.listen_for_speech_job")
-                    func_name = job.func_name.split('.')[-1] if job.func_name else "unknown"
+                    func_name = job.func_name.split(".")[-1] if job.func_name else "unknown"
 
                     # Debug: Log job details before filtering
-                    logger.debug(f"🔍 DEBUG get_jobs: Job {job_id} - func_name={func_name}, full_func_name={job.func_name}, meta_client_id={job.meta.get('client_id', '') if job.meta else ''}, status={status}")
+                    logger.debug(
+                        f"🔍 DEBUG get_jobs: Job {job_id} - func_name={func_name}, full_func_name={job.func_name}, meta_client_id={job.meta.get('client_id', '') if job.meta else ''}, status={status}"
+                    )
 
                     # Apply job_type filter
                     if job_type and job_type not in func_name:
-                        logger.debug(f"🔍 DEBUG get_jobs: Filtered out {job_id} - job_type '{job_type}' not in func_name '{func_name}'")
+                        logger.debug(
+                            f"🔍 DEBUG get_jobs: Filtered out {job_id} - job_type '{job_type}' not in func_name '{func_name}'"
+                        )
                         continue
 
                     # Apply client_id filter (partial match in meta)
                     if client_id:
                         job_client_id = job.meta.get("client_id", "") if job.meta else ""
                         if client_id not in job_client_id:
-                            logger.debug(f"🔍 DEBUG get_jobs: Filtered out {job_id} - client_id '{client_id}' not in job_client_id '{job_client_id}'")
+                            logger.debug(
+                                f"🔍 DEBUG get_jobs: Filtered out {job_id} - client_id '{client_id}' not in job_client_id '{job_client_id}'"
+                            )
                             continue
 
                     logger.debug(f"🔍 DEBUG get_jobs: Including job {job_id} in results")
 
-                    all_jobs.append({
-                        "job_id": job.id,
-                        "job_type": func_name,
-                        "user_id": user_id,
-                        "status": status,
-                        "priority": "normal",  # RQ doesn't track priority in metadata
-                        "data": {
-                            "description": job.description or "",
-                            "queue": qname,
-                        },
-                        "result": job.result if hasattr(job, 'result') else None,
-                        "meta": job.meta if job.meta else {},  # Include job metadata
-                        "error_message": str(job.exc_info) if job.exc_info else None,
-                        "created_at": job.created_at.isoformat() if job.created_at else None,
-                        "started_at": job.started_at.isoformat() if job.started_at else None,
-                        "completed_at": job.ended_at.isoformat() if job.ended_at else None,
-                        "retry_count": job.retries_left if hasattr(job, 'retries_left') else 0,
-                        "max_retries": 3,  # Default max retries
-                        "progress_percent": (job.meta or {}).get("batch_progress", {}).get("percent", 0),
-                        "progress_message": (job.meta or {}).get("batch_progress", {}).get("message", ""),
-                    })
+                    all_jobs.append(
+                        {
+                            "job_id": job.id,
+                            "job_type": func_name,
+                            "user_id": user_id,
+                            "status": status,
+                            "priority": "normal",  # RQ doesn't track priority in metadata
+                            "data": {
+                                "description": job.description or "",
+                                "queue": qname,
+                            },
+                            "result": job.result if hasattr(job, "result") else None,
+                            "meta": job.meta if job.meta else {},  # Include job metadata
+                            "error_message": str(job.exc_info) if job.exc_info else None,
+                            "created_at": job.created_at.isoformat() if job.created_at else None,
+                            "started_at": job.started_at.isoformat() if job.started_at else None,
+                            "completed_at": job.ended_at.isoformat() if job.ended_at else None,
+                            "retry_count": job.retries_left if hasattr(job, "retries_left") else 0,
+                            "max_retries": 3,  # Default max retries
+                            "progress_percent": (job.meta or {})
+                            .get("batch_progress", {})
+                            .get("percent", 0),
+                            "progress_message": (job.meta or {})
+                            .get("batch_progress", {})
+                            .get("message", ""),
+                        }
+                    )
                 except Exception as e:
                     logger.error(f"Error fetching job {job_id}: {e}")
 
@@ -238,10 +262,12 @@ def get_jobs(
 
     # Paginate
     total_jobs = len(all_jobs)
-    paginated_jobs = all_jobs[offset:offset + limit]
+    paginated_jobs = all_jobs[offset : offset + limit]
     has_more = (offset + limit) < total_jobs
 
-    logger.info(f"🔍 DEBUG get_jobs: Found {total_jobs} matching jobs (returning {len(paginated_jobs)} after pagination)")
+    logger.info(
+        f"🔍 DEBUG get_jobs: Found {total_jobs} matching jobs (returning {len(paginated_jobs)} after pagination)"
+    )
 
     return {
         "jobs": paginated_jobs,
@@ -250,7 +276,7 @@ def get_jobs(
             "limit": limit,
             "offset": offset,
             "has_more": has_more,
-        }
+        },
     }
 
 
@@ -281,7 +307,7 @@ def all_jobs_complete_for_client(client_id: str) -> bool:
             return False
 
         # Check dependent jobs
-        for dep_id in (job.dependent_ids or []):
+        for dep_id in job.dependent_ids or []:
             try:
                 dep_job = Job.fetch(dep_id, connection=redis_conn)
                 if not is_job_complete(dep_job):
@@ -310,7 +336,7 @@ def all_jobs_complete_for_client(client_id: str) -> bool:
                     job = Job.fetch(job_id, connection=redis_conn)
 
                     # Only check jobs with client_id in meta
-                    if job.meta and job.meta.get('client_id') == client_id:
+                    if job.meta and job.meta.get("client_id") == client_id:
                         if not is_job_complete(job):
                             return False
                 except Exception as e:
@@ -319,11 +345,7 @@ def all_jobs_complete_for_client(client_id: str) -> bool:
     return True
 
 
-def start_streaming_jobs(
-    session_id: str,
-    user_id: str,
-    client_id: str
-) -> Dict[str, str]:
+def start_streaming_jobs(session_id: str, user_id: str, client_id: str) -> Dict[str, str]:
     """
     Enqueue jobs for streaming audio session (initial session setup).
 
@@ -351,7 +373,7 @@ def start_streaming_jobs(
 
     # Read always_persist from global config NOW (backend process has fresh config)
     misc_settings = get_misc_settings()
-    always_persist = misc_settings.get('always_persist_enabled', False)
+    always_persist = misc_settings.get("always_persist_enabled", False)
 
     # Enqueue speech detection job
     speech_job = transcription_queue.enqueue(
@@ -363,9 +385,9 @@ def start_streaming_jobs(
         ttl=None,  # No pre-run expiry (job can wait indefinitely in queue)
         result_ttl=JOB_RESULT_TTL,  # Cleanup AFTER completion
         failure_ttl=86400,  # Cleanup failed jobs after 24h
-        job_id=f"speech-detect_{session_id[:12]}",
+        job_id=f"speech-detect_{session_id}",
         description=f"Listening for speech...",
-        meta={'client_id': client_id, 'session_level': True}
+        meta={"client_id": client_id, "session_level": True},
     )
     # Log job enqueue with TTL information for debugging
     actual_ttl = redis_conn.ttl(f"rq:job:{speech_job.id}")
@@ -397,9 +419,9 @@ def start_streaming_jobs(
         ttl=None,  # No pre-run expiry (job can wait indefinitely in queue)
         result_ttl=JOB_RESULT_TTL,  # Cleanup AFTER completion
         failure_ttl=86400,  # Cleanup failed jobs after 24h
-        job_id=f"audio-persist_{session_id[:12]}",
-        description=f"Audio persistence for session {session_id[:12]}",
-        meta={'client_id': client_id, 'session_level': True}  # Mark as session-level job
+        job_id=f"audio-persist_{session_id}",
+        description=f"Audio persistence for session {session_id}",
+        meta={"client_id": client_id, "session_level": True},  # Mark as session-level job
     )
     # Log job enqueue with TTL information for debugging
     actual_ttl = redis_conn.ttl(f"rq:job:{audio_job.id}")
@@ -411,19 +433,16 @@ def start_streaming_jobs(
         f"queue_length={audio_queue.count}, client_id={client_id}"
     )
 
-    return {
-        'speech_detection': speech_job.id,
-        'audio_persistence': audio_job.id
-    }
+    return {"speech_detection": speech_job.id, "audio_persistence": audio_job.id}
 
 
 def start_post_conversation_jobs(
     conversation_id: str,
     user_id: str,
     transcript_version_id: Optional[str] = None,
-    depends_on_job = None,
+    depends_on_job=None,
     client_id: Optional[str] = None,
-    end_reason: str = "file_upload"
+    end_reason: str = "file_upload",
 ) -> Dict[str, str]:
     """
     Start post-conversation processing jobs after conversation is created.
@@ -458,21 +477,27 @@ def start_post_conversation_jobs(
     version_id = transcript_version_id or str(uuid.uuid4())
 
     # Build job metadata (include client_id if provided for UI tracking)
-    job_meta = {'conversation_id': conversation_id}
+    job_meta = {"conversation_id": conversation_id}
     if client_id:
-        job_meta['client_id'] = client_id
+        job_meta["client_id"] = client_id
 
     # Check if speaker recognition is enabled
-    speaker_config = get_service_config('speaker_recognition')
-    speaker_enabled = speaker_config.get('enabled', True)  # Default to True for backward compatibility
+    speaker_config = get_service_config("speaker_recognition")
+    speaker_enabled = speaker_config.get(
+        "enabled", True
+    )  # Default to True for backward compatibility
 
     # Step 1: Speaker recognition job (conditional - only if enabled)
-    speaker_dependency = depends_on_job  # Start with upstream dependency (transcription if file upload)
+    speaker_dependency = (
+        depends_on_job  # Start with upstream dependency (transcription if file upload)
+    )
     speaker_job = None
 
     if speaker_enabled:
         speaker_job_id = f"speaker_{conversation_id[:12]}"
-        logger.info(f"🔍 DEBUG: Creating speaker job with job_id={speaker_job_id}, conversation_id={conversation_id[:12]}")
+        logger.info(
+            f"🔍 DEBUG: Creating speaker job with job_id={speaker_job_id}, conversation_id={conversation_id[:12]}"
+        )
 
         speaker_job = transcription_queue.enqueue(
             recognise_speakers_job,
@@ -483,26 +508,36 @@ def start_post_conversation_jobs(
             depends_on=speaker_dependency,
             job_id=speaker_job_id,
             description=f"Speaker recognition for conversation {conversation_id[:8]}",
-            meta=job_meta
+            meta=job_meta,
         )
         speaker_dependency = speaker_job  # Chain for next jobs
         if depends_on_job:
-            logger.info(f"📥 RQ: Enqueued speaker recognition job {speaker_job.id}, meta={speaker_job.meta} (depends on {depends_on_job.id})")
+            logger.info(
+                f"📥 RQ: Enqueued speaker recognition job {speaker_job.id}, meta={speaker_job.meta} (depends on {depends_on_job.id})"
+            )
         else:
-            logger.info(f"📥 RQ: Enqueued speaker recognition job {speaker_job.id}, meta={speaker_job.meta} (no dependencies, starts immediately)")
+            logger.info(
+                f"📥 RQ: Enqueued speaker recognition job {speaker_job.id}, meta={speaker_job.meta} (no dependencies, starts immediately)"
+            )
     else:
-        logger.info(f"⏭️  Speaker recognition disabled, skipping speaker job for conversation {conversation_id[:8]}")
+        logger.info(
+            f"⏭️  Speaker recognition disabled, skipping speaker job for conversation {conversation_id[:8]}"
+        )
 
     # Step 2: Memory extraction job (conditional - only if enabled)
     # Check if memory extraction is enabled
-    memory_config = get_service_config('memory.extraction')
-    memory_enabled = memory_config.get('enabled', True)  # Default to True for backward compatibility
+    memory_config = get_service_config("memory.extraction")
+    memory_enabled = memory_config.get(
+        "enabled", True
+    )  # Default to True for backward compatibility
 
     memory_job = None
     if memory_enabled:
         # Depends on speaker job if it was created, otherwise depends on upstream (transcription or nothing)
         memory_job_id = f"memory_{conversation_id[:12]}"
-        logger.info(f"🔍 DEBUG: Creating memory job with job_id={memory_job_id}, conversation_id={conversation_id[:12]}")
+        logger.info(
+            f"🔍 DEBUG: Creating memory job with job_id={memory_job_id}, conversation_id={conversation_id[:12]}"
+        )
 
         memory_job = memory_queue.enqueue(
             process_memory_job,
@@ -512,23 +547,33 @@ def start_post_conversation_jobs(
             depends_on=speaker_dependency,  # Either speaker_job or upstream dependency
             job_id=memory_job_id,
             description=f"Memory extraction for conversation {conversation_id[:8]}",
-            meta=job_meta
+            meta=job_meta,
         )
         if speaker_job:
-            logger.info(f"📥 RQ: Enqueued memory extraction job {memory_job.id}, meta={memory_job.meta} (depends on speaker job {speaker_job.id})")
+            logger.info(
+                f"📥 RQ: Enqueued memory extraction job {memory_job.id}, meta={memory_job.meta} (depends on speaker job {speaker_job.id})"
+            )
         elif depends_on_job:
-            logger.info(f"📥 RQ: Enqueued memory extraction job {memory_job.id}, meta={memory_job.meta} (depends on {depends_on_job.id})")
+            logger.info(
+                f"📥 RQ: Enqueued memory extraction job {memory_job.id}, meta={memory_job.meta} (depends on {depends_on_job.id})"
+            )
         else:
-            logger.info(f"📥 RQ: Enqueued memory extraction job {memory_job.id}, meta={memory_job.meta} (no dependencies, starts immediately)")
+            logger.info(
+                f"📥 RQ: Enqueued memory extraction job {memory_job.id}, meta={memory_job.meta} (no dependencies, starts immediately)"
+            )
     else:
-        logger.info(f"⏭️  Memory extraction disabled, skipping memory job for conversation {conversation_id[:8]}")
+        logger.info(
+            f"⏭️  Memory extraction disabled, skipping memory job for conversation {conversation_id[:8]}"
+        )
 
     # Step 3: Title/summary generation job
     # Depends on memory job to avoid race condition (both jobs save the conversation document)
     # and to ensure fresh memories are available for context-enriched summaries
     title_dependency = memory_job if memory_job else speaker_dependency
     title_job_id = f"title_summary_{conversation_id[:12]}"
-    logger.info(f"🔍 DEBUG: Creating title/summary job with job_id={title_job_id}, conversation_id={conversation_id[:12]}")
+    logger.info(
+        f"🔍 DEBUG: Creating title/summary job with job_id={title_job_id}, conversation_id={conversation_id[:12]}"
+    )
 
     title_summary_job = default_queue.enqueue(
         generate_title_summary_job,
@@ -538,21 +583,31 @@ def start_post_conversation_jobs(
         depends_on=title_dependency,
         job_id=title_job_id,
         description=f"Generate title and summary for conversation {conversation_id[:8]}",
-        meta=job_meta
+        meta=job_meta,
     )
     if memory_job:
-        logger.info(f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (depends on memory job {memory_job.id})")
+        logger.info(
+            f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (depends on memory job {memory_job.id})"
+        )
     elif speaker_job:
-        logger.info(f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (depends on speaker job {speaker_job.id})")
+        logger.info(
+            f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (depends on speaker job {speaker_job.id})"
+        )
     elif depends_on_job:
-        logger.info(f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (depends on {depends_on_job.id})")
+        logger.info(
+            f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (depends on {depends_on_job.id})"
+        )
     else:
-        logger.info(f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (no dependencies, starts immediately)")
+        logger.info(
+            f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (no dependencies, starts immediately)"
+        )
 
     # Step 5: Dispatch conversation.complete event (runs after both memory and title/summary complete)
     # This ensures plugins receive the event after all processing is done
     event_job_id = f"event_complete_{conversation_id[:12]}"
-    logger.info(f"🔍 DEBUG: Creating conversation complete event job with job_id={event_job_id}, conversation_id={conversation_id[:12]}")
+    logger.info(
+        f"🔍 DEBUG: Creating conversation complete event job with job_id={event_job_id}, conversation_id={conversation_id[:12]}"
+    )
 
     # Event job depends on memory and title/summary jobs that were actually enqueued
     # Build dependency list excluding None values
@@ -571,27 +626,31 @@ def start_post_conversation_jobs(
         end_reason,  # Use the end_reason parameter (defaults to 'file_upload' for backward compatibility)
         job_timeout=120,  # 2 minutes
         result_ttl=JOB_RESULT_TTL,
-        depends_on=event_dependencies if event_dependencies else None,  # Wait for jobs that were enqueued
+        depends_on=(
+            event_dependencies if event_dependencies else None
+        ),  # Wait for jobs that were enqueued
         job_id=event_job_id,
         description=f"Dispatch conversation complete event ({end_reason}) for {conversation_id[:8]}",
-        meta=job_meta
+        meta=job_meta,
     )
 
     # Log event dispatch dependencies
     if event_dependencies:
         dep_ids = [job.id for job in event_dependencies]
-        logger.info(f"📥 RQ: Enqueued conversation complete event job {event_dispatch_job.id}, meta={event_dispatch_job.meta} (depends on {', '.join(dep_ids)})")
+        logger.info(
+            f"📥 RQ: Enqueued conversation complete event job {event_dispatch_job.id}, meta={event_dispatch_job.meta} (depends on {', '.join(dep_ids)})"
+        )
     else:
-        logger.info(f"📥 RQ: Enqueued conversation complete event job {event_dispatch_job.id}, meta={event_dispatch_job.meta} (no dependencies, starts immediately)")
+        logger.info(
+            f"📥 RQ: Enqueued conversation complete event job {event_dispatch_job.id}, meta={event_dispatch_job.meta} (no dependencies, starts immediately)"
+        )
 
     return {
-        'speaker_recognition': speaker_job.id if speaker_job else None,
-        'memory': memory_job.id if memory_job else None,
-        'title_summary': title_summary_job.id,
-        'event_dispatch': event_dispatch_job.id
+        "speaker_recognition": speaker_job.id if speaker_job else None,
+        "memory": memory_job.id if memory_job else None,
+        "title_summary": title_summary_job.id,
+        "event_dispatch": event_dispatch_job.id,
     }
-
-
 
 
 def get_queue_health() -> Dict[str, Any]:
@@ -637,14 +696,17 @@ def get_queue_health() -> Dict[str, Any]:
         else:
             health["idle_workers"] += 1
 
-        health["workers"].append({
-            "name": worker.name,
-            "state": state,
-            "queues": [q.name for q in worker.queues],
-            "current_job": current_job,
-        })
+        health["workers"].append(
+            {
+                "name": worker.name,
+                "state": state,
+                "queues": [q.name for q in worker.queues],
+                "current_job": current_job,
+            }
+        )
 
     return health
+
 
 # needs tidying but works for now
 async def cleanup_stuck_stream_workers(request):
@@ -660,7 +722,7 @@ async def cleanup_stuck_stream_workers(request):
         if not redis_client:
             return JSONResponse(
                 status_code=503,
-                content={"error": "Redis client for audio streaming not initialized"}
+                content={"error": "Redis client for audio streaming not initialized"},
             )
 
         cleanup_results = {}
@@ -677,13 +739,17 @@ async def cleanup_stuck_stream_workers(request):
 
             try:
                 # First check stream age - delete old streams (>1 hour) immediately
-                stream_info = await redis_client.execute_command('XINFO', 'STREAM', stream_name)
+                stream_info = await redis_client.execute_command("XINFO", "STREAM", stream_name)
 
                 # Parse stream info
                 info_dict = {}
                 for i in range(0, len(stream_info), 2):
-                    key_name = stream_info[i].decode() if isinstance(stream_info[i], bytes) else str(stream_info[i])
-                    info_dict[key_name] = stream_info[i+1]
+                    key_name = (
+                        stream_info[i].decode()
+                        if isinstance(stream_info[i], bytes)
+                        else str(stream_info[i])
+                    )
+                    info_dict[key_name] = stream_info[i + 1]
 
                 stream_length = int(info_dict.get("length", 0))
                 last_entry = info_dict.get("last-entry")
@@ -700,7 +766,7 @@ async def cleanup_stuck_stream_workers(request):
                         last_id = last_entry[0]
                         if isinstance(last_id, bytes):
                             last_id = last_id.decode()
-                        last_timestamp_ms = int(last_id.split('-')[0])
+                        last_timestamp_ms = int(last_id.split("-")[0])
                         last_timestamp_s = last_timestamp_ms / 1000
                         stream_age = current_time - last_timestamp_s
 
@@ -718,15 +784,19 @@ async def cleanup_stuck_stream_workers(request):
                         "cleaned": 0,
                         "deleted_consumers": 0,
                         "deleted_stream": True,
-                        "stream_age": stream_age
+                        "stream_age": stream_age,
                     }
                     continue
 
                 # Get consumer groups
-                groups = await redis_client.execute_command('XINFO', 'GROUPS', stream_name)
+                groups = await redis_client.execute_command("XINFO", "GROUPS", stream_name)
 
                 if not groups:
-                    cleanup_results[stream_name] = {"message": "No consumer groups found", "cleaned": 0, "deleted_stream": False}
+                    cleanup_results[stream_name] = {
+                        "message": "No consumer groups found",
+                        "cleaned": 0,
+                        "deleted_stream": False,
+                    }
                     continue
 
                 # Parse first group
@@ -734,7 +804,7 @@ async def cleanup_stuck_stream_workers(request):
                 group = groups[0]
                 for i in range(0, len(group), 2):
                     key = group[i].decode() if isinstance(group[i], bytes) else str(group[i])
-                    value = group[i+1]
+                    value = group[i + 1]
                     if isinstance(value, bytes):
                         try:
                             value = value.decode()
@@ -749,7 +819,9 @@ async def cleanup_stuck_stream_workers(request):
                 pending_count = int(group_dict.get("pending", 0))
 
                 # Get consumers for this group to check per-consumer pending
-                consumers = await redis_client.execute_command('XINFO', 'CONSUMERS', stream_name, group_name)
+                consumers = await redis_client.execute_command(
+                    "XINFO", "CONSUMERS", stream_name, group_name
+                )
 
                 cleaned_count = 0
                 total_consumer_pending = 0
@@ -759,8 +831,12 @@ async def cleanup_stuck_stream_workers(request):
                 for consumer in consumers:
                     consumer_dict = {}
                     for i in range(0, len(consumer), 2):
-                        key = consumer[i].decode() if isinstance(consumer[i], bytes) else str(consumer[i])
-                        value = consumer[i+1]
+                        key = (
+                            consumer[i].decode()
+                            if isinstance(consumer[i], bytes)
+                            else str(consumer[i])
+                        )
+                        value = consumer[i + 1]
                         if isinstance(value, bytes):
                             try:
                                 value = value.decode()
@@ -780,12 +856,20 @@ async def cleanup_stuck_stream_workers(request):
                     is_dead = consumer_idle_ms > 300000
 
                     if consumer_pending > 0:
-                        logger.info(f"Found {consumer_pending} pending messages for consumer {consumer_name} (idle: {consumer_idle_ms}ms)")
+                        logger.info(
+                            f"Found {consumer_pending} pending messages for consumer {consumer_name} (idle: {consumer_idle_ms}ms)"
+                        )
 
                         # Get pending messages for this specific consumer
                         try:
                             pending_messages = await redis_client.execute_command(
-                                'XPENDING', stream_name, group_name, '-', '+', str(consumer_pending), consumer_name
+                                "XPENDING",
+                                stream_name,
+                                group_name,
+                                "-",
+                                "+",
+                                str(consumer_pending),
+                                consumer_name,
                             )
 
                             # XPENDING returns flat list: [msg_id, consumer, idle_ms, delivery_count, msg_id, ...]
@@ -799,31 +883,49 @@ async def cleanup_stuck_stream_workers(request):
                                     # Claim the message to a cleanup worker
                                     try:
                                         await redis_client.execute_command(
-                                            'XCLAIM', stream_name, group_name, 'cleanup-worker', '0', msg_id
+                                            "XCLAIM",
+                                            stream_name,
+                                            group_name,
+                                            "cleanup-worker",
+                                            "0",
+                                            msg_id,
                                         )
 
                                         # Acknowledge it immediately
                                         await redis_client.xack(stream_name, group_name, msg_id)
                                         cleaned_count += 1
                                     except Exception as claim_error:
-                                        logger.warning(f"Failed to claim/ack message {msg_id}: {claim_error}")
+                                        logger.warning(
+                                            f"Failed to claim/ack message {msg_id}: {claim_error}"
+                                        )
 
                         except Exception as consumer_error:
-                            logger.error(f"Error processing consumer {consumer_name}: {consumer_error}")
+                            logger.error(
+                                f"Error processing consumer {consumer_name}: {consumer_error}"
+                            )
 
                     # Delete dead consumers (idle > 5 minutes with no pending messages)
                     if is_dead and consumer_pending == 0:
                         try:
                             await redis_client.execute_command(
-                                'XGROUP', 'DELCONSUMER', stream_name, group_name, consumer_name
+                                "XGROUP", "DELCONSUMER", stream_name, group_name, consumer_name
                             )
                             deleted_consumers += 1
-                            logger.info(f"🧹 Deleted dead consumer {consumer_name} (idle: {consumer_idle_ms}ms)")
+                            logger.info(
+                                f"🧹 Deleted dead consumer {consumer_name} (idle: {consumer_idle_ms}ms)"
+                            )
                         except Exception as delete_error:
-                            logger.warning(f"Failed to delete consumer {consumer_name}: {delete_error}")
+                            logger.warning(
+                                f"Failed to delete consumer {consumer_name}: {delete_error}"
+                            )
 
                 if total_consumer_pending == 0 and deleted_consumers == 0:
-                    cleanup_results[stream_name] = {"message": "No pending messages or dead consumers", "cleaned": 0, "deleted_consumers": 0, "deleted_stream": False}
+                    cleanup_results[stream_name] = {
+                        "message": "No pending messages or dead consumers",
+                        "cleaned": 0,
+                        "deleted_consumers": 0,
+                        "deleted_stream": False,
+                    }
                     continue
 
                 total_cleaned += cleaned_count
@@ -833,14 +935,11 @@ async def cleanup_stuck_stream_workers(request):
                     "cleaned": cleaned_count,
                     "deleted_consumers": deleted_consumers,
                     "deleted_stream": False,
-                    "original_pending": pending_count
+                    "original_pending": pending_count,
                 }
 
             except Exception as e:
-                cleanup_results[stream_name] = {
-                    "error": str(e),
-                    "cleaned": 0
-                }
+                cleanup_results[stream_name] = {"error": str(e), "cleaned": 0}
 
         return {
             "success": True,
@@ -849,7 +948,7 @@ async def cleanup_stuck_stream_workers(request):
             "total_deleted_streams": total_deleted_streams,
             "streams": cleanup_results,  # New key for per-stream results
             "providers": cleanup_results,  # Keep for backward compatibility with frontend
-            "timestamp": time.time()
+            "timestamp": time.time(),
         }
 
     except Exception as e:

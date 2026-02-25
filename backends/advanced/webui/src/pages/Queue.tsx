@@ -22,7 +22,7 @@ import {
   Repeat,
   Zap
 } from 'lucide-react';
-import { queueApi } from '../services/api';
+import { queueApi, conversationsApi } from '../services/api';
 
 interface QueueStats {
   total_jobs: number;
@@ -1143,7 +1143,7 @@ const Queue: React.FC = () => {
                               className={`flex items-center justify-between p-3 cursor-pointer transition-colors ${hasFailedJob ? 'hover:bg-red-100' : 'hover:bg-cyan-100'}`}
                               onClick={() => toggleConversationExpansion(conversationId)}
                             >
-                              <div className="flex-1">
+                              <div className="flex-1 min-w-0">
                                 <div className="flex items-center space-x-2">
                                   {isExpanded ? (
                                     <ChevronDown className={`w-4 h-4 ${hasFailedJob ? 'text-red-600' : 'text-cyan-600'}`} />
@@ -1169,7 +1169,7 @@ const Queue: React.FC = () => {
                                     </span>
                                   )}
                                 </div>
-                                <div className="mt-1 text-xs text-gray-600">
+                                <div className="mt-1 text-xs text-gray-600 truncate">
                                   Conversation: {conversationId.substring(0, 8)}... •
                                   {createdAt && `Started: ${new Date(createdAt).toLocaleTimeString()} • `}
                                   Words: {wordCount}
@@ -1181,6 +1181,27 @@ const Queue: React.FC = () => {
                                   </div>
                                 )}
                               </div>
+                              {/* Close Conversation Button - only for actively running conversations */}
+                              {openConvJob && openConvJob.status === 'started' && (
+                                <button
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    if (!confirm(`Close the active conversation for ${clientId}? This will end the current conversation and trigger post-processing.`)) return;
+                                    try {
+                                      await conversationsApi.closeActiveConversation(clientId);
+                                      fetchData();
+                                    } catch (error: any) {
+                                      console.error('Failed to close conversation:', error);
+                                      alert(`Failed to close conversation: ${error.response?.data?.error || error.message}`);
+                                    }
+                                  }}
+                                  className="flex items-center space-x-1 px-3 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition-colors text-sm font-medium flex-shrink-0 ml-3"
+                                  title="Close the current active conversation"
+                                >
+                                  <StopCircle className="w-4 h-4" />
+                                  <span>Close</span>
+                                </button>
+                              )}
                             </div>
 
                           {/* Expanded Jobs Section */}

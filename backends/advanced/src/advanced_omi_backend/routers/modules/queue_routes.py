@@ -382,6 +382,14 @@ async def clear_jobs(
                 for job_id in job_ids:
                     try:
                         job = Job.fetch(job_id, connection=redis_conn)
+                        # Skip jobs that are currently running (their ID may have been
+                        # reused by a new session's job with the same ID)
+                        if job.get_status() in ("started", "queued", "deferred"):
+                            logger.debug(
+                                f"Skipping {registry_name} job {job_id}: currently {job.get_status()}"
+                            )
+                            registry.remove(job_id)  # Remove stale registry entry only
+                            continue
                         job.delete()
                         total_removed += 1
                     except Exception:

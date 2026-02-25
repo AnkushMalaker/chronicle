@@ -155,8 +155,9 @@ class MemoryService(MemoryServiceBase):
             if self.config.extraction_enabled and self.config.extraction_prompt:
                 fact_memories_text = await asyncio.wait_for(
                     self.llm_provider.extract_memories(
-                        transcript, self.config.extraction_prompt, user_id=user_id,
-                        langfuse_session_id=source_id,
+                        transcript,
+                        self.config.extraction_prompt,
+                        user_id=user_id,
                     ),
                     timeout=self.config.timeout_seconds,
                 )
@@ -194,8 +195,12 @@ class MemoryService(MemoryServiceBase):
             if allow_update and fact_memories_text:
                 memory_logger.info(f"🔍 Allowing update for {source_id}")
                 created_ids = await self._process_memory_updates(
-                    fact_memories_text, embeddings, user_id, client_id, source_id, user_email,
-                    langfuse_session_id=source_id,
+                    fact_memories_text,
+                    embeddings,
+                    user_id,
+                    client_id,
+                    source_id,
+                    user_email,
                 )
             else:
                 memory_logger.info(f"🔍 Not allowing update for {source_id}")
@@ -533,9 +538,7 @@ class MemoryService(MemoryServiceBase):
 
         try:
             # 1. Get existing memories for this conversation
-            existing_memories = await self.vector_store.get_memories_by_source(
-                user_id, source_id
-            )
+            existing_memories = await self.vector_store.get_memories_by_source(user_id, source_id)
 
             # 2. If no existing memories, fall back to normal extraction
             if not existing_memories:
@@ -544,7 +547,11 @@ class MemoryService(MemoryServiceBase):
                     f"falling back to normal extraction"
                 )
                 return await self.add_memory(
-                    transcript, client_id, source_id, user_id, user_email,
+                    transcript,
+                    client_id,
+                    source_id,
+                    user_id,
+                    user_email,
                     allow_update=True,
                 )
 
@@ -555,7 +562,11 @@ class MemoryService(MemoryServiceBase):
                     f"falling back to normal extraction"
                 )
                 return await self.add_memory(
-                    transcript, client_id, source_id, user_id, user_email,
+                    transcript,
+                    client_id,
+                    source_id,
+                    user_id,
+                    user_email,
                     allow_update=True,
                 )
 
@@ -580,24 +591,29 @@ class MemoryService(MemoryServiceBase):
                     existing_memories=existing_memory_dicts,
                     diff_context=diff_text,
                     new_transcript=transcript,
-                    langfuse_session_id=source_id,
                 )
-                memory_logger.info(
-                    f"🔄 Reprocess LLM returned actions: {actions_obj}"
-                )
+                memory_logger.info(f"🔄 Reprocess LLM returned actions: {actions_obj}")
             except NotImplementedError:
                 memory_logger.warning(
                     "LLM provider does not support propose_reprocess_actions, "
                     "falling back to normal extraction"
                 )
                 return await self.add_memory(
-                    transcript, client_id, source_id, user_id, user_email,
+                    transcript,
+                    client_id,
+                    source_id,
+                    user_id,
+                    user_email,
                     allow_update=True,
                 )
             except Exception as e:
                 memory_logger.error(f"Reprocess LLM call failed: {e}")
                 return await self.add_memory(
-                    transcript, client_id, source_id, user_id, user_email,
+                    transcript,
+                    client_id,
+                    source_id,
+                    user_id,
+                    user_email,
                     allow_update=True,
                 )
 
@@ -619,13 +635,9 @@ class MemoryService(MemoryServiceBase):
                         self.llm_provider.generate_embeddings(texts_needing_embeddings),
                         timeout=self.config.timeout_seconds,
                     )
-                    text_to_embedding = dict(
-                        zip(texts_needing_embeddings, embeddings, strict=True)
-                    )
+                    text_to_embedding = dict(zip(texts_needing_embeddings, embeddings, strict=True))
                 except Exception as e:
-                    memory_logger.warning(
-                        f"Batch embedding generation failed for reprocess: {e}"
-                    )
+                    memory_logger.warning(f"Batch embedding generation failed for reprocess: {e}")
 
             # 8. Apply the actions (reuses existing infrastructure)
             created_ids = await self._apply_memory_actions(
@@ -639,21 +651,20 @@ class MemoryService(MemoryServiceBase):
             )
 
             memory_logger.info(
-                f"✅ Reprocess complete for {source_id}: "
-                f"{len(created_ids)} memories affected"
+                f"✅ Reprocess complete for {source_id}: " f"{len(created_ids)} memories affected"
             )
             return True, created_ids
 
         except Exception as e:
-            memory_logger.error(
-                f"❌ Reprocess memory failed for {source_id}: {e}"
-            )
+            memory_logger.error(f"❌ Reprocess memory failed for {source_id}: {e}")
             # Fall back to normal extraction on any unexpected error
-            memory_logger.info(
-                f"🔄 Falling back to normal extraction after reprocess error"
-            )
+            memory_logger.info(f"🔄 Falling back to normal extraction after reprocess error")
             return await self.add_memory(
-                transcript, client_id, source_id, user_id, user_email,
+                transcript,
+                client_id,
+                source_id,
+                user_id,
+                user_email,
                 allow_update=True,
             )
 
@@ -688,8 +699,7 @@ class MemoryService(MemoryServiceBase):
                 )
             elif change_type == "new_segment":
                 lines.append(
-                    f"- New segment: {change.get('speaker', '?')}: "
-                    f"\"{change.get('text', '')}\""
+                    f"- New segment: {change.get('speaker', '?')}: " f"\"{change.get('text', '')}\""
                 )
 
         return "\n".join(lines)
@@ -789,7 +799,6 @@ class MemoryService(MemoryServiceBase):
         client_id: str,
         source_id: str,
         user_email: str,
-        langfuse_session_id: Optional[str] = None,
     ) -> List[str]:
         """Process memory updates using LLM-driven action proposals.
 
@@ -852,7 +861,6 @@ class MemoryService(MemoryServiceBase):
                 retrieved_old_memory=retrieved_old_memory,
                 new_facts=memories_text,
                 custom_prompt=None,
-                langfuse_session_id=langfuse_session_id,
             )
             memory_logger.info(f"📝 UpdateMemory LLM returned: {type(actions_obj)} - {actions_obj}")
         except Exception as e_actions:

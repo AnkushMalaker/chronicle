@@ -118,7 +118,9 @@ def analyze_speech(transcript_data: dict) -> dict:
                 else:
                     # Check minimum duration threshold when we have timing data
                     min_duration = settings.get("min_duration", 10.0)
-                    logger.info(f"📏 Comparing duration {speech_duration:.1f}s vs threshold {min_duration:.1f}s")
+                    logger.info(
+                        f"📏 Comparing duration {speech_duration:.1f}s vs threshold {min_duration:.1f}s"
+                    )
                     if speech_duration < min_duration:
                         return {
                             "has_speech": False,
@@ -164,7 +166,6 @@ async def generate_title_and_summary(
     text: str,
     segments: Optional[list] = None,
     user_id: Optional[str] = None,
-    langfuse_session_id: Optional[str] = None,
 ) -> tuple[str, str]:
     """
     Generate title and short summary in a single LLM call using full conversation context.
@@ -222,7 +223,7 @@ TRANSCRIPT:
 "{conversation_text}"
 """
 
-        response = await async_generate(prompt, operation="title_summary", langfuse_session_id=langfuse_session_id)
+        response = await async_generate(prompt, operation="title_summary")
 
         # Parse response for Title: and Summary: lines
         title = None
@@ -249,12 +250,10 @@ TRANSCRIPT:
         return fallback_title or "Conversation", fallback_summary or "No content"
 
 
-
 async def generate_detailed_summary(
     text: str,
     segments: Optional[list] = None,
     memory_context: Optional[str] = None,
-    langfuse_session_id: Optional[str] = None,
 ) -> str:
     """
     Generate a comprehensive, detailed summary of the conversation.
@@ -330,7 +329,7 @@ TRANSCRIPT:
 "{conversation_text}"
 """
 
-        summary = await async_generate(prompt, operation="detailed_summary", langfuse_session_id=langfuse_session_id)
+        summary = await async_generate(prompt, operation="detailed_summary")
         return summary.strip().strip('"').strip("'") or "No meaningful content to summarize"
 
     except Exception as e:
@@ -350,7 +349,6 @@ TRANSCRIPT:
 # ============================================================================
 
 
-
 def extract_speakers_from_segments(segments: list) -> List[str]:
     """
     Extract unique speaker names from segments.
@@ -364,7 +362,11 @@ def extract_speakers_from_segments(segments: list) -> List[str]:
     speakers = []
     if segments:
         for seg in segments:
-            speaker = seg.get("speaker", "Unknown") if isinstance(seg, dict) else (seg.speaker or "Unknown")
+            speaker = (
+                seg.get("speaker", "Unknown")
+                if isinstance(seg, dict)
+                else (seg.speaker or "Unknown")
+            )
             if speaker and speaker != "Unknown" and speaker not in speakers:
                 speakers.append(speaker)
     return speakers

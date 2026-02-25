@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
 from advanced_omi_backend.model_registry import get_models_registry
-from advanced_omi_backend.openai_factory import create_openai_client, is_langfuse_enabled
+from advanced_omi_backend.openai_factory import create_openai_client
 from advanced_omi_backend.services.memory.config import (
     load_config_yml as _load_root_config,
 )
@@ -62,7 +62,9 @@ class OpenAILLMClient(LLMClient):
         self.base_url = base_url
         self.model = model
         if not self.api_key or not self.base_url or not self.model:
-            raise ValueError(f"LLM configuration incomplete: api_key={'set' if self.api_key else 'MISSING'}, base_url={'set' if self.base_url else 'MISSING'}, model={'set' if self.model else 'MISSING'}")
+            raise ValueError(
+                f"LLM configuration incomplete: api_key={'set' if self.api_key else 'MISSING'}, base_url={'set' if self.base_url else 'MISSING'}, model={'set' if self.model else 'MISSING'}"
+            )
 
         # Initialize OpenAI client with optional Langfuse tracing
         try:
@@ -78,31 +80,32 @@ class OpenAILLMClient(LLMClient):
             raise
 
     def generate(
-        self, prompt: str, model: str | None = None, temperature: float | None = None,
-        **langfuse_kwargs,
+        self,
+        prompt: str,
+        model: str | None = None,
+        temperature: float | None = None,
     ) -> str:
         """Generate text completion using OpenAI-compatible API."""
         try:
             model_name = model or self.model
             temp = temperature if temperature is not None else self.temperature
 
-            params = {
-                "model": model_name,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": temp,
-            }
-            if is_langfuse_enabled():
-                params.update(langfuse_kwargs)
-
-            response = self.client.chat.completions.create(**params)
+            response = self.client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temp,
+            )
             return response.choices[0].message.content.strip()
         except Exception as e:
             self.logger.error(f"Error generating completion: {e}")
             raise
 
     def chat_with_tools(
-        self, messages: list, tools: list | None = None, model: str | None = None,
-        temperature: float | None = None, **langfuse_kwargs,
+        self,
+        messages: list,
+        tools: list | None = None,
+        model: str | None = None,
+        temperature: float | None = None,
     ):
         """Chat completion with tool/function calling support. Returns raw response object."""
         model_name = model or self.model
@@ -113,8 +116,6 @@ class OpenAILLMClient(LLMClient):
         }
         if tools:
             params["tools"] = tools
-        if is_langfuse_enabled():
-            params.update(langfuse_kwargs)
         return self.client.chat.completions.create(**params)
 
     def health_check(self) -> Dict:
@@ -157,11 +158,13 @@ class LLMClientFactory:
     def create_client() -> LLMClient:
         """Create an LLM client based on model registry configuration (config.yml)."""
         registry = get_models_registry()
-        
+
         if registry:
             llm_def = registry.get_default("llm")
             if llm_def:
-                logger.info(f"Creating LLM client from registry: {llm_def.name} ({llm_def.model_provider})")
+                logger.info(
+                    f"Creating LLM client from registry: {llm_def.name} ({llm_def.model_provider})"
+                )
                 params = llm_def.model_params or {}
                 return OpenAILLMClient(
                     api_key=llm_def.api_key,
@@ -169,7 +172,7 @@ class LLMClientFactory:
                     model=llm_def.model_name,
                     temperature=params.get("temperature", 0.1),
                 )
-        
+
         raise ValueError("No default LLM defined in config.yml")
 
     @staticmethod
@@ -196,20 +199,12 @@ def reset_llm_client():
     _llm_client = None
 
 
-def _langfuse_metadata(session_id: str | None) -> dict:
-    """Return metadata dict with langfuse_session_id if Langfuse is enabled."""
-    if session_id and is_langfuse_enabled():
-        return {"langfuse_session_id": session_id}
-    return {}
-
-
 # Async wrapper for blocking LLM operations
 async def async_generate(
     prompt: str,
     model: str | None = None,
     temperature: float | None = None,
     operation: str | None = None,
-    langfuse_session_id: str | None = None,
 ) -> str:
     """Async wrapper for LLM text generation.
 
@@ -218,9 +213,8 @@ async def async_generate(
     The resolved config determines model, temperature, max_tokens, etc.
     Explicit ``model``/``temperature`` kwargs still override the resolved values.
 
-    When ``langfuse_session_id`` is provided and Langfuse is enabled,
-    the session ID is set on the current Langfuse trace to group all
-    LLM calls for a conversation.
+    Tracing is handled automatically by the OTEL instrumentor; use
+    ``set_otel_session()`` at job boundaries to group calls by session.
     """
     if operation:
         registry = get_models_registry()
@@ -233,16 +227,13 @@ async def async_generate(
             if model is not None:
                 api_params["model"] = model
             api_params["messages"] = [{"role": "user", "content": prompt}]
-            api_params["metadata"] = _langfuse_metadata(langfuse_session_id)
             response = await client.chat.completions.create(**api_params)
             return response.choices[0].message.content.strip()
 
     # Fallback: use singleton client
     client = get_llm_client()
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None, lambda: client.generate(prompt, model, temperature)
-    )
+    return await loop.run_in_executor(None, lambda: client.generate(prompt, model, temperature))
 
 
 async def async_chat_with_tools(
@@ -251,11 +242,11 @@ async def async_chat_with_tools(
     model: str | None = None,
     temperature: float | None = None,
     operation: str | None = None,
-    langfuse_session_id: str | None = None,
 ):
     """Async wrapper for chat completion with tool calling.
 
     When ``operation`` is provided, parameters are resolved from config.
+    Tracing is handled automatically by the OTEL instrumentor.
     """
     if operation:
         registry = get_models_registry()
@@ -270,7 +261,6 @@ async def async_chat_with_tools(
             api_params["messages"] = messages
             if tools:
                 api_params["tools"] = tools
-            api_params["metadata"] = _langfuse_metadata(langfuse_session_id)
             return await client.chat.completions.create(**api_params)
 
     # Fallback: use singleton client

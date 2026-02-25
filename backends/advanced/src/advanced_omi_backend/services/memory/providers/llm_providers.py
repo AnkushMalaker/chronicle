@@ -15,10 +15,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.model_registry import ModelDef, get_models_registry
-from advanced_omi_backend.openai_factory import (
-    create_openai_client,
-    is_langfuse_enabled,
-)
+from advanced_omi_backend.openai_factory import create_openai_client
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 from advanced_omi_backend.utils.text_chunking import semantic_chunk_text
 
@@ -40,13 +37,6 @@ from ..utils import extract_json_from_text
 
 
 memory_logger = logging.getLogger("memory_service")
-
-
-def _langfuse_metadata(session_id: str | None) -> dict:
-    """Return metadata dict with langfuse_session_id if Langfuse is enabled."""
-    if session_id and is_langfuse_enabled():
-        return {"langfuse_session_id": session_id}
-    return {}
 
 
 def _get_openai_client(api_key: str, base_url: str, is_async: bool = False):
@@ -75,10 +65,7 @@ async def generate_openai_embeddings(
         base_url=base_url,
         is_async=True,
     )
-    response = await client.embeddings.create(
-        model=model,
-        input=texts,
-    )
+    response = await client.embeddings.create(model=model, input=texts)
     return [data.embedding for data in response.data]
 
 
@@ -160,9 +147,7 @@ class OpenAIProvider(LLMProviderBase):
         # Ignore provider-specific envs; use registry as single source of truth
         registry = get_models_registry()
         if not registry:
-            raise RuntimeError(
-                "config.yml not found or invalid; cannot initialize model registry"
-            )
+            raise RuntimeError("config.yml not found or invalid; cannot initialize model registry")
 
         self._registry = registry
 
@@ -182,12 +167,8 @@ class OpenAIProvider(LLMProviderBase):
         self.embedding_model = (
             self.embed_def.model_name if self.embed_def else self.llm_def.model_name
         )
-        self.embedding_api_key = (
-            self.embed_def.api_key if self.embed_def else self.api_key
-        )
-        self.embedding_base_url = (
-            self.embed_def.model_url if self.embed_def else self.base_url
-        )
+        self.embedding_api_key = self.embed_def.api_key if self.embed_def else self.api_key
+        self.embedding_base_url = self.embed_def.model_url if self.embed_def else self.base_url
 
         # CRITICAL: Validate API keys are present - fail fast instead of hanging
         if not self.api_key or self.api_key.strip() == "":
@@ -197,9 +178,7 @@ class OpenAIProvider(LLMProviderBase):
                 f"Cannot proceed without valid API credentials."
             )
 
-        if self.embed_def and (
-            not self.embedding_api_key or self.embedding_api_key.strip() == ""
-        ):
+        if self.embed_def and (not self.embedding_api_key or self.embedding_api_key.strip() == ""):
             raise RuntimeError(
                 f"API key is missing or empty for embedding provider '{self.embed_def.model_provider}' (model: {self.embedding_model}). "
                 f"Please set the API key in config.yml or environment variables."
@@ -213,7 +192,6 @@ class OpenAIProvider(LLMProviderBase):
         text: str,
         prompt: str,
         user_id: Optional[str] = None,
-        langfuse_session_id: Optional[str] = None,
     ) -> List[str]:
         """Extract memories using OpenAI API with the enhanced fact retrieval prompt.
 
@@ -221,7 +199,6 @@ class OpenAIProvider(LLMProviderBase):
             text: Input text to extract memories from
             prompt: System prompt to guide extraction (uses default if empty)
             user_id: Optional user ID for per-user prompt override resolution
-            langfuse_session_id: Optional session ID for Langfuse trace grouping
 
         Returns:
             List of extracted memory strings
@@ -248,9 +225,7 @@ class OpenAIProvider(LLMProviderBase):
                     model=self.embedding_model,
                 )
 
-            chunking_config = self._registry.memory.get("extraction", {}).get(
-                "chunking", {}
-            )
+            chunking_config = self._registry.memory.get("extraction", {}).get("chunking", {})
             dialogue_turns = [line for line in text.split("\n") if line.strip()]
             text_chunks = await semantic_chunk_text(
                 text,
@@ -266,9 +241,7 @@ class OpenAIProvider(LLMProviderBase):
 
             # Process all chunks in sequence, not concurrently
             results = [
-                await self._process_chunk(
-                    system_prompt, chunk, i, langfuse_session_id=langfuse_session_id
-                )
+                await self._process_chunk(system_prompt, chunk, i)
                 for i, chunk in enumerate(text_chunks)
             ]
 
@@ -289,7 +262,6 @@ class OpenAIProvider(LLMProviderBase):
         system_prompt: str,
         chunk: str,
         index: int,
-        langfuse_session_id: Optional[str] = None,
     ) -> List[str]:
         """Process a single text chunk to extract memories using OpenAI API.
 
@@ -301,7 +273,6 @@ class OpenAIProvider(LLMProviderBase):
             system_prompt: System prompt that guides the memory extraction behavior
             chunk: Individual text chunk to process for memory extraction
             index: Index of the chunk for logging and error tracking purposes
-            langfuse_session_id: Optional session ID for Langfuse trace grouping
 
         Returns:
             List of extracted memory fact strings from the chunk. Returns empty list
@@ -320,7 +291,6 @@ class OpenAIProvider(LLMProviderBase):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": chunk},
                 ],
-                metadata=_langfuse_metadata(langfuse_session_id),
             )
             facts = (response.choices[0].message.content or "").strip()
             if not facts:
@@ -332,7 +302,10 @@ class OpenAIProvider(LLMProviderBase):
             memory_logger.error(f"Error processing chunk {index}: {e}")
             return []
 
-    async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+    async def generate_embeddings(
+        self,
+        texts: List[str],
+    ) -> List[List[float]]:
         """Generate embeddings using OpenAI API.
 
         Args:
@@ -381,7 +354,6 @@ class OpenAIProvider(LLMProviderBase):
         retrieved_old_memory: List[Dict[str, str]] | List[str],
         new_facts: List[str],
         custom_prompt: Optional[str] = None,
-        langfuse_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Use OpenAI chat completion with enhanced prompt to propose memory actions.
 
@@ -389,7 +361,6 @@ class OpenAIProvider(LLMProviderBase):
             retrieved_old_memory: List of existing memories for context
             new_facts: List of new facts to process
             custom_prompt: Optional custom prompt to override default
-            langfuse_session_id: Optional session ID for Langfuse trace grouping
 
         Returns:
             Dictionary containing proposed memory actions
@@ -409,7 +380,6 @@ class OpenAIProvider(LLMProviderBase):
             response = await client.chat.completions.create(
                 **op.to_api_params(),
                 messages=update_memory_messages,
-                metadata=_langfuse_metadata(langfuse_session_id),
             )
             content = (response.choices[0].message.content or "").strip()
             if not content:
@@ -434,7 +404,6 @@ class OpenAIProvider(LLMProviderBase):
         diff_context: str,
         new_transcript: str,
         custom_prompt: Optional[str] = None,
-        langfuse_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Propose memory updates after speaker re-identification.
 
@@ -464,9 +433,7 @@ class OpenAIProvider(LLMProviderBase):
             else:
                 try:
                     registry = get_prompt_registry()
-                    system_prompt = await registry.get_prompt(
-                        "memory.reprocess_speaker_update"
-                    )
+                    system_prompt = await registry.get_prompt("memory.reprocess_speaker_update")
                 except Exception as e:
                     memory_logger.debug(
                         f"Registry prompt fetch failed for "
@@ -497,7 +464,6 @@ class OpenAIProvider(LLMProviderBase):
             response = await client.chat.completions.create(
                 **op.to_api_params(),
                 messages=messages,
-                metadata=_langfuse_metadata(langfuse_session_id),
             )
             content = (response.choices[0].message.content or "").strip()
 
@@ -553,16 +519,12 @@ def _parse_memories_content(content: str) -> List[str]:
             for key in ("facts", "preferences"):
                 value = parsed.get(key)
                 if isinstance(value, list):
-                    collected.extend(
-                        [str(item).strip() for item in value if str(item).strip()]
-                    )
+                    collected.extend([str(item).strip() for item in value if str(item).strip()])
             # If the dict didn't contain expected keys, try to flatten any list values
             if not collected:
                 for value in parsed.values():
                     if isinstance(value, list):
-                        collected.extend(
-                            [str(item).strip() for item in value if str(item).strip()]
-                        )
+                        collected.extend([str(item).strip() for item in value if str(item).strip()])
             if collected:
                 return collected
     except Exception:
@@ -597,17 +559,13 @@ def _try_parse_list_or_object(text: str) -> List[str] | None:
             for key in ("facts", "preferences"):
                 value = data.get(key)
                 if isinstance(value, list):
-                    collected.extend(
-                        [str(item).strip() for item in value if str(item).strip()]
-                    )
+                    collected.extend([str(item).strip() for item in value if str(item).strip()])
             if collected:
                 return collected
             # As a last attempt, flatten any list values
             for value in data.values():
                 if isinstance(value, list):
-                    collected.extend(
-                        [str(item).strip() for item in value if str(item).strip()]
-                    )
+                    collected.extend([str(item).strip() for item in value if str(item).strip()])
             return collected if collected else None
     except Exception:
         return None

@@ -24,6 +24,9 @@ dependencies = [
     "ruamel-yaml>=0.18.0",
     "omegaconf>=2.3.0",
     "langfuse>=3.13.0,<4.0",
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "openinference-instrumentation-openai>=0.1",
     "spacy>=3.8.2",
     "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
     "redis>=5.0.0",
@@ -47,10 +50,7 @@ local-audio = [
 ]
 galileo = [
     "galileo>=1.0",
-    "opentelemetry-api>=1.20",
-    "opentelemetry-sdk>=1.20",
     "opentelemetry-exporter-otlp>=1.20",
-    "openinference-instrumentation-openai>=0.1",
 ]
 
 [build-system]
