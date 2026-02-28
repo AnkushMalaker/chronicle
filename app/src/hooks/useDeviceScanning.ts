@@ -49,7 +49,7 @@ export const useDeviceScanning = (
   const startScan = useCallback(async () => {
     console.log('[Scanner] startScan called');
     setError(null);
-    setDevices([]); 
+    setDevices([]);
 
     if (scanning) {
       console.log('[Scanner] Scan already in progress. Stopping previous scan first.');
@@ -80,7 +80,7 @@ export const useDeviceScanning = (
       setError('Bluetooth is not enabled. Please turn on Bluetooth.');
       return;
     }
-    
+
     const currentState = await bleManager.state();
     if (currentState !== BluetoothState.PoweredOn) {
         console.warn(`[Scanner] Bluetooth state is ${currentState}, not PoweredOn. Cannot scan.`);
@@ -143,4 +143,4 @@ export const useDeviceScanning = (
   }, [handleStopScan]);
 
   return { devices, scanning, startScan, stopScan: handleStopScan, error };
-}; 
+};

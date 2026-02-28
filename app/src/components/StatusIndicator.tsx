@@ -15,12 +15,12 @@ const StatusIndicator: React.FC<StatusIndicatorProps> = ({
   inactiveColor = '#FF3B30', // Red
 }) => {
   return (
-    <View 
+    <View
       style={[
         styles.dot,
-        { 
-          width: size, 
-          height: size, 
+        {
+          width: size,
+          height: size,
           borderRadius: size / 2,
           backgroundColor: isActive ? activeColor : inactiveColor,
         }
@@ -40,4 +40,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default StatusIndicator; 
+export default StatusIndicator;

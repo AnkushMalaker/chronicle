@@ -189,4 +189,4 @@ export const useDeviceConnection = (
     getRawBatteryLevel,
     connectedDeviceId
   };
-}; 
+};

@@ -43,7 +43,10 @@ def is_meaningful_speech(combined_results: dict) -> bool:
     if not combined_results.get("text"):
         return False
 
-    transcript_data = {"text": combined_results["text"], "words": combined_results.get("words", [])}
+    transcript_data = {
+        "text": combined_results["text"],
+        "words": combined_results.get("words", []),
+    }
 
     speech_analysis = analyze_speech(transcript_data)
     return speech_analysis["has_speech"]
@@ -83,19 +86,25 @@ def analyze_speech(transcript_data: dict) -> dict:
     settings = get_speech_detection_settings()
     words = transcript_data.get("words", [])
 
-    logger.info(f"🔬 analyze_speech: words_list_length={len(words)}, settings={settings}")
+    logger.info(
+        f"🔬 analyze_speech: words_list_length={len(words)}, settings={settings}"
+    )
     if words and len(words) > 0:
         logger.info(f"📝 First 3 words: {words[:3]}")
 
     # Method 1: Word-level analysis (preferred - has confidence scores and timing)
     if words:
         # Filter by confidence threshold
-        valid_words = [w for w in words if (w.get("confidence") or 0) >= settings["min_confidence"]]
+        valid_words = [
+            w for w in words if (w.get("confidence") or 0) >= settings["min_confidence"]
+        ]
 
         if len(valid_words) < settings["min_words"]:
             # Not enough valid words in word-level data - fall through to text-only analysis
             # This handles cases where word-level data is incomplete or low confidence
-            logger.debug(f"Only {len(valid_words)} valid words, falling back to text-only analysis")
+            logger.debug(
+                f"Only {len(valid_words)} valid words, falling back to text-only analysis"
+            )
             # Continue to Method 2 (don't return early)
         else:
             # Calculate speech duration from word timing
@@ -113,7 +122,9 @@ def analyze_speech(transcript_data: dict) -> dict:
                 # If no timing data (duration = 0), fall back to text-only analysis
                 # This happens with some streaming transcription services
                 if speech_duration == 0:
-                    logger.debug("Word timing data missing, falling back to text-only analysis")
+                    logger.debug(
+                        "Word timing data missing, falling back to text-only analysis"
+                    )
                     # Continue to Method 2 (text-only fallback)
                 else:
                     # Check minimum duration threshold when we have timing data
@@ -245,7 +256,9 @@ TRANSCRIPT:
         # Fallback
         words = text.split()[:6]
         fallback_title = " ".join(words)
-        fallback_title = fallback_title[:40] + "..." if len(fallback_title) > 40 else fallback_title
+        fallback_title = (
+            fallback_title[:40] + "..." if len(fallback_title) > 40 else fallback_title
+        )
         fallback_summary = text[:120] + "..." if len(text) > 120 else text
         return fallback_title or "Conversation", fallback_summary or "No content"
 
@@ -330,7 +343,10 @@ TRANSCRIPT:
 """
 
         summary = await async_generate(prompt, operation="detailed_summary")
-        return summary.strip().strip('"').strip("'") or "No meaningful content to summarize"
+        return (
+            summary.strip().strip('"').strip("'")
+            or "No meaningful content to summarize"
+        )
 
     except Exception as e:
         logger.warning(f"Failed to generate detailed summary: {e}")
@@ -373,7 +389,10 @@ def extract_speakers_from_segments(segments: list) -> List[str]:
 
 
 async def track_speech_activity(
-    speech_analysis: Dict[str, Any], last_word_count: int, conversation_id: str, redis_client
+    speech_analysis: Dict[str, Any],
+    last_word_count: int,
+    conversation_id: str,
+    redis_client,
 ) -> tuple[float, int]:
     """
     Track new speech activity and update last speech timestamp using audio timestamps.
@@ -477,7 +496,9 @@ async def update_job_progress_metadata(
             "conversation_id": conversation_id,
             "client_id": client_id,  # Ensure client_id is always present
             "transcript": (
-                combined["text"][:500] + "..." if len(combined["text"]) > 500 else combined["text"]
+                combined["text"][:500] + "..."
+                if len(combined["text"]) > 500
+                else combined["text"]
             ),  # First 500 chars
             "transcript_length": len(combined["text"]),
             "speakers": speakers,
@@ -508,7 +529,9 @@ async def mark_conversation_deleted(conversation_id: str, deletion_reason: str) 
         f"🗑️ Marking conversation {conversation_id} as deleted - reason: {deletion_reason}"
     )
 
-    conversation = await Conversation.find_one(Conversation.conversation_id == conversation_id)
+    conversation = await Conversation.find_one(
+        Conversation.conversation_id == conversation_id
+    )
     if conversation:
         conversation.deleted = True
         conversation.deletion_reason = deletion_reason

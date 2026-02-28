@@ -34,7 +34,7 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
   const [isInitializing, setIsInitializing] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [audioLevel, setAudioLevel] = useState<number>(0);
-  
+
   const onAudioDataRef = useRef<((pcmBuffer: Uint8Array) => void) | null>(null);
   const mountedRef = useRef<boolean>(true);
 
@@ -53,13 +53,13 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
     try {
       const audioData = event.data;
       console.log('[PhoneAudioRecorder] processAudioDataEvent called, data type:', typeof audioData);
-      
+
       if (typeof audioData === 'string') {
         // Base64 encoded data (native platforms) - decode using react-native-base64
         console.log('[PhoneAudioRecorder] Decoding Base64 string, length:', audioData.length);
         const binaryString = base64.decode(audioData);
         console.log('[PhoneAudioRecorder] Decoded to binary string, length:', binaryString.length);
-        
+
         const bytes = new Uint8Array(binaryString.length);
         for (let i = 0; i < binaryString.length; i++) {
           bytes[i] = binaryString.charCodeAt(i);
@@ -148,10 +148,10 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
         intervalAnalysis: 500,         // Analysis every 500ms
         onAudioStream: async (event: AudioDataEvent) => {
           // EXACT payload handling from guide
-          const payload = typeof event.data === "string" 
-            ? event.data 
+          const payload = typeof event.data === "string"
+            ? event.data
             : Buffer.from(event.data as unknown as ArrayBuffer).toString("base64");
-          
+
           // Convert to our expected format
           if (onAudioDataRef.current && mountedRef.current) {
             const pcmBuffer = processAudioDataEvent(event);
@@ -163,7 +163,7 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
       };
 
       const result = await startRecorderInternal(config);
-      
+
       if (!result) {
         throw new Error('Failed to start recording');
       }
@@ -185,7 +185,7 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
   // Stop recording
   const stopRecording = useCallback(async (): Promise<void> => {
     console.log('[PhoneAudioRecorder] Stopping recording...');
-    
+
     // Early return if not recording
     if (!isRecording) {
       console.log('[PhoneAudioRecorder] Not recording, nothing to stop');
@@ -194,7 +194,7 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
       setStateSafe(setIsInitializing, false);
       return;
     }
-    
+
     onAudioDataRef.current = null;
     setStateSafe(setAudioLevel, 0);
 
@@ -231,13 +231,13 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
       console.log('[PhoneAudioRecorder] Component unmounting, setting mountedRef to false');
     };
   }, []); // Empty dependency array - only runs on mount/unmount
-  
+
   // Separate effect for stopping recording when needed
   useEffect(() => {
     return () => {
       // Stop recording if active when dependencies change
       if (isRecording) {
-        stopRecorderInternal().catch(err => 
+        stopRecorderInternal().catch(err =>
           console.error('[PhoneAudioRecorder] Cleanup stop error:', err)
         );
       }

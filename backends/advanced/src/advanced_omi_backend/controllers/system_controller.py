@@ -93,7 +93,10 @@ async def get_config_diagnostics():
                 "resolution": "Check config/defaults.yml and config/config.yml syntax",
             }
         )
-        diagnostics["components"]["omegaconf"] = {"status": "unhealthy", "message": str(e)}
+        diagnostics["components"]["omegaconf"] = {
+            "status": "unhealthy",
+            "message": str(e),
+        }
 
     # Test model registry
     try:
@@ -230,7 +233,10 @@ async def get_config_diagnostics():
                 "resolution": "Check logs for detailed error information",
             }
         )
-        diagnostics["components"]["model_registry"] = {"status": "unhealthy", "message": str(e)}
+        diagnostics["components"]["model_registry"] = {
+            "status": "unhealthy",
+            "message": str(e),
+        }
 
     # Check environment variables (only warn about keys relevant to configured providers)
     env_checks = [
@@ -243,7 +249,9 @@ async def get_config_diagnostics():
         # Add LLM API key check based on active provider
         llm_model = registry.get_default("llm")
         if llm_model and llm_model.model_provider == "openai":
-            env_checks.append(("OPENAI_API_KEY", "Required for OpenAI LLM and embeddings"))
+            env_checks.append(
+                ("OPENAI_API_KEY", "Required for OpenAI LLM and embeddings")
+            )
         elif llm_model and llm_model.model_provider == "groq":
             env_checks.append(("GROQ_API_KEY", "Required for Groq LLM"))
 
@@ -252,7 +260,9 @@ async def get_config_diagnostics():
         if stt_model:
             provider = stt_model.model_provider
             if provider == "deepgram":
-                env_checks.append(("DEEPGRAM_API_KEY", "Required for Deepgram transcription"))
+                env_checks.append(
+                    ("DEEPGRAM_API_KEY", "Required for Deepgram transcription")
+                )
             elif provider == "smallest":
                 env_checks.append(
                     ("SMALLEST_API_KEY", "Required for Smallest.ai Pulse transcription")
@@ -320,7 +330,9 @@ async def get_observability_config():
         from advanced_omi_backend.config_loader import load_config
 
         cfg = load_config()
-        public_url = cfg.get("observability", {}).get("langfuse", {}).get("public_url", "")
+        public_url = (
+            cfg.get("observability", {}).get("langfuse", {}).get("public_url", "")
+        )
         if public_url:
             # Strip trailing slash and build session URL
             session_base_url = f"{public_url.rstrip('/')}/project/chronicle/sessions"
@@ -374,7 +386,8 @@ async def save_diarization_settings_controller(settings: dict):
             if key in ["min_speakers", "max_speakers"]:
                 if not isinstance(value, int) or value < 1 or value > 20:
                     raise HTTPException(
-                        status_code=400, detail=f"Invalid value for {key}: must be integer 1-20"
+                        status_code=400,
+                        detail=f"Invalid value for {key}: must be integer 1-20",
                     )
             elif key == "diarization_source":
                 if not isinstance(value, str) or value not in ["pyannote", "deepgram"]:
@@ -385,14 +398,17 @@ async def save_diarization_settings_controller(settings: dict):
             else:
                 if not isinstance(value, (int, float)) or value < 0:
                     raise HTTPException(
-                        status_code=400, detail=f"Invalid value for {key}: must be positive number"
+                        status_code=400,
+                        detail=f"Invalid value for {key}: must be positive number",
                     )
 
             filtered_settings[key] = value
 
         # Reject if NO valid keys provided (completely invalid request)
         if not filtered_settings:
-            raise HTTPException(status_code=400, detail="No valid diarization settings provided")
+            raise HTTPException(
+                status_code=400, detail="No valid diarization settings provided"
+            )
 
         # Get current settings and merge with new values
         current_settings = load_diarization_settings()
@@ -454,7 +470,8 @@ async def save_misc_settings_controller(settings: dict):
             if key in boolean_keys:
                 if not isinstance(value, bool):
                     raise HTTPException(
-                        status_code=400, detail=f"Invalid value for {key}: must be boolean"
+                        status_code=400,
+                        detail=f"Invalid value for {key}: must be boolean",
                     )
             elif key == "transcription_job_timeout_seconds":
                 if not isinstance(value, int) or value < 60 or value > 7200:
@@ -467,7 +484,9 @@ async def save_misc_settings_controller(settings: dict):
 
         # Reject if NO valid keys provided
         if not filtered_settings:
-            raise HTTPException(status_code=400, detail="No valid misc settings provided")
+            raise HTTPException(
+                status_code=400, detail="No valid misc settings provided"
+            )
 
         # Save using OmegaConf
         if save_misc_settings(filtered_settings):
@@ -605,7 +624,9 @@ async def update_speaker_configuration(user: User, primary_speakers: list[dict])
         }
 
     except Exception as e:
-        logger.exception(f"Error updating speaker configuration for user {user.user_id}")
+        logger.exception(
+            f"Error updating speaker configuration for user {user.user_id}"
+        )
         raise e
 
 
@@ -757,9 +778,13 @@ async def validate_memory_config(config_yaml: str):
         try:
             parsed = _yaml.load(config_yaml)
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid YAML syntax: {str(e)}")
+            raise HTTPException(
+                status_code=400, detail=f"Invalid YAML syntax: {str(e)}"
+            )
         if not isinstance(parsed, dict):
-            raise HTTPException(status_code=400, detail="Configuration must be a YAML object")
+            raise HTTPException(
+                status_code=400, detail="Configuration must be a YAML object"
+            )
         # Minimal checks
         # provider optional; timeout_seconds optional; extraction enabled/prompt optional
         return {"message": "Configuration is valid", "status": "success"}
@@ -768,7 +793,9 @@ async def validate_memory_config(config_yaml: str):
         raise
     except Exception as e:
         logger.exception("Error validating memory config")
-        raise HTTPException(status_code=500, detail=f"Error validating memory config: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error validating memory config: {str(e)}"
+        )
 
 
 async def reload_memory_config():
@@ -870,7 +897,9 @@ async def set_memory_provider(provider: str):
 
         # If MEMORY_PROVIDER wasn't found, add it
         if not provider_found:
-            updated_lines.append(f"\n# Memory Provider Configuration\nMEMORY_PROVIDER={provider}\n")
+            updated_lines.append(
+                f"\n# Memory Provider Configuration\nMEMORY_PROVIDER={provider}\n"
+            )
 
         # Create backup
         backup_path = f"{env_path}.bak"
@@ -950,19 +979,23 @@ async def save_llm_operations(operations: dict):
 
         for op_name, op_value in operations.items():
             if not isinstance(op_value, dict):
-                raise HTTPException(status_code=400, detail=f"Operation '{op_name}' must be a dict")
+                raise HTTPException(
+                    status_code=400, detail=f"Operation '{op_name}' must be a dict"
+                )
 
             extra_keys = set(op_value.keys()) - valid_keys
             if extra_keys:
                 raise HTTPException(
-                    status_code=400, detail=f"Invalid keys for '{op_name}': {extra_keys}"
+                    status_code=400,
+                    detail=f"Invalid keys for '{op_name}': {extra_keys}",
                 )
 
             if "temperature" in op_value and op_value["temperature"] is not None:
                 t = op_value["temperature"]
                 if not isinstance(t, (int, float)) or t < 0 or t > 2:
                     raise HTTPException(
-                        status_code=400, detail=f"Invalid temperature for '{op_name}': must be 0-2"
+                        status_code=400,
+                        detail=f"Invalid temperature for '{op_name}': must be 0-2",
                     )
 
             if "max_tokens" in op_value and op_value["max_tokens"] is not None:
@@ -976,13 +1009,18 @@ async def save_llm_operations(operations: dict):
             if "model" in op_value and op_value["model"] is not None:
                 if not registry.get_by_name(op_value["model"]):
                     raise HTTPException(
-                        status_code=400, detail=f"Model '{op_value['model']}' not found in registry"
+                        status_code=400,
+                        detail=f"Model '{op_value['model']}' not found in registry",
                     )
 
-            if "response_format" in op_value and op_value["response_format"] is not None:
+            if (
+                "response_format" in op_value
+                and op_value["response_format"] is not None
+            ):
                 if op_value["response_format"] != "json":
                     raise HTTPException(
-                        status_code=400, detail=f"response_format must be 'json' or null"
+                        status_code=400,
+                        detail=f"response_format must be 'json' or null",
                     )
 
         if save_config_section("llm_operations", operations):
@@ -1157,7 +1195,10 @@ async def validate_chat_config_yaml(prompt_text: str) -> dict:
         if len(prompt_text) < 10:
             return {"valid": False, "error": "Prompt too short (minimum 10 characters)"}
         if len(prompt_text) > 10000:
-            return {"valid": False, "error": "Prompt too long (maximum 10000 characters)"}
+            return {
+                "valid": False,
+                "error": "Prompt too long (maximum 10000 characters)",
+            }
 
         return {"valid": True, "message": "Configuration is valid"}
 
@@ -1291,8 +1332,13 @@ async def validate_plugins_config_yaml(yaml_content: str) -> dict:
                 }
 
             # Check required fields
-            if "enabled" in plugin_config and not isinstance(plugin_config["enabled"], bool):
-                return {"valid": False, "error": f"Plugin '{plugin_id}': 'enabled' must be boolean"}
+            if "enabled" in plugin_config and not isinstance(
+                plugin_config["enabled"], bool
+            ):
+                return {
+                    "valid": False,
+                    "error": f"Plugin '{plugin_id}': 'enabled' must be boolean",
+                }
 
             if (
                 "access_level" in plugin_config
@@ -1448,11 +1494,14 @@ async def get_plugins_metadata() -> dict:
         for plugin_id, plugin_class in discovered_plugins.items():
             # Get orchestration config (or empty dict if not configured)
             orchestration_config = orchestration_configs.get(
-                plugin_id, {"enabled": False, "events": [], "condition": {"type": "always"}}
+                plugin_id,
+                {"enabled": False, "events": [], "condition": {"type": "always"}},
             )
 
             # Get complete metadata including schema
-            metadata = get_plugin_metadata(plugin_id, plugin_class, orchestration_config)
+            metadata = get_plugin_metadata(
+                plugin_id, plugin_class, orchestration_config
+            )
             plugins_metadata.append(metadata)
 
         logger.info(f"Retrieved metadata for {len(plugins_metadata)} plugins")
@@ -1527,7 +1576,9 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
                 _yaml.dump(plugins_data, f)
 
             updated_files.append(str(plugins_yml_path))
-            logger.info(f"Updated orchestration config for '{plugin_id}' in {plugins_yml_path}")
+            logger.info(
+                f"Updated orchestration config for '{plugin_id}' in {plugins_yml_path}"
+            )
 
         # 2. Update plugins/{plugin_id}/config.yml (settings with env var references)
         if "settings" in config:
@@ -1562,7 +1613,9 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
             from advanced_omi_backend.services.plugin_service import save_plugin_env
 
             # Filter out masked values (unchanged secrets)
-            changed_vars = {k: v for k, v in config["env_vars"].items() if v != "••••••••••••"}
+            changed_vars = {
+                k: v for k, v in config["env_vars"].items() if v != "••••••••••••"
+            }
 
             if changed_vars:
                 env_path = save_plugin_env(plugin_id, changed_vars)
@@ -1582,7 +1635,9 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
         except Exception as reload_err:
             logger.warning(f"Auto-reload failed, manual restart needed: {reload_err}")
 
-        message = f"Plugin '{plugin_id}' configuration updated and reloaded successfully."
+        message = (
+            f"Plugin '{plugin_id}' configuration updated and reloaded successfully."
+        )
         if reload_result is None:
             message = f"Plugin '{plugin_id}' configuration updated. Restart backend for changes to take effect."
 
@@ -1658,13 +1713,19 @@ async def test_plugin_connection(plugin_id: str, config: dict) -> dict:
         # Call plugin's test_connection static method
         result = await plugin_class.test_connection(test_config)
 
-        logger.info(f"Test connection for '{plugin_id}': {result.get('message', 'No message')}")
+        logger.info(
+            f"Test connection for '{plugin_id}': {result.get('message', 'No message')}"
+        )
 
         return result
 
     except Exception as e:
         logger.exception(f"Error testing connection for plugin '{plugin_id}'")
-        return {"success": False, "message": f"Connection test failed: {str(e)}", "status": "error"}
+        return {
+            "success": False,
+            "message": f"Connection test failed: {str(e)}",
+            "status": "error",
+        }
 
 
 # Plugin Lifecycle Management Functions (create / write-code / delete)
@@ -1705,7 +1766,10 @@ async def create_plugin(
 
     # Validate name
     if not plugin_name.replace("_", "").isalnum():
-        return {"success": False, "error": "Plugin name must be alphanumeric with underscores only"}
+        return {
+            "success": False,
+            "error": "Plugin name must be alphanumeric with underscores only",
+        }
 
     if not re.match(r"^[a-z][a-z0-9_]*$", plugin_name):
         return {
@@ -1718,11 +1782,17 @@ async def create_plugin(
 
     # Collision check
     if plugin_dir.exists():
-        return {"success": False, "error": f"Plugin '{plugin_name}' already exists at {plugin_dir}"}
+        return {
+            "success": False,
+            "error": f"Plugin '{plugin_name}' already exists at {plugin_dir}",
+        }
 
     discovered = discover_plugins()
     if plugin_name in discovered:
-        return {"success": False, "error": f"Plugin '{plugin_name}' is already registered"}
+        return {
+            "success": False,
+            "error": f"Plugin '{plugin_name}' is already registered",
+        }
 
     class_name = _snake_to_pascal(plugin_name) + "Plugin"
     created_files: list[str] = []
@@ -1740,7 +1810,9 @@ async def create_plugin(
         else:
             # Write standard boilerplate
             events_str = (
-                ", ".join(f'"{e}"' for e in events) if events else '"conversation.complete"'
+                ", ".join(f'"{e}"' for e in events)
+                if events
+                else '"conversation.complete"'
             )
             boilerplate = (
                 inspect.cleandoc(
@@ -1861,7 +1933,10 @@ async def write_plugin_code(
     plugin_dir = plugins_dir / plugin_id
 
     if not plugin_dir.exists():
-        return {"success": False, "error": f"Plugin '{plugin_id}' not found at {plugin_dir}"}
+        return {
+            "success": False,
+            "error": f"Plugin '{plugin_id}' not found at {plugin_dir}",
+        }
 
     updated_files: list[str] = []
 
@@ -1949,7 +2024,9 @@ async def delete_plugin(plugin_id: str, remove_files: bool = False) -> dict:
             "error": f"Plugin '{plugin_id}' not found in plugins.yml or on disk",
         }
 
-    logger.info(f"Deleted plugin '{plugin_id}' (yml={removed_from_yml}, files={files_removed})")
+    logger.info(
+        f"Deleted plugin '{plugin_id}' (yml={removed_from_yml}, files={files_removed})"
+    )
     return {
         "success": True,
         "plugin_id": plugin_id,

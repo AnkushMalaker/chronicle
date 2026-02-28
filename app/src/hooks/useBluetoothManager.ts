@@ -49,7 +49,7 @@ export const useBluetoothManager = () => {
             PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
           ];
         }
-        
+
         console.log('[BTManager] Android permissions to request:', permissionsToRequest);
         const statuses = await PermissionsAndroid.requestMultiple(permissionsToRequest);
         console.log('[BTManager] Android permission statuses:', statuses);
@@ -100,7 +100,7 @@ export const useBluetoothManager = () => {
         checkAndRequestPermissions();
     }
   }, [bluetoothState, checkAndRequestPermissions]); // Rerun if BT state changes or on initial mount
-  
+
   return {
     bleManager,
     bluetoothState,
@@ -108,4 +108,4 @@ export const useBluetoothManager = () => {
     requestBluetoothPermission: checkAndRequestPermissions,
     isPermissionsLoading,
   };
-}; 
+};

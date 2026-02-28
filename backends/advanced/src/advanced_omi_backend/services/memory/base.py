@@ -136,7 +136,9 @@ class MemoryServiceBase(ABC):
         pass
 
     @abstractmethod
-    async def get_all_memories(self, user_id: str, limit: int = 100) -> List[MemoryEntry]:
+    async def get_all_memories(
+        self, user_id: str, limit: int = 100
+    ) -> List[MemoryEntry]:
         """Get all memories for a specific user.
 
         Args:
@@ -265,7 +267,10 @@ class MemoryServiceBase(ABC):
 
     @abstractmethod
     async def delete_memory(
-        self, memory_id: str, user_id: Optional[str] = None, user_email: Optional[str] = None
+        self,
+        memory_id: str,
+        user_id: Optional[str] = None,
+        user_email: Optional[str] = None,
     ) -> bool:
         """Delete a specific memory by ID.
 
@@ -471,7 +476,11 @@ class VectorStoreBase(ABC):
 
     @abstractmethod
     async def search_memories(
-        self, query_embedding: List[float], user_id: str, limit: int, score_threshold: float = 0.0
+        self,
+        query_embedding: List[float],
+        user_id: str,
+        limit: int,
+        score_threshold: float = 0.0,
     ) -> List[MemoryEntry]:
         """Search memories using vector similarity.
 

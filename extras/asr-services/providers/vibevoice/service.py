@@ -117,7 +117,8 @@ class VibeVoiceService(BaseASRService):
         if self.transcriber is None:
             raise RuntimeError("Service not initialized")
         yield from self.transcriber._transcribe_batched_with_progress(
-            audio_file_path, hotwords=context_info,
+            audio_file_path,
+            hotwords=context_info,
         )
 
 
@@ -149,12 +150,16 @@ def _run_lora_training(
 
         finetune_script = vibevoice_dir / "finetuning-asr" / "lora_finetune.py"
         if not finetune_script.exists():
-            raise FileNotFoundError(f"VibeVoice LoRA fine-tuning script not found at {finetune_script}")
+            raise FileNotFoundError(
+                f"VibeVoice LoRA fine-tuning script not found at {finetune_script}"
+            )
 
         # Use importlib to load the script as a module
         import importlib.util
 
-        spec = importlib.util.spec_from_file_location("lora_finetune", str(finetune_script))
+        spec = importlib.util.spec_from_file_location(
+            "lora_finetune", str(finetune_script)
+        )
         lora_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(lora_module)
 
@@ -172,12 +177,16 @@ def _run_lora_training(
         _finetune_state["status"] = "completed"
         _finetune_state["progress"] = "done"
         _finetune_state["last_completed_job_id"] = job_id
-        logger.info(f"LoRA fine-tuning completed: job_id={job_id}, adapter at {adapter_output_dir}")
+        logger.info(
+            f"LoRA fine-tuning completed: job_id={job_id}, adapter at {adapter_output_dir}"
+        )
 
     except Exception as e:
         _finetune_state["status"] = "failed"
         _finetune_state["error"] = str(e)
-        logger.error(f"LoRA fine-tuning failed: job_id={job_id}, error={e}", exc_info=True)
+        logger.error(
+            f"LoRA fine-tuning failed: job_id={job_id}, error={e}", exc_info=True
+        )
 
 
 def add_finetune_routes(app, service: VibeVoiceService) -> None:
@@ -228,12 +237,14 @@ def add_finetune_routes(app, service: VibeVoiceService) -> None:
         adapter_output_dir = str(adapter_base_dir / "latest")
 
         # Update state and launch training in background thread
-        _finetune_state.update({
-            "status": "training",
-            "job_id": job_id,
-            "progress": "queued",
-            "error": None,
-        })
+        _finetune_state.update(
+            {
+                "status": "training",
+                "job_id": job_id,
+                "progress": "queued",
+                "error": None,
+            }
+        )
 
         loop = asyncio.get_event_loop()
         loop.run_in_executor(
@@ -247,11 +258,13 @@ def add_finetune_routes(app, service: VibeVoiceService) -> None:
             job_id,
         )
 
-        return JSONResponse(content={
-            "job_id": job_id,
-            "status": "training_started",
-            "adapter_output_dir": adapter_output_dir,
-        })
+        return JSONResponse(
+            content={
+                "job_id": job_id,
+                "status": "training_started",
+                "adapter_output_dir": adapter_output_dir,
+            }
+        )
 
     @app.get("/fine-tune/status")
     async def finetune_status():
@@ -279,10 +292,12 @@ def add_finetune_routes(app, service: VibeVoiceService) -> None:
                 service.transcriber.load_lora_adapter,
                 path,
             )
-            return JSONResponse(content={
-                "status": "adapter_loaded",
-                "adapter_path": path,
-            })
+            return JSONResponse(
+                content={
+                    "status": "adapter_loaded",
+                    "adapter_path": path,
+                }
+            )
         except Exception as e:
             logger.error(f"Failed to reload adapter: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Failed to load adapter: {e}")

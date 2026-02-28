@@ -5,11 +5,13 @@ prompts with previously-configured values, so re-runs default to existing
 settings.
 """
 
+import importlib.util
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
 import pytest
 import yaml
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-
 
 # ---------------------------------------------------------------------------
 # Import the pure helper functions directly from wizard.py.
@@ -18,8 +20,6 @@ from unittest.mock import patch, MagicMock
 # permanently.
 # ---------------------------------------------------------------------------
 
-import importlib.util
-import sys
 
 WIZARD_PATH = Path(__file__).parent.parent.parent / "wizard.py"
 PROJECT_ROOT = str(WIZARD_PATH.parent)
@@ -50,6 +50,7 @@ select_knowledge_graph = _wizard.select_knowledge_graph
 # ---------------------------------------------------------------------------
 # read_config_yml
 # ---------------------------------------------------------------------------
+
 
 def test_read_config_yml_missing_file(tmp_path, monkeypatch):
     """Returns empty dict when config/config.yml does not exist."""
@@ -95,15 +96,19 @@ def test_read_config_yml_comment_only_file(tmp_path, monkeypatch):
 # get_existing_stt_provider
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("stt_value, expected", [
-    ("stt-deepgram", "deepgram"),
-    ("stt-deepgram-stream", "deepgram"),
-    ("stt-parakeet-batch", "parakeet"),
-    ("stt-vibevoice", "vibevoice"),
-    ("stt-qwen3-asr", "qwen3-asr"),
-    ("stt-smallest", "smallest"),
-    ("stt-smallest-stream", "smallest"),
-])
+
+@pytest.mark.parametrize(
+    "stt_value, expected",
+    [
+        ("stt-deepgram", "deepgram"),
+        ("stt-deepgram-stream", "deepgram"),
+        ("stt-parakeet-batch", "parakeet"),
+        ("stt-vibevoice", "vibevoice"),
+        ("stt-qwen3-asr", "qwen3-asr"),
+        ("stt-smallest", "smallest"),
+        ("stt-smallest-stream", "smallest"),
+    ],
+)
 def test_get_existing_stt_provider_known_values(stt_value, expected):
     """Maps known config.yml stt values to wizard provider names."""
     config = {"defaults": {"stt": stt_value}}
@@ -126,12 +131,16 @@ def test_get_existing_stt_provider_missing_key():
 # get_existing_stream_provider
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("stt_stream_value, expected", [
-    ("stt-deepgram-stream", "deepgram"),
-    ("stt-smallest-stream", "smallest"),
-    ("stt-qwen3-asr", "qwen3-asr"),
-    ("stt-qwen3-asr-stream", "qwen3-asr"),
-])
+
+@pytest.mark.parametrize(
+    "stt_stream_value, expected",
+    [
+        ("stt-deepgram-stream", "deepgram"),
+        ("stt-smallest-stream", "smallest"),
+        ("stt-qwen3-asr", "qwen3-asr"),
+        ("stt-qwen3-asr-stream", "qwen3-asr"),
+    ],
+)
 def test_get_existing_stream_provider_known_values(stt_stream_value, expected):
     """Maps known config.yml stt_stream values to wizard streaming provider names."""
     config = {"defaults": {"stt_stream": stt_stream_value}}
@@ -153,6 +162,7 @@ def test_get_existing_stream_provider_missing_key():
 # ---------------------------------------------------------------------------
 # select_llm_provider — test default resolution logic via EOFError path
 # ---------------------------------------------------------------------------
+
 
 def _select_llm_with_eof(config_yml):
     """Drive select_llm_provider in non-interactive mode by injecting EOFError."""
@@ -191,6 +201,7 @@ def test_select_llm_provider_none_config():
 # select_memory_provider — test default resolution logic via EOFError path
 # ---------------------------------------------------------------------------
 
+
 def _select_memory_with_eof(config_yml):
     with patch.object(_wizard, "Prompt") as mock_prompt:
         mock_prompt.ask.side_effect = EOFError
@@ -226,6 +237,7 @@ def test_select_memory_provider_none_config():
 # ---------------------------------------------------------------------------
 # select_knowledge_graph — test default resolution logic via EOFError path
 # ---------------------------------------------------------------------------
+
 
 def _select_kg_with_eof(config_yml):
     with patch.object(_wizard, "Confirm") as mock_confirm:

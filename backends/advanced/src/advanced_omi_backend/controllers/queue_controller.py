@@ -129,7 +129,12 @@ def get_job_stats() -> Dict[str, Any]:
         deferred_jobs += len(queue.deferred_job_registry)
 
     total_jobs = (
-        queued_jobs + started_jobs + finished_jobs + failed_jobs + canceled_jobs + deferred_jobs
+        queued_jobs
+        + started_jobs
+        + finished_jobs
+        + failed_jobs
+        + canceled_jobs
+        + deferred_jobs
     )
 
     return {
@@ -168,7 +173,9 @@ def get_jobs(
         f"🔍 DEBUG get_jobs: Filtering - queue_name={queue_name}, job_type={job_type}, client_id={client_id}"
     )
     all_jobs = []
-    seen_job_ids = set()  # Track which job IDs we've already processed to avoid duplicates
+    seen_job_ids = (
+        set()
+    )  # Track which job IDs we've already processed to avoid duplicates
 
     queues_to_check = [queue_name] if queue_name else QUEUE_NAMES
     logger.info(f"🔍 DEBUG get_jobs: Checking queues: {queues_to_check}")
@@ -179,8 +186,14 @@ def get_jobs(
         # Collect jobs from all registries (using RQ standard status names)
         registries = [
             (queue.job_ids, "queued"),
-            (queue.started_job_registry.get_job_ids(), "started"),  # RQ standard, not "processing"
-            (queue.finished_job_registry.get_job_ids(), "finished"),  # RQ standard, not "completed"
+            (
+                queue.started_job_registry.get_job_ids(),
+                "started",
+            ),  # RQ standard, not "processing"
+            (
+                queue.finished_job_registry.get_job_ids(),
+                "finished",
+            ),  # RQ standard, not "completed"
             (queue.failed_job_registry.get_job_ids(), "failed"),
             (
                 queue.deferred_job_registry.get_job_ids(),
@@ -202,7 +215,9 @@ def get_jobs(
                     user_id = job.kwargs.get("user_id", "") if job.kwargs else ""
 
                     # Extract just the function name (e.g., "listen_for_speech_job" from "module.listen_for_speech_job")
-                    func_name = job.func_name.split(".")[-1] if job.func_name else "unknown"
+                    func_name = (
+                        job.func_name.split(".")[-1] if job.func_name else "unknown"
+                    )
 
                     # Debug: Log job details before filtering
                     logger.debug(
@@ -218,14 +233,18 @@ def get_jobs(
 
                     # Apply client_id filter (partial match in meta)
                     if client_id:
-                        job_client_id = job.meta.get("client_id", "") if job.meta else ""
+                        job_client_id = (
+                            job.meta.get("client_id", "") if job.meta else ""
+                        )
                         if client_id not in job_client_id:
                             logger.debug(
                                 f"🔍 DEBUG get_jobs: Filtered out {job_id} - client_id '{client_id}' not in job_client_id '{job_client_id}'"
                             )
                             continue
 
-                    logger.debug(f"🔍 DEBUG get_jobs: Including job {job_id} in results")
+                    logger.debug(
+                        f"🔍 DEBUG get_jobs: Including job {job_id} in results"
+                    )
 
                     all_jobs.append(
                         {
@@ -239,12 +258,24 @@ def get_jobs(
                                 "queue": qname,
                             },
                             "result": job.result if hasattr(job, "result") else None,
-                            "meta": job.meta if job.meta else {},  # Include job metadata
-                            "error_message": str(job.exc_info) if job.exc_info else None,
-                            "created_at": job.created_at.isoformat() if job.created_at else None,
-                            "started_at": job.started_at.isoformat() if job.started_at else None,
-                            "completed_at": job.ended_at.isoformat() if job.ended_at else None,
-                            "retry_count": job.retries_left if hasattr(job, "retries_left") else 0,
+                            "meta": (
+                                job.meta if job.meta else {}
+                            ),  # Include job metadata
+                            "error_message": (
+                                str(job.exc_info) if job.exc_info else None
+                            ),
+                            "created_at": (
+                                job.created_at.isoformat() if job.created_at else None
+                            ),
+                            "started_at": (
+                                job.started_at.isoformat() if job.started_at else None
+                            ),
+                            "completed_at": (
+                                job.ended_at.isoformat() if job.ended_at else None
+                            ),
+                            "retry_count": (
+                                job.retries_left if hasattr(job, "retries_left") else 0
+                            ),
                             "max_retries": 3,  # Default max retries
                             "progress_percent": (job.meta or {})
                             .get("batch_progress", {})
@@ -345,7 +376,9 @@ def all_jobs_complete_for_client(client_id: str) -> bool:
     return True
 
 
-def start_streaming_jobs(session_id: str, user_id: str, client_id: str) -> Dict[str, str]:
+def start_streaming_jobs(
+    session_id: str, user_id: str, client_id: str
+) -> Dict[str, str]:
     """
     Enqueue jobs for streaming audio session (initial session setup).
 
@@ -401,7 +434,9 @@ def start_streaming_jobs(session_id: str, user_id: str, client_id: str) -> Dict[
 
     # Store job ID for cleanup (keyed by client_id for easy WebSocket cleanup)
     try:
-        redis_conn.set(f"speech_detection_job:{client_id}", speech_job.id, ex=86400)  # 24 hour TTL
+        redis_conn.set(
+            f"speech_detection_job:{client_id}", speech_job.id, ex=86400
+        )  # 24 hour TTL
         logger.info(f"📌 Stored speech detection job ID for client {client_id}")
     except Exception as e:
         logger.warning(f"⚠️ Failed to store job ID for {client_id}: {e}")
@@ -421,7 +456,10 @@ def start_streaming_jobs(session_id: str, user_id: str, client_id: str) -> Dict[
         failure_ttl=86400,  # Cleanup failed jobs after 24h
         job_id=f"audio-persist_{session_id}",
         description=f"Audio persistence for session {session_id}",
-        meta={"client_id": client_id, "session_level": True},  # Mark as session-level job
+        meta={
+            "client_id": client_id,
+            "session_level": True,
+        },  # Mark as session-level job
     )
     # Log job enqueue with TTL information for debugging
     actual_ttl = redis_conn.ttl(f"rq:job:{audio_job.id}")
@@ -735,11 +773,15 @@ async def cleanup_stuck_stream_workers(request):
         stream_keys = await redis_client.keys("audio:stream:*")
 
         for stream_key in stream_keys:
-            stream_name = stream_key.decode() if isinstance(stream_key, bytes) else stream_key
+            stream_name = (
+                stream_key.decode() if isinstance(stream_key, bytes) else stream_key
+            )
 
             try:
                 # First check stream age - delete old streams (>1 hour) immediately
-                stream_info = await redis_client.execute_command("XINFO", "STREAM", stream_name)
+                stream_info = await redis_client.execute_command(
+                    "XINFO", "STREAM", stream_name
+                )
 
                 # Parse stream info
                 info_dict = {}
@@ -761,7 +803,9 @@ async def cleanup_stuck_stream_workers(request):
                 if stream_length == 0:
                     should_delete_stream = True
                     stream_age = 0
-                elif last_entry and isinstance(last_entry, list) and len(last_entry) > 0:
+                elif (
+                    last_entry and isinstance(last_entry, list) and len(last_entry) > 0
+                ):
                     try:
                         last_id = last_entry[0]
                         if isinstance(last_id, bytes):
@@ -789,7 +833,9 @@ async def cleanup_stuck_stream_workers(request):
                     continue
 
                 # Get consumer groups
-                groups = await redis_client.execute_command("XINFO", "GROUPS", stream_name)
+                groups = await redis_client.execute_command(
+                    "XINFO", "GROUPS", stream_name
+                )
 
                 if not groups:
                     cleanup_results[stream_name] = {
@@ -803,7 +849,11 @@ async def cleanup_stuck_stream_workers(request):
                 group_dict = {}
                 group = groups[0]
                 for i in range(0, len(group), 2):
-                    key = group[i].decode() if isinstance(group[i], bytes) else str(group[i])
+                    key = (
+                        group[i].decode()
+                        if isinstance(group[i], bytes)
+                        else str(group[i])
+                    )
                     value = group[i + 1]
                     if isinstance(value, bytes):
                         try:
@@ -892,7 +942,9 @@ async def cleanup_stuck_stream_workers(request):
                                         )
 
                                         # Acknowledge it immediately
-                                        await redis_client.xack(stream_name, group_name, msg_id)
+                                        await redis_client.xack(
+                                            stream_name, group_name, msg_id
+                                        )
                                         cleaned_count += 1
                                     except Exception as claim_error:
                                         logger.warning(
@@ -908,7 +960,11 @@ async def cleanup_stuck_stream_workers(request):
                     if is_dead and consumer_pending == 0:
                         try:
                             await redis_client.execute_command(
-                                "XGROUP", "DELCONSUMER", stream_name, group_name, consumer_name
+                                "XGROUP",
+                                "DELCONSUMER",
+                                stream_name,
+                                group_name,
+                                consumer_name,
                             )
                             deleted_consumers += 1
                             logger.info(
@@ -954,5 +1010,6 @@ async def cleanup_stuck_stream_workers(request):
     except Exception as e:
         logger.error(f"Error cleaning up stuck workers: {e}", exc_info=True)
         return JSONResponse(
-            status_code=500, content={"error": f"Failed to cleanup stuck workers: {str(e)}"}
+            status_code=500,
+            content={"error": f"Failed to cleanup stuck workers: {str(e)}"},
         )

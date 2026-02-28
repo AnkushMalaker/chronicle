@@ -59,9 +59,15 @@ async def mark_session_complete(
     mark_time = time.time()
     await redis_client.hset(
         session_key,
-        mapping={"status": "finished", "completed_at": str(mark_time), "completion_reason": reason},
+        mapping={
+            "status": "finished",
+            "completed_at": str(mark_time),
+            "completion_reason": reason,
+        },
     )
-    logger.info(f"✅ Session {session_id[:12]} marked finished: {reason} [TIME: {mark_time:.3f}]")
+    logger.info(
+        f"✅ Session {session_id[:12]} marked finished: {reason} [TIME: {mark_time:.3f}]"
+    )
 
 
 async def request_conversation_close(
@@ -91,7 +97,9 @@ async def request_conversation_close(
     if not await redis_client.exists(session_key):
         return False
     await redis_client.hset(session_key, "conversation_close_requested", reason)
-    logger.info(f"🔒 Conversation close requested for session {session_id[:12]}: {reason}")
+    logger.info(
+        f"🔒 Conversation close requested for session {session_id[:12]}: {reason}"
+    )
     return True
 
 
@@ -130,7 +138,9 @@ async def get_session_info(redis_client, session_id: str) -> Optional[Dict]:
             "provider": session_data.get(b"provider", b"").decode(),
             "mode": session_data.get(b"mode", b"").decode(),
             "status": session_data.get(b"status", b"").decode(),
-            "websocket_connected": session_data.get(b"websocket_connected", b"false").decode()
+            "websocket_connected": session_data.get(
+                b"websocket_connected", b"false"
+            ).decode()
             == "true",
             "completion_reason": session_data.get(b"completion_reason", b"").decode(),
             "chunks_published": int(session_data.get(b"chunks_published", b"0")),
@@ -142,8 +152,12 @@ async def get_session_info(redis_client, session_id: str) -> Optional[Dict]:
             # Speech detection events
             "last_event": session_data.get(b"last_event", b"").decode(),
             "speech_detected_at": session_data.get(b"speech_detected_at", b"").decode(),
-            "speaker_check_status": session_data.get(b"speaker_check_status", b"").decode(),
-            "identified_speakers": session_data.get(b"identified_speakers", b"").decode(),
+            "speaker_check_status": session_data.get(
+                b"speaker_check_status", b""
+            ).decode(),
+            "identified_speakers": session_data.get(
+                b"identified_speakers", b""
+            ).decode(),
         }
 
     except Exception as e:
@@ -167,7 +181,9 @@ async def get_all_sessions(redis_client, limit: int = 100) -> List[Dict]:
         session_keys = []
         cursor = b"0"
         while cursor and len(session_keys) < limit:
-            cursor, keys = await redis_client.scan(cursor, match="audio:session:*", count=limit)
+            cursor, keys = await redis_client.scan(
+                cursor, match="audio:session:*", count=limit
+            )
             session_keys.extend(keys[: limit - len(session_keys)])
 
         # Get info for each session
@@ -223,7 +239,9 @@ async def increment_session_conversation_count(redis_client, session_id: str) ->
         logger.info(f"📊 Conversation count for session {session_id}: {count}")
         return count
     except Exception as e:
-        logger.error(f"Error incrementing conversation count for session {session_id}: {e}")
+        logger.error(
+            f"Error incrementing conversation count for session {session_id}: {e}"
+        )
         return 0
 
 
@@ -332,10 +350,14 @@ async def get_streaming_status(request):
         current_time = time.time()
 
         for stream_key in stream_keys:
-            stream_name = stream_key.decode() if isinstance(stream_key, bytes) else stream_key
+            stream_name = (
+                stream_key.decode() if isinstance(stream_key, bytes) else stream_key
+            )
             try:
                 # Check if stream exists
-                stream_info = await redis_client.execute_command("XINFO", "STREAM", stream_name)
+                stream_info = await redis_client.execute_command(
+                    "XINFO", "STREAM", stream_name
+                )
 
                 # Parse stream info (returns flat list of key-value pairs)
                 info_dict = {}
@@ -391,7 +413,9 @@ async def get_streaming_status(request):
                     session_idle_seconds = session_data.get("idle_seconds", 0)
 
                 # Get consumer groups
-                groups = await redis_client.execute_command("XINFO", "GROUPS", stream_name)
+                groups = await redis_client.execute_command(
+                    "XINFO", "GROUPS", stream_name
+                )
 
                 stream_data = {
                     "stream_length": info_dict.get("length", 0),
@@ -411,7 +435,11 @@ async def get_streaming_status(request):
                 for group in groups:
                     group_dict = {}
                     for i in range(0, len(group), 2):
-                        key = group[i].decode() if isinstance(group[i], bytes) else str(group[i])
+                        key = (
+                            group[i].decode()
+                            if isinstance(group[i], bytes)
+                            else str(group[i])
+                        )
                         value = group[i + 1]
                         if isinstance(value, bytes):
                             try:
@@ -456,7 +484,9 @@ async def get_streaming_status(request):
                         consumer_pending_total += consumer_pending
 
                         # Track minimum idle time
-                        min_consumer_idle_ms = min(min_consumer_idle_ms, consumer_idle_ms)
+                        min_consumer_idle_ms = min(
+                            min_consumer_idle_ms, consumer_idle_ms
+                        )
 
                         # Consumer is active if idle < 5 minutes (300000ms)
                         if consumer_idle_ms < 300000:
@@ -492,7 +522,9 @@ async def get_streaming_status(request):
                 # Determine if stream is active or completed
                 # Active: has active consumers OR pending messages OR recent activity (< 5 min)
                 # Completed: no active consumers and idle > 5 minutes but < 1 hour
-                total_pending = sum(group["pending"] for group in stream_data["consumer_groups"])
+                total_pending = sum(
+                    group["pending"] for group in stream_data["consumer_groups"]
+                )
                 is_active = (
                     has_active_consumer
                     or total_pending > 0
@@ -552,7 +584,8 @@ async def get_streaming_status(request):
     except Exception as e:
         logger.error(f"Error getting streaming status: {e}", exc_info=True)
         return JSONResponse(
-            status_code=500, content={"error": f"Failed to get streaming status: {str(e)}"}
+            status_code=500,
+            content={"error": f"Failed to get streaming status: {str(e)}"},
         )
 
 
@@ -597,7 +630,11 @@ async def cleanup_old_sessions(request, max_age_seconds: int = 3600):
 
             if should_clean:
                 old_sessions.append(
-                    {"session_id": session_id, "age_seconds": age_seconds, "status": status}
+                    {
+                        "session_id": session_id,
+                        "age_seconds": age_seconds,
+                        "status": status,
+                    }
                 )
                 await redis_client.delete(key)
                 cleaned_sessions += 1
@@ -608,11 +645,15 @@ async def cleanup_old_sessions(request, max_age_seconds: int = 3600):
         old_streams = []
 
         for stream_key in stream_keys:
-            stream_name = stream_key.decode() if isinstance(stream_key, bytes) else stream_key
+            stream_name = (
+                stream_key.decode() if isinstance(stream_key, bytes) else stream_key
+            )
 
             try:
                 # Check stream info to get last activity
-                stream_info = await redis_client.execute_command("XINFO", "STREAM", stream_name)
+                stream_info = await redis_client.execute_command(
+                    "XINFO", "STREAM", stream_name
+                )
 
                 # Parse stream info
                 info_dict = {}
@@ -635,7 +676,9 @@ async def cleanup_old_sessions(request, max_age_seconds: int = 3600):
                     # Empty stream - safe to delete
                     should_delete = True
                     reason = "empty"
-                elif last_entry and isinstance(last_entry, list) and len(last_entry) > 0:
+                elif (
+                    last_entry and isinstance(last_entry, list) and len(last_entry) > 0
+                ):
                     # Extract timestamp from last entry ID
                     last_id = last_entry[0]
                     if isinstance(last_id, bytes):
@@ -654,7 +697,11 @@ async def cleanup_old_sessions(request, max_age_seconds: int = 3600):
                     except (ValueError, IndexError):
                         # If we can't parse timestamp, check if first entry is old
                         first_entry = info_dict.get("first-entry")
-                        if first_entry and isinstance(first_entry, list) and len(first_entry) > 0:
+                        if (
+                            first_entry
+                            and isinstance(first_entry, list)
+                            and len(first_entry) > 0
+                        ):
                             try:
                                 first_id = first_entry[0]
                                 if isinstance(first_id, bytes):
@@ -697,5 +744,6 @@ async def cleanup_old_sessions(request, max_age_seconds: int = 3600):
     except Exception as e:
         logger.error(f"Error cleaning up old sessions: {e}", exc_info=True)
         return JSONResponse(
-            status_code=500, content={"error": f"Failed to cleanup old sessions: {str(e)}"}
+            status_code=500,
+            content={"error": f"Failed to cleanup old sessions: {str(e)}"},
         )

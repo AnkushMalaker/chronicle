@@ -9,7 +9,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-import yaml
+from config_manager import ConfigManager
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
@@ -26,20 +26,6 @@ from setup_utils import (
 )
 
 console = Console()
-
-
-def read_config_yml() -> dict:
-    """Read config/config.yml and return parsed dict, or empty dict if not found.
-
-    Used to load existing configuration as defaults for wizard prompts so that
-    re-runs default to previously configured values.
-    """
-    config_path = Path("config/config.yml")
-    if not config_path.exists():
-        return {}
-    with open(config_path, "r") as f:
-        result = yaml.safe_load(f)
-        return result if result else {}
 
 
 def get_existing_stt_provider(config_yml: dict):
@@ -807,27 +793,6 @@ def setup_hf_token_if_needed(selected_services):
         return None
 
 
-def setup_config_file():
-    """Setup config/config.yml from template if it doesn't exist"""
-    config_file = Path("config/config.yml")
-    config_template = Path("config/config.yml.template")
-
-    if not config_file.exists():
-        if config_template.exists():
-            # Ensure config/ directory exists
-            config_file.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(config_template, config_file)
-            console.print("✅ [green]Created config/config.yml from template[/green]")
-        else:
-            console.print(
-                "⚠️  [yellow]config/config.yml.template not found, skipping config setup[/yellow]"
-            )
-    else:
-        console.print(
-            "ℹ️  [blue]config/config.yml already exists, keeping existing configuration[/blue]"
-        )
-
-
 # Providers that support real-time streaming
 STREAMING_CAPABLE = {"deepgram", "smallest", "qwen3-asr"}
 
@@ -1240,8 +1205,9 @@ def main():
         "[dim]When unsure, just press Enter — the defaults will work.[/dim]\n"
     )
 
-    # Setup config file from template
-    setup_config_file()
+    # Ensure config.yml exists (create from template if needed)
+    config_mgr = ConfigManager()
+    config_mgr.ensure_config_yml()
 
     # Setup git hooks first
     setup_git_hooks()
@@ -1250,7 +1216,7 @@ def main():
     show_service_status()
 
     # Read existing config.yml once — used as defaults for ALL wizard questions below
-    config_yml = read_config_yml()
+    config_yml = config_mgr.get_full_config()
 
     # Ask about transcription provider FIRST (determines which services are needed)
     transcription_provider = select_transcription_provider(config_yml)

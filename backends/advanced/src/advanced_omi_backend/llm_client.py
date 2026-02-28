@@ -73,7 +73,9 @@ class OpenAILLMClient(LLMClient):
             )
             self.logger.info(f"OpenAI client initialized, base_url: {self.base_url}")
         except ImportError:
-            self.logger.error("OpenAI library not installed. Install with: pip install openai")
+            self.logger.error(
+                "OpenAI library not installed. Install with: pip install openai"
+            )
             raise
         except Exception as e:
             self.logger.error(f"Failed to initialize OpenAI client: {e}")
@@ -128,14 +130,18 @@ class OpenAILLMClient(LLMClient):
                     "status": "✅ Connected",
                     "base_url": self.base_url,
                     "default_model": self.model,
-                    "api_key_configured": bool(self.api_key and self.api_key != "dummy"),
+                    "api_key_configured": bool(
+                        self.api_key and self.api_key != "dummy"
+                    ),
                 }
             else:
                 return {
                     "status": "⚠️ Configuration incomplete",
                     "base_url": self.base_url,
                     "default_model": self.model,
-                    "api_key_configured": bool(self.api_key and self.api_key != "dummy"),
+                    "api_key_configured": bool(
+                        self.api_key and self.api_key != "dummy"
+                    ),
                 }
         except Exception as e:
             self.logger.error(f"Health check failed: {e}")
@@ -233,7 +239,9 @@ async def async_generate(
     # Fallback: use singleton client
     client = get_llm_client()
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, lambda: client.generate(prompt, model, temperature))
+    return await loop.run_in_executor(
+        None, lambda: client.generate(prompt, model, temperature)
+    )
 
 
 async def async_chat_with_tools(

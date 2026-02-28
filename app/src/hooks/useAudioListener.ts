@@ -22,14 +22,14 @@ export const useAudioListener = (
   const [isRetrying, setIsRetrying] = useState<boolean>(false);
   const [retryAttempts, setRetryAttempts] = useState<number>(0);
   const { addEvent } = useConnectionLog();
-  
+
   const audioSubscriptionRef = useRef<Subscription | null>(null);
   const uiUpdateIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const localPacketCounterRef = useRef<number>(0);
   const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const shouldRetryRef = useRef<boolean>(false);
   const currentOnAudioDataRef = useRef<((bytes: Uint8Array) => void) | null>(null);
-  
+
   // Retry configuration
   const MAX_RETRY_ATTEMPTS = 10;
   const INITIAL_RETRY_DELAY = 1000; // 1 second
@@ -37,23 +37,23 @@ export const useAudioListener = (
 
   const stopAudioListener = useCallback(async () => {
     console.log('Attempting to stop audio listener...');
-    
+
     // Stop retry mechanism
     shouldRetryRef.current = false;
     setIsRetrying(false);
     setRetryAttempts(0);
     currentOnAudioDataRef.current = null;
-    
+
     if (retryTimeoutRef.current) {
       clearTimeout(retryTimeoutRef.current);
       retryTimeoutRef.current = null;
     }
-    
+
     if (uiUpdateIntervalRef.current) {
       clearInterval(uiUpdateIntervalRef.current);
       uiUpdateIntervalRef.current = null;
     }
-    
+
     if (audioSubscriptionRef.current) {
       try {
         await omiConnection.stopAudioBytesListener(audioSubscriptionRef.current);
@@ -147,7 +147,7 @@ export const useAudioListener = (
     setIsRetrying(true);
 
     const success = await attemptStartAudioListener(currentOnAudioDataRef.current);
-    
+
     if (success) {
       console.log('[AudioListener] Retry successful');
       return;
@@ -157,7 +157,7 @@ export const useAudioListener = (
     if (shouldRetryRef.current) {
       const delay = getRetryDelay(currentAttempt);
       console.log(`[AudioListener] Scheduling retry in ${Math.round(delay)}ms`);
-      
+
       retryTimeoutRef.current = setTimeout(() => {
         if (shouldRetryRef.current) {
           retryStartAudioListener();
@@ -171,7 +171,7 @@ export const useAudioListener = (
       Alert.alert('Not Connected', 'Please connect to a device first to start audio listener.');
       return;
     }
-    
+
     if (isListeningAudio) {
       console.log('[AudioListener] Audio listener is already active. Stopping first.');
       await stopAudioListener();
@@ -180,7 +180,7 @@ export const useAudioListener = (
     // Store the callback for retry attempts
     currentOnAudioDataRef.current = onAudioData;
     shouldRetryRef.current = true;
-    
+
     setAudioPacketsReceived(0); // Reset counter on start
     localPacketCounterRef.current = 0;
     setRetryAttempts(0);
@@ -197,7 +197,7 @@ export const useAudioListener = (
 
     // Try to start audio listener
     const success = await attemptStartAudioListener(onAudioData);
-    
+
     if (!success && shouldRetryRef.current) {
       console.log('[AudioListener] Initial attempt failed, starting retry mechanism');
       setIsRetrying(true);
@@ -227,4 +227,4 @@ export const useAudioListener = (
     isRetrying,
     retryAttempts,
   };
-}; 
+};

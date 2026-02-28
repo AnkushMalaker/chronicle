@@ -170,7 +170,7 @@ Usecases are numerous - OMI Mentor is one of them. Friend/Omi/pendants are a sma
 
 Regardless - this repo will try to do the minimal of this - multiple OMI-like audio devices feeding audio data - and from it:
 - Memories
-- Action items  
+- Action items
 - Home automation
 
 ## Golden Goals (Not Yet Achieved)
@@ -179,4 +179,3 @@ Regardless - this repo will try to do the minimal of this - multiple OMI-like au
 - **Home automation integration** (planned)
 - **Multi-device coordination** (planned)
 - **Visual context capture** (smart glasses integration planned)
-

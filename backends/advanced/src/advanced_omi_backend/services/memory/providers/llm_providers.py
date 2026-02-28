@@ -147,7 +147,9 @@ class OpenAIProvider(LLMProviderBase):
         # Ignore provider-specific envs; use registry as single source of truth
         registry = get_models_registry()
         if not registry:
-            raise RuntimeError("config.yml not found or invalid; cannot initialize model registry")
+            raise RuntimeError(
+                "config.yml not found or invalid; cannot initialize model registry"
+            )
 
         self._registry = registry
 
@@ -167,8 +169,12 @@ class OpenAIProvider(LLMProviderBase):
         self.embedding_model = (
             self.embed_def.model_name if self.embed_def else self.llm_def.model_name
         )
-        self.embedding_api_key = self.embed_def.api_key if self.embed_def else self.api_key
-        self.embedding_base_url = self.embed_def.model_url if self.embed_def else self.base_url
+        self.embedding_api_key = (
+            self.embed_def.api_key if self.embed_def else self.api_key
+        )
+        self.embedding_base_url = (
+            self.embed_def.model_url if self.embed_def else self.base_url
+        )
 
         # CRITICAL: Validate API keys are present - fail fast instead of hanging
         if not self.api_key or self.api_key.strip() == "":
@@ -178,7 +184,9 @@ class OpenAIProvider(LLMProviderBase):
                 f"Cannot proceed without valid API credentials."
             )
 
-        if self.embed_def and (not self.embedding_api_key or self.embedding_api_key.strip() == ""):
+        if self.embed_def and (
+            not self.embedding_api_key or self.embedding_api_key.strip() == ""
+        ):
             raise RuntimeError(
                 f"API key is missing or empty for embedding provider '{self.embed_def.model_provider}' (model: {self.embedding_model}). "
                 f"Please set the API key in config.yml or environment variables."
@@ -225,7 +233,9 @@ class OpenAIProvider(LLMProviderBase):
                     model=self.embedding_model,
                 )
 
-            chunking_config = self._registry.memory.get("extraction", {}).get("chunking", {})
+            chunking_config = self._registry.memory.get("extraction", {}).get(
+                "chunking", {}
+            )
             dialogue_turns = [line for line in text.split("\n") if line.strip()]
             text_chunks = await semantic_chunk_text(
                 text,
@@ -433,7 +443,9 @@ class OpenAIProvider(LLMProviderBase):
             else:
                 try:
                     registry = get_prompt_registry()
-                    system_prompt = await registry.get_prompt("memory.reprocess_speaker_update")
+                    system_prompt = await registry.get_prompt(
+                        "memory.reprocess_speaker_update"
+                    )
                 except Exception as e:
                     memory_logger.debug(
                         f"Registry prompt fetch failed for "
@@ -519,12 +531,16 @@ def _parse_memories_content(content: str) -> List[str]:
             for key in ("facts", "preferences"):
                 value = parsed.get(key)
                 if isinstance(value, list):
-                    collected.extend([str(item).strip() for item in value if str(item).strip()])
+                    collected.extend(
+                        [str(item).strip() for item in value if str(item).strip()]
+                    )
             # If the dict didn't contain expected keys, try to flatten any list values
             if not collected:
                 for value in parsed.values():
                     if isinstance(value, list):
-                        collected.extend([str(item).strip() for item in value if str(item).strip()])
+                        collected.extend(
+                            [str(item).strip() for item in value if str(item).strip()]
+                        )
             if collected:
                 return collected
     except Exception:
@@ -559,13 +575,17 @@ def _try_parse_list_or_object(text: str) -> List[str] | None:
             for key in ("facts", "preferences"):
                 value = data.get(key)
                 if isinstance(value, list):
-                    collected.extend([str(item).strip() for item in value if str(item).strip()])
+                    collected.extend(
+                        [str(item).strip() for item in value if str(item).strip()]
+                    )
             if collected:
                 return collected
             # As a last attempt, flatten any list values
             for value in data.values():
                 if isinstance(value, list):
-                    collected.extend([str(item).strip() for item in value if str(item).strip()])
+                    collected.extend(
+                        [str(item).strip() for item in value if str(item).strip()]
+                    )
             return collected if collected else None
     except Exception:
         return None

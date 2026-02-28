@@ -94,6 +94,26 @@ class ConfigManager:
         logger.debug("Could not auto-detect service path from cwd")
         return None
 
+    def ensure_config_yml(self) -> None:
+        """Create config.yml from template if it doesn't exist.
+
+        Raises:
+            RuntimeError: If config.yml doesn't exist and template is not found.
+        """
+        if self.config_yml_path.exists():
+            return
+
+        template_path = self.config_yml_path.parent / "config.yml.template"
+        if not template_path.exists():
+            raise RuntimeError(
+                f"config.yml.template not found at {template_path}. "
+                "Cannot create config.yml."
+            )
+
+        self.config_yml_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(template_path, self.config_yml_path)
+        logger.info(f"Created {self.config_yml_path} from template")
+
     def _load_config_yml(self) -> Dict[str, Any]:
         """Load config.yml file."""
         if not self.config_yml_path.exists():

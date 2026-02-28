@@ -69,10 +69,15 @@ class MemoryService(MemoryServiceBase):
 
         try:
             # Initialize LLM provider
-            if self.config.llm_provider in [LLMProviderEnum.OPENAI, LLMProviderEnum.OLLAMA]:
+            if self.config.llm_provider in [
+                LLMProviderEnum.OPENAI,
+                LLMProviderEnum.OLLAMA,
+            ]:
                 self.llm_provider = OpenAIProvider(self.config.llm_config)
             else:
-                raise ValueError(f"Unsupported LLM provider: {self.config.llm_provider}")
+                raise ValueError(
+                    f"Unsupported LLM provider: {self.config.llm_provider}"
+                )
 
             # Initialize vector store
             if self.config.vector_store_provider == VectorStoreProvider.QDRANT:
@@ -175,7 +180,9 @@ class MemoryService(MemoryServiceBase):
             memory_logger.debug(f"🧠 fact_memories_text: {fact_memories_text}")
             # Simple deduplication of extracted memories within the same call
             fact_memories_text = self._deduplicate_memories(fact_memories_text)
-            memory_logger.debug(f"🧠 fact_memories_text after deduplication: {fact_memories_text}")
+            memory_logger.debug(
+                f"🧠 fact_memories_text after deduplication: {fact_memories_text}"
+            )
             # Generate embeddings
             embeddings = await asyncio.wait_for(
                 self.llm_provider.generate_embeddings(fact_memories_text),
@@ -206,7 +213,12 @@ class MemoryService(MemoryServiceBase):
                 memory_logger.info(f"🔍 Not allowing update for {source_id}")
                 # Add all extracted memories normally
                 memory_entries = self._create_memory_entries(
-                    fact_memories_text, embeddings, client_id, source_id, user_id, user_email
+                    fact_memories_text,
+                    embeddings,
+                    client_id,
+                    source_id,
+                    user_id,
+                    user_email,
                 )
 
             # Store new entries in vector database
@@ -216,10 +228,14 @@ class MemoryService(MemoryServiceBase):
 
             # Update database relationships if helper provided
             if created_ids and db_helper:
-                await self._update_database_relationships(db_helper, source_id, created_ids)
+                await self._update_database_relationships(
+                    db_helper, source_id, created_ids
+                )
 
             if created_ids:
-                memory_logger.info(f"✅ Upserted {len(created_ids)} memories for {source_id}")
+                memory_logger.info(
+                    f"✅ Upserted {len(created_ids)} memories for {source_id}"
+                )
                 return True, created_ids
 
             # No memories created - this is a valid outcome (duplicates, no extractable facts, etc.)
@@ -276,7 +292,9 @@ class MemoryService(MemoryServiceBase):
             memory_logger.error(f"Search memories failed: {e}")
             return []
 
-    async def get_all_memories(self, user_id: str, limit: int = 100) -> List[MemoryEntry]:
+    async def get_all_memories(
+        self, user_id: str, limit: int = 100
+    ) -> List[MemoryEntry]:
         """Get all memories for a specific user.
 
         Retrieves all stored memories for the given user without
@@ -294,7 +312,9 @@ class MemoryService(MemoryServiceBase):
 
         try:
             memories = await self.vector_store.get_memories(user_id, limit)
-            memory_logger.info(f"📚 Retrieved {len(memories)} memories for user {user_id}")
+            memory_logger.info(
+                f"📚 Retrieved {len(memories)} memories for user {user_id}"
+            )
             return memories
         except Exception as e:
             memory_logger.error(f"Get all memories failed: {e}")
@@ -330,7 +350,9 @@ class MemoryService(MemoryServiceBase):
             await self.initialize()
 
         try:
-            memories = await self.vector_store.get_memories_by_source(user_id, source_id, limit)
+            memories = await self.vector_store.get_memories_by_source(
+                user_id, source_id, limit
+            )
             memory_logger.info(
                 f"📚 Retrieved {len(memories)} memories for source {source_id} (user {user_id})"
             )
@@ -416,7 +438,9 @@ class MemoryService(MemoryServiceBase):
                     new_embedding = existing_memory.embedding
                 else:
                     # No existing embedding, generate one
-                    embeddings = await self.llm_provider.generate_embeddings([new_content])
+                    embeddings = await self.llm_provider.generate_embeddings(
+                        [new_content]
+                    )
                     new_embedding = embeddings[0]
 
             # Update in vector store
@@ -435,11 +459,16 @@ class MemoryService(MemoryServiceBase):
             return success
 
         except Exception as e:
-            memory_logger.error(f"Error updating memory {memory_id}: {e}", exc_info=True)
+            memory_logger.error(
+                f"Error updating memory {memory_id}: {e}", exc_info=True
+            )
             return False
 
     async def delete_memory(
-        self, memory_id: str, user_id: Optional[str] = None, user_email: Optional[str] = None
+        self,
+        memory_id: str,
+        user_id: Optional[str] = None,
+        user_email: Optional[str] = None,
     ) -> bool:
         """Delete a specific memory by ID.
 
@@ -538,7 +567,9 @@ class MemoryService(MemoryServiceBase):
 
         try:
             # 1. Get existing memories for this conversation
-            existing_memories = await self.vector_store.get_memories_by_source(user_id, source_id)
+            existing_memories = await self.vector_store.get_memories_by_source(
+                user_id, source_id
+            )
 
             # 2. If no existing memories, fall back to normal extraction
             if not existing_memories:
@@ -635,9 +666,13 @@ class MemoryService(MemoryServiceBase):
                         self.llm_provider.generate_embeddings(texts_needing_embeddings),
                         timeout=self.config.timeout_seconds,
                     )
-                    text_to_embedding = dict(zip(texts_needing_embeddings, embeddings, strict=True))
+                    text_to_embedding = dict(
+                        zip(texts_needing_embeddings, embeddings, strict=True)
+                    )
                 except Exception as e:
-                    memory_logger.warning(f"Batch embedding generation failed for reprocess: {e}")
+                    memory_logger.warning(
+                        f"Batch embedding generation failed for reprocess: {e}"
+                    )
 
             # 8. Apply the actions (reuses existing infrastructure)
             created_ids = await self._apply_memory_actions(
@@ -651,14 +686,17 @@ class MemoryService(MemoryServiceBase):
             )
 
             memory_logger.info(
-                f"✅ Reprocess complete for {source_id}: " f"{len(created_ids)} memories affected"
+                f"✅ Reprocess complete for {source_id}: "
+                f"{len(created_ids)} memories affected"
             )
             return True, created_ids
 
         except Exception as e:
             memory_logger.error(f"❌ Reprocess memory failed for {source_id}: {e}")
             # Fall back to normal extraction on any unexpected error
-            memory_logger.info(f"🔄 Falling back to normal extraction after reprocess error")
+            memory_logger.info(
+                f"🔄 Falling back to normal extraction after reprocess error"
+            )
             return await self.add_memory(
                 transcript,
                 client_id,
@@ -699,7 +737,8 @@ class MemoryService(MemoryServiceBase):
                 )
             elif change_type == "new_segment":
                 lines.append(
-                    f"- New segment: {change.get('speaker', '?')}: " f"\"{change.get('text', '')}\""
+                    f"- New segment: {change.get('speaker', '?')}: "
+                    f"\"{change.get('text', '')}\""
                 )
 
         return "\n".join(lines)
@@ -834,7 +873,9 @@ class MemoryService(MemoryServiceBase):
                 for mem in candidates:
                     retrieved_old_memory.append({"id": mem.id, "text": mem.content})
             except Exception as e_search:
-                memory_logger.warning(f"Search failed while preparing updates: {e_search}")
+                memory_logger.warning(
+                    f"Search failed while preparing updates: {e_search}"
+                )
 
         # Dedupe by id and prepare temp mapping
         uniq = {}
@@ -854,7 +895,9 @@ class MemoryService(MemoryServiceBase):
                 f"🔍 Asking LLM for actions with {len(retrieved_old_memory)} old memories "
                 f"and {len(memories_text)} new facts"
             )
-            memory_logger.debug(f"🧠 Individual facts being sent to LLM: {memories_text}")
+            memory_logger.debug(
+                f"🧠 Individual facts being sent to LLM: {memories_text}"
+            )
 
             # add update or delete etc actions using DEFAULT_UPDATE_MEMORY_PROMPT
             actions_obj = await self.llm_provider.propose_memory_actions(
@@ -862,7 +905,9 @@ class MemoryService(MemoryServiceBase):
                 new_facts=memories_text,
                 custom_prompt=None,
             )
-            memory_logger.info(f"📝 UpdateMemory LLM returned: {type(actions_obj)} - {actions_obj}")
+            memory_logger.info(
+                f"📝 UpdateMemory LLM returned: {type(actions_obj)} - {actions_obj}"
+            )
         except Exception as e_actions:
             memory_logger.error(f"LLM propose_memory_actions failed: {e_actions}")
             actions_obj = {}
@@ -899,7 +944,9 @@ class MemoryService(MemoryServiceBase):
                 if isinstance(memory_field, list):
                     actions_list = memory_field
                 elif isinstance(actions_obj.get("facts"), list):
-                    actions_list = [{"event": "ADD", "text": str(t)} for t in actions_obj["facts"]]
+                    actions_list = [
+                        {"event": "ADD", "text": str(t)} for t in actions_obj["facts"]
+                    ]
                 else:
                     # Pick first list field found
                     for v in actions_obj.values():
@@ -909,7 +956,9 @@ class MemoryService(MemoryServiceBase):
             elif isinstance(actions_obj, list):
                 actions_list = actions_obj
 
-            memory_logger.info(f"📋 Normalized to {len(actions_list)} actions: {actions_list}")
+            memory_logger.info(
+                f"📋 Normalized to {len(actions_list)} actions: {actions_list}"
+            )
         except Exception as normalize_err:
             memory_logger.warning(f"Failed to normalize actions: {normalize_err}")
             actions_list = []
@@ -959,7 +1008,9 @@ class MemoryService(MemoryServiceBase):
                 memory_logger.warning(f"Skipping action with no text: {resp}")
                 continue
 
-            memory_logger.debug(f"Processing action: {event_type} - {action_text[:50]}...")
+            memory_logger.debug(
+                f"Processing action: {event_type} - {action_text[:50]}..."
+            )
 
             base_metadata = {
                 "source": "offline_streaming",
@@ -981,7 +1032,9 @@ class MemoryService(MemoryServiceBase):
                     )
                     emb = gen[0] if gen else None
                 except Exception as gen_err:
-                    memory_logger.warning(f"Embedding generation failed for action text: {gen_err}")
+                    memory_logger.warning(
+                        f"Embedding generation failed for action text: {gen_err}"
+                    )
                     emb = None
 
             if event_type == "ADD":
@@ -1003,7 +1056,9 @@ class MemoryService(MemoryServiceBase):
                         updated_at=current_time,
                     )
                 )
-                memory_logger.info(f"➕ Added new memory: {memory_id} - {action_text[:50]}...")
+                memory_logger.info(
+                    f"➕ Added new memory: {memory_id} - {action_text[:50]}..."
+                )
 
             elif event_type == "UPDATE":
                 provided_id = resp.get("id")
@@ -1023,11 +1078,15 @@ class MemoryService(MemoryServiceBase):
                                 f"🔄 Updated memory: {actual_id} - {action_text[:50]}..."
                             )
                         else:
-                            memory_logger.warning(f"Failed to update memory {actual_id}")
+                            memory_logger.warning(
+                                f"Failed to update memory {actual_id}"
+                            )
                     except Exception as update_err:
                         memory_logger.error(f"Update memory failed: {update_err}")
                 else:
-                    memory_logger.warning(f"Skipping UPDATE due to missing ID or embedding")
+                    memory_logger.warning(
+                        f"Skipping UPDATE due to missing ID or embedding"
+                    )
 
             elif event_type == "DELETE":
                 provided_id = resp.get("id")
@@ -1038,14 +1097,20 @@ class MemoryService(MemoryServiceBase):
                         if deleted:
                             memory_logger.info(f"🗑️ Deleted memory {actual_id}")
                         else:
-                            memory_logger.warning(f"Failed to delete memory {actual_id}")
+                            memory_logger.warning(
+                                f"Failed to delete memory {actual_id}"
+                            )
                     except Exception as delete_err:
                         memory_logger.error(f"Delete memory failed: {delete_err}")
                 else:
-                    memory_logger.warning(f"Skipping DELETE due to missing ID: {provided_id}")
+                    memory_logger.warning(
+                        f"Skipping DELETE due to missing ID: {provided_id}"
+                    )
 
             elif event_type == "NONE":
-                memory_logger.debug(f"NONE action - no changes for: {action_text[:50]}...")
+                memory_logger.debug(
+                    f"NONE action - no changes for: {action_text[:50]}..."
+                )
                 continue
             else:
                 memory_logger.warning(f"Unknown event type: {event_type}")
@@ -1108,7 +1173,9 @@ async def example_usage():
         print(f"🔍 Found {len(results)} search results")
 
         # Get all memories
-        all_memories = await memory_service.get_all_memories(user_id="user789", limit=100)
+        all_memories = await memory_service.get_all_memories(
+            user_id="user789", limit=100
+        )
         print(f"📚 Total memories: {len(all_memories)}")
 
         # Clean up test data

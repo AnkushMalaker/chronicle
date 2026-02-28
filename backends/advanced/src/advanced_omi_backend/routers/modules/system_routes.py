@@ -29,6 +29,7 @@ router = APIRouter(tags=["system"])
 # Request models for memory config endpoints
 class MemoryConfigRequest(BaseModel):
     """Request model for memory configuration validation and updates."""
+
     config_yaml: str
 
 
@@ -68,8 +69,7 @@ async def get_diarization_settings(current_user: User = Depends(current_superuse
 
 @router.post("/diarization-settings")
 async def save_diarization_settings(
-    settings: dict,
-    current_user: User = Depends(current_superuser)
+    settings: dict, current_user: User = Depends(current_superuser)
 ):
     """Save diarization settings. Admin only."""
     return await system_controller.save_diarization_settings_controller(settings)
@@ -83,32 +83,36 @@ async def get_misc_settings(current_user: User = Depends(current_superuser)):
 
 @router.post("/misc-settings")
 async def save_misc_settings(
-    settings: dict,
-    current_user: User = Depends(current_superuser)
+    settings: dict, current_user: User = Depends(current_superuser)
 ):
     """Save miscellaneous configuration settings. Admin only."""
     return await system_controller.save_misc_settings_controller(settings)
 
 
 @router.get("/cleanup-settings")
-async def get_cleanup_settings(
-    current_user: User = Depends(current_superuser)
-):
+async def get_cleanup_settings(current_user: User = Depends(current_superuser)):
     """Get cleanup configuration settings. Admin only."""
     return await system_controller.get_cleanup_settings_controller(current_user)
 
 
 @router.post("/cleanup-settings")
 async def save_cleanup_settings(
-    auto_cleanup_enabled: bool = Body(..., description="Enable automatic cleanup of soft-deleted conversations"),
-    retention_days: int = Body(..., ge=1, le=365, description="Number of days to keep soft-deleted conversations"),
-    current_user: User = Depends(current_superuser)
+    auto_cleanup_enabled: bool = Body(
+        ..., description="Enable automatic cleanup of soft-deleted conversations"
+    ),
+    retention_days: int = Body(
+        ...,
+        ge=1,
+        le=365,
+        description="Number of days to keep soft-deleted conversations",
+    ),
+    current_user: User = Depends(current_superuser),
 ):
     """Save cleanup configuration settings. Admin only."""
     return await system_controller.save_cleanup_settings_controller(
         auto_cleanup_enabled=auto_cleanup_enabled,
         retention_days=retention_days,
-        user=current_user
+        user=current_user,
     )
 
 
@@ -120,11 +124,12 @@ async def get_speaker_configuration(current_user: User = Depends(current_active_
 
 @router.post("/speaker-configuration")
 async def update_speaker_configuration(
-    primary_speakers: list[dict],
-    current_user: User = Depends(current_active_user)
+    primary_speakers: list[dict], current_user: User = Depends(current_active_user)
 ):
     """Update current user's primary speakers configuration."""
-    return await system_controller.update_speaker_configuration(current_user, primary_speakers)
+    return await system_controller.update_speaker_configuration(
+        current_user, primary_speakers
+    )
 
 
 @router.get("/enrolled-speakers")
@@ -141,6 +146,7 @@ async def get_speaker_service_status(current_user: User = Depends(current_superu
 
 # LLM Operations Configuration Endpoints
 
+
 @router.get("/admin/llm-operations")
 async def get_llm_operations(current_user: User = Depends(current_superuser)):
     """Get LLM operation configurations. Admin only."""
@@ -149,8 +155,7 @@ async def get_llm_operations(current_user: User = Depends(current_superuser)):
 
 @router.post("/admin/llm-operations")
 async def save_llm_operations(
-    operations: dict,
-    current_user: User = Depends(current_superuser)
+    operations: dict, current_user: User = Depends(current_superuser)
 ):
     """Save LLM operation configurations. Admin only."""
     return await system_controller.save_llm_operations(operations)
@@ -159,7 +164,7 @@ async def save_llm_operations(
 @router.post("/admin/llm-operations/test")
 async def test_llm_model(
     model_name: Optional[str] = Body(None, embed=True),
-    current_user: User = Depends(current_superuser)
+    current_user: User = Depends(current_superuser),
 ):
     """Test an LLM model connection with a trivial prompt. Admin only."""
     return await system_controller.test_llm_model(model_name)
@@ -171,10 +176,11 @@ async def get_memory_config_raw(current_user: User = Depends(current_superuser))
     """Get memory configuration YAML from config.yml. Admin only."""
     return await system_controller.get_memory_config_raw()
 
+
 @router.post("/admin/memory/config/raw")
 async def update_memory_config_raw(
     config_yaml: str = Body(..., media_type="text/plain"),
-    current_user: User = Depends(current_superuser)
+    current_user: User = Depends(current_superuser),
 ):
     """Save memory YAML to config.yml and hot-reload. Admin only."""
     return await system_controller.update_memory_config_raw(config_yaml)
@@ -191,8 +197,7 @@ async def validate_memory_config_raw(
 
 @router.post("/admin/memory/config/validate")
 async def validate_memory_config(
-    request: MemoryConfigRequest,
-    current_user: User = Depends(current_superuser)
+    request: MemoryConfigRequest, current_user: User = Depends(current_superuser)
 ):
     """Validate memory configuration YAML sent as JSON (used by tests). Admin only."""
     return await system_controller.validate_memory_config(request.config_yaml)
@@ -212,6 +217,7 @@ async def delete_all_user_memories(current_user: User = Depends(current_active_u
 
 # Chat Configuration Management Endpoints
 
+
 @router.get("/admin/chat/config", response_class=Response)
 async def get_chat_config(current_user: User = Depends(current_superuser)):
     """Get chat configuration as YAML. Admin only."""
@@ -225,13 +231,12 @@ async def get_chat_config(current_user: User = Depends(current_superuser)):
 
 @router.post("/admin/chat/config")
 async def save_chat_config(
-    request: Request,
-    current_user: User = Depends(current_superuser)
+    request: Request, current_user: User = Depends(current_superuser)
 ):
     """Save chat configuration from YAML. Admin only."""
     try:
         yaml_content = await request.body()
-        yaml_str = yaml_content.decode('utf-8')
+        yaml_str = yaml_content.decode("utf-8")
         result = await system_controller.save_chat_config_yaml(yaml_str)
         return JSONResponse(content=result)
     except ValueError as e:
@@ -243,13 +248,12 @@ async def save_chat_config(
 
 @router.post("/admin/chat/config/validate")
 async def validate_chat_config(
-    request: Request,
-    current_user: User = Depends(current_superuser)
+    request: Request, current_user: User = Depends(current_superuser)
 ):
     """Validate chat configuration YAML. Admin only."""
     try:
         yaml_content = await request.body()
-        yaml_str = yaml_content.decode('utf-8')
+        yaml_str = yaml_content.decode("utf-8")
         result = await system_controller.validate_chat_config_yaml(yaml_str)
         return JSONResponse(content=result)
     except Exception as e:
@@ -258,6 +262,7 @@ async def validate_chat_config(
 
 
 # Plugin Configuration Management Endpoints
+
 
 @router.get("/admin/plugins/config", response_class=Response)
 async def get_plugins_config(current_user: User = Depends(current_superuser)):
@@ -272,13 +277,12 @@ async def get_plugins_config(current_user: User = Depends(current_superuser)):
 
 @router.post("/admin/plugins/config")
 async def save_plugins_config(
-    request: Request,
-    current_user: User = Depends(current_superuser)
+    request: Request, current_user: User = Depends(current_superuser)
 ):
     """Save plugins configuration from YAML. Admin only."""
     try:
         yaml_content = await request.body()
-        yaml_str = yaml_content.decode('utf-8')
+        yaml_str = yaml_content.decode("utf-8")
         result = await system_controller.save_plugins_config_yaml(yaml_str)
         return JSONResponse(content=result)
     except ValueError as e:
@@ -290,13 +294,12 @@ async def save_plugins_config(
 
 @router.post("/admin/plugins/config/validate")
 async def validate_plugins_config(
-    request: Request,
-    current_user: User = Depends(current_superuser)
+    request: Request, current_user: User = Depends(current_superuser)
 ):
     """Validate plugins configuration YAML. Admin only."""
     try:
         yaml_content = await request.body()
-        yaml_str = yaml_content.decode('utf-8')
+        yaml_str = yaml_content.decode("utf-8")
         result = await system_controller.validate_plugins_config_yaml(yaml_str)
         return JSONResponse(content=result)
     except Exception as e:
@@ -305,6 +308,7 @@ async def validate_plugins_config(
 
 
 # Structured Plugin Configuration Endpoints (Form-based UI)
+
 
 @router.post("/admin/plugins/reload")
 async def reload_plugins(
@@ -360,9 +364,16 @@ async def get_plugins_health(current_user: User = Depends(current_superuser)):
     """Get plugin health status for all registered plugins. Admin only."""
     try:
         from advanced_omi_backend.services.plugin_service import get_plugin_router
+
         plugin_router = get_plugin_router()
         if not plugin_router:
-            return {"total": 0, "initialized": 0, "failed": 0, "registered": 0, "plugins": []}
+            return {
+                "total": 0,
+                "initialized": 0,
+                "failed": 0,
+                "registered": 0,
+                "plugins": [],
+            }
         return plugin_router.get_health_summary()
     except Exception as e:
         logger.error(f"Failed to get plugins health: {e}")
@@ -377,6 +388,7 @@ async def get_plugins_connectivity(current_user: User = Depends(current_superuse
     """
     try:
         from advanced_omi_backend.services.plugin_service import get_plugin_router
+
         plugin_router = get_plugin_router()
         if not plugin_router:
             return {"plugins": {}}
@@ -406,6 +418,7 @@ async def get_plugins_metadata(current_user: User = Depends(current_superuser)):
 
 class PluginConfigRequest(BaseModel):
     """Request model for structured plugin configuration updates."""
+
     orchestration: Optional[dict] = None
     settings: Optional[dict] = None
     env_vars: Optional[dict] = None
@@ -413,6 +426,7 @@ class PluginConfigRequest(BaseModel):
 
 class CreatePluginRequest(BaseModel):
     """Request model for creating a new plugin."""
+
     plugin_name: str
     description: str
     events: list[str] = []
@@ -421,12 +435,14 @@ class CreatePluginRequest(BaseModel):
 
 class WritePluginCodeRequest(BaseModel):
     """Request model for writing plugin code."""
+
     code: str
     config_yml: Optional[str] = None
 
 
 class PluginAssistantRequest(BaseModel):
     """Request model for plugin assistant chat."""
+
     messages: list[dict]
 
 
@@ -434,7 +450,7 @@ class PluginAssistantRequest(BaseModel):
 async def update_plugin_config_structured(
     plugin_id: str,
     config: PluginConfigRequest,
-    current_user: User = Depends(current_superuser)
+    current_user: User = Depends(current_superuser),
 ):
     """Update plugin configuration from structured JSON (form data). Admin only.
 
@@ -445,7 +461,9 @@ async def update_plugin_config_structured(
     """
     try:
         config_dict = config.dict(exclude_none=True)
-        result = await system_controller.update_plugin_config_structured(plugin_id, config_dict)
+        result = await system_controller.update_plugin_config_structured(
+            plugin_id, config_dict
+        )
         return JSONResponse(content=result)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -458,7 +476,7 @@ async def update_plugin_config_structured(
 async def test_plugin_connection(
     plugin_id: str,
     config: PluginConfigRequest,
-    current_user: User = Depends(current_superuser)
+    current_user: User = Depends(current_superuser),
 ):
     """Test plugin connection/configuration without saving. Admin only.
 
@@ -490,7 +508,9 @@ async def create_plugin(
             plugin_code=request.plugin_code,
         )
         if not result.get("success"):
-            raise HTTPException(status_code=400, detail=result.get("error", "Unknown error"))
+            raise HTTPException(
+                status_code=400, detail=result.get("error", "Unknown error")
+            )
         return JSONResponse(content=result)
     except HTTPException:
         raise
@@ -513,7 +533,9 @@ async def write_plugin_code(
             config_yml=request.config_yml,
         )
         if not result.get("success"):
-            raise HTTPException(status_code=400, detail=result.get("error", "Unknown error"))
+            raise HTTPException(
+                status_code=400, detail=result.get("error", "Unknown error")
+            )
         return JSONResponse(content=result)
     except HTTPException:
         raise
@@ -535,7 +557,9 @@ async def delete_plugin(
             remove_files=remove_files,
         )
         if not result.get("success"):
-            raise HTTPException(status_code=400, detail=result.get("error", "Unknown error"))
+            raise HTTPException(
+                status_code=400, detail=result.get("error", "Unknown error")
+            )
         return JSONResponse(content=result)
     except HTTPException:
         raise
@@ -572,24 +596,33 @@ async def plugin_assistant_chat(
 
 
 @router.get("/streaming/status")
-async def get_streaming_status(request: Request, current_user: User = Depends(current_superuser)):
+async def get_streaming_status(
+    request: Request, current_user: User = Depends(current_superuser)
+):
     """Get status of active streaming sessions and Redis Streams health. Admin only."""
     return await session_controller.get_streaming_status(request)
 
 
 @router.post("/streaming/cleanup")
-async def cleanup_stuck_stream_workers(request: Request, current_user: User = Depends(current_superuser)):
+async def cleanup_stuck_stream_workers(
+    request: Request, current_user: User = Depends(current_superuser)
+):
     """Clean up stuck Redis Stream workers and pending messages. Admin only."""
     return await queue_controller.cleanup_stuck_stream_workers(request)
 
 
 @router.post("/streaming/cleanup-sessions")
-async def cleanup_old_sessions(request: Request, max_age_seconds: int = 3600, current_user: User = Depends(current_superuser)):
+async def cleanup_old_sessions(
+    request: Request,
+    max_age_seconds: int = 3600,
+    current_user: User = Depends(current_superuser),
+):
     """Clean up old session tracking metadata. Admin only."""
     return await session_controller.cleanup_old_sessions(request, max_age_seconds)
 
 
 # Memory Provider Configuration Endpoints
+
 
 @router.get("/admin/memory/provider")
 async def get_memory_provider(current_user: User = Depends(current_superuser)):
@@ -600,7 +633,7 @@ async def get_memory_provider(current_user: User = Depends(current_superuser)):
 @router.post("/admin/memory/provider")
 async def set_memory_provider(
     provider: str = Body(..., embed=True),
-    current_user: User = Depends(current_superuser)
+    current_user: User = Depends(current_superuser),
 ):
     """Set memory provider and restart backend services. Admin only."""
     return await system_controller.set_memory_provider(provider)

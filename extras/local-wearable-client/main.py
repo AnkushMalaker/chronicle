@@ -56,7 +56,9 @@ ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
 def check_config() -> bool:
     """Check that required configuration is present. Returns True if backend streaming is possible."""
     if not os.path.exists(ENV_PATH):
-        logger.warning("No .env file found — copy .env.template to .env and fill in your settings")
+        logger.warning(
+            "No .env file found — copy .env.template to .env and fill in your settings"
+        )
         logger.warning("Audio will be saved locally but NOT streamed to the backend")
         return False
 
@@ -116,21 +118,25 @@ async def scan_all_devices(config: dict) -> list[dict]:
     for d, adv in discovered.values():
         if d.address in known:
             entry = known[d.address]
-            devices.append({
-                "mac": d.address,
-                "name": entry.get("name", d.name or "Unknown"),
-                "type": entry.get("type", detect_device_type(d.name or "")),
-                "rssi": adv.rssi,
-            })
+            devices.append(
+                {
+                    "mac": d.address,
+                    "name": entry.get("name", d.name or "Unknown"),
+                    "type": entry.get("type", detect_device_type(d.name or "")),
+                    "rssi": adv.rssi,
+                }
+            )
         elif auto_discover and d.name:
             lower = d.name.casefold()
             if "omi" in lower or "neo" in lower or "friend" in lower:
-                devices.append({
-                    "mac": d.address,
-                    "name": d.name,
-                    "type": detect_device_type(d.name),
-                    "rssi": adv.rssi,
-                })
+                devices.append(
+                    {
+                        "mac": d.address,
+                        "name": d.name,
+                        "type": detect_device_type(d.name),
+                        "rssi": adv.rssi,
+                    }
+                )
 
     devices.sort(key=lambda x: x.get("rssi", -999), reverse=True)
     return devices
@@ -148,7 +154,9 @@ def prompt_device_selection(devices: list[dict]) -> dict | None:
     print(f"  {'#':<4} {'Name':<20} {'MAC':<20} {'Type':<8} {'RSSI'}")
     print("  " + "-" * 60)
     for i, d in enumerate(devices, 1):
-        print(f"  {i:<4} {d['name']:<20} {d['mac']:<20} {d['type']:<8} {d.get('rssi', '?')}")
+        print(
+            f"  {i:<4} {d['name']:<20} {d['mac']:<20} {d['type']:<8} {d.get('rssi', '?')}"
+        )
 
     print()
     while True:
@@ -284,19 +292,29 @@ async def connect_and_stream(
                     asyncio.create_task(process_audio(), name="process_audio"),
                 ]
                 if backend_enabled:
-                    worker_tasks.append(asyncio.create_task(backend_stream_wrapper(), name="backend_stream"))
+                    worker_tasks.append(
+                        asyncio.create_task(
+                            backend_stream_wrapper(), name="backend_stream"
+                        )
+                    )
 
                 disconnect_task = asyncio.create_task(
                     conn.wait_until_disconnected(), name="disconnect"
                 )
 
-                logger.info("Streaming audio from %s [%s]%s", device_name, device["mac"],
-                            "" if backend_enabled else " (local-only, backend disabled)")
+                logger.info(
+                    "Streaming audio from %s [%s]%s",
+                    device_name,
+                    device["mac"],
+                    "" if backend_enabled else " (local-only, backend disabled)",
+                )
 
                 # Wait for disconnect or any worker to fail
                 all_tasks = [disconnect_task] + worker_tasks
                 try:
-                    done, pending = await asyncio.wait(all_tasks, return_when=asyncio.FIRST_COMPLETED)
+                    done, pending = await asyncio.wait(
+                        all_tasks, return_when=asyncio.FIRST_COMPLETED
+                    )
                 except asyncio.CancelledError:
                     # External cancellation (e.g. user disconnect) — clean up all workers
                     for task in all_tasks:
@@ -388,7 +406,11 @@ async def wifi_sync(
             logger.info("Configuring device WiFi AP (SSID=%s)...", ssid)
             rc = await conn.setup_wifi(ssid, password)
             if rc != WifiErrorCode.SUCCESS:
-                error_name = WifiErrorCode(rc).name if rc in WifiErrorCode._value2member_map_ else f"0x{rc:02X}"
+                error_name = (
+                    WifiErrorCode(rc).name
+                    if rc in WifiErrorCode._value2member_map_
+                    else f"0x{rc:02X}"
+                )
                 logger.error("WiFi setup failed: %s", error_name)
                 return
 
@@ -403,9 +425,12 @@ async def wifi_sync(
                 bytes_written[0] += len(data)
                 # Progress update every ~1MB
                 if bytes_written[0] % (1024 * 1024) < len(data):
-                    logger.info("Received %d / %d bytes (%.1f%%)",
-                                bytes_written[0], file_size,
-                                bytes_written[0] / file_size * 100 if file_size else 0)
+                    logger.info(
+                        "Received %d / %d bytes (%.1f%%)",
+                        bytes_written[0],
+                        file_size,
+                        bytes_written[0] / file_size * 100 if file_size else 0,
+                    )
 
             # Tell device to start WiFi AP (creates the network)
             logger.info("Starting device WiFi AP...")
@@ -413,7 +438,11 @@ async def wifi_sync(
             if rc == WifiErrorCode.SESSION_ALREADY_RUNNING:
                 logger.info("WiFi AP already running, continuing...")
             elif rc != WifiErrorCode.SUCCESS:
-                error_name = WifiErrorCode(rc).name if rc in WifiErrorCode._value2member_map_ else f"0x{rc:02X}"
+                error_name = (
+                    WifiErrorCode(rc).name
+                    if rc in WifiErrorCode._value2member_map_
+                    else f"0x{rc:02X}"
+                )
                 logger.error("WiFi start failed: %s", error_name)
                 output_file.close()
                 return
@@ -448,13 +477,25 @@ async def wifi_sync(
                     break
                 if attempt == 10 and not prompted_manual:
                     prompted_manual = True
-                    logger.info(">>> Auto-join may have failed. Please manually join WiFi '%s' (password: %s) <<<", ssid, password)
+                    logger.info(
+                        ">>> Auto-join may have failed. Please manually join WiFi '%s' (password: %s) <<<",
+                        ssid,
+                        password,
+                    )
                 elif attempt % 10 == 0:
-                    logger.info("Waiting for connection to '%s' AP... (current IP: %s)", ssid, local_ip)
+                    logger.info(
+                        "Waiting for connection to '%s' AP... (current IP: %s)",
+                        ssid,
+                        local_ip,
+                    )
                 await asyncio.sleep(1)
 
             if not local_ip or not local_ip.startswith("192.168.1."):
-                logger.error("Failed to get IP on device AP network (got: %s). Is your WiFi connected to '%s'?", local_ip, ssid)
+                logger.error(
+                    "Failed to get IP on device AP network (got: %s). Is your WiFi connected to '%s'?",
+                    local_ip,
+                    ssid,
+                )
                 await receiver.stop()
                 output_file.close()
                 if original_wifi:
@@ -501,7 +542,11 @@ async def wifi_sync(
             except asyncio.CancelledError:
                 pass
 
-            logger.info("Transfer complete: %d bytes written to %s", bytes_written[0], output_path)
+            logger.info(
+                "Transfer complete: %d bytes written to %s",
+                bytes_written[0],
+                output_path,
+            )
 
             # Reconnect BLE to send cleanup commands
             logger.info("Reconnecting BLE for cleanup...")
@@ -547,9 +592,16 @@ async def run(target_mac: str | None = None) -> None:
         device = None
         if target_mac:
             # --device flag: connect to specific MAC
-            device = next((d for d in devices if d["mac"].casefold() == target_mac.casefold()), None)
+            device = next(
+                (d for d in devices if d["mac"].casefold() == target_mac.casefold()),
+                None,
+            )
             if not device:
-                logger.debug("Target device %s not found, retrying in %ds...", target_mac, scan_interval)
+                logger.debug(
+                    "Target device %s not found, retrying in %ds...",
+                    target_mac,
+                    scan_interval,
+                )
         elif len(devices) == 1:
             device = devices[0]
         elif len(devices) > 1:
@@ -559,7 +611,12 @@ async def run(target_mac: str | None = None) -> None:
                 return
 
         if device:
-            logger.info("Connecting to %s [%s] (type=%s)", device["name"], device["mac"], device["type"])
+            logger.info(
+                "Connecting to %s [%s] (type=%s)",
+                device["name"],
+                device["mac"],
+                device["type"],
+            )
             await connect_and_stream(device, backend_enabled=backend_enabled)
             logger.info("Device disconnected, resuming scan...")
         else:
@@ -581,23 +638,27 @@ async def scan_and_print() -> None:
     for d, adv in discovered.values():
         if d.address in known:
             entry = known[d.address]
-            devices.append({
-                "mac": d.address,
-                "name": entry.get("name", d.name or "Unknown"),
-                "type": entry.get("type", detect_device_type(d.name or "")),
-                "rssi": adv.rssi,
-                "known": True,
-            })
+            devices.append(
+                {
+                    "mac": d.address,
+                    "name": entry.get("name", d.name or "Unknown"),
+                    "type": entry.get("type", detect_device_type(d.name or "")),
+                    "rssi": adv.rssi,
+                    "known": True,
+                }
+            )
         elif auto_discover and d.name:
             lower = d.name.casefold()
             if "omi" in lower or "neo" in lower or "friend" in lower:
-                devices.append({
-                    "mac": d.address,
-                    "name": d.name,
-                    "type": detect_device_type(d.name),
-                    "rssi": adv.rssi,
-                    "known": False,
-                })
+                devices.append(
+                    {
+                        "mac": d.address,
+                        "name": d.name,
+                        "type": detect_device_type(d.name),
+                        "rssi": adv.rssi,
+                        "known": False,
+                    }
+                )
 
     if not devices:
         print("No wearable devices found.")
@@ -609,7 +670,9 @@ async def scan_and_print() -> None:
     print(f"{'Name':<20} {'MAC':<20} {'Type':<8} {'RSSI':<8} {'Known'}")
     print("-" * 70)
     for d in devices:
-        print(f"{d['name']:<20} {d['mac']:<20} {d['type']:<8} {d['rssi']:<8} {'yes' if d['known'] else 'auto'}")
+        print(
+            f"{d['name']:<20} {d['mac']:<20} {d['type']:<8} {d['rssi']:<8} {'yes' if d['known'] else 'auto'}"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -620,15 +683,35 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("menu", help="Launch menu bar app (default)")
-    run_parser = sub.add_parser("run", help="Headless mode — scan, connect, and stream (for launchd)")
-    run_parser.add_argument("--device", metavar="MAC", help="Connect to a specific device by MAC address")
+    run_parser = sub.add_parser(
+        "run", help="Headless mode — scan, connect, and stream (for launchd)"
+    )
+    run_parser.add_argument(
+        "--device", metavar="MAC", help="Connect to a specific device by MAC address"
+    )
     sub.add_parser("scan", help="One-shot scan — print nearby devices and exit")
-    wifi_parser = sub.add_parser("wifi-sync", help="Download stored audio from device via WiFi sync")
-    wifi_parser.add_argument("--device", metavar="MAC", help="Connect to a specific device by MAC address")
-    wifi_parser.add_argument("--ssid", default="Friend", help="WiFi AP SSID (default: Friend)")
-    wifi_parser.add_argument("--password", default="12345678", help="WiFi AP password (default: 12345678)")
-    wifi_parser.add_argument("--interface", metavar="IFACE", help="WiFi interface to use (e.g. en1 for USB adapter)")
-    wifi_parser.add_argument("--output-dir", default="./wifi_audio", help="Output directory (default: ./wifi_audio)")
+    wifi_parser = sub.add_parser(
+        "wifi-sync", help="Download stored audio from device via WiFi sync"
+    )
+    wifi_parser.add_argument(
+        "--device", metavar="MAC", help="Connect to a specific device by MAC address"
+    )
+    wifi_parser.add_argument(
+        "--ssid", default="Friend", help="WiFi AP SSID (default: Friend)"
+    )
+    wifi_parser.add_argument(
+        "--password", default="12345678", help="WiFi AP password (default: 12345678)"
+    )
+    wifi_parser.add_argument(
+        "--interface",
+        metavar="IFACE",
+        help="WiFi interface to use (e.g. en1 for USB adapter)",
+    )
+    wifi_parser.add_argument(
+        "--output-dir",
+        default="./wifi_audio",
+        help="Output directory (default: ./wifi_audio)",
+    )
 
     sub.add_parser("install", help="Install macOS launchd agent (auto-start on login)")
     sub.add_parser("uninstall", help="Remove macOS launchd agent")
@@ -645,19 +728,22 @@ def main() -> None:
     command = args.command or "menu"  # Default to menu mode
 
     if command == "wifi-sync":
-        asyncio.run(wifi_sync(
-            target_mac=getattr(args, "device", None),
-            ssid=args.ssid,
-            password=args.password,
-            interface=args.interface,
-            output_dir=args.output_dir,
-        ))
+        asyncio.run(
+            wifi_sync(
+                target_mac=getattr(args, "device", None),
+                ssid=args.ssid,
+                password=args.password,
+                interface=args.interface,
+                output_dir=args.output_dir,
+            )
+        )
 
     elif command == "run":
         asyncio.run(run(target_mac=getattr(args, "device", None)))
 
     elif command == "menu":
         from menu_app import run_menu_app
+
         run_menu_app()
 
     elif command == "scan":
@@ -665,22 +751,27 @@ def main() -> None:
 
     elif command == "install":
         from service import install
+
         install()
 
     elif command == "uninstall":
         from service import uninstall
+
         uninstall()
 
     elif command == "kickstart":
         from service import kickstart
+
         kickstart()
 
     elif command == "status":
         from service import status
+
         status()
 
     elif command == "logs":
         from service import logs
+
         logs()
 
 

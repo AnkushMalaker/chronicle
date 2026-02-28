@@ -15,9 +15,13 @@ import rumps
 import yaml
 from bleak import BleakScanner
 from dotenv import load_dotenv
-
-from backend_sender import stream_to_backend
-from main import CONFIG_PATH, check_config, connect_and_stream, create_connection, detect_device_type, load_config
+from main import (
+    CONFIG_PATH,
+    check_config,
+    connect_and_stream,
+    detect_device_type,
+    load_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +30,7 @@ load_dotenv()
 
 # --- Shared state -----------------------------------------------------------
 
+
 @dataclass
 class SharedState:
     """Thread-safe state shared between the rumps UI and the asyncio BLE thread."""
@@ -33,7 +38,9 @@ class SharedState:
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     status: str = "idle"  # idle | scanning | connecting | connected | error
     connected_device: Optional[dict] = None  # {name, mac, type}
-    nearby_devices: list[dict] = field(default_factory=list)  # [{name, mac, type, rssi}]
+    nearby_devices: list[dict] = field(
+        default_factory=list
+    )  # [{name, mac, type, rssi}]
     error: Optional[str] = None
     chunks_sent: int = 0
     battery_level: int = -1  # -1 = unknown
@@ -42,7 +49,9 @@ class SharedState:
         with self._lock:
             return {
                 "status": self.status,
-                "connected_device": self.connected_device.copy() if self.connected_device else None,
+                "connected_device": (
+                    self.connected_device.copy() if self.connected_device else None
+                ),
                 "nearby_devices": [d.copy() for d in self.nearby_devices],
                 "error": self.error,
                 "chunks_sent": self.chunks_sent,
@@ -56,6 +65,7 @@ class SharedState:
 
 
 # --- Asyncio background thread ----------------------------------------------
+
 
 class AsyncioThread:
     """Runs an asyncio event loop in a daemon thread."""
@@ -83,6 +93,7 @@ class AsyncioThread:
 
 # --- BLE manager (runs in the asyncio thread) --------------------------------
 
+
 class BLEManager:
     """Manages BLE scanning and device connections in the background asyncio thread."""
 
@@ -99,7 +110,9 @@ class BLEManager:
         self._backoff_seconds: float = 0  # 0 = no backoff active
         self._BACKOFF_INITIAL: float = 10.0
         self._BACKOFF_MAX: float = 300.0  # 5 minutes
-        self._MIN_HEALTHY_DURATION: float = 30.0  # connections shorter than this trigger backoff
+        self._MIN_HEALTHY_DURATION: float = (
+            30.0  # connections shorter than this trigger backoff
+        )
 
         # Restore last connected device for auto-connect
         last = self.config.get("last_connected")
@@ -138,7 +151,10 @@ class BLEManager:
             # If we have a target and not already connecting/connected, try connecting
             if self._target_mac and not self._connecting:
                 snap = self.state.snapshot()
-                match = next((d for d in snap["nearby_devices"] if d["mac"] == self._target_mac), None)
+                match = next(
+                    (d for d in snap["nearby_devices"] if d["mac"] == self._target_mac),
+                    None,
+                )
                 if match:
                     await self._connect(match)
 
@@ -168,29 +184,35 @@ class BLEManager:
             # Check if known device
             if d.address in known:
                 entry = known[d.address]
-                devices.append({
-                    "mac": d.address,
-                    "name": entry.get("name", d.name or "Unknown"),
-                    "type": entry.get("type", detect_device_type(d.name or "")),
-                    "rssi": adv.rssi,
-                })
+                devices.append(
+                    {
+                        "mac": d.address,
+                        "name": entry.get("name", d.name or "Unknown"),
+                        "type": entry.get("type", detect_device_type(d.name or "")),
+                        "rssi": adv.rssi,
+                    }
+                )
                 continue
 
             # Auto-discover recognized names
             if auto_discover and d.name:
                 lower = d.name.casefold()
                 if "omi" in lower or "neo" in lower or "friend" in lower:
-                    devices.append({
-                        "mac": d.address,
-                        "name": d.name,
-                        "type": detect_device_type(d.name),
-                        "rssi": adv.rssi,
-                    })
+                    devices.append(
+                        {
+                            "mac": d.address,
+                            "name": d.name,
+                            "type": detect_device_type(d.name),
+                            "rssi": adv.rssi,
+                        }
+                    )
 
         # Sort by signal strength (strongest first)
         devices.sort(key=lambda x: x.get("rssi", -999), reverse=True)
 
-        new_status = "idle" if self.state.snapshot()["status"] != "connected" else "connected"
+        new_status = (
+            "idle" if self.state.snapshot()["status"] != "connected" else "connected"
+        )
         self.state.update(nearby_devices=devices, status=new_status, error=None)
         logger.info("Scan found %d device(s)", len(devices))
 
@@ -237,9 +259,15 @@ class BLEManager:
                 if self._backoff_seconds == 0:
                     self._backoff_seconds = self._BACKOFF_INITIAL
                 else:
-                    self._backoff_seconds = min(self._backoff_seconds * 2, self._BACKOFF_MAX)
-                logger.info("Connection lasted %.1fs (< %.0fs), backoff %.0fs before next attempt",
-                            elapsed, self._MIN_HEALTHY_DURATION, self._backoff_seconds)
+                    self._backoff_seconds = min(
+                        self._backoff_seconds * 2, self._BACKOFF_MAX
+                    )
+                logger.info(
+                    "Connection lasted %.1fs (< %.0fs), backoff %.0fs before next attempt",
+                    elapsed,
+                    self._MIN_HEALTHY_DURATION,
+                    self._backoff_seconds,
+                )
             else:
                 # Healthy connection — reset backoff
                 self._backoff_seconds = 0
@@ -289,6 +317,7 @@ class BLEManager:
 
 
 # --- rumps menu bar app -------------------------------------------------------
+
 
 class WearableMenuApp(rumps.App):
     """macOS menu bar app for Chronicle wearable client."""
@@ -344,7 +373,9 @@ class WearableMenuApp(rumps.App):
             dev = snap["connected_device"]
             bat = snap["battery_level"]
             bat_str = f" 🔋{bat}%" if bat >= 0 else ""
-            self.status_item.title = f"Connected: {dev['name']} [{dev['mac'][-8:]}]{bat_str}"
+            self.status_item.title = (
+                f"Connected: {dev['name']} [{dev['mac'][-8:]}]{bat_str}"
+            )
         elif status == "connecting":
             self.status_item.title = "Connecting..."
         elif status == "scanning":
@@ -357,7 +388,9 @@ class WearableMenuApp(rumps.App):
         # Update device list
         self._rebuild_device_menu(snap["nearby_devices"], snap["connected_device"])
 
-    def _rebuild_device_menu(self, devices: list[dict], connected: Optional[dict]) -> None:
+    def _rebuild_device_menu(
+        self, devices: list[dict], connected: Optional[dict]
+    ) -> None:
         """Replace the device submenu items with fresh MenuItem instances."""
         connected_mac = connected["mac"] if connected else None
 
@@ -414,11 +447,13 @@ class WearableMenuApp(rumps.App):
 
 # --- Entry point --------------------------------------------------------------
 
+
 def run_menu_app() -> None:
     """Launch the menu bar app with background BLE thread."""
     # Register as accessory app so macOS allows menu bar icons
     # (non-bundled Python processes default to no-UI policy on Sequoia)
     from AppKit import NSApplication
+
     NSApplication.sharedApplication().setActivationPolicy_(1)  # Accessory
 
     logging.basicConfig(

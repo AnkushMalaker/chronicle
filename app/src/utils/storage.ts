@@ -207,4 +207,4 @@ export const clearAuthData = async (): Promise<void> => {
   } catch (error) {
     console.error('[Storage] Error clearing auth data:', error);
   }
-}; 
+};

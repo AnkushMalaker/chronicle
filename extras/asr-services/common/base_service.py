@@ -13,11 +13,7 @@ import wave
 from abc import ABC, abstractmethod
 from typing import Optional
 
-from common.response_models import (
-    HealthResponse,
-    InfoResponse,
-    TranscriptionResult,
-)
+from common.response_models import HealthResponse, InfoResponse, TranscriptionResult
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -236,14 +232,17 @@ def create_asr_app(service: BaseASRService) -> FastAPI:
                     """Wrap sync generator as NDJSON lines, clean up temp file when done."""
                     try:
                         for event in service.transcribe_with_progress(
-                            tmp_filename, context_info=context_info,
+                            tmp_filename,
+                            context_info=context_info,
                         ):
                             yield json.dumps(event) + "\n"
                     finally:
                         try:
                             os.unlink(tmp_filename)
                         except Exception as e:
-                            logger.warning(f"Failed to delete temp file {tmp_filename}: {e}")
+                            logger.warning(
+                                f"Failed to delete temp file {tmp_filename}: {e}"
+                            )
 
                 return StreamingResponse(
                     _ndjson_generator(),
