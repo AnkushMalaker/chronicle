@@ -60,13 +60,42 @@ services:
         aliases:
           - speaker-service
 
+  # AMD Strix Halo (gfx1151 / Ryzen AI Max) Profile
+  speaker-service-strixhalo:
+    <<: *base-speaker-service
+    profiles: ["strixhalo"]
+    build:
+      context: .
+      dockerfile: Dockerfile.strixhalo
+    image: speaker-recognition-strixhalo:latest
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      # Use numeric GIDs - group names (video/render) don't exist in vllm-therock image.
+      # Find your system's GIDs with: getent group video render
+      - "${VIDEO_GID:-985}"   # video group (Arch default; Ubuntu typically 44)
+      - "${RENDER_GID:-989}"  # render group (Arch default; Ubuntu typically 107)
+    environment:
+      - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN}
+      - SIMILARITY_THRESHOLD=${SIMILARITY_THRESHOLD:-0.15}
+      - SPEAKER_SERVICE_HOST=${SPEAKER_SERVICE_HOST:-0.0.0.0}
+      - SPEAKER_SERVICE_PORT=${SPEAKER_SERVICE_PORT:-8085}
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+      - HSA_OVERRIDE_GFX_VERSION=11.5.1
+    networks:
+      default:
+        aliases:
+          - speaker-service
+
   # React Web UI
   web-ui:
     platform: linux/amd64
     build:
       context: webui
       dockerfile: Dockerfile
-    profiles: ["cpu", "gpu"]
+    profiles: ["cpu", "gpu", "strixhalo"]
     ports:
       - "${REACT_UI_PORT:-5173}:${REACT_UI_PORT:-5173}"
     volumes:
@@ -93,7 +122,7 @@ services:
   # Caddy reverse proxy for unified HTTPS endpoint
   caddy:
     image: caddy:2-alpine
-    profiles: ["cpu", "gpu"]
+    profiles: ["cpu", "gpu", "strixhalo"]
     ports:
       - "8444:443"
       - "8081:80"

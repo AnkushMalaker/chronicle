@@ -233,6 +233,88 @@ services:
     restart: unless-stopped
 
   # ============================================================================
+  # VibeVoice Provider for AMD Strix Halo (gfx1151 / Ryzen AI Max)
+  # Uses ROCm nightly torch wheels; requires /dev/kfd and /dev/dri
+  # ============================================================================
+  vibevoice-asr-strixhalo:
+    build:
+      context: .
+      dockerfile: providers/vibevoice/Dockerfile.strixhalo
+    image: chronicle-asr-vibevoice-strixhalo:latest
+    ports:
+      - "${ASR_PORT:-8767}:8765"
+    volumes:
+      - ./model_cache:/models
+      - ./debug:/app/debug
+      - ./results:/app/results
+      - ../../config:/app/config:ro
+      - ./lora_adapters:/models/lora_adapters
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      # Use numeric GIDs - group names (video/render) don't exist in slim Python image.
+      # Find your system's GIDs with: getent group video render
+      - "${VIDEO_GID:-985}"   # video group (Arch default; Ubuntu typically 44)
+      - "${RENDER_GID:-989}"  # render group (Arch default; Ubuntu typically 107)
+    environment:
+      - HF_HOME=/models
+      - ASR_MODEL=${ASR_MODEL:-microsoft/VibeVoice-ASR}
+      - VIBEVOICE_LLM_MODEL=${VIBEVOICE_LLM_MODEL:-Qwen/Qwen2.5-7B}
+      # sdpa is supported on ROCm; flash_attention_2 requires CUDA
+      - VIBEVOICE_ATTN_IMPL=sdpa
+      - DEVICE=${VIBEVOICE_DEVICE:-cuda}
+      - TORCH_DTYPE=${VIBEVOICE_TORCH_DTYPE:-bfloat16}
+      - MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-8192}
+      # bitsandbytes quantization requires CUDA - disable for ROCm
+      # Strix Halo has lot of unified memory, quantization is not needed
+      - QUANTIZATION=
+      - LORA_ADAPTER_PATH=${LORA_ADAPTER_PATH:-}
+      - HSA_OVERRIDE_GFX_VERSION=11.5.1
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    restart: unless-stopped
+
+  # ============================================================================
+  # NeMo Provider for AMD Strix Halo (gfx1151 / Ryzen AI Max)
+  # Uses ROCm nightly torch wheels; requires /dev/kfd and /dev/dri
+  # NeMo without cuda-python (CUDA-only binding); ROCm support is experimental
+  # ============================================================================
+  nemo-asr-strixhalo:
+    build:
+      context: .
+      dockerfile: providers/nemo/Dockerfile.strixhalo
+    image: chronicle-asr-nemo-strixhalo:latest
+    ports:
+      - "${ASR_PORT:-8767}:8765"
+    volumes:
+      - ./model_cache:/models
+      - ./debug:/app/debug
+      - ./results:/app/results
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      # Use numeric GIDs - group names (video/render) don't exist in slim Python image.
+      # Find your system's GIDs with: getent group video render
+      - "${VIDEO_GID:-985}"   # video group (Arch default; Ubuntu typically 44)
+      - "${RENDER_GID:-989}"  # render group (Arch default; Ubuntu typically 107)
+    environment:
+      - HF_HOME=/models
+      - ASR_MODEL=${ASR_MODEL:-nvidia/parakeet-tdt-0.6b-v3}
+      # Legacy support
+      - PARAKEET_MODEL=${PARAKEET_MODEL:-${ASR_MODEL:-nvidia/parakeet-tdt-0.6b-v3}}
+      # Enhanced chunking configuration
+      - CHUNKING_ENABLED=${CHUNKING_ENABLED:-true}
+      - CHUNK_DURATION_SECONDS=${CHUNK_DURATION_SECONDS:-30.0}
+      - OVERLAP_DURATION_SECONDS=${OVERLAP_DURATION_SECONDS:-5.0}
+      - MIN_AUDIO_FOR_CHUNKING=${MIN_AUDIO_FOR_CHUNKING:-60.0}
+      - CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD:-0.8}
+      - HSA_OVERRIDE_GFX_VERSION=11.5.1
+    restart: unless-stopped
+
+  # ============================================================================
   # Legacy Parakeet Service (backward compatibility)
   # ============================================================================
   parakeet-asr:

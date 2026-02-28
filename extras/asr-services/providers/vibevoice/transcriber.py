@@ -108,6 +108,19 @@ class VibeVoiceTranscriber:
         self.device = os.getenv(
             "DEVICE", "cuda" if torch.cuda.is_available() else "cpu"
         )
+
+        # Fail fast on invalid device configuration.
+        # This avoids confusing runtime failures (e.g., meta tensor device_map issues)
+        # when a CUDA-only wheel is installed or when the GPU is not exposed to Docker.
+        if self.device == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError(
+                "DEVICE=cuda but torch.cuda.is_available() is False. "
+                "This usually means (1) the container has a CUDA-only torch wheel on a non-NVIDIA host, "
+                "or (2) the GPU device files/drivers are not available inside Docker. "
+                f"torch={torch.__version__} cuda={torch.version.cuda!r} hip={torch.version.hip!r}. "
+                "Fix: install the correct ROCm/CUDA torch wheel for your hardware, "
+                "or set DEVICE=cpu."
+            )
         self.max_new_tokens = int(os.getenv("MAX_NEW_TOKENS", "8192"))
 
         # Quantization config: "4bit", "8bit", or "" (none)
@@ -254,11 +267,22 @@ class VibeVoiceTranscriber:
         quant_config = self._build_quantization_config()
 
         # Load model
+        is_rocm = torch.version.hip is not None
+        device_map = None
+        if self.device == "cuda":
+            if is_rocm:
+                # On Strix Halo/ROCm, avoid model.to("cuda") path which can segfault
+                # for this model; place modules directly on GPU via explicit map.
+                device_map = {"": "cuda:0"}
+            else:
+                device_map = "auto"
+
         load_kwargs = {
             "torch_dtype": self.torch_dtype,
-            "device_map": "auto" if self.device == "cuda" else None,
+            "device_map": device_map,
             "attn_implementation": self.attn_impl,
             "trust_remote_code": True,
+            "low_cpu_mem_usage": False if is_rocm else True,
         }
         if quant_config:
             load_kwargs["quantization_config"] = quant_config
@@ -271,8 +295,11 @@ class VibeVoiceTranscriber:
             **load_kwargs,
         )
 
-        # Move to device (only needed if not using device_map and not quantized)
-        if self.device != "cuda" and not quant_config:
+        # Move to device when not using accelerate device_map (e.g., ROCm).
+        if self.device == "cuda" and device_map is None and not quant_config:
+            self.model = self.model.to(self.device)
+            logger.info(f"Model moved to {self.device}")
+        elif self.device != "cuda" and not quant_config:
             self.model = self.model.to(self.device)
             logger.info(f"Model moved to {self.device}")
 
@@ -482,7 +509,7 @@ class VibeVoiceTranscriber:
         for i, (temp_path, start_time, end_time) in enumerate(windows):
             try:
                 logger.info(
-                    f"Batch {i+1}/{len(windows)}: [{start_time:.0f}s - {end_time:.0f}s]"
+                    f"Batch {i + 1}/{len(windows)}: [{start_time:.0f}s - {end_time:.0f}s]"
                 )
 
                 # NOTE: We intentionally do NOT pass prev_context between windows.
@@ -492,7 +519,7 @@ class VibeVoiceTranscriber:
                 result = self._transcribe_single(temp_path, context_info=hotwords)
                 batch_results.append((result, start_time, end_time))
                 logger.info(
-                    f"Batch {i+1} done: {len(result.segments)} segments, "
+                    f"Batch {i + 1} done: {len(result.segments)} segments, "
                     f"{len(result.text)} chars"
                 )
 
@@ -529,14 +556,14 @@ class VibeVoiceTranscriber:
         for i, (temp_path, start_time, end_time) in enumerate(windows):
             try:
                 logger.info(
-                    f"Batch {i+1}/{len(windows)}: [{start_time:.0f}s - {end_time:.0f}s]"
+                    f"Batch {i + 1}/{len(windows)}: [{start_time:.0f}s - {end_time:.0f}s]"
                 )
 
                 # No inter-window context — see note in _transcribe_batched()
                 result = self._transcribe_single(temp_path, context_info=hotwords)
                 batch_results.append((result, start_time, end_time))
                 logger.info(
-                    f"Batch {i+1} done: {len(result.segments)} segments, "
+                    f"Batch {i + 1} done: {len(result.segments)} segments, "
                     f"{len(result.text)} chars"
                 )
 
@@ -580,14 +607,14 @@ class VibeVoiceTranscriber:
         for i, (temp_path, start_time, end_time) in enumerate(windows):
             try:
                 logger.info(
-                    f"Batch {i+1}/{len(windows)}: [{start_time:.0f}s - {end_time:.0f}s]"
+                    f"Batch {i + 1}/{len(windows)}: [{start_time:.0f}s - {end_time:.0f}s]"
                 )
 
                 # No inter-window context — see note in _transcribe_batched()
                 result = self._transcribe_single(temp_path, context_info=hotwords)
                 batch_results.append((result, start_time, end_time))
                 logger.info(
-                    f"Batch {i+1} done: {len(result.segments)} segments, "
+                    f"Batch {i + 1} done: {len(result.segments)} segments, "
                     f"{len(result.text)} chars"
                 )
 
@@ -631,14 +658,14 @@ class VibeVoiceTranscriber:
         for i, (temp_path, start_time, end_time) in enumerate(windows):
             try:
                 logger.info(
-                    f"Batch {i+1}/{len(windows)}: [{start_time:.0f}s - {end_time:.0f}s]"
+                    f"Batch {i + 1}/{len(windows)}: [{start_time:.0f}s - {end_time:.0f}s]"
                 )
 
                 # No inter-window context — see note in _transcribe_batched()
                 result = self._transcribe_single(temp_path, context_info=hotwords)
                 batch_results.append((result, start_time, end_time))
                 logger.info(
-                    f"Batch {i+1} done: {len(result.segments)} segments, "
+                    f"Batch {i + 1} done: {len(result.segments)} segments, "
                     f"{len(result.text)} chars"
                 )
 

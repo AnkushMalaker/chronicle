@@ -30,6 +30,23 @@ class TestDockerfileCUDASupport:
         """Path to docker-compose.yml."""
         return Path(__file__).parent.parent / "docker-compose.yml"
 
+    @pytest.fixture
+    def nemo_strix_dockerfile_path(self):
+        """Path to NeMo Strix Halo Dockerfile."""
+        return (
+            Path(__file__).parent.parent / "providers" / "nemo" / "Dockerfile.strixhalo"
+        )
+
+    @pytest.fixture
+    def vibevoice_strix_dockerfile_path(self):
+        """Path to VibeVoice Strix Halo Dockerfile."""
+        return (
+            Path(__file__).parent.parent
+            / "providers"
+            / "vibevoice"
+            / "Dockerfile.strixhalo"
+        )
+
     def test_vibevoice_dockerfile_has_cuda_arg(self, vibevoice_dockerfile_path):
         """Test that VibeVoice Dockerfile declares PYTORCH_CUDA_VERSION arg."""
         content = vibevoice_dockerfile_path.read_text()
@@ -71,6 +88,22 @@ class TestDockerfileCUDASupport:
         assert re.search(
             r"uv\s+sync.*--extra\s+\$\{PYTORCH_CUDA_VERSION\}", content
         ), "NeMo Dockerfile should use CUDA version in uv sync"
+
+    def test_nemo_strix_dockerfile_uses_pypi_extra_index(
+        self, nemo_strix_dockerfile_path
+    ):
+        """Strix Halo NeMo Dockerfile should include PyPI fallback index."""
+        content = nemo_strix_dockerfile_path.read_text()
+        assert "--index-url https://rocm.nightlies.amd.com/v2/gfx1151/" in content
+        assert "--extra-index-url https://pypi.org/simple" in content
+
+    def test_vibevoice_strix_dockerfile_uses_pypi_extra_index(
+        self, vibevoice_strix_dockerfile_path
+    ):
+        """Strix Halo VibeVoice Dockerfile should include PyPI fallback index."""
+        content = vibevoice_strix_dockerfile_path.read_text()
+        assert "--index-url https://rocm.nightlies.amd.com/v2/gfx1151/" in content
+        assert "--extra-index-url https://pypi.org/simple" in content
 
     def test_docker_compose_passes_cuda_arg_to_vibevoice(self, docker_compose_path):
         """Test that docker-compose.yml passes PYTORCH_CUDA_VERSION to vibevoice service."""

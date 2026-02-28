@@ -1,0 +1,66 @@
+# syntax=docker/dockerfile:1
+#
+# NeMo ASR Provider Dockerfile for AMD Strix Halo (gfx1151)
+#
+# Uses the ROCm PyTorch base image directly to avoid accidentally pulling CUDA
+# torch wheels from PyPI during dependency resolution.
+
+FROM rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.9.1
+
+ENV PYTHONUNBUFFERED=1
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libsndfile1 \
+        build-essential git portaudio19-dev curl sudo \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv for dependency management
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
+
+# Install nemo-rocm deps into ROCm base venv while preserving base torch/torchaudio.
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv export --frozen --format requirements.txt --no-hashes \
+    --group nemo-rocm \
+    --no-emit-project \
+    --prune torch --prune torchaudio --prune triton \
+    --prune cuda-bindings --prune cuda-pathfinder --prune numba-cuda \
+    --output-file /tmp/requirements.txt \
+    && uv pip install --python /opt/venv/bin/python --no-managed-python --prerelease=if-necessary-or-explicit \
+        --requirements /tmp/requirements.txt \
+    && /opt/venv/bin/python -m pip uninstall -y cuda-bindings cuda-pathfinder numba-cuda || true
+
+# Verify ROCm torch is active
+RUN /opt/venv/bin/python -c "import torch; assert torch.version.hip is not None, f'Expected ROCm/HIP torch build, got {torch.__version__} (cuda={torch.version.cuda!r}, hip={torch.version.hip!r})'"
+
+ARG APP_UID=10001
+ARG APP_GID=10001
+
+RUN groupadd --system --gid ${APP_GID} appuser \
+    && useradd --system --uid ${APP_UID} --gid appuser --home-dir /home/appuser --create-home --shell /bin/bash appuser \
+    && usermod -aG sudo appuser \
+    && echo "appuser:root" | chpasswd
+
+# Copy application code
+COPY --chown=appuser:appuser common/ ./common/
+COPY --chown=appuser:appuser providers/nemo/ ./providers/nemo/
+
+RUN chown -R appuser:appuser /app
+
+# Default environment variables
+ENV PATH="/opt/venv/bin:${PATH}"
+ENV ASR_MODEL="nvidia/parakeet-tdt-0.6b-v3"
+ENV CHUNKING_ENABLED="true"
+ENV MIN_AUDIO_FOR_CHUNKING="60.0"
+ENV CHUNK_DURATION_SECONDS="30.0"
+ENV HSA_OVERRIDE_GFX_VERSION=11.5.1
+
+EXPOSE 8765
+
+USER appuser
+
+CMD ["python", "-m", "providers.nemo.service", "--port", "8765"]

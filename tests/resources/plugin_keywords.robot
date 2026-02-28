@@ -66,7 +66,7 @@ Verify Event Matches Subscription
 
 Get Test Plugins Config Path
     [Documentation]    Get path to test plugins configuration
-    RETURN    ${CURDIR}/../../config/plugins.yml
+    RETURN    ${CURDIR}/../config/plugins.test.yml
 
 Verify HA Plugin Uses Events
     [Documentation]    Verify HomeAssistant plugin config uses event events

@@ -1,0 +1,37 @@
+# docker-compose-test-strixhalo.yml
+# Strix Halo (ROCm) test environment for ASR services
+
+services:
+  parakeet-asr-strixhalo-test:
+    build:
+      context: .
+      dockerfile: providers/nemo/Dockerfile.strixhalo
+    image: parakeet-asr-strixhalo:test
+    ports:
+      - "8768:8765"
+    volumes:
+      - ./model_cache_strix_test:/models
+      - ./debug_test:/app/debug
+      - ./results_test:/app/results
+    user: "0:0"
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${VIDEO_GID:-985}"
+      - "${RENDER_GID:-989}"
+    environment:
+      - HF_HOME=/models
+      - ASR_MODEL=nvidia/parakeet-tdt-0.6b-v3
+      - HSA_OVERRIDE_GFX_VERSION=11.5.1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
+networks:
+  default:
+    name: asr-test-strix-network

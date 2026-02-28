@@ -83,6 +83,7 @@ extras/speaker-recognition/Caddyfile
 # Cache
 extras/speaker-recognition/cache/*
 extras/speaker-recognition/outputs/*
+**/model_cache_strix_test/*
 
 # my backup
 backends/advanced/src/_webui_original/*

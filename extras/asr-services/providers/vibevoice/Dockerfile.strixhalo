@@ -1,0 +1,82 @@
+# syntax=docker/dockerfile:1
+#
+# VibeVoice ASR Provider Dockerfile for AMD Strix Halo (gfx1151)
+#
+# Uses the known-good ROCm PyTorch base from the VibeVoice ROCm recipe,
+# then layers Chronicle's service code on top.
+
+FROM rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.9.1
+
+ENV PYTHONUNBUFFERED=1
+WORKDIR /app
+
+# Build/runtime dependencies for audio IO and ROCm flash-attention compilation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake ninja-build git curl ffmpeg libsndfile1 sudo \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv for locked dependency sync
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
+
+# Install Python deps into the base image ROCm venv (/opt/venv),
+# but keep base torch/torchaudio untouched.
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv export --frozen --format requirements.txt --no-hashes \
+    --group vibevoice \
+    --no-emit-project \
+    --prune torch --prune torchaudio --prune bitsandbytes \
+    --prune cuda-bindings --prune cuda-pathfinder --prune triton \
+    --output-file /tmp/requirements.txt \
+    && uv pip install --python /opt/venv/bin/python --no-managed-python --prerelease=if-necessary-or-explicit \
+        --requirements /tmp/requirements.txt \
+    && uv pip install --python /opt/venv/bin/python --no-managed-python "einops>=0.7.0"
+
+# Install ROCm flash-attention (AMD Triton path)
+ENV FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
+RUN --mount=type=cache,target=/root/.cache/pip \
+    git clone --depth 1 https://github.com/ROCm/flash-attention.git /tmp/flash-attention \
+    && cd /tmp/flash-attention \
+    && /opt/venv/bin/python setup.py install \
+    && rm -rf /tmp/flash-attention
+
+# Verify we are on ROCm/HIP torch.
+RUN /opt/venv/bin/python -c "import torch; assert torch.version.hip is not None, f'Expected ROCm/HIP torch build, got {torch.__version__} (cuda={torch.version.cuda!r}, hip={torch.version.hip!r})'"
+
+# Copy application code
+COPY common/ ./common/
+COPY providers/vibevoice/ ./providers/vibevoice/
+
+# Pre-clone VibeVoice repository for faster startup
+ENV HF_HOME="/models"
+RUN mkdir -p /models \
+    && git clone --depth 1 https://github.com/microsoft/VibeVoice.git /models/vibevoice
+
+ARG VIBE_UID=10002
+ARG VIBE_GID=10002
+
+RUN groupadd --system --gid ${VIBE_GID} vibeuser \
+    && useradd --system --uid ${VIBE_UID} --gid vibeuser --home-dir /home/vibeuser --create-home --shell /bin/bash vibeuser \
+    && usermod -aG sudo vibeuser \
+    && echo "vibeuser:root" | chpasswd \
+    && chown -R vibeuser:vibeuser /app /models
+
+# Default environment variables
+ENV PATH="/opt/venv/bin:${PATH}"
+ENV ASR_MODEL="microsoft/VibeVoice-ASR"
+ENV VIBEVOICE_LLM_MODEL="Qwen/Qwen2.5-7B"
+ENV VIBEVOICE_ATTN_IMPL="sdpa"
+ENV DEVICE="cuda"
+ENV TORCH_DTYPE="bfloat16"
+ENV MAX_NEW_TOKENS="8192"
+ENV QUANTIZATION=""
+ENV HSA_OVERRIDE_GFX_VERSION=11.5.1
+
+EXPOSE 8765
+
+USER vibeuser
+
+CMD ["python", "-m", "providers.vibevoice.service", "--port", "8765"]

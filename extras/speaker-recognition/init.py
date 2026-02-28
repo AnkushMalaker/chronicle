@@ -160,8 +160,24 @@ class SpeakerRecognitionSetup:
         # Detect macOS (Darwin) and auto-default to CPU
         is_macos = platform.system() == "Darwin"
 
-        # Check if provided via command line
-        if hasattr(self.args, "compute_mode") and self.args.compute_mode:
+        # Check if explicit PyTorch version was provided via command line
+        if (
+            hasattr(self.args, "pytorch_cuda_version")
+            and self.args.pytorch_cuda_version
+        ):
+            self.config["PYTORCH_CUDA_VERSION"] = self.args.pytorch_cuda_version
+            compute_mode = (
+                "gpu"
+                if self.args.pytorch_cuda_version.startswith("cu")
+                or self.args.pytorch_cuda_version == "strixhalo"
+                else "cpu"
+            )
+            self.console.print(
+                "[green][SUCCESS][/green] PyTorch CUDA version configured from command line: "
+                f"{self.args.pytorch_cuda_version}"
+            )
+        # Check if compute mode was provided via command line
+        elif hasattr(self.args, "compute_mode") and self.args.compute_mode:
             compute_mode = self.args.compute_mode
             self.console.print(
                 f"[green][SUCCESS][/green] Compute mode configured from command line: {compute_mode}"
@@ -185,13 +201,21 @@ class SpeakerRecognitionSetup:
             choices = {
                 "1": "CPU-only (works everywhere)",
                 "2": "GPU acceleration (requires NVIDIA+CUDA)",
+                "3": "AMD Strix Halo (ROCm, gfx1151 / Ryzen AI Max)",
             }
             choice = self.prompt_choice("Choose compute mode:", choices, default_choice)
-            compute_mode = "gpu" if choice == "2" else "cpu"
+            if choice == "1":
+                compute_mode = "cpu"
+            else:
+                compute_mode = "gpu"
 
         # Set PYTORCH_CUDA_VERSION for Docker build (profile determined from this)
-        if compute_mode == "cpu":
+        if "PYTORCH_CUDA_VERSION" in self.config:
+            pass
+        elif compute_mode == "cpu":
             self.config["PYTORCH_CUDA_VERSION"] = "cpu"
+        elif not is_macos and "choice" in locals() and choice == "3":
+            self.config["PYTORCH_CUDA_VERSION"] = "strixhalo"
         else:
             # Detect system CUDA version and suggest as default
             detected_cuda = self.detect_cuda_version()
@@ -378,7 +402,11 @@ class SpeakerRecognitionSetup:
             f"✅ HF Token: {'Configured' if self.config.get('HF_TOKEN') else 'Not configured'}"
         )
         pytorch_version = self.config.get("PYTORCH_CUDA_VERSION", "cpu")
-        compute_mode = "GPU" if pytorch_version.startswith("cu") else "CPU"
+        compute_mode = (
+            "GPU"
+            if pytorch_version.startswith("cu") or pytorch_version == "strixhalo"
+            else "CPU"
+        )
         self.console.print(f"✅ Compute Mode: {compute_mode} ({pytorch_version})")
         self.console.print(
             f"✅ HTTPS Enabled: {self.config.get('REACT_UI_HTTPS', 'false')}"
@@ -479,6 +507,11 @@ def main():
         "--compute-mode",
         choices=["cpu", "gpu"],
         help="Compute mode: cpu or gpu (default: prompt user)",
+    )
+    parser.add_argument(
+        "--pytorch-cuda-version",
+        choices=["cpu", "cu121", "cu126", "cu128", "strixhalo"],
+        help="PyTorch runtime selection for Docker profile/build",
     )
     parser.add_argument("--deepgram-api-key", help="Deepgram API key (optional)")
     parser.add_argument(

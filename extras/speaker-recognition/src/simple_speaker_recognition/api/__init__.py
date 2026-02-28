@@ -1,5 +1,3 @@
-"""FastAPI service for speaker recognition."""
+"""API package for speaker recognition service."""
 
-from .service import app
-
-__all__ = ["app"]
+__all__: list[str] = []

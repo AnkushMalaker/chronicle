@@ -1,0 +1,76 @@
+FROM docker.io/kyuz0/vllm-therock-gfx1151:sha-039484a
+
+ARG PYTORCH_CUDA_VERSION=strixhalo
+ENV PYTORCH_CUDA_VERSION=${PYTORCH_CUDA_VERSION}
+
+# Install system dependencies
+RUN set -eux; \
+    dnf -y install \
+        gcc gcc-c++ make git ffmpeg curl libjpeg-turbo-devel zlib-devel libpng-devel sudo; \
+    dnf -y clean all
+
+WORKDIR /app
+
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+
+# Copy dependency files first (for better caching)
+COPY pyproject.toml uv.lock ./
+
+# Use the base image's prebuilt venv (contains torch stack for gfx1151)
+RUN test -x /opt/venv/bin/python
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install dependencies, but never install/override torch/torchvision/torchaudio in this image.
+# We avoid `uv sync` here because it recreates the venv and drops `--system-site-packages`.
+# For strixhalo, we install pyannote.audio from git with --no-deps separately.
+RUN set -eux; \
+    uv export --frozen --format requirements.txt --no-dev --no-hashes \
+        --extra ${PYTORCH_CUDA_VERSION} --no-emit-project \
+        --prune torch --prune torchvision --prune torchaudio \
+        --prune rocm --prune rocm-sdk-core --prune rocm-sdk-devel --prune rocm-sdk-libraries-gfx1151 \
+        --prune torchcodec \
+        $(if [ "${PYTORCH_CUDA_VERSION}" = "strixhalo" ]; then echo "--prune pyannote.audio"; fi) \
+        --output-file /tmp/requirements.txt; \
+    uv pip install --python /opt/venv/bin/python --no-managed-python --prerelease=if-necessary-or-explicit \
+        --requirements /tmp/requirements.txt; \
+    if [ "${PYTORCH_CUDA_VERSION}" = "strixhalo" ]; then \
+        uv pip install --python /opt/venv/bin/python --no-managed-python --no-deps \
+            "git+https://github.com/pyannote/pyannote-audio.git"; \
+    fi; \
+    uv cache clean
+
+# Copy the full source code (after dependencies are cached)
+COPY src/ src/
+
+# Install the project (editable so the compose bind-mount workflow still works)
+RUN uv pip install --python /opt/venv/bin/python --no-managed-python --no-deps --editable .
+
+# Verify we can import the base image's torch stack (and that torchvision ops are present)
+RUN python -c "import torch, torchvision; print('torch', torch.__version__, torch.__file__); print('torchvision', torchvision.__version__, torchvision.__file__)"
+
+# Create directories
+RUN mkdir -p /app/audio_chunks /app/debug /app/data /models
+
+ARG APP_UID=10001
+ARG APP_GID=10001
+
+RUN groupadd --system --gid ${APP_GID} app \
+    && useradd --system --uid ${APP_UID} --gid app --home-dir /home/app --create-home --shell /bin/bash app \
+    && usermod -aG wheel app \
+    && echo "app:root" | chpasswd \
+    && chown -R app:app /app /models /opt/venv
+
+# Set environment variables
+ENV HF_HOME=/models
+ENV PYTHONPATH=/app
+ENV LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib/host-math/lib:/opt/rocm/lib/rocm_sysdeps/lib:/opt/venv/lib/python3.13/site-packages/torch/lib:/usr/lib64:${LD_LIBRARY_PATH}
+
+# Expose port
+EXPOSE 8085
+
+USER app
+
+# Run the service
+CMD ["/opt/venv/bin/simple-speaker-service"]

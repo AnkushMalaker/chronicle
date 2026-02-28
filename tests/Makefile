@@ -6,7 +6,7 @@
         containers-start-rebuild containers-clean containers-status containers-logs \
         start stop restart rebuild start-rebuild status logs \
         test test-quick test-custom test-slow test-sdk test-no-api test-with-api-keys test-all-with-slow-and-sdk clean-all \
-        test-asr test-asr-gpu \
+        test-asr test-asr-gpu test-asr-strix-parakeet \
         results results-path results-detailed
 
 # Default output directory
@@ -55,6 +55,7 @@ help:
 	@echo "ASR Tests:"
 	@echo "  make test-asr      - Run ASR protocol tests (no GPU required)"
 	@echo "  make test-asr-gpu  - Run ASR GPU tests (requires NVIDIA GPU)"
+	@echo "  make test-asr-strix-parakeet - Run Parakeet Strix Halo ROCm integration test"
 	@echo ""
 	@echo "Running Specific Tests:"
 	@echo "  make test-custom T=\"Test Name\"     - Run a single test by name"
@@ -337,6 +338,17 @@ test-asr-gpu:
 		--loglevel INFO:INFO \
 		--include requires-gpu \
 		asr
+
+# Run Parakeet ROCm integration test for AMD Strix Halo
+test-asr-strix-parakeet:
+	@echo "Running Parakeet Strix Halo ROCm integration test..."
+	@echo "Using extras/asr-services/docker-compose-test-strixhalo.yml"
+	PARAKEET_TEST_COMPOSE_FILE=docker-compose-test-strixhalo.yml \
+	PARAKEET_TEST_SERVICE=parakeet-asr-strixhalo-test \
+	PARAKEET_SERVICE_URL=http://localhost:8768 \
+	PARAKEET_HEALTH_TIMEOUT=420 \
+	PARAKEET_REQUEST_TIMEOUT=300 \
+	uv run --directory ../extras/asr-services pytest tests/test_parakeet_service.py -v -s
 
 # ============================================================================
 # View Test Results

@@ -37,7 +37,27 @@ PROVIDERS = {
         "default_model": "microsoft/VibeVoice-ASR",
         "service": "vibevoice-asr",
         # Note: VibeVoice provides diarization but NOT word_timestamps
-        "capabilities": ["timestamps", "diarization", "speaker_identification", "long_form"],
+        "capabilities": [
+            "timestamps",
+            "diarization",
+            "speaker_identification",
+            "long_form",
+        ],
+    },
+    "vibevoice-strixhalo": {
+        "name": "VibeVoice (Strix Halo)",
+        "description": "Microsoft VibeVoice-ASR for AMD Strix Halo (gfx1151 / Ryzen AI Max) with ROCm",
+        "models": {
+            "microsoft/VibeVoice-ASR": "VibeVoice-ASR (7B, speaker diarization, 60-min audio)",
+        },
+        "default_model": "microsoft/VibeVoice-ASR",
+        "service": "vibevoice-asr-strixhalo",
+        "capabilities": [
+            "timestamps",
+            "diarization",
+            "speaker_identification",
+            "long_form",
+        ],
     },
     "faster-whisper": {
         "name": "Faster-Whisper",
@@ -49,7 +69,13 @@ PROVIDERS = {
         },
         "default_model": "Systran/faster-whisper-large-v3",
         "service": "faster-whisper-asr",
-        "capabilities": ["timestamps", "word_timestamps", "language_detection", "vad_filter", "translation"],
+        "capabilities": [
+            "timestamps",
+            "word_timestamps",
+            "language_detection",
+            "vad_filter",
+            "translation",
+        ],
     },
     "transformers": {
         "name": "Transformers",
@@ -73,6 +99,17 @@ PROVIDERS = {
         "service": "nemo-asr",
         "capabilities": ["timestamps", "word_timestamps", "chunked_processing"],
     },
+    "nemo-strixhalo": {
+        "name": "NeMo (Strix Halo)",
+        "description": "NVIDIA NeMo ASR for AMD Strix Halo (gfx1151 / Ryzen AI Max) with ROCm",
+        "models": {
+            "nvidia/parakeet-tdt-0.6b-v3": "Parakeet TDT 0.6B v3 (Default)",
+            "nvidia/canary-1b": "Canary 1B (Multilingual)",
+        },
+        "default_model": "nvidia/parakeet-tdt-0.6b-v3",
+        "service": "nemo-asr-strixhalo",
+        "capabilities": ["timestamps", "word_timestamps", "chunked_processing"],
+    },
     "qwen3-asr": {
         "name": "Qwen3-ASR",
         "description": "Qwen3-ASR via vLLM (52 languages, streaming + batch)",
@@ -84,7 +121,12 @@ PROVIDERS = {
         "service": "qwen3-asr-wrapper",
         # No diarization (use speaker service for that).
         # word_timestamps provided by ForcedAligner (batch only, enabled via Dockerfile.full).
-        "capabilities": ["word_timestamps", "multilingual", "language_detection", "streaming"],
+        "capabilities": [
+            "word_timestamps",
+            "multilingual",
+            "language_detection",
+            "streaming",
+        ],
     },
 }
 
@@ -98,11 +140,7 @@ class ASRServicesSetup:
     def print_header(self, title: str):
         """Print a colorful header"""
         self.console.print()
-        panel = Panel(
-            Text(title, style="cyan bold"),
-            style="cyan",
-            expand=False
-        )
+        panel = Panel(Text(title, style="cyan bold"), style="cyan", expand=False)
         self.console.print(panel)
         self.console.print()
 
@@ -120,7 +158,9 @@ class ASRServicesSetup:
             self.console.print(f"Using default: {default}")
             return default
 
-    def prompt_choice(self, prompt: str, choices: Dict[str, str], default: str = "1") -> str:
+    def prompt_choice(
+        self, prompt: str, choices: Dict[str, str], default: str = "1"
+    ) -> str:
         """Prompt for a choice from options"""
         self.console.print(prompt)
         for key, desc in choices.items():
@@ -132,7 +172,9 @@ class ASRServicesSetup:
                 choice = Prompt.ask("Enter choice", default=default)
                 if choice in choices:
                     return choice
-                self.console.print(f"[red]Invalid choice. Please select from {list(choices.keys())}[/red]")
+                self.console.print(
+                    f"[red]Invalid choice. Please select from {list(choices.keys())}[/red]"
+                )
             except EOFError:
                 self.console.print(f"Using default choice: {default}")
                 return default
@@ -148,7 +190,9 @@ class ASRServicesSetup:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_path = f".env.backup.{timestamp}"
             shutil.copy2(env_path, backup_path)
-            self.console.print(f"[blue][INFO][/blue] Backed up existing .env file to {backup_path}")
+            self.console.print(
+                f"[blue][INFO][/blue] Backed up existing .env file to {backup_path}"
+            )
 
     def detect_cuda_version(self) -> str:
         """Detect system CUDA version (delegates to shared utility)"""
@@ -157,10 +201,12 @@ class ASRServicesSetup:
     def select_provider(self) -> str:
         """Select ASR provider"""
         # Check for command-line provider first (skip interactive UI)
-        if hasattr(self.args, 'provider') and self.args.provider:
+        if hasattr(self.args, "provider") and self.args.provider:
             provider = self.args.provider
-            provider_name = PROVIDERS.get(provider, {}).get('name', provider)
-            self.console.print(f"[green]✅[/green] ASR Provider: {provider_name} (configured via wizard)")
+            provider_name = PROVIDERS.get(provider, {}).get("name", provider)
+            self.console.print(
+                f"[green]✅[/green] ASR Provider: {provider_name} (configured via wizard)"
+            )
             return provider
 
         self.print_section("Provider Selection")
@@ -174,41 +220,45 @@ class ASRServicesSetup:
         table.add_row(
             "vibevoice",
             "Microsoft VibeVoice-ASR",
-            "Built-in speaker diarization, batch only"
+            "Built-in speaker diarization, batch only",
         )
         table.add_row(
-            "qwen3-asr",
-            "Qwen3-ASR via vLLM",
-            "52 languages, streaming + batch"
+            "qwen3-asr", "Qwen3-ASR via vLLM", "52 languages, streaming + batch"
         )
         table.add_row(
             "nemo",
             "NVIDIA NeMo (Parakeet)",
-            "English, streaming + batch, word timestamps"
+            "English, streaming + batch, word timestamps",
         )
-        table.add_row(
-            "transformers",
-            "HuggingFace models",
-            "Hindi, custom models"
-        )
+        table.add_row("transformers", "HuggingFace models", "Hindi, custom models")
         table.add_row(
             "faster-whisper",
             "Fast Whisper (CTranslate2)",
-            "Lightweight, fast inference"
+            "Lightweight, fast inference",
         )
         self.console.print(table)
         self.console.print()
 
         provider_choices = {
             "1": "vibevoice - Microsoft VibeVoice-ASR (built-in diarization, batch only)",
-            "2": "qwen3-asr - Qwen3-ASR via vLLM (52 languages, streaming + batch)",
-            "3": "nemo - NVIDIA NeMo Parakeet (streaming + batch, word timestamps)",
-            "4": "transformers - HuggingFace models (Hindi, custom)",
-            "5": "faster-whisper - Fast Whisper (lightweight, fast inference)",
+            "2": "vibevoice-strixhalo - VibeVoice for AMD Strix Halo / Ryzen AI Max (ROCm)",
+            "3": "nemo-strixhalo - NeMo Parakeet for AMD Strix Halo / Ryzen AI Max (ROCm, experimental)",
+            "4": "qwen3-asr - Qwen3-ASR via vLLM (52 languages, streaming + batch)",
+            "5": "nemo - NVIDIA NeMo Parakeet (streaming + batch, word timestamps)",
+            "6": "transformers - HuggingFace models (Hindi, custom)",
+            "7": "faster-whisper - Fast Whisper (lightweight, fast inference)",
         }
 
         choice = self.prompt_choice("Choose ASR provider:", provider_choices, "1")
-        choice_to_provider = {"1": "vibevoice", "2": "qwen3-asr", "3": "nemo", "4": "transformers", "5": "faster-whisper"}
+        choice_to_provider = {
+            "1": "vibevoice",
+            "2": "vibevoice-strixhalo",
+            "3": "nemo-strixhalo",
+            "4": "qwen3-asr",
+            "5": "nemo",
+            "6": "transformers",
+            "7": "faster-whisper",
+        }
         return choice_to_provider[choice]
 
     def select_model(self, provider: str) -> str:
@@ -218,15 +268,19 @@ class ASRServicesSetup:
         default_model = provider_info["default_model"]
 
         # Check for command-line model
-        if hasattr(self.args, 'model') and self.args.model:
+        if hasattr(self.args, "model") and self.args.model:
             model = self.args.model
-            self.console.print(f"[green]✅[/green] ASR Model: {model} (configured via wizard)")
+            self.console.print(
+                f"[green]✅[/green] ASR Model: {model} (configured via wizard)"
+            )
             return model
 
         self.print_section(f"Model Selection ({PROVIDERS[provider]['name']})")
 
         # Show available models
-        self.console.print(f"[blue]Available models for {provider_info['name']}:[/blue]")
+        self.console.print(
+            f"[blue]Available models for {provider_info['name']}:[/blue]"
+        )
         model_choices = {}
         for i, (model_id, description) in enumerate(models.items(), 1):
             model_choices[str(i)] = f"{model_id} - {description}"
@@ -247,7 +301,9 @@ class ASRServicesSetup:
 
         if choice == str(len(models) + 1):
             # Custom model
-            custom_model = self.prompt_value("Enter model identifier (HuggingFace repo or path)")
+            custom_model = self.prompt_value(
+                "Enter model identifier (HuggingFace repo or path)"
+            )
             return custom_model
         else:
             return list(models.keys())[int(choice) - 1]
@@ -256,17 +312,26 @@ class ASRServicesSetup:
         """Configure PyTorch CUDA version"""
         self.print_section("PyTorch CUDA Version")
 
-        is_macos = platform.system() == 'Darwin'
+        is_macos = platform.system() == "Darwin"
 
-        if hasattr(self.args, 'pytorch_cuda_version') and self.args.pytorch_cuda_version:
+        if (
+            hasattr(self.args, "pytorch_cuda_version")
+            and self.args.pytorch_cuda_version
+        ):
             cuda_version = self.args.pytorch_cuda_version
-            self.console.print(f"[green][SUCCESS][/green] CUDA version from command line: {cuda_version}")
+            self.console.print(
+                f"[green][SUCCESS][/green] CUDA version from command line: {cuda_version}"
+            )
         elif is_macos:
             cuda_version = "cpu"
-            self.console.print("[blue][INFO][/blue] Detected macOS - using CPU-only PyTorch")
+            self.console.print(
+                "[blue][INFO][/blue] Detected macOS - using CPU-only PyTorch"
+            )
         else:
             detected_cuda = self.detect_cuda_version()
-            self.console.print(f"[blue][INFO][/blue] Detected CUDA version: {detected_cuda}")
+            self.console.print(
+                f"[blue][INFO][/blue] Detected CUDA version: {detected_cuda}"
+            )
 
             cuda_choices = {
                 "1": "CUDA 12.1 (cu121)",
@@ -276,7 +341,9 @@ class ASRServicesSetup:
             cuda_to_choice = {"cu121": "1", "cu126": "2", "cu128": "3"}
             default_choice = cuda_to_choice.get(detected_cuda, "2")
 
-            choice = self.prompt_choice("Choose CUDA version:", cuda_choices, default_choice)
+            choice = self.prompt_choice(
+                "Choose CUDA version:", cuda_choices, default_choice
+            )
             choice_to_cuda = {"1": "cu121", "2": "cu126", "3": "cu128"}
             cuda_version = choice_to_cuda[choice]
 
@@ -306,8 +373,25 @@ class ASRServicesSetup:
             self.config["TORCH_DTYPE"] = "float16"
             self.config["DEVICE"] = "cuda"
             self.config["USE_FLASH_ATTENTION"] = "true"
-            self.console.print("[blue][INFO][/blue] Enabled Flash Attention for VibeVoice")
-            self.console.print("[blue][INFO][/blue] VibeVoice provides built-in speaker diarization (no pyannote needed)")
+            self.console.print(
+                "[blue][INFO][/blue] Enabled Flash Attention for VibeVoice"
+            )
+            self.console.print(
+                "[blue][INFO][/blue] VibeVoice provides built-in speaker diarization (no pyannote needed)"
+            )
+
+        elif provider == "vibevoice-strixhalo":
+            # Strix Halo uses ROCm; sdpa attention, bfloat16 for gfx1151
+            self.config["TORCH_DTYPE"] = "bfloat16"
+            self.config["DEVICE"] = "cuda"
+            self.config["VIBEVOICE_ATTN_IMPL"] = "sdpa"
+            self.config["PYTORCH_CUDA_VERSION"] = "strixhalo"
+            self.console.print(
+                "[blue][INFO][/blue] Configured for AMD Strix Halo (gfx1151) with ROCm"
+            )
+            self.console.print(
+                "[blue][INFO][/blue] VibeVoice provides built-in speaker diarization (no pyannote needed)"
+            )
 
         elif provider == "transformers":
             self.config["TORCH_DTYPE"] = "float16"
@@ -317,17 +401,33 @@ class ASRServicesSetup:
             # Hindi model-specific
             if "hindi" in model.lower():
                 self.config["LANGUAGE"] = "hi"
-                self.console.print("[blue][INFO][/blue] Set language to Hindi for Hindi Whisper model")
+                self.console.print(
+                    "[blue][INFO][/blue] Set language to Hindi for Hindi Whisper model"
+                )
 
         elif provider == "nemo":
             # NeMo's transcribe() handles long audio natively - no extra config needed
             pass
 
+        elif provider == "nemo-strixhalo":
+            # NeMo with ROCm; no cuda-python (CUDA-only binding)
+            self.config["PYTORCH_CUDA_VERSION"] = "strixhalo"
+            self.console.print(
+                "[blue][INFO][/blue] Configured for AMD Strix Halo (gfx1151) with ROCm"
+            )
+            self.console.print(
+                "[blue][INFO][/blue] Note: ROCm support for NeMo is experimental"
+            )
+
         elif provider == "qwen3-asr":
             self.config["QWEN3_GPU_MEM"] = "0.8"
             # No CUDA build needed - uses pre-built vLLM image
-            self.console.print("[blue][INFO][/blue] Qwen3-ASR uses a pre-built vLLM Docker image (no local CUDA build)")
-            self.console.print("[blue][INFO][/blue] Streaming bridge will also be started on port 8769")
+            self.console.print(
+                "[blue][INFO][/blue] Qwen3-ASR uses a pre-built vLLM Docker image (no local CUDA build)"
+            )
+            self.console.print(
+                "[blue][INFO][/blue] Streaming bridge will also be started on port 8769"
+            )
 
     def generate_env_file(self):
         """Generate .env file from configuration"""
@@ -359,9 +459,11 @@ class ASRServicesSetup:
         """
         provider_to_stt_model = {
             "vibevoice": "stt-vibevoice",
+            "vibevoice-strixhalo": "stt-vibevoice",
             "faster-whisper": "stt-faster-whisper",
             "transformers": "stt-transformers",
             "nemo": "stt-nemo",
+            "nemo-strixhalo": "stt-nemo",
             "qwen3-asr": "stt-qwen3-asr",
         }
 
@@ -372,7 +474,9 @@ class ASRServicesSetup:
 
         stt_model = provider_to_stt_model.get(provider)
         if not stt_model:
-            self.console.print(f"[yellow][WARNING][/yellow] Unknown provider '{provider}', skipping config.yml update")
+            self.console.print(
+                f"[yellow][WARNING][/yellow] Unknown provider '{provider}', skipping config.yml update"
+            )
             return
 
         stream_model = provider_to_stream_model.get(provider)
@@ -395,24 +499,35 @@ class ASRServicesSetup:
                 defaults_path = config_manager.config_dir / "defaults.yml"
                 if defaults_path.exists():
                     import yaml
+
                     with open(defaults_path) as f:
                         defaults = yaml.safe_load(f) or {}
                     defaults_models = defaults.get("models", []) or []
-                    defaults_by_name = {m["name"]: m for m in defaults_models if "name" in m}
+                    defaults_by_name = {
+                        m["name"]: m for m in defaults_models if "name" in m
+                    }
 
                     for name in missing:
                         if name in defaults_by_name:
                             models.append(defaults_by_name[name])
-                            self.console.print(f"[green][SUCCESS][/green] Added model '{name}' to config.yml from defaults")
+                            self.console.print(
+                                f"[green][SUCCESS][/green] Added model '{name}' to config.yml from defaults"
+                            )
                         else:
-                            self.console.print(f"[yellow][WARNING][/yellow] Model '{name}' not found in defaults.yml either")
+                            self.console.print(
+                                f"[yellow][WARNING][/yellow] Model '{name}' not found in defaults.yml either"
+                            )
 
                     config["models"] = models
                     config_manager.save_full_config(config)
                 else:
-                    self.console.print(f"[yellow][WARNING][/yellow] defaults.yml not found, cannot add missing models")
+                    self.console.print(
+                        f"[yellow][WARNING][/yellow] defaults.yml not found, cannot add missing models"
+                    )
             else:
-                self.console.print(f"[blue][INFO][/blue] Model definitions already present in config.yml")
+                self.console.print(
+                    f"[blue][INFO][/blue] Model definitions already present in config.yml"
+                )
 
             # Update defaults
             defaults_update = {"stt": stt_model}
@@ -420,13 +535,21 @@ class ASRServicesSetup:
                 defaults_update["stt_stream"] = stream_model
             config_manager.update_config_defaults(defaults_update)
 
-            self.console.print(f"[green][SUCCESS][/green] Updated defaults.stt to '{stt_model}' in config/config.yml")
+            self.console.print(
+                f"[green][SUCCESS][/green] Updated defaults.stt to '{stt_model}' in config/config.yml"
+            )
             if stream_model:
-                self.console.print(f"[green][SUCCESS][/green] Updated defaults.stt_stream to '{stream_model}' in config/config.yml")
+                self.console.print(
+                    f"[green][SUCCESS][/green] Updated defaults.stt_stream to '{stream_model}' in config/config.yml"
+                )
 
         except Exception as e:
-            self.console.print(f"[yellow][WARNING][/yellow] Could not update config.yml: {e}")
-            self.console.print("[blue][INFO][/blue] You may need to manually set defaults.stt in config/config.yml")
+            self.console.print(
+                f"[yellow][WARNING][/yellow] Could not update config.yml: {e}"
+            )
+            self.console.print(
+                "[blue][INFO][/blue] You may need to manually set defaults.stt in config/config.yml"
+            )
 
     def show_summary(self, provider: str, model: str):
         """Show configuration summary"""
@@ -455,24 +578,36 @@ class ASRServicesSetup:
         service_name = PROVIDERS[provider]["service"]
 
         self.console.print("1. Build and start the ASR service:")
-        self.console.print(f"   [cyan]docker compose up --build -d {service_name}[/cyan]")
+        self.console.print(
+            f"   [cyan]docker compose up --build -d {service_name}[/cyan]"
+        )
         self.console.print()
         self.console.print("2. Or use a pre-configured profile:")
-        self.console.print("   [cyan]cp configs/parakeet.env .env && docker compose up --build -d nemo-asr[/cyan]")
+        self.console.print(
+            "   [cyan]cp configs/parakeet.env .env && docker compose up --build -d nemo-asr[/cyan]"
+        )
         self.console.print()
         self.console.print("3. Service will be available at:")
-        self.console.print(f"   [cyan]http://localhost:{self.config.get('ASR_PORT', '8767')}[/cyan]")
+        self.console.print(
+            f"   [cyan]http://localhost:{self.config.get('ASR_PORT', '8767')}[/cyan]"
+        )
         self.console.print()
         self.console.print("4. Test the service:")
-        self.console.print(f"   [cyan]curl http://localhost:{self.config.get('ASR_PORT', '8767')}/health[/cyan]")
+        self.console.print(
+            f"   [cyan]curl http://localhost:{self.config.get('ASR_PORT', '8767')}/health[/cyan]"
+        )
         self.console.print()
         self.console.print("5. Configure Chronicle backend:")
-        self.console.print(f"   Set PARAKEET_ASR_URL=http://host.docker.internal:{self.config.get('ASR_PORT', '8767')}")
+        self.console.print(
+            f"   Set PARAKEET_ASR_URL=http://host.docker.internal:{self.config.get('ASR_PORT', '8767')}"
+        )
 
     def run(self):
         """Run the complete setup process"""
         self.print_header("🎤 ASR Services Setup (Provider-Based Architecture)")
-        self.console.print("Configure offline speech-to-text service with your choice of provider and model")
+        self.console.print(
+            "Configure offline speech-to-text service with your choice of provider and model"
+        )
         self.console.print()
 
         try:
@@ -499,7 +634,9 @@ class ASRServicesSetup:
             self.show_next_steps(provider)
 
             self.console.print()
-            self.console.print("[green][SUCCESS][/green] ASR Services setup complete! 🎉")
+            self.console.print(
+                "[green][SUCCESS][/green] ASR Services setup complete! 🎉"
+            )
 
         except KeyboardInterrupt:
             self.console.print()
@@ -515,17 +652,22 @@ def main():
     parser = argparse.ArgumentParser(description="ASR Services Setup (Provider-Based)")
     parser.add_argument(
         "--provider",
-        choices=["vibevoice", "faster-whisper", "transformers", "nemo", "qwen3-asr"],
-        help="ASR provider to use"
+        choices=[
+            "vibevoice",
+            "vibevoice-strixhalo",
+            "faster-whisper",
+            "transformers",
+            "nemo",
+            "nemo-strixhalo",
+            "qwen3-asr",
+        ],
+        help="ASR provider to use",
     )
-    parser.add_argument(
-        "--model",
-        help="Model identifier (HuggingFace repo or path)"
-    )
+    parser.add_argument("--model", help="Model identifier (HuggingFace repo or path)")
     parser.add_argument(
         "--pytorch-cuda-version",
-        choices=["cu121", "cu126", "cu128"],
-        help="PyTorch CUDA version"
+        choices=["cu121", "cu126", "cu128", "strixhalo"],
+        help="PyTorch CUDA version",
     )
 
     args = parser.parse_args()

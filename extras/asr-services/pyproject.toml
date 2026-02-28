@@ -43,6 +43,15 @@ cu128 = [
   "torchaudio>=2.3",
 ]
 
+# AMD Strix Halo (gfx1151) - torch/torchaudio are installed via pip in the Dockerfile
+# using the ROCm nightly index (rocm.nightlies.amd.com/v2/gfx1151/) because uv cannot
+# resolve rocm[libraries] from source dist. Mark them as never-selected so uv won't
+# try to resolve torch>=2.10 (not yet on PyPI) when generating the lockfile.
+strixhalo = [
+  "torch>=2.10; sys_platform == 'never'",
+  "torchaudio>=2.10; sys_platform == 'never'",
+]
+
 [tool.uv]
 compile-bytecode = true
 conflicts = [
@@ -50,6 +59,7 @@ conflicts = [
     { group = "faster-whisper" },
     { group = "transformers" },
     { group = "nemo" },
+    { group = "nemo-rocm" },
     { group = "vibevoice" },
     { group = "qwen3-asr" },
     { group = "qwen3-asr-full" },
@@ -58,6 +68,7 @@ conflicts = [
     { extra = "cu121" },
     { extra = "cu126" },
     { extra = "cu128" },
+    { extra = "strixhalo" },
   ],
 ]
 
@@ -93,6 +104,7 @@ explicit = true
 faster-whisper = [
     "faster-whisper>=1.0.0",
     "ctranslate2>=4.0.0",
+    "av>=13,<14",
 ]
 
 transformers = [
@@ -109,12 +121,20 @@ nemo = [
     "numpy>=1.26,<2.0",
 ]
 
+# NeMo for AMD ROCm (Strix Halo / gfx1151) - no cuda-python (CUDA-only binding)
+# torch/torchaudio installed via pip in Dockerfile.strixhalo using ROCm nightly index
+nemo-rocm = [
+    "nemo-toolkit[asr]>=2.2.0",
+    "numpy>=1.26,<2.0",
+]
+
 vibevoice = [
     "transformers>=4.51.0,<5.0.0",
     "accelerate>=0.30.0",
     "diffusers>=0.30.0",
     "torch>=2.3",
     "torchaudio>=2.3",
+    "einops>=0.7.0",
     "librosa>=0.10.0",
     "bitsandbytes>=0.43.0",
     "peft>=0.17.0",

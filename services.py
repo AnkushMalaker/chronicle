@@ -184,9 +184,14 @@ def run_compose_command(service_name, command, build=False, force_recreate=False
             env_file = service_path / ".env"
             if env_file.exists():
                 env_values = dotenv_values(env_file)
-                # Derive profile from PYTORCH_CUDA_VERSION (cu126/cu121/etc = gpu, cpu = cpu)
+                # Derive profile from PYTORCH_CUDA_VERSION
                 pytorch_version = env_values.get("PYTORCH_CUDA_VERSION", "cpu")
-                profile = "gpu" if pytorch_version.startswith("cu") else "cpu"
+                if pytorch_version == "strixhalo":
+                    profile = "strixhalo"
+                elif pytorch_version.startswith("cu"):
+                    profile = "gpu"
+                else:
+                    profile = "cpu"
                 build_cmd.extend(["--profile", profile])
 
         # For asr-services, only build the selected provider
@@ -200,9 +205,11 @@ def run_compose_command(service_name, command, build=False, force_recreate=False
                 # Map provider to docker service name
                 provider_to_service = {
                     "vibevoice": "vibevoice-asr",
+                    "vibevoice-strixhalo": "vibevoice-asr-strixhalo",
                     "faster-whisper": "faster-whisper-asr",
                     "transformers": "transformers-asr",
                     "nemo": "nemo-asr",
+                    "nemo-strixhalo": "nemo-asr-strixhalo",
                     "parakeet": "parakeet-asr",
                     "qwen3-asr": "qwen3-asr-wrapper",
                 }
@@ -288,9 +295,14 @@ def run_compose_command(service_name, command, build=False, force_recreate=False
         env_file = service_path / ".env"
         if env_file.exists():
             env_values = dotenv_values(env_file)
-            # Derive profile from PYTORCH_CUDA_VERSION (cu126/cu121/etc = gpu, cpu = cpu)
+            # Derive profile from PYTORCH_CUDA_VERSION
             pytorch_version = env_values.get("PYTORCH_CUDA_VERSION", "cpu")
-            profile = "gpu" if pytorch_version.startswith("cu") else "cpu"
+            if pytorch_version == "strixhalo":
+                profile = "strixhalo"
+            elif pytorch_version.startswith("cu"):
+                profile = "gpu"
+            else:
+                profile = "cpu"
 
             cmd.extend(["--profile", profile])
 
@@ -300,16 +312,14 @@ def run_compose_command(service_name, command, build=False, force_recreate=False
                 if https_enabled:
                     cmd.extend(up_flags)
                 else:
+                    profile_to_service = {
+                        "gpu": "speaker-service-gpu",
+                        "strixhalo": "speaker-service-strixhalo",
+                        "cpu": "speaker-service",
+                    }
                     cmd.extend(
                         up_flags
-                        + [
-                            (
-                                "speaker-service-gpu"
-                                if profile == "gpu"
-                                else "speaker-service"
-                            ),
-                            "web-ui",
-                        ]
+                        + [profile_to_service.get(profile, "speaker-service"), "web-ui"]
                     )
             elif command == "down":
                 cmd.extend(["down"])
@@ -331,9 +341,11 @@ def run_compose_command(service_name, command, build=False, force_recreate=False
             # Map provider to docker service name
             provider_to_service = {
                 "vibevoice": "vibevoice-asr",
+                "vibevoice-strixhalo": "vibevoice-asr-strixhalo",
                 "faster-whisper": "faster-whisper-asr",
                 "transformers": "transformers-asr",
                 "nemo": "nemo-asr",
+                "nemo-strixhalo": "nemo-asr-strixhalo",
                 "parakeet": "parakeet-asr",
                 "qwen3-asr": "qwen3-asr-wrapper",
             }
