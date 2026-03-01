@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# push-images.sh — Tag and push locally-built Chronicle images to DockerHub
+# push-images.sh — Tag and push locally-built Chronicle images to a registry
 #
 # Usage:
-#   DOCKERHUB_USERNAME=myuser ./scripts/push-images.sh v1.0.0 "stable before refactor"
+#   CHRONICLE_PUSH_REGISTRY=ghcr.io/myuser/ ./scripts/push-images.sh v1.0.0 "stable before refactor"
+#   DOCKERHUB_USERNAME=myuser ./scripts/push-images.sh v1.0.0 "description"   # backward compat
 #
 # Requirements:
 #   - Images must already be built locally (run ./start.sh --build first)
-#   - DOCKERHUB_USERNAME env var must be set
-#   - Must be logged in to DockerHub (docker login)
+#   - CHRONICLE_PUSH_REGISTRY or DOCKERHUB_USERNAME env var must be set
+#   - Must be logged in to the target registry (docker login)
 
 set -euo pipefail
 
@@ -25,22 +26,26 @@ warn()    { echo -e "${YELLOW}⚠️  $*${RESET}"; }
 error()   { echo -e "${RED}❌ $*${RESET}" >&2; }
 
 # ── Validate inputs ────────────────────────────────────────────────────────────
-if [[ -z "${DOCKERHUB_USERNAME:-}" ]]; then
-    error "DOCKERHUB_USERNAME env var is required."
-    echo "  Example: DOCKERHUB_USERNAME=myuser ./scripts/push-images.sh v1.0.0 'description'" >&2
+# Registry precedence: CHRONICLE_PUSH_REGISTRY > DOCKERHUB_USERNAME
+if [[ -n "${CHRONICLE_PUSH_REGISTRY:-}" ]]; then
+    REGISTRY="${CHRONICLE_PUSH_REGISTRY}"
+elif [[ -n "${DOCKERHUB_USERNAME:-}" ]]; then
+    REGISTRY="${DOCKERHUB_USERNAME}/"
+else
+    error "CHRONICLE_PUSH_REGISTRY or DOCKERHUB_USERNAME env var is required."
+    echo "  GHCR:      CHRONICLE_PUSH_REGISTRY=ghcr.io/yourusername/ ./scripts/push-images.sh v1.0.0" >&2
+    echo "  DockerHub: DOCKERHUB_USERNAME=yourusername ./scripts/push-images.sh v1.0.0" >&2
     exit 1
 fi
 
 TAG="${1:-}"
 if [[ -z "$TAG" ]]; then
     error "TAG argument is required."
-    echo "  Example: DOCKERHUB_USERNAME=myuser ./scripts/push-images.sh v1.0.0 'description'" >&2
+    echo "  Example: CHRONICLE_PUSH_REGISTRY=ghcr.io/myuser/ ./scripts/push-images.sh v1.0.0 'description'" >&2
     exit 1
 fi
 
 DESCRIPTION="${2:-}"
-
-REGISTRY="${DOCKERHUB_USERNAME}/"
 
 # ── Image inventory ────────────────────────────────────────────────────────────
 # Format: "local-image-name:registry-image-name"
@@ -181,8 +186,8 @@ if [[ ${#PUSHED[@]} -gt 0 ]]; then
     success "Pushed ${#PUSHED[@]} image(s) as ${TAG}"
     echo ""
     echo "To restore this snapshot:"
-    echo "  DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME} ./scripts/pull-images.sh ${TAG}"
-    echo "  DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME} ./start.sh --use-prebuilt ${TAG}"
+    echo "  CHRONICLE_REGISTRY=${REGISTRY} ./scripts/pull-images.sh ${TAG}"
+    echo "  CHRONICLE_REGISTRY=${REGISTRY} ./start.sh --use-prebuilt ${TAG}"
 fi
 if [[ ${#SKIPPED[@]} -gt 0 ]]; then
     warn "${#SKIPPED[@]} image(s) were skipped (not found locally)"

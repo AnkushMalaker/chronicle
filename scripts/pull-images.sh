@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# pull-images.sh — Pull Chronicle images from DockerHub and retag them locally
+# pull-images.sh — Pull Chronicle images and retag them locally
 #
-# Usage:
-#   DOCKERHUB_USERNAME=myuser ./scripts/pull-images.sh v1.0.0
+# Usage (GHCR — default, no account needed):
+#   ./scripts/pull-images.sh v1.0.0
+#
+# Usage (custom registry):
+#   CHRONICLE_REGISTRY=ghcr.io/myuser/ ./scripts/pull-images.sh v1.0.0
+#   DOCKERHUB_USERNAME=myuser ./scripts/pull-images.sh v1.0.0   # backward compat
 #
 # After pulling, start with the prebuilt images:
-#   DOCKERHUB_USERNAME=myuser ./start.sh --use-prebuilt v1.0.0
+#   ./start.sh --use-prebuilt v1.0.0
 
 set -euo pipefail
 
@@ -23,20 +27,21 @@ warn()    { echo -e "${YELLOW}⚠️  $*${RESET}"; }
 error()   { echo -e "${RED}❌ $*${RESET}" >&2; }
 
 # ── Validate inputs ────────────────────────────────────────────────────────────
-if [[ -z "${DOCKERHUB_USERNAME:-}" ]]; then
-    error "DOCKERHUB_USERNAME env var is required."
-    echo "  Example: DOCKERHUB_USERNAME=myuser ./scripts/pull-images.sh v1.0.0" >&2
-    exit 1
-fi
-
 TAG="${1:-}"
 if [[ -z "$TAG" ]]; then
     error "TAG argument is required."
-    echo "  Example: DOCKERHUB_USERNAME=myuser ./scripts/pull-images.sh v1.0.0" >&2
+    echo "  Example: ./scripts/pull-images.sh v1.0.0" >&2
     exit 1
 fi
 
-REGISTRY="${DOCKERHUB_USERNAME}/"
+# Registry precedence: CHRONICLE_REGISTRY > DOCKERHUB_USERNAME > default GHCR
+if [[ -n "${CHRONICLE_REGISTRY:-}" ]]; then
+    REGISTRY="${CHRONICLE_REGISTRY}"
+elif [[ -n "${DOCKERHUB_USERNAME:-}" ]]; then
+    REGISTRY="${DOCKERHUB_USERNAME}/"
+else
+    REGISTRY="ghcr.io/simpleopensoftware/"
+fi
 
 # ── Image inventory ────────────────────────────────────────────────────────────
 # Format: "local-image-name:registry-image-name"
@@ -85,7 +90,7 @@ for entry in "${IMAGES[@]}"; do
         success "  Ready as ${LOCAL_TAG}"
         PULLED+=("${entry##*:}")
     else
-        warn "  Not found on DockerHub — skipping (this service may not have been pushed)"
+        warn "  Not found in registry — skipping (this service may not have been pushed)"
         FAILED+=("${entry##*:}")
     fi
     echo ""
@@ -115,8 +120,8 @@ if [[ ${#PULLED[@]} -gt 0 ]]; then
     success "Pulled ${#PULLED[@]} image(s) tagged as ${TAG}"
     echo ""
     echo "Start services with prebuilt images:"
-    echo -e "  ${BOLD}DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME} ./start.sh --use-prebuilt ${TAG}${RESET}"
+    echo -e "  ${BOLD}./start.sh --use-prebuilt ${TAG}${RESET}"
 fi
 if [[ ${#FAILED[@]} -gt 0 ]]; then
-    warn "${#FAILED[@]} image(s) not found on DockerHub (these services will fall back to local builds)"
+    warn "${#FAILED[@]} image(s) not found in registry (these services will fall back to local builds)"
 fi

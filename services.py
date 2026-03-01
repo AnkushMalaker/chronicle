@@ -638,7 +638,7 @@ def main():
     start_parser.add_argument(
         "--use-prebuilt",
         metavar="TAG",
-        help="Use prebuilt images from DockerHub instead of building (requires prior pull-images.sh run)",
+        help="Use prebuilt images from GHCR (or custom registry via CHRONICLE_REGISTRY env var)",
     )
 
     # Stop command
@@ -703,16 +703,16 @@ def main():
             return
 
         if args.use_prebuilt:
-            dockerhub_user = os.environ.get("DOCKERHUB_USERNAME", "")
-            if not dockerhub_user:
-                console.print(
-                    "[red]❌ DOCKERHUB_USERNAME env var required with --use-prebuilt[/red]"
-                )
-                return
-            os.environ["CHRONICLE_REGISTRY"] = f"{dockerhub_user}/"
+            if os.environ.get("CHRONICLE_REGISTRY"):
+                registry = os.environ["CHRONICLE_REGISTRY"]
+            elif os.environ.get("DOCKERHUB_USERNAME"):
+                registry = f"{os.environ['DOCKERHUB_USERNAME']}/"
+            else:
+                registry = "ghcr.io/simpleopensoftware/"
+            os.environ["CHRONICLE_REGISTRY"] = registry
             os.environ["CHRONICLE_TAG"] = args.use_prebuilt
             console.print(
-                f"[cyan]ℹ️  Using prebuilt images: {dockerhub_user}/*:{args.use_prebuilt}[/cyan]"
+                f"[cyan]ℹ️  Using prebuilt images: {registry}*:{args.use_prebuilt}[/cyan]"
             )
             build_flag = False
         else:

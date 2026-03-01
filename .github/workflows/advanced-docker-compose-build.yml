@@ -13,7 +13,6 @@ on:
       - "backends/advanced/**"
       - "extras/asr-services/**"
       - "extras/speaker-recognition/**"
-      - "extras/openmemory-mcp/**"
       - ".github/workflows/advanced-docker-compose-build.yml"
   release:
     types: [ published ]
@@ -87,7 +86,6 @@ jobs:
           copy_env .
           copy_env ../../extras/asr-services
           copy_env ../../extras/speaker-recognition
-          copy_env ../../extras/openmemory-mcp
 
       - name: Create .env from secret (if provided)
         if: env.ADVANCED_ENV != ''
@@ -140,22 +138,21 @@ jobs:
           set -euo pipefail
           docker compose version
           OWNER_LC=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
-          
+
           # CUDA variants from pyproject.toml
           CUDA_VARIANTS=("cpu" "cu121" "cu126" "cu128")
-          
+
           # Base services (no CUDA variants, no profiles)
+          # Image names must match what docker-compose.yml expects (chronicle-backend, chronicle-webui)
           base_service_specs=(
-            "chronicle-backend|advanced-chronicle-backend|docker-compose.yml|."
-            "workers|advanced-workers|docker-compose.yml|."
-            "webui|advanced-webui|docker-compose.yml|."
-            "openmemory-mcp|openmemory-mcp|../../extras/openmemory-mcp/docker-compose.yml|../../extras/openmemory-mcp"
+            "chronicle-backend|chronicle-backend|docker-compose.yml|."
+            "webui|chronicle-webui|docker-compose.yml|."
           )
-          
+
           # Build and push base services
           for spec in "${base_service_specs[@]}"; do
             IFS='|' read -r svc svc_repo compose_file project_dir <<< "$spec"
-            
+
             echo "::group::Building and pushing $svc_repo"
             if [ "$compose_file" = "docker-compose.yml" ] && [ "$project_dir" = "." ]; then
               docker compose build --pull "$svc"
@@ -173,7 +170,7 @@ jobs:
               echo "::endgroup::"
               continue
             fi
-            
+
             # Tag and push with version
             target_image="$REGISTRY/$OWNER_LC/$svc_repo:$VERSION"
             latest_image="$REGISTRY/$OWNER_LC/$svc_repo:latest"
@@ -181,21 +178,21 @@ jobs:
             docker tag "$img_id" "$target_image"
             echo "Tagging $img_id as $latest_image"
             docker tag "$img_id" "$latest_image"
-            
+
             echo "Pushing $target_image"
             docker push "$target_image"
             echo "Pushing $latest_image"
             docker push "$latest_image"
-            
+
             # Clean up local tags
             docker image rm -f "$target_image" || true
             docker image rm -f "$latest_image" || true
             echo "::endgroup::"
-            
+
             # Aggressive cleanup to save space
             docker system prune -af || true
           done
-          
+
           # Build and push parakeet-asr with CUDA variants (cu121, cu126, cu128)
           echo "::group::Building and pushing parakeet-asr CUDA variants"
           cd ../../extras/asr-services
@@ -203,32 +200,32 @@ jobs:
             echo "Building parakeet-asr-${cuda_variant}"
             export PYTORCH_CUDA_VERSION="${cuda_variant}"
             docker compose build parakeet-asr
-            
+
             img_id=$(docker compose images -q parakeet-asr | head -n1)
             if [ -n "${img_id:-}" ]; then
-              target_image="$REGISTRY/$OWNER_LC/parakeet-asr-${cuda_variant}:$VERSION"
-              latest_image="$REGISTRY/$OWNER_LC/parakeet-asr-${cuda_variant}:latest"
+              target_image="$REGISTRY/$OWNER_LC/chronicle-asr-nemo-${cuda_variant}:$VERSION"
+              latest_image="$REGISTRY/$OWNER_LC/chronicle-asr-nemo-${cuda_variant}:latest"
               echo "Tagging $img_id as $target_image"
               docker tag "$img_id" "$target_image"
               echo "Tagging $img_id as $latest_image"
               docker tag "$img_id" "$latest_image"
-              
+
               echo "Pushing $target_image"
               docker push "$target_image"
               echo "Pushing $latest_image"
               docker push "$latest_image"
-              
+
               # Clean up local tags
               docker image rm -f "$target_image" || true
               docker image rm -f "$latest_image" || true
             fi
-            
+
             # Aggressive cleanup to save space
             docker system prune -af || true
           done
           cd - > /dev/null
           echo "::endgroup::"
-          
+
           # Build and push speaker-recognition with all CUDA variants (including CPU)
           # Note: speaker-service has profiles, but we can build it directly by setting PYTORCH_CUDA_VERSION
           echo "::group::Building and pushing speaker-recognition variants"
@@ -238,32 +235,32 @@ jobs:
             export PYTORCH_CUDA_VERSION="${cuda_variant}"
             # Build speaker-service directly (profiles only affect 'up', not 'build')
             docker compose build speaker-service
-            
+
             img_id=$(docker compose images -q speaker-service | head -n1)
             if [ -n "${img_id:-}" ]; then
-              target_image="$REGISTRY/$OWNER_LC/speaker-recognition-${cuda_variant}:$VERSION"
-              latest_image="$REGISTRY/$OWNER_LC/speaker-recognition-${cuda_variant}:latest"
+              target_image="$REGISTRY/$OWNER_LC/chronicle-speaker-${cuda_variant}:$VERSION"
+              latest_image="$REGISTRY/$OWNER_LC/chronicle-speaker-${cuda_variant}:latest"
               echo "Tagging $img_id as $target_image"
               docker tag "$img_id" "$target_image"
               echo "Tagging $img_id as $latest_image"
               docker tag "$img_id" "$latest_image"
-              
+
               echo "Pushing $target_image"
               docker push "$target_image"
               echo "Pushing $latest_image"
               docker push "$latest_image"
-              
+
               # Clean up local tags
               docker image rm -f "$target_image" || true
               docker image rm -f "$latest_image" || true
             fi
-            
+
             # Aggressive cleanup to save space
             docker system prune -af || true
           done
           cd - > /dev/null
           echo "::endgroup::"
-          
+
           # Summary
           echo "::group::Build Summary"
           echo "Built and pushed images with version tag: ${VERSION}"
@@ -291,25 +288,23 @@ jobs:
 
           ### Core Services
           \`\`\`bash
-          docker pull ghcr.io/${OWNER_LC}/advanced-chronicle-backend:${VERSION}
-          docker pull ghcr.io/${OWNER_LC}/advanced-workers:${VERSION}
-          docker pull ghcr.io/${OWNER_LC}/advanced-webui:${VERSION}
-          docker pull ghcr.io/${OWNER_LC}/openmemory-mcp:${VERSION}
+          docker pull ghcr.io/${OWNER_LC}/chronicle-backend:${VERSION}
+          docker pull ghcr.io/${OWNER_LC}/chronicle-webui:${VERSION}
           \`\`\`
 
           ### Parakeet ASR (pick your CUDA version)
           \`\`\`bash
-          docker pull ghcr.io/${OWNER_LC}/parakeet-asr-cu121:${VERSION}
-          docker pull ghcr.io/${OWNER_LC}/parakeet-asr-cu126:${VERSION}
-          docker pull ghcr.io/${OWNER_LC}/parakeet-asr-cu128:${VERSION}
+          docker pull ghcr.io/${OWNER_LC}/chronicle-asr-nemo-cu121:${VERSION}
+          docker pull ghcr.io/${OWNER_LC}/chronicle-asr-nemo-cu126:${VERSION}
+          docker pull ghcr.io/${OWNER_LC}/chronicle-asr-nemo-cu128:${VERSION}
           \`\`\`
 
           ### Speaker Recognition (pick your variant)
           \`\`\`bash
-          docker pull ghcr.io/${OWNER_LC}/speaker-recognition-cpu:${VERSION}
-          docker pull ghcr.io/${OWNER_LC}/speaker-recognition-cu121:${VERSION}
-          docker pull ghcr.io/${OWNER_LC}/speaker-recognition-cu126:${VERSION}
-          docker pull ghcr.io/${OWNER_LC}/speaker-recognition-cu128:${VERSION}
+          docker pull ghcr.io/${OWNER_LC}/chronicle-speaker-cpu:${VERSION}
+          docker pull ghcr.io/${OWNER_LC}/chronicle-speaker-cu121:${VERSION}
+          docker pull ghcr.io/${OWNER_LC}/chronicle-speaker-cu126:${VERSION}
+          docker pull ghcr.io/${OWNER_LC}/chronicle-speaker-cu128:${VERSION}
           \`\`\`
           EOF
           )
