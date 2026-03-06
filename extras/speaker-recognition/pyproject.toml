@@ -8,8 +8,8 @@ dependencies = [
     "fastapi>=0.115.12",
     "uvicorn>=0.34.2",
     "scipy>=1.10.0",
-    "pyannote.audio>=4.0; extra != 'strixhalo'",
-    "torchcodec<0.10; extra != 'strixhalo'",  # 0.10+ requires PyTorch newer than 2.9
+    "pyannote.audio>=4.0",
+    "torchcodec<0.10",  # 0.10+ requires PyTorch newer than 2.9
     "aiohttp>=3.8.0",
     "httpx>=0.27.0",
     "python-multipart>=0.0.6",

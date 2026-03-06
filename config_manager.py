@@ -29,6 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from dotenv import set_key as dotenv_set_key
 from ruamel.yaml import YAML
 
 logger = logging.getLogger(__name__)
@@ -171,35 +172,13 @@ class ConfigManager:
             return
 
         try:
-            # Read current .env
-            with open(self.env_path, "r") as f:
-                lines = f.readlines()
-
-            # Update or add line
-            key_found = False
-            updated_lines = []
-
-            for line in lines:
-                if line.strip().startswith(f"{key}="):
-                    updated_lines.append(f"{key}={value}\n")
-                    key_found = True
-                else:
-                    updated_lines.append(line)
-
-            # If key wasn't found, add it
-            if not key_found:
-                updated_lines.append(
-                    f"\n# Auto-updated by ConfigManager\n{key}={value}\n"
-                )
-
             # Create backup
             backup_path = f"{self.env_path}.bak"
             shutil.copy2(self.env_path, backup_path)
             logger.debug(f"Backed up .env to {backup_path}")
 
-            # Write updated file
-            with open(self.env_path, "w") as f:
-                f.writelines(updated_lines)
+            # Update key using python-dotenv (handles add-or-update automatically)
+            dotenv_set_key(str(self.env_path), key, value, quote_mode="never")
 
             # Update environment variable for current process
             os.environ[key] = value

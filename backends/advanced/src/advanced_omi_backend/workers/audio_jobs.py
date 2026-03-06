@@ -312,6 +312,30 @@ async def audio_streaming_persistence_job(
                 await flush_pcm_buffer()
             break
 
+        # Idle detection: no new chunks + websocket gone = zombie
+        last_chunk_at_raw = await redis_client.hget(session_key, "last_chunk_at")
+        if last_chunk_at_raw:
+            idle_seconds = time.time() - float(last_chunk_at_raw.decode())
+            if idle_seconds > 300:  # 5 minutes no new data
+                ws_connected = await redis_client.hget(
+                    session_key, "websocket_connected"
+                )
+                if not ws_connected or ws_connected.decode() != "true":
+                    logger.warning(
+                        f"⚠️ Idle {idle_seconds:.0f}s + WS disconnected — exiting audio persistence"
+                    )
+                    if len(pcm_buffer) > 0:
+                        await flush_pcm_buffer()
+                    break
+        else:
+            # Session hash key missing entirely — nothing to persist for
+            logger.warning(
+                f"⚠️ Session hash missing last_chunk_at — exiting audio persistence"
+            )
+            if len(pcm_buffer) > 0:
+                await flush_pcm_buffer()
+            break
+
         # Check if session is finalizing
         session_status = await redis_client.hget(session_key, "status")
         if session_status and session_status.decode() in ["finalizing", "finished"]:

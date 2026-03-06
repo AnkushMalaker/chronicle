@@ -138,9 +138,9 @@ async def handle_end_of_conversation(
 
     # Check if session is still active (user still recording) and restart listening jobs
     session_key = f"audio:session:{session_id}"
-    # Fetch both status and websocket_connected in one Redis call
-    status_raw, ws_connected_raw = await redis_client.hmget(
-        session_key, "status", "websocket_connected"
+    # Fetch status, websocket_connected, and completion_reason in one Redis call
+    status_raw, ws_connected_raw, cr_raw = await redis_client.hmget(
+        session_key, "status", "websocket_connected", "completion_reason"
     )
 
     if status_raw:
@@ -152,22 +152,23 @@ async def handle_end_of_conversation(
             if isinstance(ws_connected_raw, bytes)
             else (ws_connected_raw or "false")
         ) == "true"
+        completion_reason = (
+            cr_raw.decode() if isinstance(cr_raw, bytes) else (cr_raw or "")
+        )
 
         # Determine if we should restart speech detection
+        # Only restart when session is explicitly active.
+        # status=finalizing means the session is ending (audio-stop or disconnect),
+        # so re-enqueueing speech detection for the same session is always wrong.
         should_restart = False
         if status_str == "active":
             should_restart = True
-        elif ws_connected:
-            # Race condition recovery: WebSocket is still connected but status got
-            # corrupted (e.g., status endpoint polling set "finished" during the
-            # inter-conversation gap). Reset status and restart anyway.
-            logger.warning(
-                f"⚠️ Race condition recovery for session {session_id[:12]}: "
-                f"status={status_str} but websocket_connected=true. "
-                f"Resetting status to 'active' and restarting speech detection."
+        else:
+            logger.info(
+                f"Session {session_id[:12]}: status={status_str}, "
+                f"ws_connected={ws_connected}, completion_reason={completion_reason} "
+                f"— not restarting speech detection."
             )
-            await redis_client.hset(session_key, "status", "active")
-            should_restart = True
 
         if should_restart:
             # Session still active - enqueue new speech detection for next conversation

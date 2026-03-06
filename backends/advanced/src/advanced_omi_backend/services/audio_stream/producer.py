@@ -91,8 +91,8 @@ class AudioStreamProducer:
             },
         )
 
-        # Set TTL of 1 hour
-        await self.redis_client.expire(session_key, 3600)
+        # No TTL — sessions live until explicitly cleaned up via finalize_session()
+        # or mark_session_complete(). TTLs destroy state mid-session, causing zombie jobs.
 
         # Initialize audio buffer for this session
         self.session_buffers[session_id] = {
@@ -218,23 +218,6 @@ class AudioStreamProducer:
             await self.redis_client.hset(session_key, mapping=updates)
             logger.debug(f"📊 Updated job IDs for session {session_id}: {updates}")
 
-    async def mark_websocket_disconnected(self, session_id: str):
-        """
-        Mark session's websocket as disconnected.
-
-        Args:
-            session_id: Session identifier
-        """
-        session_key = f"audio:session:{session_id}"
-        await self.redis_client.hset(
-            session_key,
-            mapping={
-                "websocket_connected": "false",
-                "disconnected_at": str(time.time()),
-            },
-        )
-        logger.info(f"🔌 Marked websocket disconnected for session {session_id}")
-
     async def finalize_session(self, session_id: str, completion_reason: str = None):
         """
         Mark session as finalizing, send end marker, and clean up buffer.
@@ -252,6 +235,8 @@ class AudioStreamProducer:
         # Set completion_reason atomically with status to prevent race conditions
         if completion_reason:
             mapping["completion_reason"] = completion_reason
+            if completion_reason == "websocket_disconnect":
+                mapping["websocket_connected"] = "false"
             logger.info(
                 f"📊 Finalizing session {session_id} with reason: {completion_reason}"
             )

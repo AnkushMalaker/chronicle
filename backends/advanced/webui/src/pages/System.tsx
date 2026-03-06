@@ -192,7 +192,7 @@ export default function System() {
     const displayNames: Record<string, string> = {
       'mongodb': 'MONGODB',
       'redis': 'REDIS & RQ WORKERS',
-      'audioai': 'AUDIOAI',
+      'llm': 'LLM',
       'mem0': 'MEM0',
       'memory_service': 'MEMORY SERVICE',
       'speech_to_text': 'SPEECH TO TEXT',

@@ -37,17 +37,17 @@ Health Check Test
     Dictionary Should Contain Key    ${health}    services
     Dictionary Should Contain Key    ${health}    overall_healthy
     Dictionary Should Contain Key    ${health}    critical_services_healthy
-    
+
     ${services}=    Set Variable    ${health}[services]
     Log To Console    \n
-    Log To Console    Mongodb: ${services}[mongodb][status]    
-    Log To Console    AudioAI: ${services}[audioai][status]
+    Log To Console    Mongodb: ${services}[mongodb][status]
+    Log To Console    LLM: ${services}[llm][status]
     Log To Console    Memory Service: ${services}[memory_service][status]
     Log To Console    Speech to Text: ${services}[speech_to_text][status]
     Log To Console    Speaker recognition: ${services}[speaker_recognition][status]
     # Verify status is one of expected values
     Should Be True    '${health}[status]' in ['healthy', 'degraded', 'critical']
-    
+
     ${config}=    Set Variable    ${health}[config]
     Dictionary Should Contain Key    ${config}    mongodb_uri
     Dictionary Should Contain Key    ${config}    qdrant_url
@@ -168,7 +168,7 @@ Health Check Service Details Test
     ${services}=    Set Variable    ${health}[services]
 
     # Check for expected services
-    ${expected_services}=    Create List    mongodb    redis    audioai    memory_service    speech_to_text
+    ${expected_services}=    Create List    mongodb    redis    llm    memory_service    speech_to_text
 
     FOR    ${service}    IN    @{expected_services}
         IF    '${service}' in $services
@@ -212,4 +212,3 @@ Unauthorized Health Access Test
     # Admin-only endpoints should require authentication
     ${response}=    GET On Session    session    /api/metrics    expected_status=401
     Should Be Equal As Integers    ${response.status_code}    401
-

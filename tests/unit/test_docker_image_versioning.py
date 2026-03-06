@@ -1,4 +1,4 @@
-"""Tests for the Docker image versioning & DockerHub deployment feature.
+"""Tests for the Docker image versioning & GHCR deployment feature.
 
 Covers three areas without requiring Docker or network access:
   1. services.py  --use-prebuilt flag (argument parsing + env-var injection)
@@ -62,10 +62,13 @@ class TestUsePrebuiltFlag:
         """Import and run services.main() with given argv + env, mocking side effects."""
         services_mod = _import_services()
 
-        env = {**os.environ, **(env_override or {})}
-        # Remove CHRONICLE_* vars so we start clean
-        env.pop("CHRONICLE_REGISTRY", None)
-        env.pop("CHRONICLE_TAG", None)
+        override = env_override or {}
+        env = {**os.environ, **override}
+        # Remove CHRONICLE_* vars so we start clean, unless explicitly provided
+        if "CHRONICLE_REGISTRY" not in override:
+            env.pop("CHRONICLE_REGISTRY", None)
+        if "CHRONICLE_TAG" not in override:
+            env.pop("CHRONICLE_TAG", None)
 
         captured_calls = {}
 
@@ -96,11 +99,7 @@ class TestUsePrebuiltFlag:
     def test_use_prebuilt_argument_is_accepted(self):
         """--use-prebuilt is a valid argument that doesn't cause a parse error."""
         services_mod = _import_services()
-        parser_ns = services_mod.__dict__  # just ensure no AttributeError below
-        # Actually drive it through argparse without executing side effects
-        import argparse
-
-        # Reconstruct the parser by running main under mocks and catching SystemExit
+        # Drive it through argparse without executing side effects
         with (
             patch.object(services_mod, "start_services"),
             patch.object(services_mod, "check_service_configured", return_value=True),
@@ -108,7 +107,7 @@ class TestUsePrebuiltFlag:
             patch.object(
                 services_mod, "_langfuse_enabled_in_backend", return_value=False
             ),
-            patch.dict(os.environ, {"DOCKERHUB_USERNAME": "testuser"}, clear=False),
+            patch.dict(os.environ, {}, clear=False),
             patch.object(
                 sys,
                 "argv",
@@ -118,19 +117,38 @@ class TestUsePrebuiltFlag:
             # Should not raise
             services_mod.main()
 
-    def test_use_prebuilt_sets_chronicle_registry_env_var(self):
-        """CHRONICLE_REGISTRY is set to '{user}/' when --use-prebuilt is used."""
+    def test_use_prebuilt_defaults_to_ghcr(self):
+        """Without DOCKERHUB_USERNAME or CHRONICLE_REGISTRY, defaults to GHCR."""
+        calls = self._run_start(
+            ["services.py", "start", "--all", "--use-prebuilt", "v1.0.0"],
+            env_override={},
+        )
+        assert calls.get("CHRONICLE_REGISTRY") == "ghcr.io/simpleopensoftware/"
+
+    def test_use_prebuilt_dockerhub_username_backward_compat(self):
+        """DOCKERHUB_USERNAME still works as fallback for --use-prebuilt."""
         calls = self._run_start(
             ["services.py", "start", "--all", "--use-prebuilt", "v1.0.0"],
             env_override={"DOCKERHUB_USERNAME": "myuser"},
         )
         assert calls.get("CHRONICLE_REGISTRY") == "myuser/"
 
+    def test_use_prebuilt_chronicle_registry_takes_precedence(self):
+        """CHRONICLE_REGISTRY overrides both DOCKERHUB_USERNAME and the default."""
+        calls = self._run_start(
+            ["services.py", "start", "--all", "--use-prebuilt", "v1.0.0"],
+            env_override={
+                "CHRONICLE_REGISTRY": "ghcr.io/custom/",
+                "DOCKERHUB_USERNAME": "myuser",
+            },
+        )
+        assert calls.get("CHRONICLE_REGISTRY") == "ghcr.io/custom/"
+
     def test_use_prebuilt_sets_chronicle_tag_env_var(self):
         """CHRONICLE_TAG is set to the supplied tag when --use-prebuilt is used."""
         calls = self._run_start(
             ["services.py", "start", "--all", "--use-prebuilt", "v2.3.4"],
-            env_override={"DOCKERHUB_USERNAME": "myuser"},
+            env_override={},
         )
         assert calls.get("CHRONICLE_TAG") == "v2.3.4"
 
@@ -138,37 +156,9 @@ class TestUsePrebuiltFlag:
         """start_services is called with build=False when --use-prebuilt is used."""
         calls = self._run_start(
             ["services.py", "start", "--all", "--use-prebuilt", "v1.0.0"],
-            env_override={"DOCKERHUB_USERNAME": "myuser"},
+            env_override={},
         )
         assert calls.get("build") is False
-
-    def test_use_prebuilt_without_dockerhub_username_returns_early(self):
-        """Missing DOCKERHUB_USERNAME with --use-prebuilt exits without calling start_services."""
-        services_mod = _import_services()
-        called = []
-
-        def fake_start(service_list, build, force_recreate):
-            called.append(True)
-
-        with (
-            patch.object(services_mod, "start_services", side_effect=fake_start),
-            patch.object(services_mod, "check_service_configured", return_value=True),
-            patch.object(services_mod, "ensure_docker_network", return_value=True),
-            patch.object(
-                services_mod, "_langfuse_enabled_in_backend", return_value=False
-            ),
-            patch.dict(os.environ, {}, clear=True),  # no DOCKERHUB_USERNAME
-            patch.object(
-                sys,
-                "argv",
-                ["services.py", "start", "--all", "--use-prebuilt", "v1.0.0"],
-            ),
-        ):
-            services_mod.main()
-
-        assert (
-            not called
-        ), "start_services must not be called when DOCKERHUB_USERNAME is missing"
 
     def test_build_flag_still_works_without_use_prebuilt(self):
         """--build flag still passes build=True to start_services when --use-prebuilt is absent."""
@@ -320,6 +310,7 @@ class TestPushScriptValidation:
     def _run(self, args: list[str], env_override: dict | None = None):
         env = {**os.environ, **(env_override or {})}
         env.pop("DOCKERHUB_USERNAME", None)  # start clean
+        env.pop("CHRONICLE_PUSH_REGISTRY", None)  # start clean
         if env_override:
             env.update(env_override)
         return subprocess.run(
@@ -329,13 +320,16 @@ class TestPushScriptValidation:
             text=True,
         )
 
-    def test_exits_nonzero_without_dockerhub_username(self):
+    def test_exits_nonzero_without_any_registry_env(self):
         result = self._run(["v1.0.0"])
         assert result.returncode != 0
 
-    def test_error_message_mentions_dockerhub_username(self):
+    def test_error_message_mentions_registry_options(self):
         result = self._run(["v1.0.0"])
-        assert "DOCKERHUB_USERNAME" in result.stderr
+        assert (
+            "CHRONICLE_PUSH_REGISTRY" in result.stderr
+            or "DOCKERHUB_USERNAME" in result.stderr
+        )
 
     def test_exits_nonzero_without_tag(self):
         result = self._run([], env_override={"DOCKERHUB_USERNAME": "testuser"})
@@ -350,13 +344,14 @@ class TestPushScriptValidation:
 
 
 class TestPullScriptValidation:
-    """pull-images.sh must reject missing inputs without running docker."""
+    """pull-images.sh defaults to GHCR and rejects missing TAG."""
 
     SCRIPT = SCRIPTS_DIR / "pull-images.sh"
 
     def _run(self, args: list[str], env_override: dict | None = None):
         env = {**os.environ, **(env_override or {})}
         env.pop("DOCKERHUB_USERNAME", None)
+        env.pop("CHRONICLE_REGISTRY", None)
         if env_override:
             env.update(env_override)
         return subprocess.run(
@@ -366,21 +361,23 @@ class TestPullScriptValidation:
             text=True,
         )
 
-    def test_exits_nonzero_without_dockerhub_username(self):
-        result = self._run(["v1.0.0"])
-        assert result.returncode != 0
-
-    def test_error_message_mentions_dockerhub_username(self):
-        result = self._run(["v1.0.0"])
-        assert "DOCKERHUB_USERNAME" in result.stderr
-
     def test_exits_nonzero_without_tag(self):
-        result = self._run([], env_override={"DOCKERHUB_USERNAME": "testuser"})
+        result = self._run([])
         assert result.returncode != 0
 
     def test_error_message_mentions_tag_when_tag_missing(self):
-        result = self._run([], env_override={"DOCKERHUB_USERNAME": "testuser"})
+        result = self._run([])
         assert "TAG" in result.stderr
+
+    def test_defaults_to_ghcr_without_env_vars(self):
+        """pull-images.sh should NOT error when no DOCKERHUB_USERNAME is set (GHCR default)."""
+        # We can't actually pull, but we can verify the script doesn't exit
+        # at the validation stage. It will fail at docker pull which is fine.
+        result = self._run(["v1.0.0"])
+        # Should not fail at the input validation stage (returncode 1 with our error message)
+        # It will fail later at docker pull, but the stderr should not contain our validation errors
+        assert "DOCKERHUB_USERNAME" not in result.stderr
+        assert "env var is required" not in result.stderr
 
     def test_script_is_executable(self):
         assert os.access(self.SCRIPT, os.X_OK), "pull-images.sh must be executable"

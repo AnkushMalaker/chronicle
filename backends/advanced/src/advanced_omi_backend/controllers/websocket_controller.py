@@ -274,7 +274,18 @@ async def cleanup_client_state(client_id: str):
             for key in keys:
                 # Check if this session belongs to this client
                 client_id_bytes = await async_redis.hget(key, "client_id")
-                if client_id_bytes and client_id_bytes.decode() == client_id:
+                is_match = client_id_bytes and client_id_bytes.decode() == client_id
+                if not is_match:
+                    # Fallback: session hash may have lost client_id (e.g., partial resurrection).
+                    # Session IDs are formatted as "{client_id}-{uuid}", so check prefix.
+                    session_id_from_key = key.decode().replace("audio:session:", "")
+                    if session_id_from_key.startswith(client_id):
+                        is_match = True
+                        logger.warning(
+                            f"⚠️ Session {session_id_from_key[:12]} missing client_id field — "
+                            f"matched via session_id prefix fallback"
+                        )
+                if is_match:
                     session_id = key.decode().replace("audio:session:", "")
 
                     # Check session status

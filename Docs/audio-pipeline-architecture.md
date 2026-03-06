@@ -1,31 +1,16 @@
 # Audio Pipeline Architecture
 
-This document explains how audio flows through the Chronicle system from initial capture to final storage, including all intermediate processing stages, Redis streams, and data storage locations.
-
-## Table of Contents
-
-- [Overview](#overview)
-- [Architecture Diagram](#architecture-diagram)
-- [Data Sources](#data-sources)
-- [Redis Streams: The Central Pipeline](#redis-streams-the-central-pipeline)
-- [Producer: AudioStreamProducer](#producer-audiostreamproducer)
-- [Dual-Consumer Architecture](#dual-consumer-architecture)
-- [Transcription Results Aggregator](#transcription-results-aggregator)
-- [Job Queue Orchestration (RQ)](#job-queue-orchestration-rq)
-- [Data Storage](#data-storage)
-- [Complete End-to-End Flow](#complete-end-to-end-flow)
-- [Key Design Patterns](#key-design-patterns)
-- [Failure Handling](#failure-handling)
+How audio flows through Chronicle from capture to storage, including processing stages, Redis streams, data storage, the plugin system, and error handling.
 
 ## Overview
 
-Chronicle's audio pipeline is built on three core technologies:
+Chronicle's audio pipeline is built on:
 
 - **Redis Streams**: Distributed message queues for audio chunks and transcription results
 - **Background Tasks**: Async consumers that process streams independently
 - **RQ Job Queue**: Orchestrates session-level and conversation-level workflows
 
-**Key Insight**: Multiple workers can independently consume the **same audio stream** using Redis Consumer Groups, enabling parallel processing paths (transcription + disk persistence) without duplication.
+**Key Insight**: Multiple workers independently consume the **same audio stream** using Redis Consumer Groups, enabling parallel processing (transcription + disk persistence) without duplication.
 
 ## Architecture Diagram
 
@@ -48,11 +33,12 @@ Chronicle's audio pipeline is built on three core technologies:
                           ↓                  ↓
           ┌───────────────────────┐  ┌──────────────────────┐
           │ Transcription Consumer│  │ Audio Persistence    │
-          │ Group (streaming/batch)│  │ Consumer Group       │
+          │ (streaming or batch)  │  │ Consumer Group       │
           │                       │  │                      │
           │ → Deepgram WebSocket  │  │ → Writes WAV files   │
           │ → Batch buffering     │  │ → Monitors rotation  │
           │ → Publish results     │  │ → Stores file paths  │
+          │ → TRIGGERS PLUGINS    │  │                      │
           └───────────┬───────────┘  └──────────┬───────────┘
                       ↓                          ↓
           ┌───────────────────────┐  ┌──────────────────────┐
@@ -63,8 +49,6 @@ Chronicle's audio pipeline is built on three core technologies:
           ┌───────────────────────┐
           │ TranscriptionResults  │
           │ Aggregator            │
-          │ - Combines chunks     │
-          │ - Merges timestamps   │
           └───────────┬───────────┘
                       ↓
           ┌───────────────────────┐
@@ -75,10 +59,10 @@ Chronicle's audio pipeline is built on three core technologies:
           │ open_conversation_job │ ← Conversation-level
           │         ↓             │
           │ Post-Conversation:    │
-          │ • transcribe_full     │
           │ • speaker_recognition │
-          │ • memory_extraction   │
+          │ • memory_extraction ──┤→ memory.processed plugin
           │ • title_generation    │
+          │ • event_dispatch ─────┤→ conversation.complete plugin
           └───────────┬───────────┘
                       ↓
           ┌───────────────────────┐
@@ -92,1150 +76,376 @@ Chronicle's audio pipeline is built on three core technologies:
 
 ## Data Sources
 
-### 1. WebSocket Streaming (`/ws`)
+| Source | Endpoint | Details |
+|--------|----------|---------|
+| **WebSocket Streaming** | `/ws?codec=pcm\|opus&token=xxx&device_name=xxx` | Wyoming Protocol (JSON lines + binary). Handlers: `handle_pcm_websocket()`, `handle_omi_websocket()`. JWT required. |
+| **File Upload** | `POST /api/audio/upload` | Multiple WAV files (multipart). Admin only. Device ID: `{user_id_suffix}-upload` or custom. |
+| **Google Drive** | `POST /api/audio/upload_audio_from_gdrive` | Downloads from Google Drive folder ID, enqueues for processing. |
 
-**Endpoint**: `/ws?codec=pcm|opus&token=xxx&device_name=xxx`
-
-**Handlers**:
-- `handle_pcm_websocket()` - Raw PCM audio
-- `handle_omi_websocket()` - Opus-encoded audio (compressed, used by OMI devices)
-
-**Protocol**: Wyoming Protocol (JSON lines + binary frames)
-
-**Authentication**: JWT token required
-
-**Location**: `backends/advanced/src/advanced_omi_backend/routers/websocket_routes.py`
-
-**Container**: `chronicle-backend`
-
-### 2. File Upload (`/audio/upload`)
-
-**Endpoint**: `POST /api/audio/upload`
-
-**Accepts**: Multiple WAV files (multipart form data)
-
-**Authentication**: Admin only
-
-**Device ID**: Auto-generated as `{user_id_suffix}-upload` or custom `device_name`
-
-**Location**: `backends/advanced/src/advanced_omi_backend/routers/api_router.py`
-
-**Container**: `chronicle-backend`
-
-### 3. Google Drive Upload
-
-**Endpoint**: `POST /api/audio/upload_audio_from_gdrive`
-
-**Source**: Google Drive folder ID
-
-**Processing**: Downloads files and enqueues for processing
-
-**Container**: `chronicle-backend`
+**File**: `backends/advanced/src/advanced_omi_backend/routers/websocket_routes.py` (WS), `api_router.py` (upload)
 
 ## Redis Streams: The Central Pipeline
 
-### Stream Naming Convention
+### Audio Stream
 
-```
-audio:stream:{client_id}
-```
+Key: `audio:stream:{client_id}` (e.g., `audio:stream:user01-phone`)
 
-**Examples**:
-- `audio:stream:user01-phone`
-- `audio:stream:user01-omi-device`
-- `audio:stream:user01-upload`
+- Client-specific isolation (one stream per device)
+- Fan-out: multiple consumer groups read the same stream
+- Auto-trimmed: MAXLEN 25,000 entries (~104 min at 0.25s chunks)
 
-**Characteristics**:
-- **Client-specific isolation**: Each device has its own stream
-- **Fan-out pattern**: Multiple consumer groups read the same stream
-- **MAXLEN constraint**: Keeps last 25,000 entries (auto-trimming)
-- **No TTL**: Streams persist until manually deleted
-- **Container**: `redis` service
+### Session Metadata
 
-### Session Metadata Storage
+Key: `audio:session:{session_id}` — Redis Hash, TTL 1 hour
 
-```
-audio:session:{session_id}
-```
+Fields: `user_id`, `client_id`, `connection_id`, `stream_name`, `status` (`active` → `finalizing` → `complete`), `chunks_published`, `speech_detection_job_id`, `audio_persistence_job_id`, `websocket_connected`, `transcription_error`
 
-**Type**: Redis Hash
+### Other Redis Keys
 
-**Fields**:
-- `user_id`: MongoDB ObjectId
-- `client_id`: Device identifier
-- `connection_id`: WebSocket connection ID
-- `stream_name`: `audio:stream:{client_id}`
-- `status`: `"active"` → `"finalizing"` → `"complete"`
-- `chunks_published`: Integer count
-- `speech_detection_job_id`: RQ job ID
-- `audio_persistence_job_id`: RQ job ID
-- `websocket_connected`: `true|false`
-- `transcription_error`: Error message (if any)
-
-**TTL**: 1 hour
-
-**Container**: `redis`
-
-### Transcription Results Stream
-
-```
-transcription:results:{session_id}
-```
-
-**Type**: Redis Stream
-
-**Written by**: Transcription consumers (streaming or batch)
-
-**Read by**: `TranscriptionResultsAggregator`
-
-**Message Fields**:
-- `text`: Transcribed text for this chunk
-- `chunk_id`: Redis message ID from audio stream
-- `provider`: `"deepgram"` or `"parakeet"`
-- `confidence`: Float (0.0-1.0)
-- `words`: JSON array of word-level timestamps
-- `segments`: JSON array of speaker segments
-
-**Lifecycle**: Deleted when conversation completes
-
-**Container**: `redis`
-
-### Conversation Tracking
-
-```
-conversation:current:{session_id}
-```
-
-**Type**: Redis String
-
-**Value**: Current `conversation_id` (UUID)
-
-**Purpose**: Signals audio persistence job to rotate WAV file
-
-**TTL**: 24 hours
-
-**Container**: `redis`
-
-### Audio File Path Mapping
-
-```
-audio:file:{conversation_id}
-```
-
-**Type**: Redis String
-
-**Value**: File path (e.g., `1704067200000_user01-phone_convid.wav`)
-
-**Purpose**: Links conversation to its audio file on disk
-
-**TTL**: 24 hours
-
-**Container**: `redis`
+| Key | Type | Purpose | TTL |
+|-----|------|---------|-----|
+| `transcription:results:{session_id}` | Stream | Final transcription results | Deleted on conversation end |
+| `transcription:interim:{session_id}` | Pub/Sub | Real-time interim results for UI | Ephemeral |
+| `transcription:complete:{session_id}` | String | Completion signal (`"1"` or `"error"`) | 5 min |
+| `conversation:current:{session_id}` | String | Current conversation ID (signals WAV rotation) | 24 hours |
+| `audio:file:{conversation_id}` | String | Audio file path on disk | 24 hours |
+| `session:conversation_count:{session_id}` | Counter | Conversations in session | 1 hour |
+| `speech_detection_job:{client_id}` | String | Job ID for cleanup | 1 hour |
+| `system:event_log` | List | Plugin event audit log (capped at 1000) | None |
 
 ## Producer: AudioStreamProducer
 
-**File**: `backends/advanced/src/advanced_omi_backend/services/audio_stream/producer.py`
+**File**: `services/audio_stream/producer.py` — runs in `chronicle-backend` container
 
-**Container**: `chronicle-backend` (in-memory, no persistence)
-
-### Responsibilities
-
-#### 1. Session Initialization
-
-```python
-async def init_session(
-    session_id: str,
-    user_id: str,
-    client_id: str,
-    provider: str,
-    mode: str
-) -> None
-```
-
-**Actions**:
-- Creates `audio:session:{session_id}` hash in Redis
-- Initializes in-memory buffer for chunking
-- Stores session metadata (user, client, provider)
-
-#### 2. Audio Chunking
-
-```python
-async def add_audio_chunk(
-    session_id: str,
-    audio_data: bytes
-) -> list[str]
-```
-
-**Process**:
-1. Buffers incoming audio (arbitrary size from WebSocket)
-2. Creates **fixed-size chunks**: 0.25 seconds = 8,000 bytes
-   - Assumes: 16kHz sample rate, 16-bit mono PCM
-3. Prevents cutting audio mid-word (aligned chunks)
-4. Publishes each chunk to `audio:stream:{client_id}` via `XADD`
-5. Returns Redis message IDs for tracking
-
-**In-Memory Storage**: Session buffers stored in `AudioStreamProducer._session_buffers` dict
-
-#### 3. Session End Signal
-
-```python
-async def send_session_end_signal(session_id: str) -> None
-```
-
-**Actions**:
-- Publishes special `{"type": "END"}` message to stream
-- Signals all consumers to flush buffers and finalize
-- Updates session status to `"finalizing"`
-
-### Data Location
-
-**Memory**: `chronicle-backend` container (in-memory buffers)
-
-**Redis**: Published chunks in `audio:stream:{client_id}` (redis container)
+1. **`init_session()`**: Creates `audio:session:{session_id}` hash, initializes in-memory buffer
+2. **`add_audio_chunk()`**: Buffers incoming audio, creates fixed 0.25s chunks (8,000 bytes @ 16kHz/16-bit/mono), publishes to `audio:stream:{client_id}` via XADD
+3. **`send_session_end_signal()`**: Publishes `{"type": "END"}` message, updates session to `"finalizing"`
 
 ## Dual-Consumer Architecture
 
-Chronicle uses **Redis Consumer Groups** to enable multiple independent consumers to read the **same audio stream** without message duplication.
+Redis Consumer Groups enable two independent consumers on the same audio stream.
 
-### Consumer Group 1: Transcription
+### Consumer 1: Transcription
 
-Two implementations available:
+**A. Streaming** (`services/transcription/streaming_consumer.py`)
+- Consumer group: `streaming-transcription`
+- Opens persistent Deepgram WebSocket per stream, sends chunks immediately
+- Publishes interim results via Pub/Sub, final results to `transcription:results:{session_id}` stream
+- Triggers `transcript.streaming` plugin event on final results
+- ACKs messages after processing
 
-#### A. Streaming Transcription Consumer
+**B. Batch** (`services/audio_stream/consumer.py`)
+- Consumer group: `{provider}_workers` (e.g., `deepgram_workers`, `parakeet_workers`)
+- Buffers 30 chunks (~7.5s), batch transcribes, adjusts timestamps, publishes results
+- ACKs after publishing, trims stream to last 1,000 entries
 
-**File**: `backends/advanced/src/advanced_omi_backend/services/transcription/streaming_consumer.py`
+### Consumer 2: Audio Persistence
 
-**Class**: `StreamingTranscriptionConsumer`
+**File**: `workers/audio_jobs.py` — `audio_streaming_persistence_job()`
 
-**Consumer Group**: `streaming-transcription`
+- Consumer group: `audio_persistence`
+- Writes chunks to WAV files in real-time (`data/chunks/`)
+- Monitors `conversation:current:{session_id}` for file rotation signals
+- Stores file path in `audio:file:{conversation_id}`
+- File naming: `{timestamp_ms}_{client_id}_{conversation_id}.wav`
 
-**Provider**: Deepgram (WebSocket-based)
-
-**Process**:
-1. Discovers `audio:stream:*` streams dynamically using `SCAN`
-2. Opens persistent WebSocket connection to Deepgram per stream
-3. Sends audio chunks **immediately** (no buffering)
-4. Publishes **interim results** to `transcription:interim:{session_id}` (Redis Pub/Sub)
-5. Publishes **final results** to `transcription:results:{session_id}` (Redis Stream)
-6. Triggers plugins on final results only
-7. ACKs messages with `XACK` to prevent reprocessing
-8. Handles END signal: closes WebSocket, cleans up
-
-**Container**: `chronicle-backend` (Background Task via `BackgroundTaskManager`)
-
-**Real-time Updates**: Interim results pushed to WebSocket clients via Pub/Sub
-
-#### B. Batch Transcription Consumer
-
-**File**: `backends/advanced/src/advanced_omi_backend/services/audio_stream/consumer.py`
-
-**Class**: `BaseAudioStreamConsumer`
-
-**Consumer Group**: `{provider_name}_workers` (e.g., `deepgram_workers`, `parakeet_workers`)
-
-**Providers**: Deepgram (batch), Parakeet ASR (offline)
-
-**Process**:
-1. Reads from `audio:stream:{client_id}` using `XREADGROUP`
-2. Buffers chunks per session (default: 30 chunks = ~7.5 seconds)
-3. When buffer full:
-   - Combines chunks into single audio buffer
-   - Transcribes using provider API
-   - Adjusts word/segment timestamps relative to session start
-   - Publishes result to `transcription:results:{session_id}`
-4. Flushes remaining buffer on END signal
-5. ACKs all buffered messages with `XACK`
-6. Trims stream to keep only last 1,000 entries (`XTRIM MAXLEN`)
-
-**Container**: `chronicle-backend` (Background Task)
-
-**Batching Benefits**: Reduces API calls, improves transcription accuracy (more context)
-
-### Consumer Group 2: Audio Persistence
-
-**File**: `backends/advanced/src/advanced_omi_backend/workers/audio_jobs.py`
-
-**Function**: `audio_streaming_persistence_job()`
-
-**Consumer Group**: `audio_persistence`
-
-**Consumer Name**: `persistence-worker-{session_id}`
-
-**Process**:
-1. Reads audio chunks from `audio:stream:{client_id}` using `XREADGROUP`
-2. Monitors `conversation:current:{session_id}` for rotation signals
-3. On conversation rotation:
-   - Closes current WAV file
-   - Opens new WAV file with new conversation ID
-4. Writes chunks immediately to disk (real-time persistence)
-5. Stores file path in `audio:file:{conversation_id}` (Redis)
-6. Handles END signal: closes file, returns statistics
-7. ACKs messages after writing to disk
-
-**Container**: `chronicle-backend` (RQ Worker)
-
-**Output Location**: `backends/advanced/data/chunks/` (volume-mounted)
-
-**File Format**: `{timestamp_ms}_{client_id}_{conversation_id}.wav`
-
-### Fan-Out Pattern Visualization
+### Fan-Out Visualization
 
 ```
 audio:stream:user01-phone
-    ↓
     ├─ Consumer Group: "streaming-transcription"
-    │  └─ Worker: streaming-worker-12345
-    │     → Reads: chunks → Deepgram WS → Results stream
-    │
+    │  └─ streaming-worker → Deepgram WS → results stream + plugins
     ├─ Consumer Group: "deepgram_workers"
-    │  ├─ Worker: deepgram-worker-67890
-    │  ├─ Worker: deepgram-worker-67891
-    │  └─ Reads: chunks → Buffer (30) → Batch API → Results stream
-    │
+    │  └─ batch workers → Buffer(30) → API → results stream
     └─ Consumer Group: "audio_persistence"
-       └─ Worker: persistence-worker-sessionXYZ
-          → Reads: chunks → WAV file (disk)
+       └─ persistence-worker → WAV file on disk
 ```
-
-**Key Benefits**:
-- **Horizontal scaling**: Multiple workers per group
-- **Independent processing**: Each group processes all messages
-- **No message loss**: Messages ACKed only after processing
-- **Decoupled**: Producer doesn't know about consumers
 
 ## Transcription Results Aggregator
 
-**File**: `backends/advanced/src/advanced_omi_backend/services/audio_stream/aggregator.py`
+**File**: `services/audio_stream/aggregator.py` — stateless, in-memory
 
-**Class**: `TranscriptionResultsAggregator`
-
-**Container**: `chronicle-backend` (in-memory, stateless)
-
-### Methods
-
-#### Get Combined Results
-
-```python
-async def get_combined_results(session_id: str) -> dict
-```
-
-**Returns**:
-```python
-{
-    "text": "Full transcript...",
-    "segments": [SpeakerSegment, ...],
-    "words": [Word, ...],
-    "provider": "deepgram",
-    "chunk_count": 42
-}
-```
-
-**Process**:
-- Reads all entries from `transcription:results:{session_id}`
-- For **streaming mode**: Uses latest final result only (supersedes interim)
-- For **batch mode**: Combines all chunks sequentially
-- Adjusts timestamps across chunks (adds audio offset)
-- Merges speaker segments, words
-
-#### Get Session Results (Raw)
-
-```python
-async def get_session_results(session_id: str) -> list[dict]
-```
-
-**Returns**: Raw list of transcription result messages
-
-#### Get Real-time Results
-
-```python
-async def get_realtime_results(
-    session_id: str,
-    last_id: str = "0-0"
-) -> tuple[list[dict], str]
-```
-
-**Returns**: `(new_results, new_last_id)`
-
-**Purpose**: Incremental polling for live UI updates
-
-### Data Location
-
-**Input**: `transcription:results:{session_id}` stream (redis container)
-
-**Processing**: In-memory (chronicle-backend container)
-
-**Output**: Returned to caller (no persistence)
+- **`get_combined_results(session_id)`**: Reads all entries from results stream, combines text/segments/words. Streaming mode uses latest final result; batch mode combines sequentially.
+- **`get_realtime_results(session_id, last_id)`**: Incremental polling for live UI updates.
 
 ## Job Queue Orchestration (RQ)
 
-**Library**: Python RQ (Redis Queue)
-
-**File**: `backends/advanced/src/advanced_omi_backend/controllers/queue_controller.py`
-
-**Containers**:
-- `chronicle-backend` (enqueues jobs)
-- `rq-worker` (executes jobs)
+**File**: `controllers/queue_controller.py` — enqueued in `chronicle-backend`, executed in `rq-worker`
 
 ### Job Pipeline
 
 ```
 Session Starts
     ↓
-┌─────────────────────────────────┐
-│ stream_speech_detection_job     │ ← Session-level (long-running)
-│ - Polls transcription results   │
-│ - Analyzes speech content       │
-│ - Checks speaker filters        │
-└─────────────┬───────────────────┘
-              ↓ (when speech detected)
-┌─────────────────────────────────┐
-│ open_conversation_job           │ ← Conversation-level (long-running)
-│ - Creates conversation          │
-│ - Signals file rotation         │
-│ - Monitors activity             │
-│ - Detects end conditions        │
-└─────────────┬───────────────────┘
-              ↓ (when conversation ends)
-┌─────────────────────────────────┐
-│ Post-Conversation Pipeline      │
-├─────────────────────────────────┤
-│ • recognize_speakers_job        │
-│ • memory_extraction_job         │
-│ • generate_title_summary_job    │
-│ • dispatch_conversation_complete│
-└─────────────────────────────────┘
+stream_speech_detection_job          ← Session-level, up to 24h
+    ↓ (speech detected)
+open_conversation_job                ← Conversation-level, up to 3h
+    ↓ (conversation ends)
+Post-Conversation Chain (RQ depends_on):
+  [transcribe_full_audio_job]        ← File uploads only, RAISES on failure
+  → recognize_speakers_job           ← 20 min timeout
+  → memory_extraction_job            ← 15 min timeout
+  → generate_title_summary_job       ← 5 min timeout
+  → dispatch_conversation_complete   ← 2 min timeout
 ```
 
-### Session-Level Jobs
+### Speech Detection Job
 
-#### Speech Detection Job
+**File**: `workers/transcription_jobs.py` — `stream_speech_detection_job()`
 
-**File**: `backends/advanced/src/advanced_omi_backend/workers/transcription_jobs.py`
+Polls `TranscriptionResultsAggregator` at 1s intervals. Speech criteria: word count > 10, duration > 5s, confidence above threshold. When detected: creates conversation in MongoDB, enqueues `open_conversation_job`, exits (restarts after conversation ends). Checks `transcription_error` flag on each poll.
 
-**Function**: `stream_speech_detection_job()`
+### Open Conversation Job
 
-**Scope**: Entire session (can handle multiple conversations)
+**File**: `workers/conversation_jobs.py` — `open_conversation_job()`
 
-**Max Duration**: 24 hours
+1. Creates conversation in MongoDB
+2. Sets `conversation:current:{session_id}` → triggers WAV file rotation
+3. Polls transcription updates (1s), dispatches `transcript.streaming` plugin events
+4. Tracks inactivity (60s timeout). End conditions: disconnect, manual stop, inactivity, plugin close
+5. Waits for transcription completion (30s max) and audio file path
+6. Enqueues post-conversation pipeline
+7. Calls `handle_end_of_conversation()` → cleans up, re-enqueues speech detection if session active
 
-**Process**:
-1. Polls `TranscriptionResultsAggregator.get_combined_results()` (1-second intervals)
-2. Analyzes speech content:
-   - Word count > 10
-   - Duration > 5 seconds
-   - Confidence > threshold
-3. If speaker filter enabled: checks for enrolled speakers
-4. When speech detected:
-   - Creates conversation in MongoDB
-   - Enqueues `open_conversation_job`
-   - **Exits** (restarts when conversation completes)
-5. Handles transcription errors (marks session with error flag)
+### Post-Conversation Jobs
 
-**RQ Queue**: `speech_detection_queue` (dedicated queue)
+| Job | What it does | On Failure |
+|-----|-------------|------------|
+| `transcribe_full_audio_job` | Batch transcribes full audio (file uploads only). Dispatches `transcript.batch` plugin event. | **Raises** → blocks entire chain |
+| `recognize_speakers_job` | Sends audio + segments to speaker service, updates speaker labels | Returns dict → chain continues |
+| `memory_extraction_job` | LLM extracts facts, stores in Qdrant/OpenMemory. Dispatches `memory.processed` plugin event | Returns dict → chain continues |
+| `generate_title_summary_job` | LLM generates title/summary, updates MongoDB | Returns dict → chain continues |
+| `dispatch_conversation_complete_event_job` | Dispatches `conversation.complete` plugin event | Returns dict |
 
-**Container**: `rq-worker`
-
-### Conversation-Level Jobs
-
-#### Open Conversation Job
-
-**File**: `backends/advanced/src/advanced_omi_backend/workers/conversation_jobs.py`
-
-**Function**: `open_conversation_job()`
-
-**Scope**: Single conversation
-
-**Max Duration**: 3 hours
-
-**Process**:
-1. Creates conversation document in MongoDB `conversations` collection
-2. Sets `conversation:current:{session_id}` = `conversation_id` (Redis)
-   - **Triggers audio persistence job to rotate WAV file**
-3. Polls for transcription updates (1-second intervals)
-4. Tracks speech activity (inactivity timeout = 60 seconds default)
-5. Detects end conditions:
-   - WebSocket disconnect
-   - User manual stop
-   - Inactivity timeout
-6. Waits for audio file path from persistence job
-7. Saves `audio_path` to conversation document
-8. Triggers conversation-level plugins
-9. Enqueues post-conversation jobs
-10. Calls `handle_end_of_conversation()` for cleanup + restart
-
-**RQ Queue**: `default`
-
-**Container**: `rq-worker`
-
-#### Audio Persistence Job
-
-**File**: `backends/advanced/src/advanced_omi_backend/workers/audio_jobs.py`
-
-**Function**: `audio_streaming_persistence_job()`
-
-**Scope**: Entire session (parallel with open_conversation_job)
-
-**Max Duration**: 24 hours
-
-**Process**:
-1. Monitors `conversation:current:{session_id}` for rotation signals
-2. For each conversation:
-   - Opens new WAV file: `{timestamp}_{client_id}_{conversation_id}.wav`
-   - Writes chunks immediately as they arrive from stream
-   - Stores file path in `audio:file:{conversation_id}`
-3. On rotation signal:
-   - Closes current file
-   - Opens new file for next conversation
-4. On END signal:
-   - Closes file
-   - Returns statistics (chunk count, bytes, duration)
-
-**Output**: WAV files in `backends/advanced/data/chunks/`
-
-**Container**: `rq-worker`
-
-### Post-Conversation Pipeline
-
-**Streaming conversations**: Use streaming transcript saved during conversation. No batch re-transcription.
-
-**File uploads**: Batch transcription job runs first, then post-conversation jobs depend on it.
-
-#### 1. Recognize Speakers Job
-
-**File**: `backends/advanced/src/advanced_omi_backend/workers/transcription_jobs.py`
-
-**Function**: `recognize_speakers_job()`
-
-**Process**:
-- Sends audio + segments to speaker recognition service
-- Identifies speakers using voice embeddings
-- Updates segment speaker labels in MongoDB
-
-**Optional**: Only runs if `DISABLE_SPEAKER_RECOGNITION=false`
-
-**Container**: `rq-worker`
-
-**External Service**: `speaker-recognition` container (if enabled)
-
-#### 2. Memory Extraction Job
-
-**File**: `backends/advanced/src/advanced_omi_backend/workers/memory_jobs.py`
-
-**Function**: `memory_extraction_job()`
-
-**Prerequisite**: Speaker recognition job
-
-**Process**:
-- Uses LLM (OpenAI/Ollama) to extract semantic facts
-- Stores embeddings in vector database:
-  - **Chronicle provider**: Qdrant
-  - **OpenMemory MCP provider**: External OpenMemory server
-
-**Container**: `rq-worker`
-
-**External Services**:
-- `ollama` or OpenAI API (LLM)
-- `qdrant` or OpenMemory MCP (vector storage)
-
-#### 3. Generate Title Summary Job
-
-**File**: `backends/advanced/src/advanced_omi_backend/workers/conversation_jobs.py`
-
-**Function**: `generate_title_summary_job()`
-
-**Prerequisite**: Speaker recognition job
-
-**Process**:
-- Uses LLM to generate title, summary, detailed summary
-- Updates conversation document in MongoDB
-
-**Container**: `rq-worker`
-
-#### 4. Dispatch Conversation Complete Event
-
-**File**: `backends/advanced/src/advanced_omi_backend/workers/conversation_jobs.py`
-
-**Function**: `dispatch_conversation_complete_event_job()`
-
-**Process**:
-- Triggers `conversation.complete` plugin event
-
-**Container**: `rq-worker`
-
-#### Batch Transcription Job
-
-**File**: `backends/advanced/src/advanced_omi_backend/workers/transcription_jobs.py`
-
-**Function**: `transcribe_full_audio_job()`
-
-**When used**:
-- File uploads via `/api/process-audio-files`
-- Manual reprocessing via `/api/conversations/{id}/reprocess-transcript`
-- NOT used for streaming conversations
-
-**Process**:
-- Reconstructs audio from MongoDB chunks
-- Batch transcribes entire audio
-- Stores transcript with word-level timestamps
-
-**Container**: `rq-worker`
+**Critical RQ behavior**: A raised exception marks a job "failed" and all dependent jobs stay **deferred forever**. This is why most post-conversation jobs return `{"success": False}` instead of raising.
 
 ### Session Restart
 
-**File**: `backends/advanced/src/advanced_omi_backend/utils/conversation_utils.py`
-
-**Function**: `handle_end_of_conversation()`
-
-**Process**:
-1. Deletes transcription results stream: `transcription:results:{session_id}`
-2. Increments `session:conversation_count:{session_id}`
-3. Checks if session still active (WebSocket connected)
-4. If active: Re-enqueues `stream_speech_detection_job` for next conversation
-5. Cleans up consumer groups and pending messages
-
-**Purpose**: Allows continuous recording with multiple conversations per session
+`handle_end_of_conversation()` (`utils/conversation_utils.py`): Deletes transcription results stream, increments conversation count, re-enqueues speech detection if WebSocket still connected.
 
 ## Data Storage
 
-### MongoDB Collections
+### MongoDB (`chronicle` database)
 
-**Database**: `chronicle`
-
-**Container**: `mongo`
-
-**Volume**: `mongodb_data` (persistent)
-
-#### `conversations` Collection
-
-**Schema**:
+**`conversations` collection**:
 ```python
 {
-    "_id": ObjectId,
-    "conversation_id": "uuid-string",
+    "conversation_id": "uuid",
     "audio_uuid": "session_id",
     "user_id": ObjectId,
     "client_id": "user01-phone",
-
-    # Content
     "title": "Meeting notes",
-    "summary": "Discussion about...",
-    "detailed_summary": "Longer summary...",
-    "transcript": "Full transcript text",
+    "summary": "...",
+    "detailed_summary": "...",
+    "transcript": "Full text",
     "audio_path": "1704067200000_user01-phone_convid.wav",
-
-    # Versioned Transcripts
     "active_transcript_version": "v1",
-    "transcript_versions": {
-        "v1": {
-            "text": "Full transcript",
-            "segments": [SpeakerSegment],
-            "words": [Word],
-            "provider": "deepgram",
-            "processing_time_seconds": 45.2,
-            "created_at": "2025-01-11T12:00:00Z"
-        }
-    },
-    "segments": [SpeakerSegment],  # From active version
-
-    # Metadata
-    "created_at": "2025-01-11T12:00:00Z",
-    "completed_at": "2025-01-11T12:15:00Z",
+    "transcript_versions": { "v1": { "text": "...", "segments": [...], "words": [...], "provider": "deepgram" } },
+    "segments": [SpeakerSegment],  # mirrors active version
+    "created_at": "...", "completed_at": "...",
     "end_reason": "user_stopped|inactivity_timeout|websocket_disconnect",
     "deleted": false
 }
 ```
+Indexes: `user_id`, `client_id`, `conversation_id` (unique)
 
-**Indexes**:
-- `user_id` (for user-scoped queries)
-- `client_id` (for device filtering)
-- `conversation_id` (unique)
-
-#### `audio_chunks` Collection
-
-**Purpose**: Stores raw audio session data
-
-**Schema**:
-```python
-{
-    "_id": ObjectId,
-    "audio_uuid": "session_id",
-    "user_id": ObjectId,
-    "client_id": "user01-phone",
-    "created_at": "2025-01-11T12:00:00Z",
-    "metadata": { ... }
-}
-```
-
-**Use Case**: Speech-driven architecture (sessions without conversations)
-
-#### `users` Collection
-
-**Purpose**: User accounts, authentication, preferences
-
-**Schema**:
-```python
-{
-    "_id": ObjectId,
-    "email": "user@example.com",
-    "hashed_password": "...",
-    "is_active": true,
-    "is_superuser": false,
-    "created_at": "2025-01-11T12:00:00Z"
-}
-```
+**`audio_chunks` collection**: Raw audio session data (`audio_uuid`, `user_id`, `client_id`). Always created; conversations only created when speech detected.
 
 ### Disk Storage
 
-**Location**: `backends/advanced/data/chunks/`
+Location: `backends/advanced/data/chunks/` (volume-mounted)
+Format: `{timestamp_ms}_{client_id}_{conversation_id}.wav`
+Created by `audio_streaming_persistence_job()`, read by post-conversation jobs. Manual cleanup only.
 
-**Container**: `chronicle-backend` (volume-mounted)
+### Vector Storage
 
-**Volume**: `./backends/advanced/data/chunks:/app/data/chunks`
+- **Qdrant** (Chronicle native): Container `qdrant`, ports 6333/6334, user-specific collections
+- **OpenMemory MCP**: Container `openmemory-mcp`, port 8765, cross-client storage
 
-**File Format**: WAV files
+Both written by `memory_extraction_job()`, read by `/api/memories/search`.
 
-**Naming Convention**: `{timestamp_ms}_{client_id}_{conversation_id}.wav`
+## Plugin System
 
-**Example**: `1704067200000_user01-phone_550e8400-e29b-41d4-a716-446655440000.wav`
+**Framework**: `backends/advanced/src/advanced_omi_backend/plugins/` (base.py, router.py, events.py, services.py)
+**Implementations**: `plugins/` at repo root
 
-**Created by**: `audio_streaming_persistence_job()`
+### Events
 
-**Read by**: Post-conversation transcription jobs
+| Event | Emitted By | When |
+|-------|-----------|------|
+| `transcript.streaming` | Streaming consumer + open_conversation_job | Each final transcription result |
+| `transcript.batch` | transcribe_full_audio_job | After batch transcription |
+| `conversation.complete` | dispatch_conversation_complete_event_job | After all post-conversation jobs |
+| `memory.processed` | memory_extraction_job | After memory extraction |
+| `conversation.starred` | conversation_controller.toggle_star() | User stars/unstars via API |
+| `button.single_press` / `button.double_press` | websocket_controller._handle_button_event() | OMI device button tap |
+| `plugin_action` | PluginServices.call_plugin() | Cross-plugin call |
 
-**Retention**: Manual cleanup (no automatic deletion)
+**Note**: `transcript.streaming` is dispatched from **two** sites — the streaming consumer (FastAPI process) and `open_conversation_job` (RQ worker process) — ensuring wake-word plugins react in real-time.
 
-### Redis Storage
+### Event Data
 
-**Container**: `redis`
+| Event | Key Fields in `PluginContext.data` |
+|-------|-----------|
+| `transcript.*` | `transcript`, `segment_id`, `conversation_id`, `segments`, `word_count` |
+| `conversation.complete` | `conversation` (dict), `transcript`, `duration`, `conversation_id` |
+| `memory.processed` | `memories` (list), `conversation` (dict), `memory_count` |
+| `conversation.starred` | `conversation_id`, `starred` (bool), `starred_at`, `title` |
+| `button.*` | `state`, `timestamp`, `audio_uuid`, `session_id`, `client_id` |
 
-**Volume**: `redis_data` (persistent)
+### Discovery and Loading
 
-| Key Pattern | Type | Purpose | TTL | Created By |
-|-------------|------|---------|-----|------------|
-| `audio:stream:{client_id}` | Stream | Audio chunks for transcription | None (MAXLEN=25k) | AudioStreamProducer |
-| `audio:session:{session_id}` | Hash | Session metadata | 1 hour | AudioStreamProducer |
-| `transcription:results:{session_id}` | Stream | Transcription results | Manual delete | Transcription consumers |
-| `transcription:interim:{session_id}` | Pub/Sub | Real-time interim results | N/A (ephemeral) | Streaming consumer |
-| `conversation:current:{session_id}` | String | Current conversation ID | 24 hours | open_conversation_job |
-| `audio:file:{conversation_id}` | String | Audio file path | 24 hours | audio_persistence_job |
-| `session:conversation_count:{session_id}` | Counter | Conversation count | 1 hour | handle_end_of_conversation |
-| `speech_detection_job:{client_id}` | String | Job ID for cleanup | 1 hour | speech_detection_job |
-| `rq:job:{job_id}` | Hash | RQ job metadata | 24 hours (default) | RQ |
+On startup (`app_factory.py`, Phase 4):
+1. `discover_plugins()` scans `plugins/` directory for subdirectories with `plugin.py`
+2. Imports module, finds `BasePlugin` subclass by introspection
+3. Three-layer config merge: `plugins/{id}/config.yml` (defaults) → `plugins/{id}/.env` (secrets) → `config/plugins.yml` (orchestration)
+4. Instantiates plugin, calls `register_prompts()`, `register_plugin()`, `initialize()`
+5. Builds inverted index: `_plugins_by_event[event] → [plugin_ids]`
 
-### Vector Storage (Memory)
-
-#### Option A: Qdrant (Chronicle Native Provider)
-
-**Container**: `qdrant`
-
-**Volume**: `qdrant_data` (persistent)
-
-**Ports**: 6333 (HTTP), 6334 (gRPC)
-
-**Collections**: User-specific collections for semantic embeddings
-
-**Written by**: `memory_extraction_job()`
-
-**Read by**: Memory search API (`/api/memories/search`)
-
-#### Option B: OpenMemory MCP
-
-**Container**: `openmemory-mcp` (external service)
-
-**Port**: 8765
-
-**Protocol**: MCP (Model Context Protocol)
-
-**Collections**: Cross-client memory storage
-
-**Written by**: `memory_extraction_job()` (via MCP provider)
-
-**Read by**: Memory search API (via MCP provider)
-
-## Complete End-to-End Flow
-
-### Step-by-Step Data Journey
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ 1. AUDIO INPUT                                                  │
-└─────────────────────────────────────────────────────────────────┘
-  WebSocket (/ws) or File Upload (/audio/upload)
-  ↓
-  Container: chronicle-backend
-  ↓
-  AudioStreamProducer.init_session()
-  - Creates: audio:session:{session_id} (Redis)
-  - Initializes: In-memory buffer (chronicle-backend container)
-  ↓
-  AudioStreamProducer.add_audio_chunk()
-  - Buffers: In-memory (chronicle-backend)
-  - Chunks: Fixed 0.25s chunks (8,000 bytes)
-  - Publishes: audio:stream:{client_id} (Redis)
-  - Returns: Redis message IDs
-
-┌─────────────────────────────────────────────────────────────────┐
-│ 2. SESSION-LEVEL JOB (RQ)                                       │
-└─────────────────────────────────────────────────────────────────┘
-  stream_speech_detection_job
-  Container: rq-worker
-  ↓
-  Polls: TranscriptionResultsAggregator.get_combined_results()
-  Reads: transcription:results:{session_id} (Redis)
-  ↓
-  Analyzes: Word count, duration, confidence
-  ↓
-  When speech detected:
-    - Creates: Conversation document (MongoDB)
-    - Enqueues: open_conversation_job (RQ)
-    - Exits (restarts when conversation ends)
-
-┌─────────────────────────────────────────────────────────────────┐
-│ 3a. TRANSCRIPTION CONSUMER (Background Task)                    │
-└─────────────────────────────────────────────────────────────────┘
-  StreamingTranscriptionConsumer (or BaseAudioStreamConsumer)
-  Container: chronicle-backend (Background Task)
-  ↓
-  Reads: audio:stream:{client_id} (Redis, via XREADGROUP)
-  Consumer Group: streaming-transcription (or batch provider)
-  ↓
-  STREAMING PATH:
-    • Opens: WebSocket to Deepgram
-    • Sends: Chunks immediately (no buffering)
-    • Publishes Interim: transcription:interim:{session_id} (Redis Pub/Sub)
-    • Publishes Final: transcription:results:{session_id} (Redis Stream)
-    • Triggers: Plugins on final results
-
-  BATCH PATH:
-    • Buffers: 30 chunks (~7.5s) in memory (chronicle-backend)
-    • Combines: All buffered chunks
-    • Transcribes: Via provider API (Deepgram/Parakeet)
-    • Adjusts: Timestamps relative to session start
-    • Publishes: transcription:results:{session_id} (Redis Stream)
-
-┌─────────────────────────────────────────────────────────────────┐
-│ 3b. AUDIO PERSISTENCE CONSUMER (RQ Job)                         │
-└─────────────────────────────────────────────────────────────────┘
-  audio_streaming_persistence_job
-  Container: rq-worker
-  ↓
-  Reads: audio:stream:{client_id} (Redis, via XREADGROUP)
-  Consumer Group: audio_persistence
-  ↓
-  Monitors: conversation:current:{session_id} (Redis)
-  ↓
-  For each conversation:
-    • Opens: New WAV file (data/chunks/, chronicle-backend volume)
-    • Writes: Chunks immediately (real-time)
-    • Stores: audio:file:{conversation_id} = path (Redis)
-  ↓
-  On rotation signal:
-    • Closes: Current file
-    • Opens: New file for next conversation
-  ↓
-  On END signal:
-    • Closes: File
-    • Returns: Statistics (chunks, bytes, duration)
-
-┌─────────────────────────────────────────────────────────────────┐
-│ 4. CONVERSATION-LEVEL JOB (RQ)                                  │
-└─────────────────────────────────────────────────────────────────┘
-  open_conversation_job
-  Container: rq-worker
-  ↓
-  Creates: Conversation document (MongoDB conversations collection)
-  ↓
-  Sets: conversation:current:{session_id} = conversation_id (Redis)
-    → Triggers audio persistence job to rotate WAV file
-  ↓
-  Polls: TranscriptionResultsAggregator for updates (1s intervals)
-  Reads: transcription:results:{session_id} (Redis)
-  ↓
-  Tracks: Speech activity (inactivity timeout = 60s)
-  ↓
-  Detects End:
-    - Inactivity (60s)
-    - User manual stop
-    - WebSocket disconnect
-  ↓
-  Waits: For audio file path from persistence job
-  Reads: audio:file:{conversation_id} (Redis)
-  ↓
-  Saves: audio_path to conversation document (MongoDB)
-  ↓
-  Enqueues: POST-CONVERSATION PIPELINE (RQ)
-
-┌─────────────────────────────────────────────────────────────────┐
-│ 5. POST-CONVERSATION PIPELINE (RQ - Parallel Jobs)              │
-└─────────────────────────────────────────────────────────────────┘
-  All jobs run in parallel
-  Container: rq-worker
-  ↓
-  Reads: Audio file from disk (data/chunks/*.wav)
-
-  ┌─ transcribe_full_audio_job
-  │  - Batch transcribes: Complete audio file
-  │  - Validates: Meaningful speech
-  │  - Marks deleted: If no speech
-  │  - Stores: MongoDB (transcript, segments, words)
-  │
-  │  └─ recognize_speakers_job (if enabled)
-  │     - Sends: Audio + segments to speaker-recognition service
-  │     - Identifies: Speakers via voice embeddings
-  │     - Updates: MongoDB (segment speaker labels)
-  │
-  │  └─ memory_extraction_job
-  │     - Uses: LLM (OpenAI/Ollama) to extract facts
-  │     - Stores: Qdrant (Chronicle) or OpenMemory MCP (vector DB)
-  │
-  └─ generate_title_summary_job
-     - Uses: LLM (OpenAI/Ollama)
-     - Generates: Title, summary, detailed_summary
-     - Stores: MongoDB (conversation document)
-
-  └─ dispatch_conversation_complete_event_job
-     - Triggers: conversation.complete plugins
-     - Only for: File uploads (not streaming)
-
-  All results stored: MongoDB conversations collection
-
-┌─────────────────────────────────────────────────────────────────┐
-│ 6. SESSION RESTART                                              │
-└─────────────────────────────────────────────────────────────────┘
-  handle_end_of_conversation()
-  Container: chronicle-backend
-  ↓
-  Deletes: transcription:results:{session_id} (Redis)
-  ↓
-  Increments: session:conversation_count:{session_id} (Redis)
-  ↓
-  Checks: Session still active? (WebSocket connected)
-  ↓
-  If active:
-    - Re-enqueues: stream_speech_detection_job (RQ)
-    - Session remains: "active" for next conversation
-```
-
-### Data Locations Summary
-
-| Stage | Data Type | Location | Container |
-|-------|-----------|----------|-----------|
-| Input | Audio bytes | In-memory buffers | chronicle-backend |
-| Producer | Fixed chunks | `audio:stream:{client_id}` | redis |
-| Session metadata | Hash | `audio:session:{session_id}` | redis |
-| Transcription consumer | Interim results | `transcription:interim:{session_id}` (Pub/Sub) | redis |
-| Transcription consumer | Final results | `transcription:results:{session_id}` (Stream) | redis |
-| Audio persistence | WAV files | `data/chunks/*.wav` (disk volume) | chronicle-backend (volume) |
-| Audio persistence | File paths | `audio:file:{conversation_id}` | redis |
-| Conversation job | Conversation doc | MongoDB `conversations` | mongo |
-| Post-processing | Transcript | MongoDB `conversations` | mongo |
-| Post-processing | Memories | Qdrant or OpenMemory MCP | qdrant / openmemory-mcp |
-| Post-processing | Title/summary | MongoDB `conversations` | mongo |
-
-## Key Design Patterns
-
-### 1. Speech-Driven Architecture
-
-**Principle**: Conversations only created when speech is detected
-
-**Benefits**:
-- Clean user experience (no noise-only sessions in UI)
-- Reduced memory processing load
-- Automatic quality filtering
-
-**Implementation**:
-- `audio_chunks` collection: Always stores sessions
-- `conversations` collection: Only created with speech
-- Speech detection: Analyzes word count, duration, confidence
-
-### 2. Versioned Processing
-
-**Principle**: Store multiple versions of transcripts/memories
-
-**Benefits**:
-- Reprocess without losing originals
-- A/B testing different providers
-- Rollback to previous versions
-
-**Implementation**:
-- `transcript_versions` dict with version IDs (v1, v2, ...)
-- `active_transcript_version` pointer
-- `segments` field mirrors active version (quick access)
-
-### 3. Session-Level vs Conversation-Level
-
-**Session**: WebSocket connection lifetime (multiple conversations)
-- Duration: Up to 24 hours
-- Job: `stream_speech_detection_job`
-- Purpose: Continuous monitoring for speech
-
-**Conversation**: Speech burst between silence periods
-- Duration: Typically minutes
-- Job: `open_conversation_job`
-- Purpose: Process single meaningful exchange
-
-**Benefits**:
-- Continuous recording without manual start/stop
-- Automatic conversation segmentation
-- Efficient resource usage (one session, many conversations)
-
-### 4. Job Metadata Cascading
-
-**Pattern**: Parent jobs link to child jobs
-
-**Example**:
-```
-speech_detection_job
-  ↓ job_id stored in
-audio:session:{session_id}
-  ↓ creates
-open_conversation_job
-  ↓ job_id stored in
-conversation document
-  ↓ creates
-post-conversation jobs (parallel)
-```
-
-**Benefits**:
-- Job grouping and cleanup
-- Dependency tracking
-- Debugging (trace job lineage)
-
-### 5. Real-Time + Batch Hybrid
-
-**Real-Time Path** (Streaming Consumer):
-- Low latency (interim results in <1 second)
-- WebSocket to Deepgram
-- Publishes to Pub/Sub for live UI updates
-
-**Batch Path** (Batch Consumer):
-- High accuracy (more context)
-- Buffers 7.5 seconds
-- API-based transcription
-
-**Both paths** write to same `transcription:results:{session_id}` stream
-
-**Benefits**:
-- Live UI updates (interim results)
-- Accurate final results (batch processing)
-- Provider flexibility (switch between streaming/batch)
-
-### 6. Fan-Out via Redis Consumer Groups
-
-**Pattern**: Multiple consumer groups read same stream
-
-**Example**: `audio:stream:{client_id}` consumed by:
-- Transcription consumer group
-- Audio persistence consumer group
-
-**Benefits**:
-- Parallel processing paths
-- Horizontal scaling (multiple workers per group)
-- No message duplication (each group processes independently)
-
-### 7. File Rotation via Redis Signals
-
-**Pattern**: Conversation job signals persistence job via Redis key
-
-**Implementation**:
+**RQ Workers**: `ensure_plugin_router()` handles lazy re-initialization in worker processes.
+**Hot Reload**: `reload_plugins()` purges `sys.modules`, builds new router, atomically swaps global.
+
+### Dispatch Flow
+
+`PluginRouter.dispatch_event()`:
+1. Lookup plugins by event (O(1) index)
+2. For each enabled plugin: check condition → build context → call handler
+3. On exception: log with traceback, continue to next plugin (never propagates)
+4. Log event to `system:event_log` Redis list
+5. `should_continue=False` stops the chain; exceptions do not
+
+### Condition Types
+
+| Type | Behavior |
+|------|----------|
+| `always` | Always executes |
+| `wake_word` | Checks if transcript **starts with** any `wake_words`, extracts command after wake word |
+| `keyword_anywhere` | Checks if keyword appears **anywhere**, extracts remaining text as command |
+| `conditional` | Reserved for future use (currently always executes) |
+
+Button and starred events bypass all transcript-based conditions.
+
+### Plugin Services
+
 ```python
-# Conversation job
-redis.set(f"conversation:current:{session_id}", conversation_id)
-
-# Persistence job (monitors key)
-current_conv = redis.get(f"conversation:current:{session_id}")
-if current_conv != last_conv:
-    close_current_file()
-    open_new_file(current_conv)
+await context.services.close_conversation(session_id, reason)   # Trigger post-processing
+await context.services.star_conversation(session_id)             # Star/unstar
+result = await context.services.call_plugin("homeassistant", "toggle_lights", data)  # Cross-plugin
 ```
 
-**Benefits**:
-- Decoupled jobs (no direct communication)
-- Real-time file rotation
-- Multiple files per session (one per conversation)
+`close_conversation()`: Checks `conversation:current:{session_id}` in Redis, signals `open_conversation_job` to end.
+`call_plugin()`: Direct call bypassing router dispatch.
+
+### ASR Keyword Hints
+
+Plugin router collects `wake_words`/`keywords` from enabled plugins via `get_asr_keywords()`, injected as recognition hints into Deepgram (`keyterm`) and VibeVoice (`context_info`).
+
+### Configuration
+
+```yaml
+# config/plugins.yml (orchestration, committed)
+plugins:
+  my_plugin:
+    enabled: true
+    events: [transcript.streaming, conversation.complete]
+    condition: { type: wake_word, wake_words: ["hey chronicle"] }
+    api_url: ${MY_API_URL}
+
+# plugins/{id}/config.yml (non-secret defaults, committed)
+# plugins/{id}/.env (secrets, gitignored)
+```
+
+### Button Event Flow
+
+```
+OMI Device (BLE button) → friend-lite-sdk (parse_button_event)
+  → BLE Client (Wyoming protocol: {"type": "button-event", ...})
+  → Backend (_handle_button_event) → dispatch_event to plugins
+  → Plugin (on_button_event) → can close_conversation/call_plugin
+```
+
+### Existing Plugins
+
+| Plugin | Events | Purpose |
+|--------|--------|---------|
+| `email_summarizer` | `conversation.complete` | Emails conversation summaries |
+| `homeassistant` | `plugin_action` | Smart home control via cross-plugin calls |
+| `test_event` | `conversation.complete` | Test/debug event logging |
+| `test_button_actions` | `button.single_press`, `button.double_press` | Button → close conversation, star, call plugin |
 
 ## Failure Handling
 
-### Transcription Errors
+### Per-Component Behavior
 
-**Detection**: `stream_speech_detection_job` polls results
+| Component | On Failure | Net Effect |
+|-----------|-----------|------------|
+| **Streaming transcription** (Deepgram WS) | Sets `transcription_error` in session hash, re-raises. No retry. | Speech detection exits on next poll. User must reconnect. |
+| **Batch transcription** (API) | Logged, messages NOT ACKed. Dead consumer cleanup (30s) eventually ACKs and discards. | Failed chunks silently lost. |
+| **Speech detection job** | Checks `transcription_error` each poll. 60s no-activity watchdog. 2h max runtime. | No conversation created. No automatic restart. |
+| **Conversation job** | `try/finally` always calls `handle_end_of_conversation(end_reason="error")`. | Session always recovers; failed conversation may be marked deleted. |
+| **Audio persistence** | Buffer NOT cleared on write failure (can retry next chunk). | Audio partially lost on persistent failures; logged but not surfaced. |
+| **WebSocket disconnect** | `cleanup_client_state()` → `finalize_session()` → 60s TTL on stream. Does NOT cancel speech detection. | Orderly shutdown. In-flight processing completes. |
+| **Redis connection** | No circuit breaker. Unhandled `ConnectionError` → RQ marks job failed. | Dependent jobs stay deferred forever. Manual recovery needed. |
 
-**Action**:
-- Sets `transcription_error` field in `audio:session:{session_id}`
-- Logs error for debugging
-- Session remains active (can recover)
+### Post-Conversation Job Failures
 
-### No Meaningful Speech
+| Job | On Failure | Chain Impact |
+|-----|-----------|-------------|
+| `transcribe_full_audio_job` | **Raises** | All downstream deferred **forever** |
+| `recognize_speakers_job` | Returns dict | Chain continues without speaker labels |
+| `memory_extraction_job` | Returns dict | Chain continues without memories |
+| `generate_title_summary_job` | Returns dict | Chain continues without title |
 
-**Detection**: `transcribe_full_audio_job` validates transcript
+### Conversation Job `try/finally` Pattern
 
-**Criteria**:
-- Word count < 10
-- Duration < 5 seconds
-- All words low confidence
+```python
+end_of_conversation_handled = False
+try:
+    # ... conversation phases ...
+    end_of_conversation_handled = True
+    return await handle_end_of_conversation(...)
+finally:
+    if not end_of_conversation_handled:
+        await handle_end_of_conversation(..., end_reason="error")
+```
 
-**Action**:
-- Marks conversation `deleted=True`
-- Sets `end_reason="no_meaningful_speech"`
-- Conversation hidden from UI
+### Dead Consumer Cleanup
 
-### Audio File Not Ready
+- **Automatic**: `cleanup_dead_consumers()` — 30s idle threshold → XCLAIM + XACK (discards, no reprocess) + DELCONSUMER
+- **Manual**: `cleanup_stuck_stream_workers()` endpoint — 5 min idle threshold, same pattern
+- **Zombie RQ jobs**: `check_job_alive()` called each iteration of long-running jobs; exits if job missing from Redis
 
-**Detection**: `open_conversation_job` waits for file path
+### Edge Cases
 
-**Timeout**: 30 seconds (configurable)
+- **No meaningful speech**: `transcribe_full_audio_job` marks conversation `deleted=True`, `end_reason="no_meaningful_speech"` (word count < 10, duration < 5s)
+- **Audio file not ready**: 30s timeout → conversation marked deleted with `end_reason="audio_file_not_ready"`
+- **Stream trimming**: MAXLEN 25,000 on audio streams; results streams deleted after conversation ends
+- **Session timeout**: 24h max → graceful exit, cleanup
 
-**Action**:
-- Marks conversation `deleted=True`
-- Sets `end_reason="audio_file_not_ready"`
-- Logs error for debugging
+### Job Timeouts
 
-### Job Zombies (Stuck Jobs)
+| Job | Queue | Timeout |
+|-----|-------|---------|
+| `speech_detection_job` | `transcription_queue` | 24 hours |
+| `audio_persistence_job` | `audio_queue` | 24 hours |
+| `recognize_speakers_job` | `default_queue` | 20 min |
+| `memory_extraction_job` | `memory_queue` | 15 min |
+| `generate_title_summary_job` | `default_queue` | 5 min |
 
-**Detection**: `check_job_alive()` utility
+On timeout, RQ kills the job. Dependent deferred jobs stay deferred forever.
 
-**Method**: Checks Redis for job existence
+### BackgroundTaskManager
 
-**Action**:
-- Returns `False` if job missing
-- Caller can retry or fail gracefully
+**File**: `task_manager.py` — tracks all async tasks in the FastAPI process.
 
-### Dead Consumers
+- `track_task()` / `_task_done()`: Register, detect completion/error, cap completed at 1,000
+- `_periodic_cleanup()`: Every 30s, cancels tasks exceeding timeout
+- `shutdown()`: Cancels all, waits 30s
+- `cancel_tasks_for_client()`: On disconnect, cancels non-processing tasks (preserves `transcription_chunk`, `memory`, `cropping`)
 
-**Detection**: Consumer group lag monitoring
+### What the Pipeline Does NOT Do
 
-**Cleanup**:
-- Removes idle consumers (>30 seconds)
-- Claims pending messages from dead consumers
-- Redistributes to active workers
-
-### Stream Trimming
-
-**Prevention**: Streams don't grow unbounded
-
-**Implementation**:
-- `XTRIM MAXLEN 25000` on `audio:stream:{client_id}`
-- Keeps last 25k messages (~104 minutes @ 0.25s chunks)
-- Deletes `transcription:results:{session_id}` after conversation ends
-
-### Session Timeout
-
-**Max Duration**: 24 hours
-
-**Action**:
-- Jobs exit gracefully
-- Session marked `"complete"`
-- Resources cleaned up (streams deleted, consumer groups removed)
-
----
-
-## Conclusion
-
-Chronicle's audio pipeline is designed for:
-- **Real-time processing**: Low-latency transcription and live UI updates
-- **Horizontal scalability**: Redis Consumer Groups enable multiple workers
-- **Fault tolerance**: Decoupled components, job retries, graceful error handling
-- **Resource efficiency**: Speech-driven architecture filters noise automatically
-- **Flexibility**: Pluggable providers (Deepgram/Parakeet, OpenAI/Ollama, Qdrant/OpenMemory)
-
-All coordinated through **Redis Streams** for data flow and **RQ** for orchestration, with **MongoDB** for final storage and **disk** for audio archives.
+- **No retry logic**: Failures log-and-continue or raise/return-failure. No backoff, no dead letter queues.
+- **No circuit breakers**: External service outages cause immediate failures.
+- **No cascade job cancellation**: Failed/timed-out RQ jobs leave dependents deferred forever.
+- **No automatic session recovery**: Failed speech detection → session dead until reconnect.

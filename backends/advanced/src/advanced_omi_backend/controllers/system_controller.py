@@ -16,6 +16,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Optional
 
+from dotenv import set_key as dotenv_set_key
 from fastapi import HTTPException
 from ruamel.yaml import YAML
 
@@ -880,35 +881,13 @@ async def set_memory_provider(provider: str):
         if not os.path.exists(env_path):
             raise FileNotFoundError(f".env file not found at {env_path}")
 
-        # Read current .env file
-        with open(env_path, "r") as file:
-            lines = file.readlines()
-
-        # Update or add MEMORY_PROVIDER line
-        provider_found = False
-        updated_lines = []
-
-        for line in lines:
-            if line.strip().startswith("MEMORY_PROVIDER="):
-                updated_lines.append(f"MEMORY_PROVIDER={provider}\n")
-                provider_found = True
-            else:
-                updated_lines.append(line)
-
-        # If MEMORY_PROVIDER wasn't found, add it
-        if not provider_found:
-            updated_lines.append(
-                f"\n# Memory Provider Configuration\nMEMORY_PROVIDER={provider}\n"
-            )
-
         # Create backup
         backup_path = f"{env_path}.bak"
         shutil.copy2(env_path, backup_path)
         logger.info(f"Created .env backup at {backup_path}")
 
-        # Write updated .env file
-        with open(env_path, "w") as file:
-            file.writelines(updated_lines)
+        # Update key using python-dotenv (handles add-or-update automatically)
+        dotenv_set_key(env_path, "MEMORY_PROVIDER", provider, quote_mode="never")
 
         # Update environment variable for current process
         os.environ["MEMORY_PROVIDER"] = provider

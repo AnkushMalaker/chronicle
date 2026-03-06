@@ -634,6 +634,7 @@ async def transcription_fallback_check_job(
     session_id: str,
     user_id: str,
     client_id: str,
+    conversation_id: str = None,
     timeout_seconds: int = None,
     *,
     redis_client=None,
@@ -649,6 +650,7 @@ async def transcription_fallback_check_job(
         session_id: Stream session ID
         user_id: User ID
         client_id: Client ID
+        conversation_id: Specific conversation ID to check (avoids matching old conversations)
         timeout_seconds: Max wait time for batch transcription (default 15 minutes)
         redis_client: Redis client (injected by decorator)
 
@@ -660,8 +662,20 @@ async def transcription_fallback_check_job(
 
     logger.info(f"🔍 Checking transcription status for session {session_id[:12]}")
 
-    # Find conversation by session_id (client_id for streaming sessions)
-    conversation = await Conversation.find_one(Conversation.client_id == session_id)
+    # Find the exact conversation if conversation_id is known, otherwise fall back to client_id lookup
+    if conversation_id:
+        conversation = await Conversation.find_one(
+            Conversation.conversation_id == conversation_id
+        )
+    else:
+        conversation = await Conversation.find_one(
+            Conversation.client_id == session_id,
+            Conversation.always_persist == True,
+            In(
+                Conversation.processing_status,
+                ["pending_transcription", "transcription_failed"],
+            ),
+        )
 
     # Check if transcript exists (streaming succeeded)
     if conversation and conversation.active_transcript and conversation.transcript:
@@ -914,7 +928,7 @@ async def stream_speech_detection_job(
     current_job = get_current_job()
     session_key = f"audio:session:{session_id}"
     start_time = time.time()
-    max_runtime = 86340  # 24 hours - 60 seconds (graceful exit before RQ timeout)
+    max_runtime = 7200  # 2 hours — sufficient gap between conversations; fresh job re-enqueued after each
 
     # Get conversation count
     conversation_count_key = f"session:conversation_count:{session_id}"
@@ -953,6 +967,23 @@ async def stream_speech_detection_job(
 
         if not await check_job_alive(redis_client, current_job, session_id):
             break
+
+        # Early transcription failure detection — check every iteration, not just grace period
+        error_status = await redis_client.hget(session_key, "transcription_error")
+        if error_status:
+            logger.error(f"❌ Transcription error detected: {error_status.decode()}")
+            break
+
+        # No-activity watchdog: if 60s elapsed with zero transcription results, provider is down
+        elapsed = time.time() - start_time
+        if elapsed > 60 and not session_closed_at:
+            watchdog_combined = await aggregator.get_combined_results(session_id)
+            if not watchdog_combined.get("chunk_count", 0):
+                logger.error(
+                    f"❌ No transcription activity after {elapsed:.0f}s — "
+                    f"check provider config (API key, connectivity, consumer running)"
+                )
+                break
 
         # Check if session has closed
         session_status = await redis_client.hget(session_key, "status")
@@ -1305,11 +1336,13 @@ async def stream_speech_detection_job(
     # Enqueue fallback check job for failed streaming sessions
     # This will attempt batch transcription as a fallback
     config_timeout = get_transcription_job_timeout()
+    conversation_id = conversation.conversation_id if conversation else None
     fallback_job = transcription_queue.enqueue(
         transcription_fallback_check_job,
         session_id,
         user_id,
         client_id,
+        conversation_id=conversation_id,
         timeout_seconds=config_timeout,
         job_timeout=config_timeout + 300,  # Extra 5 min overhead for fallback check
         job_id=f"fallback_check_{session_id}",

@@ -399,6 +399,38 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
 
         return {"text": text, "words": words, "segments": segments}
 
+    async def health_check(self) -> dict:
+        """Check batch STT service reachability and auth by hitting the base URL."""
+        base = self.model.model_url.rstrip("/")
+        headers = {}
+        if self.model.api_key:
+            op = (self.model.operations or {}).get("stt_transcribe") or {}
+            hdrs = op.get("headers") or {}
+            for k, v in hdrs.items():
+                if isinstance(v, str):
+                    headers[k] = v.replace("${DEEPGRAM_API_KEY:-}", self.model.api_key)
+                else:
+                    headers[k] = v
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+                resp = await client.get(base, headers=headers)
+                if resp.status_code in (401, 403):
+                    return {
+                        "status": "❌ Auth Failed — check API key",
+                        "healthy": False,
+                    }
+                return {"status": "✅ Connected", "healthy": True}
+        except httpx.ConnectError:
+            return {
+                "status": "❌ Connection Failed — service unreachable",
+                "healthy": False,
+            }
+        except httpx.TimeoutException:
+            return {"status": "❌ Connection Timeout", "healthy": False}
+        except Exception as e:
+            return {"status": f"❌ Error: {e}", "healthy": False}
+
 
 class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
     """Streaming transcription provider using a config-driven WebSocket template."""
@@ -656,6 +688,39 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
             ),
             "segments": _normalize_provider_segments(segments),
         }
+
+    async def health_check(self) -> dict:
+        """Check streaming STT service by attempting a WebSocket handshake."""
+        base_url = self.model.model_url
+        ops = self.model.operations or {}
+        headers = {}
+        if self.model.api_key:
+            auth_prefix = ops.get("auth_prefix") or "Token"
+            headers["Authorization"] = f"{auth_prefix} {self.model.api_key}"
+
+        try:
+            ws = await asyncio.wait_for(
+                websockets.connect(base_url, additional_headers=headers),
+                timeout=5.0,
+            )
+            await ws.close()
+            return {"status": "✅ Connected", "healthy": True}
+        except asyncio.TimeoutError:
+            return {"status": "❌ Connection Timeout", "healthy": False}
+        except websockets.exceptions.InvalidStatus as e:
+            code = getattr(e, "status_code", None) or getattr(
+                getattr(e, "response", None), "status_code", None
+            )
+            if code in (401, 403):
+                return {"status": "❌ Auth Failed — check API key", "healthy": False}
+            return {"status": f"❌ HTTP {code or 'unknown'}", "healthy": False}
+        except (OSError, ConnectionRefusedError):
+            return {
+                "status": "❌ Connection Failed — service unreachable",
+                "healthy": False,
+            }
+        except Exception as e:
+            return {"status": f"❌ Error: {e}", "healthy": False}
 
 
 def get_transcription_provider(

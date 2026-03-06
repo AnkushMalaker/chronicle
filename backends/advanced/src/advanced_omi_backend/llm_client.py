@@ -36,7 +36,7 @@ class LLMClient(ABC):
         pass
 
     @abstractmethod
-    def health_check(self) -> Dict:
+    async def health_check(self) -> Dict:
         """Check if the LLM service is available and healthy."""
         pass
 
@@ -120,34 +120,55 @@ class OpenAILLMClient(LLMClient):
             params["tools"] = tools
         return self.client.chat.completions.create(**params)
 
-    def health_check(self) -> Dict:
-        """Check OpenAI-compatible service health."""
+    async def health_check(self) -> Dict:
+        """Check OpenAI-compatible service health by calling models.list()."""
+        import openai as _openai
+
+        if not self.api_key or not self.base_url or not self.model:
+            return {
+                "status": "⚠️ Configuration incomplete",
+                "healthy": False,
+                "base_url": self.base_url,
+                "default_model": self.model,
+            }
+
         try:
-            # For OpenAI API, check if we have valid configuration
-            # Avoid calling /models endpoint as it can be unreliable
-            if self.api_key and self.api_key != "dummy" and self.model:
-                return {
-                    "status": "✅ Connected",
-                    "base_url": self.base_url,
-                    "default_model": self.model,
-                    "api_key_configured": bool(
-                        self.api_key and self.api_key != "dummy"
-                    ),
-                }
-            else:
-                return {
-                    "status": "⚠️ Configuration incomplete",
-                    "base_url": self.base_url,
-                    "default_model": self.model,
-                    "api_key_configured": bool(
-                        self.api_key and self.api_key != "dummy"
-                    ),
-                }
+            async_client = create_openai_client(
+                api_key=self.api_key, base_url=self.base_url, is_async=True
+            )
+            await asyncio.wait_for(async_client.models.list(), timeout=5.0)
+            return {
+                "status": "✅ Connected",
+                "healthy": True,
+                "base_url": self.base_url,
+                "default_model": self.model,
+            }
+        except _openai.AuthenticationError:
+            return {
+                "status": "❌ Auth Failed — check API key",
+                "healthy": False,
+                "base_url": self.base_url,
+                "default_model": self.model,
+            }
+        except asyncio.TimeoutError:
+            return {
+                "status": "❌ Connection Timeout",
+                "healthy": False,
+                "base_url": self.base_url,
+                "default_model": self.model,
+            }
+        except _openai.APIConnectionError:
+            return {
+                "status": "❌ Connection Failed — service unreachable",
+                "healthy": False,
+                "base_url": self.base_url,
+                "default_model": self.model,
+            }
         except Exception as e:
             self.logger.error(f"Health check failed: {e}")
             return {
-                "status": "❌ Failed",
-                "error": str(e),
+                "status": f"❌ Error: {e}",
+                "healthy": False,
                 "base_url": self.base_url,
                 "default_model": self.model,
             }
@@ -280,7 +301,6 @@ async def async_chat_with_tools(
 
 
 async def async_health_check() -> Dict:
-    """Async wrapper for LLM health check."""
+    """Async LLM health check."""
     client = get_llm_client()
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, client.health_check)
+    return await client.health_check()

@@ -57,13 +57,16 @@ async def mark_session_complete(
     """
     session_key = f"audio:session:{session_id}"
     mark_time = time.time()
+    mapping = {
+        "status": "finished",
+        "completed_at": str(mark_time),
+        "completion_reason": reason,
+    }
+    if reason == "websocket_disconnect":
+        mapping["websocket_connected"] = "false"
     await redis_client.hset(
         session_key,
-        mapping={
-            "status": "finished",
-            "completed_at": str(mark_time),
-            "completion_reason": reason,
-        },
+        mapping=mapping,
     )
     logger.info(
         f"✅ Session {session_id[:12]} marked finished: {reason} [TIME: {mark_time:.3f}]"

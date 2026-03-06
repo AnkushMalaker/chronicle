@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
 
 import yaml
+from dotenv import dotenv_values
+from dotenv import set_key as dotenv_set_key
 
 from advanced_omi_backend.config_loader import get_plugins_yml_path
 from advanced_omi_backend.plugins import BasePlugin, PluginRouter
@@ -49,9 +51,6 @@ def _get_plugins_dir() -> Path:
 def load_plugin_env(plugin_id: str) -> Dict[str, str]:
     """Load per-plugin .env file from plugins/{id}/.env.
 
-    Parses KEY=value lines, skipping comments and blank lines.
-    Strips surrounding quotes from values.
-
     Args:
         plugin_id: Plugin identifier (directory name)
 
@@ -64,26 +63,12 @@ def load_plugin_env(plugin_id: str) -> Dict[str, str]:
     if not env_path.exists():
         return {}
 
-    env_vars: Dict[str, str] = {}
     try:
-        with open(env_path, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key = key.strip()
-                value = value.strip()
-                # Strip surrounding quotes
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-                    value = value[1:-1]
-                env_vars[key] = value
+        values = dotenv_values(str(env_path))
+        return {k: v for k, v in values.items() if v is not None}
     except Exception as e:
         logger.warning(f"Failed to read plugin .env for '{plugin_id}': {e}")
-
-    return env_vars
+        return {}
 
 
 def save_plugin_env(plugin_id: str, env_vars: Dict[str, str]) -> Path:
@@ -103,17 +88,18 @@ def save_plugin_env(plugin_id: str, env_vars: Dict[str, str]) -> Path:
     plugin_dir = plugins_dir / plugin_id
     env_path = plugin_dir / ".env"
 
+    # Ensure plugin directory and .env file exist
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    if not env_path.exists():
+        env_path.touch()
+
     # Load existing values and merge
     existing = load_plugin_env(plugin_id)
     existing.update(env_vars)
 
-    # Ensure plugin directory exists
-    plugin_dir.mkdir(parents=True, exist_ok=True)
-
-    # Write all values
-    with open(env_path, "w") as f:
-        for key, value in existing.items():
-            f.write(f"{key}={value}\n")
+    # Write all values using python-dotenv (preserves comments in existing files)
+    for key, value in existing.items():
+        dotenv_set_key(str(env_path), key, value, quote_mode="never")
 
     logger.info(f"Saved {len(env_vars)} env var(s) to {env_path}")
     return env_path
