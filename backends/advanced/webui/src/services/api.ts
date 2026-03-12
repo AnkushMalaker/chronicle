@@ -301,7 +301,7 @@ export const systemApi = {
 
   // Miscellaneous Configuration Settings
   getMiscSettings: () => api.get('/api/misc-settings'),
-  saveMiscSettings: (settings: { always_persist_enabled?: boolean; use_provider_segments?: boolean; per_segment_speaker_id?: boolean; transcription_job_timeout_seconds?: number }) =>
+  saveMiscSettings: (settings: { always_persist_enabled?: boolean; use_provider_segments?: boolean; per_segment_speaker_id?: boolean; streaming_fallback_timeout_seconds?: number }) =>
     api.post('/api/misc-settings', settings),
 
   // Plugin Configuration Management (YAML-based)

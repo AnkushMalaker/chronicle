@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional
 from rq.exceptions import NoSuchJobError
 from rq.job import Job
 
+from advanced_omi_backend.config import get_max_conversation_duration
 from advanced_omi_backend.controllers.queue_controller import (
     redis_conn,
     start_post_conversation_jobs,
@@ -109,9 +110,7 @@ async def handle_end_of_conversation(
 
     from advanced_omi_backend.models.conversation import Conversation
 
-    conversation = await Conversation.find_one(
-        Conversation.conversation_id == conversation_id
-    )
+    conversation = await Conversation.find_one(Conversation.conversation_id == conversation_id)
     if conversation:
         # Convert string to enum
         try:
@@ -126,9 +125,7 @@ async def handle_end_of_conversation(
             f"💾 Saved conversation {conversation_id[:12]} end_reason: {conversation.end_reason}"
         )
     else:
-        logger.warning(
-            f"⚠️ Conversation {conversation_id} not found for end reason tracking"
-        )
+        logger.warning(f"⚠️ Conversation {conversation_id} not found for end reason tracking")
 
     # Increment conversation count for this session
     conversation_count_key = f"session:conversation_count:{session_id}"
@@ -144,17 +141,13 @@ async def handle_end_of_conversation(
     )
 
     if status_raw:
-        status_str = (
-            status_raw.decode() if isinstance(status_raw, bytes) else status_raw
-        )
+        status_str = status_raw.decode() if isinstance(status_raw, bytes) else status_raw
         ws_connected = (
             ws_connected_raw.decode()
             if isinstance(ws_connected_raw, bytes)
             else (ws_connected_raw or "false")
         ) == "true"
-        completion_reason = (
-            cr_raw.decode() if isinstance(cr_raw, bytes) else (cr_raw or "")
-        )
+        completion_reason = cr_raw.decode() if isinstance(cr_raw, bytes) else (cr_raw or "")
 
         # Determine if we should restart speech detection
         # Only restart when session is explicitly active.
@@ -271,9 +264,7 @@ def _validate_segments(segments: list) -> list:
         start = seg.get("start", 0.0)
         end = seg.get("end", 0.0)
         if end <= start:
-            logger.debug(
-                f"Segment {i} has invalid timing (start={start}, end={end}), correcting"
-            )
+            logger.debug(f"Segment {i} has invalid timing (start={start}, end={end}), correcting")
             estimated_duration = len(text.split()) * 0.5  # ~0.5 seconds per word
             seg["end"] = start + estimated_duration
 
@@ -322,9 +313,7 @@ async def _initialize_conversation(
     conversation = None
     if existing_conversation_id_bytes:
         existing_conversation_id = existing_conversation_id_bytes.decode()
-        logger.info(
-            f"🔍 Found Redis key with conversation_id={existing_conversation_id}"
-        )
+        logger.info(f"🔍 Found Redis key with conversation_id={existing_conversation_id}")
 
         # Try to fetch the existing conversation by conversation_id
         conversation = await Conversation.find_one(
@@ -339,16 +328,13 @@ async def _initialize_conversation(
                 f"processing_status={processing_status}"
             )
         else:
-            logger.warning(
-                f"⚠️ Conversation {existing_conversation_id} not found in database!"
-            )
+            logger.warning(f"⚠️ Conversation {existing_conversation_id} not found in database!")
 
         # Verify it's a placeholder conversation (always_persist=True, processing_status='pending_transcription')
         if (
             conversation
             and getattr(conversation, "always_persist", False)
-            and getattr(conversation, "processing_status", None)
-            == "pending_transcription"
+            and getattr(conversation, "processing_status", None) == "pending_transcription"
         ):
             logger.info(
                 f"🔄 Reusing placeholder conversation {conversation.conversation_id} for session {session_id}"
@@ -367,9 +353,7 @@ async def _initialize_conversation(
                 )
             conversation = None
     else:
-        logger.info(
-            f"🔍 No Redis key found for {conversation_key}, creating new conversation"
-        )
+        logger.info(f"🔍 No Redis key found for {conversation_key}, creating new conversation")
 
     # If no valid placeholder found, create new conversation
     if not conversation:
@@ -381,18 +365,14 @@ async def _initialize_conversation(
         )
         await conversation.insert()
         conversation_id = conversation.conversation_id
-        logger.info(
-            f"✅ Created streaming conversation {conversation_id} for session {session_id}"
-        )
+        logger.info(f"✅ Created streaming conversation {conversation_id} for session {session_id}")
 
     # Attach markers from Redis session (e.g., button events captured during streaming)
     session_key = f"audio:session:{session_id}"
     markers_json = await redis_client.hget(session_key, "markers")
     if markers_json:
         try:
-            markers_data = (
-                markers_json if isinstance(markers_json, str) else markers_json.decode()
-            )
+            markers_data = markers_json if isinstance(markers_json, str) else markers_json.decode()
             conversation.markers = json.loads(markers_data)
             await conversation.save()
             logger.info(
@@ -412,9 +392,7 @@ async def _initialize_conversation(
         speaker_check_job_id = speech_job.meta.get("speaker_check_job_id")
         if speaker_check_job_id:
             try:
-                speaker_check_job = Job.fetch(
-                    speaker_check_job_id, connection=redis_conn
-                )
+                speaker_check_job = Job.fetch(speaker_check_job_id, connection=redis_conn)
                 speaker_check_job.meta["conversation_id"] = conversation_id
                 speaker_check_job.save_meta()
             except Exception as e:
@@ -438,9 +416,7 @@ async def _initialize_conversation(
 
     # Signal audio persistence job to rotate to this conversation's file
     rotation_signal_key = f"conversation:current:{session_id}"
-    await redis_client.set(
-        rotation_signal_key, conversation_id, ex=86400
-    )  # 24 hour TTL
+    await redis_client.set(rotation_signal_key, conversation_id, ex=86400)  # 24 hour TTL
     logger.info(
         f"🔄 Signaled audio persistence to rotate file for conversation {conversation_id[:12]}"
     )
@@ -469,16 +445,12 @@ async def _monitor_conversation_loop(
     close_requested_reason, last_result_count, and last_word_count.
     """
     session_key = f"audio:session:{state.session_id}"
-    max_runtime = (
-        10740  # 3 hours - 60 seconds (single conversations shouldn't exceed 3 hours)
-    )
+    max_runtime = get_max_conversation_duration()
 
     finalize_received = False
 
     # Inactivity timeout configuration
-    inactivity_timeout_seconds = float(
-        os.getenv("SPEECH_INACTIVITY_THRESHOLD_SECONDS", "60")
-    )
+    inactivity_timeout_seconds = float(os.getenv("SPEECH_INACTIVITY_THRESHOLD_SECONDS", "60"))
     inactivity_timeout_minutes = inactivity_timeout_seconds / 60
     last_inactivity_log_time = (
         time.time()
@@ -486,9 +458,7 @@ async def _monitor_conversation_loop(
 
     # Test mode: wait for audio queue to drain before timing out
     # In real usage, ambient noise keeps connection alive. In tests, chunks arrive in bursts.
-    wait_for_queue_drain = (
-        os.getenv("WAIT_FOR_AUDIO_QUEUE_DRAIN", "false").lower() == "true"
-    )
+    wait_for_queue_drain = os.getenv("WAIT_FOR_AUDIO_QUEUE_DRAIN", "false").lower() == "true"
 
     logger.info(
         f"📊 Conversation timeout configured: {inactivity_timeout_minutes} minutes ({inactivity_timeout_seconds}s)"
@@ -538,9 +508,7 @@ async def _monitor_conversation_loop(
                             f"🔌 WebSocket disconnected for session {state.session_id[:12]} - "
                             f"ending conversation early"
                         )
-                        state.timeout_triggered = (
-                            False  # This is a disconnect, not a timeout
-                        )
+                        state.timeout_triggered = False  # This is a disconnect, not a timeout
                     else:
                         logger.info(
                             f"🛑 Session finalizing (reason: {completion_reason_str}), "
@@ -550,20 +518,16 @@ async def _monitor_conversation_loop(
 
         # Check for conversation close request (set by API, plugins, button press)
         if not finalize_received:
-            close_reason = await redis_client.hget(
-                session_key, "conversation_close_requested"
-            )
+            close_reason = await redis_client.hget(session_key, "conversation_close_requested")
             if close_reason:
                 await redis_client.hdel(session_key, "conversation_close_requested")
                 state.close_requested_reason = (
-                    close_reason.decode()
-                    if isinstance(close_reason, bytes)
-                    else close_reason
+                    close_reason.decode() if isinstance(close_reason, bytes) else close_reason
                 )
-                logger.info(
-                    f"🔒 Conversation close requested: {state.close_requested_reason}"
+                logger.info(f"🔒 Conversation close requested: {state.close_requested_reason}")
+                state.timeout_triggered = (
+                    True  # Session stays active (same restart behavior as inactivity timeout)
                 )
-                state.timeout_triggered = True  # Session stays active (same restart behavior as inactivity timeout)
                 finalize_received = True
                 break
 
@@ -622,9 +586,7 @@ async def _monitor_conversation_loop(
             # Can't reliably detect inactivity, so skip timeout check this iteration
             inactivity_duration = 0
             if speech_analysis.get("fallback", False):
-                logger.debug(
-                    "⚠️ Skipping inactivity check (no audio timestamps available)"
-                )
+                logger.debug("⚠️ Skipping inactivity check (no audio timestamps available)")
 
         current_time = time.time()
 
@@ -736,15 +698,11 @@ async def _save_streaming_transcript(
     """
     from advanced_omi_backend.models.conversation import Conversation
 
-    logger.info(
-        f"📝 Retrieving final streaming transcript for conversation {conversation_id[:12]}"
-    )
+    logger.info(f"📝 Retrieving final streaming transcript for conversation {conversation_id[:12]}")
     final_transcript = await aggregator.get_combined_results(session_id)
 
     # Fetch conversation from database to ensure we have latest state
-    conversation = await Conversation.find_one(
-        Conversation.conversation_id == conversation_id
-    )
+    conversation = await Conversation.find_one(Conversation.conversation_id == conversation_id)
     if not conversation:
         logger.error(f"❌ Conversation {conversation_id} not found in database")
         raise ValueError(f"Conversation {conversation_id} not found")
@@ -872,7 +830,6 @@ async def _enqueue_post_processing(
     if batch_retranscribe:
         # BATCH PATH: Streaming transcript saved as preview — user sees it immediately
         # Full post-processing (speaker, memory, title) waits for batch transcript
-        from advanced_omi_backend.config import get_transcription_job_timeout
         from advanced_omi_backend.controllers.queue_controller import (
             JOB_RESULT_TTL,
             transcription_queue,
@@ -887,7 +844,7 @@ async def _enqueue_post_processing(
             conversation_id,
             batch_version_id,
             "always_batch_retranscribe",
-            job_timeout=get_transcription_job_timeout(),
+            job_timeout=-1,
             result_ttl=JOB_RESULT_TTL,
             job_id=f"batch_retranscribe_{conversation_id[:12]}",
             description=f"Batch re-transcription for {conversation_id[:8]}",
@@ -1018,19 +975,15 @@ async def open_conversation_job(
         logger.info(f"📊 Using completion_reason from session: {state.end_reason}")
     elif state.close_requested_reason:
         state.end_reason = "close_requested"
-        logger.info(
-            f"📊 Conversation closed by request: {state.close_requested_reason}"
-        )
+        logger.info(f"📊 Conversation closed by request: {state.close_requested_reason}")
     elif state.timeout_triggered:
         state.end_reason = "inactivity_timeout"
-    elif time.time() - state.start_time > 10740:
+    elif time.time() - state.start_time > get_max_conversation_duration():
         state.end_reason = "max_duration"
     else:
         state.end_reason = "user_stopped"
 
-    logger.info(
-        f"📊 Conversation {conversation_id[:12]} end_reason determined: {state.end_reason}"
-    )
+    logger.info(f"📊 Conversation {conversation_id[:12]} end_reason determined: {state.end_reason}")
 
     # Phase 4-7: Post-processing (wrapped in try/finally for guaranteed cleanup)
     end_of_conversation_handled = False
@@ -1100,9 +1053,7 @@ async def open_conversation_job(
                 end_reason=state.end_reason,
             )
 
-        logger.info(
-            f"📦 MongoDB audio chunks ready for conversation {conversation_id[:12]}"
-        )
+        logger.info(f"📦 MongoDB audio chunks ready for conversation {conversation_id[:12]}")
 
         # Phase 6: Save streaming transcript
         version_id = await _save_streaming_transcript(
@@ -1156,9 +1107,7 @@ async def open_conversation_job(
 
 
 @async_job(redis=True, beanie=True)
-async def generate_title_summary_job(
-    conversation_id: str, *, redis_client=None
-) -> Dict[str, Any]:
+async def generate_title_summary_job(conversation_id: str, *, redis_client=None) -> Dict[str, Any]:
     """
     Generate title, short summary, and detailed summary for a conversation using LLM.
 
@@ -1182,16 +1131,12 @@ async def generate_title_summary_job(
     )
 
     set_otel_session(conversation_id)
-    logger.info(
-        f"📝 Starting title/summary generation for conversation {conversation_id}"
-    )
+    logger.info(f"📝 Starting title/summary generation for conversation {conversation_id}")
 
     start_time = time.time()
 
     # Get the conversation
-    conversation = await Conversation.find_one(
-        Conversation.conversation_id == conversation_id
-    )
+    conversation = await Conversation.find_one(Conversation.conversation_id == conversation_id)
     if not conversation:
         logger.error(f"Conversation {conversation_id} not found")
         return {"success": False, "error": "Conversation not found"}
@@ -1201,9 +1146,7 @@ async def generate_title_summary_job(
     segments = conversation.segments or []
 
     if not transcript_text and (not segments or len(segments) == 0):
-        logger.warning(
-            f"⚠️ No transcript or segments available for conversation {conversation_id}"
-        )
+        logger.warning(f"⚠️ No transcript or segments available for conversation {conversation_id}")
         return {
             "success": False,
             "error": "No transcript or segments available",
@@ -1235,9 +1178,7 @@ async def generate_title_summary_job(
             else:
                 logger.info(f"📚 No memories found for context enrichment")
         except Exception as mem_error:
-            logger.warning(
-                f"⚠️ Could not fetch memory context (continuing without): {mem_error}"
-            )
+            logger.warning(f"⚠️ Could not fetch memory context (continuing without): {mem_error}")
 
         # Generate title+summary (one call) and detailed summary in parallel
         import asyncio
@@ -1261,9 +1202,7 @@ async def generate_title_summary_job(
 
         logger.info(f"✅ Generated title: '{conversation.title}'")
         logger.info(f"✅ Generated summary: '{conversation.summary}'")
-        logger.info(
-            f"✅ Generated detailed summary: {len(conversation.detailed_summary)} chars"
-        )
+        logger.info(f"✅ Generated detailed summary: {len(conversation.detailed_summary)} chars")
 
         # Update processing status for placeholder/reprocessing conversations
         if getattr(conversation, "processing_status", None) in [
@@ -1360,16 +1299,12 @@ async def dispatch_conversation_complete_event_job(
     """
     from advanced_omi_backend.models.conversation import Conversation
 
-    logger.info(
-        f"📌 Dispatching conversation.complete event for conversation {conversation_id}"
-    )
+    logger.info(f"📌 Dispatching conversation.complete event for conversation {conversation_id}")
 
     start_time = time.time()
 
     # Get the conversation to include in event data
-    conversation = await Conversation.find_one(
-        Conversation.conversation_id == conversation_id
-    )
+    conversation = await Conversation.find_one(Conversation.conversation_id == conversation_id)
     if not conversation:
         logger.error(f"Conversation {conversation_id} not found")
         return {"success": False, "error": "Conversation not found"}

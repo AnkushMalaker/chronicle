@@ -88,9 +88,7 @@ def init_otel() -> None:
     langfuse = is_langfuse_enabled()
 
     if not galileo and not langfuse:
-        logger.info(
-            "No OTEL backends configured (Galileo/Langfuse), skipping initialization"
-        )
+        logger.info("No OTEL backends configured (Galileo/Langfuse), skipping initialization")
         return
 
     try:
@@ -106,15 +104,12 @@ def init_otel() -> None:
 
                 project = os.getenv("GALILEO_PROJECT", "chronicle")
                 logstream = os.getenv("GALILEO_LOG_STREAM", "default")
-                galileo_processor = otel.GalileoSpanProcessor(
-                    project=project, logstream=logstream
-                )
+                galileo_processor = otel.GalileoSpanProcessor(project=project, logstream=logstream)
                 tracer_provider.add_span_processor(galileo_processor)
                 backends.append("Galileo")
             except ImportError:
                 logger.warning(
-                    "Galileo packages not installed. "
-                    "Install with: uv pip install '.[galileo]'"
+                    "Galileo packages not installed. " "Install with: uv pip install '.[galileo]'"
                 )
             except Exception as e:
                 logger.error(f"Failed to add Galileo span processor: {e}")
@@ -129,8 +124,7 @@ def init_otel() -> None:
                 backends.append("Langfuse")
             except ImportError:
                 logger.warning(
-                    "Langfuse OTEL packages not installed. "
-                    "Ensure langfuse>=3.13.0 is installed."
+                    "Langfuse OTEL packages not installed. " "Ensure langfuse>=4.0.0 is installed."
                 )
             except Exception as e:
                 logger.error(f"Failed to add Langfuse span processor: {e}")
@@ -158,8 +152,7 @@ def init_otel() -> None:
         )
     except ImportError:
         logger.warning(
-            "OTEL SDK packages not installed. "
-            "Install opentelemetry-api and opentelemetry-sdk."
+            "OTEL SDK packages not installed. " "Install opentelemetry-api and opentelemetry-sdk."
         )
     except Exception as e:
         logger.error(f"Failed to initialize OTEL: {e}")

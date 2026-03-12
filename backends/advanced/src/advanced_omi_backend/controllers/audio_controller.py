@@ -15,7 +15,6 @@ import uuid
 from fastapi import UploadFile
 from fastapi.responses import JSONResponse
 
-from advanced_omi_backend.config import get_transcription_job_timeout
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
     start_post_conversation_jobs,
@@ -90,9 +89,7 @@ async def upload_and_process_audio_files(
 
                 is_video_source = ext in VIDEO_EXTENSIONS
 
-                audio_logger.info(
-                    f"📁 Uploading file {file_index + 1}/{len(files)}: {filename}"
-                )
+                audio_logger.info(f"📁 Uploading file {file_index + 1}/{len(files)}: {filename}")
 
                 # Read file content
                 content = await file.read()
@@ -227,7 +224,7 @@ async def upload_and_process_audio_files(
                         conversation_id,
                         version_id,
                         "batch",  # trigger
-                        job_timeout=get_transcription_job_timeout(),
+                        job_timeout=-1,
                         result_ttl=JOB_RESULT_TTL,
                         job_id=transcribe_job_id,
                         description=f"Transcribe uploaded file {conversation_id[:8]}",
@@ -336,12 +333,8 @@ async def upload_and_process_audio_files(
     except (OSError, IOError) as e:
         # File system errors during upload handling
         audio_logger.exception("File I/O error in upload_and_process_audio_files")
-        return JSONResponse(
-            status_code=500, content={"error": f"File upload failed: {str(e)}"}
-        )
+        return JSONResponse(status_code=500, content={"error": f"File upload failed: {str(e)}"})
     except Exception as e:
         # Unexpected errors in upload handler
         audio_logger.exception("Unexpected error in upload_and_process_audio_files")
-        return JSONResponse(
-            status_code=500, content={"error": f"File upload failed: {str(e)}"}
-        )
+        return JSONResponse(status_code=500, content={"error": f"File upload failed: {str(e)}"})

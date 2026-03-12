@@ -17,7 +17,6 @@ from advanced_omi_backend.client_manager import (
     client_belongs_to_user,
     get_client_manager,
 )
-from advanced_omi_backend.config import get_transcription_job_timeout
 from advanced_omi_backend.config_loader import get_service_config
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
@@ -51,17 +50,11 @@ async def _get_conversation_or_error(conversation_id: str, user: User):
 
     Returns (conversation, None) on success, or (None, error_response) on failure.
     """
-    conversation = await Conversation.find_one(
-        Conversation.conversation_id == conversation_id
-    )
+    conversation = await Conversation.find_one(Conversation.conversation_id == conversation_id)
     if not conversation:
-        return None, JSONResponse(
-            status_code=404, content={"error": "Conversation not found"}
-        )
+        return None, JSONResponse(status_code=404, content={"error": "Conversation not found"})
     if not user.is_superuser and conversation.user_id != str(user.user_id):
-        return None, JSONResponse(
-            status_code=403, content={"error": "Access forbidden"}
-        )
+        return None, JSONResponse(status_code=403, content={"error": "Access forbidden"})
     return conversation, None
 
 
@@ -115,9 +108,7 @@ async def close_current_conversation(client_id: str, user: User):
             status_code=404,
         )
 
-    logger.info(
-        f"Conversation close requested for client {client_id} by user {user.user_id}"
-    )
+    logger.info(f"Conversation close requested for client {client_id} by user {user.user_id}")
 
     return JSONResponse(
         content={
@@ -153,13 +144,9 @@ async def get_conversation(conversation_id: str, user: User):
             ),
             "processing_status": conversation.processing_status,
             "always_persist": conversation.always_persist,
-            "end_reason": (
-                conversation.end_reason.value if conversation.end_reason else None
-            ),
+            "end_reason": (conversation.end_reason.value if conversation.end_reason else None),
             "completed_at": (
-                conversation.completed_at.isoformat()
-                if conversation.completed_at
-                else None
+                conversation.completed_at.isoformat() if conversation.completed_at else None
             ),
             "title": conversation.title,
             "summary": conversation.summary,
@@ -186,9 +173,7 @@ async def get_conversation(conversation_id: str, user: User):
 
     except Exception as e:
         logger.error(f"Error fetching conversation {conversation_id}: {e}")
-        return JSONResponse(
-            status_code=500, content={"error": "Error fetching conversation"}
-        )
+        return JSONResponse(status_code=500, content={"error": "Error fetching conversation"})
 
 
 async def get_conversation_memories(conversation_id: str, user: User, limit: int = 100):
@@ -390,9 +375,7 @@ async def get_conversations(
             conditions.append(
                 {
                     "always_persist": True,
-                    "processing_status": {
-                        "$in": ["pending_transcription", "transcription_failed"]
-                    },
+                    "processing_status": {"$in": ["pending_transcription", "transcription_failed"]},
                     "deleted": False,
                 }
             )
@@ -470,9 +453,7 @@ async def get_conversations(
 
     except Exception as e:
         logger.exception(f"Error fetching conversations: {e}")
-        return JSONResponse(
-            status_code=500, content={"error": "Error fetching conversations"}
-        )
+        return JSONResponse(status_code=500, content={"error": "Error fetching conversations"})
 
 
 async def search_conversations(
@@ -548,14 +529,10 @@ async def search_conversations(
 
     except Exception as e:
         logger.exception(f"Error searching conversations: {e}")
-        return JSONResponse(
-            status_code=500, content={"error": "Error searching conversations"}
-        )
+        return JSONResponse(status_code=500, content={"error": "Error searching conversations"})
 
 
-async def _soft_delete_conversation(
-    conversation: Conversation, user: User
-) -> JSONResponse:
+async def _soft_delete_conversation(conversation: Conversation, user: User) -> JSONResponse:
     """Mark conversation and chunks as deleted (soft delete).
 
     Chunks are soft-deleted first so that a crash between the two writes
@@ -572,9 +549,7 @@ async def _soft_delete_conversation(
     ).update_many({"$set": {"deleted": True, "deleted_at": deleted_at}})
 
     deleted_chunks = result.modified_count
-    logger.info(
-        f"Soft deleted {deleted_chunks} audio chunks for conversation {conversation_id}"
-    )
+    logger.info(f"Soft deleted {deleted_chunks} audio chunks for conversation {conversation_id}")
 
     # 2. Mark conversation as deleted
     conversation.deleted = True
@@ -625,9 +600,7 @@ async def _hard_delete_conversation(conversation: Conversation) -> JSONResponse:
     ).delete()
 
     deleted_chunks = result.deleted_count
-    logger.info(
-        f"Hard deleted {deleted_chunks} audio chunks for conversation {conversation_id}"
-    )
+    logger.info(f"Hard deleted {deleted_chunks} audio chunks for conversation {conversation_id}")
 
     # 2. Delete conversation document
     try:
@@ -652,9 +625,7 @@ async def _hard_delete_conversation(conversation: Conversation) -> JSONResponse:
     )
 
 
-async def delete_conversation(
-    conversation_id: str, user: User, permanent: bool = False
-):
+async def delete_conversation(conversation_id: str, user: User, permanent: bool = False):
     """
     Soft delete a conversation (mark as deleted but keep data).
 
@@ -711,9 +682,7 @@ async def restore_conversation(conversation_id: str, user: User) -> JSONResponse
             return error
 
         if not conversation.deleted:
-            return JSONResponse(
-                status_code=400, content={"error": "Conversation is not deleted"}
-            )
+            return JSONResponse(status_code=400, content={"error": "Conversation is not deleted"})
 
         # 1. Restore audio chunks FIRST (safe failure mode: restored chunks, conversation still deleted)
         original_deleted_at = conversation.deleted_at
@@ -739,9 +708,7 @@ async def restore_conversation(conversation_id: str, user: User) -> JSONResponse
             await AudioChunkDocument.find(
                 AudioChunkDocument.conversation_id == conversation_id,
                 AudioChunkDocument.deleted == False,
-            ).update_many(
-                {"$set": {"deleted": True, "deleted_at": original_deleted_at}}
-            )
+            ).update_many({"$set": {"deleted": True, "deleted_at": original_deleted_at}})
             raise
 
         logger.info(
@@ -788,7 +755,7 @@ def _enqueue_transcript_reprocessing(
         conversation_id,
         version_id,
         source,
-        job_timeout=get_transcription_job_timeout(),
+        job_timeout=-1,
         result_ttl=JOB_RESULT_TTL,
         job_id=f"{job_id_prefix}_{conversation_id[:8]}",
         description=f"Transcribe audio for {conversation_id[:8]}",
@@ -869,9 +836,7 @@ def _enqueue_speaker_reprocessing_chain(
             "trigger": "reprocess",
         },
     )
-    logger.info(
-        f"Enqueued speaker reprocessing job {speaker_job.id} for version {version_id}"
-    )
+    logger.info(f"Enqueued speaker reprocessing job {speaker_job.id} for version {version_id}")
 
     memory_job = memory_queue.enqueue(
         process_memory_job,
@@ -883,9 +848,7 @@ def _enqueue_speaker_reprocessing_chain(
         description=f"Extract memories for {conversation_id[:8]}",
         meta={"conversation_id": conversation_id, "trigger": "reprocess_after_speaker"},
     )
-    logger.info(
-        f"Chained memory job {memory_job.id} after speaker job {speaker_job.id}"
-    )
+    logger.info(f"Chained memory job {memory_job.id} after speaker job {speaker_job.id}")
 
     title_summary_job = default_queue.enqueue(
         generate_title_summary_job,
@@ -938,9 +901,7 @@ async def toggle_star(conversation_id: str, user: User):
                         "conversation_id": conversation_id,
                         "starred": conversation.starred,
                         "starred_at": (
-                            conversation.starred_at.isoformat()
-                            if conversation.starred_at
-                            else None
+                            conversation.starred_at.isoformat() if conversation.starred_at else None
                         ),
                         "title": conversation.title,
                     },
@@ -1031,9 +992,7 @@ async def reprocess_orphan(conversation_id: str, user: User):
 async def reprocess_transcript(conversation_id: str, user: User):
     """Reprocess transcript for a conversation. Users can only reprocess their own conversations."""
     try:
-        conversation_model, error = await _get_conversation_or_error(
-            conversation_id, user
-        )
+        conversation_model, error = await _get_conversation_or_error(conversation_id, user)
         if error:
             return error
 
@@ -1083,14 +1042,10 @@ async def reprocess_transcript(conversation_id: str, user: User):
         )
 
 
-async def reprocess_memory(
-    conversation_id: str, transcript_version_id: str, user: User
-):
+async def reprocess_memory(conversation_id: str, transcript_version_id: str, user: User):
     """Reprocess memory extraction for a specific transcript version. Users can only reprocess their own conversations."""
     try:
-        conversation_model, error = await _get_conversation_or_error(
-            conversation_id, user
-        )
+        conversation_model, error = await _get_conversation_or_error(conversation_id, user)
         if error:
             return error
         # Resolve transcript version ID (handle "active" special case)
@@ -1131,9 +1086,7 @@ async def reprocess_memory(
         )
 
 
-async def reprocess_speakers(
-    conversation_id: str, transcript_version_id: str, user: User
-):
+async def reprocess_speakers(conversation_id: str, transcript_version_id: str, user: User):
     """
     Reprocess speaker identification for a specific transcript version.
     Users can only reprocess their own conversations.
@@ -1143,9 +1096,7 @@ async def reprocess_speakers(
     """
     try:
         # 1. Find conversation and validate ownership
-        conversation_model, error = await _get_conversation_or_error(
-            conversation_id, user
-        )
+        conversation_model, error = await _get_conversation_or_error(conversation_id, user)
         if error:
             return error
         # 2-3. Resolve source transcript version ID and find version object
@@ -1270,14 +1221,10 @@ async def reprocess_speakers(
         )
 
 
-async def activate_transcript_version(
-    conversation_id: str, version_id: str, user: User
-):
+async def activate_transcript_version(conversation_id: str, version_id: str, user: User):
     """Activate a specific transcript version. Users can only modify their own conversations."""
     try:
-        conversation_model, error = await _get_conversation_or_error(
-            conversation_id, user
-        )
+        conversation_model, error = await _get_conversation_or_error(conversation_id, user)
         if error:
             return error
 
@@ -1315,9 +1262,7 @@ async def activate_transcript_version(
 async def activate_memory_version(conversation_id: str, version_id: str, user: User):
     """Activate a specific memory version. Users can only modify their own conversations."""
     try:
-        conversation_model, error = await _get_conversation_or_error(
-            conversation_id, user
-        )
+        conversation_model, error = await _get_conversation_or_error(conversation_id, user)
         if error:
             return error
 
@@ -1343,17 +1288,13 @@ async def activate_memory_version(conversation_id: str, version_id: str, user: U
 
     except Exception as e:
         logger.error(f"Error activating memory version: {e}")
-        return JSONResponse(
-            status_code=500, content={"error": "Error activating memory version"}
-        )
+        return JSONResponse(status_code=500, content={"error": "Error activating memory version"})
 
 
 async def get_conversation_version_history(conversation_id: str, user: User):
     """Get version history for a conversation. Users can only access their own conversations."""
     try:
-        conversation_model, error = await _get_conversation_or_error(
-            conversation_id, user
-        )
+        conversation_model, error = await _get_conversation_or_error(conversation_id, user)
         if error:
             return error
 
@@ -1385,6 +1326,4 @@ async def get_conversation_version_history(conversation_id: str, user: User):
 
     except Exception as e:
         logger.error(f"Error fetching version history: {e}")
-        return JSONResponse(
-            status_code=500, content={"error": "Error fetching version history"}
-        )
+        return JSONResponse(status_code=500, content={"error": "Error fetching version history"})
