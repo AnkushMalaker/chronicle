@@ -22,6 +22,7 @@ backends/advanced/src/advanced_omi_backend/plugins/*/config.yml
 # Config backups
 config/*.backup.*
 config/*.backup*
+plugins/*/config.yml.backup
 
 example/*
 **/node_modules/*
