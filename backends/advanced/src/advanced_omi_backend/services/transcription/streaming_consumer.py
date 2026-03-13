@@ -30,6 +30,8 @@ from advanced_omi_backend.utils.audio_utils import pcm_to_wav_bytes
 
 logger = logging.getLogger(__name__)
 
+MAX_STREAMING_START_ATTEMPTS = 2
+
 
 def _normalize_words(words: list) -> None:
     """Normalize provider-specific word field names in-place.
@@ -220,7 +222,7 @@ class StreamingTranscriptionConsumer:
             sample_rate: Audio sample rate in Hz
         """
         last_error = None
-        for attempt in range(2):
+        for attempt in range(MAX_STREAMING_START_ATTEMPTS):
             try:
                 await self.provider.start_stream(
                     client_id=session_id,
@@ -244,15 +246,17 @@ class StreamingTranscriptionConsumer:
 
             except Exception as e:
                 last_error = e
-                if attempt == 0:
+                if attempt < MAX_STREAMING_START_ATTEMPTS - 1:
                     logger.warning(
-                        f"Failed to start stream for {session_id} (attempt 1/2): {e}. "
+                        f"Failed to start stream for {session_id} "
+                        f"(attempt {attempt + 1}/{MAX_STREAMING_START_ATTEMPTS}): {e}. "
                         f"Retrying in 5s..."
                     )
                     await asyncio.sleep(5)
                 else:
                     logger.error(
-                        f"Failed to start stream for {session_id} (attempt 2/2): {e}",
+                        f"Failed to start stream for {session_id} "
+                        f"(attempt {attempt + 1}/{MAX_STREAMING_START_ATTEMPTS}): {e}",
                         exc_info=True,
                     )
 
