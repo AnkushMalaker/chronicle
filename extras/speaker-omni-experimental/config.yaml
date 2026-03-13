@@ -1,5 +1,5 @@
 # Qwen2.5-Omni Speaker Recognition Configuration
-# 
+#
 # This file defines the speakers to enroll and their reference audio clips.
 # Update the speaker names and paths to match your family/group members.
 
@@ -24,16 +24,16 @@ speakers:
     - "reference_clips/flowerin_01.wav"
     - "reference_clips/flowerin_02.wav"
     - "reference_clips/flowerin_03.wav"
-  
+
   Brother:
     - "reference_clips/brother_01.wav"
     - "reference_clips/brother_02.wav"
-  
+
   Dad:
     - "reference_clips/dad_01.wav"
     - "reference_clips/dad_02.wav"
     - "reference_clips/dad_03.wav"
-  
+
   Mom:
     - "reference_clips/mom_01.wav"
     - "reference_clips/mom_02.wav"

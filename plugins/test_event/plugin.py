@@ -4,6 +4,7 @@ Test Event Plugin
 Logs all plugin events to SQLite database for integration testing.
 Subscribes to all event types to verify event dispatch system works correctly.
 """
+
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -27,12 +28,12 @@ class TestEventPlugin(BasePlugin):
     All events are logged to SQLite database with full context for test verification.
     """
 
-    SUPPORTED_ACCESS_LEVELS: List[str] = ['transcript', 'conversation', 'memory']
+    SUPPORTED_ACCESS_LEVELS: List[str] = ["transcript", "conversation", "memory"]
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.storage = EventStorage(
-            db_path=config.get('db_path', '/app/debug/test_plugin_events.db')
+            db_path=config.get("db_path", "/app/debug/test_plugin_events.db")
         )
         self.event_count = 0
 
@@ -66,15 +67,15 @@ class TestEventPlugin(BasePlugin):
             event_type = context.event  # 'transcript.streaming' or 'transcript.batch'
 
             # Extract key data fields
-            transcript = context.data.get('transcript', '')
-            conversation_id = context.data.get('conversation_id', 'unknown')
+            transcript = context.data.get("transcript", "")
+            conversation_id = context.data.get("conversation_id", "unknown")
 
             # Log to storage
             row_id = await self.storage.log_event(
                 event=event_type,
                 user_id=context.user_id,
                 data=context.data,
-                metadata=context.metadata
+                metadata=context.metadata,
             )
 
             self.event_count += 1
@@ -89,7 +90,7 @@ class TestEventPlugin(BasePlugin):
             return PluginResult(
                 success=True,
                 message=f"Transcript event logged (row_id={row_id})",
-                should_continue=True  # Don't block normal processing
+                should_continue=True,  # Don't block normal processing
             )
 
         except Exception as e:
@@ -97,10 +98,12 @@ class TestEventPlugin(BasePlugin):
             return PluginResult(
                 success=False,
                 message=f"Failed to log transcript event: {e}",
-                should_continue=True
+                should_continue=True,
             )
 
-    async def on_conversation_complete(self, context: PluginContext) -> Optional[PluginResult]:
+    async def on_conversation_complete(
+        self, context: PluginContext
+    ) -> Optional[PluginResult]:
         """
         Log conversation completion events.
 
@@ -116,8 +119,8 @@ class TestEventPlugin(BasePlugin):
         Returns:
             PluginResult indicating success
         """
-        conversation_id = context.data.get('conversation_id', 'unknown')
-        duration = context.data.get('duration', 0)
+        conversation_id = context.data.get("conversation_id", "unknown")
+        duration = context.data.get("duration", 0)
 
         # Add at start
         logger.info(
@@ -135,7 +138,7 @@ class TestEventPlugin(BasePlugin):
                 event=context.event,  # 'conversation.complete'
                 user_id=context.user_id,
                 data=context.data,
-                metadata=context.metadata
+                metadata=context.metadata,
             )
 
             # Add after storage
@@ -153,8 +156,7 @@ class TestEventPlugin(BasePlugin):
         except Exception as e:
             # Enhance error logging
             logger.error(
-                f"   ✗ Storage FAILED for {conversation_id[:12]}: {e}",
-                exc_info=True
+                f"   ✗ Storage FAILED for {conversation_id[:12]}: {e}", exc_info=True
             )
             return PluginResult(
                 success=False,
@@ -162,7 +164,9 @@ class TestEventPlugin(BasePlugin):
                 should_continue=True,
             )
 
-    async def on_memory_processed(self, context: PluginContext) -> Optional[PluginResult]:
+    async def on_memory_processed(
+        self, context: PluginContext
+    ) -> Optional[PluginResult]:
         """
         Log memory processing events.
 
@@ -183,17 +187,17 @@ class TestEventPlugin(BasePlugin):
             PluginResult indicating success
         """
         try:
-            conversation_id = context.data.get('conversation_id', 'unknown')
-            memory_count = context.data.get('memory_count', 0)
-            memory_provider = context.metadata.get('memory_provider', 'unknown')
-            processing_time = context.metadata.get('processing_time', 0)
+            conversation_id = context.data.get("conversation_id", "unknown")
+            memory_count = context.data.get("memory_count", 0)
+            memory_provider = context.metadata.get("memory_provider", "unknown")
+            processing_time = context.metadata.get("processing_time", 0)
 
             # Log to storage
             row_id = await self.storage.log_event(
                 event=context.event,  # 'memory.processed'
                 user_id=context.user_id,
                 data=context.data,
-                metadata=context.metadata
+                metadata=context.metadata,
             )
 
             self.event_count += 1
@@ -210,7 +214,7 @@ class TestEventPlugin(BasePlugin):
             return PluginResult(
                 success=True,
                 message=f"Memory event logged (row_id={row_id})",
-                should_continue=True
+                should_continue=True,
             )
 
         except Exception as e:
@@ -218,7 +222,7 @@ class TestEventPlugin(BasePlugin):
             return PluginResult(
                 success=False,
                 message=f"Failed to log memory event: {e}",
-                should_continue=True
+                should_continue=True,
             )
 
     async def cleanup(self):

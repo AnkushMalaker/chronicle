@@ -7,4 +7,4 @@ or triggering cross-plugin calls.
 
 from .plugin import TestButtonActionsPlugin
 
-__all__ = ['TestButtonActionsPlugin']
+__all__ = ["TestButtonActionsPlugin"]

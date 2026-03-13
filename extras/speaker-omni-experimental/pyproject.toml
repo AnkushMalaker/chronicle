@@ -8,29 +8,29 @@ dependencies = [
     # Core ML Framework for Qwen2.5-Omni
     "torch>=2.0.0",
     "transformers>=4.35.0",
-    
+
     # Audio Processing
     "soundfile>=0.12.0",
     "librosa>=0.10.0",
     "pydub>=0.25.1",
-    
+
     # YouTube downloading and transcription
     "yt-dlp>=2025.7.21",
     "deepgram-sdk>=4.7.0",
-    
+
     # Configuration and Utilities
     "PyYAML>=6.0",
     "numpy>=1.21.0",
     "scipy>=1.10.0",
-    
+
     # Data processing for speaker analysis
     "pandas>=2.2.0",
     "scikit-learn>=1.4.0",
-    
+
     # CLI and async support
     "click>=8.1.0",
     "aiohttp>=3.8.0",
-    
+
     # Audio quality assessment
     "matplotlib>=3.8.0",  # For visualization during development
 ]

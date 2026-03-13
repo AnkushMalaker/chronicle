@@ -2,4 +2,4 @@
 
 from .plugin import TestEventPlugin
 
-__all__ = ['TestEventPlugin']
+__all__ = ["TestEventPlugin"]

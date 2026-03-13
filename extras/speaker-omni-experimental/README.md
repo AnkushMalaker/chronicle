@@ -50,7 +50,7 @@ pip install -r requirements.txt
 ```bash
 # For GPU acceleration (TODO: add to project)
 uv add torch[cuda] --group gpu
-uv add flash-attn --group gpu  
+uv add flash-attn --group gpu
 uv add accelerate --group gpu
 
 # Alternative: Manual PyTorch CUDA installation
@@ -86,7 +86,7 @@ The script creates this structure:
 ```
 data/
 ├── raw_audio/           # Downloaded YouTube audio
-├── segments/            # Individual speaker segments  
+├── segments/            # Individual speaker segments
 ├── reference_clips/     # Best segments organized by speaker
 │   ├── speaker_0/       # Auto-detected speakers
 │   ├── speaker_1/
@@ -127,12 +127,12 @@ The script generates a `config.yaml` with placeholder names. Edit it to use real
 ```yaml
 speakers:
   # Replace these placeholder names with real family member names
-  Flowerin:  # was "Alice" 
+  Flowerin:  # was "Alice"
     - "data/reference_clips/speaker_0/speaker_0_ref_01.wav"
     - "data/reference_clips/speaker_0/speaker_0_ref_02.wav"
-  
+
   Brother:   # was "Bob"
-    - "data/reference_clips/speaker_1/speaker_1_ref_01.wav" 
+    - "data/reference_clips/speaker_1/speaker_1_ref_01.wav"
     - "data/reference_clips/speaker_1/speaker_1_ref_02.wav"
 ```
 
@@ -144,11 +144,11 @@ speakers:
   Flowerin:
     - "reference_clips/flowerin_01.wav"
     - "reference_clips/flowerin_02.wav"
-  
+
   Brother:
     - "reference_clips/brother_01.wav"
     - "reference_clips/brother_02.wav"
-  
+
   Dad:
     - "reference_clips/dad_01.wav"
     - "reference_clips/dad_02.wav"
@@ -163,7 +163,7 @@ uv run python qwen_speaker_diarizer.py enroll --config config.yaml
 # Transcribe a single audio file
 uv run python qwen_speaker_diarizer.py transcribe --audio test_audio/family_conversation.wav --config config.yaml
 
-# Batch process multiple files  
+# Batch process multiple files
 uv run python qwen_speaker_diarizer.py batch --input-dir test_audio/ --config config.yaml --output-dir output/
 ```
 

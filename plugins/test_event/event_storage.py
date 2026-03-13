@@ -3,6 +3,7 @@ Event storage module for test plugin using SQLite.
 
 Provides async SQLite operations for logging and querying plugin events.
 """
+
 import json
 import logging
 import os
@@ -34,7 +35,9 @@ class EventStorage:
         try:
             db_dir.mkdir(parents=True, exist_ok=True)
             logger.info(f"🔍 DEBUG: Directory created/verified: {db_dir}")
-            logger.info(f"🔍 DEBUG: Directory permissions: {oct(db_dir.stat().st_mode)}")
+            logger.info(
+                f"🔍 DEBUG: Directory permissions: {oct(db_dir.stat().st_mode)}"
+            )
         except Exception as e:
             logger.error(f"🔍 DEBUG: Failed to create directory: {e}")
             raise
@@ -67,13 +70,18 @@ class EventStorage:
 
         except Exception as e:
             logger.error(f"🔍 DEBUG: Failed to connect to database: {e}")
-            logger.error(f"🔍 DEBUG: Database file exists: {Path(self.db_path).exists()}")
+            logger.error(
+                f"🔍 DEBUG: Database file exists: {Path(self.db_path).exists()}"
+            )
             if Path(self.db_path).exists():
-                logger.error(f"🔍 DEBUG: Database file permissions: {oct(Path(self.db_path).stat().st_mode)}")
+                logger.error(
+                    f"🔍 DEBUG: Database file permissions: {oct(Path(self.db_path).stat().st_mode)}"
+                )
             raise
 
         # Create events table
-        await self.db.execute("""
+        await self.db.execute(
+            """
             CREATE TABLE IF NOT EXISTS plugin_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp DATETIME NOT NULL,
@@ -83,18 +91,23 @@ class EventStorage:
                 metadata TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
-        """)
+        """
+        )
 
         # Create index for faster queries
-        await self.db.execute("""
+        await self.db.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_event_type
             ON plugin_events(event)
-        """)
+        """
+        )
 
-        await self.db.execute("""
+        await self.db.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_user_id
             ON plugin_events(user_id)
-        """)
+        """
+        )
 
         await self.db.commit()
         logger.info(f"Event storage initialized at {self.db_path}")
@@ -104,7 +117,7 @@ class EventStorage:
         event: str,
         user_id: str,
         data: Dict[str, Any],
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> int:
         """
         Log an event to the database.
@@ -135,7 +148,7 @@ class EventStorage:
         except Exception as e:
             logger.error(
                 f"💾 STORAGE: JSON serialization failed for event '{event}': {e}",
-                exc_info=True
+                exc_info=True,
             )
             raise
 
@@ -148,7 +161,7 @@ class EventStorage:
                 INSERT INTO plugin_events (timestamp, event, user_id, data, metadata)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (timestamp, event, user_id, data_json, metadata_json)
+                (timestamp, event, user_id, data_json, metadata_json),
             )
 
             await self.db.commit()
@@ -164,7 +177,7 @@ class EventStorage:
         except Exception as e:
             logger.error(
                 f"💾 STORAGE: Database operation failed for event '{event}': {e}",
-                exc_info=True
+                exc_info=True,
             )
             raise
 
@@ -188,7 +201,7 @@ class EventStorage:
             WHERE event = ?
             ORDER BY created_at DESC
             """,
-            (event,)
+            (event,),
         )
 
         rows = await cursor.fetchall()
@@ -214,7 +227,7 @@ class EventStorage:
             WHERE user_id = ?
             ORDER BY created_at DESC
             """,
-            (user_id,)
+            (user_id,),
         )
 
         rows = await cursor.fetchall()
@@ -274,13 +287,10 @@ class EventStorage:
 
         if event:
             cursor = await self.db.execute(
-                "SELECT COUNT(*) FROM plugin_events WHERE event = ?",
-                (event,)
+                "SELECT COUNT(*) FROM plugin_events WHERE event = ?", (event,)
             )
         else:
-            cursor = await self.db.execute(
-                "SELECT COUNT(*) FROM plugin_events"
-            )
+            cursor = await self.db.execute("SELECT COUNT(*) FROM plugin_events")
 
         row = await cursor.fetchone()
         return row[0] if row else 0
@@ -299,18 +309,18 @@ class EventStorage:
 
         for row in rows:
             event_dict = {
-                'id': row[0],
-                'timestamp': row[1],
-                'event': row[2],
-                'user_id': row[3],
-                'data': json.loads(row[4]) if row[4] else {},
-                'metadata': json.loads(row[5]) if row[5] else {},
-                'created_at': row[6]
+                "id": row[0],
+                "timestamp": row[1],
+                "event": row[2],
+                "user_id": row[3],
+                "data": json.loads(row[4]) if row[4] else {},
+                "metadata": json.loads(row[5]) if row[5] else {},
+                "created_at": row[6],
             }
 
             # Flatten data fields to top level for easier access in tests
-            if isinstance(event_dict['data'], dict):
-                event_dict.update(event_dict['data'])
+            if isinstance(event_dict["data"], dict):
+                event_dict.update(event_dict["data"])
 
             events.append(event_dict)
 

@@ -11,7 +11,11 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
-from advanced_omi_backend.plugins.events import ButtonActionType, ConversationCloseReason, PluginEvent
+from advanced_omi_backend.plugins.events import (
+    ButtonActionType,
+    ConversationCloseReason,
+    PluginEvent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +34,9 @@ class TestButtonActionsPlugin(BasePlugin):
 
     async def initialize(self):
         if not self.enabled:
-            logger.info("Test Button Actions plugin is disabled, skipping initialization")
+            logger.info(
+                "Test Button Actions plugin is disabled, skipping initialization"
+            )
             return
         logger.info(
             f"Test Button Actions plugin initialized with actions: "
@@ -83,7 +89,9 @@ class TestButtonActionsPlugin(BasePlugin):
 
         session_id = context.data.get("session_id")
         if not session_id:
-            logger.warning("No session_id in button event data, cannot close conversation")
+            logger.warning(
+                "No session_id in button event data, cannot close conversation"
+            )
             return PluginResult(success=False, message="No active session")
 
         success = await context.services.close_conversation(
@@ -92,14 +100,18 @@ class TestButtonActionsPlugin(BasePlugin):
         )
 
         if success:
-            logger.info(f"Button press closed conversation for session {session_id[:12]}")
+            logger.info(
+                f"Button press closed conversation for session {session_id[:12]}"
+            )
             return PluginResult(
                 success=True,
                 message="Conversation closed by button press",
                 should_continue=False,
             )
         else:
-            logger.warning(f"Failed to close conversation for session {session_id[:12]}")
+            logger.warning(
+                f"Failed to close conversation for session {session_id[:12]}"
+            )
             return PluginResult(success=False, message="Failed to close conversation")
 
     async def _handle_star_conversation(
@@ -112,7 +124,9 @@ class TestButtonActionsPlugin(BasePlugin):
 
         session_id = context.data.get("session_id")
         if not session_id:
-            logger.warning("No session_id in button event data, cannot star conversation")
+            logger.warning(
+                "No session_id in button event data, cannot star conversation"
+            )
             return PluginResult(success=False, message="No active session")
 
         success = await context.services.star_conversation(session_id=session_id)
@@ -125,7 +139,9 @@ class TestButtonActionsPlugin(BasePlugin):
             )
         else:
             logger.warning(f"Failed to toggle star for session {session_id[:12]}")
-            return PluginResult(success=False, message="Failed to toggle conversation star")
+            return PluginResult(
+                success=False, message="Failed to toggle conversation star"
+            )
 
     async def _handle_call_plugin(
         self, context: PluginContext, action_config: dict
@@ -140,7 +156,9 @@ class TestButtonActionsPlugin(BasePlugin):
         data = action_config.get("data", {})
 
         if not plugin_id or not action:
-            logger.warning(f"call_plugin action missing plugin_id or action: {action_config}")
+            logger.warning(
+                f"call_plugin action missing plugin_id or action: {action_config}"
+            )
             return PluginResult(
                 success=False, message="Invalid call_plugin configuration"
             )
@@ -155,4 +173,6 @@ class TestButtonActionsPlugin(BasePlugin):
         if result:
             return result
 
-        return PluginResult(success=False, message=f"No response from plugin '{plugin_id}'")
+        return PluginResult(
+            success=False, message=f"No response from plugin '{plugin_id}'"
+        )
