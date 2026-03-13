@@ -31,7 +31,7 @@ const DEFAULT_CONFIG: AudioCaptureConfig = {
 
 export function useAudioCapture(config: Partial<AudioCaptureConfig> = {}): UseAudioCaptureReturn {
   const audioConfig = { ...DEFAULT_CONFIG, ...config }
-  
+
   // Refs for audio management
   const audioBufferRef = useRef<Float32Array[]>([])
   const mediaStreamRef = useRef<MediaStream | null>(null)
@@ -53,7 +53,7 @@ export function useAudioCapture(config: Partial<AudioCaptureConfig> = {}): UseAu
 
     try {
       audioLogger.info('Starting audio capture...')
-      
+
       // Request microphone access
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -72,7 +72,7 @@ export function useAudioCapture(config: Partial<AudioCaptureConfig> = {}): UseAu
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({
         sampleRate: audioConfig.sampleRate
       })
-      
+
       const source = audioContext.createMediaStreamSource(stream)
       const processor = audioContext.createScriptProcessor(audioConfig.bufferSize, 1, 1)
 
@@ -82,23 +82,23 @@ export function useAudioCapture(config: Partial<AudioCaptureConfig> = {}): UseAu
         if (deepgramRef.current && deepgramRef.current.getConnectionStatus() === 'connected') {
           const inputBuffer = event.inputBuffer
           const inputData = inputBuffer.getChannelData(0)
-          
+
           // Buffer audio for speaker identification
           const audioCopy = new Float32Array(inputData)
           audioBufferRef.current.push(audioCopy)
-          
+
           // Keep only the last N buffers (rolling window)
           if (audioBufferRef.current.length > audioConfig.maxBufferLength) {
             audioBufferRef.current.shift()
           }
-          
+
           // Convert Float32Array to Int16 (linear16) for Deepgram
           const int16Buffer = new Int16Array(inputData.length)
           for (let i = 0; i < inputData.length; i++) {
             const sample = Math.max(-1, Math.min(1, inputData[i]))
             int16Buffer[i] = sample * 0x7FFF
           }
-          
+
           // Send to Deepgram (reduced logging to avoid spam)
           if (Math.random() < 0.01) {
             audioLogger.debug('Sending audio data...')
@@ -119,7 +119,7 @@ export function useAudioCapture(config: Partial<AudioCaptureConfig> = {}): UseAu
     } catch (error) {
       isCapturingRef.current = false
       audioLogger.error('Failed to start audio capture:', error)
-      
+
       let errorMessage = 'Failed to access microphone. '
       if (error instanceof Error) {
         if (error.name === 'NotAllowedError') {
@@ -136,11 +136,11 @@ export function useAudioCapture(config: Partial<AudioCaptureConfig> = {}): UseAu
 
   const stopAudioCapture = useCallback(() => {
     audioLogger.info('Stopping audio capture...')
-    
+
     // Stop Web Audio API components
     if (mediaStreamRef.current) {
       const stream = mediaStreamRef.current as any
-      
+
       // Stop audio context and processor
       if (stream.audioContext) {
         stream.audioContext.close()
@@ -148,16 +148,16 @@ export function useAudioCapture(config: Partial<AudioCaptureConfig> = {}): UseAu
       if (stream.processor) {
         stream.processor.disconnect()
       }
-      
+
       // Stop media stream tracks
       mediaStreamRef.current.getTracks().forEach(track => track.stop())
       mediaStreamRef.current = null
     }
-    
+
     // Clear audio buffer
     audioBufferRef.current = []
     isCapturingRef.current = false
-    
+
     audioLogger.info('Audio capture stopped')
   }, [])
 

@@ -12,7 +12,7 @@ import SettingsPanel from '../components/SettingsPanel'
 
 export default function InferLive() {
   const { user } = useUser()
-  
+
   // Audio processing refs
   const mediaStreamRef = useRef<MediaStream | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
@@ -67,7 +67,7 @@ export default function InferLive() {
       // Get actual sample rate from the audio context
       const actualSampleRate = audioContextRef.current.sampleRate
       console.log(`🎵 [AUDIO] Requested: 16kHz, Actual: ${actualSampleRate}Hz`)
-      
+
       if (actualSampleRate !== 16000) {
         console.warn(`⚠️ [AUDIO] Sample rate mismatch! Expected 16kHz, got ${actualSampleRate}Hz`)
       }
@@ -103,7 +103,7 @@ export default function InferLive() {
 
     } catch (error) {
       console.error('Failed to start audio capture:', error)
-      
+
       let errorMessage = 'Failed to access microphone. '
       if (error.name === 'NotAllowedError') {
         errorMessage += 'Please allow microphone access and try again.'
@@ -112,7 +112,7 @@ export default function InferLive() {
       } else {
         errorMessage += 'Please check permissions and try again.'
       }
-      
+
       alert(errorMessage)
     }
   }
@@ -150,7 +150,7 @@ export default function InferLive() {
     const seconds = Math.floor(ms / 1000)
     const minutes = Math.floor(seconds / 60)
     const hours = Math.floor(minutes / 60)
-    
+
     if (hours > 0) {
       return `${hours}:${(minutes % 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`
     }
@@ -264,7 +264,7 @@ export default function InferLive() {
           <Mic className="h-6 w-6" />
           <span>
             {!deepgram.apiKey ? '⚠️ API Key Required' :
-             deepgram.connectionStatus === 'connecting' ? '🔄 Connecting...' : 
+             deepgram.connectionStatus === 'connecting' ? '🔄 Connecting...' :
              deepgram.isStreaming ? 'Stop Transcribe & Identify' :
              'Start Transcribe & Identify'}
           </span>

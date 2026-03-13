@@ -42,9 +42,9 @@ class AudioStreamService:
         self.memory_events_stream = "memory:events"
 
         # Consumer group names (action verbs - what they DO)
-        self.audio_writer = "audio-file-writer"            # Writes audio chunks to WAV files
-        self.memory_enqueuer = "memory-job-enqueuer"       # Enqueues memory extraction jobs
-        self.event_listener = "event-listener"             # Listens for completion events
+        self.audio_writer = "audio-file-writer"  # Writes audio chunks to WAV files
+        self.memory_enqueuer = "memory-job-enqueuer"  # Enqueues memory extraction jobs
+        self.event_listener = "event-listener"  # Listens for completion events
 
     async def connect(self):
         """Connect to Redis with connection pooling."""
@@ -55,7 +55,7 @@ class AudioStreamService:
             max_connections=20,  # Allow multiple concurrent operations
             socket_keepalive=True,
             socket_connect_timeout=5,
-            retry_on_timeout=True
+            retry_on_timeout=True,
         )
         logger.info(f"Audio stream service connected to Redis at {self.redis_url}")
 
@@ -84,7 +84,7 @@ class AudioStreamService:
         user_email: str,
         audio_chunk: AudioChunk,
         audio_uuid: Optional[str] = None,
-        timestamp: Optional[int] = None
+        timestamp: Optional[int] = None,
     ) -> str:
         """
         Publish audio chunk to Redis Stream.
@@ -135,12 +135,11 @@ class AudioStreamService:
         # Ensure consumer group exists for this stream
         try:
             await self.redis.xgroup_create(
-                stream_name,
-                self.audio_writer,
-                id="0",
-                mkstream=True
+                stream_name, self.audio_writer, id="0", mkstream=True
             )
-            audio_logger.debug(f"Created consumer group {self.audio_writer} for {stream_name}")
+            audio_logger.debug(
+                f"Created consumer group {self.audio_writer} for {stream_name}"
+            )
         except aioredis.ResponseError as e:
             if "BUSYGROUP" not in str(e):
                 raise
@@ -152,7 +151,7 @@ class AudioStreamService:
         audio_uuid: str,
         conversation_id: str,
         status: str,
-        error: Optional[str] = None
+        error: Optional[str] = None,
     ):
         """
         Publish transcript completion event.
@@ -189,7 +188,7 @@ class AudioStreamService:
                 self.transcript_events_stream,
                 self.memory_enqueuer,
                 id="0",
-                mkstream=True
+                mkstream=True,
             )
         except aioredis.ResponseError as e:
             if "BUSYGROUP" not in str(e):
@@ -200,7 +199,7 @@ class AudioStreamService:
         conversation_id: str,
         status: str,
         memory_count: int = 0,
-        error: Optional[str] = None
+        error: Optional[str] = None,
     ):
         """
         Publish memory processing event.
@@ -234,21 +233,14 @@ class AudioStreamService:
         # Ensure consumer group exists
         try:
             await self.redis.xgroup_create(
-                self.memory_events_stream,
-                self.event_listener,
-                id="0",
-                mkstream=True
+                self.memory_events_stream, self.event_listener, id="0", mkstream=True
             )
         except aioredis.ResponseError as e:
             if "BUSYGROUP" not in str(e):
                 raise
 
     async def consume_audio_stream(
-        self,
-        consumer_name: str,
-        callback,
-        block_ms: int = 5000,
-        count: int = 10
+        self, consumer_name: str, callback, block_ms: int = 5000, count: int = 10
     ):
         """
         Consume audio chunks from all client streams.
@@ -288,7 +280,7 @@ class AudioStreamService:
                 consumer_name,
                 streams_dict,
                 count=count,
-                block=block_ms
+                block=block_ms,
             )
 
             for stream_name, stream_messages in messages:
@@ -299,15 +291,13 @@ class AudioStreamService:
 
                         # Acknowledge message
                         await self.redis.xack(
-                            stream_name,
-                            self.audio_writer,
-                            message_id
+                            stream_name, self.audio_writer, message_id
                         )
 
                     except Exception as e:
                         logger.error(
                             f"Error processing audio message {message_id.decode()}: {e}",
-                            exc_info=True
+                            exc_info=True,
                         )
 
         except Exception as e:

@@ -43,6 +43,7 @@ RATE, WIDTH, CHANNELS = 16_000, 2, 1  # 16-kHz/16-bit/mono
 DEFAULT_OMI_MAC = "C67EDFB1-56C8-7A6F-0776-7303E8F697AF"
 DEFAULT_OMI_CHAR_UUID = "19B10001-E8F2-537E-4F6C-D104768A1214"
 
+
 ###############################################################################
 # BLE → PCM helper
 ###############################################################################
@@ -87,7 +88,9 @@ class _OmiMic:
                     self._q.put_nowait(pcm)
                 except asyncio.QueueFull:
                     _LOGGER.warning("PCM queue full - dropping packet")
+
         await listen_to_omi(self._mac, self._char_uuid, _cb)
+
 
 ###############################################################################
 # Satellite mix-in: consume _OmiMic instead of built-in mic service
@@ -113,8 +116,11 @@ class _BluetoothMixin(SatelliteBase):
 
     async def _pump(self):
         async for pcm in self._mic_src.pcm_iter():
-            evt = AudioChunk(rate=RATE, width=WIDTH, channels=CHANNELS, audio=pcm).event()
+            evt = AudioChunk(
+                rate=RATE, width=WIDTH, channels=CHANNELS, audio=pcm
+            ).event()
             await self.event_from_mic(evt, audio_bytes=pcm)
+
 
 ###############################################################################
 # Handler bridging TCP client ↔ satellite
@@ -137,13 +143,10 @@ class _SatHandler(AsyncEventHandler):
             info = Info(
                 satellite=Satellite(
                     name="Omi Bluetooth Satellite",
-                    attribution=Attribution(
-                        name="Omi",
-                        url="https://omi.com"
-                    ),
+                    attribution=Attribution(name="Omi", url="https://omi.com"),
                     installed=True,
                     description="Omi Bluetooth Satellite",
-                    version="0.1.0"
+                    version="0.1.0",
                 )
             )
             await self.write_event(info.event())
@@ -155,11 +158,15 @@ class _SatHandler(AsyncEventHandler):
         await self._sat.clear_server()
         await super().disconnect()
 
+
 ###############################################################################
 # SatelliteSettings factory (matches frozen dataclass definition)
 ###############################################################################
 
-def build_settings(*, wake_uri: str | None, wake_names: list[str] | None) -> SatelliteSettings:
+
+def build_settings(
+    *, wake_uri: str | None, wake_names: list[str] | None
+) -> SatelliteSettings:
     mic = MicSettings(
         uri=None,
         command=None,
@@ -169,8 +176,23 @@ def build_settings(*, wake_uri: str | None, wake_names: list[str] | None) -> Sat
     snd = SndSettings(
         awake_wav="./sounds/awake_sound.wav",
         done_wav="./sounds/done_sound.wav",
-        command=["sox", "-t", "raw", "-r", "22050", "-c", "1", "-e", "signed-integer", "-b", "16", "-", "-t", "coreaudio"]
-        )
+        command=[
+            "sox",
+            "-t",
+            "raw",
+            "-r",
+            "22050",
+            "-c",
+            "1",
+            "-e",
+            "signed-integer",
+            "-b",
+            "16",
+            "-",
+            "-t",
+            "coreaudio",
+        ],
+    )
     # event = EventSettings()
     # timer = TimerSettings()
 
@@ -179,7 +201,10 @@ def build_settings(*, wake_uri: str | None, wake_names: list[str] | None) -> Sat
             uri=wake_uri,
             command=None,
             reconnect_seconds=1.0,
-            names=[WakeWordAndPipeline(name=n, pipeline="Omi BT Wakeword Pipeline") for n in (wake_names or [])],
+            names=[
+                WakeWordAndPipeline(name=n, pipeline="Omi BT Wakeword Pipeline")
+                for n in (wake_names or [])
+            ],
             rate=RATE,
             width=WIDTH,
             channels=CHANNELS,
@@ -197,7 +222,7 @@ def build_settings(*, wake_uri: str | None, wake_names: list[str] | None) -> Sat
 
 
 def register_service(ip: str, port: int):
-    desc = {'uri': f'tcp://{ip}:{port}'}
+    desc = {"uri": f"tcp://{ip}:{port}"}
     info = ServiceInfo(
         "_wyoming._tcp.local.",
         "OmiSatellite._wyoming._tcp.local.",
@@ -210,6 +235,7 @@ def register_service(ip: str, port: int):
     zeroconf = Zeroconf()
     zeroconf.register_service(info)
     return zeroconf
+
 
 ###############################################################################
 # Entry-point
@@ -224,6 +250,7 @@ async def _run_satellite(sat: SatelliteBase, host: str, port: int):
         _LOGGER.error(f"Failed to start satellite server: {e}")
         raise
 
+
 async def main():
     p = argparse.ArgumentParser()
     p.add_argument("--host", default="0.0.0.0")
@@ -237,31 +264,38 @@ async def main():
 
     logging_level = logging.DEBUG if args.debug else logging.INFO
     print(f"Logging level: {logging_level}")
-    logging.basicConfig(level=logging_level, format="%(asctime)s %(levelname)s: %(message)s")
+    logging.basicConfig(
+        level=logging_level, format="%(asctime)s %(levelname)s: %(message)s"
+    )
 
     try:
         mic_src = _OmiMic(args.omi_mac, args.omi_char_uuid)
         await mic_src.start()
 
-        settings = build_settings(wake_uri=args.wake_uri, wake_names=args.wake_word_name)
+        settings = build_settings(
+            wake_uri=args.wake_uri, wake_names=args.wake_word_name
+        )
 
         sat_cls = type(
             "OmiBluetoothSatellite",
-            (_BluetoothMixin, WakeStreamingSatellite if args.wake_uri else AlwaysStreamingSatellite),
+            (
+                _BluetoothMixin,
+                WakeStreamingSatellite if args.wake_uri else AlwaysStreamingSatellite,
+            ),
             {},
         )
         _LOGGER.info(f"Creating satellite with class: {sat_cls.__name__}")
         satellite: SatelliteBase = sat_cls(settings, mic_src)  # type: ignore[arg-type]
 
-
-                
         # Initialize satellite
         await satellite.started()
-        
+
         try:
-            
+
             await asyncio.gather(
-                asyncio.create_task(_run_satellite(satellite, args.host, args.port), name="tcp"),
+                asyncio.create_task(
+                    _run_satellite(satellite, args.host, args.port), name="tcp"
+                ),
                 asyncio.create_task(satellite.run(), name="sat-loop"),
             )
         finally:
@@ -270,6 +304,7 @@ async def main():
     except Exception as e:
         _LOGGER.error(f"Error in main: {e}", exc_info=True)
         raise
+
 
 def get_lan_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -282,6 +317,7 @@ def get_lan_ip():
     finally:
         s.close()
     return ip
+
 
 if __name__ == "__main__":
     try:

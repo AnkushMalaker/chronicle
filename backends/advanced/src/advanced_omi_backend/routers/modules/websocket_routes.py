@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # Create router
 router = APIRouter(tags=["websocket"])
 
+
 @router.websocket("/ws")
 async def ws_endpoint(
     ws: WebSocket,
@@ -42,7 +43,9 @@ async def ws_endpoint(
     codec = codec.lower()
     if codec not in ["pcm", "opus"]:
         logger.warning(f"Unsupported codec requested: {codec}")
-        await ws.close(code=1008, reason=f"Unsupported codec: {codec}. Supported: pcm, opus")
+        await ws.close(
+            code=1008, reason=f"Unsupported codec: {codec}. Supported: pcm, opus"
+        )
         return
 
     # Route to appropriate handler

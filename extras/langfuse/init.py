@@ -29,11 +29,7 @@ console = Console()
 def print_header(title: str):
     """Print a colorful header"""
     console.print()
-    panel = Panel(
-        Text(title, style="cyan bold"),
-        style="cyan",
-        expand=False
-    )
+    panel = Panel(Text(title, style="cyan bold"), style="cyan", expand=False)
     console.print(panel)
     console.print()
 
@@ -52,7 +48,9 @@ def backup_existing_env():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = f".env.backup.{timestamp}"
         shutil.copy2(env_path, backup_path)
-        console.print(f"[blue][INFO][/blue] Backed up existing .env file to {backup_path}")
+        console.print(
+            f"[blue][INFO][/blue] Backed up existing .env file to {backup_path}"
+        )
 
 
 def generate_secret(length: int = 32) -> str:
@@ -81,20 +79,32 @@ def run(args):
         console.print(f"[green][GENERATED][/green] LANGFUSE_SALT: {mask_value(salt)}")
 
     existing_enc_key = read_env_value(".env", "LANGFUSE_ENCRYPTION_KEY")
-    if existing_enc_key and existing_enc_key != "0000000000000000000000000000000000000000000000000000000000000000":
+    if (
+        existing_enc_key
+        and existing_enc_key
+        != "0000000000000000000000000000000000000000000000000000000000000000"
+    ):
         enc_key = existing_enc_key
-        console.print(f"[green][PRESERVED][/green] LANGFUSE_ENCRYPTION_KEY: {mask_value(enc_key)}")
+        console.print(
+            f"[green][PRESERVED][/green] LANGFUSE_ENCRYPTION_KEY: {mask_value(enc_key)}"
+        )
     else:
         enc_key = generate_secret(32)
-        console.print(f"[green][GENERATED][/green] LANGFUSE_ENCRYPTION_KEY: {mask_value(enc_key)}")
+        console.print(
+            f"[green][GENERATED][/green] LANGFUSE_ENCRYPTION_KEY: {mask_value(enc_key)}"
+        )
 
     existing_nextauth = read_env_value(".env", "LANGFUSE_NEXTAUTH_SECRET")
     if existing_nextauth and existing_nextauth != "mysecret":
         nextauth_secret = existing_nextauth
-        console.print(f"[green][PRESERVED][/green] LANGFUSE_NEXTAUTH_SECRET: {mask_value(nextauth_secret)}")
+        console.print(
+            f"[green][PRESERVED][/green] LANGFUSE_NEXTAUTH_SECRET: {mask_value(nextauth_secret)}"
+        )
     else:
         nextauth_secret = generate_secret(32)
-        console.print(f"[green][GENERATED][/green] LANGFUSE_NEXTAUTH_SECRET: {mask_value(nextauth_secret)}")
+        console.print(
+            f"[green][GENERATED][/green] LANGFUSE_NEXTAUTH_SECRET: {mask_value(nextauth_secret)}"
+        )
 
     # --- Project API keys (auto-generate if not already set) ---
     print_section("Project API Keys")
@@ -102,24 +112,32 @@ def run(args):
     existing_pub_key = read_env_value(".env", "LANGFUSE_INIT_PROJECT_PUBLIC_KEY")
     if existing_pub_key:
         public_key = existing_pub_key
-        console.print(f"[green][PRESERVED][/green] Public key: {mask_value(public_key)}")
+        console.print(
+            f"[green][PRESERVED][/green] Public key: {mask_value(public_key)}"
+        )
     else:
         public_key = f"pk-lf-{secrets.token_hex(16)}"
-        console.print(f"[green][GENERATED][/green] Public key: {mask_value(public_key)}")
+        console.print(
+            f"[green][GENERATED][/green] Public key: {mask_value(public_key)}"
+        )
 
     existing_sec_key = read_env_value(".env", "LANGFUSE_INIT_PROJECT_SECRET_KEY")
     if existing_sec_key:
         secret_key = existing_sec_key
-        console.print(f"[green][PRESERVED][/green] Secret key: {mask_value(secret_key)}")
+        console.print(
+            f"[green][PRESERVED][/green] Secret key: {mask_value(secret_key)}"
+        )
     else:
         secret_key = f"sk-lf-{secrets.token_hex(16)}"
-        console.print(f"[green][GENERATED][/green] Secret key: {mask_value(secret_key)}")
+        console.print(
+            f"[green][GENERATED][/green] Secret key: {mask_value(secret_key)}"
+        )
 
     # --- Admin user credentials ---
     print_section("Admin User")
 
-    admin_email = getattr(args, 'admin_email', None) or ""
-    admin_password = getattr(args, 'admin_password', None) or ""
+    admin_email = getattr(args, "admin_email", None) or ""
+    admin_password = getattr(args, "admin_password", None) or ""
 
     if admin_email:
         console.print(f"[green][FROM WIZARD][/green] Admin email: {admin_email}")
@@ -130,11 +148,13 @@ def run(args):
             existing_value=existing_email,
             placeholders=[""],
             is_password=False,
-            default="admin@example.com"
+            default="admin@example.com",
         )
 
     if admin_password:
-        console.print(f"[green][FROM WIZARD][/green] Admin password: {mask_value(admin_password)}")
+        console.print(
+            f"[green][FROM WIZARD][/green] Admin password: {mask_value(admin_password)}"
+        )
     else:
         existing_password = read_env_value(".env", "LANGFUSE_INIT_USER_PASSWORD")
         admin_password = prompt_with_existing_masked(
@@ -142,7 +162,7 @@ def run(args):
             existing_value=existing_password,
             placeholders=[""],
             is_password=True,
-            default=""
+            default="",
         )
 
     # --- Write .env file ---

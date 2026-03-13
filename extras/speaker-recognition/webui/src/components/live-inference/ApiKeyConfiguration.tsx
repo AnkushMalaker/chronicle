@@ -11,10 +11,10 @@ export interface ApiKeyConfigurationProps {
   onApiKeyChange: (key: string) => void
 }
 
-export function ApiKeyConfiguration({ 
-  apiKeySource, 
-  apiKey, 
-  onApiKeyChange 
+export function ApiKeyConfiguration({
+  apiKeySource,
+  apiKey,
+  onApiKeyChange
 }: ApiKeyConfigurationProps) {
   // Only show if manual key is needed and not provided
   if (apiKeySource !== 'manual' || apiKey) {
@@ -39,10 +39,10 @@ export function ApiKeyConfiguration({
       />
       <p className="text-xs text-gray-600 mt-1">
         Get your key from{' '}
-        <a 
-          href="https://console.deepgram.com/" 
-          target="_blank" 
-          rel="noopener noreferrer" 
+        <a
+          href="https://console.deepgram.com/"
+          target="_blank"
+          rel="noopener noreferrer"
           className="text-blue-600 underline"
         >
           Deepgram Console

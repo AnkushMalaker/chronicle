@@ -48,10 +48,15 @@ def convert_model(
     # Build conversion command
     cmd = [
         "ct2-transformers-converter",
-        "--model", hf_model,
-        "--output_dir", str(output_path),
-        "--quantization", quantization,
-        "--copy_files", "tokenizer.json", "preprocessor_config.json",
+        "--model",
+        hf_model,
+        "--output_dir",
+        str(output_path),
+        "--quantization",
+        quantization,
+        "--copy_files",
+        "tokenizer.json",
+        "preprocessor_config.json",
     ]
 
     if force:

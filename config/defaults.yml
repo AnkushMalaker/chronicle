@@ -467,8 +467,8 @@ backend:
     # When true: Use segments from transcription provider (e.g., mock provider in tests)
     # When false: Expect speaker service to create segments via diarization (default production behavior)
     use_provider_segments: false
-    # Transcription job timeout in seconds (default 15 min; increase for slow local STT)
-    job_timeout_seconds: 900
+    # Streaming fallback timeout in seconds (how long the fallback check waits for batch transcription)
+    streaming_fallback_timeout_seconds: 120
     # When enabled, automatically re-transcribe every streaming conversation with the batch provider
     # Streaming transcript is shown as a preview; memories/summaries only generated from batch result
     always_batch_retranscribe: false
@@ -496,8 +496,8 @@ backend:
 
   # Conversation stop conditions
   conversation_stop:
-    transcription_buffer_seconds: 120    # Periodic transcription interval (2 minutes)
     speech_inactivity_threshold: 60      # Speech gap threshold for closure (1 minute)
+    max_conversation_duration_seconds: 7200  # Max conversation duration (2 hours)
 
   # Audio storage paths
   audio_storage:

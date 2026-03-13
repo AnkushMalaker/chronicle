@@ -9,10 +9,10 @@ import { useUser } from '../contexts/UserContext'
 import { apiService } from '../services/api'
 import { createWAVBlob } from '../utils/audioUtils'
 import { speakerLogger } from '../utils/logger'
-import { 
-  speakerIdentificationService, 
-  ProcessingMode, 
-  ProcessingOptions, 
+import {
+  speakerIdentificationService,
+  ProcessingMode,
+  ProcessingOptions,
   ProcessingResult
 } from '../services/speakerIdentification'
 import { ProcessedAudio } from '../services/audioProcessing'
@@ -37,7 +37,7 @@ export interface UseSpeakerIdentificationOptions {
 export interface UseSpeakerIdentificationReturn {
   // Legacy method for backward compatibility
   identifyUtteranceSpeaker: (audioBuffer: Float32Array, sampleRate: number) => Promise<IdentifyResult>
-  
+
   // New enhanced functionality
   isProcessing: boolean
   currentMode: ProcessingMode
@@ -45,7 +45,7 @@ export interface UseSpeakerIdentificationReturn {
   results: ProcessingResult[]
   selectedResult: ProcessingResult | null
   processingProgress: string | null
-  
+
   // Controls
   setProcessingMode: (mode: ProcessingMode) => void
   setConfidenceThreshold: (threshold: number) => void
@@ -53,7 +53,7 @@ export interface UseSpeakerIdentificationReturn {
   selectResult: (result: ProcessingResult | null) => void
   clearResults: () => void
   exportResult: (result: ProcessingResult) => void
-  
+
   // Available modes
   availableModes: Array<{ mode: ProcessingMode; name: string; description: string }>
 }
@@ -85,15 +85,15 @@ export function useSpeakerIdentification(
 
   // Legacy method for backward compatibility
   const identifyUtteranceSpeaker = useCallback(async (
-    audioBuffer: Float32Array, 
+    audioBuffer: Float32Array,
     sampleRate: number
   ): Promise<IdentifyResult> => {
     try {
       speakerLogger.info('Starting utterance speaker identification')
-      
+
       // Create WAV blob
       const wavBlob = createWAVBlob(audioBuffer, sampleRate)
-      
+
       // Call the simple identify-utterance endpoint
       const formData = new FormData()
       formData.append('file', wavBlob, 'utterance.wav')
@@ -101,25 +101,25 @@ export function useSpeakerIdentification(
       if (user?.id) {
         formData.append('user_id', user.id.toString())
       }
-      
+
       const response = await apiService.post('/identify', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
         timeout: 15000, // 15 seconds for utterance identification
       })
-      
+
       speakerLogger.info('API Response:', response.data)
-      
+
       return response.data as IdentifyResult
-      
+
     } catch (error) {
       speakerLogger.error('Error during utterance identification:', error)
-      return { 
-        found: false, 
-        speaker_id: null, 
-        speaker_name: null, 
-        confidence: 0, 
+      return {
+        found: false,
+        speaker_id: null,
+        speaker_name: null,
+        confidence: 0,
         status: 'error',
         similarity_threshold: confidenceThreshold,
         duration: 0
@@ -210,7 +210,7 @@ export function useSpeakerIdentification(
       const errorMsg = `${processingMode} processing failed: ${error.message}`
       setProcessingProgress(null)
       onError?.(errorMsg)
-      
+
       // Create failed result for tracking
       const failedResult: ProcessingResult = {
         id: Math.random().toString(36),
@@ -228,7 +228,7 @@ export function useSpeakerIdentification(
         },
         error: error.message
       }
-      
+
       setResults((prev: ProcessingResult[]) => [failedResult, ...prev])
       return null
 
@@ -290,7 +290,7 @@ export function useSpeakerIdentification(
   return {
     // Legacy method for backward compatibility
     identifyUtteranceSpeaker,
-    
+
     // New enhanced functionality
     isProcessing,
     currentMode,
@@ -298,7 +298,7 @@ export function useSpeakerIdentification(
     results,
     selectedResult,
     processingProgress,
-    
+
     // Controls
     setProcessingMode,
     setConfidenceThreshold: setThreshold,
@@ -306,7 +306,7 @@ export function useSpeakerIdentification(
     selectResult,
     clearResults,
     exportResult,
-    
+
     // Available modes
     availableModes
   }

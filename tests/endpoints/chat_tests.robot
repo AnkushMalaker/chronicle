@@ -40,7 +40,7 @@ Create Chat Session With Custom Title Test
     ${session}=        Set Variable    ${response.json()}
     Should Be Equal    ${session}[title]    ${custom_title}
 
-    
+
 Get Chat Sessions Test
     [Documentation]    Test getting all chat sessions for user
     [Tags]    chat
@@ -239,4 +239,3 @@ User Isolation Test
     Should Be Equal As Integers    ${count}    0
 
     Delete User    api    ${test_user}[id]
-

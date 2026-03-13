@@ -21,32 +21,29 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 def require_admin(current_user: User = Depends(current_active_user)) -> User:
     """Dependency to require admin/superuser permissions."""
     if not current_user.is_superuser:
-        raise HTTPException(
-            status_code=403,
-            detail="Admin permissions required"
-        )
+        raise HTTPException(status_code=403, detail="Admin permissions required")
     return current_user
 
 
 @router.get("/cleanup/settings")
-async def get_cleanup_settings_admin(
-    admin: User = Depends(require_admin)
-):
+async def get_cleanup_settings_admin(admin: User = Depends(require_admin)):
     """Get current cleanup settings (admin only)."""
     from advanced_omi_backend.config import get_cleanup_settings
 
     settings = get_cleanup_settings()
     return {
         **settings,
-        "note": "Cleanup settings are stored in /app/data/cleanup_config.json"
+        "note": "Cleanup settings are stored in /app/data/cleanup_config.json",
     }
 
 
 @router.post("/cleanup")
 async def trigger_cleanup(
     dry_run: bool = Query(False, description="Preview what would be deleted"),
-    retention_days: Optional[int] = Query(None, description="Override retention period"),
-    admin: User = Depends(require_admin)
+    retention_days: Optional[int] = Query(
+        None, description="Override retention period"
+    ),
+    admin: User = Depends(require_admin),
 ):
     """Manually trigger cleanup of soft-deleted conversations (admin only)."""
     try:
@@ -64,7 +61,9 @@ async def trigger_cleanup(
             job_timeout="30m",
         )
 
-        logger.info(f"Admin {admin.email} triggered cleanup job {job.id} (dry_run={dry_run}, retention={retention_days or 'default'})")
+        logger.info(
+            f"Admin {admin.email} triggered cleanup job {job.id} (dry_run={dry_run}, retention={retention_days or 'default'})"
+        )
 
         return JSONResponse(
             status_code=200,
@@ -73,22 +72,23 @@ async def trigger_cleanup(
                 "job_id": job.id,
                 "retention_days": retention_days or "default (from config)",
                 "dry_run": dry_run,
-                "note": "Check job status at /api/queue/jobs/{job_id}"
-            }
+                "note": "Check job status at /api/queue/jobs/{job_id}",
+            },
         )
 
     except Exception as e:
         logger.error(f"Failed to trigger cleanup: {e}")
         return JSONResponse(
-            status_code=500,
-            content={"error": f"Failed to trigger cleanup: {str(e)}"}
+            status_code=500, content={"error": f"Failed to trigger cleanup: {str(e)}"}
         )
 
 
 @router.get("/cleanup/preview")
 async def preview_cleanup(
-    retention_days: Optional[int] = Query(None, description="Preview with specific retention period"),
-    admin: User = Depends(require_admin)
+    retention_days: Optional[int] = Query(
+        None, description="Preview with specific retention period"
+    ),
+    admin: User = Depends(require_admin),
 ):
     """Preview what would be deleted by cleanup (admin only)."""
     try:
@@ -100,26 +100,24 @@ async def preview_cleanup(
         # Use provided retention or default from config
         if retention_days is None:
             settings_dict = get_cleanup_settings()
-            retention_days = settings_dict['retention_days']
+            retention_days = settings_dict["retention_days"]
 
         cutoff_date = datetime.utcnow() - timedelta(days=retention_days)
 
         # Count conversations that would be deleted
         count = await Conversation.find(
-            Conversation.deleted == True,
-            Conversation.deleted_at < cutoff_date
+            Conversation.deleted == True, Conversation.deleted_at < cutoff_date
         ).count()
 
         return {
             "retention_days": retention_days,
             "cutoff_date": cutoff_date.isoformat(),
             "conversations_to_delete": count,
-            "note": f"Conversations deleted before {cutoff_date.date()} would be purged"
+            "note": f"Conversations deleted before {cutoff_date.date()} would be purged",
         }
 
     except Exception as e:
         logger.error(f"Failed to preview cleanup: {e}")
         return JSONResponse(
-            status_code=500,
-            content={"error": f"Failed to preview cleanup: {str(e)}"}
+            status_code=500, content={"error": f"Failed to preview cleanup: {str(e)}"}
         )

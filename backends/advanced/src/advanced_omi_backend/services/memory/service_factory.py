@@ -34,7 +34,9 @@ def create_memory_service(config: MemoryConfig) -> MemoryServiceBase:
         ValueError: If unsupported memory provider is specified
         RuntimeError: If required dependencies are missing
     """
-    memory_logger.info(f"🧠  Creating memory service with provider: {config.memory_provider.value}")
+    memory_logger.info(
+        f"🧠  Creating memory service with provider: {config.memory_provider.value}"
+    )
 
     if config.memory_provider == MemoryProvider.CHRONICLE:
         # Use the sophisticated Chronicle implementation
@@ -50,7 +52,9 @@ def create_memory_service(config: MemoryConfig) -> MemoryServiceBase:
             raise RuntimeError(f"OpenMemory MCP service not available: {e}")
 
         if not config.openmemory_config:
-            raise ValueError("OpenMemory configuration is required for OPENMEMORY_MCP provider")
+            raise ValueError(
+                "OpenMemory configuration is required for OPENMEMORY_MCP provider"
+            )
 
         return OpenMemoryMCPService(**config.openmemory_config)
 

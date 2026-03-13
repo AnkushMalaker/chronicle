@@ -16,7 +16,7 @@ Think of it like having Siri/Alexa, but it's **your own AI** running on **your h
 - **Chronicle Backend** - The main AI brain (transcription, memory, processing)
 - **Tailscale** - Creates secure tunnel so your phone can reach home
 
-### On Your Phone  
+### On Your Phone
 - **Tailscale** - Connects securely to your home computer
 - **Chronicle Mobile App** - Interface for your OMI device and conversations
 
@@ -40,7 +40,7 @@ Think of it like having Siri/Alexa, but it's **your own AI** running on **your h
 ### On Your Home Computer
 
 **Git** (Downloads code from the internet):
-- **Windows/Mac**: [Download Git](https://git-scm.com/downloads)  
+- **Windows/Mac**: [Download Git](https://git-scm.com/downloads)
 - **Linux**: `sudo apt install git` or `sudo yum install git`
 
 **Docker** (Runs the AI services):
@@ -184,7 +184,7 @@ uv run --with-requirements setup-requirements.txt python services.py start --all
 Before connecting your phone, make sure everything works:
 
 1. Visit: **https://[your-tailscale-ip]** (like `https://100.64.1.5`)
-   
+
    *Your browser will warn about "unsafe certificate" - click "Advanced" → "Proceed anyway"*
 
 2. You should see the Chronicle dashboard
@@ -204,27 +204,27 @@ Before connecting your phone, make sure everything works:
    - Enable "Install from unknown sources" in Android settings
    - Tap the downloaded APK file to install
 
-### iPhone Users  
+### iPhone Users
 1. Go to [GitHub Releases](https://github.com/AnkushMalaker/chronicle/releases)
-2. Find the latest release and download `chronicle-ios.ipa` 
+2. Find the latest release and download `chronicle-ios.ipa`
 3. Install using sideloading tool:
    - **AltStore** (recommended): [altstore.io](https://altstore.io)
    - **Sideloadly**: [sideloadly.io](https://sideloadly.io)
-   
+
    *Note: iOS requires sideloading since we're not on App Store yet*
 
 ### Configure the App
 1. **First**: Make sure Tailscale is running on your phone
 2. Open Chronicle app
 3. Go to Settings → Backend Configuration
-4. Enter Backend URL: `https://[your-tailscale-ip]` 
-   
+4. Enter Backend URL: `https://[your-tailscale-ip]`
+
    *Use the same IP as your web dashboard - like `https://100.64.1.5`*
-   
+
 5. Tap "Test Connection" - should show **green checkmark**
 6. If connection fails, double-check:
    - Tailscale is running on phone
-   - Same IP as web dashboard  
+   - Same IP as web dashboard
    - Using `https://` (not `http://`)
 
 ## Step 6: Connect Your OMI Device
@@ -240,7 +240,7 @@ Before connecting your phone, make sure everything works:
 
 **What you now have:**
 - ✅ Personal AI running on your home computer
-- ✅ Phone app connected securely via Tailscale  
+- ✅ Phone app connected securely via Tailscale
 - ✅ OMI device streaming audio to your AI
 - ✅ All conversations processed privately and stored locally
 - ✅ Access from anywhere via your phone
@@ -257,7 +257,7 @@ Before connecting your phone, make sure everything works:
 - **"Permission denied"**: Try `sudo` before commands (Linux/Mac)
 - **"uv not found"**: Restart terminal after installing uv
 
-### Connection Issues  
+### Connection Issues
 - **Phone can't reach backend**: Check Tailscale is running on both devices
 - **Certificate warnings**: Click "Advanced" → "Proceed" in browser
 - **Test connection fails**: Verify you're using `https://` and correct Tailscale IP

@@ -286,14 +286,20 @@ async def _exec_tool(name: str, arguments: dict) -> dict:
         metadata = await system_controller.get_plugins_metadata()
         plugin_id = arguments.get("plugin_id")
         if plugin_id:
-            plugins = [p for p in metadata.get("plugins", []) if p.get("plugin_id") == plugin_id]
+            plugins = [
+                p
+                for p in metadata.get("plugins", [])
+                if p.get("plugin_id") == plugin_id
+            ]
             return {"plugins": plugins, "status": "success"}
         return metadata
 
     if name == "apply_plugin_config":
         plugin_id = arguments["plugin_id"]
         config = {k: v for k, v in arguments.items() if k != "plugin_id"}
-        return await system_controller.update_plugin_config_structured(plugin_id, config)
+        return await system_controller.update_plugin_config_structured(
+            plugin_id, config
+        )
 
     if name == "test_plugin_connection":
         plugin_id = arguments["plugin_id"]
@@ -418,7 +424,9 @@ async def generate_response_stream(messages: list[dict]) -> AsyncGenerator[dict,
     full_messages = [{"role": "system", "content": system_prompt}] + messages
 
     for _ in range(MAX_TOOL_ROUNDS):
-        response = await async_chat_with_tools(full_messages, tools=TOOLS, operation="plugin_assistant")
+        response = await async_chat_with_tools(
+            full_messages, tools=TOOLS, operation="plugin_assistant"
+        )
         choice = response.choices[0]
 
         # If the model wants to call tools, execute them and loop
@@ -441,11 +449,15 @@ async def generate_response_stream(messages: list[dict]) -> AsyncGenerator[dict,
 
                     if confirmation == "rejected":
                         # User rejected — add tool result and let model respond
-                        full_messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": json.dumps({"rejected": True, "reason": "User declined"}),
-                        })
+                        full_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": json.dumps(
+                                    {"rejected": True, "reason": "User declined"}
+                                ),
+                            }
+                        )
                         continue
 
                     if not confirmation:
@@ -473,11 +485,13 @@ async def generate_response_stream(messages: list[dict]) -> AsyncGenerator[dict,
 
                 yield {"type": "tool_result", "name": fn_name, "result": result}
 
-                full_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": json.dumps(result, default=str),
-                })
+                full_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(result, default=str),
+                    }
+                )
 
             if needs_confirmation:
                 # Stop the loop — frontend will re-send with confirmation

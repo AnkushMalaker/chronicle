@@ -24,13 +24,17 @@ async def get_users(current_user: User = Depends(current_superuser)):
 
 
 @router.post("")
-async def create_user(user_data: UserCreate, current_user: User = Depends(current_superuser)):
+async def create_user(
+    user_data: UserCreate, current_user: User = Depends(current_superuser)
+):
     """Create a new user. Admin only."""
     return await user_controller.create_user(user_data)
 
 
 @router.put("/{user_id}")
-async def update_user(user_id: str, user_data: UserUpdate, current_user: User = Depends(current_superuser)):
+async def update_user(
+    user_id: str, user_data: UserUpdate, current_user: User = Depends(current_superuser)
+):
     """Update a user. Admin only."""
     return await user_controller.update_user(user_id, user_data)
 
@@ -43,4 +47,6 @@ async def delete_user(
     delete_memories: bool = False,
 ):
     """Delete a user and optionally their associated data. Admin only."""
-    return await user_controller.delete_user(user_id, delete_conversations, delete_memories)
+    return await user_controller.delete_user(
+        user_id, delete_conversations, delete_memories
+    )

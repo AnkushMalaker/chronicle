@@ -126,7 +126,9 @@ class KnowledgeGraphService:
             )
 
             if not extraction.entities and not extraction.promises:
-                logger.debug(f"No entities extracted from conversation {conversation_id}")
+                logger.debug(
+                    f"No entities extracted from conversation {conversation_id}"
+                )
                 return {"entities": 0, "relationships": 0, "promises": 0}
 
             # Create conversation entity node
@@ -827,6 +829,7 @@ class KnowledgeGraphService:
         if isinstance(value, str):
             try:
                 import json
+
                 return json.loads(value)
             except (json.JSONDecodeError, ValueError):
                 return {}

@@ -366,4 +366,3 @@ WebSocket Disconnect Conversation End Reason Test
     Should Not Be Equal    ${conversation}[completed_at]    ${None}
 
     [Teardown]    Run Keyword And Ignore Error    Close Audio Stream    ${stream_id}
-

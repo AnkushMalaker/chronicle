@@ -7,7 +7,7 @@ The advanced backend now includes sophisticated speaker recognition functionalit
 The speaker recognition system provides:
 
 1. **Speaker Diarization**: Automatically detect and separate different speakers in audio
-2. **Speaker Enrollment**: Register known speakers with audio samples  
+2. **Speaker Enrollment**: Register known speakers with audio samples
 3. **Speaker Identification**: Identify enrolled speakers in new audio
 4. **API Endpoints**: RESTful API for all speaker operations
 5. **Command Line Tools**: Easy-to-use scripts for speaker management
@@ -32,7 +32,7 @@ The speaker recognition system requires additional packages. Install them with:
 # For audio recording (optional)
 pip install sounddevice soundfile
 
-# For API calls  
+# For API calls
 pip install aiohttp requests
 
 # Core dependencies (should already be installed)
@@ -75,7 +75,7 @@ curl -X POST "http://localhost:8000/api/speakers/enroll" \
   -H "Content-Type: application/json" \
   -d '{
     "speaker_id": "alice",
-    "speaker_name": "Alice Smith", 
+    "speaker_name": "Alice Smith",
     "audio_file_path": "audio_chunk_file.wav"
   }'
 
@@ -151,7 +151,7 @@ python enroll_speaker.py --identify "audio_chunk_test_recognition_67890.wav"
 4. **FAISS Storage**: Add embedding to FAISS index for fast similarity search
 5. **Database Storage**: Store speaker metadata in MongoDB
 
-### Identification Process  
+### Identification Process
 
 1. **Embedding Extraction**: Generate embedding from unknown audio
 2. **Similarity Search**: Search FAISS index for most similar enrolled speaker
@@ -211,7 +211,7 @@ The system supports:
 4. **Poor Recognition Accuracy**
    ```
    Issue: Speakers not being identified correctly
-   Solutions: 
+   Solutions:
    - Use cleaner audio for enrollment (less background noise)
    - Enroll with longer audio segments (5-10 seconds)
    - Lower similarity threshold if needed
@@ -248,10 +248,10 @@ from enroll_speaker import enroll_speaker_api
 async def batch_enroll():
     speakers = [
         ("alice", "Alice Smith", "alice.wav"),
-        ("bob", "Bob Jones", "bob.wav"), 
+        ("bob", "Bob Jones", "bob.wav"),
         ("charlie", "Charlie Brown", "charlie.wav")
     ]
-    
+
     for speaker_id, name, file in speakers:
         await enroll_speaker_api("localhost", 8000, speaker_id, name, file)
 
@@ -286,7 +286,7 @@ speakers = list_enrolled_speakers()
 ## Next Steps
 
 1. **Improve Accuracy**: Collect more training data for your specific use case
-2. **Real-time Processing**: Implement streaming speaker recognition  
+2. **Real-time Processing**: Implement streaming speaker recognition
 3. **Speaker Adaptation**: Fine-tune models on your specific speakers
 4. **Multi-language Support**: Add support for different languages
-5. **Speaker Verification**: Add 1:1 verification in addition to 1:N identification 
+5. **Speaker Verification**: Add 1:1 verification in addition to 1:N identification

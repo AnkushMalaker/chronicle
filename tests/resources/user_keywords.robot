@@ -81,5 +81,3 @@ Update User
 
     ${response}=    PUT On Session    ${session}    /api/users/${user_id}    json=${updates}    expected_status=200
     RETURN    ${response.json()}
-
-

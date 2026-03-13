@@ -16,7 +16,7 @@
 
   1. MEMORY_DEBUG_IMPLEMENTATION.md
   2. src/memory_debug.py
-  3. src/memory_debug_api.py  
+  3. src/memory_debug_api.py
   4. API endpoints: /api/debug/memory/*
 
   🏗️ "I want to understand the full architecture"

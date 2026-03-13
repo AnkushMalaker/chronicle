@@ -27,11 +27,12 @@ logger = logging.getLogger(__name__)
 _beanie_initialized = False
 _beanie_init_lock = asyncio.Lock()
 
+
 async def _ensure_beanie_initialized():
     """Ensure Beanie is initialized in the current process (for RQ workers)."""
     global _beanie_initialized
     async with _beanie_init_lock:
-        if _beanie_initialized:            
+        if _beanie_initialized:
             return
         try:
             import os
@@ -85,10 +86,11 @@ class JobPriority(str, Enum):
     - NORMAL: 5 minutes timeout (default)
     - LOW: 3 minutes timeout
     """
-    URGENT = "urgent"      # 1 - Process immediately
-    HIGH = "high"          # 2 - Process before normal
-    NORMAL = "normal"      # 3 - Default priority
-    LOW = "low"            # 4 - Process when idle
+
+    URGENT = "urgent"  # 1 - Process immediately
+    HIGH = "high"  # 2 - Process before normal
+    NORMAL = "normal"  # 3 - Default priority
+    LOW = "low"  # 4 - Process when idle
 
 
 class BaseRQJob(ABC):
@@ -188,6 +190,7 @@ class BaseRQJob(ABC):
             asyncio.set_event_loop(loop)
 
             try:
+
                 async def process():
                     await self._setup()
                     try:
@@ -207,11 +210,15 @@ class BaseRQJob(ABC):
 
         except Exception as e:
             elapsed = time.time() - self.job_start_time
-            logger.error(f"❌ {job_name} failed after {elapsed:.2f}s: {e}", exc_info=True)
+            logger.error(
+                f"❌ {job_name} failed after {elapsed:.2f}s: {e}", exc_info=True
+            )
             raise
 
 
-def async_job(redis: bool = True, beanie: bool = True, timeout: int = 300, result_ttl: int = 3600):
+def async_job(
+    redis: bool = True, beanie: bool = True, timeout: int = 300, result_ttl: int = 3600
+):
     """
     Decorator to convert async functions into RQ-compatible job functions.
 
@@ -239,6 +246,7 @@ def async_job(redis: bool = True, beanie: bool = True, timeout: int = 300, resul
         queue.enqueue(my_job, arg1_value, arg2_value)  # Uses timeout=600
         queue.enqueue(my_job, arg1_value, arg2_value, job_timeout=1200)  # Override
     """
+
     def decorator(func: Callable) -> Callable:
         @wraps(func)
         def wrapper(*args, **kwargs) -> Dict[str, Any]:
@@ -254,6 +262,7 @@ def async_job(redis: bool = True, beanie: bool = True, timeout: int = 300, resul
                 asyncio.set_event_loop(loop)
 
                 try:
+
                     async def process():
                         nonlocal redis_client
 
@@ -267,8 +276,9 @@ def async_job(redis: bool = True, beanie: bool = True, timeout: int = 300, resul
                             from advanced_omi_backend.controllers.queue_controller import (
                                 REDIS_URL,
                             )
+
                             redis_client = redis_async.from_url(REDIS_URL)
-                            kwargs['redis_client'] = redis_client
+                            kwargs["redis_client"] = redis_client
                             logger.debug(f"Redis client created")
 
                         try:
@@ -292,7 +302,9 @@ def async_job(redis: bool = True, beanie: bool = True, timeout: int = 300, resul
 
             except Exception as e:
                 elapsed = time.time() - start_time
-                logger.error(f"❌ {job_name} failed after {elapsed:.2f}s: {e}", exc_info=True)
+                logger.error(
+                    f"❌ {job_name} failed after {elapsed:.2f}s: {e}", exc_info=True
+                )
                 raise
 
         # Store default job configuration as attributes for RQ introspection
@@ -300,4 +312,5 @@ def async_job(redis: bool = True, beanie: bool = True, timeout: int = 300, resul
         wrapper.result_ttl = result_ttl
 
         return wrapper
+
     return decorator

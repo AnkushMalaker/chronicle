@@ -26,7 +26,9 @@ class TranscriptCapability(str, Enum):
 
     WORD_TIMESTAMPS = "word_timestamps"  # Word-level timing data
     SEGMENTS = "segments"  # Speaker segments in output
-    DIARIZATION = "diarization"  # Speaker labels in segments (Speaker 0, Speaker 1, etc.)
+    DIARIZATION = (
+        "diarization"  # Speaker labels in segments (Speaker 0, Speaker 1, etc.)
+    )
 
 
 class FeatureRequirement(str, Enum):
@@ -99,7 +101,9 @@ def check_requirements(
     return True, "OK"
 
 
-def get_provider_capabilities(transcript_version: "Conversation.TranscriptVersion") -> dict:
+def get_provider_capabilities(
+    transcript_version: "Conversation.TranscriptVersion",
+) -> dict:
     """
     Get provider capabilities from transcript version metadata.
 

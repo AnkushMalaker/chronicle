@@ -19,7 +19,7 @@ export default function ConnectionStatus() {
     // In development, this would be localhost:8085 (via port-forward)
     // In production with ingress, this would be the ingress URL
     const isDevelopment = process.env.NODE_ENV === 'development'
-    
+
     if (isDevelopment) {
       return 'http://localhost:8085'
     } else {
@@ -30,12 +30,12 @@ export default function ConnectionStatus() {
 
   const checkBackendConnection = async () => {
     const backendUrl = getBackendUrl()
-    
+
     try {
       const response = await axios.get('/health', {
         timeout: 5000
       })
-      
+
       if (response.status === 200) {
         setStatus({
           status: 'connected',
@@ -59,10 +59,10 @@ export default function ConnectionStatus() {
   useEffect(() => {
     // Initial check
     checkBackendConnection()
-    
+
     // Set up periodic checks every 15 seconds
     const interval = setInterval(checkBackendConnection, 15000)
-    
+
     return () => clearInterval(interval)
   }, [])
 
@@ -96,7 +96,7 @@ export default function ConnectionStatus() {
   }
 
   return (
-    <div 
+    <div
       className="flex items-center space-x-2 text-sm cursor-pointer"
       title={getTooltipText()}
       onClick={() => checkBackendConnection()}

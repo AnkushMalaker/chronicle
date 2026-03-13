@@ -28,7 +28,7 @@ Full Pipeline Integration Test
 
     Log    Starting Full Pipeline Integration Test    INFO
 
-   
+
     # Phase 4: Audio Processing - Upload and wait for conversation completion
     Log    Starting audio upload and started    INFO
     ${conversation}=    Upload Audio File    ${TEST_AUDIO_FILE}    ${TEST_DEVICE_NAME}
@@ -252,5 +252,3 @@ Verify Chat Integration
     Should Be True    ${response.status_code} in [200, 204]    Chat session deletion failed with status ${response.status_code}
 
     Log    Chat integration verification finished    INFO
-
-

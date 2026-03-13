@@ -7,7 +7,7 @@ class OmiOpusDecoder:
 
     def decode_packet(self, data: bytes, strip_header: bool = True):
         if len(data) <= 3:
-            return b''
+            return b""
 
         # Remove 3-byte header
         if strip_header:
@@ -21,4 +21,4 @@ class OmiOpusDecoder:
             return pcm
         except Exception as e:
             print("Opus decode error:", e)
-            return b''
+            return b""

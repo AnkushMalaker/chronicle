@@ -10,29 +10,29 @@ metadata:
       if ($request_uri ~ ^/api/(.*)$) {
         rewrite ^/api/(.*)$ /$1 break;
       }
-    
+
     # SSL and security
     nginx.ingress.kubernetes.io/ssl-redirect: "false"
-    
+
     # File upload settings (from nginx.conf)
     nginx.ingress.kubernetes.io/client-max-body-size: "100m"
     nginx.ingress.kubernetes.io/proxy-body-size: "100m"
-    
+
     # Timeout settings (from nginx.conf)
     nginx.ingress.kubernetes.io/proxy-read-timeout: "86400"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "86400"
     nginx.ingress.kubernetes.io/proxy-connect-timeout: "60s"
-    
+
     # WebSocket support
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
-    
+
     # CORS headers
     nginx.ingress.kubernetes.io/enable-cors: "true"
     nginx.ingress.kubernetes.io/cors-allow-origin: "*"
     nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS"
     nginx.ingress.kubernetes.io/cors-allow-headers: "DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization"
-  
+
 spec:
   ingressClassName: nginx
   rules:
@@ -47,7 +47,7 @@ spec:
             name: speaker-recognition-speaker
             port:
               number: 8085
-      
+
       # API endpoints - proxy to speaker service and rewrite /api prefix
       - path: /api
         pathType: Prefix
@@ -56,7 +56,7 @@ spec:
             name: speaker-recognition-speaker
             port:
               number: 8085
-      
+
       # WebSocket endpoints - proxy to speaker service
       - path: /ws
         pathType: Prefix
@@ -65,7 +65,7 @@ spec:
             name: speaker-recognition-speaker
             port:
               number: 8085
-      
+
       # Deepgram API endpoints - proxy to speaker service
       - path: /v1
         pathType: Prefix
@@ -74,7 +74,7 @@ spec:
             name: speaker-recognition-speaker
             port:
               number: 8085
-      
+
       # Frontend application - proxy to webui service
       - path: /
         pathType: Prefix

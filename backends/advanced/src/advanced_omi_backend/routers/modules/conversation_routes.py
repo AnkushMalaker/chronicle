@@ -26,26 +26,42 @@ async def close_current_conversation(
     current_user: User = Depends(current_active_user),
 ):
     """Close the current active conversation for a client. Works for both connected and disconnected clients."""
-    return await conversation_controller.close_current_conversation(client_id, current_user)
+    return await conversation_controller.close_current_conversation(
+        client_id, current_user
+    )
 
 
 @router.get("")
 async def get_conversations(
-    include_deleted: bool = Query(False, description="Include soft-deleted conversations"),
-    include_unprocessed: bool = Query(False, description="Include orphan audio sessions (always_persist with failed/pending transcription)"),
-    starred_only: bool = Query(False, description="Only return starred/favorited conversations"),
+    include_deleted: bool = Query(
+        False, description="Include soft-deleted conversations"
+    ),
+    include_unprocessed: bool = Query(
+        False,
+        description="Include orphan audio sessions (always_persist with failed/pending transcription)",
+    ),
+    starred_only: bool = Query(
+        False, description="Only return starred/favorited conversations"
+    ),
     limit: int = Query(200, ge=1, le=500, description="Max conversations to return"),
     offset: int = Query(0, ge=0, description="Number of conversations to skip"),
-    sort_by: str = Query("created_at", description="Sort field: created_at, title, audio_total_duration"),
+    sort_by: str = Query(
+        "created_at", description="Sort field: created_at, title, audio_total_duration"
+    ),
     sort_order: str = Query("desc", description="Sort direction: asc or desc"),
-    current_user: User = Depends(current_active_user)
+    current_user: User = Depends(current_active_user),
 ):
     """Get conversations. Admins see all conversations, users see only their own."""
     return await conversation_controller.get_conversations(
-        current_user, include_deleted, include_unprocessed, starred_only, limit, offset,
-        sort_by=sort_by, sort_order=sort_order,
+        current_user,
+        include_deleted,
+        include_unprocessed,
+        starred_only,
+        limit,
+        offset,
+        sort_by=sort_by,
+        sort_order=sort_order,
     )
-
 
 
 @router.get("/search")
@@ -56,13 +72,14 @@ async def search_conversations(
     current_user: User = Depends(current_active_user),
 ):
     """Full-text search across conversation titles, summaries, and transcripts."""
-    return await conversation_controller.search_conversations(q, current_user, limit, offset)
+    return await conversation_controller.search_conversations(
+        q, current_user, limit, offset
+    )
 
 
 @router.get("/{conversation_id}")
 async def get_conversation_detail(
-    conversation_id: str,
-    current_user: User = Depends(current_active_user)
+    conversation_id: str, current_user: User = Depends(current_active_user)
 ):
     """Get a specific conversation with full transcript details."""
     return await conversation_controller.get_conversation(conversation_id, current_user)
@@ -94,24 +111,28 @@ async def reprocess_transcript(
     conversation_id: str, current_user: User = Depends(current_active_user)
 ):
     """Reprocess transcript for a conversation. Users can only reprocess their own conversations."""
-    return await conversation_controller.reprocess_transcript(conversation_id, current_user)
+    return await conversation_controller.reprocess_transcript(
+        conversation_id, current_user
+    )
 
 
 @router.post("/{conversation_id}/reprocess-memory")
 async def reprocess_memory(
     conversation_id: str,
     current_user: User = Depends(current_active_user),
-    transcript_version_id: str = Query(default="active")
+    transcript_version_id: str = Query(default="active"),
 ):
     """Reprocess memory extraction for a specific transcript version. Users can only reprocess their own conversations."""
-    return await conversation_controller.reprocess_memory(conversation_id, transcript_version_id, current_user)
+    return await conversation_controller.reprocess_memory(
+        conversation_id, transcript_version_id, current_user
+    )
 
 
 @router.post("/{conversation_id}/reprocess-speakers")
 async def reprocess_speakers(
     conversation_id: str,
     current_user: User = Depends(current_active_user),
-    transcript_version_id: str = Query(default="active")
+    transcript_version_id: str = Query(default="active"),
 ):
     """
     Re-run speaker identification/diarization on existing transcript.
@@ -127,9 +148,7 @@ async def reprocess_speakers(
         Job status with job_id and new version_id
     """
     return await conversation_controller.reprocess_speakers(
-        conversation_id,
-        transcript_version_id,
-        current_user
+        conversation_id, transcript_version_id, current_user
     )
 
 
@@ -137,20 +156,24 @@ async def reprocess_speakers(
 async def activate_transcript_version(
     conversation_id: str,
     version_id: str,
-    current_user: User = Depends(current_active_user)
+    current_user: User = Depends(current_active_user),
 ):
     """Activate a specific transcript version. Users can only modify their own conversations."""
-    return await conversation_controller.activate_transcript_version(conversation_id, version_id, current_user)
+    return await conversation_controller.activate_transcript_version(
+        conversation_id, version_id, current_user
+    )
 
 
 @router.post("/{conversation_id}/activate-memory/{version_id}")
 async def activate_memory_version(
     conversation_id: str,
     version_id: str,
-    current_user: User = Depends(current_active_user)
+    current_user: User = Depends(current_active_user),
 ):
     """Activate a specific memory version. Users can only modify their own conversations."""
-    return await conversation_controller.activate_memory_version(conversation_id, version_id, current_user)
+    return await conversation_controller.activate_memory_version(
+        conversation_id, version_id, current_user
+    )
 
 
 @router.get("/{conversation_id}/versions")
@@ -158,13 +181,14 @@ async def get_conversation_version_history(
     conversation_id: str, current_user: User = Depends(current_active_user)
 ):
     """Get version history for a conversation. Users can only access their own conversations."""
-    return await conversation_controller.get_conversation_version_history(conversation_id, current_user)
+    return await conversation_controller.get_conversation_version_history(
+        conversation_id, current_user
+    )
 
 
 @router.get("/{conversation_id}/waveform")
 async def get_conversation_waveform(
-    conversation_id: str,
-    current_user: User = Depends(current_active_user)
+    conversation_id: str, current_user: User = Depends(current_active_user)
 ):
     """
     Get or generate waveform visualization data for a conversation.
@@ -208,37 +232,38 @@ async def get_conversation_waveform(
 
     # If waveform exists, return cached version
     if waveform:
-        logger.info(f"Returning cached waveform for conversation {conversation_id[:12]}")
+        logger.info(
+            f"Returning cached waveform for conversation {conversation_id[:12]}"
+        )
         return waveform.model_dump(exclude={"id", "revision_id"})
 
     # Generate waveform on-demand
-    logger.info(f"Generating waveform on-demand for conversation {conversation_id[:12]}")
+    logger.info(
+        f"Generating waveform on-demand for conversation {conversation_id[:12]}"
+    )
 
     waveform_dict = await generate_waveform_data(
-        conversation_id=conversation_id,
-        sample_rate=3
+        conversation_id=conversation_id, sample_rate=3
     )
 
     if not waveform_dict.get("success"):
         error_msg = waveform_dict.get("error", "Unknown error")
         logger.error(f"Waveform generation failed: {error_msg}")
         raise HTTPException(
-            status_code=500,
-            detail=f"Waveform generation failed: {error_msg}"
+            status_code=500, detail=f"Waveform generation failed: {error_msg}"
         )
 
     # Return generated waveform (already saved to database by generator)
     return {
         "samples": waveform_dict["samples"],
         "sample_rate": waveform_dict["sample_rate"],
-        "duration_seconds": waveform_dict["duration_seconds"]
+        "duration_seconds": waveform_dict["duration_seconds"],
     }
 
 
 @router.get("/{conversation_id}/metadata")
 async def get_conversation_metadata(
-    conversation_id: str,
-    current_user: User = Depends(current_active_user)
+    conversation_id: str, current_user: User = Depends(current_active_user)
 ) -> dict:
     """
     Get conversation metadata (duration, etc.) without loading audio.
@@ -270,7 +295,7 @@ async def get_conversation_metadata(
         "conversation_id": conversation_id,
         "duration": conversation.audio_total_duration or 0.0,
         "created_at": conversation.created_at,
-        "has_audio": (conversation.audio_total_duration or 0.0) > 0
+        "has_audio": (conversation.audio_total_duration or 0.0) > 0,
     }
 
 
@@ -278,8 +303,10 @@ async def get_conversation_metadata(
 async def get_audio_segment(
     conversation_id: str,
     start: float = Query(0.0, description="Start time in seconds"),
-    duration: Optional[float] = Query(None, description="Duration in seconds (omit for full audio)"),
-    current_user: User = Depends(current_active_user)
+    duration: Optional[float] = Query(
+        None, description="Duration in seconds (omit for full audio)"
+    ),
+    current_user: User = Depends(current_active_user),
 ) -> Response:
     """
     Get audio segment from a conversation.
@@ -297,6 +324,7 @@ async def get_audio_segment(
         WAV audio bytes (16kHz, mono) for the requested time range
     """
     import time
+
     request_start = time.time()
 
     # Verify conversation exists and user has access
@@ -314,7 +342,9 @@ async def get_audio_segment(
     # Calculate end time
     total_duration = conversation.audio_total_duration or 0.0
     if total_duration == 0:
-        raise HTTPException(status_code=404, detail="No audio available for this conversation")
+        raise HTTPException(
+            status_code=404, detail="No audio available for this conversation"
+        )
 
     if duration is None:
         end = total_duration
@@ -323,18 +353,23 @@ async def get_audio_segment(
 
     # Validate time range
     if start < 0 or start >= total_duration:
-        raise HTTPException(status_code=400, detail=f"Invalid start time: {start}s (max: {total_duration}s)")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid start time: {start}s (max: {total_duration}s)",
+        )
 
     # Get audio chunks for time range
     try:
         wav_bytes = await reconstruct_audio_segment(
-            conversation_id=conversation_id,
-            start_time=start,
-            end_time=end
+            conversation_id=conversation_id, start_time=start, end_time=end
         )
     except Exception as e:
-        logger.error(f"Failed to reconstruct audio segment for {conversation_id[:12]}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to reconstruct audio: {str(e)}")
+        logger.error(
+            f"Failed to reconstruct audio segment for {conversation_id[:12]}: {e}"
+        )
+        raise HTTPException(
+            status_code=500, detail=f"Failed to reconstruct audio: {str(e)}"
+        )
 
     request_time = time.time() - request_start
     logger.info(
@@ -351,15 +386,14 @@ async def get_audio_segment(
             "Content-Disposition": f"attachment; filename=segment_{start}_{end}.wav",
             "X-Audio-Start": str(start),
             "X-Audio-End": str(end),
-            "X-Audio-Duration": str(end - start)
-        }
+            "X-Audio-Duration": str(end - start),
+        },
     )
 
 
 @router.post("/{conversation_id}/star")
 async def toggle_star(
-    conversation_id: str,
-    current_user: User = Depends(current_active_user)
+    conversation_id: str, current_user: User = Depends(current_active_user)
 ):
     """Toggle the starred/favorite status of a conversation."""
     return await conversation_controller.toggle_star(conversation_id, current_user)
@@ -369,16 +403,19 @@ async def toggle_star(
 async def delete_conversation(
     conversation_id: str,
     permanent: bool = Query(False, description="Permanently delete (admin only)"),
-    current_user: User = Depends(current_active_user)
+    current_user: User = Depends(current_active_user),
 ):
     """Soft delete a conversation (or permanently delete if admin)."""
-    return await conversation_controller.delete_conversation(conversation_id, current_user, permanent)
+    return await conversation_controller.delete_conversation(
+        conversation_id, current_user, permanent
+    )
 
 
 @router.post("/{conversation_id}/restore")
 async def restore_conversation(
-    conversation_id: str,
-    current_user: User = Depends(current_active_user)
+    conversation_id: str, current_user: User = Depends(current_active_user)
 ):
     """Restore a soft-deleted conversation."""
-    return await conversation_controller.restore_conversation(conversation_id, current_user)
+    return await conversation_controller.restore_conversation(
+        conversation_id, current_user
+    )

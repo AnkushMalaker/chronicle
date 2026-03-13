@@ -162,7 +162,9 @@ async def list_entities(client: aioesphomeapi.APIClient) -> None:
         for mp in media_players:
             print(f"  - {mp.name or mp.object_id} (key={mp.key})")
     else:
-        print("\nNo media players found! Device needs firmware with media_player component.")
+        print(
+            "\nNo media players found! Device needs firmware with media_player component."
+        )
 
     return entities
 
@@ -278,22 +280,71 @@ Examples:
         """,
     )
 
-    parser.add_argument("--device-ip", required=True, help="IP address of the VA-PE device")
-    parser.add_argument("--port", type=int, default=6053, help="ESPHome native API port (default: 6053)")
-    parser.add_argument("--password", default="", help="API password (if set in firmware)")
-    parser.add_argument("--noise-psk", default=None, help="API encryption key (base64-encoded noise PSK)")
+    parser.add_argument(
+        "--device-ip", required=True, help="IP address of the VA-PE device"
+    )
+    parser.add_argument(
+        "--port", type=int, default=6053, help="ESPHome native API port (default: 6053)"
+    )
+    parser.add_argument(
+        "--password", default="", help="API password (if set in firmware)"
+    )
+    parser.add_argument(
+        "--noise-psk",
+        default=None,
+        help="API encryption key (base64-encoded noise PSK)",
+    )
 
-    parser.add_argument("--file", help="Path to WAV file to play (default: generate test tone)")
-    parser.add_argument("--frequency", type=float, default=440.0, help="Test tone frequency in Hz (default: 440)")
-    parser.add_argument("--duration", type=float, default=3.0, help="Test tone duration in seconds (default: 3)")
-    parser.add_argument("--sample-rate", type=int, default=48000, help="Test tone sample rate (default: 48000)")
+    parser.add_argument(
+        "--file", help="Path to WAV file to play (default: generate test tone)"
+    )
+    parser.add_argument(
+        "--frequency",
+        type=float,
+        default=440.0,
+        help="Test tone frequency in Hz (default: 440)",
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=3.0,
+        help="Test tone duration in seconds (default: 3)",
+    )
+    parser.add_argument(
+        "--sample-rate",
+        type=int,
+        default=48000,
+        help="Test tone sample rate (default: 48000)",
+    )
 
-    parser.add_argument("--media", action="store_true", help="Play as media instead of announcement")
-    parser.add_argument("--http-port", type=int, default=8080, help="Port for temporary HTTP audio server (default: 8080)")
-    parser.add_argument("--wait", type=int, default=10, help="Seconds to wait for playback to finish (default: 10)")
+    parser.add_argument(
+        "--media", action="store_true", help="Play as media instead of announcement"
+    )
+    parser.add_argument(
+        "--http-port",
+        type=int,
+        default=8080,
+        help="Port for temporary HTTP audio server (default: 8080)",
+    )
+    parser.add_argument(
+        "--wait",
+        type=int,
+        default=10,
+        help="Seconds to wait for playback to finish (default: 10)",
+    )
 
-    parser.add_argument("--list-entities", action="store_true", help="List all entities on the device and exit")
-    parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity (-v for INFO, -vv for DEBUG)")
+    parser.add_argument(
+        "--list-entities",
+        action="store_true",
+        help="List all entities on the device and exit",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="Increase verbosity (-v for INFO, -vv for DEBUG)",
+    )
 
     args = parser.parse_args()
 

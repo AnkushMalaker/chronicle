@@ -39,6 +39,7 @@ MEMORY_LOOKBACK_SECONDS = 86400
 # Job 1: Speaker Fine-tuning
 # ---------------------------------------------------------------------------
 
+
 async def run_speaker_finetuning_job() -> dict:
     """Process applied diarization annotations and send to speaker recognition service.
 
@@ -136,13 +137,17 @@ async def run_speaker_finetuning_job() -> dict:
 
             # Mark as trained
             annotation.processed_by = (
-                f"{annotation.processed_by},training" if annotation.processed_by else "training"
+                f"{annotation.processed_by},training"
+                if annotation.processed_by
+                else "training"
             )
             annotation.updated_at = datetime.now(timezone.utc)
             await annotation.save()
 
         except Exception as e:
-            logger.error(f"Speaker finetuning: error processing annotation {annotation.id}: {e}")
+            logger.error(
+                f"Speaker finetuning: error processing annotation {annotation.id}: {e}"
+            )
             failed += 1
 
     total = enrolled + appended
@@ -150,7 +155,13 @@ async def run_speaker_finetuning_job() -> dict:
         f"Speaker finetuning complete: {total} processed "
         f"({enrolled} new, {appended} appended, {failed} failed, {cleaned} orphaned cleaned)"
     )
-    return {"enrolled": enrolled, "appended": appended, "failed": failed, "cleaned": cleaned, "processed": total}
+    return {
+        "enrolled": enrolled,
+        "appended": appended,
+        "failed": failed,
+        "cleaned": cleaned,
+        "processed": total,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -174,12 +185,14 @@ def _build_vibevoice_label(conversation) -> dict:
     segments = []
     for seg in transcript.segments:
         speaker_id = speaker_map.setdefault(seg.speaker, len(speaker_map))
-        segments.append({
-            "speaker": speaker_id,
-            "text": seg.text,
-            "start": round(seg.start, 2),
-            "end": round(seg.end, 2),
-        })
+        segments.append(
+            {
+                "speaker": speaker_id,
+                "text": seg.text,
+                "start": round(seg.start, 2),
+                "end": round(seg.end, 2),
+            }
+        )
 
     return {
         "audio_path": f"{conversation.conversation_id}.wav",
@@ -198,31 +211,49 @@ async def run_asr_finetuning_job() -> dict:
     from advanced_omi_backend.model_registry import get_models_registry
     from advanced_omi_backend.models.annotation import Annotation, AnnotationType
     from advanced_omi_backend.models.conversation import Conversation
-    from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_wav_from_conversation
+    from advanced_omi_backend.utils.audio_chunk_utils import (
+        reconstruct_wav_from_conversation,
+    )
 
     # Resolve STT service URL from model registry (same URL used for transcription)
     registry = get_models_registry()
     stt_model = registry.get_default("stt") if registry else None
     if not stt_model or not stt_model.model_url:
         logger.warning("ASR finetuning: no STT model configured in registry, skipping")
-        return {"conversations_exported": 0, "annotations_consumed": 0, "message": "No STT model configured"}
+        return {
+            "conversations_exported": 0,
+            "annotations_consumed": 0,
+            "message": "No STT model configured",
+        }
 
     vibevoice_url = stt_model.model_url.rstrip("/")
 
     # Find applied annotations (TRANSCRIPT and DIARIZATION) not yet consumed by ASR training
     annotations = await Annotation.find(
-        {"annotation_type": {"$in": [AnnotationType.TRANSCRIPT.value, AnnotationType.DIARIZATION.value]}},
+        {
+            "annotation_type": {
+                "$in": [
+                    AnnotationType.TRANSCRIPT.value,
+                    AnnotationType.DIARIZATION.value,
+                ]
+            }
+        },
         Annotation.processed == True,
     ).to_list()
 
     ready = [
-        a for a in annotations
+        a
+        for a in annotations
         if not a.processed_by or _ASR_TRAINING_MARKER not in a.processed_by
     ]
 
     if not ready:
         logger.info("ASR finetuning: no annotations ready for export")
-        return {"conversations_exported": 0, "annotations_consumed": 0, "message": "No annotations ready"}
+        return {
+            "conversations_exported": 0,
+            "annotations_consumed": 0,
+            "message": "No annotations ready",
+        }
 
     # Group annotations by conversation_id
     by_conversation: dict[str, list[Annotation]] = {}
@@ -245,36 +276,52 @@ async def run_asr_finetuning_job() -> dict:
                         Conversation.conversation_id == conv_id
                     )
                     if not conversation or not conversation.active_transcript:
-                        logger.warning(f"ASR finetuning: conversation {conv_id} not found or no transcript")
+                        logger.warning(
+                            f"ASR finetuning: conversation {conv_id} not found or no transcript"
+                        )
                         errors += 1
                         continue
 
                     if not conversation.active_transcript.segments:
-                        logger.info(f"ASR finetuning: conversation {conv_id} has no segments, skipping")
+                        logger.info(
+                            f"ASR finetuning: conversation {conv_id} has no segments, skipping"
+                        )
                         continue
 
                     # Reconstruct full WAV audio
                     wav_data = await reconstruct_wav_from_conversation(conv_id)
                     if not wav_data:
-                        logger.warning(f"ASR finetuning: no audio for conversation {conv_id}")
+                        logger.warning(
+                            f"ASR finetuning: no audio for conversation {conv_id}"
+                        )
                         errors += 1
                         continue
 
                     # Build training label
                     label = _build_vibevoice_label(conversation)
                     if not label.get("segments"):
-                        logger.info(f"ASR finetuning: no segments in label for {conv_id}, skipping")
+                        logger.info(
+                            f"ASR finetuning: no segments in label for {conv_id}, skipping"
+                        )
                         continue
 
                     # Try to add jargon context from Redis cache
                     if conversation.user_id:
-                        jargon = await redis_client.get(f"asr:jargon:{conversation.user_id}")
+                        jargon = await redis_client.get(
+                            f"asr:jargon:{conversation.user_id}"
+                        )
                         if jargon:
-                            label["customized_context"] = [t.strip() for t in jargon.split(",") if t.strip()]
+                            label["customized_context"] = [
+                                t.strip() for t in jargon.split(",") if t.strip()
+                            ]
 
                     # POST to VibeVoice /fine-tune endpoint
                     files = {
-                        "audio_files": (f"{conv_id}.wav", io.BytesIO(wav_data), "audio/wav"),
+                        "audio_files": (
+                            f"{conv_id}.wav",
+                            io.BytesIO(wav_data),
+                            "audio/wav",
+                        ),
                     }
                     data = {"labels": json.dumps([label])}
 
@@ -307,7 +354,9 @@ async def run_asr_finetuning_job() -> dict:
                         consumed += 1
 
                 except Exception as e:
-                    logger.error(f"ASR finetuning: error processing conversation {conv_id}: {e}")
+                    logger.error(
+                        f"ASR finetuning: error processing conversation {conv_id}: {e}"
+                    )
                     errors += 1
 
     finally:
@@ -328,6 +377,7 @@ async def run_asr_finetuning_job() -> dict:
 # Job 3: ASR Jargon Extraction
 # ---------------------------------------------------------------------------
 
+
 async def run_asr_jargon_extraction_job() -> dict:
     """Extract jargon from recent memories for all users and cache in Redis."""
     from advanced_omi_backend.models.user import User
@@ -344,7 +394,9 @@ async def run_asr_jargon_extraction_job() -> dict:
             try:
                 jargon = await _extract_jargon_for_user(user_id)
                 if jargon:
-                    await redis_client.set(f"asr:jargon:{user_id}", jargon, ex=JARGON_CACHE_TTL)
+                    await redis_client.set(
+                        f"asr:jargon:{user_id}", jargon, ex=JARGON_CACHE_TTL
+                    )
                     processed += 1
                     logger.debug(f"Cached jargon for user {user_id}: {jargon[:80]}...")
                 else:
@@ -398,7 +450,9 @@ async def _extract_jargon_for_user(user_id: str) -> Optional[str]:
 
     # Use LLM to extract jargon
     registry = get_prompt_registry()
-    prompt_template = await registry.get_prompt("asr.jargon_extraction", memories=memory_text)
+    prompt_template = await registry.get_prompt(
+        "asr.jargon_extraction", memories=memory_text
+    )
 
     result = await async_generate(prompt_template)
 

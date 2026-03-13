@@ -48,7 +48,7 @@ export interface UtteranceExtractionResult {
 
 export class AudioProcessingService {
   private static instance: AudioProcessingService
-  
+
   // Audio processing constants
   private readonly SUPPORTED_FORMATS = ['audio/wav', 'audio/webm', 'audio/mp4']
   private readonly TARGET_SAMPLE_RATE = 16000
@@ -76,10 +76,10 @@ export class AudioProcessingService {
       const arrayBuffer = await this.loadFileAsArrayBuffer(file)
       const audioContext = this.createAudioContext()
       const audioBuffer = await this.decodeAudioData(audioContext, arrayBuffer)
-      
+
       // Extract samples (convert to mono if needed)
       const samples = this.extractMonoSamples(audioBuffer)
-      
+
       // Create processed audio object
       const processed: ProcessedAudio = {
         file,
@@ -161,10 +161,10 @@ export class AudioProcessingService {
       // Assume standard 4096 samples per buffer
       const samplesPerBuffer = audioBuffers.length > 0 ? audioBuffers[0].length : 4096
       const actualBufferDurationMs = (samplesPerBuffer / sampleRate) * 1000
-      
+
       console.log(`🎵 [AUDIO EXTRACTION] Sample rate: ${sampleRate}Hz, Buffer duration: ${actualBufferDurationMs.toFixed(2)}ms`)
       console.log(`🕐 [TIMING] Utterance: ${utteranceStartTime.toFixed(3)}s - ${utteranceEndTime.toFixed(3)}s`)
-      
+
       const startBufferIndex = Math.max(0, Math.floor(utteranceStartTime * 1000 / actualBufferDurationMs))
       const endBufferIndex = Math.min(audioBuffers.length, Math.ceil(utteranceEndTime * 1000 / actualBufferDurationMs))
 
@@ -179,7 +179,7 @@ export class AudioProcessingService {
 
       // Extract utterance buffers
       const utteranceAudioBuffer = extractAudioSegmentFromBuffers(audioBuffers, startBufferIndex, endBufferIndex)
-      
+
       if (!utteranceAudioBuffer) {
         return {
           audioBuffer: new Float32Array(0),
@@ -190,7 +190,7 @@ export class AudioProcessingService {
       }
 
       console.log(`✅ [EXTRACTION SUCCESS] Extracted ${utteranceAudioBuffer.length} samples (${(utteranceAudioBuffer.length / sampleRate).toFixed(3)}s)`)
-      
+
       return {
         audioBuffer: utteranceAudioBuffer,
         duration: utteranceAudioBuffer.length / sampleRate,
@@ -211,17 +211,17 @@ export class AudioProcessingService {
    */
   manageAudioBufferArray(buffers: Float32Array[], newBuffer: Float32Array, sampleRate: number = this.TARGET_SAMPLE_RATE): Float32Array[] {
     const updatedBuffers = [...buffers, new Float32Array(newBuffer)]
-    
+
     // Calculate dynamic buffer duration based on actual sample rate
     const actualBufferDurationMs = (newBuffer.length / sampleRate) * 1000
     const bufferRetentionMs = 120 * 1000 // Keep 120 seconds of audio for utterance capture
     const maxBuffers = Math.ceil(bufferRetentionMs / actualBufferDurationMs)
-    
+
     // Keep only last 120 seconds of audio (adjusted for actual sample rate)
     if (updatedBuffers.length > maxBuffers) {
       updatedBuffers.shift()
     }
-    
+
     return updatedBuffers
   }
 
@@ -236,14 +236,14 @@ export class AudioProcessingService {
   ): Float32Array {
     const startSample = Math.floor(startTime * sampleRate)
     const endSample = Math.floor(endTime * sampleRate)
-    
+
     const segmentLength = Math.max(0, Math.min(endSample - startSample, samples.length - startSample))
     const segment = new Float32Array(segmentLength)
-    
+
     for (let i = 0; i < segmentLength; i++) {
       segment[i] = samples[startSample + i] || 0
     }
-    
+
     return segment
   }
 
@@ -254,7 +254,7 @@ export class AudioProcessingService {
     // Check file extension for WAV specifically (most reliable)
     const isWav = file.name.toLowerCase().endsWith('.wav')
     const isSupportedType = this.SUPPORTED_FORMATS.some(format => file.type.includes(format.split('/')[1]))
-    
+
     return isWav || isSupportedType
   }
 
@@ -307,16 +307,16 @@ export class AudioProcessingService {
     if (audioBuffer.numberOfChannels === 1) {
       return new Float32Array(audioBuffer.getChannelData(0))
     }
-    
+
     // Mix stereo to mono
     const leftChannel = audioBuffer.getChannelData(0)
     const rightChannel = audioBuffer.getChannelData(1)
     const mono = new Float32Array(leftChannel.length)
-    
+
     for (let i = 0; i < leftChannel.length; i++) {
       mono[i] = (leftChannel[i] + rightChannel[i]) / 2
     }
-    
+
     return mono
   }
 
@@ -327,12 +327,12 @@ export class AudioProcessingService {
     if (blob.type.includes('wav')) {
       return blob
     }
-    
+
     const arrayBuffer = await blob.arrayBuffer()
     const audioContext = this.createAudioContext()
     const audioBuffer = await this.decodeAudioData(audioContext, arrayBuffer)
     const samples = this.extractMonoSamples(audioBuffer)
-    
+
     return this.createWavBlob(samples, audioBuffer.sampleRate)
   }
 
@@ -343,30 +343,30 @@ export class AudioProcessingService {
     if (samples.length === 0) {
       return { snr: 0, level: 'poor' }
     }
-    
+
     // Calculate RMS for signal power
     let sumSquares = 0
     for (let i = 0; i < samples.length; i++) {
       sumSquares += samples[i] * samples[i]
     }
     const rms = Math.sqrt(sumSquares / samples.length)
-    
+
     // Estimate noise floor (lowest 10% of values)
     const sorted = Array.from(samples).map(Math.abs).sort((a, b) => a - b)
     const noiseFloorIndex = Math.floor(sorted.length * 0.1)
     const noiseFloor = sorted[noiseFloorIndex] || 0.001
-    
+
     // SNR in dB
     const snr = 20 * Math.log10(rms / noiseFloor)
     const validSnr = isFinite(snr) ? snr : 0
-    
+
     // Classify quality level
     let level: string
     if (validSnr >= 30) level = 'excellent'
     else if (validSnr >= 20) level = 'good'
     else if (validSnr >= 15) level = 'fair'
     else level = 'poor'
-    
+
     return { snr: validSnr, level }
   }
 }

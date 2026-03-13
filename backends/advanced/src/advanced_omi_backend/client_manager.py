@@ -98,7 +98,9 @@ class ClientManager:
         """
         return len(self._active_clients)
 
-    def create_client(self, client_id: str, chunk_dir, user_id: str, user_email: Optional[str] = None) -> "ClientState":
+    def create_client(
+        self, client_id: str, chunk_dir, user_id: str, user_email: Optional[str] = None
+    ) -> "ClientState":
         """
         Atomically create and register a new client.
 
@@ -327,12 +329,16 @@ def unregister_client_user_mapping(client_id: str):
     if client_id in _client_to_user_mapping:
         user_id = _client_to_user_mapping.pop(client_id)
         logger.info(f"❌ Unregistered active client {client_id} from user {user_id}")
-        logger.info(f"📊 Active client mappings: {len(_client_to_user_mapping)} remaining")
+        logger.info(
+            f"📊 Active client mappings: {len(_client_to_user_mapping)} remaining"
+        )
     else:
         logger.warning(f"⚠️ Attempted to unregister non-existent client {client_id}")
 
 
-async def track_client_user_relationship_async(client_id: str, user_id: str, ttl: int = 86400):
+async def track_client_user_relationship_async(
+    client_id: str, user_id: str, ttl: int = 86400
+):
     """
     Track that a client belongs to a user (async, writes to Redis for cross-container support).
 
@@ -346,11 +352,15 @@ async def track_client_user_relationship_async(client_id: str, user_id: str, ttl
     if _redis_client:
         try:
             await _redis_client.setex(f"client:owner:{client_id}", ttl, user_id)
-            logger.debug(f"✅ Tracked client {client_id} → user {user_id} in Redis (TTL: {ttl}s)")
+            logger.debug(
+                f"✅ Tracked client {client_id} → user {user_id} in Redis (TTL: {ttl}s)"
+            )
         except Exception as e:
             logger.warning(f"Failed to track client in Redis: {e}")
     else:
-        logger.debug(f"Tracked client {client_id} relationship to user {user_id} (in-memory only)")
+        logger.debug(
+            f"Tracked client {client_id} relationship to user {user_id} (in-memory only)"
+        )
 
 
 def track_client_user_relationship(client_id: str, user_id: str):
@@ -424,7 +434,9 @@ def get_user_clients_active(user_id: str) -> list[str]:
         if mapped_user_id == user_id
     ]
 
-    logger.debug(f"🔍 Found {len(user_clients)} active clients for user {user_id}: {user_clients}")
+    logger.debug(
+        f"🔍 Found {len(user_clients)} active clients for user {user_id}: {user_clients}"
+    )
     return user_clients
 
 
@@ -515,7 +527,9 @@ def generate_client_id(user: "User", device_name: Optional[str] = None) -> str:
 
     if device_name:
         # Sanitize device name: lowercase, alphanumeric + hyphens only, max 10 chars
-        sanitized_device = "".join(c for c in device_name.lower() if c.isalnum() or c == "-")[:10]
+        sanitized_device = "".join(
+            c for c in device_name.lower() if c.isalnum() or c == "-"
+        )[:10]
         base_client_id = f"{user_id_suffix}-{sanitized_device}"
 
         # Check for existing client IDs in database

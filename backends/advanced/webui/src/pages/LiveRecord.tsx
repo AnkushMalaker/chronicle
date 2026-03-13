@@ -106,7 +106,7 @@ export default function LiveRecord() {
       <StatusDisplay recording={recording} />
 
       {/* Audio Visualizer - Shows waveform when recording */}
-      <AudioVisualizer 
+      <AudioVisualizer
         isRecording={recording.isRecording}
         analyser={recording.analyser}
       />

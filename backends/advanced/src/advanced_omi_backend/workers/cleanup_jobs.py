@@ -4,6 +4,7 @@ Cleanup jobs for managing soft-deleted data.
 Provides manual cleanup of soft-deleted conversations and chunks.
 Auto-cleanup is controlled via admin API settings (stored in /app/data/cleanup_config.json).
 """
+
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
@@ -19,8 +20,7 @@ logger = logging.getLogger(__name__)
 
 @async_job(redis=False, beanie=True, timeout=1800)  # 30 minute timeout
 async def purge_old_deleted_conversations(
-    retention_days: Optional[int] = None,
-    dry_run: bool = False
+    retention_days: Optional[int] = None, dry_run: bool = False
 ) -> dict:
     """
     Permanently delete conversations that have been soft-deleted for longer than retention period.
@@ -35,16 +35,17 @@ async def purge_old_deleted_conversations(
     # Get retention period from config if not specified
     if retention_days is None:
         settings_dict = get_cleanup_settings()
-        retention_days = settings_dict['retention_days']
+        retention_days = settings_dict["retention_days"]
 
     cutoff_date = datetime.utcnow() - timedelta(days=retention_days)
 
-    logger.info(f"{'[DRY RUN] ' if dry_run else ''}Purging conversations deleted before {cutoff_date.isoformat()}")
+    logger.info(
+        f"{'[DRY RUN] ' if dry_run else ''}Purging conversations deleted before {cutoff_date.isoformat()}"
+    )
 
     # Find soft-deleted conversations older than cutoff
     old_deleted = await Conversation.find(
-        Conversation.deleted == True,
-        Conversation.deleted_at < cutoff_date
+        Conversation.deleted == True, Conversation.deleted_at < cutoff_date
     ).to_list()
 
     purged_conversations = 0
@@ -129,7 +130,7 @@ def schedule_cleanup_job(retention_days: Optional[int] = None) -> Optional[str]:
     """
     # Check if auto-cleanup is enabled
     settings_dict = get_cleanup_settings()
-    if not settings_dict['auto_cleanup_enabled']:
+    if not settings_dict["auto_cleanup_enabled"]:
         logger.info("Auto-cleanup is disabled (auto_cleanup_enabled=false)")
         return None
 
@@ -137,7 +138,7 @@ def schedule_cleanup_job(retention_days: Optional[int] = None) -> Optional[str]:
         from advanced_omi_backend.controllers.queue_controller import get_queue
 
         if retention_days is None:
-            retention_days = settings_dict['retention_days']
+            retention_days = settings_dict["retention_days"]
 
         queue = get_queue("default")
         job = queue.enqueue(
@@ -146,10 +147,11 @@ def schedule_cleanup_job(retention_days: Optional[int] = None) -> Optional[str]:
             dry_run=False,
             job_timeout="30m",
         )
-        logger.info(f"Scheduled cleanup job {job.id} with {retention_days}-day retention")
+        logger.info(
+            f"Scheduled cleanup job {job.id} with {retention_days}-day retention"
+        )
         return job.id
 
     except Exception as e:
         logger.error(f"Failed to schedule cleanup job: {e}")
         return None
-

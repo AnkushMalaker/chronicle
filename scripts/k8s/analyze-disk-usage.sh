@@ -33,7 +33,7 @@ echo "💾 Analyzing disk space usage on $NODE_NAME..."
 run_ssh_command() {
     local cmd="$1"
     local use_sudo="${2:-false}"
-    
+
     if [[ -n "$SUDO_PASSWORD" && "$use_sudo" == "true" ]]; then
         echo "$SUDO_PASSWORD" | ssh "$NODE_NAME" "sudo -S $cmd" 2>/dev/null
     elif [[ "$use_sudo" == "true" ]]; then

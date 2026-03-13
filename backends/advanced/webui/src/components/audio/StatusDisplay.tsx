@@ -48,14 +48,14 @@ const getStepStatus = (stepId: RecordingStep, currentStep: RecordingStep, isReco
     if (stepIndex <= currentStepIndex) return 'error'
     return 'pending'
   }
-  
+
   if (isRecording) {
     return 'completed' // All steps completed when recording
   }
-  
+
   const stepIndex = steps.findIndex(s => s.id === stepId)
   const currentStepIndex = steps.findIndex(s => s.id === currentStep)
-  
+
   if (stepIndex < currentStepIndex) return 'completed'
   if (stepIndex === currentStepIndex) return 'current'
   return 'pending'
@@ -84,18 +84,18 @@ export default function StatusDisplay({ recording }: StatusDisplayProps) {
   if (recording.currentStep === 'idle' || recording.isRecording) {
     return null
   }
-  
+
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
       <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4 flex items-center">
         <Radio className="h-5 w-5 mr-2 text-blue-600" />
         Recording Setup Progress
       </h3>
-      
+
       <div className="space-y-3">
         {steps.map((step, index) => {
           const status = getStepStatus(step.id, recording.currentStep, recording.isRecording)
-          
+
           return (
             <div
               key={step.id}
@@ -105,7 +105,7 @@ export default function StatusDisplay({ recording }: StatusDisplayProps) {
               <div className="flex items-center justify-center w-8 h-8 rounded-full bg-white dark:bg-gray-700 mr-3">
                 {step.icon}
               </div>
-              
+
               {/* Step Info */}
               <div className="flex-1">
                 <div className="flex items-center justify-between">
@@ -118,7 +118,7 @@ export default function StatusDisplay({ recording }: StatusDisplayProps) {
                   {step.description}
                 </p>
               </div>
-              
+
               {/* Step Number */}
               <div className="ml-3 text-xs text-gray-500 font-mono">
                 {index + 1}
@@ -127,7 +127,7 @@ export default function StatusDisplay({ recording }: StatusDisplayProps) {
           )
         })}
       </div>
-      
+
       {/* Overall Status */}
       <div className="mt-4 p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
         <div className="flex items-center justify-between text-sm">

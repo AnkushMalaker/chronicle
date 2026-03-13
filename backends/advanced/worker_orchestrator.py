@@ -131,7 +131,9 @@ class WorkerOrchestrator:
         # 6. Setup signal handlers
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self._signal_handler(s)))
+            loop.add_signal_handler(
+                sig, lambda s=sig: asyncio.create_task(self._signal_handler(s))
+            )
 
         logger.info("✅ Signal handlers configured (SIGTERM, SIGINT)")
 
@@ -143,7 +145,9 @@ class WorkerOrchestrator:
         await self.health_monitor.start()
         logger.info("✅ Health monitor started")
 
-        logger.info("⏳ Workers running - health monitor will auto-restart failed workers")
+        logger.info(
+            "⏳ Workers running - health monitor will auto-restart failed workers"
+        )
 
     def _cleanup_stale_workers(self) -> int:
         """

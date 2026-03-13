@@ -9,7 +9,7 @@ export default defineConfig({
     host: process.env.REACT_UI_HOST || '0.0.0.0',
     port: parseInt(process.env.REACT_UI_PORT || '5174'),
     https: process.env.REACT_UI_HTTPS === 'true' ? true : false,
-    allowedHosts: process.env.VITE_ALLOWED_HOSTS 
+    allowedHosts: process.env.VITE_ALLOWED_HOSTS
       ? process.env.VITE_ALLOWED_HOSTS.split(' ').map(host => host.trim()).filter(host => host.length > 0)
       : [
           'localhost',

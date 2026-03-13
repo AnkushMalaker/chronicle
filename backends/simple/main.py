@@ -31,25 +31,26 @@ TARGET_SAMPLES = SAMPLE_RATE * SEGMENT_SECONDS
 CHUNK_DIR = Path("./audio_chunks")
 CHUNK_DIR.mkdir(parents=True, exist_ok=True)
 
+
 ###############################################################################
 # Wyoming Protocol Support
 ###############################################################################
 async def parse_wyoming_protocol(ws: WebSocket) -> Tuple[dict, Optional[bytes]]:
     """Parse Wyoming protocol or fall back to raw Opus audio.
-    
+
     Returns:
         Tuple of (header_dict, payload_bytes or None)
     """
     # Read data from WebSocket
     message = await ws.receive()
-    
+
     # Handle text message (JSON header)
     if "text" in message:
         header_text = message["text"]
         # Wyoming protocol uses newline-terminated JSON
-        if not header_text.endswith('\n'):
-            header_text += '\n'
-        
+        if not header_text.endswith("\n"):
+            header_text += "\n"
+
         # Parse JSON header
         json_line = header_text.strip()
         try:
@@ -58,18 +59,20 @@ async def parse_wyoming_protocol(ws: WebSocket) -> Tuple[dict, Optional[bytes]]:
             # Invalid JSON, treat as error
             audio_logger.warning(f"Invalid JSON header: {json_line}")
             return {"type": "error", "data": {"message": "Invalid JSON"}}, None
-        
+
         # If payload is expected, read binary data
         payload = None
-        if header.get('payload_length', 0) > 0:
+        if header.get("payload_length", 0) > 0:
             payload_msg = await ws.receive()
             if "bytes" in payload_msg:
                 payload = payload_msg["bytes"]
             else:
-                audio_logger.warning(f"Expected binary payload but got: {payload_msg.keys()}")
-                
+                audio_logger.warning(
+                    f"Expected binary payload but got: {payload_msg.keys()}"
+                )
+
         return header, payload
-    
+
     # Handle binary message (backward compatibility - treat as raw Opus audio)
     elif "bytes" in message:
         # For simple backend, we expect Opus audio, not PCM
@@ -79,13 +82,13 @@ async def parse_wyoming_protocol(ws: WebSocket) -> Tuple[dict, Optional[bytes]]:
             "type": "audio-chunk",
             "data": {
                 "format": "opus",  # Indicate this is Opus, not PCM
-                "timestamp": int(datetime.utcnow().timestamp() * 1000)
+                "timestamp": int(datetime.utcnow().timestamp() * 1000),
             },
             "data_length": None,
-            "payload_length": len(opus_data)
+            "payload_length": len(opus_data),
         }
         return header, opus_data
-    
+
     else:
         raise ValueError(f"Unexpected WebSocket message type: {message.keys()}")
 
@@ -143,7 +146,9 @@ class ClientState:
             wf.setsampwidth(SAMPLE_WIDTH)
             wf.setframerate(SAMPLE_RATE)
             wf.writeframes(pcm_bytes)
-        audio_logger.info("Client %s: wrote %s (%.1fs)", self.id, wav_path.name, duration)
+        audio_logger.info(
+            "Client %s: wrote %s (%.1fs)", self.id, wav_path.name, duration
+        )
 
         # Reset buffers
         self.pcm_frames.clear()
@@ -166,7 +171,7 @@ async def ws_endpoint(ws: WebSocket):
     state = ClientState(ws, client_id)
     clients.append(state)
     audio_logger.info("Client %s connected", client_id)
-    
+
     audio_session_active = False
     packet_count = 0
 
@@ -176,21 +181,23 @@ async def ws_endpoint(ws: WebSocket):
                 audio_logger.debug("Client %s: waiting for message...", client_id)
                 # Parse Wyoming protocol or raw audio
                 header, payload = await parse_wyoming_protocol(ws)
-                
-                if header['type'] == 'audio-start':
+
+                if header["type"] == "audio-start":
                     # Audio session started
                     audio_session_active = True
-                    audio_format = header.get('data', {})
+                    audio_format = header.get("data", {})
                     audio_logger.info(
                         f"Client {client_id}: Audio session started - "
                         f"Format: {audio_format}"
                     )
                     packet_count = 0
-                    
-                elif header['type'] == 'audio-chunk' and payload:
+
+                elif header["type"] == "audio-chunk" and payload:
                     packet_count += 1
                     # Check if this is Opus audio (from Wyoming or raw)
-                    if header.get('data', {}).get('format') == 'opus' or not 'format' in header.get('data', {}):
+                    if header.get("data", {}).get(
+                        "format"
+                    ) == "opus" or not "format" in header.get("data", {}):
                         # This is Opus audio that needs decoding
                         audio_logger.debug(
                             f"Client {client_id}: received Opus packet #{packet_count} "
@@ -203,8 +210,8 @@ async def ws_endpoint(ws: WebSocket):
                             f"Client {client_id}: Received non-Opus audio format: "
                             f"{header.get('data', {}).get('format')}"
                         )
-                        
-                elif header['type'] == 'audio-stop':
+
+                elif header["type"] == "audio-stop":
                     # Audio session stopped
                     audio_session_active = False
                     audio_logger.info(
@@ -214,24 +221,26 @@ async def ws_endpoint(ws: WebSocket):
                     # Flush any remaining audio
                     await state._flush_segment()
                     packet_count = 0
-                    
-                elif header['type'] == 'error':
+
+                elif header["type"] == "error":
                     # Error in protocol parsing
                     audio_logger.error(
                         f"Client {client_id}: Protocol error - {header.get('data', {}).get('message')}"
                     )
-                    
+
                 else:
                     # Unknown event type, ignore
                     audio_logger.debug(
                         f"Client {client_id}: Ignoring Wyoming event type '{header['type']}'"
                     )
-                    
+
             except WebSocketDisconnect:
                 break  # graceful client close
             except Exception as e:
-                audio_logger.error(f"Client {client_id}: Error processing message - {e}")
-                
+                audio_logger.error(
+                    f"Client {client_id}: Error processing message - {e}"
+                )
+
     finally:
         clients.remove(state)
         # Flush remainder (<30s) before goodbye

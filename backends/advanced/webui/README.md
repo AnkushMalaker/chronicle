@@ -18,7 +18,7 @@ A modern React-based web interface for the Chronicle AI-powered personal audio s
 ### Public Pages
 - **Login** (`/login`) - Authentication page
 
-### Authenticated Pages  
+### Authenticated Pages
 - **Conversations** (`/conversations`) - View and manage conversations with audio playback
 - **Memories** (`/memories`) - Search and manage extracted memories
 - **User Management** (`/users`) - View user accounts (admin: full CRUD)
@@ -51,7 +51,7 @@ A modern React-based web interface for the Chronicle AI-powered personal audio s
    ```bash
    npm run dev
    ```
-   
+
    The app will be available at http://localhost:5173
 
 4. **Start backend services:**
@@ -101,7 +101,7 @@ npm run build
 
 ### Docker Compose Variables
 
-- `WEBUI_PORT` - Production webui port (default: 3000)  
+- `WEBUI_PORT` - Production webui port (default: 3000)
 - `WEBUI_DEV_PORT` - Development webui port (default: 5173)
 - `HOST_IP` - Your host IP for external access
 - `BACKEND_PUBLIC_PORT` - Backend port accessible from browser
@@ -110,7 +110,7 @@ npm run build
 
 ### Frontend Stack
 - **React 18** - UI framework with hooks and concurrent features
-- **TypeScript** - Type safety and better developer experience  
+- **TypeScript** - Type safety and better developer experience
 - **Vite** - Fast build tool with HMR
 - **TailwindCSS** - Utility-first CSS framework
 - **React Router** - Client-side routing
@@ -167,7 +167,7 @@ The frontend integrates with these backend endpoints:
 - `POST /auth/jwt/login` - User login
 - `GET /auth/me` - Get current user info
 
-### Conversations  
+### Conversations
 - `GET /api/conversations` - List conversations
 - `GET /api/conversations/{id}` - Get conversation details
 - `DELETE /api/conversations/{id}` - Delete conversation
@@ -180,7 +180,7 @@ The frontend integrates with these backend endpoints:
 ### Users (Admin)
 - `GET /api/users` - List all users
 - `POST /api/users` - Create user
-- `PUT /api/users/{id}` - Update user  
+- `PUT /api/users/{id}` - Update user
 - `DELETE /api/users/{id}` - Delete user
 
 ### System (Admin)
@@ -212,7 +212,7 @@ The frontend integrates with these backend endpoints:
 ### Common Issues
 
 1. **CORS Errors**: Ensure backend CORS settings allow your frontend domain
-2. **Authentication Issues**: Check JWT token validity and backend auth endpoints  
+2. **Authentication Issues**: Check JWT token validity and backend auth endpoints
 3. **API Connection**: Verify `VITE_BACKEND_URL` matches your backend location
 4. **Docker Build Issues**: Clear Docker cache and rebuild from scratch
 

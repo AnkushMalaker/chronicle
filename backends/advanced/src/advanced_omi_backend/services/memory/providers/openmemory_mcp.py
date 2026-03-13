@@ -66,8 +66,12 @@ class OpenMemoryMCPService(MemoryServiceBase):
             timeout: HTTP request timeout in seconds
         """
         super().__init__()
-        self.server_url = server_url or os.getenv("OPENMEMORY_MCP_URL", "http://localhost:8765")
-        self.client_name = client_name or os.getenv("OPENMEMORY_CLIENT_NAME", "chronicle")
+        self.server_url = server_url or os.getenv(
+            "OPENMEMORY_MCP_URL", "http://localhost:8765"
+        )
+        self.client_name = client_name or os.getenv(
+            "OPENMEMORY_CLIENT_NAME", "chronicle"
+        )
         self.user_id = user_id or os.getenv("OPENMEMORY_USER_ID", "default")
         self.timeout = int(timeout or os.getenv("OPENMEMORY_TIMEOUT", "30"))
         self.mcp_client: Optional[MCPClient] = None
@@ -95,7 +99,9 @@ class OpenMemoryMCPService(MemoryServiceBase):
             # Test connection to OpenMemory MCP server
             is_connected = await self.mcp_client.test_connection()
             if not is_connected:
-                raise RuntimeError(f"Cannot connect to OpenMemory MCP server at {self.server_url}")
+                raise RuntimeError(
+                    f"Cannot connect to OpenMemory MCP server at {self.server_url}"
+                )
 
             self._initialized = True
             memory_logger.info(
@@ -148,7 +154,9 @@ class OpenMemoryMCPService(MemoryServiceBase):
 
             # Use configured OpenMemory user (from config) for all Chronicle users
             # Chronicle user_id and email are stored in metadata for filtering
-            enriched_transcript = f"[Source: {source_id}, Client: {client_id}] {transcript}"
+            enriched_transcript = (
+                f"[Source: {source_id}, Client: {client_id}] {transcript}"
+            )
 
             memory_logger.info(
                 f"Delegating memory processing to OpenMemory for user {user_id}, source {source_id}"
@@ -168,7 +176,9 @@ class OpenMemoryMCPService(MemoryServiceBase):
 
             # Update database relationships if helper provided
             if memory_ids and db_helper:
-                await self._update_database_relationships(db_helper, source_id, memory_ids)
+                await self._update_database_relationships(
+                    db_helper, source_id, memory_ids
+                )
 
             if memory_ids:
                 memory_logger.info(
@@ -186,7 +196,9 @@ class OpenMemoryMCPService(MemoryServiceBase):
             memory_logger.error(f"❌ OpenMemory MCP error for {source_id}: {e}")
             raise e
         except Exception as e:
-            memory_logger.error(f"❌ OpenMemory MCP service failed for {source_id}: {e}")
+            memory_logger.error(
+                f"❌ OpenMemory MCP service failed for {source_id}: {e}"
+            )
             raise e
 
     async def search_memories(
@@ -241,7 +253,9 @@ class OpenMemoryMCPService(MemoryServiceBase):
             memory_logger.error(f"Search memories failed: {e}")
             return []
 
-    async def get_all_memories(self, user_id: str, limit: int = 100) -> List[MemoryEntry]:
+    async def get_all_memories(
+        self, user_id: str, limit: int = 100
+    ) -> List[MemoryEntry]:
         """Get all memories for a specific user.
 
         Retrieves all stored memories for the given user without
@@ -275,7 +289,9 @@ class OpenMemoryMCPService(MemoryServiceBase):
                         if len(memory_entries) >= limit:
                             break  # Got enough results
 
-            memory_logger.info(f"📚 Retrieved {len(memory_entries)} memories for user {user_id}")
+            memory_logger.info(
+                f"📚 Retrieved {len(memory_entries)} memories for user {user_id}"
+            )
             return memory_entries
 
         except MCPError as e:
@@ -338,7 +354,9 @@ class OpenMemoryMCPService(MemoryServiceBase):
 
         # Update MCP client user context for this operation
         original_user_id = self.mcp_client.user_id
-        self.mcp_client.user_id = user_id or self.user_id  # Use the actual Chronicle user's ID
+        self.mcp_client.user_id = (
+            user_id or self.user_id
+        )  # Use the actual Chronicle user's ID
 
         try:
             result = await self.mcp_client.get_memory(memory_id)
@@ -348,7 +366,9 @@ class OpenMemoryMCPService(MemoryServiceBase):
                 return None
 
             # Convert MCP result to MemoryEntry
-            memory_entry = self._mcp_result_to_memory_entry(result, user_id or self.user_id)
+            memory_entry = self._mcp_result_to_memory_entry(
+                result, user_id or self.user_id
+            )
             if memory_entry:
                 memory_logger.info(f"📖 Retrieved memory {memory_id}")
             return memory_entry
@@ -385,7 +405,9 @@ class OpenMemoryMCPService(MemoryServiceBase):
 
         # Update MCP client user context for this operation
         original_user_id = self.mcp_client.user_id
-        self.mcp_client.user_id = user_id or self.user_id  # Use the actual Chronicle user's ID
+        self.mcp_client.user_id = (
+            user_id or self.user_id
+        )  # Use the actual Chronicle user's ID
 
         try:
             success = await self.mcp_client.update_memory(
@@ -404,7 +426,10 @@ class OpenMemoryMCPService(MemoryServiceBase):
             self.mcp_client.user_id = original_user_id
 
     async def delete_memory(
-        self, memory_id: str, user_id: Optional[str] = None, user_email: Optional[str] = None
+        self,
+        memory_id: str,
+        user_id: Optional[str] = None,
+        user_email: Optional[str] = None,
     ) -> bool:
         """Delete a specific memory by ID.
 
@@ -444,7 +469,9 @@ class OpenMemoryMCPService(MemoryServiceBase):
 
         try:
             count = await self.mcp_client.delete_all_memories()
-            memory_logger.info(f"🗑️ Deleted {count} memories for user {user_id} via OpenMemory MCP")
+            memory_logger.info(
+                f"🗑️ Deleted {count} memories for user {user_id} via OpenMemory MCP"
+            )
             return count
 
         except Exception as e:

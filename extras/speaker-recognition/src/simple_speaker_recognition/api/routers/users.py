@@ -1,7 +1,6 @@
 """User management endpoints."""
 
 from fastapi import APIRouter
-
 from simple_speaker_recognition.core.models import UserRequest, UserResponse
 from simple_speaker_recognition.database import get_db_session
 from simple_speaker_recognition.database.queries import UserQueries
@@ -19,8 +18,9 @@ async def list_users():
             UserResponse(
                 id=user.id,
                 username=user.username,
-                created_at=user.created_at.isoformat()
-            ) for user in users
+                created_at=user.created_at.isoformat(),
+            )
+            for user in users
         ]
     finally:
         db.close()
@@ -33,9 +33,7 @@ async def create_user(request: UserRequest):
     try:
         user = UserQueries.get_or_create_user(db, request.username)
         return UserResponse(
-            id=user.id,
-            username=user.username,
-            created_at=user.created_at.isoformat()
+            id=user.id, username=user.username, created_at=user.created_at.isoformat()
         )
     finally:
         db.close()

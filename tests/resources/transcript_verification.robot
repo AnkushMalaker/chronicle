@@ -254,8 +254,8 @@ Verify Segments Match Expected Timestamps
 
     Log    All ${actual_count} segments matched expected timestamps within ${tolerance}s tolerance    INFO
 
-   
-    
+
+
 Verify Transcript Content
     [Documentation]    Verify transcript contains expected content and quality
     [Arguments]    ${conversation}    ${expected_keywords}    ${min_length}=50
@@ -282,4 +282,3 @@ Verify Transcript Content
     Should Be True    ${segment_count} > 0    No segments found
 
     Log    Transcript verification passed: ${transcript_length} chars, ${segment_count} segments    INFO
-

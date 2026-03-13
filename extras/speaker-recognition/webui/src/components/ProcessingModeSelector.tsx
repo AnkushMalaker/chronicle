@@ -133,10 +133,10 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
               const displayName = isTranscriptMode && !uploadedJson
                 ? `${config.icon} ${config.name} (upload transcript)`
                 : `${config.icon} ${config.name}`
-              
+
               return (
-                <option 
-                  key={config.mode} 
+                <option
+                  key={config.mode}
                   value={config.mode}
                   disabled={isDisabled}
                   style={isDisabled ? { color: '#9CA3AF' } : {}}
@@ -303,7 +303,7 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
             <Settings className="h-4 w-4 text-gray-600 dark:text-gray-400" />
             <h4 className="font-medium text-primary">Processing Settings</h4>
           </div>
-          
+
           <div className="space-y-4">
             <div>
               <label className="input-label dark:text-gray-300 mb-1">
@@ -439,15 +439,15 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
       {/* Mode Selection */}
       <div className="space-y-4">
         <h4 className="font-medium text-gray-900">Choose Processing Mode</h4>
-        
+
         {/* Grid Layout for Modes */}
         <div className="grid md:grid-cols-2 gap-4">
           {PROCESSING_MODES.slice(0, 2).map((config) => (
             <div
               key={config.mode}
               className={`border rounded-lg p-4 cursor-pointer transition-colors ${
-                selectedMode === config.mode 
-                  ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 dark:border-blue-400' 
+                selectedMode === config.mode
+                  ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 dark:border-blue-400'
                   : 'border-gray-200 dark:border-gray-600 hover:border-gray-300 dark:hover:border-gray-500'
               }`}
               onClick={() => onModeChange(config.mode)}
@@ -457,7 +457,7 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
                 <div className="flex-1">
                   <h5 className="heading-sm">{config.name}</h5>
                   <p className="text-sm text-secondary mt-1">{config.description}</p>
-                  
+
                   {/* Requirements */}
                   {config.requirements && (
                     <div className="mt-2">
@@ -466,7 +466,7 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
                       </span>
                     </div>
                   )}
-                  
+
                   {/* Features */}
                   <div className="mt-2">
                     <div className="flex flex-wrap gap-1">
@@ -486,8 +486,8 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
         {/* Full-width mode for hybrid */}
         <div
           className={`border rounded-lg p-4 cursor-pointer transition-colors ${
-            selectedMode === 'deepgram-transcript-internal-speakers' 
-              ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 dark:border-blue-400' 
+            selectedMode === 'deepgram-transcript-internal-speakers'
+              ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 dark:border-blue-400'
               : 'border-gray-200 dark:border-gray-600 hover:border-gray-300 dark:hover:border-gray-500'
           }`}
           onClick={() => onModeChange('deepgram-transcript-internal-speakers')}
@@ -497,13 +497,13 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
             <div className="flex-1">
               <h5 className="heading-sm">Hybrid: Deepgram Transcription + Internal Diarization</h5>
               <p className="text-sm text-secondary mt-1">Best of both: High-quality transcription with accurate speaker segmentation</p>
-              
+
               <div className="mt-2">
                 <span className="inline-flex items-center px-2 py-1 rounded-full text-xs bg-yellow-100 text-yellow-800">
                   Requires: Deepgram API key
                 </span>
               </div>
-              
+
               <div className="mt-2">
                 <div className="flex flex-wrap gap-1">
                   {PROCESSING_MODES[2].features.map((feature, index) => (
@@ -527,7 +527,7 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
             <h5 className="font-medium text-blue-900 dark:text-blue-100">Selected: {selectedConfig.name}</h5>
           </div>
           <p className="text-sm text-blue-800 dark:text-blue-200 mb-3">{selectedConfig.description}</p>
-          
+
           <div className="space-y-2">
             <div>
               <span className="text-sm font-medium text-blue-900 dark:text-blue-100">Features:</span>
@@ -537,7 +537,7 @@ export const ProcessingModeSelector: React.FC<ProcessingModeSelectorProps> = ({
                 ))}
               </ul>
             </div>
-            
+
             {selectedConfig.requirements && (
               <div>
                 <span className="text-sm font-medium text-blue-900 dark:text-blue-100">Requirements:</span>

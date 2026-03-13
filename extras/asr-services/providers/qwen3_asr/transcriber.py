@@ -58,8 +58,8 @@ def _audio_to_wav_base64(audio_file_path: str) -> str:
         pass
 
     # Not a WAV – use soundfile to convert
-    import soundfile as sf
     import numpy as np
+    import soundfile as sf
 
     data, sr = sf.read(audio_file_path, dtype="int16")
 
@@ -131,7 +131,9 @@ def detect_and_fix_repetitions(text: str, threshold: int = 20) -> str:
 
                 if valid:
                     end_index = i + thresh * k
-                    while end_index + k <= n and s[end_index : end_index + k] == pattern:
+                    while (
+                        end_index + k <= n and s[end_index : end_index + k] == pattern
+                    ):
                         end_index += k
                     result.append(pattern)
                     result.append(fix_pattern_repeats(s[end_index:], thresh, max_len))
@@ -212,7 +214,9 @@ class Qwen3ASRTranscriber:
 
     def __init__(self, model_id: Optional[str] = None, vllm_url: Optional[str] = None):
         self.model_id = model_id or os.getenv("ASR_MODEL", "Qwen/Qwen3-ASR-1.7B")
-        self.vllm_url = (vllm_url or os.getenv("QWEN3_VLLM_URL", "http://localhost:8000")).rstrip("/")
+        self.vllm_url = (
+            vllm_url or os.getenv("QWEN3_VLLM_URL", "http://localhost:8000")
+        ).rstrip("/")
         self._client = httpx.AsyncClient(timeout=VLLM_TIMEOUT)
         self._aligner = None
 
@@ -224,7 +228,9 @@ class Qwen3ASRTranscriber:
 
                 device = "cuda" if torch.cuda.is_available() else "cpu"
                 dtype = torch.bfloat16 if device == "cuda" else torch.float32
-                logger.info(f"Loading ForcedAligner: model={aligner_model}, device={device}, dtype={dtype}")
+                logger.info(
+                    f"Loading ForcedAligner: model={aligner_model}, device={device}, dtype={dtype}"
+                )
                 self._aligner = Qwen3ForcedAligner.from_pretrained(
                     aligner_model, device_map=device, dtype=dtype
                 )
@@ -311,7 +317,9 @@ class Qwen3ASRTranscriber:
                 words = await self._run_aligner(audio_file_path, text, language)
                 logger.info(f"ForcedAligner produced {len(words)} word timestamps")
             except Exception as e:
-                logger.warning(f"ForcedAligner failed, returning without timestamps: {e}")
+                logger.warning(
+                    f"ForcedAligner failed, returning without timestamps: {e}"
+                )
 
         return TranscriptionResult(
             text=text,
@@ -320,7 +328,9 @@ class Qwen3ASRTranscriber:
             language=language or None,
         )
 
-    async def _run_aligner(self, audio_file_path: str, text: str, language: str) -> list[Word]:
+    async def _run_aligner(
+        self, audio_file_path: str, text: str, language: str
+    ) -> list[Word]:
         """Run ForcedAligner in a thread executor (it's sync/blocking).
 
         Returns list of Word objects with start/end timestamps.
@@ -339,6 +349,8 @@ class Qwen3ASRTranscriber:
             # align() returns List[ForcedAlignResult], each has .items: List[ForcedAlignItem]
             for result in align_results:
                 for item in result.items:
-                    words.append(Word(word=item.text, start=item.start_time, end=item.end_time))
+                    words.append(
+                        Word(word=item.text, start=item.start_time, end=item.end_time)
+                    )
 
         return words

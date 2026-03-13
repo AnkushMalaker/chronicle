@@ -46,5 +46,5 @@ if __name__ == "__main__":
         port=port,
         reload=False,  # Set to True for development
         access_log=False,  # Disabled - using custom RequestLoggingMiddleware instead
-        log_level="info"
+        log_level="info",
     )

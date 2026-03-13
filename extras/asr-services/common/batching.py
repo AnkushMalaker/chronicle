@@ -15,8 +15,11 @@ import wave
 from typing import List, Optional, Tuple
 
 import numpy as np
-
-from common.audio_utils import STANDARD_SAMPLE_RATE, load_audio_file, numpy_to_audio_bytes
+from common.audio_utils import (
+    STANDARD_SAMPLE_RATE,
+    load_audio_file,
+    numpy_to_audio_bytes,
+)
 from common.response_models import Segment, Speaker, TranscriptionResult, Word
 
 logger = logging.getLogger(__name__)
@@ -85,7 +88,9 @@ def split_audio_file(
             wf.writeframes(audio_bytes)
 
         segments.append((tmp.name, start_time, end_time))
-        logger.info(f"  Window {len(segments)-1}: [{start_time:.1f}s - {end_time:.1f}s]")
+        logger.info(
+            f"  Window {len(segments)-1}: [{start_time:.1f}s - {end_time:.1f}s]"
+        )
 
         # Advance by batch_duration (not window size) so next window overlaps
         offset += batch_samples
@@ -162,11 +167,13 @@ def stitch_transcription_results(
             _, next_start, _ = batch_results[i + 1]
             right_cutoff = next_start + overlap_seconds / 2
             offset_segs = [
-                s for s in offset_segs
+                s
+                for s in offset_segs
                 if _seg_midpoint(s) >= left_cutoff and _seg_midpoint(s) < right_cutoff
             ]
             offset_words = [
-                w for w in offset_words
+                w
+                for w in offset_words
                 if _word_midpoint(w) >= left_cutoff and _word_midpoint(w) < right_cutoff
             ]
 
@@ -180,7 +187,10 @@ def stitch_transcription_results(
                 abs_end = spk.end + batch_start
                 if spk.id in all_speakers:
                     prev_s, prev_e = all_speakers[spk.id]
-                    all_speakers[spk.id] = (min(prev_s, abs_start), max(prev_e, abs_end))
+                    all_speakers[spk.id] = (
+                        min(prev_s, abs_start),
+                        max(prev_e, abs_end),
+                    )
                 else:
                     all_speakers[spk.id] = (abs_start, abs_end)
 
@@ -188,10 +198,14 @@ def stitch_transcription_results(
     text = " ".join(s.text for s in all_segments if s.text.strip())
 
     # Build speaker list
-    speakers = [
-        Speaker(id=spk_id, start=times[0], end=times[1])
-        for spk_id, times in all_speakers.items()
-    ] if all_speakers else None
+    speakers = (
+        [
+            Speaker(id=spk_id, start=times[0], end=times[1])
+            for spk_id, times in all_speakers.items()
+        ]
+        if all_speakers
+        else None
+    )
 
     # Duration from last segment
     duration = max(s.end for s in all_segments) if all_segments else None

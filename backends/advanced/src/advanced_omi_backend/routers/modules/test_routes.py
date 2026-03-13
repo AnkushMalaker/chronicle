@@ -37,7 +37,7 @@ async def clear_test_plugin_events():
 
     # Clear events from all plugins that have storage
     for plugin_id, plugin in plugin_router.plugins.items():
-        if hasattr(plugin, 'storage') and plugin.storage:
+        if hasattr(plugin, "storage") and plugin.storage:
             try:
                 cleared = await plugin.storage.clear_events()
                 total_cleared += cleared
@@ -45,10 +45,7 @@ async def clear_test_plugin_events():
             except Exception as e:
                 logger.error(f"Error clearing events from plugin '{plugin_id}': {e}")
 
-    return {
-        "message": "Test plugin events cleared",
-        "events_cleared": total_cleared
-    }
+    return {"message": "Test plugin events cleared", "events_cleared": total_cleared}
 
 
 @router.get("/plugins/events/count")
@@ -65,23 +62,33 @@ async def get_test_plugin_event_count(event_type: Optional[str] = None):
     plugin_router = get_plugin_router()
 
     if not plugin_router:
-        return {"count": 0, "event_type": event_type, "message": "No plugin router initialized"}
+        return {
+            "count": 0,
+            "event_type": event_type,
+            "message": "No plugin router initialized",
+        }
 
     # Get count from first plugin with storage (usually test_event plugin)
     for plugin_id, plugin in plugin_router.plugins.items():
-        if hasattr(plugin, 'storage') and plugin.storage:
+        if hasattr(plugin, "storage") and plugin.storage:
             try:
                 count = await plugin.storage.get_event_count(event_type)
                 return {
                     "count": count,
                     "event_type": event_type,
-                    "plugin_id": plugin_id
+                    "plugin_id": plugin_id,
                 }
             except Exception as e:
-                logger.error(f"Error getting event count from plugin '{plugin_id}': {e}")
+                logger.error(
+                    f"Error getting event count from plugin '{plugin_id}': {e}"
+                )
                 raise HTTPException(status_code=500, detail=str(e))
 
-    return {"count": 0, "event_type": event_type, "message": "No plugin with storage found"}
+    return {
+        "count": 0,
+        "event_type": event_type,
+        "message": "No plugin with storage found",
+    }
 
 
 @router.get("/plugins/events")
@@ -102,7 +109,7 @@ async def get_test_plugin_events(event_type: Optional[str] = None):
 
     # Get events from first plugin with storage
     for plugin_id, plugin in plugin_router.plugins.items():
-        if hasattr(plugin, 'storage') and plugin.storage:
+        if hasattr(plugin, "storage") and plugin.storage:
             try:
                 if event_type:
                     events = await plugin.storage.get_events_by_type(event_type)
@@ -113,7 +120,7 @@ async def get_test_plugin_events(event_type: Optional[str] = None):
                     "events": events,
                     "count": len(events),
                     "event_type": event_type,
-                    "plugin_id": plugin_id
+                    "plugin_id": plugin_id,
                 }
             except Exception as e:
                 logger.error(f"Error getting events from plugin '{plugin_id}': {e}")

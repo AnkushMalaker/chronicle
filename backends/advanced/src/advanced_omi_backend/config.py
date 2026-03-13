@@ -19,9 +19,7 @@ from advanced_omi_backend.config_loader import (
     load_config,
 )
 from advanced_omi_backend.config_loader import reload_config as reload_omegaconf_config
-from advanced_omi_backend.config_loader import (
-    save_config_section,
-)
+from advanced_omi_backend.config_loader import save_config_section
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +32,7 @@ CHUNK_DIR = Path("./audio_chunks")  # Mounted to ./data/audio_chunks by Docker
 # Configuration Functions (OmegaConf-based)
 # ============================================================================
 
+
 def get_config_yml_path() -> Path:
     """
     Get path to config.yml file.
@@ -42,6 +41,7 @@ def get_config_yml_path() -> Path:
         Path to config.yml
     """
     return get_config_dir() / "config.yml"
+
 
 def get_config(force_reload: bool = False) -> dict:
     """
@@ -68,6 +68,7 @@ def reload_config():
 # Diarization Settings (OmegaConf-based)
 # ============================================================================
 
+
 def get_diarization_settings() -> dict:
     """
     Get diarization settings using OmegaConf.
@@ -75,7 +76,7 @@ def get_diarization_settings() -> dict:
     Returns:
         Dict with diarization configuration (resolved from YAML + env vars)
     """
-    cfg = get_backend_config('diarization')
+    cfg = get_backend_config("diarization")
     return OmegaConf.to_container(cfg, resolve=True)
 
 
@@ -89,16 +90,18 @@ def save_diarization_settings(settings: dict) -> bool:
     Returns:
         True if saved successfully, False otherwise
     """
-    return save_config_section('backend.diarization', settings)
+    return save_config_section("backend.diarization", settings)
 
 
 # ============================================================================
 # Cleanup Settings (OmegaConf-based)
 # ============================================================================
 
+
 @dataclass
 class CleanupSettings:
     """Cleanup configuration for soft-deleted conversations."""
+
     auto_cleanup_enabled: bool = False
     retention_days: int = 30
 
@@ -110,7 +113,7 @@ def get_cleanup_settings() -> dict:
     Returns:
         Dict with auto_cleanup_enabled and retention_days
     """
-    cfg = get_backend_config('cleanup')
+    cfg = get_backend_config("cleanup")
     return OmegaConf.to_container(cfg, resolve=True)
 
 
@@ -125,12 +128,14 @@ def save_cleanup_settings(settings: CleanupSettings) -> bool:
         True if saved successfully, False otherwise
     """
     from dataclasses import asdict
-    return save_config_section('backend.cleanup', asdict(settings))
+
+    return save_config_section("backend.cleanup", asdict(settings))
 
 
 # ============================================================================
 # Speech Detection Settings (OmegaConf-based)
 # ============================================================================
+
 
 def get_speech_detection_settings() -> dict:
     """
@@ -139,13 +144,14 @@ def get_speech_detection_settings() -> dict:
     Returns:
         Dict with min_words, min_confidence, min_duration
     """
-    cfg = get_backend_config('speech_detection')
+    cfg = get_backend_config("speech_detection")
     return OmegaConf.to_container(cfg, resolve=True)
 
 
 # ============================================================================
 # Conversation Stop Settings (OmegaConf-based)
 # ============================================================================
+
 
 def get_conversation_stop_settings() -> dict:
     """
@@ -154,12 +160,14 @@ def get_conversation_stop_settings() -> dict:
     Returns:
         Dict with transcription_buffer_seconds, speech_inactivity_threshold
     """
-    cfg = get_backend_config('conversation_stop')
+    cfg = get_backend_config("conversation_stop")
     settings = OmegaConf.to_container(cfg, resolve=True)
 
     # Add min_word_confidence from speech_detection for backward compatibility
-    speech_cfg = get_backend_config('speech_detection')
-    settings['min_word_confidence'] = OmegaConf.to_container(speech_cfg, resolve=True).get('min_confidence', 0.7)
+    speech_cfg = get_backend_config("speech_detection")
+    settings["min_word_confidence"] = OmegaConf.to_container(
+        speech_cfg, resolve=True
+    ).get("min_confidence", 0.7)
 
     return settings
 
@@ -168,6 +176,7 @@ def get_conversation_stop_settings() -> dict:
 # Audio Storage Settings (OmegaConf-based)
 # ============================================================================
 
+
 def get_audio_storage_settings() -> dict:
     """
     Get audio storage settings using OmegaConf.
@@ -175,13 +184,14 @@ def get_audio_storage_settings() -> dict:
     Returns:
         Dict with audio_base_path, audio_chunks_path
     """
-    cfg = get_backend_config('audio_storage')
+    cfg = get_backend_config("audio_storage")
     return OmegaConf.to_container(cfg, resolve=True)
 
 
 # ============================================================================
 # Transcription Job Timeout (OmegaConf-based)
 # ============================================================================
+
 
 def get_transcription_job_timeout() -> int:
     """
@@ -190,14 +200,15 @@ def get_transcription_job_timeout() -> int:
     Returns:
         Job timeout in seconds (default 900 = 15 minutes)
     """
-    cfg = get_backend_config('transcription')
+    cfg = get_backend_config("transcription")
     settings = OmegaConf.to_container(cfg, resolve=True) if cfg else {}
-    return int(settings.get('job_timeout_seconds', 900))
+    return int(settings.get("job_timeout_seconds", 900))
 
 
 # ============================================================================
 # Miscellaneous Settings (OmegaConf-based)
 # ============================================================================
+
 
 def get_misc_settings() -> dict:
     """
@@ -207,23 +218,37 @@ def get_misc_settings() -> dict:
         Dict with always_persist_enabled and use_provider_segments
     """
     # Get audio settings for always_persist_enabled
-    audio_cfg = get_backend_config('audio')
-    audio_settings = OmegaConf.to_container(audio_cfg, resolve=True) if audio_cfg else {}
+    audio_cfg = get_backend_config("audio")
+    audio_settings = (
+        OmegaConf.to_container(audio_cfg, resolve=True) if audio_cfg else {}
+    )
 
     # Get transcription settings for use_provider_segments
-    transcription_cfg = get_backend_config('transcription')
-    transcription_settings = OmegaConf.to_container(transcription_cfg, resolve=True) if transcription_cfg else {}
+    transcription_cfg = get_backend_config("transcription")
+    transcription_settings = (
+        OmegaConf.to_container(transcription_cfg, resolve=True)
+        if transcription_cfg
+        else {}
+    )
 
     # Get speaker recognition settings for per_segment_speaker_id
-    speaker_cfg = get_backend_config('speaker_recognition')
-    speaker_settings = OmegaConf.to_container(speaker_cfg, resolve=True) if speaker_cfg else {}
+    speaker_cfg = get_backend_config("speaker_recognition")
+    speaker_settings = (
+        OmegaConf.to_container(speaker_cfg, resolve=True) if speaker_cfg else {}
+    )
 
     return {
-        'always_persist_enabled': audio_settings.get('always_persist_enabled', False),
-        'use_provider_segments': transcription_settings.get('use_provider_segments', False),
-        'per_segment_speaker_id': speaker_settings.get('per_segment_speaker_id', False),
-        'transcription_job_timeout_seconds': int(transcription_settings.get('job_timeout_seconds', 900)),
-        'always_batch_retranscribe': transcription_settings.get('always_batch_retranscribe', False),
+        "always_persist_enabled": audio_settings.get("always_persist_enabled", False),
+        "use_provider_segments": transcription_settings.get(
+            "use_provider_segments", False
+        ),
+        "per_segment_speaker_id": speaker_settings.get("per_segment_speaker_id", False),
+        "transcription_job_timeout_seconds": int(
+            transcription_settings.get("job_timeout_seconds", 900)
+        ),
+        "always_batch_retranscribe": transcription_settings.get(
+            "always_batch_retranscribe", False
+        ),
     }
 
 
@@ -240,33 +265,41 @@ def save_misc_settings(settings: dict) -> bool:
     success = True
 
     # Save audio settings if always_persist_enabled is provided
-    if 'always_persist_enabled' in settings:
-        audio_settings = {'always_persist_enabled': settings['always_persist_enabled']}
-        if not save_config_section('backend.audio', audio_settings):
+    if "always_persist_enabled" in settings:
+        audio_settings = {"always_persist_enabled": settings["always_persist_enabled"]}
+        if not save_config_section("backend.audio", audio_settings):
             success = False
 
     # Save transcription settings if use_provider_segments is provided
-    if 'use_provider_segments' in settings:
-        transcription_settings = {'use_provider_segments': settings['use_provider_segments']}
-        if not save_config_section('backend.transcription', transcription_settings):
+    if "use_provider_segments" in settings:
+        transcription_settings = {
+            "use_provider_segments": settings["use_provider_segments"]
+        }
+        if not save_config_section("backend.transcription", transcription_settings):
             success = False
 
     # Save speaker recognition settings if per_segment_speaker_id is provided
-    if 'per_segment_speaker_id' in settings:
-        speaker_settings = {'per_segment_speaker_id': settings['per_segment_speaker_id']}
-        if not save_config_section('backend.speaker_recognition', speaker_settings):
+    if "per_segment_speaker_id" in settings:
+        speaker_settings = {
+            "per_segment_speaker_id": settings["per_segment_speaker_id"]
+        }
+        if not save_config_section("backend.speaker_recognition", speaker_settings):
             success = False
 
     # Save transcription job timeout if provided
-    if 'transcription_job_timeout_seconds' in settings:
-        timeout_settings = {'job_timeout_seconds': settings['transcription_job_timeout_seconds']}
-        if not save_config_section('backend.transcription', timeout_settings):
+    if "transcription_job_timeout_seconds" in settings:
+        timeout_settings = {
+            "job_timeout_seconds": settings["transcription_job_timeout_seconds"]
+        }
+        if not save_config_section("backend.transcription", timeout_settings):
             success = False
 
     # Save always_batch_retranscribe if provided
-    if 'always_batch_retranscribe' in settings:
-        batch_settings = {'always_batch_retranscribe': settings['always_batch_retranscribe']}
-        if not save_config_section('backend.transcription', batch_settings):
+    if "always_batch_retranscribe" in settings:
+        batch_settings = {
+            "always_batch_retranscribe": settings["always_batch_retranscribe"]
+        }
+        if not save_config_section("backend.transcription", batch_settings):
             success = False
 
     return success

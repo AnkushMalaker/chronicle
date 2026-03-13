@@ -53,20 +53,24 @@ async def generate_waveform_data(
     waveform_gen_time = 0.0
 
     try:
-        logger.info(f"🎵 Generating waveform for conversation {conversation_id[:12]}... (sample_rate={sample_rate} samples/sec)")
+        logger.info(
+            f"🎵 Generating waveform for conversation {conversation_id[:12]}... (sample_rate={sample_rate} samples/sec)"
+        )
 
         # Retrieve all audio chunks for conversation
         fetch_start = time.time()
         chunks = await retrieve_audio_chunks(conversation_id=conversation_id)
         fetch_time = time.time() - fetch_start
 
-        logger.info(f"📦 Fetched {len(chunks) if chunks else 0} chunks from MongoDB in {fetch_time:.2f}s")
+        logger.info(
+            f"📦 Fetched {len(chunks) if chunks else 0} chunks from MongoDB in {fetch_time:.2f}s"
+        )
 
         if not chunks:
             logger.warning(f"No audio chunks found for conversation {conversation_id}")
             return {
                 "success": False,
-                "error": "No audio chunks found for this conversation"
+                "error": "No audio chunks found for this conversation",
             }
 
         # Get audio format from first chunk
@@ -162,29 +166,30 @@ async def generate_waveform_data(
             samples=waveform_samples,
             sample_rate=sample_rate,
             duration_seconds=total_duration,
-            processing_time_seconds=processing_time
+            processing_time_seconds=processing_time,
         )
 
         await waveform_doc.insert()
 
-        logger.info(f"💾 Saved waveform to MongoDB for conversation {conversation_id[:12]}")
+        logger.info(
+            f"💾 Saved waveform to MongoDB for conversation {conversation_id[:12]}"
+        )
 
         return {
             "success": True,
             "samples": waveform_samples,
             "sample_rate": sample_rate,
             "duration_seconds": total_duration,
-            "processing_time_seconds": processing_time
+            "processing_time_seconds": processing_time,
         }
 
     except Exception as e:
         processing_time = time.time() - start_time
         logger.error(
-            f"❌ Waveform generation failed for {conversation_id}: {e}",
-            exc_info=True
+            f"❌ Waveform generation failed for {conversation_id}: {e}", exc_info=True
         )
         return {
             "success": False,
             "error": str(e),
-            "processing_time_seconds": processing_time
+            "processing_time_seconds": processing_time,
         }

@@ -5,8 +5,11 @@ when converting their native formats to MemoryEntry objects.
 """
 
 import time
-from advanced_omi_backend.services.memory.providers.openmemory_mcp import OpenMemoryMCPService
+
 from advanced_omi_backend.services.memory.base import MemoryEntry
+from advanced_omi_backend.services.memory.providers.openmemory_mcp import (
+    OpenMemoryMCPService,
+)
 
 
 class TestOpenMemoryMCPProviderTimestamps:
@@ -25,7 +28,7 @@ class TestOpenMemoryMCPProviderTimestamps:
             "content": "Test memory content",
             "created_at": "1704067200",  # 2024-01-01 00:00:00 UTC
             "updated_at": "1704153600",  # 2024-01-02 00:00:00 UTC
-            "metadata": {"source": "test"}
+            "metadata": {"source": "test"},
         }
 
         # Convert to MemoryEntry
@@ -64,7 +67,9 @@ class TestOpenMemoryMCPProviderTimestamps:
         assert entry is not None, "MemoryEntry should be created"
         assert entry.created_at is not None, "created_at should be present"
         assert entry.updated_at is not None, "updated_at should default to created_at"
-        assert entry.created_at == entry.updated_at, "updated_at should equal created_at when missing"
+        assert (
+            entry.created_at == entry.updated_at
+        ), "updated_at should equal created_at when missing"
 
     def test_mcp_result_to_memory_entry_with_alternate_timestamp_fields(self):
         """Test that OpenMemory MCP provider handles alternate timestamp field names."""
@@ -85,9 +90,13 @@ class TestOpenMemoryMCPProviderTimestamps:
 
         # Verify conversion handles alternate field names
         assert entry is not None, "MemoryEntry should be created"
-        assert entry.content == "Test memory content", "Should extract from 'memory' field"
+        assert (
+            entry.content == "Test memory content"
+        ), "Should extract from 'memory' field"
         assert entry.created_at == "1704067200", "Should extract from 'timestamp' field"
-        assert entry.updated_at == "1704153600", "Should extract from 'modified_at' field"
+        assert (
+            entry.updated_at == "1704153600"
+        ), "Should extract from 'modified_at' field"
 
     def test_mcp_result_with_no_timestamps(self):
         """Test that OpenMemory MCP provider generates timestamps when none provided."""
@@ -116,8 +125,12 @@ class TestOpenMemoryMCPProviderTimestamps:
         # Verify timestamps are current (within test execution window)
         created_int = int(entry.created_at)
         updated_int = int(entry.updated_at)
-        assert before_conversion <= created_int <= after_conversion, "Timestamp should be current"
-        assert before_conversion <= updated_int <= after_conversion, "Timestamp should be current"
+        assert (
+            before_conversion <= created_int <= after_conversion
+        ), "Timestamp should be current"
+        assert (
+            before_conversion <= updated_int <= after_conversion
+        ), "Timestamp should be current"
 
 
 class TestProviderTimestampConsistency:
@@ -139,8 +152,18 @@ class TestProviderTimestampConsistency:
 
         # Verify all return MemoryEntry instances with both timestamp fields
         for entry, provider_name in [(mcp_entry, "OpenMemory MCP")]:
-            assert isinstance(entry, MemoryEntry), f"{provider_name} should return MemoryEntry"
-            assert hasattr(entry, "created_at"), f"{provider_name} entry should have created_at"
-            assert hasattr(entry, "updated_at"), f"{provider_name} entry should have updated_at"
-            assert entry.created_at is not None, f"{provider_name} created_at should not be None"
-            assert entry.updated_at is not None, f"{provider_name} updated_at should not be None"
+            assert isinstance(
+                entry, MemoryEntry
+            ), f"{provider_name} should return MemoryEntry"
+            assert hasattr(
+                entry, "created_at"
+            ), f"{provider_name} entry should have created_at"
+            assert hasattr(
+                entry, "updated_at"
+            ), f"{provider_name} entry should have updated_at"
+            assert (
+                entry.created_at is not None
+            ), f"{provider_name} created_at should not be None"
+            assert (
+                entry.updated_at is not None
+            ), f"{provider_name} updated_at should not be None"

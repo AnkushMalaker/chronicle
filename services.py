@@ -13,7 +13,6 @@ import yaml
 from dotenv import dotenv_values
 from rich.console import Console
 from rich.table import Table
-
 from setup_utils import read_env_value
 
 console = Console()

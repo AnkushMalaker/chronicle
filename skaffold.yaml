@@ -99,7 +99,7 @@ profiles:
               persistence.size: "10Gi"
               persistence.storageClass: "openebs-hostpath"
               service.nameOverride: "mongodb"
-              
+
           - name: qdrant
             chartPath: backends/charts/qdrant
             namespace: "{{.INFRASTRUCTURE_NAMESPACE}}"
@@ -187,7 +187,7 @@ profiles:
         - image: chronicle-backend-test
           context: backends/advanced
           docker:
-            dockerfile: Dockerfile          
+            dockerfile: Dockerfile
         - image: webui-test
           context: backends/advanced/webui
           docker:
@@ -196,8 +196,8 @@ profiles:
     deploy:
       docker:
         images: [chronicle-backend-test, webui-test, mongo-test, qdrant-test, redis-test]
-          
-   
+
+
 
   - name: speaker-recognition-gtx1070
     build:
@@ -229,5 +229,3 @@ profiles:
               global.sharedModels.useHostPath: "true"
               global.sharedModels.size: "20Gi"
               global.sharedModels.hostPath: "/shared/models"
-
-

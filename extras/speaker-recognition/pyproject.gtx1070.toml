@@ -81,4 +81,4 @@ conflicts = [
     ],
 ]
 [tool.isort]
-profile = "black" 
+profile = "black"

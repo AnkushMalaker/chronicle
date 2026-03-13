@@ -20,14 +20,14 @@ export default function DebugPanel({ recording }: DebugPanelProps) {
             Attempts: {recording.debugStats.connectionAttempts}
           </p>
         </div>
-        
+
         <div>
           <p className="font-medium text-gray-700 dark:text-gray-300">Audio Chunks</p>
           <p className="text-gray-600 dark:text-gray-400">
             Sent: {recording.debugStats.chunksSent}
           </p>
           <p className="text-gray-600 dark:text-gray-400">
-            Rate: {recording.debugStats.chunksSent > 0 && recording.debugStats.sessionStartTime ? 
+            Rate: {recording.debugStats.chunksSent > 0 && recording.debugStats.sessionStartTime ?
               Math.round(recording.debugStats.chunksSent / ((Date.now() - recording.debugStats.sessionStartTime.getTime()) / 1000)) : 0}/s
           </p>
         </div>
@@ -45,7 +45,7 @@ export default function DebugPanel({ recording }: DebugPanelProps) {
         <div>
           <p className="font-medium text-gray-700 dark:text-gray-300">Session</p>
           <p className="text-gray-600 dark:text-gray-400">
-            Duration: {recording.debugStats.sessionStartTime ? 
+            Duration: {recording.debugStats.sessionStartTime ?
               Math.round((Date.now() - recording.debugStats.sessionStartTime.getTime()) / 1000) + 's' : 'N/A'}
           </p>
           <p className="text-gray-600 dark:text-gray-400">

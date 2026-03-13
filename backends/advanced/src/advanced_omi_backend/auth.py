@@ -53,11 +53,12 @@ ADMIN_EMAIL = _verify_configured("ADMIN_EMAIL", optional=True) or "admin@example
 # Accepted token issuers - comma-separated list of services whose tokens we accept
 # Default: "chronicle,ushadow" (accept tokens from both chronicle and ushadow)
 ACCEPTED_ISSUERS = [
-    iss.strip() 
-    for iss in os.getenv("ACCEPTED_TOKEN_ISSUERS", "chronicle,ushadow").split(",") 
+    iss.strip()
+    for iss in os.getenv("ACCEPTED_TOKEN_ISSUERS", "chronicle,ushadow").split(",")
     if iss.strip()
 ]
 logger.info(f"Accepting tokens from issuers: {ACCEPTED_ISSUERS}")
+
 
 class UserManager(BaseUserManager[User, PydanticObjectId]):
     """User manager with minimal customization for fastapi-users."""
@@ -108,8 +109,9 @@ bearer_transport = BearerTransport(tokenUrl="auth/jwt/login")
 def get_jwt_strategy() -> JWTStrategy:
     """Get JWT strategy for token generation and validation."""
     return JWTStrategy(
-        secret=SECRET_KEY, lifetime_seconds=JWT_LIFETIME_SECONDS,
-        token_audience=["fastapi-users:auth"] + ACCEPTED_ISSUERS
+        secret=SECRET_KEY,
+        lifetime_seconds=JWT_LIFETIME_SECONDS,
+        token_audience=["fastapi-users:auth"] + ACCEPTED_ISSUERS,
     )
 
 
@@ -220,7 +222,9 @@ async def create_admin_user_if_needed():
         existing_admin = await user_db.get_by_email(ADMIN_EMAIL)
 
         if existing_admin:
-            logger.debug(f"existing_admin.id = {existing_admin.id}, type = {type(existing_admin.id)}")
+            logger.debug(
+                f"existing_admin.id = {existing_admin.id}, type = {type(existing_admin.id)}"
+            )
             logger.debug(f"str(existing_admin.id) = {str(existing_admin.id)}")
             logger.debug(f"existing_admin.user_id = {existing_admin.user_id}")
             logger.info(
@@ -258,25 +262,39 @@ async def websocket_auth(websocket, token: Optional[str] = None) -> Optional[Use
 
     # Try JWT token from query parameter first
     if token:
-        logger.info(f"Attempting WebSocket auth with query token (first 20 chars): {token[:20]}...")
+        logger.info(
+            f"Attempting WebSocket auth with query token (first 20 chars): {token[:20]}..."
+        )
         try:
             user_db_gen = get_user_db()
             user_db = await user_db_gen.__anext__()
             user_manager = UserManager(user_db)
             user = await strategy.read_token(token, user_manager)
             if user and user.is_active:
-                logger.info(f"WebSocket auth successful for user {user.user_id} using query token.")
+                logger.info(
+                    f"WebSocket auth successful for user {user.user_id} using query token."
+                )
                 return user
             else:
-                logger.warning(f"Token validated but user inactive or not found: user={user}")
+                logger.warning(
+                    f"Token validated but user inactive or not found: user={user}"
+                )
         except Exception as e:
-            logger.error(f"WebSocket auth with query token failed: {type(e).__name__}: {e}", exc_info=True)
+            logger.error(
+                f"WebSocket auth with query token failed: {type(e).__name__}: {e}",
+                exc_info=True,
+            )
 
     # Try cookie authentication
     logger.debug("Attempting WebSocket auth with cookie.")
     try:
         cookie_header = next(
-            (v.decode() for k, v in websocket.headers.items() if k.lower() == b"cookie"), None
+            (
+                v.decode()
+                for k, v in websocket.headers.items()
+                if k.lower() == b"cookie"
+            ),
+            None,
         )
         if cookie_header:
             match = re.search(r"fastapiusersauth=([^;]+)", cookie_header)
@@ -286,7 +304,9 @@ async def websocket_auth(websocket, token: Optional[str] = None) -> Optional[Use
                 user_manager = UserManager(user_db)
                 user = await strategy.read_token(match.group(1), user_manager)
                 if user and user.is_active:
-                    logger.info(f"WebSocket auth successful for user {user.user_id} using cookie.")
+                    logger.info(
+                        f"WebSocket auth successful for user {user.user_id} using cookie."
+                    )
                     return user
     except Exception as e:
         logger.warning(f"WebSocket auth with cookie failed: {e}")

@@ -26,11 +26,11 @@ jobs:
     defaults:
       run:
         working-directory: ./app
-    
+
     steps:
       - name: Setup repo
         uses: actions/checkout@v4
-      
+
       - name: Setup node
         uses: actions/setup-node@v4.0.2
         with:
@@ -80,14 +80,14 @@ jobs:
           release_name: ${{ steps.tag.outputs.RELEASE_NAME }}
           body: |
             ## 🚀 Automated Build
-            
+
             **Built from commit:** ${{ github.sha }}
             **Branch:** ${{ github.ref_name }}
             **Build time:** ${{ steps.tag.outputs.BUILD_TIME }}
-            
+
             ### 📱 Downloads
             - **Android APK**: Ready for installation on Android devices
-            
+
             ### 🔧 Build Info
             - Built with GitHub Actions
             - Debug build (unsigned)
@@ -112,11 +112,11 @@ jobs:
     defaults:
       run:
         working-directory: ./app
-    
+
     steps:
       - name: Setup repo
         uses: actions/checkout@v4
-      
+
       - name: Setup node
         uses: actions/setup-node@v4.0.2
         with:
@@ -173,11 +173,11 @@ jobs:
           release_name: ${{ steps.ios_tag.outputs.IOS_RELEASE_NAME }}
           body: |
             ## 🍎 iOS IPA Build
-            
+
             **Built from commit:** ${{ github.sha }}
             **Branch:** ${{ github.ref_name }}
             **Build time:** ${{ steps.ios_tag.outputs.IOS_BUILD_TIME }}
-            
+
             For iOS Simulator testing!
           draft: false
           prerelease: true
@@ -191,4 +191,4 @@ jobs:
           upload_url: ${{ steps.create_ios_release.outputs.upload_url }}
           asset_path: ${{ github.workspace }}/friend-lite-ios.ipa
           asset_name: friend-lite-ios.ipa
-          asset_content_type: application/octet-stream 
+          asset_content_type: application/octet-stream

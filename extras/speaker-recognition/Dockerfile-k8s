@@ -24,7 +24,7 @@ COPY uv.lock ./
 # Copy source code
 COPY src/ src/
 
-# Install dependencies and package  
+# Install dependencies and package
 # Use build arg to control CPU vs GPU mode
 ARG COMPUTE_MODE=cpu
 RUN if [ "$COMPUTE_MODE" = "gpu" ]; then \
@@ -56,4 +56,4 @@ RUN --mount=type=cache,target=/models \
 EXPOSE 8085
 
 # Run the service
-CMD ["uv", "run", "--no-dev", "simple-speaker-service"] 
+CMD ["uv", "run", "--no-dev", "simple-speaker-service"]

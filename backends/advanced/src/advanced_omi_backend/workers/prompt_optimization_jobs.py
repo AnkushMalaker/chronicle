@@ -52,9 +52,7 @@ async def run_prompt_optimization_job() -> dict:
     langfuse_client = registry._get_client()
 
     if langfuse_client is None:
-        logger.warning(
-            "Prompt optimization: LangFuse not configured — skipping"
-        )
+        logger.warning("Prompt optimization: LangFuse not configured — skipping")
         return {"skipped": True, "reason": "LangFuse not available"}
 
     total_users = 0
@@ -154,9 +152,7 @@ async def run_prompt_optimization_job() -> dict:
                             "optimized_at": datetime.now(timezone.utc).isoformat(),
                         },
                     )
-                    logger.info(
-                        f"Created new LangFuse prompt '{user_prompt_name}'"
-                    )
+                    logger.info(f"Created new LangFuse prompt '{user_prompt_name}'")
                 except Exception as e:
                     err_msg = str(e).lower()
                     if "already exists" in err_msg or "409" in err_msg:

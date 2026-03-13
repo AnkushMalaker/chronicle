@@ -18,11 +18,11 @@ jobs:
     defaults:
       run:
         working-directory: ./app
-    
+
     steps:
       - name: Setup repo
         uses: actions/checkout@v4
-      
+
       - name: Setup node
         uses: actions/setup-node@v4.0.2
         with:
@@ -54,7 +54,7 @@ jobs:
 
       - name: Build Android APK
         run: eas build --platform android --profile local --local --output ${{ github.workspace }}/app-release.apk --non-interactive
-                            
+
       - name: Generate release tag
         id: tag
         run: |
@@ -73,11 +73,11 @@ jobs:
           release_name: ${{ steps.tag.outputs.RELEASE_NAME }}
           body: |
             ## 📱 Android APK Build
-            
+
             **Built from commit:** ${{ github.sha }}
             **Branch:** ${{ github.ref_name }}
             **Build time:** ${{ steps.tag.outputs.BUILD_TIME }}
-            
+
             Ready to install on Android devices!
           draft: false
           prerelease: true
@@ -90,4 +90,4 @@ jobs:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: ${{ github.workspace }}/app-release.apk
           asset_name: friend-lite-android.apk
-          asset_content_type: application/vnd.android.package-archive 
+          asset_content_type: application/vnd.android.package-archive

@@ -70,7 +70,9 @@ class TransformersService(BaseASRService):
             try:
                 await loop.run_in_executor(
                     None,
-                    lambda: self.transcriber.transcribe(tmp_path, return_timestamps=False),
+                    lambda: self.transcriber.transcribe(
+                        tmp_path, return_timestamps=False
+                    ),
                 )
             finally:
                 os.unlink(tmp_path)

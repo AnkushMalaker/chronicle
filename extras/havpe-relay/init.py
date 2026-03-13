@@ -116,9 +116,7 @@ class HavpeRelaySetup:
         self.config["BACKEND_URL"] = backend_url
 
         # Auto-derive WS URL from HTTP URL
-        auto_ws = backend_url.replace("https://", "wss://").replace(
-            "http://", "ws://"
-        )
+        auto_ws = backend_url.replace("https://", "wss://").replace("http://", "ws://")
 
         if hasattr(self.args, "backend_ws_url") and self.args.backend_ws_url:
             ws_url = self.args.backend_ws_url
@@ -136,9 +134,7 @@ class HavpeRelaySetup:
     def setup_auth_credentials(self):
         """Configure authentication credentials"""
         self.print_section("Authentication")
-        self.console.print(
-            "Credentials for authenticating with the Chronicle backend"
-        )
+        self.console.print("Credentials for authenticating with the Chronicle backend")
         self.console.print()
 
         # Try to read defaults from backend .env
@@ -216,15 +212,11 @@ class HavpeRelaySetup:
     def setup_firmware_secrets(self):
         """Optionally configure ESP32 firmware secrets"""
         self.print_section("ESP32 Firmware Configuration (Optional)")
-        self.console.print(
-            "Configure WiFi and relay address for ESPHome firmware"
-        )
+        self.console.print("Configure WiFi and relay address for ESPHome firmware")
         self.console.print()
 
         try:
-            configure = Confirm.ask(
-                "Configure ESP32 firmware secrets?", default=False
-            )
+            configure = Confirm.ask("Configure ESP32 firmware secrets?", default=False)
         except EOFError:
             configure = False
 
@@ -350,9 +342,7 @@ class HavpeRelaySetup:
         self.console.print("   [cyan]docker compose up --build -d[/cyan]")
         self.console.print()
         self.console.print("2. Or run directly (without Docker):")
-        self.console.print(
-            "   [cyan]uv run python main.py[/cyan]"
-        )
+        self.console.print("   [cyan]uv run python main.py[/cyan]")
         self.console.print()
         self.console.print("3. If you configured firmware, flash your ESP32:")
         self.console.print("   [cyan]cd firmware && esphome run voice-tcp.yaml[/cyan]")
@@ -360,9 +350,7 @@ class HavpeRelaySetup:
     def run(self):
         """Run the complete setup process"""
         self.print_header("HAVPE Relay Setup")
-        self.console.print(
-            "Configure the ESP32 Voice-PE TCP-to-WebSocket relay"
-        )
+        self.console.print("Configure the ESP32 Voice-PE TCP-to-WebSocket relay")
         self.console.print()
 
         try:
@@ -380,9 +368,7 @@ class HavpeRelaySetup:
             self.show_next_steps()
 
             self.console.print()
-            self.console.print(
-                "[green][SUCCESS][/green] HAVPE Relay setup complete!"
-            )
+            self.console.print("[green][SUCCESS][/green] HAVPE Relay setup complete!")
 
         except KeyboardInterrupt:
             self.console.print()
@@ -396,24 +382,14 @@ class HavpeRelaySetup:
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(description="HAVPE Relay Setup")
-    parser.add_argument(
-        "--backend-url", help="Backend HTTP URL (default: prompt user)"
-    )
+    parser.add_argument("--backend-url", help="Backend HTTP URL (default: prompt user)")
     parser.add_argument(
         "--backend-ws-url", help="Backend WebSocket URL (default: prompt user)"
     )
-    parser.add_argument(
-        "--username", help="Auth username/email (default: prompt user)"
-    )
-    parser.add_argument(
-        "--password", help="Auth password (default: prompt user)"
-    )
-    parser.add_argument(
-        "--device-name", help="Device name (default: havpe)"
-    )
-    parser.add_argument(
-        "--tcp-port", help="TCP listen port (default: 8989)"
-    )
+    parser.add_argument("--username", help="Auth username/email (default: prompt user)")
+    parser.add_argument("--password", help="Auth password (default: prompt user)")
+    parser.add_argument("--device-name", help="Device name (default: havpe)")
+    parser.add_argument("--tcp-port", help="TCP listen port (default: 8989)")
 
     args = parser.parse_args()
 

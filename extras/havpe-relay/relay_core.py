@@ -149,7 +149,11 @@ async def handle_backend_messages(ws, device: DeviceController) -> None:
             duration = float(data.get("duration", 5.0))
             logger.info(
                 "Backend→device: led-control rgb=(%.1f,%.1f,%.1f) br=%.1f dur=%.1fs",
-                r, g, b, brightness, duration,
+                r,
+                g,
+                b,
+                brightness,
+                duration,
             )
             await device.set_led(r, g, b, brightness, duration=duration)
 
@@ -167,11 +171,13 @@ async def forward_esphome_events(
         event = await device.get_event()
         event_type = event.pop("type")
 
-        wyoming_msg = json.dumps({
-            "type": event_type,
-            "data": event,
-            "payload_length": 0,
-        })
+        wyoming_msg = json.dumps(
+            {
+                "type": event_type,
+                "data": event,
+                "payload_length": 0,
+            }
+        )
         async with ws_lock:
             await ws.send(wyoming_msg)
         logger.info("ESPHome→WS: %s %s", event_type, event)
@@ -205,7 +211,9 @@ async def run_device_session(
     if on_session_start:
         on_session_start(addr_str)
 
-    token = await get_jwt_token(config.auth_username, config.auth_password, config.backend_url)
+    token = await get_jwt_token(
+        config.auth_username, config.auth_password, config.backend_url
+    )
     if not token:
         logger.error("Auth failed, dropping connection")
         if on_auth_failure:
@@ -235,7 +243,9 @@ async def run_device_session(
             tasks = [
                 asyncio.create_task(
                     forward_tcp_to_ws(
-                        reader, ws, ws_lock,
+                        reader,
+                        ws,
+                        ws_lock,
                         on_audio_chunk=on_audio_chunk,
                         on_audio_event=on_audio_event,
                     ),
@@ -254,7 +264,9 @@ async def run_device_session(
                     )
                 )
 
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            done, pending = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_COMPLETED
+            )
 
             for t in done:
                 if t.exception():

@@ -58,7 +58,7 @@ webui:
   env:
     # Environment variables are set by Skaffold setValueTemplates
     # REACT_UI_HOST: set by skaffold
-    # REACT_UI_PORT: set by skaffold  
+    # REACT_UI_PORT: set by skaffold
     # REACT_UI_HTTPS: set by skaffold
     # VITE_ALLOWED_HOSTS: set by skaffold
     # WEBUI_CORS_ORIGIN: set by skaffold
@@ -75,13 +75,13 @@ global:
     size: 20Gi
     # Use the working openebs-hostpath storage class
     storageClassName: "openebs-hostpath"
-    
+
     # Disable HostPath since we're using external PVC
     useHostPath: false
-    
+
     # Use external PVC created in k8s-manifests
     useExternalPVC: true
-    
+
     # Pre-download models using init job
     initJob:
       enabled: false

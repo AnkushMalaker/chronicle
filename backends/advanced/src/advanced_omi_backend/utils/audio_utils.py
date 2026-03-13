@@ -24,8 +24,12 @@ logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
 
 # Import constants from main.py (these are defined there)
-MIN_SPEECH_SEGMENT_DURATION = float(os.getenv("MIN_SPEECH_SEGMENT_DURATION", "1.0"))  # seconds
-CROPPING_CONTEXT_PADDING = float(os.getenv("CROPPING_CONTEXT_PADDING", "0.1"))  # seconds
+MIN_SPEECH_SEGMENT_DURATION = float(
+    os.getenv("MIN_SPEECH_SEGMENT_DURATION", "1.0")
+)  # seconds
+CROPPING_CONTEXT_PADDING = float(
+    os.getenv("CROPPING_CONTEXT_PADDING", "0.1")
+)  # seconds
 
 SUPPORTED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".mp4", ".m4a", ".flac", ".ogg", ".webm"}
 VIDEO_EXTENSIONS = {".mp4", ".webm"}
@@ -33,6 +37,7 @@ VIDEO_EXTENSIONS = {".mp4", ".webm"}
 
 class AudioValidationError(Exception):
     """Exception raised when audio validation fails."""
+
     pass
 
 
@@ -42,7 +47,7 @@ async def resample_audio_with_ffmpeg(
     input_channels: int,
     input_sample_width: int,
     target_sample_rate: int,
-    target_channels: int = 1
+    target_channels: int = 1,
 ) -> bytes:
     """
     Resample audio using FFmpeg with stdin/stdout pipes (no disk I/O).
@@ -75,13 +80,20 @@ async def resample_audio_with_ffmpeg(
     # pipe:0 = stdin, pipe:1 = stdout
     cmd = [
         "ffmpeg",
-        "-f", input_format,
-        "-ar", str(input_sample_rate),
-        "-ac", str(input_channels),
-        "-i", "pipe:0",  # Read from stdin
-        "-ar", str(target_sample_rate),
-        "-ac", str(target_channels),
-        "-f", "s16le",  # Always output 16-bit
+        "-f",
+        input_format,
+        "-ar",
+        str(input_sample_rate),
+        "-ac",
+        str(input_channels),
+        "-i",
+        "pipe:0",  # Read from stdin
+        "-ar",
+        str(target_sample_rate),
+        "-ac",
+        str(target_channels),
+        "-f",
+        "s16le",  # Always output 16-bit
         "pipe:1",  # Write to stdout
     ]
 
@@ -133,12 +145,17 @@ async def convert_any_to_wav(file_data: bytes, file_extension: str) -> bytes:
 
     cmd = [
         "ffmpeg",
-        "-i", "pipe:0",
+        "-i",
+        "pipe:0",
         "-vn",  # Strip video track (no-op for audio-only files)
-        "-acodec", "pcm_s16le",
-        "-ar", "16000",
-        "-ac", "1",
-        "-f", "wav",
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        "-f",
+        "wav",
         "pipe:1",
     ]
 
@@ -156,9 +173,7 @@ async def convert_any_to_wav(file_data: bytes, file_extension: str) -> bytes:
         audio_logger.error(f"FFmpeg conversion failed for {ext}: {error_msg}")
         raise AudioValidationError(f"Failed to convert {ext} file to WAV: {error_msg}")
 
-    audio_logger.info(
-        f"Converted {ext} to WAV: {len(file_data)} → {len(stdout)} bytes"
-    )
+    audio_logger.info(f"Converted {ext} to WAV: {len(file_data)} → {len(stdout)} bytes")
 
     return stdout
 
@@ -167,7 +182,7 @@ async def validate_and_prepare_audio(
     audio_data: bytes,
     expected_sample_rate: int = 16000,
     convert_to_mono: bool = True,
-    auto_resample: bool = False
+    auto_resample: bool = False,
 ) -> tuple[bytes, int, int, int, float]:
     """
     Validate WAV audio data and prepare it for processing.
@@ -212,7 +227,7 @@ async def validate_and_prepare_audio(
                 input_channels=channels,
                 input_sample_width=sample_width,
                 target_sample_rate=expected_sample_rate,
-                target_channels=1 if convert_to_mono else channels
+                target_channels=1 if convert_to_mono else channels,
             )
             # Update metadata after resampling
             sample_rate = expected_sample_rate
@@ -243,7 +258,9 @@ async def validate_and_prepare_audio(
 
         # Reshape to separate channels and average
         audio_array = audio_array.reshape(-1, 2)
-        processed_audio = np.mean(audio_array, axis=1).astype(audio_array.dtype).tobytes()
+        processed_audio = (
+            np.mean(audio_array, axis=1).astype(audio_array.dtype).tobytes()
+        )
         channels = 1
 
     audio_logger.debug(
@@ -301,8 +318,9 @@ async def write_audio_file(
 
     # Validate and prepare audio if needed
     if validate:
-        audio_data, sample_rate, sample_width, channels, duration = \
+        audio_data, sample_rate, sample_width, channels, duration = (
             await validate_and_prepare_audio(raw_audio_data)
+        )
     else:
         # For WebSocket/streaming path - audio is already processed PCM
         audio_data = raw_audio_data
@@ -325,7 +343,7 @@ async def write_audio_file(
     # If output_dir is a subdirectory of CHUNK_DIR, include the folder prefix
     try:
         relative_path_parts = output_dir.relative_to(CHUNK_DIR)
-        if str(relative_path_parts) != '.':
+        if str(relative_path_parts) != ".":
             relative_audio_path = f"{relative_path_parts}/{wav_filename}"
         else:
             relative_audio_path = wav_filename
@@ -338,15 +356,12 @@ async def write_audio_file(
         file_path=str(file_path),
         sample_rate=int(sample_rate),
         channels=int(channels),
-        sample_width=int(sample_width)
+        sample_width=int(sample_width),
     )
 
     await sink.open()
     audio_chunk = AudioChunk(
-        rate=sample_rate,
-        width=sample_width,
-        channels=channels,
-        audio=audio_data
+        rate=sample_rate, width=sample_width, channels=channels, audio=audio_data
     )
     await sink.write(audio_chunk)
     await sink.close()
@@ -364,7 +379,7 @@ async def process_audio_chunk(
     user_id: str,
     user_email: str,
     audio_format: dict,
-    client_state: Optional["ClientState"] = None
+    client_state: Optional["ClientState"] = None,
 ) -> None:
     """Process a single audio chunk through Redis Streams pipeline.
 
@@ -396,11 +411,7 @@ async def process_audio_chunk(
 
     # Create AudioChunk with format details
     chunk = AudioChunk(
-        audio=audio_data,
-        rate=rate,
-        width=width,
-        channels=channels,
-        timestamp=timestamp
+        audio=audio_data, rate=rate, width=width, channels=channels, timestamp=timestamp
     )
 
     # Publish audio chunk to Redis Streams
@@ -411,7 +422,7 @@ async def process_audio_chunk(
         user_email=user_email,
         audio_chunk=chunk,
         audio_uuid=None,  # Will be generated by worker
-        timestamp=timestamp
+        timestamp=timestamp,
     )
 
     # Update client state if provided
@@ -420,10 +431,7 @@ async def process_audio_chunk(
 
 
 def pcm_to_wav_bytes(
-    pcm_data: bytes,
-    sample_rate: int = 16000,
-    channels: int = 1,
-    sample_width: int = 2
+    pcm_data: bytes, sample_rate: int = 16000, channels: int = 1, sample_width: int = 2
 ) -> bytes:
     """
     Convert raw PCM audio data to WAV format in memory.
@@ -448,7 +456,7 @@ def pcm_to_wav_bytes(
     # Use BytesIO to create WAV in memory
     wav_buffer = io.BytesIO()
 
-    with wave.open(wav_buffer, 'wb') as wav_file:
+    with wave.open(wav_buffer, "wb") as wav_file:
         wav_file.setnchannels(channels)
         wav_file.setsampwidth(sample_width)
         wav_file.setframerate(sample_rate)
@@ -467,7 +475,7 @@ def write_pcm_to_wav(
     output_path: str,
     sample_rate: int = 16000,
     channels: int = 1,
-    sample_width: int = 2
+    sample_width: int = 2,
 ) -> None:
     """
     Write raw PCM audio data to a WAV file.
@@ -487,7 +495,7 @@ def write_pcm_to_wav(
     )
 
     try:
-        with wave.open(output_path, 'wb') as wav_file:
+        with wave.open(output_path, "wb") as wav_file:
             wav_file.setnchannels(channels)
             wav_file.setsampwidth(sample_width)
             wav_file.setframerate(sample_rate)

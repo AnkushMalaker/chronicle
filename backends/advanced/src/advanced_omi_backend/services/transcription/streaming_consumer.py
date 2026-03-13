@@ -20,13 +20,12 @@ from typing import Dict, Optional
 import redis.asyncio as redis
 from redis import exceptions as redis_exceptions
 
-from advanced_omi_backend.plugins.events import PluginEvent
-
 from advanced_omi_backend.client_manager import get_client_owner_async
 from advanced_omi_backend.models.user import get_user_by_id
+from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.plugins.router import PluginRouter
-from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 from advanced_omi_backend.services.transcription import get_transcription_provider
+from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 from advanced_omi_backend.utils.audio_utils import pcm_to_wav_bytes
 
 logger = logging.getLogger(__name__)
@@ -75,13 +74,19 @@ def _group_words_into_segments(words: list) -> list:
 
         if spk != current_speaker and current_words:
             # Flush previous segment
-            segments.append({
-                "start": current_words[0].get("start", 0.0),
-                "end": current_words[-1].get("end", 0.0),
-                "text": " ".join(cw.get("word", "") for cw in current_words),
-                "speaker": f"Speaker {current_speaker}" if current_speaker != -1 else "Unknown",
-                "words": list(current_words),
-            })
+            segments.append(
+                {
+                    "start": current_words[0].get("start", 0.0),
+                    "end": current_words[-1].get("end", 0.0),
+                    "text": " ".join(cw.get("word", "") for cw in current_words),
+                    "speaker": (
+                        f"Speaker {current_speaker}"
+                        if current_speaker != -1
+                        else "Unknown"
+                    ),
+                    "words": list(current_words),
+                }
+            )
             current_words = []
 
         current_speaker = spk
@@ -89,13 +94,17 @@ def _group_words_into_segments(words: list) -> list:
 
     # Flush last segment
     if current_words:
-        segments.append({
-            "start": current_words[0].get("start", 0.0),
-            "end": current_words[-1].get("end", 0.0),
-            "text": " ".join(cw.get("word", "") for cw in current_words),
-            "speaker": f"Speaker {current_speaker}" if current_speaker != -1 else "Unknown",
-            "words": list(current_words),
-        })
+        segments.append(
+            {
+                "start": current_words[0].get("start", 0.0),
+                "end": current_words[-1].get("end", 0.0),
+                "text": " ".join(cw.get("word", "") for cw in current_words),
+                "speaker": (
+                    f"Speaker {current_speaker}" if current_speaker != -1 else "Unknown"
+                ),
+                "words": list(current_words),
+            }
+        )
 
     return segments
 
@@ -145,8 +154,8 @@ class StreamingTranscriptionConsumer:
 
         # Check if provider supports streaming diarization
         self._provider_has_diarization = (
-            hasattr(self.provider, 'capabilities')
-            and 'diarization' in self.provider.capabilities
+            hasattr(self.provider, "capabilities")
+            and "diarization" in self.provider.capabilities
         )
 
         # Stream configuration
@@ -160,7 +169,9 @@ class StreamingTranscriptionConsumer:
         self.active_streams: Dict[str, Dict] = {}  # {stream_name: {"session_id": ...}}
 
         # Session tracking for WebSocket connections
-        self.active_sessions: Dict[str, Dict] = {}  # {session_id: {"last_activity": timestamp}}
+        self.active_sessions: Dict[str, Dict] = (
+            {}
+        )  # {session_id: {"last_activity": timestamp}}
 
         # Audio buffers for speaker identification (raw PCM bytes per session)
         self._audio_buffers: Dict[str, bytearray] = {}
@@ -180,7 +191,9 @@ class StreamingTranscriptionConsumer:
                 cursor, match=self.stream_pattern, count=100
             )
             if keys:
-                streams.extend([k.decode() if isinstance(k, bytes) else k for k in keys])
+                streams.extend(
+                    [k.decode() if isinstance(k, bytes) else k for k in keys]
+                )
 
         return streams
 
@@ -188,16 +201,15 @@ class StreamingTranscriptionConsumer:
         """Create consumer group if it doesn't exist."""
         try:
             await self.redis_client.xgroup_create(
-                stream_name,
-                self.group_name,
-                "0",
-                mkstream=True
+                stream_name, self.group_name, "0", mkstream=True
             )
             logger.debug(f"Created consumer group {self.group_name} for {stream_name}")
         except redis_exceptions.ResponseError as e:
             if "BUSYGROUP" not in str(e):
                 raise
-            logger.debug(f"Consumer group {self.group_name} already exists for {stream_name}")
+            logger.debug(
+                f"Consumer group {self.group_name} already exists for {stream_name}"
+            )
 
     async def start_session_stream(self, session_id: str, sample_rate: int = 16000):
         """
@@ -258,7 +270,10 @@ class StreamingTranscriptionConsumer:
                 has_word_speakers = (
                     self._provider_has_diarization
                     and words
-                    and any(isinstance(w, dict) and w.get("speaker") is not None for w in words)
+                    and any(
+                        isinstance(w, dict) and w.get("speaker") is not None
+                        for w in words
+                    )
                 )
 
                 if has_word_speakers:
@@ -266,21 +281,28 @@ class StreamingTranscriptionConsumer:
                     speaker_name = None
                     speaker_confidence = 0.0
                 else:
-                    speaker_name, speaker_confidence = await self._identify_speaker(session_id)
+                    speaker_name, speaker_confidence = await self._identify_speaker(
+                        session_id
+                    )
 
                 if speaker_name:
                     final_result["speaker_name"] = speaker_name
                     final_result["speaker_confidence"] = speaker_confidence
 
                 await self.publish_to_client(
-                    session_id, final_result, is_final=True,
-                    speaker_name=speaker_name, speaker_confidence=speaker_confidence,
+                    session_id,
+                    final_result,
+                    is_final=True,
+                    speaker_name=speaker_name,
+                    speaker_confidence=speaker_confidence,
                 )
                 await self.store_final_result(session_id, final_result)
 
                 # Trigger plugins on final result
                 if self.plugin_router:
-                    await self.trigger_plugins(session_id, final_result, speaker_name=speaker_name)
+                    await self.trigger_plugins(
+                        session_id, final_result, speaker_name=speaker_name
+                    )
 
             self.active_sessions.pop(session_id, None)
             self._audio_buffers.pop(session_id, None)
@@ -288,7 +310,9 @@ class StreamingTranscriptionConsumer:
             # Signal that streaming transcription is complete for this session
             completion_key = f"transcription:complete:{session_id}"
             await self.redis_client.set(completion_key, "1", ex=300)  # 5 min TTL
-            logger.info(f"Streaming transcription complete for {session_id} (signal set)")
+            logger.info(
+                f"Streaming transcription complete for {session_id} (signal set)"
+            )
 
         except Exception as e:
             logger.error(f"Error ending stream for {session_id}: {e}", exc_info=True)
@@ -300,7 +324,9 @@ class StreamingTranscriptionConsumer:
             except Exception:
                 pass  # Best effort
 
-    async def process_audio_chunk(self, session_id: str, audio_chunk: bytes, chunk_id: str):
+    async def process_audio_chunk(
+        self, session_id: str, audio_chunk: bytes, chunk_id: str
+    ):
         """
         Process a single audio chunk through streaming transcription provider.
 
@@ -316,8 +342,7 @@ class StreamingTranscriptionConsumer:
 
             # Send audio chunk to provider WebSocket and get result
             result = await self.provider.process_audio_chunk(
-                client_id=session_id,
-                audio_chunk=audio_chunk
+                client_id=session_id, audio_chunk=audio_chunk
             )
 
             # Update last activity
@@ -337,7 +362,7 @@ class StreamingTranscriptionConsumer:
                 # Track transcript at each step
                 logger.info(
                     f"TRANSCRIPT session={session_id}, is_final={is_final}, "
-                    f"words={word_count}, text=\"{text}\""
+                    f'words={word_count}, text="{text}"'
                 )
 
                 if is_final:
@@ -345,7 +370,10 @@ class StreamingTranscriptionConsumer:
                     has_word_speakers = (
                         self._provider_has_diarization
                         and words
-                        and any(isinstance(w, dict) and w.get("speaker") is not None for w in words)
+                        and any(
+                            isinstance(w, dict) and w.get("speaker") is not None
+                            for w in words
+                        )
                     )
 
                     if has_word_speakers:
@@ -355,7 +383,9 @@ class StreamingTranscriptionConsumer:
                         speaker_confidence = 0.0
                     else:
                         # Identify speaker from buffered audio (non-diarizing providers)
-                        speaker_name, speaker_confidence = await self._identify_speaker(session_id)
+                        speaker_name, speaker_confidence = await self._identify_speaker(
+                            session_id
+                        )
 
                     if speaker_name:
                         result["speaker_name"] = speaker_name
@@ -363,26 +393,33 @@ class StreamingTranscriptionConsumer:
 
                     # Publish to clients with speaker info
                     await self.publish_to_client(
-                        session_id, result, is_final=True,
-                        speaker_name=speaker_name, speaker_confidence=speaker_confidence,
+                        session_id,
+                        result,
+                        is_final=True,
+                        speaker_name=speaker_name,
+                        speaker_confidence=speaker_confidence,
                     )
 
                     logger.info(
                         f"TRANSCRIPT [STORE] session={session_id}, words={word_count}, "
                         f"speaker={speaker_name}, segments={len(result.get('segments', []))}, "
-                        f"text=\"{text}\""
+                        f'text="{text}"'
                     )
                     await self.store_final_result(session_id, result, chunk_id=chunk_id)
 
                     # Trigger plugins on final results only
                     if self.plugin_router:
-                        await self.trigger_plugins(session_id, result, speaker_name=speaker_name)
+                        await self.trigger_plugins(
+                            session_id, result, speaker_name=speaker_name
+                        )
                 else:
                     # Interim result — normalize words but no speaker identification
                     await self.publish_to_client(session_id, result, is_final=False)
 
         except Exception as e:
-            logger.error(f"Error processing audio chunk for {session_id}: {e}", exc_info=True)
+            logger.error(
+                f"Error processing audio chunk for {session_id}: {e}", exc_info=True
+            )
 
     async def _identify_speaker(self, session_id: str) -> tuple[Optional[str], float]:
         """Identify the speaker from buffered audio via speaker recognition service.
@@ -405,7 +442,9 @@ class StreamingTranscriptionConsumer:
             user_id = await self._get_user_id_from_client_id(session_id)
 
             # Convert buffered PCM to WAV
-            wav_bytes = pcm_to_wav_bytes(bytes(buffer), sample_rate=16000, channels=1, sample_width=2)
+            wav_bytes = pcm_to_wav_bytes(
+                bytes(buffer), sample_rate=16000, channels=1, sample_width=2
+            )
 
             # Call speaker recognition service
             result = await self.speaker_client.identify_segment(
@@ -460,7 +499,7 @@ class StreamingTranscriptionConsumer:
                 "words": result.get("words", []),
                 "segments": result.get("segments", []),
                 "confidence": result.get("confidence", 0.0),
-                "timestamp": time.time()
+                "timestamp": time.time(),
             }
 
             # Include speaker info on final results
@@ -472,12 +511,18 @@ class StreamingTranscriptionConsumer:
             await self.redis_client.publish(channel, json.dumps(message))
 
             result_type = "FINAL" if is_final else "interim"
-            logger.debug(f"Published {result_type} result to {channel}: {message['text'][:50]}...")
+            logger.debug(
+                f"Published {result_type} result to {channel}: {message['text'][:50]}..."
+            )
 
         except Exception as e:
-            logger.error(f"Error publishing to client for {session_id}: {e}", exc_info=True)
+            logger.error(
+                f"Error publishing to client for {session_id}: {e}", exc_info=True
+            )
 
-    async def store_final_result(self, session_id: str, result: Dict, chunk_id: str = None):
+    async def store_final_result(
+        self, session_id: str, result: Dict, chunk_id: str = None
+    ):
         """
         Store final transcription result to Redis Stream.
 
@@ -512,10 +557,14 @@ class StreamingTranscriptionConsumer:
             # Write to Redis Stream
             await self.redis_client.xadd(stream_name, entry)
 
-            logger.info(f"Stored final result to {stream_name}: {result.get('text', '')[:50]}... ({len(words)} words)")
+            logger.info(
+                f"Stored final result to {stream_name}: {result.get('text', '')[:50]}... ({len(words)} words)"
+            )
 
         except Exception as e:
-            logger.error(f"Error storing final result for {session_id}: {e}", exc_info=True)
+            logger.error(
+                f"Error storing final result for {session_id}: {e}", exc_info=True
+            )
 
     async def _get_user_id_from_client_id(self, client_id: str) -> Optional[str]:
         """
@@ -582,17 +631,17 @@ class StreamingTranscriptionConsumer:
                     # Don't block plugins on lookup failure
 
             plugin_data = {
-                'transcript': result.get("text", ""),
-                'session_id': session_id,
-                'words': result.get("words", []),
-                'segments': result.get("segments", []),
-                'confidence': result.get("confidence", 0.0),
-                'is_final': True,
+                "transcript": result.get("text", ""),
+                "session_id": session_id,
+                "words": result.get("words", []),
+                "segments": result.get("segments", []),
+                "confidence": result.get("confidence", 0.0),
+                "is_final": True,
             }
 
             # Include speaker info if available
             if speaker_name:
-                plugin_data['speaker_name'] = speaker_name
+                plugin_data["speaker_name"] = speaker_name
 
             # Dispatch transcript.streaming event
             logger.info(
@@ -604,16 +653,20 @@ class StreamingTranscriptionConsumer:
                 event=PluginEvent.TRANSCRIPT_STREAMING,
                 user_id=user_id,
                 data=plugin_data,
-                metadata={'client_id': session_id}
+                metadata={"client_id": session_id},
             )
 
             if plugin_results:
-                logger.info(f"Plugins triggered successfully: {len(plugin_results)} results")
+                logger.info(
+                    f"Plugins triggered successfully: {len(plugin_results)} results"
+                )
             else:
                 logger.info(f"No plugins triggered (no matching conditions)")
 
         except Exception as e:
-            logger.error(f"Error triggering plugins for {session_id}: {e}", exc_info=True)
+            logger.error(
+                f"Error triggering plugins for {session_id}: {e}", exc_info=True
+            )
 
     async def process_stream(self, stream_name: str):
         """
@@ -628,7 +681,7 @@ class StreamingTranscriptionConsumer:
         # Track this stream
         self.active_streams[stream_name] = {
             "session_id": session_id,
-            "started_at": time.time()
+            "started_at": time.time(),
         }
 
         # Read actual sample rate from the session's audio_format stored in Redis
@@ -639,9 +692,13 @@ class StreamingTranscriptionConsumer:
             if audio_format_raw:
                 audio_format = json.loads(audio_format_raw)
                 sample_rate = int(audio_format.get("rate", 16000))
-                logger.info(f"Read sample rate {sample_rate}Hz from session {session_id}")
+                logger.info(
+                    f"Read sample rate {sample_rate}Hz from session {session_id}"
+                )
         except Exception as e:
-            logger.warning(f"Failed to read audio_format from Redis for {session_id}: {e}")
+            logger.warning(
+                f"Failed to read audio_format from Redis for {session_id}: {e}"
+            )
 
         # Start WebSocket connection to transcription provider
         await self.start_session_stream(session_id, sample_rate=sample_rate)
@@ -658,44 +715,62 @@ class StreamingTranscriptionConsumer:
                         self.consumer_name,  # "streaming-worker-{pid}"
                         {stream_name: ">"},  # Read only new messages
                         count=10,
-                        block=1000  # Block for 1 second
+                        block=1000,  # Block for 1 second
                     )
 
                     if not messages:
                         # No new messages - check if stream is still alive
                         if session_id not in self.active_sessions:
-                            logger.info(f"Session {session_id} no longer active, ending stream processing")
+                            logger.info(
+                                f"Session {session_id} no longer active, ending stream processing"
+                            )
                             stream_ended = True
                         continue
 
                     for stream, stream_messages in messages:
-                        logger.debug(f"Read {len(stream_messages)} messages from {stream_name}")
+                        logger.debug(
+                            f"Read {len(stream_messages)} messages from {stream_name}"
+                        )
                         for message_id, fields in stream_messages:
-                            msg_id = message_id.decode() if isinstance(message_id, bytes) else message_id
+                            msg_id = (
+                                message_id.decode()
+                                if isinstance(message_id, bytes)
+                                else message_id
+                            )
 
                             # Check for end marker
-                            if fields.get(b'end_marker') or fields.get('end_marker'):
+                            if fields.get(b"end_marker") or fields.get("end_marker"):
                                 logger.info(f"End marker received for {session_id}")
                                 stream_ended = True
                                 # ACK the end marker
-                                await self.redis_client.xack(stream_name, self.group_name, msg_id)
+                                await self.redis_client.xack(
+                                    stream_name, self.group_name, msg_id
+                                )
                                 break
 
                             # Extract audio data (producer sends as 'audio_data', not 'audio_chunk')
-                            audio_chunk = fields.get(b'audio_data') or fields.get('audio_data')
+                            audio_chunk = fields.get(b"audio_data") or fields.get(
+                                "audio_data"
+                            )
                             if audio_chunk:
-                                logger.debug(f"Processing audio chunk {msg_id} ({len(audio_chunk)} bytes)")
+                                logger.debug(
+                                    f"Processing audio chunk {msg_id} ({len(audio_chunk)} bytes)"
+                                )
                                 # Process audio chunk through streaming provider
                                 await self.process_audio_chunk(
                                     session_id=session_id,
                                     audio_chunk=audio_chunk,
-                                    chunk_id=msg_id
+                                    chunk_id=msg_id,
                                 )
                             else:
-                                logger.warning(f"Message {msg_id} has no audio_data field")
+                                logger.warning(
+                                    f"Message {msg_id} has no audio_data field"
+                                )
 
                             # ACK the message after processing
-                            await self.redis_client.xack(stream_name, self.group_name, msg_id)
+                            await self.redis_client.xack(
+                                stream_name, self.group_name, msg_id
+                            )
 
                         if stream_ended:
                             break
@@ -703,14 +778,21 @@ class StreamingTranscriptionConsumer:
                 except redis_exceptions.ResponseError as e:
                     if "NOGROUP" in str(e):
                         # Stream has expired or been deleted - exit gracefully
-                        logger.info(f"Stream {stream_name} expired or deleted, ending processing")
+                        logger.info(
+                            f"Stream {stream_name} expired or deleted, ending processing"
+                        )
                         stream_ended = True
                         break
                     else:
-                        logger.error(f"Redis error reading from stream {stream_name}: {e}", exc_info=True)
+                        logger.error(
+                            f"Redis error reading from stream {stream_name}: {e}",
+                            exc_info=True,
+                        )
                         await asyncio.sleep(1)
                 except Exception as e:
-                    logger.error(f"Error reading from stream {stream_name}: {e}", exc_info=True)
+                    logger.error(
+                        f"Error reading from stream {stream_name}: {e}", exc_info=True
+                    )
                     await asyncio.sleep(1)
 
         finally:
@@ -727,7 +809,9 @@ class StreamingTranscriptionConsumer:
             try:
                 await self._try_delete_finished_stream(stream_name)
             except Exception as e:
-                logger.debug(f"Stream cleanup check failed for {stream_name} (non-fatal): {e}")
+                logger.debug(
+                    f"Stream cleanup check failed for {stream_name} (non-fatal): {e}"
+                )
 
     async def _try_delete_finished_stream(self, stream_name: str):
         """
@@ -743,7 +827,7 @@ class StreamingTranscriptionConsumer:
         if not await self.redis_client.exists(stream_name):
             return
 
-        groups = await self.redis_client.execute_command('XINFO', 'GROUPS', stream_name)
+        groups = await self.redis_client.execute_command("XINFO", "GROUPS", stream_name)
         if not groups:
             return
 
@@ -753,7 +837,9 @@ class StreamingTranscriptionConsumer:
         for group in groups:
             group_dict = {}
             for i in range(0, len(group), 2):
-                key = group[i].decode() if isinstance(group[i], bytes) else str(group[i])
+                key = (
+                    group[i].decode() if isinstance(group[i], bytes) else str(group[i])
+                )
                 value = group[i + 1]
                 if isinstance(value, bytes):
                     try:
@@ -818,7 +904,9 @@ class StreamingTranscriptionConsumer:
                     session_id = stream_name.replace("audio:stream:", "")
                     completion_key = f"transcription:complete:{session_id}"
                     if await self.redis_client.exists(completion_key):
-                        logger.debug(f"Stream {stream_name} already completed, skipping")
+                        logger.debug(
+                            f"Stream {stream_name} already completed, skipping"
+                        )
                         continue
 
                     # Setup consumer group (no manual lock needed)
@@ -829,7 +917,9 @@ class StreamingTranscriptionConsumer:
 
                     # Spawn task to process this stream
                     asyncio.create_task(self.process_stream(stream_name))
-                    logger.info(f"Now consuming from {stream_name} (group: {self.group_name})")
+                    logger.info(
+                        f"Now consuming from {stream_name} (group: {self.group_name})"
+                    )
 
                 # Sleep before next discovery cycle (1s for fast discovery)
                 await asyncio.sleep(1)

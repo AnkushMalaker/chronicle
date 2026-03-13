@@ -137,7 +137,9 @@ def build_memory_config_from_env() -> MemoryConfig:
 
         # Map legacy provider names to current names
         if memory_provider in ("friend-lite", "friend_lite"):
-            memory_logger.info(f"🔧 Mapping legacy provider '{memory_provider}' to 'chronicle'")
+            memory_logger.info(
+                f"🔧 Mapping legacy provider '{memory_provider}' to 'chronicle'"
+            )
             memory_provider = "chronicle"
 
         if memory_provider not in [p.value for p in MemoryProvider]:
@@ -178,7 +180,9 @@ def build_memory_config_from_env() -> MemoryConfig:
         if not llm_def:
             raise ValueError("No default LLM defined in config.yml")
         model = llm_def.model_name
-        embedding_model = embed_def.model_name if embed_def else "text-embedding-3-small"
+        embedding_model = (
+            embed_def.model_name if embed_def else "text-embedding-3-small"
+        )
         base_url = llm_def.model_url
         memory_logger.info(
             f"🔧 Memory config (registry): LLM={model}, Embedding={embedding_model}, Base URL={base_url}"
@@ -201,7 +205,9 @@ def build_memory_config_from_env() -> MemoryConfig:
 
         host = str(vs_def.model_params.get("host", "qdrant"))
         port = int(vs_def.model_params.get("port", 6333))
-        collection_name = str(vs_def.model_params.get("collection_name", "chronicle_memories"))
+        collection_name = str(
+            vs_def.model_params.get("collection_name", "chronicle_memories")
+        )
         vector_store_config = create_qdrant_config(
             host=host,
             port=port,
@@ -235,7 +241,9 @@ def build_memory_config_from_env() -> MemoryConfig:
         )
 
     except ImportError:
-        memory_logger.warning("Config loader not available, using environment variables only")
+        memory_logger.warning(
+            "Config loader not available, using environment variables only"
+        )
         raise
 
 

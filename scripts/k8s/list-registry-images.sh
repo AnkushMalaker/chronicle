@@ -22,7 +22,7 @@ fi
 for repo in $REPOS; do
     echo "🏷️  Repository: $repo"
     tags=$(curl -s http://$REGISTRY/v2/$repo/tags/list | jq -r '.tags[]?' 2>/dev/null)
-    
+
     if [ -z "$tags" ]; then
         echo "   No tags found"
     else
@@ -32,4 +32,3 @@ for repo in $REPOS; do
     fi
     echo
 done
-

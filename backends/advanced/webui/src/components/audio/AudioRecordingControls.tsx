@@ -8,7 +8,7 @@ export default function AudioRecordingControls({ recording }: AudioRecordingCont
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
       <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">🔧 WebSocket Protocol Testing</h3>
-      
+
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {/* WebSocket Connection */}
         <div className="text-center">
@@ -69,7 +69,7 @@ export default function AudioRecordingControls({ recording }: AudioRecordingCont
 
       {/* New Granular Testing Controls */}
       <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4 mt-6">🧪 Granular Component Testing</h3>
-      
+
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {/* Microphone Access Test */}
         <div className="text-center">

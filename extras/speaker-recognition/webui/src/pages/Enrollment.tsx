@@ -2,9 +2,9 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { Mic, MicOff, Upload, Play, Pause, Save, Trash2, CheckCircle, AlertCircle } from 'lucide-react'
 import { useUser } from '../contexts/UserContext'
 import { calculateFileHash, isAudioFile } from '../utils/fileHash'
-import { 
-  loadAudioBuffer, 
-  createAudioContext, 
+import {
+  loadAudioBuffer,
+  createAudioContext,
   decodeAudioData,
   extractAudioSamples,
   calculateSNR,
@@ -42,7 +42,7 @@ export default function Enrollment() {
   const [recordingTime, setRecordingTime] = useState(0)
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
-  
+
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
   const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null)
@@ -56,17 +56,17 @@ export default function Enrollment() {
       if (mediaRecorderRef.current) {
         mediaRecorderRef.current.stop()
       }
-      
+
       // Clear interval
       if (recordingIntervalRef.current) {
         clearInterval(recordingIntervalRef.current)
       }
-      
+
       // Stop audio playback
       if (audioSourceRef.current) {
         audioSourceRef.current.stop()
       }
-      
+
       // Close audio context
       if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
         audioContextRef.current.close()
@@ -89,11 +89,11 @@ export default function Enrollment() {
 
   const calculateSessionQuality = useCallback((audioFiles: EnrollmentAudio[]): 'excellent' | 'good' | 'fair' | 'poor' => {
     if (audioFiles.length === 0) return 'poor'
-    
+
     const totalDurationMs = audioFiles.reduce((sum, audio) => sum + audio.duration, 0)
     const totalDurationSeconds = totalDurationMs / 1000 // Convert to seconds for quality thresholds
     const avgSNR = audioFiles.reduce((sum, audio) => sum + audio.snr, 0) / audioFiles.length
-    
+
     if (totalDurationSeconds >= 60 && avgSNR >= 30 && audioFiles.length >= 5) return 'excellent'
     if (totalDurationSeconds >= 30 && avgSNR >= 20 && audioFiles.length >= 3) return 'good'
     if (totalDurationSeconds >= 15 && avgSNR >= 15 && audioFiles.length >= 2) return 'fair'
@@ -112,7 +112,7 @@ export default function Enrollment() {
       }
       return session
     }))
-    
+
     if (currentSession?.id === sessionId) {
       setCurrentSession(prev => {
         if (!prev) return null
@@ -139,15 +139,15 @@ export default function Enrollment() {
         return
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({ 
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true
           // Removed sampleRate constraint for better compatibility
-        } 
+        }
       })
-      
+
       // Try WAV first, fallback to WebM if not supported
       let mimeType = 'audio/wav'
       if (!MediaRecorder.isTypeSupported(mimeType)) {
@@ -156,44 +156,44 @@ export default function Enrollment() {
           mimeType = '' // Let browser choose
         }
       }
-      
+
       const mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
-      
+
       audioChunksRef.current = []
-      
+
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
           audioChunksRef.current.push(event.data)
         }
       }
-      
+
       mediaRecorder.onstop = async () => {
         const blob = new Blob(audioChunksRef.current, { type: mimeType || 'audio/webm' })
         await processRecording(blob)
         stream.getTracks().forEach(track => track.stop())
       }
-      
+
       mediaRecorder.onerror = (event) => {
         console.error('MediaRecorder error:', event)
         alert('Recording failed. Please try again.')
         setIsRecording(false)
         stream.getTracks().forEach(track => track.stop())
       }
-      
+
       mediaRecorderRef.current = mediaRecorder
       setIsRecording(true)
       setRecordingTime(0)
-      
+
       // Start timer immediately (track milliseconds for formatDuration compatibility)
       recordingIntervalRef.current = setInterval(() => {
         setRecordingTime(prev => prev + 1000)
       }, 1000)
-      
+
       mediaRecorder.start(250) // Increased interval for better stability
-      
+
     } catch (error) {
       console.error('Failed to start recording:', error)
-      
+
       // Clean up if recording failed
       setIsRecording(false)
       setRecordingTime(0)
@@ -201,7 +201,7 @@ export default function Enrollment() {
         clearInterval(recordingIntervalRef.current)
         recordingIntervalRef.current = null
       }
-      
+
       let errorMessage = 'Failed to access microphone. '
       if (error.name === 'NotAllowedError') {
         errorMessage += 'Please allow microphone access and try again.'
@@ -212,7 +212,7 @@ export default function Enrollment() {
       } else {
         errorMessage += 'Please check permissions and try again.'
       }
-      
+
       alert(errorMessage)
     }
   }, [currentSession])
@@ -226,9 +226,9 @@ export default function Enrollment() {
       } catch (error) {
         console.error('Error stopping MediaRecorder:', error)
       }
-      
+
       setIsRecording(false)
-      
+
       if (recordingIntervalRef.current) {
         clearInterval(recordingIntervalRef.current)
         recordingIntervalRef.current = null
@@ -241,10 +241,10 @@ export default function Enrollment() {
       console.error('No current session for processing recording')
       return
     }
-    
+
     try {
       console.log('Processing recording blob:', blob.type, blob.size, 'bytes')
-      
+
       // Convert WebM blob to WAV if needed for better backend compatibility
       let processedBlob = blob
       if (blob.type.includes('webm')) {
@@ -252,33 +252,33 @@ export default function Enrollment() {
         processedBlob = await convertBlobToWav(blob)
         console.log('Conversion successful:', processedBlob.type, processedBlob.size, 'bytes')
       }
-      
+
       // Convert blob to audio buffer for analysis
       const arrayBuffer = await processedBlob.arrayBuffer()
-      
+
       if (arrayBuffer.byteLength === 0) {
         alert('Recording is empty. Please try recording again.')
         return
       }
-      
+
       const audioContext = createAudioContext()
       audioContextRef.current = audioContext
-      
+
       console.log('Decoding audio data...')
       const audioBuffer = await decodeAudioData(audioContext, arrayBuffer)
-      
+
       if (audioBuffer.duration === 0) {
         alert('Recording has no duration. Please try recording again.')
         return
       }
-      
+
       console.log('Audio decoded successfully:', audioBuffer.duration, 'seconds')
-      
+
       const samples = extractAudioSamples(audioBuffer)
       const snr = calculateSNR(samples)
-      
+
       const quality = snr >= 30 ? 'excellent' : snr >= 20 ? 'good' : snr >= 15 ? 'fair' : 'poor'
-      
+
       const newAudio: EnrollmentAudio = {
         id: Math.random().toString(36),
         name: `Recording ${new Date().toLocaleTimeString()}`,
@@ -288,15 +288,15 @@ export default function Enrollment() {
         quality,
         source: 'recording'
       }
-      
+
       const updatedAudioFiles = [...currentSession.audioFiles, newAudio]
       updateSession(currentSession.id, { audioFiles: updatedAudioFiles })
-      
+
       console.log('Recording processed successfully:', newAudio)
-      
+
     } catch (error) {
       console.error('Failed to process recording:', error)
-      
+
       let errorMessage = 'Failed to process recording. '
       if (error.name === 'EncodingError' || error.message.includes('decode')) {
         errorMessage += 'Audio format not supported. Try using a different browser or check your microphone settings.'
@@ -307,29 +307,29 @@ export default function Enrollment() {
       } else {
         errorMessage += 'Please try again or refresh the page.'
       }
-      
+
       alert(errorMessage)
     }
   }, [currentSession, updateSession])
 
   const handleFileUpload = useCallback(async (files: File[]) => {
     if (!currentSession) return
-    
+
     for (const file of files) {
       if (!file.name.toLowerCase().endsWith('.wav')) {
         alert('Please select a WAV audio file. Other formats are not currently supported.')
         continue
       }
-      
+
       try {
         const arrayBuffer = await loadAudioBuffer(file)
         const audioContext = createAudioContext()
         const audioBuffer = await decodeAudioData(audioContext, arrayBuffer)
         const samples = extractAudioSamples(audioBuffer)
         const snr = calculateSNR(samples)
-        
+
         const quality = snr >= 30 ? 'excellent' : snr >= 20 ? 'good' : snr >= 15 ? 'fair' : 'poor'
-        
+
         const newAudio: EnrollmentAudio = {
           id: Math.random().toString(36),
           name: file.name,
@@ -339,10 +339,10 @@ export default function Enrollment() {
           quality,
           source: 'upload'
         }
-        
+
         const updatedAudioFiles = [...currentSession.audioFiles, newAudio]
         updateSession(currentSession.id, { audioFiles: updatedAudioFiles })
-        
+
       } catch (error) {
         console.error('Failed to process uploaded file:', error)
         alert(`Failed to process ${file.name}. Please try a different file.`)
@@ -357,26 +357,26 @@ export default function Enrollment() {
         audioSourceRef.current.stop()
         audioSourceRef.current = null
       }
-      
+
       const arrayBuffer = await audio.blob.arrayBuffer()
       if (!audioContextRef.current) {
         audioContextRef.current = createAudioContext()
       }
-      
+
       const audioBuffer = await decodeAudioData(audioContextRef.current, arrayBuffer)
       const source = audioContextRef.current.createBufferSource()
       source.buffer = audioBuffer
       source.connect(audioContextRef.current.destination)
-      
+
       source.start(0)
       audioSourceRef.current = source
       setPlayingAudioId(audio.id)
-      
+
       source.onended = () => {
         setPlayingAudioId(null)
         audioSourceRef.current = null
       }
-      
+
     } catch (error) {
       console.error('Failed to play audio:', error)
       setPlayingAudioId(null)
@@ -393,10 +393,10 @@ export default function Enrollment() {
 
   const removeAudio = useCallback((audioId: string) => {
     if (!currentSession) return
-    
+
     const updatedAudioFiles = currentSession.audioFiles.filter(audio => audio.id !== audioId)
     updateSession(currentSession.id, { audioFiles: updatedAudioFiles })
-    
+
     if (playingAudioId === audioId) {
       stopAudio()
     }
@@ -404,48 +404,48 @@ export default function Enrollment() {
 
   const submitEnrollment = useCallback(async () => {
     if (!currentSession || !user) return
-    
+
     if (currentSession.audioFiles.length === 0) {
       alert('Please add at least one audio sample before submitting.')
       return
     }
-    
+
     if (currentSession.quality === 'poor') {
       const proceed = confirm(
         'The audio quality is poor. This may result in reduced speaker recognition accuracy. Continue anyway?'
       )
       if (!proceed) return
     }
-    
+
     setIsSubmitting(true)
     updateSession(currentSession.id, { status: 'processing' })
-    
+
     try {
       const formData = new FormData()
-      
+
       // Generate unique speaker ID with user prefix (treating user as a "folder")
       const speakerId = `user_${user.id}_${currentSession.speakerName.replace(/\s+/g, '_').toLowerCase()}_${Date.now()}`
-      
+
       // BatchEnrollRequest expects exactly these field names
       formData.append('speaker_name', currentSession.speakerName)
       formData.append('speaker_id', speakerId)
-      
+
       // Add all audio files (backend expects 'files' field for batch enrollment)
       for (const audio of currentSession.audioFiles) {
         formData.append('files', audio.blob, audio.name)
       }
-      
+
       const response = await apiService.post('/enroll/batch', formData, {
         timeout: 120000, // 2 minutes for enrollment operations
       })
-      
+
       updateSession(currentSession.id, { status: 'completed' })
-      const message = response.data?.audio_saved 
+      const message = response.data?.audio_saved
         ? `Speaker enrollment completed successfully! ${response.data.saved_files || 0} audio files saved.`
         : 'Speaker enrollment completed successfully!'
       alert(message)
       setCurrentSession(null)
-      
+
     } catch (error) {
       console.error('Failed to submit enrollment:', error)
       updateSession(currentSession.id, { status: 'failed' })
@@ -506,7 +506,7 @@ export default function Enrollment() {
           <span className="font-medium">💾 Audio Storage:</span> All enrollment audio files are automatically saved for future reference and reprocessing.
         </p>
       </div>
-      
+
       <p className="text-secondary">
         Enroll new speakers by uploading audio files or recording directly in your browser.
       </p>
@@ -576,7 +576,7 @@ export default function Enrollment() {
                 <div className="text-sm text-muted space-y-1">
                   <p>Speak clearly for 10-30 seconds</p>
                   <p className="text-xs">
-                    {location.protocol !== 'https:' && location.hostname !== 'localhost' 
+                    {location.protocol !== 'https:' && location.hostname !== 'localhost'
                       ? '⚠️ HTTPS required for microphone access'
                       : '✓ Ready to record'}
                   </p>

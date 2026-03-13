@@ -16,12 +16,12 @@ export interface RecordingControlsProps {
   onToggle: () => void
 }
 
-export function RecordingControls({ 
-  isRecording, 
-  deepgramStatus, 
-  apiKeySource, 
-  hasApiKey, 
-  onToggle 
+export function RecordingControls({
+  isRecording,
+  deepgramStatus,
+  apiKeySource,
+  hasApiKey,
+  onToggle
 }: RecordingControlsProps) {
   const isDisabled = !hasApiKey || deepgramStatus === 'connecting' || apiKeySource === 'loading'
 

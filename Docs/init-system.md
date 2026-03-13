@@ -3,7 +3,7 @@
 ## Quick Links
 
 - **👉 [Start Here: Quick Start Guide](../quickstart.md)** - Main setup path for new users
-- **📚 [Full Documentation](../CLAUDE.md)** - Comprehensive reference  
+- **📚 [Full Documentation](../CLAUDE.md)** - Comprehensive reference
 - **🏗️ [Architecture Details](overview.md)** - Technical deep dive
 
 ---
@@ -59,12 +59,12 @@ Each service can be configured independently:
 cd backends/advanced
 uv run --with-requirements setup-requirements.txt python init.py
 
-# Speaker Recognition only  
+# Speaker Recognition only
 cd extras/speaker-recognition
 ./setup.sh
 
 # ASR Services only
-cd extras/asr-services  
+cd extras/asr-services
 ./setup.sh
 
 # OpenMemory MCP only
@@ -80,21 +80,21 @@ cd extras/openmemory-mcp
 - **Generates**: Complete `.env` file with all required configuration
 - **Default ports**: Backend (8000), WebUI (5173)
 
-### Speaker Recognition  
+### Speaker Recognition
 - **Prompts for**: Hugging Face token, compute mode (cpu/gpu)
 - **Service port**: 8085
 - **WebUI port**: 5173
 - **Requires**: HF_TOKEN for pyannote models
 
 ### ASR Services
-- **Starts**: Parakeet ASR service via Docker Compose  
+- **Starts**: Parakeet ASR service via Docker Compose
 - **Service port**: 8767
 - **Purpose**: Offline speech-to-text processing
 - **No configuration required**
 
 ### OpenMemory MCP
 - **Starts**: External OpenMemory MCP server
-- **Service port**: 8765  
+- **Service port**: 8765
 - **WebUI**: Available at http://localhost:8765
 - **Purpose**: Cross-client memory compatibility
 
@@ -112,10 +112,10 @@ Note (Linux): If `host.docker.internal` is unavailable, add `extra_hosts: - "hos
 
 ## Key Benefits
 
-✅ **No Unnecessary Building** - Services are only started when you explicitly request them  
-✅ **Resource Efficient** - Parakeet ASR won't start if you're using cloud transcription  
-✅ **Clean Separation** - Configuration vs service management are separate concerns  
-✅ **Unified Control** - Single command to start/stop all services  
+✅ **No Unnecessary Building** - Services are only started when you explicitly request them
+✅ **Resource Efficient** - Parakeet ASR won't start if you're using cloud transcription
+✅ **Clean Separation** - Configuration vs service management are separate concerns
+✅ **Unified Control** - Single command to start/stop all services
 ✅ **Selective Starting** - Choose which services to run based on your current needs
 
 ## Ports & Access
@@ -215,7 +215,7 @@ You can also manage services individually:
 # Advanced Backend
 cd backends/advanced && docker compose up --build -d
 
-# Speaker Recognition  
+# Speaker Recognition
 cd extras/speaker-recognition && docker compose up --build -d
 
 # ASR Services (only if using offline transcription)
@@ -250,7 +250,7 @@ cd extras/openmemory-mcp && docker compose up --build -d
 # Backend health
 curl http://localhost:8000/health
 
-# Speaker Recognition health  
+# Speaker Recognition health
 curl http://localhost:8085/health
 
 # ASR service health

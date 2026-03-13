@@ -58,14 +58,25 @@ class DeviceController:
             for entity in entities:
                 oid = entity.object_id
                 self._entity_keys[oid] = entity.key
-                logger.debug("Entity: %s (key=%d, type=%s)", oid, entity.key, type(entity).__name__)
+                logger.debug(
+                    "Entity: %s (key=%d, type=%s)",
+                    oid,
+                    entity.key,
+                    type(entity).__name__,
+                )
 
                 # Type-based discovery for light and media_player
                 if isinstance(entity, aioesphomeapi.LightInfo) and light_key is None:
                     light_key = entity.key
-                elif isinstance(entity, aioesphomeapi.MediaPlayerInfo) and media_player_key is None:
+                elif (
+                    isinstance(entity, aioesphomeapi.MediaPlayerInfo)
+                    and media_player_key is None
+                ):
                     media_player_key = entity.key
-                elif isinstance(entity, aioesphomeapi.NumberInfo) and oid == "led_hold_duration":
+                elif (
+                    isinstance(entity, aioesphomeapi.NumberInfo)
+                    and oid == "led_hold_duration"
+                ):
                     self._entity_keys["_led_hold_duration"] = entity.key
                     logger.info("LED hold duration entity found (key=%d)", entity.key)
 
@@ -85,7 +96,9 @@ class DeviceController:
             # Check text_sensors
             for name in ["button_action", "dial_action"]:
                 if name in self._entity_keys:
-                    logger.info("Text sensor '%s' found (key=%d)", name, self._entity_keys[name])
+                    logger.info(
+                        "Text sensor '%s' found (key=%d)", name, self._entity_keys[name]
+                    )
                 else:
                     logger.warning("Text sensor '%s' not found", name)
 
@@ -95,7 +108,9 @@ class DeviceController:
             return True
 
         except Exception as e:
-            logger.warning("ESPHome API connection failed: %s (relay continues audio-only)", e)
+            logger.warning(
+                "ESPHome API connection failed: %s (relay continues audio-only)", e
+            )
             self._connected = False
             return False
 
@@ -123,7 +138,14 @@ class DeviceController:
         """Await next device event from queue."""
         return await self._event_queue.get()
 
-    async def set_led(self, r: float, g: float, b: float, brightness: float = 0.3, duration: float = 5.0) -> None:
+    async def set_led(
+        self,
+        r: float,
+        g: float,
+        b: float,
+        brightness: float = 0.3,
+        duration: float = 5.0,
+    ) -> None:
         """Set LED ring color. Values 0.0-1.0. Duration in seconds. No-op if not connected."""
         key = self._entity_keys.get("_light")
         if not self._connected or not self._client or key is None:
@@ -142,7 +164,14 @@ class DeviceController:
                 rgb=(r, g, b),
                 brightness=brightness,
             )
-            logger.info("LED set: rgb=(%.1f, %.1f, %.1f) br=%.1f dur=%.1fs", r, g, b, brightness, duration)
+            logger.info(
+                "LED set: rgb=(%.1f, %.1f, %.1f) br=%.1f dur=%.1fs",
+                r,
+                g,
+                b,
+                brightness,
+                duration,
+            )
         except Exception as e:
             logger.warning("LED command failed: %s", e)
 

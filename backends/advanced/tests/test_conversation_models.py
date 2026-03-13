@@ -19,7 +19,7 @@ class TestConversationModel:
             end=15.8,
             text="Hello, how are you today?",
             speaker="Speaker A",
-            confidence=0.95
+            confidence=0.95,
         )
 
         assert segment.start == 10.5
@@ -31,8 +31,12 @@ class TestConversationModel:
     def test_transcript_version_model(self):
         """Test TranscriptVersion model."""
         segments = [
-            Conversation.SpeakerSegment(start=0.0, end=5.0, text="Hello", speaker="Speaker A"),
-            Conversation.SpeakerSegment(start=5.1, end=10.0, text="Hi there", speaker="Speaker B")
+            Conversation.SpeakerSegment(
+                start=0.0, end=5.0, text="Hello", speaker="Speaker A"
+            ),
+            Conversation.SpeakerSegment(
+                start=5.1, end=10.0, text="Hi there", speaker="Speaker B"
+            ),
         ]
 
         version = Conversation.TranscriptVersion(
@@ -43,7 +47,7 @@ class TestConversationModel:
             model="nova-3",
             created_at=datetime.now(),
             processing_time_seconds=12.5,
-            metadata={"confidence": 0.9}
+            metadata={"confidence": 0.9},
         )
 
         assert version.version_id == "trans-v1"
@@ -64,7 +68,7 @@ class TestConversationModel:
             model="gpt-4o-mini",
             created_at=datetime.now(),
             processing_time_seconds=45.2,
-            metadata={"extraction_quality": "high"}
+            metadata={"extraction_quality": "high"},
         )
 
         assert version.version_id == "mem-v1"
@@ -82,12 +86,7 @@ class TestConversationModel:
 
     def test_word_model(self):
         """Test Word model."""
-        word = Conversation.Word(
-            word="hello",
-            start=0.0,
-            end=0.5,
-            confidence=0.98
-        )
+        word = Conversation.Word(word="hello", start=0.0, end=0.5, confidence=0.98)
         assert word.word == "hello"
         assert word.start == 0.0
         assert word.end == 0.5
@@ -96,10 +95,7 @@ class TestConversationModel:
     def test_speaker_segment_defaults(self):
         """Test SpeakerSegment default values."""
         segment = Conversation.SpeakerSegment(
-            start=0.0,
-            end=1.0,
-            text="Test",
-            speaker="Speaker 0"
+            start=0.0, end=1.0, text="Test", speaker="Speaker 0"
         )
         assert segment.confidence is None
         assert segment.identified_as is None

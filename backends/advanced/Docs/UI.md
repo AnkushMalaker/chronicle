@@ -30,7 +30,7 @@ The Chronicle web dashboard provides a comprehensive interface for managing conv
 
 **Features**:
 - Real-time conversation listing with metadata
-- Audio playback and transcript viewing  
+- Audio playback and transcript viewing
 - Conversation status tracking (open/closed)
 - Speaker identification and timing information
 - Audio file upload for processing existing recordings
@@ -39,7 +39,7 @@ The Chronicle web dashboard provides a comprehensive interface for managing conv
 - View all users' conversations
 - Advanced filtering and search capabilities
 
-### 2. Memories Tab  
+### 2. Memories Tab
 **Purpose**: Browse and search extracted conversation memories with advanced filtering
 
 **Core Search Features**:
@@ -97,7 +97,7 @@ The Chronicle web dashboard provides a comprehensive interface for managing conv
 
 #### System Overview (Click "📈 Load Debug Stats")
 - **Processing Metrics**: Total memory sessions, success rates, processing times
-- **Failure Analysis**: Failed extractions and error tracking  
+- **Failure Analysis**: Failed extractions and error tracking
 - **Performance Monitoring**: Average processing times and bottlenecks
 - **Live Statistics**: Real-time system performance data
 
@@ -199,7 +199,7 @@ ADMIN_PASSWORD=your-admin-password
 4. **User Management**: Create/manage user accounts as needed
 5. **Troubleshooting**: Use debug tools to investigate issues
 
-### User Workflow  
+### User Workflow
 1. **Authentication**: Login via sidebar
 2. **View Conversations**: Browse recent audio sessions
 3. **Search Memories**: Find relevant conversation insights
@@ -243,7 +243,7 @@ ADMIN_PASSWORD=your-admin-password
 
 ### Debug Steps
 1. **Check Logs**: `./logs/streamlit.log` for frontend issues
-2. **Backend Health**: Use `/health` endpoint to verify backend status  
+2. **Backend Health**: Use `/health` endpoint to verify backend status
 3. **API Testing**: Test endpoints directly with admin token
 4. **Service Status**: Use debug tab to check component health
 5. **Configuration**: Verify all environment variables are set correctly

@@ -76,7 +76,7 @@ export const AudioRecordingControls: React.FC<AudioRecordingControlsProps> = ({
     const { level, snr } = processedAudio.quality
     const colors = {
       excellent: 'bg-green-100 text-green-800',
-      good: 'bg-blue-100 text-blue-800', 
+      good: 'bg-blue-100 text-blue-800',
       fair: 'bg-yellow-100 text-yellow-800',
       poor: 'bg-red-100 text-red-800'
     }
@@ -113,7 +113,7 @@ export const AudioRecordingControls: React.FC<AudioRecordingControlsProps> = ({
             <span className="text-sm">Stop</span>
           </button>
         )}
-        
+
         {processedAudio && (
           <button
             onClick={clearRecording}
@@ -130,7 +130,7 @@ export const AudioRecordingControls: React.FC<AudioRecordingControlsProps> = ({
   return (
     <div className={`border rounded-lg p-4 ${className}`}>
       <h4 className="mb-3 heading-sm">🎤 Record Audio</h4>
-      
+
       {/* Recording Status */}
       <div className="text-center space-y-4">
         {/* Status Indicator */}
@@ -159,7 +159,7 @@ export const AudioRecordingControls: React.FC<AudioRecordingControlsProps> = ({
               <span>Stop Recording</span>
             </button>
           )}
-          
+
           {processedAudio && !recordingState.isRecording && (
             <button
               onClick={clearRecording}
@@ -174,7 +174,7 @@ export const AudioRecordingControls: React.FC<AudioRecordingControlsProps> = ({
         <div className="text-sm text-primary space-y-1">
           <p>Record audio for speaker identification</p>
           <p className="text-xs">
-            {location.protocol !== 'https:' && location.hostname !== 'localhost' 
+            {location.protocol !== 'https:' && location.hostname !== 'localhost'
               ? '⚠️ HTTPS required for microphone access'
               : '✓ Ready to record'}
           </p>
@@ -197,7 +197,7 @@ export const AudioRecordingControls: React.FC<AudioRecordingControlsProps> = ({
               <CheckCircle className="h-4 w-4" />
               <span className="text-sm font-medium">Recording Ready</span>
             </div>
-            
+
             <div className="grid grid-cols-2 gap-4 text-sm">
               <div className="text-center">
                 <div className="text-primary">Duration</div>

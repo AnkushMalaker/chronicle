@@ -56,7 +56,7 @@ Get Conversation By ID
 Get Conversation Versions
     [Documentation]    Get version history for a conversation
     [Arguments]    ${conversation_id}
-    ${response}=    GET On Session    api    /api/conversations/${conversation_id}/versions 
+    ${response}=    GET On Session    api    /api/conversations/${conversation_id}/versions
     RETURN    ${response.json()}[transcript_versions]
 
 Get conversation memory versions
@@ -95,14 +95,14 @@ Activate Transcript Version
     [Documentation]    Activate a specific transcript version
     [Arguments]    ${conversation_id}    ${version_id}
 
-    ${response}=    POST On Session    api    /api/conversations/${conversation_id}/activate-transcript/${version_id}  
+    ${response}=    POST On Session    api    /api/conversations/${conversation_id}/activate-transcript/${version_id}
     RETURN    ${response.json()}
 
 Activate Memory Version
     [Documentation]    Activate a specific memory version
     [Arguments]     ${conversation_id}    ${version_id}
 
-    ${response}=    POST On Session    api    /api/conversations/${conversation_id}/activate-memory/${version_id}  
+    ${response}=    POST On Session    api    /api/conversations/${conversation_id}/activate-memory/${version_id}
     RETURN    ${response.json()}
 
 Delete Conversation

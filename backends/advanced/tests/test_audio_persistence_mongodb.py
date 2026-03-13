@@ -15,25 +15,25 @@ import wave
 from pathlib import Path
 
 import pytest
+from beanie import init_beanie
 from bson import Binary
 from motor.motor_asyncio import AsyncIOMotorClient
-from beanie import init_beanie
 
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.utils.audio_chunk_utils import (
-    encode_pcm_to_opus,
-    decode_opus_to_pcm,
     build_wav_from_pcm,
-    retrieve_audio_chunks,
     concatenate_chunks_to_pcm,
-    reconstruct_wav_from_conversation,
     convert_wav_to_chunks,
+    decode_opus_to_pcm,
+    encode_pcm_to_opus,
+    reconstruct_wav_from_conversation,
+    retrieve_audio_chunks,
     wait_for_audio_chunks,
 )
 
-
 # Test configuration
+
 
 def get_mongodb_url():
     """Get MongoDB URL from environment or pytest args."""
@@ -66,10 +66,7 @@ async def init_db(mongodb_client):
     """Initialize Beanie with test database."""
     db = mongodb_client[get_test_db_name()]
 
-    await init_beanie(
-        database=db,
-        document_models=[AudioChunkDocument, Conversation]
-    )
+    await init_beanie(database=db, document_models=[AudioChunkDocument, Conversation])
 
     yield db
 
@@ -87,6 +84,7 @@ async def clean_db(init_db):
 
 
 # Test data generators
+
 
 def generate_pcm_data(duration_seconds=1, sample_rate=16000):
     """Generate sample PCM audio data."""
@@ -111,6 +109,7 @@ def create_wav_file(pcm_data, output_path, sample_rate=16000):
 
 
 # Integration Tests
+
 
 @pytest.mark.asyncio
 class TestOpusCodecIntegration:
@@ -239,11 +238,7 @@ class TestMongoDBChunkStorage:
             await chunk.insert()
 
         # Retrieve chunks 5-7 (3 chunks starting at index 5)
-        chunks = await retrieve_audio_chunks(
-            conversation_id,
-            start_index=5,
-            limit=3
-        )
+        chunks = await retrieve_audio_chunks(conversation_id, start_index=5, limit=3)
 
         assert len(chunks) == 3
         assert chunks[0].chunk_index == 5
@@ -341,7 +336,7 @@ class TestWAVConversion:
             conversation_id=conversation_id,
             audio_uuid="test-audio-001",
             user_id="test-user",
-            client_id="test-client"
+            client_id="test-client",
         )
         await conversation.insert()
 
@@ -376,7 +371,7 @@ class TestWAVConversion:
             conversation_id=conversation_id,
             audio_uuid="test-audio-002",
             user_id="test-user",
-            client_id="test-client"
+            client_id="test-client",
         )
         await conversation.insert()
 
@@ -419,10 +414,7 @@ class TestChunkWaiting:
 
     async def test_wait_for_chunks_timeout(self, clean_db):
         """Test wait times out when chunks don't exist."""
-        result = await wait_for_audio_chunks(
-            "nonexistent-conv",
-            max_wait_seconds=1
-        )
+        result = await wait_for_audio_chunks("nonexistent-conv", max_wait_seconds=1)
         assert result is False
 
 

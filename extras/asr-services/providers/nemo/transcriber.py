@@ -11,7 +11,6 @@ import os
 from typing import Optional, cast
 
 import torch
-
 from common.response_models import TranscriptionResult, Word
 
 logger = logging.getLogger(__name__)

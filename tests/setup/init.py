@@ -50,9 +50,7 @@ def main():
 
     # Ensure template exists
     if not ENV_TEST_TEMPLATE.exists():
-        console.print(
-            f"[red][ERROR][/red] Template not found: {ENV_TEST_TEMPLATE}"
-        )
+        console.print(f"[red][ERROR][/red] Template not found: {ENV_TEST_TEMPLATE}")
         sys.exit(1)
 
     # Copy template to .env.test if it doesn't exist

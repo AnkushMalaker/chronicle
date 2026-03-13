@@ -1,4 +1,3 @@
-
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
@@ -8,6 +7,7 @@ Event = Literal["ADD", "UPDATE", "DELETE", "NONE"]
 NUMERIC_ID = re.compile(r"^\d+$")
 ALLOWED_EVENTS = {"ADD", "UPDATE", "DELETE", "NONE"}
 
+
 @dataclass(frozen=True)
 class MemoryItem:
     id: str
@@ -15,8 +15,10 @@ class MemoryItem:
     text: str
     old_memory: Optional[str] = None
 
+
 class MemoryXMLParseError(ValueError):
     pass
+
 
 def extract_xml_from_content(content: str) -> str:
     """
@@ -27,31 +29,33 @@ def extract_xml_from_content(content: str) -> str:
     import re
 
     # Look for <result>...</result> block
-    xml_match = re.search(r'<result>.*?</result>', content, re.DOTALL)
+    xml_match = re.search(r"<result>.*?</result>", content, re.DOTALL)
     if xml_match:
         return xml_match.group(0)
-    
+
     # If no <result> tags found, return the original content
     return content
+
 
 def clean_and_validate_xml(xml_str: str) -> str:
     """
     Clean common XML issues and validate structure.
     """
     xml_str = xml_str.strip()
-    
+
     # Print raw XML for debugging
     print("Raw XML content:")
     print("=" * 50)
     print(repr(xml_str))
     print("=" * 50)
     print("Formatted XML content:")
-    lines = xml_str.split('\n')
+    lines = xml_str.split("\n")
     for i, line in enumerate(lines, 1):
         print(f"{i:2d}: {line}")
     print("=" * 50)
-    
+
     return xml_str
+
 
 def extract_assistant_xml_from_openai_response(response) -> str:
     """
@@ -62,7 +66,10 @@ def extract_assistant_xml_from_openai_response(response) -> str:
         # OpenAI ChatCompletion object structure
         return response.choices[0].message.content
     except (AttributeError, IndexError, KeyError) as e:
-        raise MemoryXMLParseError(f"Could not extract assistant XML from OpenAI response: {e}") from e
+        raise MemoryXMLParseError(
+            f"Could not extract assistant XML from OpenAI response: {e}"
+        ) from e
+
 
 def parse_memory_xml(xml_str: str) -> List[MemoryItem]:
     """
@@ -118,9 +125,11 @@ def parse_memory_xml(xml_str: str) -> List[MemoryItem]:
         # Children
         text_el = item.find("text")
         if text_el is None or (text_el.text or "").strip() == "":
-            raise MemoryXMLParseError(f"<text> is required and non-empty for id {item_id}.")
+            raise MemoryXMLParseError(
+                f"<text> is required and non-empty for id {item_id}."
+            )
         text_val = (text_el.text or "").strip()
-        
+
         # No JSON expansion needed - individual facts are now properly handled by improved prompts
 
         old_el = item.find("old_memory")
@@ -133,9 +142,13 @@ def parse_memory_xml(xml_str: str) -> List[MemoryItem]:
         else:
             # For non-UPDATE, <old_memory> must not appear
             if old_el is not None:
-                raise MemoryXMLParseError(f"<old_memory> must only appear for UPDATE (id {item_id}).")
+                raise MemoryXMLParseError(
+                    f"<old_memory> must only appear for UPDATE (id {item_id})."
+                )
 
-        items.append(MemoryItem(id=item_id, event=event, text=text_val, old_memory=old_val))
+        items.append(
+            MemoryItem(id=item_id, event=event, text=text_val, old_memory=old_val)
+        )
 
     if not items:
         raise MemoryXMLParseError("No <item> elements found in <memory>.")

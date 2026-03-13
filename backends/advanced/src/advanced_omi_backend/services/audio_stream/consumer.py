@@ -23,7 +23,9 @@ class BaseAudioStreamConsumer(ABC):
     Writes results to transcription:results:{session_id}.
     """
 
-    def __init__(self, provider_name: str, redis_client: redis.Redis, buffer_chunks: int = 30):
+    def __init__(
+        self, provider_name: str, redis_client: redis.Redis, buffer_chunks: int = 30
+    ):
         """
         Initialize consumer.
 
@@ -50,7 +52,9 @@ class BaseAudioStreamConsumer(ABC):
         self.active_streams = {}  # {stream_name: True}
 
         # Buffering: accumulate chunks per session
-        self.session_buffers = {}  # {session_id: {"chunks": [], "chunk_ids": [], "sample_rate": int}}
+        self.session_buffers = (
+            {}
+        )  # {session_id: {"chunks": [], "chunk_ids": [], "sample_rate": int}}
 
     async def discover_streams(self) -> list[str]:
         """
@@ -67,7 +71,9 @@ class BaseAudioStreamConsumer(ABC):
                 cursor, match=self.stream_pattern, count=100
             )
             if keys:
-                streams.extend([k.decode() if isinstance(k, bytes) else k for k in keys])
+                streams.extend(
+                    [k.decode() if isinstance(k, bytes) else k for k in keys]
+                )
 
         return streams
 
@@ -76,16 +82,17 @@ class BaseAudioStreamConsumer(ABC):
         # Create consumer group (ignore error if already exists)
         try:
             await self.redis_client.xgroup_create(
-                stream_name,
-                self.group_name,
-                "0",
-                mkstream=True
+                stream_name, self.group_name, "0", mkstream=True
             )
-            logger.debug(f"➡️ Created consumer group {self.group_name} for {stream_name}")
+            logger.debug(
+                f"➡️ Created consumer group {self.group_name} for {stream_name}"
+            )
         except redis_exceptions.ResponseError as e:
             if "BUSYGROUP" not in str(e):
                 raise
-            logger.debug(f"➡️ Consumer group {self.group_name} already exists for {stream_name}")
+            logger.debug(
+                f"➡️ Consumer group {self.group_name} already exists for {stream_name}"
+            )
 
     async def cleanup_dead_consumers(self, idle_threshold_ms: int = 30000):
         """
@@ -100,7 +107,7 @@ class BaseAudioStreamConsumer(ABC):
         try:
             # Get all consumers in the group
             consumers = await self.redis_client.execute_command(
-                'XINFO', 'CONSUMERS', self.input_stream, self.group_name
+                "XINFO", "CONSUMERS", self.input_stream, self.group_name
             )
 
             if not consumers:
@@ -115,9 +122,13 @@ class BaseAudioStreamConsumer(ABC):
 
                 # Parse consumer fields (flat key-value pairs within each consumer)
                 for j in range(0, len(consumer_info), 2):
-                    if j+1 < len(consumer_info):
-                        key = consumer_info[j].decode() if isinstance(consumer_info[j], bytes) else str(consumer_info[j])
-                        value = consumer_info[j+1]
+                    if j + 1 < len(consumer_info):
+                        key = (
+                            consumer_info[j].decode()
+                            if isinstance(consumer_info[j], bytes)
+                            else str(consumer_info[j])
+                        )
+                        value = consumer_info[j + 1]
                         if isinstance(value, bytes):
                             try:
                                 value = value.decode()
@@ -142,11 +153,19 @@ class BaseAudioStreamConsumer(ABC):
                 if is_dead:
                     # If consumer has pending messages, claim and ACK them first
                     if consumer_pending > 0:
-                        logger.info(f"🔄 Claiming {consumer_pending} pending messages from dead consumer {consumer_name}")
+                        logger.info(
+                            f"🔄 Claiming {consumer_pending} pending messages from dead consumer {consumer_name}"
+                        )
 
                         try:
                             pending_messages = await self.redis_client.execute_command(
-                                'XPENDING', self.input_stream, self.group_name, '-', '+', str(consumer_pending), consumer_name
+                                "XPENDING",
+                                self.input_stream,
+                                self.group_name,
+                                "-",
+                                "+",
+                                str(consumer_pending),
+                                consumer_name,
                             )
 
                             # Parse pending messages (groups of 4: msg_id, consumer, idle_ms, delivery_count)
@@ -159,28 +178,49 @@ class BaseAudioStreamConsumer(ABC):
                                     # Claim to ourselves and ACK immediately
                                     try:
                                         await self.redis_client.execute_command(
-                                            'XCLAIM', self.input_stream, self.group_name, self.consumer_name, '0', msg_id
+                                            "XCLAIM",
+                                            self.input_stream,
+                                            self.group_name,
+                                            self.consumer_name,
+                                            "0",
+                                            msg_id,
                                         )
-                                        await self.redis_client.xack(self.input_stream, self.group_name, msg_id)
+                                        await self.redis_client.xack(
+                                            self.input_stream, self.group_name, msg_id
+                                        )
                                         claimed_count += 1
                                     except Exception as claim_error:
-                                        logger.warning(f"Failed to claim/ack message {msg_id}: {claim_error}")
+                                        logger.warning(
+                                            f"Failed to claim/ack message {msg_id}: {claim_error}"
+                                        )
 
                         except Exception as pending_error:
-                            logger.warning(f"Failed to process pending messages for {consumer_name}: {pending_error}")
+                            logger.warning(
+                                f"Failed to process pending messages for {consumer_name}: {pending_error}"
+                            )
 
                     # Delete the dead consumer
                     try:
                         await self.redis_client.execute_command(
-                            'XGROUP', 'DELCONSUMER', self.input_stream, self.group_name, consumer_name
+                            "XGROUP",
+                            "DELCONSUMER",
+                            self.input_stream,
+                            self.group_name,
+                            consumer_name,
                         )
                         deleted_count += 1
-                        logger.info(f"🧹 Deleted dead consumer {consumer_name} (idle: {consumer_idle_ms}ms)")
+                        logger.info(
+                            f"🧹 Deleted dead consumer {consumer_name} (idle: {consumer_idle_ms}ms)"
+                        )
                     except Exception as delete_error:
-                        logger.warning(f"Failed to delete consumer {consumer_name}: {delete_error}")
+                        logger.warning(
+                            f"Failed to delete consumer {consumer_name}: {delete_error}"
+                        )
 
             if deleted_count > 0 or claimed_count > 0:
-                logger.info(f"✅ Cleanup complete: deleted {deleted_count} dead consumers, claimed {claimed_count} pending messages")
+                logger.info(
+                    f"✅ Cleanup complete: deleted {deleted_count} dead consumers, claimed {claimed_count} pending messages"
+                )
 
         except Exception as e:
             logger.error(f"❌ Failed to cleanup dead consumers: {e}", exc_info=True)
@@ -204,7 +244,9 @@ class BaseAudioStreamConsumer(ABC):
     async def start_consuming(self):
         """Discover and consume from multiple streams using Redis consumer groups."""
         self.running = True
-        logger.info(f"➡️ Starting dynamic stream consumer: {self.consumer_name} (group: {self.group_name})")
+        logger.info(
+            f"➡️ Starting dynamic stream consumer: {self.consumer_name} (group: {self.group_name})"
+        )
 
         last_discovery = 0
         discovery_interval = 10  # Discover new streams every 10 seconds
@@ -223,7 +265,9 @@ class BaseAudioStreamConsumer(ABC):
                             # Setup consumer group for this stream (no manual lock needed)
                             await self.setup_consumer_group(stream_name)
                             self.active_streams[stream_name] = True
-                            logger.info(f"✅ Now consuming from {stream_name} (group: {self.group_name})")
+                            logger.info(
+                                f"✅ Now consuming from {stream_name} (group: {self.group_name})"
+                            )
 
                     last_discovery = current_time
 
@@ -241,14 +285,18 @@ class BaseAudioStreamConsumer(ABC):
                     self.consumer_name,
                     streams_dict,
                     count=1,
-                    block=1000  # Block for 1 second
+                    block=1000,  # Block for 1 second
                 )
 
                 if not messages:
                     continue
 
                 for stream_name, msgs in messages:
-                    stream_name_str = stream_name.decode() if isinstance(stream_name, bytes) else stream_name
+                    stream_name_str = (
+                        stream_name.decode()
+                        if isinstance(stream_name, bytes)
+                        else stream_name
+                    )
                     for message_id, fields in msgs:
                         await self.process_message(message_id, fields, stream_name_str)
 
@@ -260,11 +308,15 @@ class BaseAudioStreamConsumer(ABC):
                     # Extract stream name from error message
                     for stream_name in list(self.active_streams.keys()):
                         if stream_name in error_msg:
-                            logger.warning(f"➡️ [{self.consumer_name}] Stream {stream_name} was deleted, removing from active streams")
+                            logger.warning(
+                                f"➡️ [{self.consumer_name}] Stream {stream_name} was deleted, removing from active streams"
+                            )
 
                             # Remove from active streams
                             del self.active_streams[stream_name]
-                            logger.info(f"➡️ [{self.consumer_name}] Removed {stream_name}, {len(self.active_streams)} streams remaining")
+                            logger.info(
+                                f"➡️ [{self.consumer_name}] Removed {stream_name}, {len(self.active_streams)} streams remaining"
+                            )
                             break
                 else:
                     # Other ResponseError - log and continue
@@ -273,7 +325,10 @@ class BaseAudioStreamConsumer(ABC):
                 await asyncio.sleep(1)
 
             except Exception as e:
-                logger.error(f"➡️ [{self.consumer_name}] Error in dynamic consume loop: {e}", exc_info=True)
+                logger.error(
+                    f"➡️ [{self.consumer_name}] Error in dynamic consume loop: {e}",
+                    exc_info=True,
+                )
                 await asyncio.sleep(1)
 
     async def process_message(self, message_id: bytes, fields: dict, stream_name: str):
@@ -295,7 +350,9 @@ class BaseAudioStreamConsumer(ABC):
 
             # Check for end-of-session signal
             if chunk_id == "END":
-                logger.info(f"➡️ [{self.consumer_name}] {self.provider_name}: Received END signal for session {session_id}")
+                logger.info(
+                    f"➡️ [{self.consumer_name}] {self.provider_name}: Received END signal for session {session_id}"
+                )
 
                 # Flush buffer for this session if it has any chunks
                 if session_id in self.session_buffers:
@@ -306,7 +363,9 @@ class BaseAudioStreamConsumer(ABC):
 
                         # Combine buffered chunks
                         combined_audio = b"".join(buffer["chunks"])
-                        combined_chunk_id = f"{buffer['chunk_ids'][0]}-{buffer['chunk_ids'][-1]}"
+                        combined_chunk_id = (
+                            f"{buffer['chunk_ids'][0]}-{buffer['chunk_ids'][-1]}"
+                        )
 
                         logger.info(
                             f"➡️ [{self.consumer_name}] {self.provider_name}: Flushing {len(buffer['chunks'])} remaining chunks "
@@ -314,7 +373,9 @@ class BaseAudioStreamConsumer(ABC):
                         )
 
                         # Transcribe remaining audio
-                        result = await self.transcribe_audio(combined_audio, buffer["sample_rate"])
+                        result = await self.transcribe_audio(
+                            combined_audio, buffer["sample_rate"]
+                        )
 
                         # Store result
                         processing_time = time.time() - start_time
@@ -325,19 +386,27 @@ class BaseAudioStreamConsumer(ABC):
                             confidence=result.get("confidence", 0.0),
                             words=result.get("words", []),
                             segments=result.get("segments", []),
-                            processing_time=processing_time
+                            processing_time=processing_time,
                         )
 
                         # ACK all buffered messages
                         for msg_id in buffer["message_ids"]:
-                            await self.redis_client.xack(stream_name, self.group_name, msg_id)
+                            await self.redis_client.xack(
+                                stream_name, self.group_name, msg_id
+                            )
 
                         # Trim stream to remove ACKed messages (keep only last 1000 for safety)
                         try:
-                            await self.redis_client.xtrim(stream_name, maxlen=1000, approximate=True)
-                            logger.debug(f"🧹 Trimmed audio stream {stream_name} to max 1000 entries")
+                            await self.redis_client.xtrim(
+                                stream_name, maxlen=1000, approximate=True
+                            )
+                            logger.debug(
+                                f"🧹 Trimmed audio stream {stream_name} to max 1000 entries"
+                            )
                         except Exception as trim_error:
-                            logger.warning(f"Failed to trim stream {stream_name}: {trim_error}")
+                            logger.warning(
+                                f"Failed to trim stream {stream_name}: {trim_error}"
+                            )
 
                         logger.info(
                             f"➡️ [{self.consumer_name}] {self.provider_name}: Flushed buffer for session {session_id} "
@@ -358,7 +427,7 @@ class BaseAudioStreamConsumer(ABC):
                     "chunk_ids": [],
                     "sample_rate": sample_rate,
                     "message_ids": [],
-                    "audio_offset_seconds": 0.0  # Track cumulative audio duration
+                    "audio_offset_seconds": 0.0,  # Track cumulative audio duration
                 }
 
             # Add to buffer (skip empty audio data from END signals)
@@ -382,14 +451,24 @@ class BaseAudioStreamConsumer(ABC):
 
                 # Combine buffered chunks
                 combined_audio = b"".join(buffer["chunks"])
-                combined_chunk_id = f"{buffer['chunk_ids'][0]}-{buffer['chunk_ids'][-1]}"
+                combined_chunk_id = (
+                    f"{buffer['chunk_ids'][0]}-{buffer['chunk_ids'][-1]}"
+                )
 
                 # Calculate audio duration for this chunk (16-bit PCM, 1 channel)
-                audio_duration_seconds = len(combined_audio) / (sample_rate * 2)  # 2 bytes per sample
+                audio_duration_seconds = len(combined_audio) / (
+                    sample_rate * 2
+                )  # 2 bytes per sample
                 audio_offset = buffer["audio_offset_seconds"]
 
                 # Log individual chunk IDs to detect duplicates
-                chunk_list = ", ".join(buffer['chunk_ids'][:5] + ['...'] + buffer['chunk_ids'][-5:]) if len(buffer['chunk_ids']) > 10 else ", ".join(buffer['chunk_ids'])
+                chunk_list = (
+                    ", ".join(
+                        buffer["chunk_ids"][:5] + ["..."] + buffer["chunk_ids"][-5:]
+                    )
+                    if len(buffer["chunk_ids"]) > 10
+                    else ", ".join(buffer["chunk_ids"])
+                )
 
                 logger.info(
                     f"➡️ [{self.consumer_name}] {self.provider_name}: Transcribing {len(buffer['chunks'])} chunks "
@@ -415,7 +494,9 @@ class BaseAudioStreamConsumer(ABC):
                     adjusted_word["end"] = word.get("end", 0.0) + audio_offset
                     adjusted_words.append(adjusted_word)
 
-                logger.debug(f"➡️ [{self.consumer_name}] Adjusted {len(adjusted_segments)} segments by +{audio_offset:.1f}s")
+                logger.debug(
+                    f"➡️ [{self.consumer_name}] Adjusted {len(adjusted_segments)} segments by +{audio_offset:.1f}s"
+                )
 
                 # Store result with adjusted timestamps
                 processing_time = time.time() - start_time
@@ -426,7 +507,7 @@ class BaseAudioStreamConsumer(ABC):
                     confidence=result.get("confidence", 0.0),
                     words=adjusted_words,
                     segments=adjusted_segments,
-                    processing_time=processing_time
+                    processing_time=processing_time,
                 )
 
                 # Update audio offset for next chunk
@@ -438,8 +519,12 @@ class BaseAudioStreamConsumer(ABC):
 
                 # Trim stream to remove ACKed messages (keep only last 1000 for safety)
                 try:
-                    await self.redis_client.xtrim(stream_name, maxlen=1000, approximate=True)
-                    logger.debug(f"🧹 Trimmed audio stream {stream_name} to max 1000 entries")
+                    await self.redis_client.xtrim(
+                        stream_name, maxlen=1000, approximate=True
+                    )
+                    logger.debug(
+                        f"🧹 Trimmed audio stream {stream_name} to max 1000 entries"
+                    )
                 except Exception as trim_error:
                     logger.warning(f"Failed to trim stream {stream_name}: {trim_error}")
 
@@ -456,7 +541,7 @@ class BaseAudioStreamConsumer(ABC):
         except Exception as e:
             logger.error(
                 f"➡️ [{self.consumer_name}] {self.provider_name}: Failed to process chunk {fields.get(b'chunk_id', b'unknown').decode()}: {e}",
-                exc_info=True
+                exc_info=True,
             )
 
     async def store_result(
@@ -467,7 +552,7 @@ class BaseAudioStreamConsumer(ABC):
         confidence: float,
         words: list,
         segments: list,
-        processing_time: float
+        processing_time: float,
     ):
         """
         Store transcription result in Redis Stream.
@@ -502,7 +587,7 @@ class BaseAudioStreamConsumer(ABC):
             session_results_stream,
             result_data,
             maxlen=1000,  # Keep max 1k results per session
-            approximate=True
+            approximate=True,
         )
 
         logger.debug(

@@ -74,7 +74,7 @@ client{id}_{timestamp}_{segment}.wav
 The service supports Wyoming protocol events:
 
 - **audio-start**: Begins audio session
-- **audio-chunk**: Contains Opus audio data  
+- **audio-chunk**: Contains Opus audio data
 - **audio-stop**: Ends audio session and flushes remaining audio
 
 For clients not using Wyoming protocol, raw Opus packets are accepted with automatic session management.
@@ -127,7 +127,7 @@ The service provides basic logging for connection and audio processing status.
 ## Limitations
 
 - **No Transcription**: Audio is only saved, not transcribed
-- **No Memory Processing**: No conversation memory or LLM integration  
+- **No Memory Processing**: No conversation memory or LLM integration
 - **Basic Session Management**: Simple session tracking without advanced features
 - **Storage Only**: Files are saved but not indexed or searchable
 

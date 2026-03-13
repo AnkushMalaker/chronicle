@@ -37,4 +37,4 @@ EXPOSE 8001
 ENV PATH="/app/.venv/bin:$PATH"
 
 # Run the service
-CMD ["python", "speaker_service.py"] 
+CMD ["python", "speaker_service.py"]

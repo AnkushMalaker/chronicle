@@ -15,4 +15,3 @@ spec:
   storageClassName: {{ .Values.persistence.storageClass }}
   {{- end }}
 {{- end }}
-

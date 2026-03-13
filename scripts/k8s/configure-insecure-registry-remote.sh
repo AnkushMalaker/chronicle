@@ -45,14 +45,14 @@ echo "SSH user: $SSH_USER"
 configure_node() {
     local node=$1
     local user=$2
-    
+
     echo "📋 Configuring node: $node"
-    
+
     # Create the containerd configuration directory and file
     ssh -o StrictHostKeyChecking=no "$user@$node" "
         echo 'Creating MicroK8s containerd configuration...'
         sudo mkdir -p /var/snap/microk8s/current/args/certs.d/$REGISTRY
-        
+
         echo 'Creating hosts.toml configuration...'
         sudo tee /var/snap/microk8s/current/args/certs.d/$REGISTRY/hosts.toml > /dev/null <<EOF
 [host.\"http://$REGISTRY\"]
@@ -60,19 +60,19 @@ configure_node() {
   plain_http = true
   skip_verify = true
 EOF
-        
+
         echo 'Verifying configuration...'
         sudo cat /var/snap/microk8s/current/args/certs.d/$REGISTRY/hosts.toml
-        
+
         echo 'Restarting MicroK8s containerd...'
         sudo snap restart microk8s.daemon-containerd
-        
+
         echo 'Waiting for containerd to restart...'
         sleep 10
-        
+
         echo 'Testing registry access...'
         curl -s http://$REGISTRY/v2/ > /dev/null && echo '✅ Registry accessible via HTTP' || echo '❌ Registry not accessible'
-        
+
         echo 'Configuration complete on $node'
     "
 }

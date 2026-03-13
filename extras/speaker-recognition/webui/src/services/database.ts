@@ -25,27 +25,27 @@ class DatabaseService {
         userId,
         savedAt: new Date().toISOString()
       }
-      
+
       localStorage.setItem(storageKey, JSON.stringify(data))
-      
+
       // Also maintain a list of all annotation files for this user
       const userKey = this.getStorageKey(userId)
       const existingFiles = JSON.parse(localStorage.getItem(userKey) || '[]')
-      
+
       const fileEntry = {
         hash: fileHash,
         name: fileName,
         annotationCount: annotations.length,
         lastSaved: new Date().toISOString()
       }
-      
+
       const existingIndex = existingFiles.findIndex((f: any) => f.hash === fileHash)
       if (existingIndex >= 0) {
         existingFiles[existingIndex] = fileEntry
       } else {
         existingFiles.push(fileEntry)
       }
-      
+
       localStorage.setItem(userKey, JSON.stringify(existingFiles))
     } catch (error) {
       console.error('Failed to save annotations:', error)
@@ -58,11 +58,11 @@ class DatabaseService {
     try {
       const storageKey = this.getHashStorageKey(fileHash, userId)
       const data = localStorage.getItem(storageKey)
-      
+
       if (!data) {
         return null
       }
-      
+
       const parsed = JSON.parse(data)
       return parsed.annotations
     } catch (error) {
@@ -82,11 +82,11 @@ class DatabaseService {
     try {
       const storageKey = this.getHashStorageKey(fileHash, userId)
       const data = localStorage.getItem(storageKey)
-      
+
       if (!data) {
         return null
       }
-      
+
       const parsed = JSON.parse(data)
       return {
         fileName: parsed.fileName,
@@ -116,7 +116,7 @@ class DatabaseService {
     try {
       const storageKey = this.getHashStorageKey(fileHash, userId)
       localStorage.removeItem(storageKey)
-      
+
       // Remove from user file list
       const userKey = this.getStorageKey(userId)
       const existingFiles = JSON.parse(localStorage.getItem(userKey) || '[]')
@@ -135,7 +135,7 @@ class DatabaseService {
       for (const file of files) {
         await this.deleteAnnotations(file.hash, userId)
       }
-      
+
       const userKey = this.getStorageKey(userId)
       localStorage.removeItem(userKey)
     } catch (error) {

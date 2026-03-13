@@ -39,7 +39,7 @@ export default function AudioVisualizer({ isRecording, analyser }: AudioVisualiz
         const red = Math.floor(59 * (1 - intensity) + 34 * intensity)
         const green = Math.floor(130 * (1 - intensity) + 197 * intensity)
         const blue = Math.floor(246 * (1 - intensity) + 94 * intensity)
-        
+
         canvasCtx.fillStyle = `rgb(${red},${green},${blue})`
         canvasCtx.fillRect(x, canvas.height - barHeight, barWidth, barHeight)
 
@@ -59,7 +59,7 @@ export default function AudioVisualizer({ isRecording, analyser }: AudioVisualiz
       if (animationIdRef.current) {
         cancelAnimationFrame(animationIdRef.current)
       }
-      
+
       // Clear canvas
       if (canvasRef.current) {
         const canvasCtx = canvasRef.current.getContext('2d')

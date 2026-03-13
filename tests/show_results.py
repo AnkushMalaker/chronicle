@@ -8,9 +8,9 @@ SSH-friendly with multiple display modes.
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 from xml.etree import ElementTree as ET
-from datetime import datetime
 
 
 # ANSI color codes
@@ -132,12 +132,14 @@ def parse_results(xml_file):
                 except (ValueError, TypeError):
                     pass
 
-            failed_tests.append({
-                "name": test.get("name"),
-                "suite": " > ".join(suite_path) if suite_path else "Unknown Suite",
-                "error": error_msg.strip(),
-                "duration": test_duration
-            })
+            failed_tests.append(
+                {
+                    "name": test.get("name"),
+                    "suite": " > ".join(suite_path) if suite_path else "Unknown Suite",
+                    "error": error_msg.strip(),
+                    "duration": test_duration,
+                }
+            )
 
     return {
         "passed": passed,
@@ -145,7 +147,7 @@ def parse_results(xml_file):
         "skipped": skipped,
         "total": total,
         "duration_seconds": duration_seconds,
-        "failed_tests": failed_tests
+        "failed_tests": failed_tests,
     }
 
 
@@ -187,32 +189,46 @@ def print_summary(results, xml_file, show_detailed=False):
 
     # File info
     file_mtime = datetime.fromtimestamp(xml_file.stat().st_mtime)
-    print(f"Results from: {colorize(str(xml_file.relative_to(Path.cwd())), Colors.BLUE)}")
+    print(
+        f"Results from: {colorize(str(xml_file.relative_to(Path.cwd())), Colors.BLUE)}"
+    )
     print(f"Last modified: {file_mtime.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Total duration: {format_duration(results['duration_seconds'])}")
     print()
 
     # Statistics
     print(colorize("Test Statistics:", Colors.BOLD))
-    print(f"  {colorize('✓', Colors.GREEN)} Passed:  {colorize(str(results['passed']), Colors.GREEN)}")
-    print(f"  {colorize('✗', Colors.RED)} Failed:  {colorize(str(results['failed']), Colors.RED)}")
-    if results['skipped'] > 0:
-        print(f"  {colorize('○', Colors.YELLOW)} Skipped: {colorize(str(results['skipped']), Colors.YELLOW)}")
+    print(
+        f"  {colorize('✓', Colors.GREEN)} Passed:  {colorize(str(results['passed']), Colors.GREEN)}"
+    )
+    print(
+        f"  {colorize('✗', Colors.RED)} Failed:  {colorize(str(results['failed']), Colors.RED)}"
+    )
+    if results["skipped"] > 0:
+        print(
+            f"  {colorize('○', Colors.YELLOW)} Skipped: {colorize(str(results['skipped']), Colors.YELLOW)}"
+        )
     print(f"  Total:    {results['total']}")
 
-    if results['total'] > 0:
-        pass_rate = (results['passed'] / results['total']) * 100
-        color = Colors.GREEN if pass_rate == 100 else Colors.YELLOW if pass_rate >= 90 else Colors.RED
+    if results["total"] > 0:
+        pass_rate = (results["passed"] / results["total"]) * 100
+        color = (
+            Colors.GREEN
+            if pass_rate == 100
+            else Colors.YELLOW if pass_rate >= 90 else Colors.RED
+        )
         print(f"  Pass rate: {colorize(f'{pass_rate:.1f}%', color)}")
     print()
 
     # Failed tests
-    if results['failed'] > 0:
+    if results["failed"] > 0:
         print(colorize(f"Failed Tests ({results['failed']}):", Colors.BOLD))
         print()
 
-        for i, test in enumerate(results['failed_tests'], 1):
-            print(f"{colorize(f'{i}.', Colors.RED)} {colorize(test['name'], Colors.BOLD)}")
+        for i, test in enumerate(results["failed_tests"], 1):
+            print(
+                f"{colorize(f'{i}.', Colors.RED)} {colorize(test['name'], Colors.BOLD)}"
+            )
             print(f"   Suite: {test['suite']}")
 
             if show_detailed:
@@ -221,13 +237,15 @@ def print_summary(results, xml_file, show_detailed=False):
                 print(f"   Duration: {format_duration(test['duration'])}")
             else:
                 # Truncate error in summary mode
-                error_lines = test['error'].split('\n')
+                error_lines = test["error"].split("\n")
                 first_line = error_lines[0]
                 if len(first_line) > 100:
                     first_line = first_line[:97] + "..."
                 print(f"   Error: {first_line}")
                 if len(error_lines) > 1:
-                    print(f"   {colorize('(Use --detailed for full error)', Colors.YELLOW)}")
+                    print(
+                        f"   {colorize('(Use --detailed for full error)', Colors.YELLOW)}"
+                    )
             print()
     else:
         print(colorize("🎉 All tests passed!", Colors.GREEN))
@@ -273,24 +291,24 @@ Examples:
   %(prog)s --path            # Print path to HTML report
   %(prog)s --detailed        # Detailed terminal output with full errors
   %(prog)s --dir results-no-api  # Specific result directory
-        """
+        """,
     )
 
     parser.add_argument(
         "--dir",
-        help="Specific result directory to use (default: auto-find most recent)"
+        help="Specific result directory to use (default: auto-find most recent)",
     )
 
     parser.add_argument(
         "--path",
         action="store_true",
-        help="Print path to HTML report instead of showing summary"
+        help="Print path to HTML report instead of showing summary",
     )
 
     parser.add_argument(
         "--detailed",
         action="store_true",
-        help="Show detailed output with full error messages"
+        help="Show detailed output with full error messages",
     )
 
     args = parser.parse_args()
@@ -300,7 +318,12 @@ Examples:
 
     if xml_file is None:
         if args.dir:
-            print(colorize(f"Error: No test results found in '{args.dir}' directory", Colors.RED))
+            print(
+                colorize(
+                    f"Error: No test results found in '{args.dir}' directory",
+                    Colors.RED,
+                )
+            )
         else:
             print(colorize("Error: No test results found", Colors.RED))
         print()
@@ -331,7 +354,7 @@ Examples:
     print_summary(results, xml_file, show_detailed=args.detailed)
 
     # Return exit code based on test results
-    return 1 if results['failed'] > 0 else 0
+    return 1 if results["failed"] > 0 else 0
 
 
 if __name__ == "__main__":

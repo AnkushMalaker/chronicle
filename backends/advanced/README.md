@@ -38,7 +38,7 @@ Modern React-based web dashboard located in `./webui/` with:
 - **Optional Services**: Speaker Recognition, network configuration
 - **API Keys**: Prompts for all required keys with helpful links
 
-#### 2. Start Services 
+#### 2. Start Services
 
 **HTTP Mode (Default - No SSL required):**
 ```bash

@@ -22,30 +22,30 @@ export interface UseAudioRecordingReturn {
   // Connection state
   isWebSocketConnected: boolean
   connectionStatus: 'disconnected' | 'connecting' | 'connected' | 'error'
-  
+
   // Recording state
   isRecording: boolean
   recordingDuration: number
   audioProcessingStarted: boolean
-  
+
   // Component states (direct checks, no sync issues)
   hasValidWebSocket: boolean
   hasValidMicrophone: boolean
   hasValidAudioContext: boolean
   isCurrentlyStreaming: boolean
-  
+
   // Granular test states
   hasMicrophoneAccess: boolean
   hasAudioContext: boolean
   isStreaming: boolean
-  
+
   // Error management
   error: string | null
   componentErrors: ComponentErrors
-  
+
   // Debug information
   debugStats: DebugStats
-  
+
   // Actions
   connectWebSocketOnly: () => Promise<boolean>
   disconnectWebSocketOnly: () => void
@@ -58,7 +58,7 @@ export interface UseAudioRecordingReturn {
   testFullFlowOnly: () => Promise<boolean>
   startRecording: () => Promise<void>
   stopRecording: () => void
-  
+
   // Utilities
   formatDuration: (seconds: number) => string
   canAccessMicrophone: boolean
@@ -72,12 +72,12 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
   const [recordingDuration, setRecordingDuration] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [audioProcessingStarted, setAudioProcessingStarted] = useState(false)
-  
+
   // Granular testing states
   const [hasMicrophoneAccess, setHasMicrophoneAccess] = useState(false)
   const [hasAudioContext, setHasAudioContext] = useState(false)
   const [isStreaming, setIsStreaming] = useState(false)
-  
+
   // Error tracking
   const [componentErrors, setComponentErrors] = useState<ComponentErrors>({
     websocket: null,
@@ -85,7 +85,7 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
     audioContext: null,
     streaming: null
   })
-  
+
   // Debug stats
   const [debugStats, setDebugStats] = useState<DebugStats>({
     chunksSent: 0,
@@ -95,7 +95,7 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
     sessionStartTime: null,
     connectionAttempts: 0
   })
-  
+
   // Refs for direct access (no state sync issues)
   const wsRef = useRef<WebSocket | null>(null)
   const mediaStreamRef = useRef<MediaStream | null>(null)
@@ -107,18 +107,18 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
   const audioProcessingStartedRef = useRef(false)
   const chunkCountRef = useRef(0)
   // Note: Legacy message queue code removed as it was unused
-  
+
   // Check if we're on localhost or using HTTPS
   const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
   const isHttps = window.location.protocol === 'https:'
   const canAccessMicrophone = isLocalhost || isHttps
-  
+
   // Direct status checks (no state sync issues)
   const hasValidWebSocket = wsRef.current?.readyState === WebSocket.OPEN
   const hasValidMicrophone = mediaStreamRef.current !== null
   const hasValidAudioContext = audioContextRef.current !== null
   const isCurrentlyStreaming = isStreaming && hasValidWebSocket && hasValidMicrophone
-  
+
   const connectWebSocket = useCallback(async () => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       return true
@@ -157,16 +157,16 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
           console.log('🎤 WebSocket connected for live recording')
           setConnectionStatus('connected')
           setIsWebSocketConnected(true)
-          
+
           // Add stabilization delay before resolving to prevent protocol violations
           setTimeout(() => {
             wsRef.current = ws
-            setDebugStats(prev => ({ 
-              ...prev, 
+            setDebugStats(prev => ({
+              ...prev,
               sessionStartTime: new Date(),
               connectionAttempts: prev.connectionAttempts + 1
             }))
-            
+
             // Start keepalive ping every 30 seconds
             keepAliveIntervalRef.current = setInterval(() => {
               if (ws.readyState === WebSocket.OPEN) {
@@ -179,7 +179,7 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
                 }
               }
             }, 30000)
-            
+
             console.log('🔌 WebSocket stabilized and ready for messages')
             resolve(true)
           }, 100) // 100ms stabilization delay
@@ -190,13 +190,13 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
           setConnectionStatus('disconnected')
           setIsWebSocketConnected(false)
           wsRef.current = null
-          
+
           // Clear keepalive interval
           if (keepAliveIntervalRef.current) {
             clearInterval(keepAliveIntervalRef.current)
             keepAliveIntervalRef.current = undefined
           }
-          
+
           if (isRecording) {
             stopRecording()
           }
@@ -210,7 +210,7 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
           setComponentErrors(prev => ({ ...prev, websocket: errorMsg }))
           reject(error)
         }
-        
+
         ws.onmessage = (event) => {
           // Handle any messages from the server
           console.log('🎤 Received message from server:', event.data)
@@ -322,7 +322,7 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
   const requestMicrophoneOnly = async () => {
     try {
       setComponentErrors(prev => ({ ...prev, microphone: null }))
-      
+
       if (!canAccessMicrophone) {
         throw new Error('Microphone access requires HTTPS or localhost')
       }
@@ -336,10 +336,10 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
           autoGainControl: true
         }
       })
-      
+
       // Clean up the stream immediately - we just wanted to test permissions
       stream.getTracks().forEach(track => track.stop())
-      
+
       setHasMicrophoneAccess(true)
       console.log('🎤 Microphone access granted')
       return true
@@ -355,7 +355,7 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
   const createAudioContextOnly = async () => {
     try {
       setComponentErrors(prev => ({ ...prev, audioContext: null }))
-      
+
       if (audioContextRef.current) {
         audioContextRef.current.close()
       }
@@ -363,10 +363,10 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
       const audioContext = new AudioContext({ sampleRate: 16000 })
       const analyser = audioContext.createAnalyser()
       analyser.fftSize = 256
-      
+
       audioContextRef.current = audioContext
       analyserRef.current = analyser
-      
+
       setHasAudioContext(true)
       console.log('📊 Audio context created successfully')
       return true
@@ -382,17 +382,17 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
   const startStreamingOnly = async () => {
     try {
       setComponentErrors(prev => ({ ...prev, streaming: null }))
-      
+
       // Use direct checks instead of state
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
         throw new Error('WebSocket not connected')
       }
-      
+
       // Check if microphone access was previously tested
       if (!hasMicrophoneAccess) {
         throw new Error('Microphone access test required first - click "Get Mic" button')
       }
-      
+
       // Check if audio context was previously created
       if (!hasAudioContext) {
         throw new Error('Audio context test required first - click "Create Context" button')
@@ -425,7 +425,7 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
           if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
             return
           }
-          
+
           if (!audioProcessingStartedRef.current) {
             console.log('🚫 Audio processing not started yet, skipping chunk')
             return
@@ -433,7 +433,7 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
 
           const inputBuffer = event.inputBuffer
           const inputData = inputBuffer.getChannelData(0)
-          
+
           // Convert float32 to int16 PCM
           const pcmBuffer = new Int16Array(inputData.length)
           for (let i = 0; i < inputData.length; i++) {
@@ -460,14 +460,14 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
 
             wsRef.current.send(JSON.stringify(chunkHeader) + '\n')
             wsRef.current.send(new Uint8Array(pcmBuffer.buffer, pcmBuffer.byteOffset, pcmBuffer.byteLength))
-            
+
             // Update debug stats
             chunkCountRef.current++
             setDebugStats(prev => ({ ...prev, chunksSent: chunkCountRef.current }))
           } catch (error) {
             console.error('Failed to send audio chunk:', error)
-            setDebugStats(prev => ({ 
-              ...prev, 
+            setDebugStats(prev => ({
+              ...prev,
               lastError: error instanceof Error ? error.message : 'Chunk send failed',
               lastErrorTime: new Date()
             }))
@@ -516,46 +516,46 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
     try {
       setError(null)
       console.log('💾 Starting full flow test...')
-      
+
       // Step 1: Connect WebSocket
       const connected = await connectWebSocket()
       if (!connected) {
         throw new Error('WebSocket connection failed')
       }
-      
+
       // Step 2: Get microphone access
       const micAccess = await requestMicrophoneOnly()
       if (!micAccess) {
         throw new Error('Microphone access failed')
       }
-      
+
       // Step 3: Create audio context
       const contextCreated = await createAudioContextOnly()
       if (!contextCreated) {
         throw new Error('Audio context creation failed')
       }
-      
+
       // Step 4: Send audio-start
       const startSent = await sendAudioStartOnly()
       if (!startSent) {
         throw new Error('Audio-start message failed')
       }
-      
+
       // Step 5: Start streaming for 10 seconds
       const streamingStarted = await startStreamingOnly()
       if (!streamingStarted) {
         throw new Error('Audio streaming failed')
       }
-      
+
       console.log('💾 Full flow test running for 10 seconds...')
-      
+
       // Wait 10 seconds
       setTimeout(() => {
         stopStreamingOnly()
         sendAudioStopOnly()
         console.log('💾 Full flow test completed')
       }, 10000)
-      
+
       return true
     } catch (error) {
       console.error('Full flow test failed:', error)
@@ -596,10 +596,10 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
       const audioContext = new AudioContext({ sampleRate: 16000 })
       const analyser = audioContext.createAnalyser()
       const source = audioContext.createMediaStreamSource(stream)
-      
+
       analyser.fftSize = 256
       source.connect(analyser)
-      
+
       audioContextRef.current = audioContext
       analyserRef.current = analyser
 
@@ -636,7 +636,7 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
           if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
             return
           }
-          
+
           // Don't send audio chunks until audio-start has been sent and processed
           if (!audioProcessingStartedRef.current) {
             console.log('🚫 Audio processing not started yet, skipping chunk')
@@ -645,7 +645,7 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
 
           const inputBuffer = event.inputBuffer
           const inputData = inputBuffer.getChannelData(0)
-          
+
           // Convert float32 to int16 PCM
           const pcmBuffer = new Int16Array(inputData.length)
           for (let i = 0; i < inputData.length; i++) {
@@ -675,14 +675,14 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
             wsRef.current.send(JSON.stringify(chunkHeader) + '\n')
             // Send the actual Int16Array buffer, not the underlying ArrayBuffer
             wsRef.current.send(new Uint8Array(pcmBuffer.buffer, pcmBuffer.byteOffset, pcmBuffer.byteLength))
-            
+
             // Update debug stats
             chunkCountRef.current++
             setDebugStats(prev => ({ ...prev, chunksSent: chunkCountRef.current }))
           } catch (error) {
             console.error('Failed to send audio chunk:', error)
-            setDebugStats(prev => ({ 
-              ...prev, 
+            setDebugStats(prev => ({
+              ...prev,
               lastError: error instanceof Error ? error.message : 'Chunk send failed',
               lastErrorTime: new Date()
             }))
@@ -697,7 +697,7 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
 
       setIsRecording(true)
       setRecordingDuration(0)
-      
+
       // Start duration timer
       durationIntervalRef.current = setInterval(() => {
         setRecordingDuration(prev => prev + 1)
@@ -718,7 +718,7 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
       setAudioProcessingStarted(false)
       audioProcessingStartedRef.current = false
       console.log('🛑 Audio processing disabled')
-      
+
       // Send Wyoming protocol stop message
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         try {
@@ -792,30 +792,30 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
     // Connection state
     isWebSocketConnected,
     connectionStatus,
-    
+
     // Recording state
     isRecording,
     recordingDuration,
     audioProcessingStarted,
-    
+
     // Direct status checks (no state sync issues)
     hasValidWebSocket,
     hasValidMicrophone,
     hasValidAudioContext,
     isCurrentlyStreaming,
-    
+
     // Granular test states
     hasMicrophoneAccess,
     hasAudioContext,
     isStreaming,
-    
+
     // Error management
     error,
     componentErrors,
-    
+
     // Debug information
     debugStats,
-    
+
     // Actions
     connectWebSocketOnly,
     disconnectWebSocketOnly,
@@ -828,11 +828,11 @@ export const useAudioRecording = (): UseAudioRecordingReturn => {
     testFullFlowOnly,
     startRecording,
     stopRecording,
-    
+
     // Utilities
     formatDuration,
     canAccessMicrophone,
-    
+
     // Internal refs for components that need them
     analyserRef
   } as UseAudioRecordingReturn & { analyserRef: React.RefObject<AnalyserNode | null> }

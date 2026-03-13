@@ -43,7 +43,7 @@ export default function LiveAudioCapture({
   const [status, setStatus] = useState<'idle' | 'requesting' | 'recording' | 'paused' | 'error'>('idle')
   const [audioLevel, setAudioLevel] = useState(0)
   const [showSettings, setShowSettings] = useState(false)
-  
+
   const mediaStreamRef = useRef<MediaStream | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
@@ -52,7 +52,7 @@ export default function LiveAudioCapture({
   const animationFrameRef = useRef<number>()
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const audioPacketCountRef = useRef<number>(0)
-  
+
   const fullConfig = { ...DEFAULT_CONFIG, ...config }
 
   const updateStatus = useCallback((newStatus: typeof status) => {
@@ -129,18 +129,18 @@ export default function LiveAudioCapture({
                 this.packetCount = 0;
                 console.log('🔧 [WORKLET] AudioCaptureProcessor constructor called');
               }
-              
+
               process(inputs, outputs, parameters) {
                 try {
                   this.packetCount++;
-                  
+
                   // Debug: Log first few packets
                   if (this.packetCount <= 5) {
                     console.log('🔧 [WORKLET] process() called #' + this.packetCount);
                     console.log('🔧 [WORKLET] inputs.length:', inputs.length);
                     console.log('🔧 [WORKLET] inputs[0]:', inputs[0]);
                   }
-                  
+
                   const input = inputs[0];
                   if (!input) {
                     if (this.packetCount <= 5) {
@@ -148,14 +148,14 @@ export default function LiveAudioCapture({
                     }
                     return true;
                   }
-                  
+
                   if (input.length === 0) {
                     if (this.packetCount <= 5) {
                       console.warn('🔧 [WORKLET] Input has no channels');
                     }
                     return true;
                   }
-                  
+
                   const audioData = input[0]; // Get first channel
                   if (!audioData) {
                     if (this.packetCount <= 5) {
@@ -163,7 +163,7 @@ export default function LiveAudioCapture({
                     }
                     return true;
                   }
-                  
+
                   // Debug: Log audio characteristics for first few packets
                   if (this.packetCount <= 5) {
                     const maxAmplitude = Math.max(...Array.from(audioData.map(Math.abs)));
@@ -176,13 +176,13 @@ export default function LiveAudioCapture({
                       lastSample: audioData[audioData.length - 1].toFixed(6)
                     });
                   }
-                  
+
                   // Send audio data via message port
                   this.port.postMessage({
                     type: 'audioData',
                     data: audioData.slice() // Copy the data
                   });
-                  
+
                   return true; // Keep processor alive
                 } catch (error) {
                   console.error('🔧 [WORKLET] Error in process():', error);
@@ -193,18 +193,18 @@ export default function LiveAudioCapture({
             registerProcessor('audio-capture-processor', AudioCaptureProcessor);
           `)
         )
-        
+
         const workletNode = new AudioWorkletNode(audioContext, 'audio-capture-processor')
         processorRef.current = workletNode as any
-        
+
         workletNode.port.onmessage = (event) => {
           if (event.data.type === 'audioData') {
             audioPacketCountRef.current++
-            
+
             // When using external control (autoControl=true), prioritize the recording prop
             // Otherwise, use internal status
             const shouldSendAudio = autoControl ? recording : (status === 'recording')
-            
+
             if (shouldSendAudio) {
               onAudioData?.(event.data.data, audioContext.sampleRate)
             } else {
@@ -215,19 +215,19 @@ export default function LiveAudioCapture({
             }
           }
         }
-        
+
         // Connect nodes with debugging
         console.log('🔧 [SETUP] Connecting audio graph: MediaStreamSource → Analyser → AudioWorkletNode')
         console.log('🔧 [SETUP] source:', source)
-        console.log('🔧 [SETUP] analyser:', analyser)  
+        console.log('🔧 [SETUP] analyser:', analyser)
         console.log('🔧 [SETUP] workletNode:', workletNode)
-        
+
         source.connect(analyser)
         console.log('🔧 [SETUP] ✅ Connected source to analyser')
-        
+
         analyser.connect(workletNode)
         console.log('🔧 [SETUP] ✅ Connected analyser to workletNode')
-        
+
         // Verify audio context state
         console.log('🔧 [SETUP] AudioContext state:', audioContext.state)
         if (audioContext.state === 'suspended') {
@@ -235,10 +235,10 @@ export default function LiveAudioCapture({
           await audioContext.resume()
           console.log('🔧 [SETUP] AudioContext resumed, new state:', audioContext.state)
         }
-        
+
       } catch (error) {
         console.warn('🔧 [FALLBACK] AudioWorklet not supported, falling back to ScriptProcessorNode:', error)
-        
+
         // Fallback to ScriptProcessorNode for older browsers
         console.log('🔧 [FALLBACK] Creating ScriptProcessorNode with bufferSize:', fullConfig.bufferSize)
         const processor = audioContext.createScriptProcessor(fullConfig.bufferSize, fullConfig.channels, fullConfig.channels)
@@ -248,7 +248,7 @@ export default function LiveAudioCapture({
           // When using external control (autoControl=true), prioritize the recording prop
           // Otherwise, use internal status
           const shouldSendAudio = autoControl ? recording : (status === 'recording')
-          
+
           if (!shouldSendAudio) {
             // Log why audio is not being sent for debugging
             audioPacketCountRef.current++
@@ -260,9 +260,9 @@ export default function LiveAudioCapture({
 
           const inputBuffer = event.inputBuffer
           const audioData = inputBuffer.getChannelData(0) // Get first channel
-          
+
           audioPacketCountRef.current++
-          
+
           // Debug: Log audio characteristics for first few packets
           if (audioPacketCountRef.current <= 5) {
             const maxAmplitude = Math.max(...Array.from(audioData.map(Math.abs)))
@@ -275,7 +275,7 @@ export default function LiveAudioCapture({
               lastSample: audioData[audioData.length - 1].toFixed(6)
             })
           }
-          
+
           // Send audio data to callback
           onAudioData?.(audioData, audioContext.sampleRate)
         }
@@ -289,10 +289,10 @@ export default function LiveAudioCapture({
       }
 
       updateStatus('recording')
-      
+
       // Reset audio packet counter
       audioPacketCountRef.current = 0
-      
+
       if (showWaveform) {
         startVisualization()
       }
@@ -446,12 +446,12 @@ export default function LiveAudioCapture({
             <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${getStatusColor()}`}>
               {getStatusText()}
             </span>
-            
+
             {/* Audio Level Indicator */}
             <div className="flex items-center space-x-2">
               <Volume2 className="h-4 w-4 text-gray-500" />
               <div className="w-20 h-2 bg-gray-200 rounded-full overflow-hidden">
-                <div 
+                <div
                   className="h-full bg-blue-500 transition-all duration-100"
                   style={{ width: `${audioLevel * 100}%` }}
                 />
@@ -499,7 +499,7 @@ export default function LiveAudioCapture({
       {/* Waveform Visualization */}
       {showWaveform && (
         <div className="bg-white border rounded-lg p-4">
-          <canvas 
+          <canvas
             ref={canvasRef}
             width={800}
             height={150}

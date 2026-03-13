@@ -70,7 +70,9 @@ class MCPClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
 
-    async def add_memories(self, text: str, metadata: Dict[str, Any] = None) -> List[str]:
+    async def add_memories(
+        self, text: str, metadata: Dict[str, Any] = None
+    ) -> List[str]:
         """Add memories to the OpenMemory server.
 
         Uses the REST API to create memories. OpenMemory will handle:
@@ -104,18 +106,28 @@ class MCPClient:
             app_id = None
             if apps_data.get("apps"):
                 # Find matching app by name, prefer one with most memories
-                matching = [a for a in apps_data["apps"] if a["name"] == self.client_name]
-                memory_logger.debug(f"Matching apps for '{self.client_name}': {matching}")
+                matching = [
+                    a for a in apps_data["apps"] if a["name"] == self.client_name
+                ]
+                memory_logger.debug(
+                    f"Matching apps for '{self.client_name}': {matching}"
+                )
                 if matching:
-                    matching.sort(key=lambda x: x.get("total_memories_created", 0), reverse=True)
+                    matching.sort(
+                        key=lambda x: x.get("total_memories_created", 0), reverse=True
+                    )
                     app_id = matching[0]["id"]
                     memory_logger.info(f"Found matching app with ID: {app_id}")
                 else:
                     app_id = apps_data["apps"][0]["id"]
-                    memory_logger.info(f"No matching app name, using first app ID: {app_id}")
+                    memory_logger.info(
+                        f"No matching app name, using first app ID: {app_id}"
+                    )
 
             if not app_id:
-                memory_logger.error("No apps found in OpenMemory - cannot create memory")
+                memory_logger.error(
+                    "No apps found in OpenMemory - cannot create memory"
+                )
                 raise MCPError("No apps found in OpenMemory")
 
             # Merge custom metadata with default metadata
@@ -143,9 +155,13 @@ class MCPClient:
             )
             memory_logger.debug(f"Full payload: {payload}")
 
-            response = await self.client.post(f"{self.server_url}/api/v1/memories/", json=payload)
+            response = await self.client.post(
+                f"{self.server_url}/api/v1/memories/", json=payload
+            )
 
-            response_body = response.text[:500] if response.status_code != 200 else "..."
+            response_body = (
+                response.text[:500] if response.status_code != 200 else "..."
+            )
             memory_logger.info(
                 f"OpenMemory response: status={response.status_code}, body={response_body}, headers={dict(response.headers)}"
             )
@@ -218,7 +234,12 @@ class MCPClient:
                 app_id = apps_data["apps"][0]["id"]
 
             # Use app-specific memories endpoint with search
-            params = {"user_id": self.user_id, "search_query": query, "page": 1, "size": limit}
+            params = {
+                "user_id": self.user_id,
+                "search_query": query,
+                "page": 1,
+                "size": limit,
+            }
 
             response = await self.client.get(
                 f"{self.server_url}/api/v1/apps/{app_id}/memories", params=params
@@ -242,7 +263,8 @@ class MCPClient:
                     {
                         "id": memory.get("id", str(uuid.uuid4())),
                         "content": memory.get("content", "") or memory.get("text", ""),
-                        "metadata": memory.get("metadata_", {}) or memory.get("metadata", {}),
+                        "metadata": memory.get("metadata_", {})
+                        or memory.get("metadata", {}),
                         "created_at": memory.get("created_at"),
                         "score": memory.get("score", 0.0),  # No score from list API
                     }
@@ -311,7 +333,8 @@ class MCPClient:
                     {
                         "id": memory.get("id", str(uuid.uuid4())),
                         "content": memory.get("content", "") or memory.get("text", ""),
-                        "metadata": memory.get("metadata_", {}) or memory.get("metadata", {}),
+                        "metadata": memory.get("metadata_", {})
+                        or memory.get("metadata", {}),
                         "created_at": memory.get("created_at"),
                     }
                 )
@@ -377,7 +400,8 @@ class MCPClient:
         try:
             # Use the memories endpoint with specific ID
             response = await self.client.get(
-                f"{self.server_url}/api/v1/memories/{memory_id}", params={"user_id": self.user_id}
+                f"{self.server_url}/api/v1/memories/{memory_id}",
+                params={"user_id": self.user_id},
             )
 
             if response.status_code == 404:
@@ -392,7 +416,8 @@ class MCPClient:
                 return {
                     "id": result.get("id", memory_id),
                     "content": result.get("content", "") or result.get("text", ""),
-                    "metadata": result.get("metadata_", {}) or result.get("metadata", {}),
+                    "metadata": result.get("metadata_", {})
+                    or result.get("metadata", {}),
                     "created_at": result.get("created_at"),
                 }
 
@@ -454,7 +479,10 @@ class MCPClient:
             return False
 
     async def delete_memory(
-        self, memory_id: str, user_id: Optional[str] = None, user_email: Optional[str] = None
+        self,
+        memory_id: str,
+        user_id: Optional[str] = None,
+        user_email: Optional[str] = None,
     ) -> bool:
         """Delete a specific memory by ID.
 

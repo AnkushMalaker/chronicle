@@ -4,7 +4,7 @@
 
 This document explains how to configure and customize the memory service in the chronicle backend.
 
-**Code References**: 
+**Code References**:
 - **Main Implementation**: `src/memory/memory_service.py`
 - **Event Coordination**: `src/advanced_omi_backend/transcript_coordinator.py` (zero-polling async events)
 - **Repository Layer**: `src/advanced_omi_backend/conversation_repository.py` (clean data access)
@@ -16,7 +16,7 @@ This document explains how to configure and customize the memory service in the 
 
 The memory service uses [Mem0](https://mem0.ai/) to store, retrieve, and search conversation memories. It integrates with Ollama for embeddings and LLM processing, and Qdrant for vector storage.
 
-**Key Architecture Changes**: 
+**Key Architecture Changes**:
 1. **Event-Driven Processing**: Memories use asyncio events instead of polling/retry mechanisms
 2. **Repository Pattern**: Clean data access through ConversationRepository
 3. **User-Centric Storage**: All memories keyed by user_id instead of client_id
@@ -47,7 +47,7 @@ The memory service uses [Mem0](https://mem0.ai/) to store, retrieve, and search 
 
 **Key Flow:**
 1. **Audio** → **TranscriptCoordinator** signals completion
-2. **ConversationManager** waits for event, queues memory processing  
+2. **ConversationManager** waits for event, queues memory processing
 3. **MemoryProcessor** uses **ConversationRepository** for data access
 4. **Mem0 + Ollama** extract and store memories in **Qdrant**
 
@@ -88,7 +88,7 @@ MEM0_CONFIG = {
         },
     },
     "embedder": {
-        "provider": "ollama", 
+        "provider": "ollama",
         "config": {
             "model": "nomic-embed-text:latest",
             "embedding_dims": 768,
@@ -311,10 +311,10 @@ MEM0_CONFIG["vector_store"]["config"].update({
 ```python
 def search_memories_with_filters(self, query: str, user_id: str, topic: str = None):
     filters = {}
-    
+
     if topic:
         filters["metadata.topics"] = {"$in": [topic]}
-    
+
     return self.memory.search(
         query=query,
         user_id=user_id,
@@ -329,7 +329,7 @@ def search_memories_with_filters(self, query: str, user_id: str, topic: str = No
 def get_important_memories(self, user_id: str):
     """Get memories sorted by importance/frequency"""
     memories = self.memory.get_all(user_id=user_id)
-    
+
     # Custom scoring logic
     for memory in memories:
         score = 0
@@ -338,7 +338,7 @@ def get_important_memories(self, user_id: str):
         if "deadline" in memory.get('memory', '').lower():
             score += 3
         memory['importance_score'] = score
-    
+
     return sorted(memories, key=lambda x: x.get('importance_score', 0), reverse=True)
 ```
 
@@ -409,13 +409,13 @@ Create a custom processing function:
 def custom_memory_processor(transcript: str, client_id: str, audio_uuid: str, user_id: str, user_email: str):
     # Extract entities
     entities = extract_named_entities(transcript)
-    
+
     # Classify conversation type
     conv_type = classify_conversation(transcript)
-    
+
     # Generate custom summary
     summary = generate_custom_summary(transcript, conv_type)
-    
+
     # Store with enriched metadata
     process_memory.add(
         summary,
@@ -440,12 +440,12 @@ def init_specialized_memory_services():
     # Personal memories
     personal_config = MEM0_CONFIG.copy()
     personal_config["vector_store"]["config"]["collection_name"] = "personal_memories"
-    
-    # Work memories  
+
+    # Work memories
     work_config = MEM0_CONFIG.copy()
     work_config["vector_store"]["config"]["collection_name"] = "work_memories"
     work_config["custom_prompt"] = "Focus on work-related tasks, meetings, and projects"
-    
+
     return {
         "personal": Memory.from_config(personal_config),
         "work": Memory.from_config(work_config)
@@ -460,7 +460,7 @@ Implement automatic memory cleanup:
 def cleanup_old_memories(self, user_id: str, days_old: int = 365):
     """Remove memories older than specified days"""
     cutoff_timestamp = int(time.time()) - (days_old * 24 * 60 * 60)
-    
+
     memories = self.get_all_memories(user_id)
     for memory in memories:
         if memory.get('metadata', {}).get('timestamp', 0) < cutoff_timestamp:
@@ -533,14 +533,14 @@ async def batch_add_memories(self, transcripts_data: List[Dict]):
     tasks = []
     for data in transcripts_data:
         task = self.add_memory(
-            data['transcript'], 
-            data['client_id'], 
+            data['transcript'],
+            data['client_id'],
             data['audio_uuid'],
             data['user_id'],      # Database user_id
             data['user_email']    # User email
         )
         tasks.append(task)
-    
+
     results = await asyncio.gather(*tasks, return_exceptions=True)
     return results
 ```
@@ -553,14 +553,14 @@ Implement memory consolidation:
 def consolidate_memories(self, user_id: str, time_window_hours: int = 24):
     """Consolidate related memories from the same time period"""
     recent_memories = self.get_recent_memories(user_id, time_window_hours)
-    
+
     if len(recent_memories) > 5:  # If many memories in short time
         consolidated = self.summarize_memories(recent_memories)
-        
+
         # Delete individual memories and store consolidated version
         for memory in recent_memories:
             self.delete_memory(memory['id'])
-        
+
         return self.add_consolidated_memory(consolidated, user_id)
 ```
 
@@ -569,7 +569,7 @@ def consolidate_memories(self, user_id: str, time_window_hours: int = 24):
 The memory service exposes these endpoints with enhanced search capabilities:
 
 - `GET /api/memories` - Get user memories with total count support (keyed by database user_id)
-- `GET /api/memories/search?query={query}&limit={limit}` - **Semantic memory search** with relevance scoring (user-scoped)  
+- `GET /api/memories/search?query={query}&limit={limit}` - **Semantic memory search** with relevance scoring (user-scoped)
 - `GET /api/memories/unfiltered` - User's memories without filtering for debugging
 - `DELETE /api/memories/{memory_id}` - Delete specific memory (requires authentication)
 - `GET /api/memories/admin` - Admin view of all memories across all users (superuser only)
@@ -578,11 +578,11 @@ The memory service exposes these endpoints with enhanced search capabilities:
 
 **Semantic Search (`/api/memories/search`)**:
 - **Relevance Scoring**: Returns similarity scores from vector database (0.0-1.0 range)
-- **Configurable Limits**: Supports `limit` parameter for result count control  
+- **Configurable Limits**: Supports `limit` parameter for result count control
 - **User Scoped**: Results automatically filtered by authenticated user
 - **Vector-based**: Uses embeddings for contextual understanding beyond keyword matching
 
-**Memory Count API**: 
+**Memory Count API**:
 - **Chronicle Provider**: Native Qdrant count API provides accurate total counts
 - **OpenMemory MCP Provider**: Count support varies by OpenMemory implementation
 - **Response Format**: `{"memories": [...], "total_count": 42}` when supported
@@ -604,7 +604,7 @@ Returns all memories across all users in a clean, searchable format:
             "user_id": "abc123",
             "created_at": "2025-07-10T14:30:00Z",
             "owner_user_id": "abc123",
-            "owner_email": "user@example.com", 
+            "owner_email": "user@example.com",
             "owner_display_name": "John Doe",
             "metadata": {
                 "client_id": "abc123-laptop",

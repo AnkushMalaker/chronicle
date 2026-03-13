@@ -16,11 +16,11 @@ class User(BeanieBaseUser, Document):
     is_active: bool = True
     is_superuser: bool = False
     is_verified: bool = False
-    
+
     # Custom fields
     display_name: Optional[str] = None
     registered_clients: dict[str, dict] = Field(default_factory=dict)
-    
+
     @property
     def user_id(self) -> str:
         """Return string representation of MongoDB ObjectId for backward compatibility."""
@@ -41,7 +41,7 @@ class UserManager(BaseUserManager[User, PydanticObjectId]):
         """Authenticate with email+password"""
         username = credentials.get("username")
         # Email-based authentication only
-        
+
     async def get_by_email(self, email: str) -> Optional[User]:
         """Get user by email address"""
 ```
@@ -287,7 +287,7 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/users/me
    ```bash
    # Old
    AUTH_USERNAME=abc123  # Custom user_id (deprecated)
-   
+
    # New
    AUTH_USERNAME=user@example.com  # Email address only
    ```
@@ -296,7 +296,7 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/users/me
    ```python
    # Old
    username = AUTH_USERNAME  # Could be email or user_id
-   
+
    # New
    username = AUTH_USERNAME  # Email address only
    ```

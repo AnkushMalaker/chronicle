@@ -47,9 +47,7 @@ def convert_audio_to_numpy(
         raise ValueError(f"Unsupported sample width: {sample_width}")
 
 
-def numpy_to_audio_bytes(
-    audio_array: np.ndarray, sample_width: int = 2
-) -> bytes:
+def numpy_to_audio_bytes(audio_array: np.ndarray, sample_width: int = 2) -> bytes:
     """
     Convert numpy float32 array to raw audio bytes.
 
@@ -234,9 +232,7 @@ def get_audio_duration(
     return len(audio_array) / sample_rate
 
 
-def validate_audio_format(
-    sample_rate: int, channels: int, sample_width: int
-) -> None:
+def validate_audio_format(sample_rate: int, channels: int, sample_width: int) -> None:
     """
     Validate audio format parameters.
 

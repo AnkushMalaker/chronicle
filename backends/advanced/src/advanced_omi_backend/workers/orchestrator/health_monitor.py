@@ -105,7 +105,9 @@ class HealthMonitor:
             raise
         except Exception as e:
             logger.error(f"Health monitor loop error: {e}", exc_info=True)
-            self.running = False  # Mark monitor as stopped so callers know it's not active
+            self.running = (
+                False  # Mark monitor as stopped so callers know it's not active
+            )
             raise  # Re-raise to ensure the monitor task fails properly
 
     async def _check_health(self):
@@ -311,7 +313,9 @@ class HealthMonitor:
         if success:
             logger.info("✅ Bulk restart completed - workers should re-register soon")
         else:
-            logger.error("❌ Bulk restart encountered errors - check individual worker logs")
+            logger.error(
+                "❌ Bulk restart encountered errors - check individual worker logs"
+            )
 
     def _restart_all_rq_workers(self) -> bool:
         """

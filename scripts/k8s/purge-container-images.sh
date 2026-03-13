@@ -2,7 +2,7 @@
 
 # Script to purge unused container images from the local container runtime
 # Only removes images that are not currently being used by any pods or deployments
-# 
+#
 # Usage: ./purge-container-images.sh [pass=PASSWORD]
 # Example: ./purge-container-images.sh pass=mysudopassword
 
@@ -130,7 +130,7 @@ FAILED_COUNT=0
 
 while IFS= read -r image || [[ -n "$image" ]]; do
     echo "   Removing container image: $image"
-    
+
     # Use microk8s ctr to remove the image
     if [[ -n "$SUDO_PASSWORD" ]]; then
         # Use password with sudo -S

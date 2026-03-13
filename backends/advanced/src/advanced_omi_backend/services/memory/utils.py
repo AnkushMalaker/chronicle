@@ -38,7 +38,7 @@ def extract_json_from_text(response_text: str) -> Optional[Dict[str, Any]]:
             think_end = response_text.find("</think>")
             if think_end != -1:
                 # Extract everything after </think>
-                json_part = response_text[think_end + 8:].strip()
+                json_part = response_text[think_end + 8 :].strip()
 
                 if json_part:
                     try:
@@ -56,12 +56,14 @@ def extract_json_from_text(response_text: str) -> Optional[Dict[str, Any]]:
     # Clean up common LLM response artifacts
     cleaned_text = response_text
     # Remove markdown code blocks
-    cleaned_text = re.sub(r'```(?:json)?\s*(.*?)\s*```', r'\1', cleaned_text, flags=re.DOTALL)
+    cleaned_text = re.sub(
+        r"```(?:json)?\s*(.*?)\s*```", r"\1", cleaned_text, flags=re.DOTALL
+    )
     # Remove common prefixes
-    cleaned_text = re.sub(r'^.*?(?=\{)', '', cleaned_text, flags=re.DOTALL)
+    cleaned_text = re.sub(r"^.*?(?=\{)", "", cleaned_text, flags=re.DOTALL)
     # Remove trailing non-JSON content
-    cleaned_text = re.sub(r'\}.*$', '}', cleaned_text, flags=re.DOTALL)
-    
+    cleaned_text = re.sub(r"\}.*$", "}", cleaned_text, flags=re.DOTALL)
+
     # Try parsing the cleaned text
     try:
         parsed = json.loads(cleaned_text.strip())
@@ -79,7 +81,7 @@ def extract_json_from_text(response_text: str) -> Optional[Dict[str, Any]]:
         # Look for any JSON object containing memory or facts
         r'\{[^{}]*"(?:memory|facts)"[^{}]*\}',
         # Look for any balanced JSON object
-        r'\{(?:[^{}]|{[^{}]*})*\}',
+        r"\{(?:[^{}]|{[^{}]*})*\}",
     ]
 
     for pattern in json_patterns:
@@ -100,7 +102,7 @@ def extract_json_from_text(response_text: str) -> Optional[Dict[str, Any]]:
                 except json.JSONDecodeError:
                     continue
             # Use fallback if we found a valid dict but without preferred keys
-            if 'fallback' in locals():
+            if "fallback" in locals():
                 return fallback
         except Exception as e:
             memory_logger.debug(f"Pattern {pattern} failed: {e}")
@@ -115,7 +117,9 @@ def extract_json_from_text(response_text: str) -> Optional[Dict[str, Any]]:
                 array_str = match.group(1)
                 array_data = json.loads(array_str)
                 if isinstance(array_data, list):
-                    memory_logger.debug(f"Successfully extracted {key} array from response")
+                    memory_logger.debug(
+                        f"Successfully extracted {key} array from response"
+                    )
                     return {key: array_data}
         except Exception as e:
             memory_logger.debug(f"{key} array extraction failed: {e}")
@@ -131,7 +135,9 @@ def extract_json_from_text(response_text: str) -> Optional[Dict[str, Any]]:
             try:
                 parsed = json.loads(potential_json)
                 if isinstance(parsed, dict):
-                    memory_logger.debug("Successfully extracted JSON using bracket matching")
+                    memory_logger.debug(
+                        "Successfully extracted JSON using bracket matching"
+                    )
                     return parsed
             except json.JSONDecodeError:
                 pass
@@ -143,5 +149,3 @@ def extract_json_from_text(response_text: str) -> Optional[Dict[str, Any]]:
         f"Failed to extract JSON from LLM response. Response preview: {response_text[:200]}..."
     )
     return None
-
-

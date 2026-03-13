@@ -270,9 +270,7 @@ class ProcessManager:
             worker.state = WorkerState.FAILED
             return False
 
-        logger.info(
-            f"{name}: Stopped in {stop_duration:.2f}s (timeout was {timeout}s)"
-        )
+        logger.info(f"{name}: Stopped in {stop_duration:.2f}s (timeout was {timeout}s)")
 
         # START phase with timing
         start_start = time.time()

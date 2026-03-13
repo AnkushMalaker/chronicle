@@ -18,7 +18,6 @@ import time
 import wave
 
 from dotenv import load_dotenv
-
 from relay_core import RelayConfig, get_jwt_token, run_device_session
 
 load_dotenv()
@@ -45,7 +44,9 @@ def _make_wav_callbacks(dump_dir: str):
         wf.setnchannels(channels)
         wf.setsampwidth(width)
         wf.setframerate(rate)
-        logger.info("Debug audio dump: %s (rate=%d width=%d ch=%d)", path, rate, width, channels)
+        logger.info(
+            "Debug audio dump: %s (rate=%d width=%d ch=%d)", path, rate, width, channels
+        )
         return wf
 
     def on_audio_chunk(payload: bytes, length: int) -> None:
@@ -64,8 +65,12 @@ def _make_wav_callbacks(dump_dir: str):
             logger.info(
                 "Audio stats: %d chunks, %d bytes, %.1fs elapsed, "
                 "%.0f B/s actual vs %d B/s declared (ratio=%.2fx)",
-                s["chunk_count"], s["total_bytes"], elapsed,
-                byte_rate, expected_rate, ratio,
+                s["chunk_count"],
+                s["total_bytes"],
+                elapsed,
+                byte_rate,
+                expected_rate,
+                ratio,
             )
 
     def on_audio_event(msg_type: str, header: dict) -> None:
@@ -86,13 +91,20 @@ def _make_wav_callbacks(dump_dir: str):
                 byte_rate = s["total_bytes"] / elapsed if elapsed > 0 else 0
                 expected_rate = s["rate"] * s["width"] * s["channels"]
                 ratio = byte_rate / expected_rate if expected_rate > 0 else 0
-                declared_duration = s["total_bytes"] / expected_rate if expected_rate > 0 else 0
+                declared_duration = (
+                    s["total_bytes"] / expected_rate if expected_rate > 0 else 0
+                )
                 logger.info(
                     "Session end: %d chunks, %d bytes in %.1fs wall-clock | "
                     "%.0f B/s actual vs %d B/s expected (ratio=%.2fx) | "
                     "declared duration=%.1fs",
-                    s["chunk_count"], s["total_bytes"], elapsed,
-                    byte_rate, expected_rate, ratio, declared_duration,
+                    s["chunk_count"],
+                    s["total_bytes"],
+                    elapsed,
+                    byte_rate,
+                    expected_rate,
+                    ratio,
+                    declared_duration,
                 )
             if s["wav_file"]:
                 s["wav_file"].close()
@@ -108,11 +120,21 @@ async def main():
     )
     parser.add_argument("--port", type=int, default=8989)
     parser.add_argument("--host", type=str, default="0.0.0.0")
-    parser.add_argument("--backend-url", type=str, default=os.getenv("BACKEND_URL", "http://localhost:8000"))
-    parser.add_argument("--backend-ws-url", type=str, default=os.getenv("BACKEND_WS_URL", "ws://localhost:8000"))
+    parser.add_argument(
+        "--backend-url",
+        type=str,
+        default=os.getenv("BACKEND_URL", "http://localhost:8000"),
+    )
+    parser.add_argument(
+        "--backend-ws-url",
+        type=str,
+        default=os.getenv("BACKEND_WS_URL", "ws://localhost:8000"),
+    )
     parser.add_argument("--username", type=str, default=os.getenv("AUTH_USERNAME"))
     parser.add_argument("--password", type=str, default=os.getenv("AUTH_PASSWORD"))
-    parser.add_argument("--device-name", type=str, default=os.getenv("DEVICE_NAME", "havpe"))
+    parser.add_argument(
+        "--device-name", type=str, default=os.getenv("DEVICE_NAME", "havpe")
+    )
     parser.add_argument("-v", "--verbose", action="count", default=0)
     parser.add_argument(
         "--dump-audio",
@@ -142,7 +164,9 @@ async def main():
         )
         return
 
-    token = await get_jwt_token(config.auth_username, config.auth_password, config.backend_url)
+    token = await get_jwt_token(
+        config.auth_username, config.auth_password, config.backend_url
+    )
     if not token:
         logger.error("Startup auth check failed")
         return
@@ -158,7 +182,9 @@ async def main():
 
     server = await asyncio.start_server(
         lambda r, w: run_device_session(
-            r, w, config,
+            r,
+            w,
+            config,
             on_audio_chunk=on_chunk,
             on_audio_event=on_event,
         ),
@@ -192,30 +218,45 @@ def cli():
 
     if command == "menu":
         from menu_relay import main as menu_main
+
         menu_main()
     elif command == "relay":
         sys.argv = [sys.argv[0]] + sys.argv[2:]  # strip subcommand
         asyncio.run(main())
     elif command == "install":
         from service import install
+
         install()
     elif command == "uninstall":
         from service import uninstall
+
         uninstall()
     elif command == "kickstart":
         from service import kickstart
+
         kickstart()
     elif command == "status":
         from service import status
+
         status()
     elif command == "logs":
         from service import logs
+
         logs()
 
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] in ("menu", "relay", "install", "uninstall", "kickstart", "status", "logs"):
+
+    if len(sys.argv) > 1 and sys.argv[1] in (
+        "menu",
+        "relay",
+        "install",
+        "uninstall",
+        "kickstart",
+        "status",
+        "logs",
+    ):
         cli()
     else:
         asyncio.run(main())

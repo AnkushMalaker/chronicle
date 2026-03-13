@@ -57,7 +57,9 @@ class TranscriptionContext:
         }
 
 
-async def gather_transcription_context(user_id: Optional[str] = None) -> TranscriptionContext:
+async def gather_transcription_context(
+    user_id: Optional[str] = None,
+) -> TranscriptionContext:
     """Build structured transcription context: static hot words + cached user jargon.
 
     Args:

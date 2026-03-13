@@ -18,7 +18,7 @@ Test Browser Can Access Login Page
 
     # Use the backend URL from test.env
     ${backend_url}=    Set Variable    ${WEB_URL}
-    
+
     Open Browser    ${backend_url}/login    chromium
     Wait For Elements State    id=email    visible    timeout=10s
     Fill Text    id=email    ${ADMIN_EMAIL}

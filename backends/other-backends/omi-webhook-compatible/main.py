@@ -1,9 +1,10 @@
-import fastapi
-import uvicorn
+import os
 import wave
 from datetime import datetime
-import os
-from fastapi import Request, HTTPException
+
+import fastapi
+import uvicorn
+from fastapi import HTTPException, Request
 
 app = fastapi.FastAPI()
 
@@ -27,6 +28,7 @@ COMP_TYPE = "NONE"
 COMP_NAME = "not compressed"
 # --- End WAV File Parameters ---
 
+
 @app.post("/webhook/audio_bytes")
 async def receive_audio_bytes(request: Request):
     """
@@ -43,20 +45,24 @@ async def receive_audio_bytes(request: Request):
         filename = os.path.join(AUDIO_DIR, f"audio_{timestamp}.wav")
 
         # Write the audio bytes to a WAV file
-        with wave.open(filename, 'wb') as wf:
+        with wave.open(filename, "wb") as wf:
             wf.setnchannels(N_CHANNELS)
             wf.setsampwidth(SAMP_WIDTH)
             wf.setframerate(FRAME_RATE)
             wf.writeframes(audio_bytes)
 
-        return {"message": "Audio received and saved successfully", "filename": filename}
+        return {
+            "message": "Audio received and saved successfully",
+            "filename": filename,
+        }
 
     except HTTPException as e:
         # Re-raise HTTPExceptions to let FastAPI handle them
         raise e
     except Exception as e:
-        print(f"Error processing audio: {e}") # For server-side logging
+        print(f"Error processing audio: {e}")  # For server-side logging
         raise HTTPException(status_code=500, detail=f"Error processing audio: {str(e)}")
+
 
 def main():
     """
@@ -65,11 +71,12 @@ def main():
     print(f"Starting Uvicorn server. Listening on http://0.0.0.0:8000")
     print(f"Audio files will be saved in: {os.path.abspath(AUDIO_DIR)}")
     print("POST audio bytes to http://0.0.0.0:8000/webhook/audio_bytes")
-    
+
     # It's common to run uvicorn from the command line like:
     # uvicorn main:app --reload
     # However, for self-contained execution for this example, we can run it programmatically.
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
 if __name__ == "__main__":
     main()

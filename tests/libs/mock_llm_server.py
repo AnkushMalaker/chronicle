@@ -14,18 +14,18 @@ Request Detection:
 - Memory updates: system prompt contains "UPDATE_MEMORY_PROMPT" or "memory manager"
 """
 
+import argparse
 import asyncio
+import hashlib
 import json
 import logging
-import argparse
-import hashlib
 from typing import List
-from aiohttp import web
+
 import numpy as np
+from aiohttp import web
 
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -38,8 +38,8 @@ def generate_deterministic_embedding(text: str, dimensions: int = 1536) -> List[
     Generates unit vector for cosine similarity compatibility.
     """
     # Use SHA-256 hash as seed
-    hash_bytes = hashlib.sha256(text.encode('utf-8')).digest()
-    seed = int.from_bytes(hash_bytes[:4], 'big')
+    hash_bytes = hashlib.sha256(text.encode("utf-8")).digest()
+    seed = int.from_bytes(hash_bytes[:4], "big")
 
     # Generate reproducible random vector
     rng = np.random.default_rng(seed)
@@ -83,7 +83,7 @@ def create_fact_extraction_response() -> dict:
         "User met with John",
         "Discussed project timeline",
         "User prefers morning meetings",
-        "User is working on Chronicle project"
+        "User is working on Chronicle project",
     ]
 
     content = json.dumps({"facts": facts})
@@ -93,19 +93,14 @@ def create_fact_extraction_response() -> dict:
         "object": "chat.completion",
         "created": 1234567890,
         "model": "gpt-4o-mini",
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": content
-            },
-            "finish_reason": "stop"
-        }],
-        "usage": {
-            "prompt_tokens": 100,
-            "completion_tokens": 50,
-            "total_tokens": 150
-        }
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
     }
 
 
@@ -136,19 +131,14 @@ def create_memory_update_response() -> dict:
         "object": "chat.completion",
         "created": 1234567890,
         "model": "gpt-4o-mini",
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": xml_content
-            },
-            "finish_reason": "stop"
-        }],
-        "usage": {
-            "prompt_tokens": 150,
-            "completion_tokens": 80,
-            "total_tokens": 230
-        }
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": xml_content},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 150, "completion_tokens": 80, "total_tokens": 230},
     }
 
 
@@ -161,19 +151,14 @@ def create_general_response(user_message: str) -> dict:
         "object": "chat.completion",
         "created": 1234567890,
         "model": "gpt-4o-mini",
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": response_text
-            },
-            "finish_reason": "stop"
-        }],
-        "usage": {
-            "prompt_tokens": 50,
-            "completion_tokens": 20,
-            "total_tokens": 70
-        }
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": response_text},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 20, "total_tokens": 70},
     }
 
 
@@ -206,8 +191,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
     except Exception as e:
         logger.error(f"Error handling chat completions: {e}", exc_info=True)
         return web.json_response(
-            {"error": {"message": str(e), "type": "server_error"}},
-            status=500
+            {"error": {"message": str(e), "type": "server_error"}}, status=500
         )
 
 
@@ -225,11 +209,9 @@ async def handle_embeddings(request: web.Request) -> web.Response:
         embeddings_data = []
         for idx, text in enumerate(input_texts):
             embedding = generate_deterministic_embedding(text, dimensions=1536)
-            embeddings_data.append({
-                "object": "embedding",
-                "embedding": embedding,
-                "index": idx
-            })
+            embeddings_data.append(
+                {"object": "embedding", "embedding": embedding, "index": idx}
+            )
 
         logger.info(f"Generated {len(embeddings_data)} embeddings")
 
@@ -239,8 +221,8 @@ async def handle_embeddings(request: web.Request) -> web.Response:
             "model": "text-embedding-3-small",
             "usage": {
                 "prompt_tokens": len(input_texts) * 10,
-                "total_tokens": len(input_texts) * 10
-            }
+                "total_tokens": len(input_texts) * 10,
+            },
         }
 
         return web.json_response(response)
@@ -248,8 +230,7 @@ async def handle_embeddings(request: web.Request) -> web.Response:
     except Exception as e:
         logger.error(f"Error handling embeddings: {e}", exc_info=True)
         return web.json_response(
-            {"error": {"message": str(e), "type": "server_error"}},
-            status=500
+            {"error": {"message": str(e), "type": "server_error"}}, status=500
         )
 
 
@@ -262,15 +243,15 @@ async def handle_models(request: web.Request) -> web.Response:
                 "id": "gpt-4o-mini",
                 "object": "model",
                 "created": 1234567890,
-                "owned_by": "mock-llm"
+                "owned_by": "mock-llm",
             },
             {
                 "id": "text-embedding-3-small",
                 "object": "model",
                 "created": 1234567890,
-                "owned_by": "mock-llm"
-            }
-        ]
+                "owned_by": "mock-llm",
+            },
+        ],
     }
 
     logger.info("Returning available models")
@@ -287,12 +268,12 @@ def create_app() -> web.Application:
     app = web.Application()
 
     # OpenAI-compatible routes
-    app.router.add_post('/v1/chat/completions', handle_chat_completions)
-    app.router.add_post('/v1/embeddings', handle_embeddings)
-    app.router.add_get('/v1/models', handle_models)
+    app.router.add_post("/v1/chat/completions", handle_chat_completions)
+    app.router.add_post("/v1/embeddings", handle_embeddings)
+    app.router.add_get("/v1/models", handle_models)
 
     # Health check
-    app.router.add_get('/health', handle_health)
+    app.router.add_get("/health", handle_health)
 
     return app
 
@@ -313,8 +294,12 @@ def main(host: str, port: int):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Mock LLM Server")
-    parser.add_argument("--host", default="0.0.0.0", help="Server host (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=11435, help="Server port (default: 11435)")
+    parser.add_argument(
+        "--host", default="0.0.0.0", help="Server host (default: 0.0.0.0)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=11435, help="Server port (default: 11435)"
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 
     args = parser.parse_args()

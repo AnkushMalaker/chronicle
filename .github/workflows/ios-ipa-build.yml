@@ -18,11 +18,11 @@ jobs:
     defaults:
       run:
         working-directory: ./app
-    
+
     steps:
       - name: Setup repo
         uses: actions/checkout@v4
-      
+
       - name: Setup node
         uses: actions/setup-node@v4.0.2
         with:
@@ -66,11 +66,11 @@ jobs:
           release_name: ${{ steps.tag.outputs.RELEASE_NAME }}
           body: |
             ## 🍎 iOS IPA Build
-            
+
             **Built from commit:** ${{ github.sha }}
             **Branch:** ${{ github.ref_name }}
             **Build time:** ${{ steps.tag.outputs.BUILD_TIME }}
-            
+
             For iOS Simulator testing!
           draft: false
           prerelease: true
@@ -83,4 +83,4 @@ jobs:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: ${{ github.workspace }}/app-release.ipa
           asset_name: friend-lite-ios.ipa
-          asset_content_type: application/octet-stream 
+          asset_content_type: application/octet-stream

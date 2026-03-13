@@ -15,7 +15,6 @@ from typing import Optional
 
 import rumps
 from dotenv import load_dotenv
-
 from relay_core import RelayConfig, get_jwt_token, run_device_session
 
 logger = logging.getLogger(__name__)
@@ -26,6 +25,7 @@ RELAY_PORT = int(os.getenv("RELAY_PORT", "8989"))
 
 
 # --- Shared state ------------------------------------------------------------
+
 
 @dataclass
 class SharedState:
@@ -54,6 +54,7 @@ class SharedState:
 
 # --- Asyncio background thread -----------------------------------------------
 
+
 class AsyncioThread:
     """Runs an asyncio event loop in a daemon thread."""
 
@@ -78,6 +79,7 @@ class AsyncioThread:
 
 # --- Relay manager ------------------------------------------------------------
 
+
 class RelayManager:
     """Manages the TCP relay server lifecycle in the background asyncio thread."""
 
@@ -99,11 +101,15 @@ class RelayManager:
             return
 
         if not self.config.auth_username or not self.config.auth_password:
-            self.state.update(status="error", error="AUTH_USERNAME/AUTH_PASSWORD not set in .env")
+            self.state.update(
+                status="error", error="AUTH_USERNAME/AUTH_PASSWORD not set in .env"
+            )
             return
 
         token = await get_jwt_token(
-            self.config.auth_username, self.config.auth_password, self.config.backend_url,
+            self.config.auth_username,
+            self.config.auth_password,
+            self.config.backend_url,
         )
         if not token:
             self.state.update(status="error", error="Backend auth failed")
@@ -128,7 +134,9 @@ class RelayManager:
 
             task = asyncio.ensure_future(
                 run_device_session(
-                    r, w, config,
+                    r,
+                    w,
+                    config,
                     on_audio_chunk=on_chunk,
                     on_session_start=on_session_start,
                     on_session_end=on_session_end,
@@ -166,6 +174,7 @@ class RelayManager:
 
 # --- rumps menu bar app -------------------------------------------------------
 
+
 class RelayMenuApp(rumps.App):
     """macOS menu bar app for the HAVPE relay."""
 
@@ -193,7 +202,9 @@ class RelayMenuApp(rumps.App):
             self.title = "\u25cf\u02b0\u1d43"  # filled circle + ha
             addr = snap["device_addr"] or "?"
             chunks = f"{snap['chunks_sent']:,}"
-            self.status_item.title = f"Status: Connected ({addr}) \u2014 {chunks} chunks"
+            self.status_item.title = (
+                f"Status: Connected ({addr}) \u2014 {chunks} chunks"
+            )
             self.toggle_item.title = "Stop Relay"
         elif status == "listening":
             self.title = "\u2299\u02b0\u1d43"  # circled dot + ha
@@ -201,7 +212,9 @@ class RelayMenuApp(rumps.App):
             self.toggle_item.title = "Stop Relay"
         elif status == "error":
             self.title = "\u2298\u02b0\u1d43"  # circled division slash + ha
-            self.status_item.title = f"Status: Error \u2014 {snap['error'] or 'unknown'}"
+            self.status_item.title = (
+                f"Status: Error \u2014 {snap['error'] or 'unknown'}"
+            )
             self.toggle_item.title = "Start Relay"
         else:
             self.title = "\u2298\u02b0\u1d43"  # stopped + ha
@@ -220,8 +233,10 @@ class RelayMenuApp(rumps.App):
 
 # --- Entry point --------------------------------------------------------------
 
+
 def main() -> None:
     from AppKit import NSApplication
+
     NSApplication.sharedApplication().setActivationPolicy_(1)
 
     logging.basicConfig(

@@ -6,8 +6,9 @@ Provides direct MongoDB access for verifying audio chunk storage.
 
 import os
 from pathlib import Path
-from pymongo import MongoClient
+
 from dotenv import load_dotenv
+from pymongo import MongoClient
 
 # Load test environment variables
 tests_dir = Path(__file__).parent.parent
@@ -39,10 +40,11 @@ def get_audio_chunks(conversation_id):
 
     try:
         # Query audio_chunks collection
-        chunks = list(db.audio_chunks.find(
-            {"conversation_id": conversation_id},
-            sort=[("chunk_index", 1)]
-        ))
+        chunks = list(
+            db.audio_chunks.find(
+                {"conversation_id": conversation_id}, sort=[("chunk_index", 1)]
+            )
+        )
 
         # Convert ObjectId to string and Binary to bytes length for Robot Framework
         for chunk in chunks:

@@ -15,13 +15,14 @@ logger = logging.getLogger(__name__)
 
 class ZipExtractionError(Exception):
     """Exception raised when zip extraction fails."""
+
     pass
 
 
 def extract_zip(
     zip_path: Union[str, Path],
     extract_dir: Union[str, Path],
-    create_extract_dir: bool = True
+    create_extract_dir: bool = True,
 ) -> Path:
     """
     Extract a zip file to a specified directory.
@@ -59,7 +60,7 @@ def extract_zip(
 
     # Extract zip file
     try:
-        with zipfile.ZipFile(zip_path, 'r') as zf:
+        with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(extract_dir)
         logger.info(f"Successfully extracted {zip_path} to {extract_dir}")
         return extract_dir
@@ -79,4 +80,3 @@ def extract_zip(
         error_msg = f"Error extracting zip file {zip_path}: {e}"
         logger.error(error_msg)
         raise ZipExtractionError(error_msg) from e
-

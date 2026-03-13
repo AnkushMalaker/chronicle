@@ -174,7 +174,7 @@ Stream audio directly from your phone's microphone to Chronicle backend, bypassi
 
 #### Requirements
 - **iOS**: iOS 13+ with microphone permissions
-- **Android**: Android API 21+ with microphone permissions  
+- **Android**: Android API 21+ with microphone permissions
 - **Network**: Stable connection to Chronicle backend
 - **Backend**: Advanced backend running with `/ws?codec=pcm` endpoint
 
@@ -191,7 +191,7 @@ Stream audio directly from your phone's microphone to Chronicle backend, bypassi
 - **Network Connection**: Test backend connectivity
 - **Authentication**: Verify JWT token is valid
 
-#### Poor Audio Quality  
+#### Poor Audio Quality
 - **Check Signal Strength**: Ensure stable network connection
 - **Reduce Background Noise**: Use in quiet environment
 - **Restart Recording**: Stop and restart phone audio streaming
