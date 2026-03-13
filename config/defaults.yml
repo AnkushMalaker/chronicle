@@ -497,7 +497,6 @@ backend:
   # Conversation stop conditions
   conversation_stop:
     speech_inactivity_threshold: 60      # Speech gap threshold for closure (1 minute)
-    max_conversation_duration_seconds: 7200  # Max conversation duration (2 hours)
 
   # Audio storage paths
   audio_storage:

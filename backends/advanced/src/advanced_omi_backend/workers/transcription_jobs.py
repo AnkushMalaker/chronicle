@@ -155,6 +155,22 @@ async def apply_speaker_recognition(
         return segments
 
 
+BATCH_CHUNK_SECONDS = 3600  # Never send more than 1h to ASR at once
+
+
+def _build_wav(
+    pcm_data: bytes, sample_rate: int, channels: int, sample_width: int
+) -> bytes:
+    """Build a WAV file from raw PCM data."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(sample_width)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_data)
+    return buf.getvalue()
+
+
 async def transcribe_audio_range(
     conversation_id: str,
     start_time: float = 0.0,
@@ -167,6 +183,7 @@ async def transcribe_audio_range(
     Reconstruct audio for a time range and transcribe it.
 
     Pure reconstruction + transcription — no DB writes, no plugins, no speech validation.
+    If the audio exceeds BATCH_CHUNK_SECONDS (1h), it is split internally and merged.
 
     Args:
         conversation_id: Conversation ID
@@ -204,44 +221,127 @@ async def transcribe_audio_range(
         f"{len(wav_data) / 1024 / 1024:.2f} MB"
     )
 
-    # Read actual sample rate from WAV header
+    # Read WAV header to get audio properties
     try:
         with wave.open(io.BytesIO(wav_data), "rb") as wf:
             actual_sample_rate = wf.getframerate()
+            channels = wf.getnchannels()
+            sample_width = wf.getsampwidth()
+            n_frames = wf.getnframes()
+            pcm_data = wf.readframes(n_frames)
     except Exception:
         actual_sample_rate = 16000
+        channels = 1
+        sample_width = 2
+        # Strip WAV header (44 bytes) as fallback
+        pcm_data = wav_data[44:] if len(wav_data) > 44 else wav_data
 
-    # Transcribe
-    transcribe_kwargs: dict = {
-        "audio_data": wav_data,
-        "sample_rate": actual_sample_rate,
-        "diarize": diarize,
-    }
-    if progress_callback:
-        transcribe_kwargs["progress_callback"] = progress_callback
-    if context_info:
-        transcribe_kwargs["context_info"] = context_info
-
-    try:
-        result = await provider.transcribe(**transcribe_kwargs)
-    except ConnectionError as e:
-        raise RuntimeError(str(e))
-    except RuntimeError:
-        raise
-    except Exception as e:
-        raise RuntimeError(f"Transcription failed ({type(e).__name__}): {e}")
+    duration = (
+        len(pcm_data) / (actual_sample_rate * sample_width * channels)
+        if (actual_sample_rate * sample_width * channels) > 0
+        else 0
+    )
 
     provider_capabilities = {}
     if hasattr(provider, "get_capabilities_dict"):
         provider_capabilities = provider.get_capabilities_dict()
 
+    if duration <= BATCH_CHUNK_SECONDS:
+        # Single chunk — transcribe directly
+        transcribe_kwargs: dict = {
+            "audio_data": wav_data,
+            "sample_rate": actual_sample_rate,
+            "diarize": diarize,
+        }
+        if progress_callback:
+            transcribe_kwargs["progress_callback"] = progress_callback
+        if context_info:
+            transcribe_kwargs["context_info"] = context_info
+
+        try:
+            result = await provider.transcribe(**transcribe_kwargs)
+        except ConnectionError as e:
+            raise RuntimeError(str(e))
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Transcription failed ({type(e).__name__}): {e}")
+
+        return {
+            "text": result.get("text", ""),
+            "segments": result.get("segments", []),
+            "words": result.get("words", []),
+            "provider_name": provider.name,
+            "provider_capabilities": provider_capabilities,
+            "wav_size": len(wav_data),
+            "sample_rate": actual_sample_rate,
+        }
+
+    # Multi-chunk: split PCM, create WAV per chunk, transcribe, merge
+    chunk_size_bytes = int(
+        BATCH_CHUNK_SECONDS * actual_sample_rate * sample_width * channels
+    )
+    all_text = []
+    all_segments = []
+    all_words = []
+    total_wav_size = 0
+    chunk_num = 0
+
+    logger.info(
+        f"📦 Audio duration {duration:.0f}s exceeds {BATCH_CHUNK_SECONDS}s, "
+        f"splitting into {BATCH_CHUNK_SECONDS}s chunks"
+    )
+
+    for i in range(0, len(pcm_data), chunk_size_bytes):
+        chunk_pcm = pcm_data[i : i + chunk_size_bytes]
+        chunk_wav = _build_wav(chunk_pcm, actual_sample_rate, channels, sample_width)
+        chunk_start = i / (actual_sample_rate * sample_width * channels)
+        chunk_num += 1
+
+        logger.info(
+            f"📦 Transcribing chunk {chunk_num}: "
+            f"[{chunk_start:.0f}s - {chunk_start + len(chunk_pcm) / (actual_sample_rate * sample_width * channels):.0f}s]"
+        )
+
+        transcribe_kwargs = {
+            "audio_data": chunk_wav,
+            "sample_rate": actual_sample_rate,
+            "diarize": diarize,
+        }
+        if progress_callback:
+            transcribe_kwargs["progress_callback"] = progress_callback
+        if context_info:
+            transcribe_kwargs["context_info"] = context_info
+
+        try:
+            result = await provider.transcribe(**transcribe_kwargs)
+        except ConnectionError as e:
+            raise RuntimeError(str(e))
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Transcription failed ({type(e).__name__}): {e}")
+
+        # Offset timestamps by chunk start time
+        for seg in result.get("segments", []):
+            seg["start"] = seg.get("start", 0.0) + chunk_start
+            seg["end"] = seg.get("end", 0.0) + chunk_start
+        for w in result.get("words", []):
+            w["start"] = w.get("start", 0.0) + chunk_start
+            w["end"] = w.get("end", 0.0) + chunk_start
+
+        all_text.append(result.get("text", ""))
+        all_segments.extend(result.get("segments", []))
+        all_words.extend(result.get("words", []))
+        total_wav_size += len(chunk_wav)
+
     return {
-        "text": result.get("text", ""),
-        "segments": result.get("segments", []),
-        "words": result.get("words", []),
+        "text": " ".join(all_text),
+        "segments": all_segments,
+        "words": all_words,
         "provider_name": provider.name,
         "provider_capabilities": provider_capabilities,
-        "wav_size": len(wav_data),
+        "wav_size": total_wav_size,
         "sample_rate": actual_sample_rate,
     }
 
@@ -882,116 +982,41 @@ async def transcription_fallback_check_job(
                 session_id, user_id, client_id
             )
 
-    # Check total audio duration to decide single-shot vs chunked transcription
+    # Transcribe directly — transcribe_audio_range handles chunking internally
     conv_id = conversation.conversation_id
     version_id = f"batch_fallback_{session_id[:12]}"
-    max_duration = get_max_conversation_duration()
 
-    # Refresh conversation to get audio metadata
-    conversation = await Conversation.find_one(Conversation.conversation_id == conv_id)
-    total_duration = conversation.audio_total_duration or 0.0
+    # Build ASR context
+    context_info = None
+    try:
+        from advanced_omi_backend.services.transcription.context import get_asr_context
+
+        context_info = await get_asr_context(user_id=user_id)
+    except Exception as e:
+        logger.warning(f"Failed to build ASR context: {e}")
 
     start_time_wall = time.time()
 
-    if total_duration <= max_duration:
-        # Single-shot: enqueue transcribe_full_audio_job and wait
-        batch_job = transcription_queue.enqueue(
-            transcribe_full_audio_job,
-            conv_id,
-            version_id,
-            "batch_fallback",
-            job_timeout=-1,
-            job_id=f"transcribe_{conv_id[:12]}",
-            description=f"Batch transcription fallback for {session_id[:8]}",
-            meta={"session_id": session_id, "client_id": client_id},
-        )
+    result = await transcribe_audio_range(
+        conv_id, diarize=True, context_info=context_info
+    )
 
-        logger.info(f"🔄 Enqueued batch transcription fallback job {batch_job.id}")
+    processing_time = time.time() - start_time_wall
 
-        max_wait = timeout_seconds
-        waited = 0
-        while waited < max_wait:
-            batch_job.refresh()
-            if batch_job.is_failed:
-                raise RuntimeError(f"Batch transcription failed: {batch_job.exc_info}")
-            if batch_job.is_finished:
-                logger.info("✅ Batch transcription completed successfully")
-                break
-            await asyncio.sleep(2)
-            waited += 2
-
-        if waited >= max_wait:
-            raise TimeoutError(f"Batch transcription timed out after {max_wait}s")
-    else:
-        # Chunked: transcribe in max_duration-second ranges, merge results
-        logger.info(
-            f"📦 Audio duration {total_duration:.0f}s exceeds max {max_duration}s, "
-            f"transcribing in {max_duration}s chunks"
-        )
-
-        # Build ASR context
-        context_info = None
-        try:
-            from advanced_omi_backend.services.transcription.context import (
-                get_asr_context,
-            )
-
-            context_info = await get_asr_context(user_id=user_id)
-        except Exception as e:
-            logger.warning(f"Failed to build ASR context: {e}")
-
-        all_text = []
-        all_segments = []
-        all_words = []
-        provider_name = None
-        provider_capabilities = {}
-        total_wav_size = 0
-        start_t = 0.0
-        chunk_num = 0
-
-        while start_t < total_duration:
-            end_t = min(start_t + max_duration, total_duration)
-            chunk_num += 1
-            logger.info(
-                f"📦 Transcribing chunk {chunk_num}: [{start_t:.0f}s - {end_t:.0f}s]"
-            )
-
-            result = await transcribe_audio_range(
-                conv_id, start_t, end_t, diarize=True, context_info=context_info
-            )
-
-            # Offset timestamps (provider returns 0-based for each range)
-            for seg in result["segments"]:
-                seg["start"] = seg.get("start", 0.0) + start_t
-                seg["end"] = seg.get("end", 0.0) + start_t
-            for word in result["words"]:
-                word["start"] = word.get("start", 0.0) + start_t
-                word["end"] = word.get("end", 0.0) + start_t
-
-            all_text.append(result["text"])
-            all_segments.extend(result["segments"])
-            all_words.extend(result["words"])
-            total_wav_size += result["wav_size"]
-            provider_name = result["provider_name"]
-            provider_capabilities = result["provider_capabilities"]
-            start_t = end_t
-
-        processing_time = time.time() - start_time_wall
-
-        await process_transcription_result(
-            conversation_id=conv_id,
-            version_id=version_id,
-            trigger="batch_fallback",
-            transcript_text=" ".join(all_text),
-            segments=all_segments,
-            words=all_words,
-            provider_name=provider_name or "unknown",
-            provider_capabilities=provider_capabilities,
-            wav_size=total_wav_size,
-            processing_time=processing_time,
-            user_id=user_id,
-            client_id=client_id,
-        )
+    await process_transcription_result(
+        conversation_id=conv_id,
+        version_id=version_id,
+        trigger="batch_fallback",
+        transcript_text=result["text"],
+        segments=result["segments"],
+        words=result["words"],
+        provider_name=result["provider_name"],
+        provider_capabilities=result["provider_capabilities"],
+        wav_size=result["wav_size"],
+        processing_time=processing_time,
+        user_id=user_id,
+        client_id=client_id,
+    )
 
     # Enqueue post-conversation jobs
     post_jobs = start_post_conversation_jobs(

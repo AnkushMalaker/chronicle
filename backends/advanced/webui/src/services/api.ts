@@ -301,8 +301,14 @@ export const systemApi = {
 
   // Miscellaneous Configuration Settings
   getMiscSettings: () => api.get('/api/misc-settings'),
-  saveMiscSettings: (settings: { always_persist_enabled?: boolean; use_provider_segments?: boolean; per_segment_speaker_id?: boolean; streaming_fallback_timeout_seconds?: number }) =>
-    api.post('/api/misc-settings', settings),
+  saveMiscSettings: (settings: {
+    always_persist_enabled?: boolean;
+    use_provider_segments?: boolean;
+    per_segment_speaker_id?: boolean;
+    streaming_fallback_timeout_seconds?: number;
+    max_conversation_duration_seconds?: number;
+    always_batch_retranscribe?: boolean;
+  }) => api.post('/api/misc-settings', settings),
 
   // Plugin Configuration Management (YAML-based)
   getPluginsConfigRaw: () => api.get('/api/admin/plugins/config'),

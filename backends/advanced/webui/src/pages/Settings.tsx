@@ -46,7 +46,6 @@ export default function Settings() {
     per_segment_speaker_id: false,
     streaming_fallback_timeout_seconds: 120,
     always_batch_retranscribe: false,
-    max_conversation_duration_seconds: 7200
   })
   const [miscLoading, setMiscLoading] = useState(false)
   const [miscMessage, setMiscMessage] = useState('')
@@ -583,6 +582,7 @@ export default function Settings() {
                 className="ml-4 w-24 px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               />
             </div>
+
 
             {/* Status Message */}
             {miscMessage && (

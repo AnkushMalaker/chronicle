@@ -490,6 +490,7 @@ async def save_misc_settings_controller(settings: dict):
                         detail=f"Invalid value for {key}: must be integer between 600 and 86400",
                     )
 
+
             filtered_settings[key] = value
 
         # Reject if NO valid keys provided

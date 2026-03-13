@@ -158,7 +158,7 @@ def get_conversation_stop_settings() -> dict:
     Get conversation stop settings using OmegaConf.
 
     Returns:
-        Dict with speech_inactivity_threshold, max_conversation_duration_seconds
+        Dict with speech_inactivity_threshold
     """
     cfg = get_backend_config("conversation_stop")
     settings = OmegaConf.to_container(cfg, resolve=True)
@@ -170,18 +170,6 @@ def get_conversation_stop_settings() -> dict:
     ).get("min_confidence", 0.7)
 
     return settings
-
-
-def get_max_conversation_duration() -> int:
-    """
-    Get max conversation duration in seconds from config.
-
-    Returns:
-        Max duration in seconds (default 7200 = 2 hours)
-    """
-    cfg = get_backend_config("conversation_stop")
-    settings = OmegaConf.to_container(cfg, resolve=True) if cfg else {}
-    return int(settings.get("max_conversation_duration_seconds", 7200))
 
 
 # ============================================================================
@@ -256,12 +244,6 @@ def get_misc_settings() -> dict:
         OmegaConf.to_container(speaker_cfg, resolve=True) if speaker_cfg else {}
     )
 
-    # Get conversation stop settings for max_conversation_duration_seconds
-    conv_stop_cfg = get_backend_config("conversation_stop")
-    conv_stop_settings = (
-        OmegaConf.to_container(conv_stop_cfg, resolve=True) if conv_stop_cfg else {}
-    )
-
     return {
         "always_persist_enabled": audio_settings.get("always_persist_enabled", False),
         "use_provider_segments": transcription_settings.get(
@@ -278,9 +260,6 @@ def get_misc_settings() -> dict:
         ),
         "always_batch_retranscribe": transcription_settings.get(
             "always_batch_retranscribe", False
-        ),
-        "max_conversation_duration_seconds": int(
-            conv_stop_settings.get("max_conversation_duration_seconds", 7200)
         ),
     }
 
@@ -329,22 +308,13 @@ def save_misc_settings(settings: dict) -> bool:
         if not save_config_section("backend.transcription", timeout_settings):
             success = False
 
+
     # Save always_batch_retranscribe if provided
     if "always_batch_retranscribe" in settings:
         batch_settings = {
             "always_batch_retranscribe": settings["always_batch_retranscribe"]
         }
         if not save_config_section("backend.transcription", batch_settings):
-            success = False
-
-    # Save max_conversation_duration_seconds if provided
-    if "max_conversation_duration_seconds" in settings:
-        conv_stop_settings = {
-            "max_conversation_duration_seconds": settings[
-                "max_conversation_duration_seconds"
-            ]
-        }
-        if not save_config_section("backend.conversation_stop", conv_stop_settings):
             success = False
 
     return success
