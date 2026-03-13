@@ -17,7 +17,6 @@ from advanced_omi_backend.client_manager import (
     client_belongs_to_user,
     get_client_manager,
 )
-from advanced_omi_backend.config import get_transcription_job_timeout
 from advanced_omi_backend.config_loader import get_service_config
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
@@ -788,7 +787,7 @@ def _enqueue_transcript_reprocessing(
         conversation_id,
         version_id,
         source,
-        job_timeout=get_transcription_job_timeout(),
+        job_timeout=-1,
         result_ttl=JOB_RESULT_TTL,
         job_id=f"{job_id_prefix}_{conversation_id[:8]}",
         description=f"Transcribe audio for {conversation_id[:8]}",

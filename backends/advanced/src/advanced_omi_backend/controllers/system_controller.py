@@ -458,7 +458,10 @@ async def save_misc_settings_controller(settings: dict):
             "per_segment_speaker_id",
             "always_batch_retranscribe",
         }
-        integer_keys = {"transcription_job_timeout_seconds"}
+        integer_keys = {
+            "streaming_fallback_timeout_seconds",
+            "max_conversation_duration_seconds",
+        }
         valid_keys = boolean_keys | integer_keys
 
         # Filter to only valid keys
@@ -474,11 +477,17 @@ async def save_misc_settings_controller(settings: dict):
                         status_code=400,
                         detail=f"Invalid value for {key}: must be boolean",
                     )
-            elif key == "transcription_job_timeout_seconds":
+            elif key == "streaming_fallback_timeout_seconds":
                 if not isinstance(value, int) or value < 60 or value > 7200:
                     raise HTTPException(
                         status_code=400,
                         detail=f"Invalid value for {key}: must be integer between 60 and 7200",
+                    )
+            elif key == "max_conversation_duration_seconds":
+                if not isinstance(value, int) or value < 600 or value > 86400:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid value for {key}: must be integer between 600 and 86400",
                     )
 
             filtered_settings[key] = value

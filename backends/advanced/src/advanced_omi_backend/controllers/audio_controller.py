@@ -15,7 +15,6 @@ import uuid
 from fastapi import UploadFile
 from fastapi.responses import JSONResponse
 
-from advanced_omi_backend.config import get_transcription_job_timeout
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
     start_post_conversation_jobs,
@@ -227,7 +226,7 @@ async def upload_and_process_audio_files(
                         conversation_id,
                         version_id,
                         "batch",  # trigger
-                        job_timeout=get_transcription_job_timeout(),
+                        job_timeout=-1,
                         result_ttl=JOB_RESULT_TTL,
                         job_id=transcribe_job_id,
                         description=f"Transcribe uploaded file {conversation_id[:8]}",

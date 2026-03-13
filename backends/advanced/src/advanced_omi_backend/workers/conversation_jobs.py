@@ -469,9 +469,7 @@ async def _monitor_conversation_loop(
     close_requested_reason, last_result_count, and last_word_count.
     """
     session_key = f"audio:session:{state.session_id}"
-    max_runtime = (
-        10740  # 3 hours - 60 seconds (single conversations shouldn't exceed 3 hours)
-    )
+    max_runtime = 86400  # 24h safety ceiling
 
     finalize_received = False
 
@@ -872,7 +870,6 @@ async def _enqueue_post_processing(
     if batch_retranscribe:
         # BATCH PATH: Streaming transcript saved as preview — user sees it immediately
         # Full post-processing (speaker, memory, title) waits for batch transcript
-        from advanced_omi_backend.config import get_transcription_job_timeout
         from advanced_omi_backend.controllers.queue_controller import (
             JOB_RESULT_TTL,
             transcription_queue,
@@ -887,7 +884,7 @@ async def _enqueue_post_processing(
             conversation_id,
             batch_version_id,
             "always_batch_retranscribe",
-            job_timeout=get_transcription_job_timeout(),
+            job_timeout=-1,
             result_ttl=JOB_RESULT_TTL,
             job_id=f"batch_retranscribe_{conversation_id[:12]}",
             description=f"Batch re-transcription for {conversation_id[:8]}",
@@ -1023,7 +1020,7 @@ async def open_conversation_job(
         )
     elif state.timeout_triggered:
         state.end_reason = "inactivity_timeout"
-    elif time.time() - state.start_time > 10740:
+    elif time.time() - state.start_time > 86400:
         state.end_reason = "max_duration"
     else:
         state.end_reason = "user_stopped"

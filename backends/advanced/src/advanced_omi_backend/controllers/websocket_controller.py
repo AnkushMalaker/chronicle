@@ -1109,7 +1109,6 @@ async def _create_batch_conversation_and_enqueue(
     Returns:
         conversation_id on success, None on failure.
     """
-    from advanced_omi_backend.config import get_transcription_job_timeout
     from advanced_omi_backend.controllers.queue_controller import (
         JOB_RESULT_TTL,
         transcription_queue,
@@ -1168,7 +1167,7 @@ async def _create_batch_conversation_and_enqueue(
         conversation_id,
         version_id,
         trigger,
-        job_timeout=get_transcription_job_timeout(),
+        job_timeout=-1,
         result_ttl=JOB_RESULT_TTL,
         job_id=f"{job_id_prefix}_{conversation_id[:12]}",
         description=f"Transcribe {title.lower()} {conversation_id[:8]}",

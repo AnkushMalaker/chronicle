@@ -30,6 +30,8 @@ from advanced_omi_backend.utils.audio_utils import pcm_to_wav_bytes
 
 logger = logging.getLogger(__name__)
 
+MAX_STREAMING_START_ATTEMPTS = 2
+
 
 def _normalize_words(words: list) -> None:
     """Normalize provider-specific word field names in-place.
@@ -219,36 +221,56 @@ class StreamingTranscriptionConsumer:
             session_id: Session ID (client_id from audio stream)
             sample_rate: Audio sample rate in Hz
         """
-        try:
-            await self.provider.start_stream(
-                client_id=session_id,
-                sample_rate=sample_rate,
-                diarize=self._provider_has_diarization,
-            )
-
-            self.active_sessions[session_id] = {
-                "last_activity": time.time(),
-                "sample_rate": sample_rate,
-            }
-
-            # Only buffer audio for speaker identification when provider lacks diarization
-            if not self._provider_has_diarization:
-                self._audio_buffers[session_id] = bytearray()
-
-            logger.info(f"Started streaming transcription for session: {session_id}")
-
-        except Exception as e:
-            logger.error(f"Failed to start stream for {session_id}: {e}", exc_info=True)
-
-            # Set error flag in Redis so speech detection can detect failure early
-            session_key = f"audio:session:{session_id}"
+        last_error = None
+        for attempt in range(MAX_STREAMING_START_ATTEMPTS):
             try:
-                await self.redis_client.hset(session_key, "transcription_error", str(e))
-                logger.info(f"Set transcription error flag for {session_id}")
-            except Exception as redis_error:
-                logger.warning(f"Failed to set error flag in Redis: {redis_error}")
+                await self.provider.start_stream(
+                    client_id=session_id,
+                    sample_rate=sample_rate,
+                    diarize=self._provider_has_diarization,
+                )
 
-            raise
+                self.active_sessions[session_id] = {
+                    "last_activity": time.time(),
+                    "sample_rate": sample_rate,
+                }
+
+                # Only buffer audio for speaker identification when provider lacks diarization
+                if not self._provider_has_diarization:
+                    self._audio_buffers[session_id] = bytearray()
+
+                logger.info(
+                    f"Started streaming transcription for session: {session_id}"
+                )
+                return
+
+            except Exception as e:
+                last_error = e
+                if attempt < MAX_STREAMING_START_ATTEMPTS - 1:
+                    logger.warning(
+                        f"Failed to start stream for {session_id} "
+                        f"(attempt {attempt + 1}/{MAX_STREAMING_START_ATTEMPTS}): {e}. "
+                        f"Retrying in 5s..."
+                    )
+                    await asyncio.sleep(5)
+                else:
+                    logger.error(
+                        f"Failed to start stream for {session_id} "
+                        f"(attempt {attempt + 1}/{MAX_STREAMING_START_ATTEMPTS}): {e}",
+                        exc_info=True,
+                    )
+
+        # Both attempts failed — set error flag and raise
+        session_key = f"audio:session:{session_id}"
+        try:
+            await self.redis_client.hset(
+                session_key, "transcription_error", str(last_error)
+            )
+            logger.info(f"Set transcription error flag for {session_id}")
+        except Exception as redis_error:
+            logger.warning(f"Failed to set error flag in Redis: {redis_error}")
+
+        raise last_error
 
     async def end_session_stream(self, session_id: str):
         """

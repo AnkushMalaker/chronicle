@@ -130,7 +130,7 @@ def init_otel() -> None:
             except ImportError:
                 logger.warning(
                     "Langfuse OTEL packages not installed. "
-                    "Ensure langfuse>=3.13.0 is installed."
+                    "Ensure langfuse>=4.0.0 is installed."
                 )
             except Exception as e:
                 logger.error(f"Failed to add Langfuse span processor: {e}")
