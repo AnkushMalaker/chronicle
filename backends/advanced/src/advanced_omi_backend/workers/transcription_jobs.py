@@ -19,10 +19,7 @@ from rq import get_current_job
 from rq.exceptions import NoSuchJobError
 from rq.job import Job
 
-from advanced_omi_backend.config import (
-    get_max_conversation_duration,
-    get_streaming_fallback_timeout,
-)
+from advanced_omi_backend.config import get_streaming_fallback_timeout
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
     start_post_conversation_jobs,
@@ -31,6 +28,11 @@ from advanced_omi_backend.controllers.queue_controller import (
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import async_job
+from advanced_omi_backend.observability.otel_setup import (
+    set_otel_session,
+    set_span_attrs,
+    traced_job,
+)
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggregator
 from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
@@ -600,6 +602,7 @@ async def process_transcription_result(
 
 
 @async_job(redis=True, beanie=True)
+@traced_job("transcription", pipeline_stage="transcription")
 async def transcribe_full_audio_job(
     conversation_id: str,
     version_id: str,
@@ -628,6 +631,7 @@ async def transcribe_full_audio_job(
     Returns:
         Dict with processing results including transcript data for next job
     """
+    set_otel_session(conversation_id)
     logger.info(
         f"🔄 RQ: Starting transcript processing for conversation {conversation_id} (trigger: {trigger})"
     )
@@ -643,6 +647,7 @@ async def transcribe_full_audio_job(
 
     user_id = str(conversation.user_id) if conversation.user_id else None
     client_id = conversation.client_id if hasattr(conversation, "client_id") else None
+    set_span_attrs(user_id=user_id, client_id=client_id)
 
     # Build ASR context
     context_info = None
@@ -652,6 +657,18 @@ async def transcribe_full_audio_job(
         context_info = await get_asr_context(user_id=user_id)
     except Exception as e:
         logger.warning(f"Failed to build ASR context: {e}")
+
+    # Log ASR context as span attributes
+    if context_info:
+        set_span_attrs(
+            asr_hot_words=(
+                context_info.hot_words[:200] if context_info.hot_words else ""
+            ),
+            asr_user_jargon=(
+                context_info.user_jargon[:200] if context_info.user_jargon else ""
+            ),
+            asr_context_length=len(context_info.combined),
+        )
 
     # Progress callback for RQ job metadata.
     # RQ job_timeout=-1 disables the parent-side kill, so the job runs as long
@@ -1067,6 +1084,7 @@ async def stream_speech_detection_job(
     """
     from .conversation_jobs import open_conversation_job
 
+    set_otel_session(session_id)
     logger.info(f"🔍 Starting speech detection for session {session_id[:12]}")
 
     # Setup
