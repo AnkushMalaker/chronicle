@@ -567,7 +567,6 @@ class HomeAssistantPlugin(BasePlugin):
 
         try:
             from advanced_omi_backend.llm_client import get_llm_client
-            from advanced_omi_backend.openai_factory import is_langfuse_enabled
 
             llm_client = get_llm_client()
 
@@ -589,25 +588,15 @@ class HomeAssistantPlugin(BasePlugin):
                 "Output: toggle the kitchen fan"
             )
 
-            params = {
-                "model": llm_client.model,
-                "messages": [
+            response = llm_client.client.chat.completions.create(
+                model=llm_client.model,
+                messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": transcript},
                 ],
-                "temperature": 0.0,
-                "max_tokens": 100,
-            }
-            if is_langfuse_enabled():
-                params["name"] = "ha-command-extraction"
-                params["metadata"] = {
-                    "plugin": "homeassistant",
-                    "step": "extract_command",
-                }
-                if conversation_id:
-                    params["langfuse_session_id"] = conversation_id
-
-            response = llm_client.client.chat.completions.create(**params)
+                temperature=0.0,
+                max_tokens=100,
+            )
 
             result = response.choices[0].message.content.strip()
 
@@ -646,7 +635,6 @@ class HomeAssistantPlugin(BasePlugin):
         """
         try:
             from advanced_omi_backend.llm_client import get_llm_client
-            from advanced_omi_backend.openai_factory import is_langfuse_enabled
             from advanced_omi_backend.prompt_registry import get_prompt_registry
 
             from .command_parser import ParsedCommand
@@ -677,29 +665,18 @@ class HomeAssistantPlugin(BasePlugin):
                     labels = "\nAvailable labels: " + ", ".join(label_parts)
                 entity_context = f"\n\nAvailable areas: {areas}{labels}\nUse target_type 'area' with an area/label name above, or target_type 'all' for everything."
 
-            # Use OpenAI chat format with system + user messages
-            params = {
-                "model": llm_client.model,
-                "messages": [
+            response = llm_client.client.chat.completions.create(
+                model=llm_client.model,
+                messages=[
                     {"role": "system", "content": system_prompt},
                     {
                         "role": "user",
                         "content": f'Command: "{command}"{entity_context}\n\nReturn JSON only.',
                     },
                 ],
-                "temperature": 0.1,
-                "max_tokens": 150,
-            }
-            if is_langfuse_enabled():
-                params["name"] = "ha-command-parser"
-                params["metadata"] = {
-                    "plugin": "homeassistant",
-                    "step": "parse_command",
-                }
-                if conversation_id:
-                    params["langfuse_session_id"] = conversation_id
-
-            response = llm_client.client.chat.completions.create(**params)
+                temperature=0.1,
+                max_tokens=150,
+            )
 
             result_text = response.choices[0].message.content.strip()
             logger.debug(f"LLM response: {result_text}")

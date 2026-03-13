@@ -14,10 +14,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from ruamel.yaml import YAML
 from dotenv import set_key
 from rich.console import Console
 from rich.prompt import Confirm
+from ruamel.yaml import YAML
 
 # Add repo root to path for setup_utils import
 project_root = Path(__file__).resolve().parents[6]
@@ -41,42 +41,44 @@ def update_plugins_yml_orchestration():
 
     # Load existing or create from template
     if plugins_yml_path.exists():
-        with open(plugins_yml_path, 'r') as f:
+        with open(plugins_yml_path, "r") as f:
             config = _yaml.load(f) or {}
     else:
         # Copy from template
         template_path = project_root / "config" / "plugins.yml.template"
         if template_path.exists():
-            with open(template_path, 'r') as f:
+            with open(template_path, "r") as f:
                 config = _yaml.load(f) or {}
         else:
-            config = {'plugins': {}}
+            config = {"plugins": {}}
 
     # Ensure structure exists
-    if 'plugins' not in config:
-        config['plugins'] = {}
+    if "plugins" not in config:
+        config["plugins"] = {}
 
     # Only orchestration settings in config/plugins.yml
     # Plugin-specific settings are in plugins/email_summarizer/config.yml
     plugin_config = {
-        'enabled': False,  # Let user enable manually or prompt
-        'events': ['conversation.complete'],
-        'condition': {'type': 'always'}
+        "enabled": False,  # Let user enable manually or prompt
+        "events": ["conversation.complete"],
+        "condition": {"type": "always"},
     }
 
     # Update or create plugin entry
-    config['plugins']['email_summarizer'] = plugin_config
+    config["plugins"]["email_summarizer"] = plugin_config
 
     # Backup existing file
     if plugins_yml_path.exists():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = plugins_yml_path.parent / f"plugins.yml.backup.{timestamp}"
         shutil.copy(plugins_yml_path, backup_path)
-        console.print(f"[dim]Backed up existing plugins.yml to {backup_path.name}[/dim]")
+        console.print(
+            f"[dim]Backed up existing plugins.yml to {backup_path.name}[/dim]"
+        )
 
     # Write updated config
     plugins_yml_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(plugins_yml_path, 'w') as f:
+    with open(plugins_yml_path, "w") as f:
         _yaml.dump(config, f)
 
     console.print("[green]✅ Updated config/plugins.yml (orchestration only)[/green]")
@@ -94,15 +96,17 @@ def main():
 
     # SMTP Configuration
     console.print("[bold]SMTP Configuration[/bold]")
-    console.print("[dim]For Gmail: Use App Password (Settings > Security > 2FA > App Passwords)[/dim]\n")
+    console.print(
+        "[dim]For Gmail: Use App Password (Settings > Security > 2FA > App Passwords)[/dim]\n"
+    )
 
     smtp_host = prompt_with_existing_masked(
         prompt_text="SMTP Host",
         env_file_path=env_path,
         env_key="SMTP_HOST",
-        placeholders=['your-smtp-host-here'],
+        placeholders=["your-smtp-host-here"],
         is_password=False,
-        default="smtp.gmail.com"
+        default="smtp.gmail.com",
     )
 
     smtp_port = prompt_value("SMTP Port", default="587")
@@ -111,16 +115,16 @@ def main():
         prompt_text="SMTP Username (your email)",
         env_file_path=env_path,
         env_key="SMTP_USERNAME",
-        placeholders=['your-email@example.com'],
-        is_password=False
+        placeholders=["your-email@example.com"],
+        is_password=False,
     )
 
     smtp_password = prompt_with_existing_masked(
         prompt_text="SMTP Password (App Password)",
         env_file_path=env_path,
         env_key="SMTP_PASSWORD",
-        placeholders=['your-password-here', 'your-app-password-here'],
-        is_password=True  # Shows masked existing value
+        placeholders=["your-password-here", "your-app-password-here"],
+        is_password=True,  # Shows masked existing value
     )
 
     # Remove spaces from app password (Google adds spaces when copying)
@@ -133,9 +137,9 @@ def main():
         prompt_text="From Email",
         env_file_path=env_path,
         env_key="FROM_EMAIL",
-        placeholders=['noreply@example.com'],
+        placeholders=["noreply@example.com"],
         is_password=False,
-        default=smtp_username  # Default to SMTP username
+        default=smtp_username,  # Default to SMTP username
     )
 
     from_name = prompt_value("From Name", default="Chronicle AI")
@@ -160,18 +164,26 @@ def main():
     # Prompt to enable plugin
     enable_now = Confirm.ask("\nEnable email_summarizer plugin now?", default=True)
     if enable_now:
-        with open(plugins_yml_path, 'r') as f:
+        with open(plugins_yml_path, "r") as f:
             config = _yaml.load(f)
-        config['plugins']['email_summarizer']['enabled'] = True
-        with open(plugins_yml_path, 'w') as f:
+        config["plugins"]["email_summarizer"]["enabled"] = True
+        with open(plugins_yml_path, "w") as f:
             _yaml.dump(config, f)
         console.print("[green]✅ Plugin enabled in config/plugins.yml[/green]")
 
-    console.print("\n[bold cyan]✅ Email Summarizer configured successfully![/bold cyan]")
+    console.print(
+        "\n[bold cyan]✅ Email Summarizer configured successfully![/bold cyan]"
+    )
     console.print("\n[bold]Configuration saved to:[/bold]")
-    console.print("  • [green]backends/advanced/.env[/green] - SMTP credentials (secrets)")
-    console.print("  • [green]config/plugins.yml[/green] - Plugin orchestration (enabled, events)")
-    console.print("  • [green]plugins/email_summarizer/config.yml[/green] - Plugin settings (already configured)")
+    console.print(
+        "  • [green]backends/advanced/.env[/green] - SMTP credentials (secrets)"
+    )
+    console.print(
+        "  • [green]config/plugins.yml[/green] - Plugin orchestration (enabled, events)"
+    )
+    console.print(
+        "  • [green]plugins/email_summarizer/config.yml[/green] - Plugin settings (already configured)"
+    )
     console.print()
 
     if not enable_now:
@@ -183,11 +195,13 @@ def main():
     console.print("  [dim]cd backends/advanced && docker compose restart[/dim]")
     console.print()
     console.print("[yellow]⚠️  SECURITY: Never commit secrets to git![/yellow]")
-    console.print("[yellow]    • Secrets go in backends/advanced/.env (gitignored)[/yellow]")
+    console.print(
+        "[yellow]    • Secrets go in backends/advanced/.env (gitignored)[/yellow]"
+    )
     console.print("[yellow]    • Config files use ${ENV_VAR} references only[/yellow]")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
@@ -196,5 +210,6 @@ if __name__ == '__main__':
     except Exception as e:
         console.print(f"\n[red]Error during setup: {e}[/red]")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)

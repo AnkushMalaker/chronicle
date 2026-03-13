@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 class MCPError(Exception):
     """MCP protocol error"""
+
     pass
 
 
@@ -37,7 +38,7 @@ class HAMCPClient:
             timeout: Request timeout in seconds
 
         """
-        self.base_url = base_url.rstrip('/')
+        self.base_url = base_url.rstrip("/")
         self.mcp_url = f"{self.base_url}/api/mcp"
         self.token = token
         self.timeout = timeout
@@ -53,7 +54,9 @@ class HAMCPClient:
         self._request_id += 1
         return self._request_id
 
-    async def _send_mcp_request(self, method: str, params: Optional[Dict] = None) -> Dict[str, Any]:
+    async def _send_mcp_request(
+        self, method: str, params: Optional[Dict] = None
+    ) -> Dict[str, Any]:
         """
         Send MCP protocol request to Home Assistant.
 
@@ -67,26 +70,20 @@ class HAMCPClient:
         Raises:
             MCPError: If request fails or returns an error
         """
-        payload = {
-            "jsonrpc": "2.0",
-            "id": self._next_request_id(),
-            "method": method
-        }
+        payload = {"jsonrpc": "2.0", "id": self._next_request_id(), "method": method}
 
         if params:
             payload["params"] = params
 
         headers = {
             "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
 
         try:
             logger.debug(f"MCP Request: {method} with params: {params}")
             response = await self.client.post(
-                self.mcp_url,
-                json=payload,
-                headers=headers
+                self.mcp_url, json=payload, headers=headers
             )
             response.raise_for_status()
 
@@ -133,7 +130,9 @@ class HAMCPClient:
         logger.info(f"Retrieved {len(tools)} tools from Home Assistant MCP")
         return tools
 
-    async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def call_tool(
+        self, tool_name: str, arguments: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """
         Execute a tool via MCP.
 
@@ -151,10 +150,7 @@ class HAMCPClient:
             >>> await client.call_tool("turn_off", {"entity_id": "light.hall_light"})
             {"success": True}
         """
-        params = {
-            "name": tool_name,
-            "arguments": arguments
-        }
+        params = {"name": tool_name, "arguments": arguments}
 
         logger.info(f"Calling MCP tool '{tool_name}' with args: {arguments}")
         result = await self._send_mcp_request("tools/call", params)
@@ -178,7 +174,9 @@ class HAMCPClient:
         """
         try:
             tools = await self.list_tools()
-            logger.info(f"MCP connection test successful ({len(tools)} tools available)")
+            logger.info(
+                f"MCP connection test successful ({len(tools)} tools available)"
+            )
             return True
         except Exception as e:
             logger.error(f"MCP connection test failed: {e}")
@@ -203,7 +201,7 @@ class HAMCPClient:
         """
         headers = {
             "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
 
         payload = {"template": template}
@@ -211,16 +209,14 @@ class HAMCPClient:
         try:
             logger.debug(f"Rendering template: {template}")
             response = await self.client.post(
-                f"{self.base_url}/api/template",
-                json=payload,
-                headers=headers
+                f"{self.base_url}/api/template", json=payload, headers=headers
             )
             response.raise_for_status()
 
             result = response.text.strip()
 
             # Try to parse as JSON (for lists, dicts)
-            if result.startswith('[') or result.startswith('{'):
+            if result.startswith("[") or result.startswith("{"):
                 try:
                     return json.loads(result)
                 except json.JSONDecodeError:
@@ -278,7 +274,9 @@ class HAMCPClient:
             logger.info(f"Label '{label}' maps to {len(areas)} areas: {areas}")
             return areas
         else:
-            logger.warning(f"Unexpected label_areas format for '{label}': {type(areas)}")
+            logger.warning(
+                f"Unexpected label_areas format for '{label}': {type(areas)}"
+            )
             return []
 
     async def fetch_area_entities(self, area_name: str) -> List[str]:
@@ -302,7 +300,9 @@ class HAMCPClient:
             logger.info(f"Fetched {len(entities)} entities from area '{area_name}'")
             return entities
         else:
-            logger.warning(f"Unexpected entities format for area '{area_name}': {type(entities)}")
+            logger.warning(
+                f"Unexpected entities format for area '{area_name}': {type(entities)}"
+            )
             return []
 
     async def fetch_entity_states(self) -> Dict[str, Dict]:
@@ -324,14 +324,13 @@ class HAMCPClient:
         """
         headers = {
             "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
 
         try:
             logger.debug("Fetching all entity states")
             response = await self.client.get(
-                f"{self.base_url}/api/states",
-                headers=headers
+                f"{self.base_url}/api/states", headers=headers
             )
             response.raise_for_status()
 
@@ -340,16 +339,16 @@ class HAMCPClient:
 
             # Enrich with area information
             for state in states:
-                entity_id = state.get('entity_id')
+                entity_id = state.get("entity_id")
                 if entity_id:
                     # Get area_id using Template API
                     try:
                         area_template = f"{{{{ area_id('{entity_id}') }}}}"
                         area_id = await self._render_template(area_template)
-                        state['area_id'] = area_id if area_id else None
+                        state["area_id"] = area_id if area_id else None
                     except Exception as e:
                         logger.debug(f"Failed to get area for {entity_id}: {e}")
-                        state['area_id'] = None
+                        state["area_id"] = None
 
                     entity_details[entity_id] = state
 
@@ -364,11 +363,7 @@ class HAMCPClient:
             raise MCPError(f"Request failed: {e}")
 
     async def call_service(
-        self,
-        domain: str,
-        service: str,
-        entity_ids: List[str],
-        **parameters
+        self, domain: str, service: str, entity_ids: List[str], **parameters
     ) -> Dict[str, Any]:
         """
         Call a Home Assistant service directly via REST API.
@@ -388,24 +383,21 @@ class HAMCPClient:
         """
         headers = {
             "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
 
-        payload = {
-            "entity_id": entity_ids,
-            **parameters
-        }
+        payload = {"entity_id": entity_ids, **parameters}
 
         service_url = f"{self.base_url}/api/services/{domain}/{service}"
 
         try:
-            logger.info(f"Calling service {domain}.{service} for {len(entity_ids)} entities")
+            logger.info(
+                f"Calling service {domain}.{service} for {len(entity_ids)} entities"
+            )
             logger.debug(f"Service payload: {payload}")
 
             response = await self.client.post(
-                service_url,
-                json=payload,
-                headers=headers
+                service_url, json=payload, headers=headers
             )
             response.raise_for_status()
 

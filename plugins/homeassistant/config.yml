@@ -13,6 +13,9 @@ wake_word: ${HA_WAKE_WORD:-vivi}
 timeout: ${HA_TIMEOUT:-30}
 
 # Button action mappings
+# Maps device button events to Home Assistant service calls.
+# Each key is a button event type (single_press, double_press).
+# Values specify: service, target_type (area/entity), target, entity_type.
 button_actions:
   double_press:
     service: toggle

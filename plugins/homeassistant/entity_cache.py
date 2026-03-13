@@ -50,20 +50,24 @@ class EntityCache:
 
         # Step 1: Exact friendly_name match
         for entity_id, details in self.entity_details.items():
-            friendly_name = details.get('attributes', {}).get('friendly_name', '')
+            friendly_name = details.get("attributes", {}).get("friendly_name", "")
             if friendly_name.lower() == name_lower:
-                logger.debug(f"Exact match: {name} → {entity_id} (friendly_name: {friendly_name})")
+                logger.debug(
+                    f"Exact match: {name} → {entity_id} (friendly_name: {friendly_name})"
+                )
                 return entity_id
 
         # Step 2: Partial friendly_name match
         for entity_id, details in self.entity_details.items():
-            friendly_name = details.get('attributes', {}).get('friendly_name', '')
+            friendly_name = details.get("attributes", {}).get("friendly_name", "")
             if name_lower in friendly_name.lower():
-                logger.debug(f"Partial match: {name} → {entity_id} (friendly_name: {friendly_name})")
+                logger.debug(
+                    f"Partial match: {name} → {entity_id} (friendly_name: {friendly_name})"
+                )
                 return entity_id
 
         # Step 3: Entity ID match (try adding common domains)
-        common_domains = ['light', 'switch', 'fan', 'cover']
+        common_domains = ["light", "switch", "fan", "cover"]
         for domain in common_domains:
             candidate_id = f"{domain}.{name_lower.replace(' ', '_')}"
             if candidate_id in self.entity_details:
@@ -74,9 +78,7 @@ class EntityCache:
         return None
 
     def get_entities_in_area(
-        self,
-        area: str,
-        entity_type: Optional[str] = None
+        self, area: str, entity_type: Optional[str] = None
     ) -> List[str]:
         """
         Get all entities in an area, optionally filtered by domain.
@@ -121,10 +123,7 @@ class EntityCache:
         # Filter by entity type if specified
         if entity_type:
             entity_type_lower = entity_type.lower()
-            entities = [
-                e for e in entities
-                if e.split('.')[0] == entity_type_lower
-            ]
+            entities = [e for e in entities if e.split(".")[0] == entity_type_lower]
 
         logger.debug(
             f"Found {len(entities)} entities in area '{area}'"

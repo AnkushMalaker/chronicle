@@ -3,6 +3,7 @@ Email Summarizer Plugin for Chronicle.
 
 Automatically sends email summaries after memory extraction.
 """
+
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -33,7 +34,7 @@ class EmailSummarizerPlugin(BasePlugin):
     4. Sends email via SMTP
     """
 
-    SUPPORTED_ACCESS_LEVELS: List[str] = ['conversation']
+    SUPPORTED_ACCESS_LEVELS: List[str] = ["conversation"]
 
     name = "Email Summarizer"
     description = "Sends email summaries after memory extraction"
@@ -47,13 +48,12 @@ class EmailSummarizerPlugin(BasePlugin):
         """
         super().__init__(config)
 
-        self.subject_prefix = config.get('subject_prefix', 'Conversation Summary')
-        self.include_conversation_id = config.get('include_conversation_id', True)
-        self.include_duration = config.get('include_duration', True)
+        self.subject_prefix = config.get("subject_prefix", "Conversation Summary")
+        self.include_conversation_id = config.get("include_conversation_id", True)
+        self.include_duration = config.get("include_duration", True)
 
         # Email service will be initialized in initialize()
         self.email_service: Optional[SMTPEmailService] = None
-
 
     def register_prompts(self, registry) -> None:
         """Register email summarizer prompts with the prompt registry."""
@@ -91,13 +91,13 @@ class EmailSummarizerPlugin(BasePlugin):
         # Initialize SMTP email service
         try:
             smtp_config = {
-                'smtp_host': self.config.get('smtp_host'),
-                'smtp_port': self.config.get('smtp_port', 587),
-                'smtp_username': self.config.get('smtp_username'),
-                'smtp_password': self.config.get('smtp_password'),
-                'smtp_use_tls': self.config.get('smtp_use_tls', True),
-                'from_email': self.config.get('from_email'),
-                'from_name': self.config.get('from_name', 'Chronicle AI'),
+                "smtp_host": self.config.get("smtp_host"),
+                "smtp_port": self.config.get("smtp_port", 587),
+                "smtp_username": self.config.get("smtp_username"),
+                "smtp_password": self.config.get("smtp_password"),
+                "smtp_use_tls": self.config.get("smtp_use_tls", True),
+                "from_email": self.config.get("from_email"),
+                "from_name": self.config.get("from_name", "Chronicle AI"),
             }
 
             self.email_service = SMTPEmailService(smtp_config)
@@ -127,8 +127,16 @@ class EmailSummarizerPlugin(BasePlugin):
             success = await self.email_service.test_connection()
             latency_ms = int((time.time() - start) * 1000)
             if success:
-                return {"ok": True, "message": "SMTP connected", "latency_ms": latency_ms}
-            return {"ok": False, "message": "SMTP connection failed", "latency_ms": latency_ms}
+                return {
+                    "ok": True,
+                    "message": "SMTP connected",
+                    "latency_ms": latency_ms,
+                }
+            return {
+                "ok": False,
+                "message": "SMTP connection failed",
+                "latency_ms": latency_ms,
+            }
         except Exception as e:
             return {"ok": False, "message": str(e)}
 
@@ -136,7 +144,9 @@ class EmailSummarizerPlugin(BasePlugin):
         """Clean up plugin resources."""
         logger.info("Email Summarizer plugin cleanup complete")
 
-    async def on_conversation_complete(self, context: PluginContext) -> Optional[PluginResult]:
+    async def on_conversation_complete(
+        self, context: PluginContext
+    ) -> Optional[PluginResult]:
         """
         Send email summary after all conversation processing completes.
 
@@ -152,7 +162,7 @@ class EmailSummarizerPlugin(BasePlugin):
                 - duration: float
         """
         try:
-            conversation_id = context.data.get('conversation_id', 'unknown')
+            conversation_id = context.data.get("conversation_id", "unknown")
             logger.info(
                 f"Processing conversation.complete event for user: {context.user_id}, "
                 f"conversation: {conversation_id}"
@@ -163,25 +173,33 @@ class EmailSummarizerPlugin(BasePlugin):
                 Conversation.conversation_id == conversation_id
             )
             if not conversation:
-                logger.warning(f"Conversation {conversation_id} not found in DB, skipping email")
+                logger.warning(
+                    f"Conversation {conversation_id} not found in DB, skipping email"
+                )
                 return PluginResult(success=False, message="Conversation not found")
 
             # Get transcript from active version (computed property handles version lookup)
             transcript = conversation.transcript
             if not transcript:
-                logger.warning(f"No transcript for conversation {conversation_id}, skipping email")
+                logger.warning(
+                    f"No transcript for conversation {conversation_id}, skipping email"
+                )
                 return PluginResult(success=False, message="Skipped: Empty transcript")
 
             # Use the DB summary (already generated by this point)
             summary = conversation.detailed_summary or conversation.summary
             if not summary:
-                logger.warning(f"No summary for conversation {conversation_id}, skipping email")
-                return PluginResult(success=False, message="Skipped: No summary available")
+                logger.warning(
+                    f"No summary for conversation {conversation_id}, skipping email"
+                )
+                return PluginResult(
+                    success=False, message="Skipped: No summary available"
+                )
 
             title = conversation.title or self.subject_prefix
 
             # Send to the configured SMTP username (the user's own email)
-            user_email = self.config.get('smtp_username')
+            user_email = self.config.get("smtp_username")
             if not user_email:
                 return PluginResult(
                     success=False,
@@ -216,22 +234,28 @@ class EmailSummarizerPlugin(BasePlugin):
             )
 
             if success:
-                logger.info(f"✅ Email summary sent to {user_email} for conversation {conversation_id}")
+                logger.info(
+                    f"✅ Email summary sent to {user_email} for conversation {conversation_id}"
+                )
                 return PluginResult(
                     success=True,
                     message=f"Email sent to {user_email}",
                     data={
-                        'recipient': user_email,
-                        'conversation_id': conversation_id,
-                        'title': title,
+                        "recipient": user_email,
+                        "conversation_id": conversation_id,
+                        "title": title,
                     },
                 )
             else:
                 logger.error(f"Failed to send email to {user_email}")
-                return PluginResult(success=False, message=f"Failed to send email to {user_email}")
+                return PluginResult(
+                    success=False, message=f"Failed to send email to {user_email}"
+                )
 
         except Exception as e:
-            logger.error(f"Error in email summarizer (conversation.complete): {e}", exc_info=True)
+            logger.error(
+                f"Error in email summarizer (conversation.complete): {e}", exc_info=True
+            )
             return PluginResult(success=False, message=f"Error: {str(e)}")
 
     def _format_subject(self, created_at: Optional[datetime] = None) -> str:
@@ -281,25 +305,32 @@ class EmailSummarizerPlugin(BasePlugin):
 
         try:
             # Validate required config fields
-            required_fields = ['smtp_host', 'smtp_username', 'smtp_password', 'from_email']
-            missing_fields = [field for field in required_fields if not config.get(field)]
+            required_fields = [
+                "smtp_host",
+                "smtp_username",
+                "smtp_password",
+                "from_email",
+            ]
+            missing_fields = [
+                field for field in required_fields if not config.get(field)
+            ]
 
             if missing_fields:
                 return {
                     "success": False,
                     "message": f"Missing required fields: {', '.join(missing_fields)}",
-                    "status": "error"
+                    "status": "error",
                 }
 
             # Build SMTP config
             smtp_config = {
-                'smtp_host': config.get('smtp_host'),
-                'smtp_port': config.get('smtp_port', 587),
-                'smtp_username': config.get('smtp_username'),
-                'smtp_password': config.get('smtp_password'),
-                'smtp_use_tls': config.get('smtp_use_tls', True),
-                'from_email': config.get('from_email'),
-                'from_name': config.get('from_name', 'Chronicle AI'),
+                "smtp_host": config.get("smtp_host"),
+                "smtp_port": config.get("smtp_port", 587),
+                "smtp_username": config.get("smtp_username"),
+                "smtp_password": config.get("smtp_password"),
+                "smtp_use_tls": config.get("smtp_use_tls", True),
+                "from_email": config.get("from_email"),
+                "from_name": config.get("from_name", "Chronicle AI"),
             }
 
             # Log config with masked secrets for debugging
@@ -321,27 +352,29 @@ class EmailSummarizerPlugin(BasePlugin):
                     "message": f"Successfully connected to SMTP server at {smtp_config['smtp_host']}",
                     "status": "success",
                     "details": {
-                        "smtp_host": smtp_config['smtp_host'],
-                        "smtp_port": smtp_config['smtp_port'],
+                        "smtp_host": smtp_config["smtp_host"],
+                        "smtp_port": smtp_config["smtp_port"],
                         "connection_time_ms": connection_time_ms,
-                        "use_tls": smtp_config['smtp_use_tls']
-                    }
+                        "use_tls": smtp_config["smtp_use_tls"],
+                    },
                 }
             else:
                 return {
                     "success": False,
                     "message": "SMTP connection test failed",
-                    "status": "error"
+                    "status": "error",
                 }
 
         except Exception as e:
             logger.error(f"SMTP connection test failed: {e}", exc_info=True)
             error_msg = str(e)
-            
+
             # Provide helpful hints based on error type
             hints = []
             if "Authentication" in error_msg or "535" in error_msg:
-                hints.append("For Gmail: Enable 2FA and create an App Password at https://myaccount.google.com/apppasswords")
+                hints.append(
+                    "For Gmail: Enable 2FA and create an App Password at https://myaccount.google.com/apppasswords"
+                )
                 hints.append("Verify your username and password are correct")
             elif "Connection" in error_msg or "timeout" in error_msg.lower():
                 hints.append("Check your SMTP host and port settings")
@@ -349,10 +382,10 @@ class EmailSummarizerPlugin(BasePlugin):
             elif "TLS" in error_msg or "SSL" in error_msg:
                 hints.append("For port 587: Enable TLS")
                 hints.append("For port 465: Disable TLS (uses implicit SSL)")
-            
+
             return {
                 "success": False,
                 "message": f"Connection test failed: {error_msg}",
                 "status": "error",
-                "hints": hints
+                "hints": hints,
             }

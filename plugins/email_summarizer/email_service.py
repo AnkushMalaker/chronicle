@@ -7,6 +7,7 @@ Provides email sending functionality via SMTP protocol with support for:
 - Gmail and other SMTP providers
 - Async implementation
 """
+
 import asyncio
 import logging
 import smtplib
@@ -36,13 +37,13 @@ class SMTPEmailService:
                 - from_email: Sender email address
                 - from_name: Sender display name (default: 'Chronicle AI')
         """
-        self.host = config.get('smtp_host')
-        self.port = config.get('smtp_port', 587)
-        self.username = config.get('smtp_username')
-        self.password = config.get('smtp_password')
-        self.use_tls = config.get('smtp_use_tls', True)
-        self.from_email = config.get('from_email')
-        self.from_name = config.get('from_name', 'Chronicle AI')
+        self.host = config.get("smtp_host")
+        self.port = config.get("smtp_port", 587)
+        self.username = config.get("smtp_username")
+        self.password = config.get("smtp_password")
+        self.use_tls = config.get("smtp_use_tls", True)
+        self.from_email = config.get("from_email")
+        self.from_name = config.get("from_name", "Chronicle AI")
 
         # Validate required configuration
         if not all([self.host, self.username, self.password, self.from_email]):
@@ -64,7 +65,7 @@ class SMTPEmailService:
         to_email: str,
         subject: str,
         body_text: str,
-        body_html: Optional[str] = None
+        body_html: Optional[str] = None,
     ) -> bool:
         """
         Send email via SMTP with HTML/text support.
@@ -80,18 +81,18 @@ class SMTPEmailService:
         """
         try:
             # Create message container
-            msg = MIMEMultipart('alternative')
-            msg['Subject'] = subject
-            msg['From'] = f"{self.from_name} <{self.from_email}>"
-            msg['To'] = to_email
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"] = f"{self.from_name} <{self.from_email}>"
+            msg["To"] = to_email
 
             # Attach plain text version
-            text_part = MIMEText(body_text, 'plain')
+            text_part = MIMEText(body_text, "plain")
             msg.attach(text_part)
 
             # Attach HTML version if provided
             if body_html:
-                html_part = MIMEText(body_html, 'html')
+                html_part = MIMEText(body_html, "html")
                 msg.attach(html_part)
 
             # Send email asynchronously (run in thread pool to avoid blocking)
@@ -143,7 +144,9 @@ class SMTPEmailService:
         """
         try:
             await asyncio.to_thread(self._test_smtp_connection)
-            logger.info(f"✅ SMTP connection test successful: {self.username}@{self.host}")
+            logger.info(
+                f"✅ SMTP connection test successful: {self.username}@{self.host}"
+            )
             return True
         except Exception as e:
             logger.error(f"SMTP connection test failed: {e}", exc_info=True)
@@ -172,15 +175,25 @@ class SMTPEmailService:
                 smtp_server.quit()
         except smtplib.SMTPAuthenticationError as e:
             # Note: Error message from smtplib should not contain password, but be cautious
-            raise Exception(f"SMTP Authentication failed for {self.username}. Check credentials. For Gmail, use an App Password instead of your regular password. Error: {str(e)}")
+            raise Exception(
+                f"SMTP Authentication failed for {self.username}. Check credentials. For Gmail, use an App Password instead of your regular password. Error: {str(e)}"
+            )
         except smtplib.SMTPConnectError as e:
-            raise Exception(f"Failed to connect to SMTP server {self.host}:{self.port}. Check host and port. Error: {str(e)}")
+            raise Exception(
+                f"Failed to connect to SMTP server {self.host}:{self.port}. Check host and port. Error: {str(e)}"
+            )
         except smtplib.SMTPServerDisconnected as e:
-            raise Exception(f"SMTP server disconnected unexpectedly. Check TLS settings (port 587 needs TLS, port 465 needs SSL). Error: {str(e)}")
+            raise Exception(
+                f"SMTP server disconnected unexpectedly. Check TLS settings (port 587 needs TLS, port 465 needs SSL). Error: {str(e)}"
+            )
         except TimeoutError as e:
-            raise Exception(f"Connection to {self.host}:{self.port} timed out. Check firewall/network settings. Error: {str(e)}")
+            raise Exception(
+                f"Connection to {self.host}:{self.port} timed out. Check firewall/network settings. Error: {str(e)}"
+            )
         except Exception as e:
-            raise Exception(f"SMTP connection test failed: {type(e).__name__}: {str(e)}")
+            raise Exception(
+                f"SMTP connection test failed: {type(e).__name__}: {str(e)}"
+            )
 
 
 # Test script for development/debugging
@@ -193,13 +206,13 @@ async def main():
     load_dotenv()
 
     config = {
-        'smtp_host': os.getenv('SMTP_HOST', 'smtp.gmail.com'),
-        'smtp_port': int(os.getenv('SMTP_PORT', 587)),
-        'smtp_username': os.getenv('SMTP_USERNAME'),
-        'smtp_password': os.getenv('SMTP_PASSWORD'),
-        'smtp_use_tls': os.getenv('SMTP_USE_TLS', 'true').lower() == 'true',
-        'from_email': os.getenv('FROM_EMAIL', 'noreply@chronicle.ai'),
-        'from_name': os.getenv('FROM_NAME', 'Chronicle AI'),
+        "smtp_host": os.getenv("SMTP_HOST", "smtp.gmail.com"),
+        "smtp_port": int(os.getenv("SMTP_PORT", 587)),
+        "smtp_username": os.getenv("SMTP_USERNAME"),
+        "smtp_password": os.getenv("SMTP_PASSWORD"),
+        "smtp_use_tls": os.getenv("SMTP_USE_TLS", "true").lower() == "true",
+        "from_email": os.getenv("FROM_EMAIL", "noreply@chronicle.ai"),
+        "from_name": os.getenv("FROM_NAME", "Chronicle AI"),
     }
 
     try:
@@ -214,14 +227,14 @@ async def main():
             return
 
         # Send test email
-        test_email = config['smtp_username']  # Send to self
+        test_email = config["smtp_username"]  # Send to self
         print(f"\nSending test email to {test_email}...")
 
         success = await service.send_email(
             to_email=test_email,
             subject="Chronicle Email Service Test",
             body_text="This is a test email from Chronicle Email Service.\n\nIf you received this, the email service is working correctly!",
-            body_html="<h2>Chronicle Email Service Test</h2><p>This is a test email from Chronicle Email Service.</p><p>If you received this, the email service is working correctly!</p>"
+            body_html="<h2>Chronicle Email Service Test</h2><p>This is a test email from Chronicle Email Service.</p><p>If you received this, the email service is working correctly!</p>",
         )
 
         if success:
@@ -233,5 +246,5 @@ async def main():
         print(f"❌ Error: {e}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     asyncio.run(main())

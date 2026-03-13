@@ -3,6 +3,7 @@ Email templates for the Email Summarizer plugin.
 
 Provides HTML and plain text email templates.
 """
+
 import html
 from datetime import datetime
 from typing import Optional
@@ -35,7 +36,7 @@ def format_html_email(
     transcript: str,
     conversation_id: str,
     duration: float,
-    created_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None,
 ) -> str:
     """
     Format HTML email template.
@@ -58,7 +59,7 @@ def format_html_email(
     transcript_escaped = html.escape(transcript, quote=True)
 
     # Format transcript with line breaks (after escaping)
-    transcript_html = transcript_escaped.replace('\n', '<br>')
+    transcript_html = transcript_escaped.replace("\n", "<br>")
 
     return f"""
 <!DOCTYPE html>
@@ -209,7 +210,7 @@ def format_text_email(
     transcript: str,
     conversation_id: str,
     duration: float,
-    created_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None,
 ) -> str:
     """
     Format plain text email template.

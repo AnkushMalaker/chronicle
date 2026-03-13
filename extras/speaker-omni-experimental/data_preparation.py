@@ -23,13 +23,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-import pandas as pd
 import soundfile as sf
 import yaml
 import yt_dlp
 from deepgram import DeepgramClient, PrerecordedOptions
 from pydub import AudioSegment
-from scipy import signal
 
 # Configure logging
 logging.basicConfig(
