@@ -31,4 +31,4 @@ COPY . .
 EXPOSE 8989
 
 # Run the application
-CMD ["uv", "run", "python3", "main.py"] 
+CMD ["uv", "run", "python3", "main.py"]

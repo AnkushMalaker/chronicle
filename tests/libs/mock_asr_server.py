@@ -24,12 +24,11 @@ import os
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -120,7 +119,12 @@ MOCK_WORDS = [
 
 # Mock diarized segments (for providers with built-in diarization)
 MOCK_DIARIZED_SEGMENTS = [
-    {"speaker": "Speaker 0", "start": 0.0, "end": 1.2, "text": "This is a mock transcription"},
+    {
+        "speaker": "Speaker 0",
+        "start": 0.0,
+        "end": 1.2,
+        "text": "This is a mock transcription",
+    },
     {"speaker": "Speaker 1", "start": 1.25, "end": 2.2, "text": "for testing purposes"},
 ]
 
@@ -131,9 +135,7 @@ async def health():
     config = get_provider_config()
     logger.debug(f"Health check requested (provider: {config['provider']})")
     return HealthResponse(
-        status="healthy",
-        model=config["model_id"],
-        provider=config["provider"]
+        status="healthy", model=config["model_id"], provider=config["provider"]
     )
 
 
@@ -146,7 +148,7 @@ async def info():
         model_id=config["model_id"],
         provider=config["provider"],
         capabilities=config["capabilities"],
-        supported_languages=None
+        supported_languages=None,
     )
 
 
@@ -165,7 +167,9 @@ async def transcribe(file: UploadFile = File(...)):
     file_size = len(content)
     config = get_provider_config()
 
-    logger.info(f"Received file: {file.filename}, size: {file_size} bytes (provider: {config['provider']})")
+    logger.info(
+        f"Received file: {file.filename}, size: {file_size} bytes (provider: {config['provider']})"
+    )
 
     # Basic validation - reject empty files
     if file_size == 0:
@@ -181,11 +185,7 @@ async def transcribe(file: UploadFile = File(...)):
     if config["has_diarization"]:
         segments = MOCK_DIARIZED_SEGMENTS
 
-    return TranscriptionResult(
-        text=MOCK_TRANSCRIPT,
-        words=words,
-        segments=segments
-    )
+    return TranscriptionResult(text=MOCK_TRANSCRIPT, words=words, segments=segments)
 
 
 def main(host: str, port: int, provider: str = "mock", debug: bool = False):
@@ -203,23 +203,22 @@ def main(host: str, port: int, provider: str = "mock", debug: bool = False):
     logger.info(f"Has word timestamps: {config['has_word_timestamps']}")
     logger.info("Endpoints: /health, /info, /transcribe")
 
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        log_level=log_level
-    )
+    uvicorn.run(app, host=host, port=port, log_level=log_level)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Mock ASR Server")
-    parser.add_argument("--host", default="0.0.0.0", help="Server host (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8765, help="Server port (default: 8765)")
+    parser.add_argument(
+        "--host", default="0.0.0.0", help="Server host (default: 0.0.0.0)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=8765, help="Server port (default: 8765)"
+    )
     parser.add_argument(
         "--provider",
         default="mock",
         choices=["mock", "parakeet", "vibevoice", "deepgram"],
-        help="Provider mode - determines reported capabilities (default: mock)"
+        help="Provider mode - determines reported capabilities (default: mock)",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 

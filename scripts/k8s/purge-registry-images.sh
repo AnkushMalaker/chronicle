@@ -98,18 +98,18 @@ FAILED_COUNT=0
 
 while IFS= read -r image || [[ -n "$image" ]]; do
     echo "   Removing from registry: $image"
-    
+
     # Extract repository and tag from full image name (registry/repo:tag)
     repo_tag=$(echo "$image" | sed "s|^$REGISTRY/||")
     repo=$(echo "$repo_tag" | cut -d':' -f1)
     tag=$(echo "$repo_tag" | cut -d':' -f2)
-    
+
     # Delete using Docker Registry API
     # First get the digest
     digest=$(curl -s -I -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
               "http://$REGISTRY/v2/$repo/manifests/$tag" | \
               grep -i docker-content-digest | cut -d' ' -f2 | tr -d '\r')
-    
+
     if [[ -n "$digest" ]]; then
         if curl -s -X DELETE "http://$REGISTRY/v2/$repo/manifests/$digest" >/dev/null 2>&1; then
             ((PURGED_COUNT++))
@@ -133,7 +133,7 @@ echo "   Remaining registry images: $((TOTAL_COUNT - PURGED_COUNT))"
 if [ "$PURGED_COUNT" -gt 0 ]; then
     echo ""
     echo "🗑️  Running garbage collection to free disk space..."
-    
+
     # Try to run garbage collection on the registry
     # This requires access to the registry container or filesystem
     NODE_NAME="${SPEAKER_NODE:-}"

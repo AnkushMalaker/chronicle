@@ -136,4 +136,3 @@ Delete User Test
 
     ${response}=       POST On Session    api    /auth/jwt/login    data=${auth_data}    headers=${headers}    expected_status=400
     Should Be Equal As Integers    ${response.status_code}    400
-

@@ -35,7 +35,9 @@ class Speaker(BaseModel):
     """Speaker information from diarization."""
 
     id: str = Field(..., description="Speaker identifier")
-    label: Optional[str] = Field(default=None, description="Human-readable speaker label")
+    label: Optional[str] = Field(
+        default=None, description="Human-readable speaker label"
+    )
     start: float = Field(..., description="Speaker segment start time")
     end: float = Field(..., description="Speaker segment end time")
 
@@ -53,9 +55,7 @@ class TranscriptionResult(BaseModel):
     speakers: Optional[List[Speaker]] = Field(
         default=None, description="Speaker diarization information (if available)"
     )
-    language: Optional[str] = Field(
-        default=None, description="Detected language code"
-    )
+    language: Optional[str] = Field(default=None, description="Detected language code")
     duration: Optional[float] = Field(
         default=None, description="Audio duration in seconds"
     )

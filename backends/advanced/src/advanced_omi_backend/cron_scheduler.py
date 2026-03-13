@@ -32,6 +32,7 @@ _NEXT_RUN_KEY = "cron:next_run:{job_id}"
 # Data classes
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class CronJobConfig:
     job_id: str
@@ -66,6 +67,7 @@ def _get_job_func(job_id: str) -> Optional[JobFunc]:
 # Scheduler
 # ---------------------------------------------------------------------------
 
+
 class CronScheduler:
     def __init__(self) -> None:
         self.jobs: Dict[str, CronJobConfig] = {}
@@ -79,6 +81,7 @@ class CronScheduler:
     async def start(self) -> None:
         """Load config, restore state from Redis, and start the scheduler loop."""
         import os
+
         redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
         self._redis = aioredis.from_url(redis_url, decode_responses=True)
 
@@ -129,7 +132,9 @@ class CronScheduler:
             if not croniter.is_valid(schedule):
                 raise ValueError(f"Invalid cron expression: {schedule}")
             cfg.schedule = schedule
-            cfg.next_run = croniter(schedule, datetime.now(timezone.utc)).get_next(datetime)
+            cfg.next_run = croniter(schedule, datetime.now(timezone.utc)).get_next(
+                datetime
+            )
 
         if enabled is not None:
             cfg.enabled = enabled
@@ -137,7 +142,11 @@ class CronScheduler:
         # Persist changes to config.yml
         save_config_section(
             f"cron_jobs.{job_id}",
-            {"enabled": cfg.enabled, "schedule": cfg.schedule, "description": cfg.description},
+            {
+                "enabled": cfg.enabled,
+                "schedule": cfg.schedule,
+                "description": cfg.description,
+            },
         )
 
         # Update next_run in Redis
@@ -147,22 +156,26 @@ class CronScheduler:
                 cfg.next_run.isoformat(),
             )
 
-        logger.info(f"Updated cron job '{job_id}': enabled={cfg.enabled}, schedule={cfg.schedule}")
+        logger.info(
+            f"Updated cron job '{job_id}': enabled={cfg.enabled}, schedule={cfg.schedule}"
+        )
 
     async def get_all_jobs_status(self) -> List[dict]:
         """Return status of all registered cron jobs."""
         result = []
         for job_id, cfg in self.jobs.items():
-            result.append({
-                "job_id": job_id,
-                "enabled": cfg.enabled,
-                "schedule": cfg.schedule,
-                "description": cfg.description,
-                "last_run": cfg.last_run.isoformat() if cfg.last_run else None,
-                "next_run": cfg.next_run.isoformat() if cfg.next_run else None,
-                "running": cfg.running,
-                "last_error": cfg.last_error,
-            })
+            result.append(
+                {
+                    "job_id": job_id,
+                    "enabled": cfg.enabled,
+                    "schedule": cfg.schedule,
+                    "description": cfg.description,
+                    "last_run": cfg.last_run.isoformat() if cfg.last_run else None,
+                    "next_run": cfg.next_run.isoformat() if cfg.next_run else None,
+                    "running": cfg.running,
+                    "last_error": cfg.last_error,
+                }
+            )
         return result
 
     # -- internals -----------------------------------------------------------
@@ -175,7 +188,9 @@ class CronScheduler:
         for job_id, job_cfg in cron_section.items():
             schedule = str(job_cfg.get("schedule", "0 * * * *"))
             if not croniter.is_valid(schedule):
-                logger.warning(f"Invalid cron expression for job '{job_id}': {schedule} — skipping")
+                logger.warning(
+                    f"Invalid cron expression for job '{job_id}': {schedule} — skipping"
+                )
                 continue
             now = datetime.now(timezone.utc)
             self.jobs[job_id] = CronJobConfig(

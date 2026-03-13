@@ -6,10 +6,7 @@ import logging
 
 from fastapi.responses import JSONResponse
 
-from advanced_omi_backend.client_manager import (
-    ClientManager,
-    get_user_clients_active,
-)
+from advanced_omi_backend.client_manager import ClientManager, get_user_clients_active
 from advanced_omi_backend.users import User
 
 logger = logging.getLogger(__name__)
@@ -37,7 +34,9 @@ async def get_active_clients(user: User, client_manager: ClientManager):
 
             # Filter to only the user's clients
             user_clients = [
-                client for client in all_clients if client["client_id"] in user_active_clients
+                client
+                for client in all_clients
+                if client["client_id"] in user_active_clients
             ]
 
             return {

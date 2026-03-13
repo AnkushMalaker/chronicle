@@ -40,7 +40,7 @@ MAX_CONVERSATION_HISTORY = 10  # Maximum conversation turns to keep in context
 
 class ChatMessage:
     """Represents a chat message."""
-    
+
     def __init__(
         self,
         message_id: str,
@@ -91,7 +91,7 @@ class ChatMessage:
 
 class ChatSession:
     """Represents a chat session."""
-    
+
     def __init__(
         self,
         session_id: str,
@@ -152,11 +152,13 @@ class ChatService:
         """
         try:
             reg = get_models_registry()
-            if reg and hasattr(reg, 'chat'):
+            if reg and hasattr(reg, "chat"):
                 chat_config = reg.chat
-                prompt = chat_config.get('system_prompt')
+                prompt = chat_config.get("system_prompt")
                 if prompt:
-                    logger.info(f"✅ Loaded chat system prompt from config (length: {len(prompt)} chars)")
+                    logger.info(
+                        f"✅ Loaded chat system prompt from config (length: {len(prompt)} chars)"
+                    )
                     logger.debug(f"System prompt: {prompt[:100]}...")
                     return prompt
         except Exception as e:
@@ -193,9 +195,15 @@ If no relevant memories are available, respond normally based on the conversatio
             self.messages_collection = self.db["chat_messages"]
 
             # Create indexes for better performance
-            await self.sessions_collection.create_index([("user_id", 1), ("updated_at", -1)])
-            await self.messages_collection.create_index([("session_id", 1), ("timestamp", 1)])
-            await self.messages_collection.create_index([("user_id", 1), ("timestamp", -1)])
+            await self.sessions_collection.create_index(
+                [("user_id", 1), ("updated_at", -1)]
+            )
+            await self.messages_collection.create_index(
+                [("session_id", 1), ("timestamp", 1)]
+            )
+            await self.messages_collection.create_index(
+                [("user_id", 1), ("timestamp", -1)]
+            )
 
             # Initialize LLM client and memory service
             self.llm_client = get_llm_client()
@@ -214,23 +222,25 @@ If no relevant memories are available, respond normally based on the conversatio
             await self.initialize()
 
         session = ChatSession(
-            session_id=str(uuid4()),
-            user_id=user_id,
-            title=title or "New Chat"
+            session_id=str(uuid4()), user_id=user_id, title=title or "New Chat"
         )
 
         await self.sessions_collection.insert_one(session.to_dict())
         logger.info(f"Created new chat session {session.session_id} for user {user_id}")
         return session
 
-    async def get_user_sessions(self, user_id: str, limit: int = 50) -> List[ChatSession]:
+    async def get_user_sessions(
+        self, user_id: str, limit: int = 50
+    ) -> List[ChatSession]:
         """Get all chat sessions for a user."""
         if not self._initialized:
             await self.initialize()
 
-        cursor = self.sessions_collection.find(
-            {"user_id": user_id}
-        ).sort("updated_at", -1).limit(limit)
+        cursor = (
+            self.sessions_collection.find({"user_id": user_id})
+            .sort("updated_at", -1)
+            .limit(limit)
+        )
 
         sessions = []
         async for doc in cursor:
@@ -243,10 +253,9 @@ If no relevant memories are available, respond normally based on the conversatio
         if not self._initialized:
             await self.initialize()
 
-        doc = await self.sessions_collection.find_one({
-            "session_id": session_id,
-            "user_id": user_id
-        })
+        doc = await self.sessions_collection.find_one(
+            {"session_id": session_id, "user_id": user_id}
+        )
 
         if doc:
             return ChatSession.from_dict(doc)
@@ -258,16 +267,14 @@ If no relevant memories are available, respond normally based on the conversatio
             await self.initialize()
 
         # Delete all messages in the session
-        await self.messages_collection.delete_many({
-            "session_id": session_id,
-            "user_id": user_id
-        })
+        await self.messages_collection.delete_many(
+            {"session_id": session_id, "user_id": user_id}
+        )
 
         # Delete the session
-        result = await self.sessions_collection.delete_one({
-            "session_id": session_id,
-            "user_id": user_id
-        })
+        result = await self.sessions_collection.delete_one(
+            {"session_id": session_id, "user_id": user_id}
+        )
 
         success = result.deleted_count > 0
         if success:
@@ -281,10 +288,13 @@ If no relevant memories are available, respond normally based on the conversatio
         if not self._initialized:
             await self.initialize()
 
-        cursor = self.messages_collection.find({
-            "session_id": session_id,
-            "user_id": user_id
-        }).sort("timestamp", 1).limit(limit)
+        cursor = (
+            self.messages_collection.find(
+                {"session_id": session_id, "user_id": user_id}
+            )
+            .sort("timestamp", 1)
+            .limit(limit)
+        )
 
         messages = []
         async for doc in cursor:
@@ -299,10 +309,10 @@ If no relevant memories are available, respond normally based on the conversatio
 
         try:
             await self.messages_collection.insert_one(message.to_dict())
-            
+
             # Update session timestamp and title if needed
             update_data = {"updated_at": message.timestamp}
-            
+
             # Auto-generate title from first user message if session has default title
             if message.role == "user":
                 session = await self.get_session(message.session_id, message.user_id)
@@ -315,35 +325,43 @@ If no relevant memories are available, respond normally based on the conversatio
 
             await self.sessions_collection.update_one(
                 {"session_id": message.session_id, "user_id": message.user_id},
-                {"$set": update_data}
+                {"$set": update_data},
             )
-            
+
             return True
         except Exception as e:
             logger.error(f"Failed to add message to session {message.session_id}: {e}")
             return False
 
-    async def get_relevant_memories(self, query: str, user_id: str) -> List[MemoryEntry]:
+    async def get_relevant_memories(
+        self, query: str, user_id: str
+    ) -> List[MemoryEntry]:
         """Get relevant memories for the user's query."""
         try:
             memories = await self.memory_service.search_memories(
-                query=query, 
-                user_id=user_id, 
-                limit=MAX_MEMORY_CONTEXT
+                query=query, user_id=user_id, limit=MAX_MEMORY_CONTEXT
             )
-            logger.info(f"Retrieved {len(memories)} relevant memories for query: {query[:50]}...")
+            logger.info(
+                f"Retrieved {len(memories)} relevant memories for query: {query[:50]}..."
+            )
             return memories
         except Exception as e:
             logger.error(f"Failed to retrieve memories for user {user_id}: {e}")
             return []
 
     async def format_conversation_context(
-        self, session_id: str, user_id: str, current_message: str, include_obsidian_memory: bool = False
+        self,
+        session_id: str,
+        user_id: str,
+        current_message: str,
+        include_obsidian_memory: bool = False,
     ) -> Tuple[str, List[str]]:
         """Format conversation context with memory integration."""
         # Get recent conversation history
-        messages = await self.get_session_messages(session_id, user_id, MAX_CONVERSATION_HISTORY)
-        
+        messages = await self.get_session_messages(
+            session_id, user_id, MAX_CONVERSATION_HISTORY
+        )
+
         # Get relevant memories
         memories = await self.get_relevant_memories(current_message, user_id)
         memory_ids = [memory.id for memory in memories if memory.id]
@@ -364,14 +382,18 @@ If no relevant memories are available, respond normally based on the conversatio
         if include_obsidian_memory:
             try:
                 obsidian_service = get_obsidian_service()
-                obsidian_result = await obsidian_service.search_obsidian(current_message)
+                obsidian_result = await obsidian_service.search_obsidian(
+                    current_message
+                )
                 obsidian_context = obsidian_result["results"]
                 if obsidian_context:
                     context_parts.append("# Relevant Obsidian Notes:")
                     for entry in obsidian_context:
                         context_parts.append(entry)
                     context_parts.append("")
-                    logger.info(f"Added {len(obsidian_context)} Obsidian notes to context")
+                    logger.info(
+                        f"Added {len(obsidian_context)} Obsidian notes to context"
+                    )
             except ObsidianSearchError as exc:
                 logger.error(
                     "Failed to get Obsidian context (%s stage): %s",
@@ -399,7 +421,11 @@ If no relevant memories are available, respond normally based on the conversatio
         return context, memory_ids
 
     async def generate_response_stream(
-        self, session_id: str, user_id: str, message_content: str, include_obsidian_memory: bool = False
+        self,
+        session_id: str,
+        user_id: str,
+        message_content: str,
+        include_obsidian_memory: bool = False,
     ) -> AsyncGenerator[Dict, None]:
         """Generate streaming response with memory context."""
         if not self._initialized:
@@ -412,23 +438,23 @@ If no relevant memories are available, respond normally based on the conversatio
                 session_id=session_id,
                 user_id=user_id,
                 role="user",
-                content=message_content
+                content=message_content,
             )
             await self.add_message(user_message)
 
             # Format context with memories
             context, memory_ids = await self.format_conversation_context(
-                session_id, user_id, message_content, include_obsidian_memory=include_obsidian_memory
+                session_id,
+                user_id,
+                message_content,
+                include_obsidian_memory=include_obsidian_memory,
             )
 
             # Send memory context used
             yield {
                 "type": "memory_context",
-                "data": {
-                    "memory_ids": memory_ids,
-                    "memory_count": len(memory_ids)
-                },
-                "timestamp": time.time()
+                "data": {"memory_ids": memory_ids, "memory_count": len(memory_ids)},
+                "timestamp": time.time(),
             }
 
             # Get system prompt from config
@@ -438,8 +464,10 @@ If no relevant memories are available, respond normally based on the conversatio
             full_prompt = f"{system_prompt}\n\n{context}"
 
             # Generate streaming response
-            logger.info(f"Generating response for session {session_id} with {len(memory_ids)} memories")
-            
+            logger.info(
+                f"Generating response for session {session_id} with {len(memory_ids)} memories"
+            )
+
             # Resolve chat operation temperature from config
             chat_temp = None
             registry = get_models_registry()
@@ -457,16 +485,16 @@ If no relevant memories are available, respond normally based on the conversatio
             # Simulate streaming by yielding chunks
             words = response_content.split()
             current_text = ""
-            
+
             for i, word in enumerate(words):
                 current_text += word + " "
-                
+
                 # Yield every few words to simulate streaming
                 if i % 3 == 0 or i == len(words) - 1:
                     yield {
                         "type": "token",
                         "data": current_text.strip(),
-                        "timestamp": time.time()
+                        "timestamp": time.time(),
                     }
                     await asyncio.sleep(0.05)  # Small delay for realistic streaming
 
@@ -477,7 +505,7 @@ If no relevant memories are available, respond normally based on the conversatio
                 user_id=user_id,
                 role="assistant",
                 content=response_content.strip(),
-                memories_used=memory_ids
+                memories_used=memory_ids,
             )
             await self.add_message(assistant_message)
 
@@ -486,20 +514,18 @@ If no relevant memories are available, respond normally based on the conversatio
                 "type": "complete",
                 "data": {
                     "message_id": assistant_message.message_id,
-                    "memories_used": memory_ids
+                    "memories_used": memory_ids,
                 },
-                "timestamp": time.time()
+                "timestamp": time.time(),
             }
 
         except Exception as e:
             logger.error(f"Error generating response for session {session_id}: {e}")
-            yield {
-                "type": "error",
-                "data": {"error": str(e)},
-                "timestamp": time.time()
-            }
+            yield {"type": "error", "data": {"error": str(e)}, "timestamp": time.time()}
 
-    async def update_session_title(self, session_id: str, user_id: str, title: str) -> bool:
+    async def update_session_title(
+        self, session_id: str, user_id: str, title: str
+    ) -> bool:
         """Update a session's title."""
         if not self._initialized:
             await self.initialize()
@@ -507,7 +533,7 @@ If no relevant memories are available, respond normally based on the conversatio
         try:
             result = await self.sessions_collection.update_one(
                 {"session_id": session_id, "user_id": user_id},
-                {"$set": {"title": title, "updated_at": datetime.utcnow()}}
+                {"$set": {"title": title, "updated_at": datetime.utcnow()}},
             )
             return result.modified_count > 0
         except Exception as e:
@@ -521,33 +547,38 @@ If no relevant memories are available, respond normally based on the conversatio
 
         try:
             # Count sessions
-            session_count = await self.sessions_collection.count_documents({"user_id": user_id})
-            
+            session_count = await self.sessions_collection.count_documents(
+                {"user_id": user_id}
+            )
+
             # Count messages
-            message_count = await self.messages_collection.count_documents({"user_id": user_id})
-            
+            message_count = await self.messages_collection.count_documents(
+                {"user_id": user_id}
+            )
+
             # Get most recent session
             latest_session = await self.sessions_collection.find_one(
-                {"user_id": user_id},
-                sort=[("updated_at", -1)]
+                {"user_id": user_id}, sort=[("updated_at", -1)]
             )
-            
+
             return {
                 "total_sessions": session_count,
                 "total_messages": message_count,
-                "last_chat": latest_session["updated_at"] if latest_session else None
+                "last_chat": latest_session["updated_at"] if latest_session else None,
             }
         except Exception as e:
             logger.error(f"Failed to get chat statistics for user {user_id}: {e}")
             return {"total_sessions": 0, "total_messages": 0, "last_chat": None}
 
-    async def extract_memories_from_session(self, session_id: str, user_id: str) -> Tuple[bool, List[str], int]:
+    async def extract_memories_from_session(
+        self, session_id: str, user_id: str
+    ) -> Tuple[bool, List[str], int]:
         """Extract and store memories from a chat session.
-        
+
         Args:
             session_id: ID of the chat session to extract memories from
             user_id: User ID for authorization and memory scoping
-            
+
         Returns:
             Tuple of (success: bool, memory_ids: List[str], memory_count: int)
         """
@@ -556,20 +587,23 @@ If no relevant memories are available, respond normally based on the conversatio
 
         try:
             # Verify session belongs to user
-            session = await self.sessions_collection.find_one({
-                "session_id": session_id,
-                "user_id": user_id
-            })
-            
+            session = await self.sessions_collection.find_one(
+                {"session_id": session_id, "user_id": user_id}
+            )
+
             if not session:
                 logger.error(f"Session {session_id} not found for user {user_id}")
                 return False, [], 0
 
             # Get all messages from the session
             messages = await self.get_session_messages(session_id, user_id)
-            
-            if not messages or len(messages) < 2:  # Need at least user + assistant message
-                logger.info(f"Not enough messages in session {session_id} for memory extraction")
+
+            if (
+                not messages or len(messages) < 2
+            ):  # Need at least user + assistant message
+                logger.info(
+                    f"Not enough messages in session {session_id} for memory extraction"
+                )
                 return True, [], 0
 
             # Format messages as a transcript
@@ -577,12 +611,12 @@ If no relevant memories are available, respond normally based on the conversatio
             for message in messages:
                 role = "User" if message.role == "user" else "Assistant"
                 transcript_parts.append(f"{role}: {message.content}")
-            
+
             transcript = "\n".join(transcript_parts)
-            
+
             # Get user email for memory service
             user_email = session.get("user_email", f"user_{user_id}")
-            
+
             # Extract memories using the memory service
             success, memory_ids = await self.memory_service.add_memory(
                 transcript=transcript,
@@ -590,16 +624,20 @@ If no relevant memories are available, respond normally based on the conversatio
                 source_id=f"chat_{session_id}",
                 user_id=user_id,
                 user_email=user_email,
-                allow_update=True  # Allow deduplication and updates
+                allow_update=True,  # Allow deduplication and updates
             )
-            
+
             if success:
-                logger.info(f"✅ Extracted {len(memory_ids)} memories from chat session {session_id}")
+                logger.info(
+                    f"✅ Extracted {len(memory_ids)} memories from chat session {session_id}"
+                )
                 return True, memory_ids, len(memory_ids)
             else:
-                logger.error(f"❌ Failed to extract memories from chat session {session_id}")
+                logger.error(
+                    f"❌ Failed to extract memories from chat session {session_id}"
+                )
                 return False, [], 0
-                
+
         except Exception as e:
             logger.error(f"Failed to extract memories from session {session_id}: {e}")
             return False, [], 0

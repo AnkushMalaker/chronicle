@@ -96,7 +96,9 @@ def _parse_qwen3_output(raw: str) -> str:
     return text_part.strip()
 
 
-async def _transcribe_vllm(audio_b64: str, client: httpx.AsyncClient, stream: bool = False) -> str:
+async def _transcribe_vllm(
+    audio_b64: str, client: httpx.AsyncClient, stream: bool = False
+) -> str:
     """Send audio to vLLM and return the transcription text.
 
     Args:
@@ -181,7 +183,9 @@ async def websocket_stream(ws: WebSocket):
                     audio_buffer.extend(message["bytes"])
 
                     # Check if we have enough audio for an interim transcription
-                    buffer_duration = len(audio_buffer) / (SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS)
+                    buffer_duration = len(audio_buffer) / (
+                        SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS
+                    )
                     if buffer_duration >= STREAM_INTERVAL:
                         try:
                             wav_b64 = _pcm_to_wav_base64(bytes(audio_buffer))
@@ -189,12 +193,14 @@ async def websocket_stream(ws: WebSocket):
                             text = text.strip()
 
                             if text and text != prev_transcript:
-                                await ws.send_json({
-                                    "type": "interim",
-                                    "text": text,
-                                    "words": [],
-                                    "segments": [],
-                                })
+                                await ws.send_json(
+                                    {
+                                        "type": "interim",
+                                        "text": text,
+                                        "words": [],
+                                        "segments": [],
+                                    }
+                                )
                                 prev_transcript = text
                         except Exception as e:
                             logger.warning(f"Interim transcription failed: {e}")
@@ -220,28 +226,34 @@ async def websocket_stream(ws: WebSocket):
                     text = await _transcribe_vllm(wav_b64, client, stream=False)
                     text = text.strip()
 
-                    await ws.send_json({
-                        "type": "final",
-                        "text": text,
-                        "words": [],
-                        "segments": [],
-                    })
+                    await ws.send_json(
+                        {
+                            "type": "final",
+                            "text": text,
+                            "words": [],
+                            "segments": [],
+                        }
+                    )
                     logger.info(f"Final transcript: {len(text)} chars")
                 except Exception as e:
                     logger.error(f"Final transcription failed: {e}")
-                    await ws.send_json({
+                    await ws.send_json(
+                        {
+                            "type": "final",
+                            "text": prev_transcript,
+                            "words": [],
+                            "segments": [],
+                        }
+                    )
+            else:
+                await ws.send_json(
+                    {
                         "type": "final",
-                        "text": prev_transcript,
+                        "text": "",
                         "words": [],
                         "segments": [],
-                    })
-            else:
-                await ws.send_json({
-                    "type": "final",
-                    "text": "",
-                    "words": [],
-                    "segments": [],
-                })
+                    }
+                )
 
         except WebSocketDisconnect:
             logger.info("Streaming bridge: client disconnected")

@@ -45,10 +45,10 @@ read -p "Choose option (1 or 2): " choice
 case $choice in
     1)
         echo -e "${GREEN}Setting up simple storage configuration...${NC}"
-        
+
         # Update values.yaml to disable shared models
         sed -i 's/enabled: true/enabled: false/' extras/speaker-recognition/charts/values.yaml
-        
+
         echo -e "${GREEN}✅ Simple storage configured!${NC}"
         echo -e "${YELLOW}Each pod will download models independently.${NC}"
         echo
@@ -57,22 +57,22 @@ case $choice in
         echo -e "   ${YELLOW}skaffold run --profile speaker-recognition --default-repo=${CONTAINER_REGISTRY:-localhost:32000}${NC}"
         echo
         ;;
-        
+
     2)
         echo -e "${GREEN}Setting up shared storage configuration...${NC}"
-        
+
         # Check available storage classes
         echo -e "${YELLOW}Available storage classes:${NC}"
         kubectl get storageclass
-        
+
         echo
         read -p "Enter storage class name (or press Enter for 'openebs-hostpath'): " storage_class
         storage_class=${storage_class:-"openebs-hostpath"}
-        
+
         # Update values.yaml to enable shared models
         sed -i 's/enabled: false/enabled: true/' extras/speaker-recognition/charts/values.yaml
         sed -i "s/storageClassName: \"openebs-hostpath\"/storageClassName: \"${storage_class}\"/" extras/speaker-recognition/charts/values.yaml
-        
+
         echo -e "${GREEN}✅ Shared storage configured!${NC}"
         echo -e "${YELLOW}Storage class: ${storage_class}${NC}"
         echo
@@ -83,7 +83,7 @@ case $choice in
         echo -e "   ${YELLOW}kubectl logs -n speech -l app.kubernetes.io/component=speaker -f${NC}"
         echo
         ;;
-        
+
     *)
         echo -e "${RED}Invalid choice. Please run the script again and choose 1 or 2.${NC}"
         exit 1

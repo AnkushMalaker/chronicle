@@ -80,7 +80,9 @@ class User(BeanieBaseUser, Document):
         """Return string representation of MongoDB ObjectId for backward compatibility."""
         return str(self.id)
 
-    def register_client(self, client_id: str, device_name: Optional[str] = None) -> None:
+    def register_client(
+        self, client_id: str, device_name: Optional[str] = None
+    ) -> None:
         """Register a new client for this user."""
         # Check if client already exists
         if client_id in self.registered_clients:

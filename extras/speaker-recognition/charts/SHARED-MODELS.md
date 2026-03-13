@@ -54,6 +54,6 @@ kubectl exec -n speech deployment/speaker-recognition-speaker -- ls -la /models
 # Enable shared storage
 sed -i 's/enabled: false/enabled: true/' extras/speaker-recognition/charts/values.yaml
 
-# Disable shared storage  
+# Disable shared storage
 sed -i 's/enabled: true/enabled: false/' extras/speaker-recognition/charts/values.yaml
 ```

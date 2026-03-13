@@ -20,7 +20,7 @@ export default function Inference() {
 
   // State for uploaded audio (separate from recorded audio)
   const [uploadedAudio, setUploadedAudio] = useState<any>(null)
-  
+
   // State for diarization parameters
   const [minSpeakers, setMinSpeakers] = useState(1)
   const [maxSpeakers, setMaxSpeakers] = useState(4)
@@ -52,7 +52,7 @@ export default function Inference() {
     try {
       // Process the audio file using our shared service
       const processedAudio = await audioProcessingService.processAudioFile(file)
-      
+
       // Store uploaded audio separately from recorded audio
       setUploadedAudio(processedAudio)
       recording.clearRecording() // Clear any existing recording
@@ -134,7 +134,7 @@ export default function Inference() {
       {audioForProcessing && (
         <div className="card p-6">
           <h4 className="font-medium text-primary mb-4">🎵 {audioForProcessing.filename}</h4>
-          
+
           {/* Audio Info */}
           <div className="grid grid-cols-3 gap-4 text-sm mb-4">
             <div>
@@ -220,14 +220,14 @@ export default function Inference() {
         {speakerProcessing.results.length > 0 && (
           <div className="space-y-4">
             <h2 className="heading-md">📊 Processing History</h2>
-            
+
             <div className="space-y-3">
               {speakerProcessing.results.map((result) => (
                 <div
                   key={result.id}
                   className={`border rounded-lg p-4 cursor-pointer transition-colors ${
-                    speakerProcessing.selectedResult?.id === result.id 
-                      ? 'border-blue-500 bg-blue-50 dark:border-blue-400 dark:bg-blue-900' 
+                    speakerProcessing.selectedResult?.id === result.id
+                      ? 'border-blue-500 bg-blue-50 dark:border-blue-400 dark:bg-blue-900'
                       : 'border-gray-200 hover:border-gray-300 dark:border-gray-700 dark:hover:border-gray-600'
                   }`}
                   onClick={() => speakerProcessing.selectResult(result)}
@@ -250,7 +250,7 @@ export default function Inference() {
                         </span>
                       </div>
                     </div>
-                    
+
                     {result.status === 'completed' && (
                       <div className="flex items-center space-x-4">
                         <div className="text-right text-sm">

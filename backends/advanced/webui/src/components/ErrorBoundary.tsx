@@ -27,7 +27,7 @@ export class ErrorBoundary extends Component<Props, State> {
     console.error('❌ ErrorBoundary caught an error:', error)
     console.error('📍 Component stack:', errorInfo.componentStack)
     console.error('📝 Error stack:', error.stack)
-    
+
     this.setState({
       error,
       errorInfo
@@ -54,11 +54,11 @@ export class ErrorBoundary extends Component<Props, State> {
             <div className="flex justify-center mb-4">
               <AlertTriangle className="h-12 w-12 text-red-500" />
             </div>
-            
+
             <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-2">
               Something went wrong
             </h2>
-            
+
             <p className="text-gray-600 dark:text-gray-400 mb-6">
               An unexpected error occurred. You can try refreshing the page or go back to the dashboard.
             </p>
@@ -94,7 +94,7 @@ export class ErrorBoundary extends Component<Props, State> {
                 <RefreshCw className="h-4 w-4" />
                 <span>Try Again</span>
               </button>
-              
+
               <button
                 onClick={this.handleGoHome}
                 className="flex items-center space-x-2 px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
@@ -112,7 +112,7 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 }
 
-// Lightweight error boundary for individual components  
+// Lightweight error boundary for individual components
 export const PageErrorBoundary: React.FC<{ children: ReactNode }> = ({ children }) => (
   <ErrorBoundary
     fallback={

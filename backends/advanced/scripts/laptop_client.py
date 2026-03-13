@@ -21,7 +21,11 @@ DEFAULT_ENDPOINT = "/ws?codec=pcm"
 
 
 def build_websocket_uri(
-    host: str, port: int, endpoint: str, token: str | None = None, device_name: str = "laptop"
+    host: str,
+    port: int,
+    endpoint: str,
+    token: str | None = None,
+    device_name: str = "laptop",
 ) -> str:
     """Build WebSocket URI with JWT token authentication."""
     base_uri = f"ws://{host}:{port}{endpoint}"
@@ -36,7 +40,9 @@ def build_websocket_uri(
     return base_uri
 
 
-async def authenticate_with_credentials(host: str, port: int, username: str, password: str) -> str:
+async def authenticate_with_credentials(
+    host: str, port: int, username: str, password: str
+) -> str:
     """Authenticate with username/password and return JWT token."""
     auth_url = f"http://{host}:{port}/auth/jwt/login"
 
@@ -58,7 +64,9 @@ async def authenticate_with_credentials(host: str, port: int, username: str, pas
                         raise Exception("No access token received from server")
                 elif response.status == 400:
                     error_detail = await response.text()
-                    raise Exception(f"Authentication failed: Invalid credentials - {error_detail}")
+                    raise Exception(
+                        f"Authentication failed: Invalid credentials - {error_detail}"
+                    )
                 else:
                     error_detail = await response.text()
                     raise Exception(
@@ -96,29 +104,31 @@ def validate_auth_args(args):
 
 async def send_wyoming_event(websocket, wyoming_event):
     """Send a Wyoming protocol event over WebSocket.
-    
+
     Based on how the backend processes Wyoming events, they expect:
     1. JSON header line ending with \n
     2. Optional binary payload if payload_length > 0
-    
+
     This replicates Wyoming's async_write_event behavior for WebSocket transport.
     """
     # Get the event data from Wyoming event
     event_data = wyoming_event.event()
-    
+
     # Build event dict like Wyoming's async_write_event does
     event_dict = event_data.to_dict()
     event_dict["version"] = "1.0.0"  # Wyoming adds version
-    
+
     # Add payload_length if payload exists (critical for audio chunks!)
     if event_data.payload:
         event_dict["payload_length"] = len(event_data.payload)
-    
+
     # Send JSON header
-    json_header = json.dumps(event_dict) + '\n'
+    json_header = json.dumps(event_dict) + "\n"
     await websocket.send(json_header)
-    logger.debug(f"Sent Wyoming event: {event_data.type} (payload_length: {event_dict.get('payload_length', 0)})")
-    
+    logger.debug(
+        f"Sent Wyoming event: {event_data.type} (payload_length: {event_dict.get('payload_length', 0)})"
+    )
+
     # Send binary payload if exists
     if event_data.payload:
         await websocket.send(event_data.payload)
@@ -131,11 +141,17 @@ async def main():
         description="Laptop audio client for OMI backend with dual authentication modes"
     )
     parser.add_argument("--host", default=DEFAULT_HOST, help="WebSocket server host")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="WebSocket server port")
-    parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help="WebSocket endpoint")
+    parser.add_argument(
+        "--port", type=int, default=DEFAULT_PORT, help="WebSocket server port"
+    )
+    parser.add_argument(
+        "--endpoint", default=DEFAULT_ENDPOINT, help="WebSocket endpoint"
+    )
 
     # Authentication options (mutually exclusive)
-    auth_group = parser.add_argument_group("authentication", "Choose one authentication method")
+    auth_group = parser.add_argument_group(
+        "authentication", "Choose one authentication method"
+    )
     auth_group.add_argument("--token", help="JWT authentication token")
     auth_group.add_argument("--username", help="Username for login authentication")
     auth_group.add_argument("--password", help="Password for login authentication")
@@ -174,7 +190,9 @@ async def main():
             return
 
     # Build WebSocket URI
-    ws_uri = build_websocket_uri(args.host, args.port, args.endpoint, token, args.device_name)
+    ws_uri = build_websocket_uri(
+        args.host, args.port, args.endpoint, token, args.device_name
+    )
     print(f"Connecting to {ws_uri}")
     print(f"Using device name: {args.device_name}")
 
@@ -190,10 +208,12 @@ async def main():
                         audio_start = AudioStart(
                             rate=stream.sample_rate,
                             width=stream.sample_width,
-                            channels=stream.channels
+                            channels=stream.channels,
                         )
                         await send_wyoming_event(websocket, audio_start)
-                        logger.info(f"Sent audio-start event (rate={stream.sample_rate}, width={stream.sample_width}, channels={stream.channels})")
+                        logger.info(
+                            f"Sent audio-start event (rate={stream.sample_rate}, width={stream.sample_width}, channels={stream.channels})"
+                        )
                         while True:
                             try:
                                 data = await stream.read()
@@ -203,18 +223,24 @@ async def main():
                                         audio=data.audio,
                                         rate=stream.sample_rate,
                                         width=stream.sample_width,
-                                        channels=stream.channels
+                                        channels=stream.channels,
                                     )
                                     await send_wyoming_event(websocket, audio_chunk)
-                                    logger.debug(f"Sent audio chunk: {len(data.audio)} bytes")
-                                await asyncio.sleep(0.01)  # Small delay to prevent overwhelming
+                                    logger.debug(
+                                        f"Sent audio chunk: {len(data.audio)} bytes"
+                                    )
+                                await asyncio.sleep(
+                                    0.01
+                                )  # Small delay to prevent overwhelming
                             except websockets.exceptions.ConnectionClosed:
-                                logger.info("WebSocket connection closed during audio sending")
+                                logger.info(
+                                    "WebSocket connection closed during audio sending"
+                                )
                                 break
                             except Exception as e:
                                 logger.error(f"Error sending audio: {e}")
                                 break
-                                
+
                 except Exception as e:
                     logger.error(f"Error in audio session: {e}")
                 finally:

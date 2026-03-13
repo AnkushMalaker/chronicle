@@ -49,8 +49,12 @@ class TranscriptionResultsAggregator:
                     "text": fields[b"text"].decode(),
                     "confidence": float(fields[b"confidence"].decode()),
                     "provider": fields[b"provider"].decode(),
-                    "chunk_id": fields.get(b"chunk_id", b"unknown").decode(),  # Handle missing chunk_id gracefully
-                    "processing_time": float(fields.get(b"processing_time", b"0.0").decode()),
+                    "chunk_id": fields.get(
+                        b"chunk_id", b"unknown"
+                    ).decode(),  # Handle missing chunk_id gracefully
+                    "processing_time": float(
+                        fields.get(b"processing_time", b"0.0").decode()
+                    ),
                     "timestamp": float(fields[b"timestamp"].decode()),
                 }
 
@@ -104,7 +108,7 @@ class TranscriptionResultsAggregator:
                 "segments": [],
                 "chunk_count": 0,
                 "total_confidence": 0.0,
-                "provider": None
+                "provider": None,
             }
 
         # Combine ALL final results for cumulative speech detection
@@ -150,7 +154,7 @@ class TranscriptionResultsAggregator:
             "segments": all_segments,
             "chunk_count": len(results),
             "total_confidence": avg_confidence,
-            "provider": provider
+            "provider": provider,
         }
 
         logger.info(
@@ -162,10 +166,7 @@ class TranscriptionResultsAggregator:
         return combined
 
     async def get_realtime_results(
-        self,
-        session_id: str,
-        last_id: str = "0",
-        timeout_ms: int = 1000
+        self, session_id: str, last_id: str = "0", timeout_ms: int = 1000
     ) -> tuple[list[dict], str]:
         """
         Get new results since last_id (for real-time streaming).
@@ -183,9 +184,7 @@ class TranscriptionResultsAggregator:
         try:
             # Read new messages since last_id
             messages = await self.redis_client.xread(
-                {stream_name: last_id},
-                count=10,
-                block=timeout_ms
+                {stream_name: last_id}, count=10, block=timeout_ms
             )
 
             results = []
@@ -199,14 +198,18 @@ class TranscriptionResultsAggregator:
                             "text": fields[b"text"].decode(),
                             "confidence": float(fields[b"confidence"].decode()),
                             "provider": fields[b"provider"].decode(),
-                            "chunk_id": fields.get(b"chunk_id", b"unknown").decode(),  # Handle missing chunk_id gracefully
+                            "chunk_id": fields.get(
+                                b"chunk_id", b"unknown"
+                            ).decode(),  # Handle missing chunk_id gracefully
                         }
 
                         # Optional fields
                         if b"words" in fields:
                             result["words"] = json.loads(fields[b"words"].decode())
                         if b"segments" in fields:
-                            result["segments"] = json.loads(fields[b"segments"].decode())
+                            result["segments"] = json.loads(
+                                fields[b"segments"].decode()
+                            )
 
                         results.append(result)
                         new_last_id = message_id.decode()
@@ -214,5 +217,7 @@ class TranscriptionResultsAggregator:
             return results, new_last_id
 
         except Exception as e:
-            logger.error(f"🔄 Error getting realtime results for session {session_id}: {e}")
+            logger.error(
+                f"🔄 Error getting realtime results for session {session_id}: {e}"
+            )
             return [], last_id

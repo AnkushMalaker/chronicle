@@ -11,5 +11,3 @@ To scan for Omi devices and list them:
 ```bash
 uv run python3 -c 'from omi.bluetooth import print_devices;print_devices()'
 ```
-
-

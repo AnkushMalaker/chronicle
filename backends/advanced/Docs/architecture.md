@@ -46,21 +46,21 @@ graph TB
     subgraph "ProcessorManager"
         direction TB
         PM[Manager Coordinator]
-        
+
         subgraph "Global Queues"
             AQ[Audio Queue]
             TQ[Transcription Queue]
             MQ[Memory Queue]
             CQ[Cropping Queue]
         end
-        
+
         subgraph "Processors"
             AP[Audio Processor]
             TP[Transcription Processor]
             MP[Memory Processor]
             CP[Cropping Processor]
         end
-        
+
         subgraph "Event Coordination"
             TC[TranscriptCoordinator<br/>AsyncIO Events]
         end
@@ -99,33 +99,33 @@ graph TB
     APP --> WS
     WS --> AUTH
     AUTH --> WP
-    
+
     %% Wyoming Protocol Flow
     WP --> AS
     WP --> AC
     WP --> AST
-    
+
     AS --> CM
     AC --> CM
     AST --> CM
-    
+
     %% Client State Management
     CM --> CS
     CS --> CT
-    
+
     %% Audio Processing Flow
     CS -->|queue audio| AQ
     AQ --> AP
     AP -->|save| FS
     AP -->|queue| TQ
-    
+
     %% Transcription Flow
     TQ --> TP
     TP --> DG
     TP --> WY
     TP -->|save transcript| AC_COL
     TP -->|signal completion| TC
-    
+
     %% Conversation Closure Flow (Critical Path)
     AST -->|close_conversation| CS
     CS -->|delegate to| CONV_MGR
@@ -133,7 +133,7 @@ graph TB
     TC -->|transcript ready| CONV_MGR
     CONV_MGR -->|queue memory| MQ
     CONV_MGR -->|if enabled| CQ
-    
+
     %% Memory Processing Flow
     MQ --> MP
     MP -->|read via| CONV_REPO
@@ -142,13 +142,13 @@ graph TB
     MP --> OLL
     MP -->|orchestrate by mem0| MEM
     MP -->|update via| CONV_REPO
-    
+
     %% Cropping Flow
     CQ --> CP
     CP -->|read| FS
     CP -->|save cropped| FS
     CP -->|update| AC_COL
-    
+
     %% Management
     PM -.-> AQ
     PM -.-> TQ
@@ -385,7 +385,7 @@ BackgroundTaskManager(
 
 ### Conversation Closure and Memory Processing
 
-**Recent Architecture Changes**: 
+**Recent Architecture Changes**:
 1. Memory processing decoupled from transcription to prevent duplicates
 2. **Event-driven coordination** eliminates polling/retry race conditions
 
@@ -410,14 +410,14 @@ The system now uses **TranscriptCoordinator** for proper async coordination:
 class TranscriptCoordinator:
     async def wait_for_transcript_completion(audio_uuid: str) -> bool:
         # Wait for asyncio.Event (no polling!)
-        
+
     def signal_transcript_ready(audio_uuid: str):
         # Signal completion from TranscriptionManager
 ```
 
 **Benefits:**
 - ✅ **Zero polling** - Uses asyncio events instead of sleep/retry loops
-- ✅ **Immediate processing** - Memory processor starts as soon as transcript is ready  
+- ✅ **Immediate processing** - Memory processor starts as soon as transcript is ready
 - ✅ **No race conditions** - Proper async coordination prevents timing issues
 - ✅ **Better performance** - No artificial delays or timeout-based waiting
 
@@ -450,7 +450,7 @@ The `close_conversation()` method in ClientState now delegates to ConversationMa
    - Most reliable trigger
    - Immediate processing
 
-2. **Client Disconnect** 
+2. **Client Disconnect**
    - WebSocket connection closed
    - Cleanup handler ensures closure
    - Prevents orphaned conversations
@@ -473,10 +473,10 @@ async def close_current_conversation(self):
     # 1. Check if conversation has content
     if not self.has_transcripts():
         return  # No memory processing needed
-    
+
     # 2. Save conversation to MongoDB
     audio_uuid = await self.save_conversation()
-    
+
     # 3. Queue memory processing (ONLY place this happens)
     if audio_uuid and self.has_required_data():
         processor_manager.queue_memory_processing({
@@ -484,11 +484,11 @@ async def close_current_conversation(self):
             'user_id': self.user_id,
             'transcript': self.get_transcript()
         })
-    
+
     # 4. Queue audio cropping if enabled
     if self.audio_cropping_enabled:
         processor_manager.queue_audio_cropping(audio_path)
-    
+
     # 5. Reset state for next conversation
     self.reset_conversation_state()
 ```
@@ -591,21 +591,21 @@ graph LR
         Mongo[mongo:4.4.18<br/>Primary Database]
         Qdrant[qdrant<br/>Vector Store]
     end
-    
+
     subgraph "External Services"
         Ollama[ollama<br/>LLM Service]
         ASRService[ASR Services<br/>extras/asr-services]
     end
-    
+
     subgraph "Client Access"
         WebBrowser[Web Browser<br/>Dashboard]
         AudioClient[Audio Client<br/>Mobile/Desktop]
     end
-    
+
     WebBrowser -->|Port 5173 (dev)| WebUI
     WebBrowser -->|Port 80 (prod)| Proxy
     AudioClient -->|Port 8000| Backend
-    
+
     Proxy --> Backend
     Proxy --> WebUI
     Backend --> Mongo
@@ -639,7 +639,7 @@ graph LR
 
 ## Detailed Data Flow Architecture
 
-> 📖 **Reference Documentation**: 
+> 📖 **Reference Documentation**:
 > - [Authentication Details](./auth.md) - Complete authentication system documentation
 
 ### Complete System Data Flow Diagram
@@ -661,13 +661,13 @@ flowchart TB
     subgraph "🎵 Audio Processing Pipeline"
         WSAuth[WebSocket Auth<br/>🕐 Connection timeout: 30s]
         OpusDecoder[Opus/PCM Decoder<br/>Real-time Processing]
-        
+
         subgraph "⏱️ Per-Client State Management"
             ClientState[Client State<br/>🕐 Conversation timeout: 1.5min]
             AudioQueue[Audio Chunk Queue<br/>60s segments]
             ConversationTimer[Conversation Timer<br/>🔄 Auto-timeout tracking]
         end
-        
+
         subgraph "🎙️ Transcription Layer"
             ASRManager[Transcription Manager<br/>🕐 Init timeout: 60s]
             DeepgramWS[Deepgram WebSocket<br/>Nova-3 Model, Smart Format<br/>🔌 Auto-reconnect on disconnect]
@@ -685,7 +685,7 @@ flowchart TB
             LLMProcessor[Ollama LLM<br/>🔄 Circuit breaker protection]
             VectorStore[Qdrant Vector Store<br/>🔍 Semantic search]
         end
-        
+
     end
 
 
@@ -701,7 +701,7 @@ flowchart TB
     AuthGW -->|❌ 401 Unauthorized<br/>⏱️ Invalid/expired token| Client
     AuthGW -->|✅ Validated| ClientGen
     ClientGen -->|🏷️ Generate client_id| WSAuth
-    
+
     %% Audio Processing Flow
     Client -->|🎵 Opus/PCM Stream<br/>🕐 30s connection timeout| WSAuth
     WSAuth -->|❌ 1008 Policy Violation<br/>🔐 Auth required| Client
@@ -709,7 +709,7 @@ flowchart TB
     OpusDecoder -->|📦 Audio chunks| ClientState
     ClientState -->|⏱️ 1.5min timeout check| ConversationTimer
     ConversationTimer -->|🔄 Timeout exceeded| ClientState
-    
+
     %% Transcription Flow with Failure Points
     ClientState -->|🎵 Audio data| ASRManager
     ASRManager -->|🔌 Primary connection| DeepgramWS
@@ -727,7 +727,7 @@ flowchart TB
     LLMProcessor -->|❌ Empty response<br/>🔄 Fallback memory| MemoryService
     LLMProcessor -->|✅ Memory extracted| VectorStore
     MemoryService -->|📊 Track processing| QueueTracker
-    
+
 
     %% Disconnect and Cleanup Flow
     Client -->|🔌 Disconnect| ClientState
@@ -765,7 +765,7 @@ flowchart TB
 
 #### 🔌 **Disconnection Scenarios**
 1. **Client Disconnect**: Graceful cleanup with conversation finalization
-2. **Network Interruption**: Auto-reconnection with exponential backoff  
+2. **Network Interruption**: Auto-reconnection with exponential backoff
 3. **Service Failure**: Circuit breaker protection and alternative routing
 4. **Authentication Expiry**: Forced re-authentication with clear error codes
 
@@ -792,7 +792,7 @@ flowchart TB
 **Solution**: A 2-second delay is added before calling `close_client_audio()` to ensure the transcription manager is created by the background processor. Without this delay, the flush call fails silently and transcription never completes.
 
 **File Upload Flow**:
-1. Audio chunks queued to `transcription_queue` 
+1. Audio chunks queued to `transcription_queue`
 2. Background transcription processor creates `TranscriptionManager` on first chunk
 3. 2-second delay ensures manager exists before flush
 4. Client audio closure triggers transcript completion

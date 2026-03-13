@@ -61,7 +61,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
       try {
         // First, refresh users list
         await refreshUsers()
-        
+
         // Check if there's a saved user
         const savedUser = localStorage.getItem('selectedUser')
         if (savedUser) {

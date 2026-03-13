@@ -32,50 +32,33 @@ from advanced_omi_backend.controllers.queue_controller import (
 from advanced_omi_backend.models.job import _ensure_beanie_initialized
 
 # Import from audio_jobs
-from .audio_jobs import (
-    audio_streaming_persistence_job,
-)
+from .audio_jobs import audio_streaming_persistence_job
 
 # Import from conversation_jobs
-from .conversation_jobs import (
-    open_conversation_job,
-)
+from .conversation_jobs import open_conversation_job
 
 # Import from memory_jobs
-from .memory_jobs import (
-    enqueue_memory_processing,
-    process_memory_job,
-)
+from .memory_jobs import enqueue_memory_processing, process_memory_job
 
 # Import from speaker_jobs
-from .speaker_jobs import (
-    check_enrolled_speakers_job,
-    recognise_speakers_job,
-)
+from .speaker_jobs import check_enrolled_speakers_job, recognise_speakers_job
 
 # Import from transcription_jobs
-from .transcription_jobs import (
-    stream_speech_detection_job,
-    transcribe_full_audio_job,
-)
+from .transcription_jobs import stream_speech_detection_job, transcribe_full_audio_job
 
 __all__ = [
     # Transcription jobs
     "transcribe_full_audio_job",
     "stream_speech_detection_job",
-
     # Speaker jobs
     "check_enrolled_speakers_job",
     "recognise_speakers_job",
-
     # Conversation jobs
     "open_conversation_job",
     "audio_streaming_persistence_job",
-
     # Memory jobs
     "process_memory_job",
     "enqueue_memory_processing",
-
     # Queue utils
     "get_queue",
     "get_job_stats",

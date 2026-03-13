@@ -18,7 +18,9 @@ from wyoming.audio import AudioChunk
 audio_logger = logging.getLogger("audio_processing")
 
 # Configuration constants
-NEW_CONVERSATION_TIMEOUT_MINUTES = float(os.getenv("NEW_CONVERSATION_TIMEOUT_MINUTES", "1.5"))
+NEW_CONVERSATION_TIMEOUT_MINUTES = float(
+    os.getenv("NEW_CONVERSATION_TIMEOUT_MINUTES", "1.5")
+)
 
 
 class ClientState:
@@ -99,7 +101,9 @@ class ClientState:
                     f"(duration: {duration:.3f}s)"
                 )
         else:
-            audio_logger.warning(f"Speech end recorded for {audio_uuid} but no start time found")
+            audio_logger.warning(
+                f"Speech end recorded for {audio_uuid} but no start time found"
+            )
 
     def update_transcript_received(self):
         """Update timestamp when transcript is received (for timeout detection)."""

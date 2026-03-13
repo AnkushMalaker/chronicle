@@ -29,7 +29,10 @@ class MockLLMProvider(LLMProviderBase):
         self.embedding_dimension = 384  # Standard dimension for mock embeddings
 
     async def extract_memories(
-        self, text: str, prompt: str, user_id: Optional[str] = None,
+        self,
+        text: str,
+        prompt: str,
+        user_id: Optional[str] = None,
     ) -> List[str]:
         """
         Return predefined mock memories extracted from text.
@@ -114,12 +117,9 @@ class MockLLMProvider(LLMProviderBase):
 
         actions = []
         for idx, fact in enumerate(new_facts):
-            actions.append({
-                "id": str(idx),
-                "event": "ADD",
-                "text": fact,
-                "old_memory": None
-            })
+            actions.append(
+                {"id": str(idx), "event": "ADD", "text": fact, "old_memory": None}
+            )
 
         return {"memory": actions}
 

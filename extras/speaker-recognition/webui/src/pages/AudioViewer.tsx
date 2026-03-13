@@ -2,9 +2,9 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { Play, Pause, Download, Volume2 } from 'lucide-react'
 import { useUser } from '../contexts/UserContext'
 import { calculateFileHash, isAudioFile } from '../utils/fileHash'
-import { 
-  loadAudioBuffer, 
-  createAudioContext, 
+import {
+  loadAudioBuffer,
+  createAudioContext,
   decodeAudioData,
   extractAudioSamples,
   calculateSNR,
@@ -45,7 +45,7 @@ export default function AudioViewer() {
           // Ignore errors if already stopped
         }
       }
-      
+
       // Close audio context
       if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
         audioContextRef.current.close()
@@ -66,18 +66,18 @@ export default function AudioViewer() {
     try {
       // Calculate file hash
       const hash = await calculateFileHash(file)
-      
+
       // Load and decode audio
       const arrayBuffer = await loadAudioBuffer(file)
       const audioContext = createAudioContext()
       audioContextRef.current = audioContext
-      
+
       const audioBuffer = await decodeAudioData(audioContext, arrayBuffer)
       const samples = extractAudioSamples(audioBuffer)
-      
+
       // Analyze audio
       const snr = calculateSNR(samples)
-      
+
       setAudioData({
         file,
         buffer: audioBuffer,
@@ -87,7 +87,7 @@ export default function AudioViewer() {
       })
     } catch (error) {
       console.error('Audio processing error details:', error)
-      
+
       let errorMessage = 'Failed to process audio file. '
       if (error instanceof Error) {
         if (error.message.includes('decode') || error.name === 'EncodingError') {
@@ -104,7 +104,7 @@ export default function AudioViewer() {
       } else {
         errorMessage += 'Unknown error occurred. Please try a different file.'
       }
-      
+
       alert(errorMessage)
     } finally {
       setIsLoading(false)
@@ -124,13 +124,13 @@ export default function AudioViewer() {
       const source = audioContextRef.current.createBufferSource()
       source.buffer = audioData.buffer
       source.connect(audioContextRef.current.destination)
-      
+
       source.start(0, startTime)
       audioSourceRef.current = source
       setIsPlaying(true)
       setPlaybackPosition(startTime)
       playbackStartTimeRef.current = audioContextRef.current.currentTime - startTime
-      
+
       source.onended = () => {
         setIsPlaying(false)
         setPlaybackPosition(null)
@@ -275,7 +275,7 @@ export default function AudioViewer() {
                 <span className="text-sm input-label">Show Spectrogram</span>
               </label>
             </div>
-            
+
             <WaveformPlot
               samples={audioData.samples}
               sampleRate={audioData.buffer.sampleRate}

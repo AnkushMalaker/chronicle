@@ -174,7 +174,7 @@ Unauthorized Queue Access Test
     [Documentation]    Test that queue endpoints require authentication
     [Tags]             queue    security    negative
     ${session}=    Get Anonymous Session    session
-    
+
     # Try to access queue jobs without token
     ${response}=    GET On Session    ${session}    /api/queue/jobs    expected_status=401
     Should Be Equal As Integers    ${response.status_code}    401
@@ -197,4 +197,3 @@ Client Manager Integration Test
     ${clients}=        Set Variable    ${response.json()}
     # Verify structure - should be a valid JSON response
     Should Be True     isinstance($clients, (dict, list))
-

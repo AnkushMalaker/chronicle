@@ -52,7 +52,7 @@ ingress:
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
-   
+
   # hosts: defined in ingress-values.yaml and overridden by Skaffold
   # tls:
   #   - secretName: chronicle-tls

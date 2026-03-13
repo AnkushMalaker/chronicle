@@ -34,7 +34,6 @@ from common.batching import (
 )
 from common.response_models import Segment, Speaker, TranscriptionResult, Word
 
-
 # ---------------------------------------------------------------------------
 # Unit tests for stitching logic (no GPU)
 # ---------------------------------------------------------------------------
@@ -46,9 +45,7 @@ def _make_result(segments, words=None, text=None):
         Segment(text=s[0], start=s[1], end=s[2], speaker=s[3] if len(s) > 3 else None)
         for s in segments
     ]
-    word_objs = [
-        Word(word=w[0], start=w[1], end=w[2]) for w in (words or [])
-    ]
+    word_objs = [Word(word=w[0], start=w[1], end=w[2]) for w in (words or [])]
     return TranscriptionResult(
         text=text or " ".join(s.text for s in seg_objs),
         words=word_objs,
@@ -93,20 +90,28 @@ class TestStitchWithOverlap:
 
     def test_overlap_deduplication(self):
         # Batch 1: [0-70s] with segments throughout
-        r1 = _make_result([
-            ("seg A", 0.0, 20.0),
-            ("seg B", 20.0, 40.0),
-            ("seg C", 40.0, 60.0),   # overlap region: 50-70
-            ("seg D", 60.0, 70.0),   # midpoint=65, overlap midpoint=50+10/2=55 -> 65 >= 55? yes for batch 1 cutoff
-        ])
+        r1 = _make_result(
+            [
+                ("seg A", 0.0, 20.0),
+                ("seg B", 20.0, 40.0),
+                ("seg C", 40.0, 60.0),  # overlap region: 50-70
+                (
+                    "seg D",
+                    60.0,
+                    70.0,
+                ),  # midpoint=65, overlap midpoint=50+10/2=55 -> 65 >= 55? yes for batch 1 cutoff
+            ]
+        )
 
         # Batch 2: [50-120s] with segments throughout
-        r2 = _make_result([
-            ("seg C'", 0.0, 10.0),   # absolute: 50-60, midpoint=55 >= cutoff
-            ("seg D'", 10.0, 20.0),  # absolute: 60-70, midpoint=65 >= cutoff
-            ("seg E", 20.0, 40.0),   # absolute: 70-90
-            ("seg F", 40.0, 70.0),   # absolute: 90-120
-        ])
+        r2 = _make_result(
+            [
+                ("seg C'", 0.0, 10.0),  # absolute: 50-60, midpoint=55 >= cutoff
+                ("seg D'", 10.0, 20.0),  # absolute: 60-70, midpoint=65 >= cutoff
+                ("seg E", 20.0, 40.0),  # absolute: 70-90
+                ("seg F", 40.0, 70.0),  # absolute: 90-120
+            ]
+        )
 
         stitched = stitch_transcription_results(
             [(r1, 0.0, 70.0), (r2, 50.0, 120.0)],
@@ -159,10 +164,12 @@ class TestExtractContextTail:
         assert tail == ""
 
     def test_multiple_segments(self):
-        result = _make_result([
-            ("first segment", 0.0, 5.0),
-            ("second segment", 5.0, 10.0),
-        ])
+        result = _make_result(
+            [
+                ("first segment", 0.0, 5.0),
+                ("second segment", 5.0, 10.0),
+            ]
+        )
         tail = extract_context_tail(result, max_chars=20)
         assert "second segment" in tail
 
@@ -291,7 +298,9 @@ class TestBatchedTranscriptionQuality:
 
     _DEFAULT_AUDIO = (
         Path(__file__).resolve().parent.parent.parent.parent
-        / "tests" / "test_assets" / "DIY_Experts_Glass_Blowing_16khz_mono_4min.wav"
+        / "tests"
+        / "test_assets"
+        / "DIY_Experts_Glass_Blowing_16khz_mono_4min.wav"
     )
     TEST_AUDIO = os.getenv("TEST_AUDIO_FILE") or str(_DEFAULT_AUDIO)
 
@@ -321,9 +330,7 @@ class TestBatchedTranscriptionQuality:
         reference_text = " ".join(s.text for s in reference_segments)
 
         # Batched: use small windows (60s batch, 15s overlap) to force multiple batches
-        windows = split_audio_file(
-            self.TEST_AUDIO, batch_duration=60, overlap=15
-        )
+        windows = split_audio_file(self.TEST_AUDIO, batch_duration=60, overlap=15)
         batch_results = []
         prev_context = None
         for temp_path, start, end in windows:
@@ -341,11 +348,13 @@ class TestBatchedTranscriptionQuality:
         stitched_text = " ".join(s.text for s in stitched_first_2min)
 
         # Compare
-        similarity = difflib.SequenceMatcher(None, reference_text, stitched_text).ratio()
+        similarity = difflib.SequenceMatcher(
+            None, reference_text, stitched_text
+        ).ratio()
 
-        assert len(stitched_first_2min) >= len(reference_segments) - 2, (
-            f"Batched has too few segments: {len(stitched_first_2min)} vs {len(reference_segments)}"
-        )
+        assert (
+            len(stitched_first_2min) >= len(reference_segments) - 2
+        ), f"Batched has too few segments: {len(stitched_first_2min)} vs {len(reference_segments)}"
         assert similarity > 0.7, f"Text similarity too low: {similarity:.2f}"
 
         # Verify no timestamp gaps > 5s in stitched output
@@ -355,9 +364,7 @@ class TestBatchedTranscriptionQuality:
 
     def test_batched_covers_full_duration(self, transcriber):
         """Batched transcription should cover the full audio duration."""
-        windows = split_audio_file(
-            self.TEST_AUDIO, batch_duration=60, overlap=15
-        )
+        windows = split_audio_file(self.TEST_AUDIO, batch_duration=60, overlap=15)
         batch_results = []
         prev_context = None
         for temp_path, start, end in windows:
@@ -372,6 +379,6 @@ class TestBatchedTranscriptionQuality:
 
         # Should cover most of the ~4 minute audio
         assert stitched.duration is not None
-        assert stitched.duration > 200.0, (
-            f"Stitched duration {stitched.duration:.1f}s seems too short for ~4min audio"
-        )
+        assert (
+            stitched.duration > 200.0
+        ), f"Stitched duration {stitched.duration:.1f}s seems too short for ~4min audio"

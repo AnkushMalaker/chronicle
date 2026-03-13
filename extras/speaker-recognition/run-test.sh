@@ -75,7 +75,7 @@ elif [ -n "${HF_TOKEN:-}" ]; then
     export REACT_UI_HOST=0.0.0.0
     export REACT_UI_PORT=5173
     export REACT_UI_HTTPS=false
-    
+
     # Create .env file for the test scripts that expect it
     print_info "Creating .env file for test compatibility..."
     cat > .env << EOF

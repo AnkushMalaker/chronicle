@@ -8,9 +8,8 @@ import logging
 import os
 from typing import Optional
 
-from faster_whisper import WhisperModel
-
 from common.response_models import Segment, TranscriptionResult, Word
+from faster_whisper import WhisperModel
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +139,9 @@ class FasterWhisperTranscriber:
             f"Transcription complete: {len(full_text)} chars, "
             f"{len(all_words)} words, {len(all_segments)} segments"
         )
-        logger.info(f"Detected language: {info.language} (prob: {info.language_probability:.2f})")
+        logger.info(
+            f"Detected language: {info.language} (prob: {info.language_probability:.2f})"
+        )
 
         return TranscriptionResult(
             text=full_text,

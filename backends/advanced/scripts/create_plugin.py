@@ -16,7 +16,7 @@ from pathlib import Path
 
 def snake_to_pascal(snake_str: str) -> str:
     """Convert snake_case to PascalCase."""
-    return ''.join(word.capitalize() for word in snake_str.split('_'))
+    return "".join(word.capitalize() for word in snake_str.split("_"))
 
 
 def create_plugin(plugin_name: str, force: bool = False):
@@ -28,19 +28,19 @@ def create_plugin(plugin_name: str, force: bool = False):
         force: Overwrite existing plugin if True
     """
     # Validate plugin name
-    if not plugin_name.replace('_', '').isalnum():
+    if not plugin_name.replace("_", "").isalnum():
         print(f"❌ Error: Plugin name must be alphanumeric with underscores")
         print(f"   Got: {plugin_name}")
         print(f"   Example: my_awesome_plugin")
         sys.exit(1)
 
     # Convert to class name
-    class_name = snake_to_pascal(plugin_name) + 'Plugin'
+    class_name = snake_to_pascal(plugin_name) + "Plugin"
 
     # Get plugins directory (repo root plugins/)
     script_dir = Path(__file__).parent
     backend_dir = script_dir.parent
-    plugins_dir = backend_dir.parent.parent / 'plugins'
+    plugins_dir = backend_dir.parent.parent / "plugins"
     plugin_dir = plugins_dir / plugin_name
 
     # Check if plugin already exists
@@ -70,7 +70,7 @@ from .plugin import {class_name}
 __all__ = ['{class_name}']
 '''
 
-    init_file = plugin_dir / '__init__.py'
+    init_file = plugin_dir / "__init__.py"
     print(f"📝 Creating {init_file}")
     init_file.write_text(init_content, encoding="utf-8")
 
@@ -271,12 +271,12 @@ class {class_name}(BasePlugin):
         pass
 '''
 
-    plugin_file = plugin_dir / 'plugin.py'
+    plugin_file = plugin_dir / "plugin.py"
     print(f"📝 Creating {plugin_file}")
-    plugin_file.write_text(plugin_content,encoding="utf-8")
+    plugin_file.write_text(plugin_content, encoding="utf-8")
 
     # Create README.md
-    readme_content = f'''# {class_name}
+    readme_content = f"""# {class_name}
 
 [Brief description of what your plugin does]
 
@@ -363,9 +363,9 @@ plugins/{plugin_name}/
 ## License
 
 MIT License - see project LICENSE file for details.
-'''
+"""
 
-    readme_file = plugin_dir / 'README.md'
+    readme_file = plugin_dir / "README.md"
     print(f"📝 Creating {readme_file}")
     readme_file.write_text(readme_content, encoding="utf-8")
 
@@ -402,23 +402,23 @@ MIT License - see project LICENSE file for details.
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Create a new Chronicle plugin with boilerplate structure',
+        description="Create a new Chronicle plugin with boilerplate structure",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='''
+        epilog="""
 Examples:
   uv run python scripts/create_plugin.py my_awesome_plugin
   uv run python scripts/create_plugin.py slack_notifier
   uv run python scripts/create_plugin.py todo_extractor --force
-        '''
+        """,
     )
     parser.add_argument(
-        'plugin_name',
-        help='Plugin name in snake_case (e.g., my_awesome_plugin)'
+        "plugin_name", help="Plugin name in snake_case (e.g., my_awesome_plugin)"
     )
     parser.add_argument(
-        '--force', '-f',
-        action='store_true',
-        help='Overwrite existing plugin if it exists'
+        "--force",
+        "-f",
+        action="store_true",
+        help="Overwrite existing plugin if it exists",
     )
 
     args = parser.parse_args()
@@ -433,5 +433,5 @@ Examples:
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

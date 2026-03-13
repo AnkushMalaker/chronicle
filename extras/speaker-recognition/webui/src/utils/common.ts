@@ -9,7 +9,7 @@ export function formatDuration(ms: number): string {
   const seconds = Math.floor(ms / 1000)
   const minutes = Math.floor(seconds / 60)
   const hours = Math.floor(minutes / 60)
-  
+
   if (hours > 0) {
     return `${hours}:${(minutes % 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`
   }
@@ -23,11 +23,11 @@ export function validateApiKey(key: string): { isValid: boolean; error?: string 
   if (!key || !key.trim()) {
     return { isValid: false, error: 'API key is required' }
   }
-  
+
   if (!key.match(/^[a-f0-9]{40}$/i)) {
     return { isValid: false, error: 'Invalid API key format. Should be a 40-character hex string.' }
   }
-  
+
   return { isValid: true }
 }
 
@@ -53,12 +53,12 @@ export function debounce<T extends (...args: any[]) => any>(
   delay: number
 ): (...args: Parameters<T>) => void {
   let timeoutId: NodeJS.Timeout | null = null
-  
+
   return (...args: Parameters<T>) => {
     if (timeoutId) {
       clearTimeout(timeoutId)
     }
-    
+
     timeoutId = setTimeout(() => {
       func(...args)
     }, delay)

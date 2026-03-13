@@ -15,7 +15,7 @@ Welcome to chronicle! This guide provides the optimal reading sequence to unders
 - Basic setup and configuration
 - **Code References**: `src/advanced_omi_backend/main.py`, `config/config.yml`, `docker-compose.yml`
 
-### 2. **[System Architecture](./architecture.md)** 
+### 2. **[System Architecture](./architecture.md)**
 **Read second** - Complete technical architecture with diagrams
 - Component relationships and data flow
 - Authentication and security architecture
@@ -32,7 +32,7 @@ Welcome to chronicle! This guide provides the optimal reading sequence to unders
 - How conversations become memories
 - Mem0 integration and vector storage
 - Configuration and customization options
-- **Code References**: 
+- **Code References**:
   - `src/advanced_omi_backend/memory/memory_service.py` (main processing)
   - `src/advanced_omi_backend/transcript_coordinator.py` (event coordination)
   - `src/advanced_omi_backend/conversation_repository.py` (data access)
@@ -78,7 +78,7 @@ Welcome to chronicle! This guide provides the optimal reading sequence to unders
 
 ### **"I want to understand the system quickly"** (30 min)
 1. [quickstart.md](./quickstart.md) - System overview
-2. [architecture.md](./architecture.md) - Technical architecture  
+2. [architecture.md](./architecture.md) - Technical architecture
 3. `src/advanced_omi_backend/main.py` - Core imports and setup
 4. `config/config.yml` - Configuration overview
 
@@ -147,7 +147,7 @@ backends/advanced-backend/
 
 ### **Authentication**
 - **Setup**: `src/advanced_omi_backend/auth.py`
-- **Users**: `src/advanced_omi_backend/users.py`  
+- **Users**: `src/advanced_omi_backend/users.py`
 - **Integration**: `src/advanced_omi_backend/routers/api_router.py`
 
 ---

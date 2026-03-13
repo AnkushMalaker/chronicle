@@ -12,7 +12,7 @@ fullnameOverride: ""
 service:
   type: LoadBalancer
   port: 80
-  nodePort: 31011  
+  nodePort: 31011
 
 ingress:
   enabled: true
@@ -31,7 +31,7 @@ ingress:
   commonPaths: &commonPaths
     - path: /
       pathType: Prefix
-  
+
   hosts:
     - host: webui.example.com  # Overridden by Skaffold setValueTemplates
       paths: *commonPaths
@@ -54,9 +54,9 @@ resources:
 env:
   # Backend connection (will be set by Skaffold)
   REACT_APP_BACKEND_URL: ""
-  
+
   # Vite allowed hosts configured at build time via Docker buildArgs
-  
+
   # Other environment variables
   NODE_ENV: "production"
 

@@ -42,7 +42,7 @@ docker compose up --build -d
 
 ### 3. Access the Web UI
 
-- **Local access**: Open https://localhost:8444/ in your browser 
+- **Local access**: Open https://localhost:8444/ in your browser
 - **Network access**: Open https://your-tailscale-ip:8444/ in your browser
 
 **Important**: Accept the SSL certificate warning when prompted. Self-signed certificates are used for local development.
@@ -85,7 +85,7 @@ DEEPGRAM_API_KEY=your_key   # For transcription modes
 - **When**: You just want to see speaker changes
 - **Output**: Generic speaker labels (Speaker A, Speaker B, etc.)
 
-### Speaker Identification  
+### Speaker Identification
 - **What**: Separates speakers + identifies them by name
 - **When**: You have enrolled speakers and want to know who said what
 - **Output**: Named speakers ("John said this, Mary said that")
@@ -117,7 +117,7 @@ DEEPGRAM_API_KEY=your_key   # For transcription modes
 1. Ensure services are running: `docker compose ps`
 2. Rebuild if needed: `docker compose up --build -d`
 
-### Port conflicts  
+### Port conflicts
 1. Check what's using ports 80/443: `netstat -tulpn | grep -E ':(80|443)'`
 2. If needed, customize backend/UI ports in `.env` file
 3. Restart: `docker compose down && docker compose up -d`
@@ -164,7 +164,7 @@ HF_TOKEN=your_token         # Required for Hugging Face model download
 SPEAKER_SERVICE_PORT=8085   # Backend API port
 REACT_UI_PORT=5173         # Web UI port (internal)
 
-# Settings  
+# Settings
 SIMILARITY_THRESHOLD=0.15   # Speaker ID confidence (0.1-0.3)
 REACT_UI_HTTPS=true        # Enable HTTPS (needed for microphone)
 

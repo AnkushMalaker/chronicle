@@ -1,6 +1,7 @@
 # Test Environment Configuration
 import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 # Load environment files with correct precedence:
@@ -30,32 +31,27 @@ load_dotenv(backend_dir / ".env", override=False)
 # Final precedence: environment variables > .env.test > .env
 
 # API Configuration
-API_URL = 'http://localhost:8001'  # Use BACKEND_URL from test.env
-API_BASE = 'http://localhost:8001/api'
-SPEAKER_RECOGNITION_URL = 'http://localhost:8085'  # Speaker recognition service
+API_URL = "http://localhost:8001"  # Use BACKEND_URL from test.env
+API_BASE = "http://localhost:8001/api"
+SPEAKER_RECOGNITION_URL = "http://localhost:8085"  # Speaker recognition service
 
-WEB_URL = os.getenv('FRONTEND_URL', 'http://localhost:3001')  # Use FRONTEND_URL from test.env
+WEB_URL = os.getenv(
+    "FRONTEND_URL", "http://localhost:3001"
+)  # Use FRONTEND_URL from test.env
 
 # Test-specific credentials (override any values from .env)
 # These are the credentials used in docker-compose-test.yml
-ADMIN_EMAIL = 'test-admin@example.com'
-ADMIN_PASSWORD = 'test-admin-password-123'
+ADMIN_EMAIL = "test-admin@example.com"
+ADMIN_PASSWORD = "test-admin-password-123"
 
 # Admin user credentials (Robot Framework format)
-ADMIN_USER = {
-    "email": ADMIN_EMAIL,
-    "password": ADMIN_PASSWORD
-}
+ADMIN_USER = {"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}
 
-TEST_USER = {
-    "email": "test@example.com",
-    "password": "test-password"
-}
+TEST_USER = {"email": "test@example.com", "password": "test-password"}
 
 # Individual variables for Robot Framework
 TEST_USER_EMAIL = "test@example.com"
 TEST_USER_PASSWORD = "test-password"
-
 
 
 # API Endpoints
@@ -66,20 +62,16 @@ ENDPOINTS = {
     "conversations": "/api/conversations",
     "memories": "/api/memories",
     "memory_search": "/api/memories/search",
-    "users": "/api/users"
+    "users": "/api/users",
 }
 
 # API Keys (loaded from test.env)
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-DEEPGRAM_API_KEY = os.getenv('DEEPGRAM_API_KEY')
-HF_TOKEN = os.getenv('HF_TOKEN')
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+HF_TOKEN = os.getenv("HF_TOKEN")
 
 # Test Configuration
-TEST_CONFIG = {
-    "retry_count": 3,
-    "retry_delay": 1,
-    "default_timeout": 30
-}
+TEST_CONFIG = {"retry_count": 3, "retry_delay": 1, "default_timeout": 30}
 
 # Docker Container Names (based on docker-compose-test.yml project name: backend-test)
 BACKEND_CONTAINER = "backend-test-chronicle-backend-test-1"

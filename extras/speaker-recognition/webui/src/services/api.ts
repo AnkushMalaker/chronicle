@@ -89,7 +89,7 @@ class ApiService {
       // Fallback to local user creation
       const existingUsers = JSON.parse(localStorage.getItem('users') || '[]')
       const existingUser = existingUsers.find((u: User) => u.username === username)
-      
+
       if (existingUser) {
         return existingUser
       }
@@ -99,7 +99,7 @@ class ApiService {
         username,
         created_at: new Date().toISOString()
       }
-      
+
       existingUsers.push(newUser)
       localStorage.setItem('users', JSON.stringify(existingUsers))
       return newUser
@@ -142,7 +142,7 @@ class ApiService {
     audioFiles: File[]
   ): Promise<any> {
     const formData = new FormData()
-    
+
     audioFiles.forEach(file => {
       formData.append('files', file)
     })

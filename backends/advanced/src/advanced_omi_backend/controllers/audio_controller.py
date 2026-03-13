@@ -12,6 +12,9 @@ import os
 import time
 import uuid
 
+from fastapi import UploadFile
+from fastapi.responses import JSONResponse
+
 from advanced_omi_backend.config import get_transcription_job_timeout
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
@@ -29,11 +32,7 @@ from advanced_omi_backend.utils.audio_utils import (
     convert_any_to_wav,
     validate_and_prepare_audio,
 )
-from advanced_omi_backend.workers.transcription_jobs import (
-    transcribe_full_audio_job,
-)
-from fastapi import UploadFile
-from fastapi.responses import JSONResponse
+from advanced_omi_backend.workers.transcription_jobs import transcribe_full_audio_job
 
 logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
@@ -50,7 +49,7 @@ async def upload_and_process_audio_files(
     user: User,
     files: list[UploadFile],
     device_name: str = "upload",
-    source: str = "upload"
+    source: str = "upload",
 ) -> dict:
     """
     Upload audio files and process them directly.
@@ -80,11 +79,13 @@ async def upload_and_process_audio_files(
                 _, ext = os.path.splitext(filename.lower())
                 if not ext or ext not in SUPPORTED_AUDIO_EXTENSIONS:
                     supported = ", ".join(sorted(SUPPORTED_AUDIO_EXTENSIONS))
-                    processed_files.append({
-                        "filename": filename,
-                        "status": "error",
-                        "error": f"Unsupported format '{ext}'. Supported: {supported}",
-                    })
+                    processed_files.append(
+                        {
+                            "filename": filename,
+                            "status": "error",
+                            "error": f"Unsupported format '{ext}'. Supported: {supported}",
+                        }
+                    )
                     continue
 
                 is_video_source = ext in VIDEO_EXTENSIONS
@@ -101,37 +102,47 @@ async def upload_and_process_audio_files(
                     try:
                         content = await convert_any_to_wav(content, ext)
                     except AudioValidationError as e:
-                        processed_files.append({
-                            "filename": filename,
-                            "status": "error",
-                            "error": str(e),
-                        })
+                        processed_files.append(
+                            {
+                                "filename": filename,
+                                "status": "error",
+                                "error": str(e),
+                            }
+                        )
                         continue
 
                 # Track external source for deduplication (Google Drive, etc.)
                 external_source_id = None
                 external_source_type = None
                 if source == "gdrive":
-                    external_source_id = getattr(file, "file_id", None) or getattr(file, "audio_uuid", None)
+                    external_source_id = getattr(file, "file_id", None) or getattr(
+                        file, "audio_uuid", None
+                    )
                     external_source_type = "gdrive"
                     if not external_source_id:
-                        audio_logger.warning(f"Missing file_id for gdrive file: {filename}")
+                        audio_logger.warning(
+                            f"Missing file_id for gdrive file: {filename}"
+                        )
                 timestamp = int(time.time() * 1000)
 
                 # Validate and prepare audio (read format from WAV file)
                 try:
-                    audio_data, sample_rate, sample_width, channels, duration = await validate_and_prepare_audio(
-                        audio_data=content,
-                        expected_sample_rate=16000,  # Expecting 16kHz
-                        convert_to_mono=True,  # Convert stereo to mono
-                        auto_resample=True  # Auto-resample if sample rate doesn't match
+                    audio_data, sample_rate, sample_width, channels, duration = (
+                        await validate_and_prepare_audio(
+                            audio_data=content,
+                            expected_sample_rate=16000,  # Expecting 16kHz
+                            convert_to_mono=True,  # Convert stereo to mono
+                            auto_resample=True,  # Auto-resample if sample rate doesn't match
+                        )
                     )
                 except AudioValidationError as e:
-                    processed_files.append({
-                        "filename": filename,
-                        "status": "error",
-                        "error": str(e),
-                    })
+                    processed_files.append(
+                        {
+                            "filename": filename,
+                            "status": "error",
+                            "error": str(e),
+                        }
+                    )
                     continue
 
                 audio_logger.info(
@@ -139,7 +150,11 @@ async def upload_and_process_audio_files(
                 )
 
                 # Generate title from filename
-                title = filename.rsplit('.', 1)[0][:50] if filename != "unknown" else "Uploaded Audio"
+                title = (
+                    filename.rsplit(".", 1)[0][:50]
+                    if filename != "unknown"
+                    else "Uploaded Audio"
+                )
 
                 conversation = create_conversation(
                     user_id=user.user_id,
@@ -150,9 +165,13 @@ async def upload_and_process_audio_files(
                     external_source_type=external_source_type,
                 )
                 await conversation.insert()
-                conversation_id = conversation.conversation_id  # Get the auto-generated ID
+                conversation_id = (
+                    conversation.conversation_id
+                )  # Get the auto-generated ID
 
-                audio_logger.info(f"📝 Created conversation {conversation_id} for uploaded file")
+                audio_logger.info(
+                    f"📝 Created conversation {conversation_id} for uploaded file"
+                )
 
                 # Convert audio directly to MongoDB chunks
                 try:
@@ -170,24 +189,28 @@ async def upload_and_process_audio_files(
                 except ValueError as val_error:
                     # Handle validation errors (e.g., file too long)
                     audio_logger.error(f"Audio validation failed: {val_error}")
-                    processed_files.append({
-                        "filename": filename,
-                        "status": "error",
-                        "error": str(val_error),
-                    })
+                    processed_files.append(
+                        {
+                            "filename": filename,
+                            "status": "error",
+                            "error": str(val_error),
+                        }
+                    )
                     # Delete the conversation since it won't have audio chunks
                     await conversation.delete()
                     continue
                 except Exception as chunk_error:
                     audio_logger.error(
                         f"Failed to convert uploaded file to chunks: {chunk_error}",
-                        exc_info=True
+                        exc_info=True,
                     )
-                    processed_files.append({
-                        "filename": filename,
-                        "status": "error",
-                        "error": f"Audio conversion failed: {str(chunk_error)}",
-                    })
+                    processed_files.append(
+                        {
+                            "filename": filename,
+                            "status": "error",
+                            "error": f"Audio conversion failed: {str(chunk_error)}",
+                        }
+                    )
                     # Delete the conversation since it won't have audio chunks
                     await conversation.delete()
                     continue
@@ -208,9 +231,14 @@ async def upload_and_process_audio_files(
                         result_ttl=JOB_RESULT_TTL,
                         job_id=transcribe_job_id,
                         description=f"Transcribe uploaded file {conversation_id[:8]}",
-                        meta={'conversation_id': conversation_id, 'client_id': client_id}
+                        meta={
+                            "conversation_id": conversation_id,
+                            "client_id": client_id,
+                        },
                     )
-                    audio_logger.info(f"📥 Enqueued transcription job {transcription_job.id} for uploaded file")
+                    audio_logger.info(
+                        f"📥 Enqueued transcription job {transcription_job.id} for uploaded file"
+                    )
                 else:
                     audio_logger.warning(
                         f"⚠️ Skipping transcription for conversation {conversation_id}: "
@@ -223,16 +251,18 @@ async def upload_and_process_audio_files(
                     user_id=user.user_id,
                     transcript_version_id=version_id,  # Pass the version_id from transcription job
                     depends_on_job=transcription_job,  # Wait for transcription to complete (or None)
-                    client_id=client_id  # Pass client_id for UI tracking
+                    client_id=client_id,  # Pass client_id for UI tracking
                 )
 
                 file_result = {
                     "filename": filename,
                     "status": "started",  # RQ standard: job has been enqueued
                     "conversation_id": conversation_id,
-                    "transcript_job_id": transcription_job.id if transcription_job else None,
-                    "speaker_job_id": job_ids['speaker_recognition'],
-                    "memory_job_id": job_ids['memory'],
+                    "transcript_job_id": (
+                        transcription_job.id if transcription_job else None
+                    ),
+                    "speaker_job_id": job_ids["speaker_recognition"],
+                    "memory_job_id": job_ids["memory"],
                     "duration_seconds": round(duration, 2),
                 }
                 if is_video_source:
@@ -243,10 +273,10 @@ async def upload_and_process_audio_files(
                 job_chain = []
                 if transcription_job:
                     job_chain.append(transcription_job.id)
-                if job_ids['speaker_recognition']:
-                    job_chain.append(job_ids['speaker_recognition'])
-                if job_ids['memory']:
-                    job_chain.append(job_ids['memory'])
+                if job_ids["speaker_recognition"]:
+                    job_chain.append(job_ids["speaker_recognition"])
+                if job_ids["memory"]:
+                    job_chain.append(job_ids["memory"])
 
                 audio_logger.info(
                     f"✅ Processed {filename} → conversation {conversation_id}, "
@@ -256,19 +286,23 @@ async def upload_and_process_audio_files(
             except (OSError, IOError) as e:
                 # File I/O errors during audio processing
                 audio_logger.exception(f"File I/O error processing {filename}")
-                processed_files.append({
-                    "filename": filename,
-                    "status": "error",
-                    "error": str(e),
-                })
+                processed_files.append(
+                    {
+                        "filename": filename,
+                        "status": "error",
+                        "error": str(e),
+                    }
+                )
             except Exception as e:
                 # Unexpected errors during file processing
                 audio_logger.exception(f"Unexpected error processing file {filename}")
-                processed_files.append({
-                    "filename": filename,
-                    "status": "error",
-                    "error": str(e),
-                })
+                processed_files.append(
+                    {
+                        "filename": filename,
+                        "status": "error",
+                        "error": str(e),
+                    }
+                )
 
         successful_files = [f for f in processed_files if f.get("status") == "started"]
         failed_files = [f for f in processed_files if f.get("status") == "error"]
@@ -291,7 +325,9 @@ async def upload_and_process_audio_files(
             return JSONResponse(status_code=400, content=response_body)
         elif len(failed_files) > 0:
             # SOME files failed (partial success) - return 207 Multi-Status
-            audio_logger.warning(f"Partial upload: {len(successful_files)} succeeded, {len(failed_files)} failed")
+            audio_logger.warning(
+                f"Partial upload: {len(successful_files)} succeeded, {len(failed_files)} failed"
+            )
             return JSONResponse(status_code=207, content=response_body)
         else:
             # All files succeeded - return 200 OK

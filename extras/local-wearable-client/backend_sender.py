@@ -105,7 +105,11 @@ async def receive_handler(websocket, logger) -> None:
                 if msg_type == "interim_transcript":
                     text = data.get("data", {}).get("text", "")[:50]
                     is_final = data.get("data", {}).get("is_final", False)
-                    logger.debug("Interim transcript (%s): %s...", "FINAL" if is_final else "partial", text)
+                    logger.debug(
+                        "Interim transcript (%s): %s...",
+                        "FINAL" if is_final else "partial",
+                        text,
+                    )
                 elif msg_type == "ready":
                     logger.info("Backend ready message: %s", data.get("message"))
                 else:

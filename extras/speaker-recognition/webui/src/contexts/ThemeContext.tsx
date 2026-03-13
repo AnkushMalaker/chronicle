@@ -31,7 +31,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     // Listen for system theme changes
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
-    
+
     const handleChange = (e: MediaQueryListEvent) => {
       // Only update if no explicit theme is set in localStorage
       const stored = localStorage.getItem('theme')

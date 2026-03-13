@@ -478,7 +478,7 @@ export default function Chat() {
                   <Send className="h-5 w-5" />
                 </button>
               </div>
-              
+
               <div className="mt-2 flex items-center">
                 <input
                   type="checkbox"

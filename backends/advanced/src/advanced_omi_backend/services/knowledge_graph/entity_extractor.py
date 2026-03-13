@@ -161,35 +161,45 @@ def _parse_extraction_response(content: str) -> ExtractionResult:
         for e in data.get("entities", []):
             if isinstance(e, dict) and e.get("name"):
                 entity_type = _normalize_entity_type(e.get("type", "thing"))
-                entities.append(ExtractedEntity(
-                    name=e["name"].strip(),
-                    type=entity_type,
-                    details=e.get("details"),
-                    icon=e.get("icon") or _get_default_icon(entity_type),
-                    when=e.get("when"),
-                ))
+                entities.append(
+                    ExtractedEntity(
+                        name=e["name"].strip(),
+                        type=entity_type,
+                        details=e.get("details"),
+                        icon=e.get("icon") or _get_default_icon(entity_type),
+                        when=e.get("when"),
+                    )
+                )
 
         # Parse relationships
         relationships = []
         for r in data.get("relationships", []):
             if isinstance(r, dict) and r.get("subject") and r.get("object"):
-                relationships.append(ExtractedRelationship(
-                    subject=r["subject"].strip(),
-                    relation=_normalize_relation_type(r.get("relation", "related_to")),
-                    object=r["object"].strip(),
-                ))
+                relationships.append(
+                    ExtractedRelationship(
+                        subject=r["subject"].strip(),
+                        relation=_normalize_relation_type(
+                            r.get("relation", "related_to")
+                        ),
+                        object=r["object"].strip(),
+                    )
+                )
 
         # Parse promises
         promises = []
         for p in data.get("promises", []):
             if isinstance(p, dict) and p.get("action"):
-                promises.append(ExtractedPromise(
-                    action=p["action"].strip(),
-                    to=p.get("to"),
-                    deadline=p.get("deadline"),
-                ))
+                promises.append(
+                    ExtractedPromise(
+                        action=p["action"].strip(),
+                        to=p.get("to"),
+                        deadline=p.get("deadline"),
+                    )
+                )
 
-        logger.info(f"Extracted {len(entities)} entities, {len(relationships)} relationships, {len(promises)} promises")
+        logger.info(
+            f"Extracted {len(entities)} entities, {len(relationships)} relationships, {len(promises)} promises"
+        )
         return ExtractionResult(
             entities=entities,
             relationships=relationships,
@@ -274,7 +284,9 @@ def _get_default_icon(entity_type: str) -> str:
     return icons.get(entity_type, "📌")
 
 
-def parse_natural_datetime(text: Optional[str], reference_date: Optional[datetime] = None) -> Optional[datetime]:
+def parse_natural_datetime(
+    text: Optional[str], reference_date: Optional[datetime] = None
+) -> Optional[datetime]:
     """Parse natural language date/time into datetime.
 
     Args:
@@ -292,9 +304,20 @@ def parse_natural_datetime(text: Optional[str], reference_date: Optional[datetim
 
     # Simple patterns - can be extended with dateparser library later
     weekdays = {
-        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
-        "friday": 4, "saturday": 5, "sunday": 6,
-        "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+        "monday": 0,
+        "tuesday": 1,
+        "wednesday": 2,
+        "thursday": 3,
+        "friday": 4,
+        "saturday": 5,
+        "sunday": 6,
+        "mon": 0,
+        "tue": 1,
+        "wed": 2,
+        "thu": 3,
+        "fri": 4,
+        "sat": 5,
+        "sun": 6,
     }
 
     try:
@@ -318,6 +341,7 @@ def parse_natural_datetime(text: Optional[str], reference_date: Optional[datetim
 
         # Handle "in X days/weeks"
         import re
+
         match = re.search(r"in (\d+) (day|week|month)s?", text_lower)
         if match:
             num = int(match.group(1))

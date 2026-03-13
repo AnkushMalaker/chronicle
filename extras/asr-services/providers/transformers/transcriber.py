@@ -10,7 +10,6 @@ import os
 from typing import Optional
 
 import torch
-
 from common.response_models import Segment, TranscriptionResult, Word
 
 logger = logging.getLogger(__name__)
@@ -38,8 +37,12 @@ class TransformersTranscriber:
             model_id: Model identifier. If None, reads from ASR_MODEL env var.
         """
         self.model_id = model_id or os.getenv("ASR_MODEL", "openai/whisper-large-v3")
-        self.use_flash_attn = os.getenv("USE_FLASH_ATTENTION", "false").lower() == "true"
-        self.device = os.getenv("DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
+        self.use_flash_attn = (
+            os.getenv("USE_FLASH_ATTENTION", "false").lower() == "true"
+        )
+        self.device = os.getenv(
+            "DEVICE", "cuda" if torch.cuda.is_available() else "cpu"
+        )
         self.torch_dtype_str = os.getenv("TORCH_DTYPE", "float16")
 
         # Determine torch dtype
@@ -172,7 +175,9 @@ class TransformersTranscriber:
                 )
             )
 
-        logger.info(f"Transcription complete: {len(text)} chars, {len(all_words)} words")
+        logger.info(
+            f"Transcription complete: {len(text)} chars, {len(all_words)} words"
+        )
 
         return TranscriptionResult(
             text=text,

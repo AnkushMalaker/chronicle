@@ -57,7 +57,9 @@ class AppConfig:
                 f"✅ Using {self.transcription_provider.name} transcription provider ({self.transcription_provider.mode})"
             )
         else:
-            logger.warning("⚠️ No transcription provider configured - speech-to-text will not be available")
+            logger.warning(
+                "⚠️ No transcription provider configured - speech-to-text will not be available"
+            )
 
         # External Services Configuration
         self.qdrant_base_url = os.getenv("QDRANT_BASE_URL", "qdrant")
@@ -73,7 +75,9 @@ class AppConfig:
         # CORS Configuration
         default_origins = "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:3002"
         self.cors_origins = os.getenv("CORS_ORIGINS", default_origins)
-        self.allowed_origins = [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+        self.allowed_origins = [
+            origin.strip() for origin in self.cors_origins.split(",") if origin.strip()
+        ]
 
         # Tailscale support
         self.tailscale_regex = r"http://100\.\d{1,3}\.\d{1,3}\.\d{1,3}:3000"
@@ -105,15 +109,11 @@ def get_audio_chunk_dir() -> Path:
 def get_mongo_collections():
     """Get MongoDB collections."""
     return {
-        'users': app_config.users_col,
-        'speakers': app_config.speakers_col,
+        "users": app_config.users_col,
+        "speakers": app_config.speakers_col,
     }
 
 
 def get_redis_config():
     """Get Redis configuration."""
-    return {
-        'url': app_config.redis_url,
-        'encoding': "utf-8",
-        'decode_responses': False
-    }
+    return {"url": app_config.redis_url, "encoding": "utf-8", "decode_responses": False}

@@ -25,9 +25,9 @@ export function useDeepgramSession(): UseDeepgramSessionReturn {
   const fetchApiKey = async () => {
     if (apiKeyFetchedRef.current) return
     apiKeyFetchedRef.current = true
-    
+
     sessionLogger.info('Fetching Deepgram API key from server...')
-    
+
     try {
       const response = await apiService.get('/deepgram/config')
       sessionLogger.info('✅ Server API key retrieved successfully')

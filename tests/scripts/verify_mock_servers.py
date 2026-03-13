@@ -14,6 +14,7 @@ import asyncio
 import json
 import sys
 import urllib.request
+
 import websockets
 
 
@@ -21,7 +22,7 @@ def test_llm_models():
     """Test mock LLM models endpoint."""
     print("Testing Mock LLM - Models endpoint...")
     try:
-        with urllib.request.urlopen('http://localhost:11435/v1/models') as response:
+        with urllib.request.urlopen("http://localhost:11435/v1/models") as response:
             data = json.loads(response.read())
             assert "data" in data
             assert len(data["data"]) == 2
@@ -43,14 +44,14 @@ def test_llm_fact_extraction():
             "model": "gpt-4o-mini",
             "messages": [
                 {"role": "system", "content": "FACT_RETRIEVAL_PROMPT extract facts"},
-                {"role": "user", "content": "I like hiking"}
-            ]
+                {"role": "user", "content": "I like hiking"},
+            ],
         }
 
         req = urllib.request.Request(
-            'http://localhost:11435/v1/chat/completions',
+            "http://localhost:11435/v1/chat/completions",
             data=json.dumps(request_data).encode(),
-            headers={'Content-Type': 'application/json'}
+            headers={"Content-Type": "application/json"},
         )
 
         with urllib.request.urlopen(req) as response:
@@ -74,14 +75,14 @@ def test_llm_memory_update():
             "model": "gpt-4o-mini",
             "messages": [
                 {"role": "system", "content": "UPDATE_MEMORY_PROMPT memory manager"},
-                {"role": "user", "content": "User now likes apple pie"}
-            ]
+                {"role": "user", "content": "User now likes apple pie"},
+            ],
         }
 
         req = urllib.request.Request(
-            'http://localhost:11435/v1/chat/completions',
+            "http://localhost:11435/v1/chat/completions",
             data=json.dumps(request_data).encode(),
-            headers={'Content-Type': 'application/json'}
+            headers={"Content-Type": "application/json"},
         )
 
         with urllib.request.urlopen(req) as response:
@@ -103,13 +104,13 @@ def test_llm_embeddings():
     try:
         request_data = {
             "model": "text-embedding-3-small",
-            "input": ["test text 1", "test text 2"]
+            "input": ["test text 1", "test text 2"],
         }
 
         req = urllib.request.Request(
-            'http://localhost:11435/v1/embeddings',
+            "http://localhost:11435/v1/embeddings",
             data=json.dumps(request_data).encode(),
-            headers={'Content-Type': 'application/json'}
+            headers={"Content-Type": "application/json"},
         )
 
         with urllib.request.urlopen(req) as response:
@@ -178,9 +179,9 @@ async def test_streaming_stt():
 
 def main():
     """Run all verification tests."""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Mock Servers Verification")
-    print("="*60 + "\n")
+    print("=" * 60 + "\n")
 
     results = []
 
@@ -194,11 +195,11 @@ def main():
     results.append(asyncio.run(test_streaming_stt()))
 
     # Summary
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     passed = sum(results)
     total = len(results)
     print(f"Results: {passed}/{total} tests passed")
-    print("="*60 + "\n")
+    print("=" * 60 + "\n")
 
     if passed == total:
         print("✅ All mock servers are working correctly!")

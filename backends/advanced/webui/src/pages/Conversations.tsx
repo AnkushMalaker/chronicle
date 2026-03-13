@@ -178,7 +178,7 @@ export default function Conversations() {
   const allSpeakers = useMemo(() => {
     const speakers = [...enrolledSpeakers]
     const existingNames = new Set(speakers.map(s => s.name))
-    
+
     // Add speakers from all diarization annotations
     diarizationAnnotations.forEach((annotations) => {
       annotations.forEach(a => {

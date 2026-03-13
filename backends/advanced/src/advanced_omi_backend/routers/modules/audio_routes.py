@@ -49,7 +49,10 @@ def _safe_filename(conversation: "Conversation") -> str:
 
 @router.post("/upload_audio_from_gdrive")
 async def upload_audio_from_drive_folder(
-    gdrive_folder_id: str = Query(..., description="Google Drive Folder ID containing audio files (e.g., the string after /folders/ in the URL)"),
+    gdrive_folder_id: str = Query(
+        ...,
+        description="Google Drive Folder ID containing audio files (e.g., the string after /folders/ in the URL)",
+    ),
     current_user: User = Depends(current_superuser),
     device_name: str = Query(default="upload"),
 ):
@@ -67,7 +70,9 @@ async def upload_audio_from_drive_folder(
 async def get_conversation_audio(
     conversation_id: str,
     request: Request,
-    token: Optional[str] = Query(default=None, description="JWT token for audio element access"),
+    token: Optional[str] = Query(
+        default=None, description="JWT token for audio element access"
+    ),
     current_user: Optional[User] = Depends(current_active_user_optional),
 ):
     """
@@ -111,7 +116,9 @@ async def get_conversation_audio(
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     # Check ownership (admins can access all)
-    if not current_user.is_superuser and conversation.user_id != str(current_user.user_id):
+    if not current_user.is_superuser and conversation.user_id != str(
+        current_user.user_id
+    ):
         raise HTTPException(status_code=403, detail="Access denied")
 
     # Reconstruct WAV from MongoDB chunks
@@ -123,8 +130,7 @@ async def get_conversation_audio(
     except Exception as e:
         # Reconstruction failed
         raise HTTPException(
-            status_code=500,
-            detail=f"Failed to reconstruct audio: {str(e)}"
+            status_code=500, detail=f"Failed to reconstruct audio: {str(e)}"
         )
 
     # Handle Range requests for seeking support
@@ -143,7 +149,7 @@ async def get_conversation_audio(
                 "Accept-Ranges": "bytes",
                 "X-Audio-Source": "mongodb-chunks",
                 "X-Chunk-Count": str(conversation.audio_chunks_count or 0),
-            }
+            },
         )
 
     # Parse Range header (e.g., "bytes=0-1023")
@@ -159,7 +165,7 @@ async def get_conversation_audio(
         content_length = range_end - range_start + 1
 
         # Extract requested byte range
-        range_data = wav_data[range_start:range_end + 1]
+        range_data = wav_data[range_start : range_end + 1]
 
         # Return 206 Partial Content with Range headers
         return Response(
@@ -172,22 +178,21 @@ async def get_conversation_audio(
                 "Accept-Ranges": "bytes",
                 "Content-Disposition": f'inline; filename="{filename}.wav"',
                 "X-Audio-Source": "mongodb-chunks",
-            }
+            },
         )
     except (ValueError, IndexError) as e:
         # Invalid Range header, return 416 Range Not Satisfiable
         return Response(
-            status_code=416,
-            headers={
-                "Content-Range": f"bytes */{file_size}"
-            }
+            status_code=416, headers={"Content-Range": f"bytes */{file_size}"}
         )
 
 
 @router.get("/stream_audio/{conversation_id}")
 async def stream_conversation_audio(
     conversation_id: str,
-    token: Optional[str] = Query(default=None, description="JWT token for audio element access"),
+    token: Optional[str] = Query(
+        default=None, description="JWT token for audio element access"
+    ),
     current_user: Optional[User] = Depends(current_active_user_optional),
 ):
     """
@@ -230,12 +235,16 @@ async def stream_conversation_audio(
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     # Check ownership (admins can access all)
-    if not current_user.is_superuser and conversation.user_id != str(current_user.user_id):
+    if not current_user.is_superuser and conversation.user_id != str(
+        current_user.user_id
+    ):
         raise HTTPException(status_code=403, detail="Access denied")
 
     # Check if chunks exist
     if not conversation.audio_chunks_count or conversation.audio_chunks_count == 0:
-        raise HTTPException(status_code=404, detail="No audio data for this conversation")
+        raise HTTPException(
+            status_code=404, detail="No audio data for this conversation"
+        )
 
     async def stream_chunks():
         """Generator that yields WAV data in batches."""
@@ -249,6 +258,7 @@ async def stream_conversation_audio(
         # We'll write a placeholder size since we're streaming
         wav_header = io.BytesIO()
         import wave
+
         with wave.open(wav_header, "wb") as wav:
             wav.setnchannels(CHANNELS)
             wav.setsampwidth(SAMPLE_WIDTH)
@@ -268,7 +278,7 @@ async def stream_conversation_audio(
             chunks = await retrieve_audio_chunks(
                 conversation_id=conversation_id,
                 start_index=start_index,
-                limit=batch_size
+                limit=batch_size,
             )
 
             if not chunks:
@@ -292,7 +302,7 @@ async def stream_conversation_audio(
             "X-Audio-Source": "mongodb-chunks-stream",
             "X-Chunk-Count": str(conversation.audio_chunks_count or 0),
             "X-Total-Duration": str(conversation.audio_total_duration or 0),
-        }
+        },
     )
 
 
@@ -301,7 +311,9 @@ async def get_audio_chunk_range(
     conversation_id: str,
     start_time: float = Query(..., description="Start time in seconds"),
     end_time: float = Query(..., description="End time in seconds"),
-    token: Optional[str] = Query(default=None, description="JWT token for audio element access"),
+    token: Optional[str] = Query(
+        default=None, description="JWT token for audio element access"
+    ),
     current_user: Optional[User] = Depends(current_active_user_optional),
 ):
     """
@@ -331,8 +343,11 @@ async def get_audio_chunk_range(
         400: If time range is invalid
     """
     import logging
+
     logger = logging.getLogger(__name__)
-    logger.info(f"🎵 Audio chunk request: conversation={conversation_id[:8]}..., start={start_time:.2f}s, end={end_time:.2f}s")
+    logger.info(
+        f"🎵 Audio chunk request: conversation={conversation_id[:8]}..., start={start_time:.2f}s, end={end_time:.2f}s"
+    )
 
     # Try token param if header auth failed
     if not current_user and token:
@@ -350,27 +365,38 @@ async def get_audio_chunk_range(
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     # Check ownership (admins can access all)
-    if not current_user.is_superuser and conversation.user_id != str(current_user.user_id):
+    if not current_user.is_superuser and conversation.user_id != str(
+        current_user.user_id
+    ):
         raise HTTPException(status_code=403, detail="Access denied")
 
     # Validate time range
     if start_time < 0 or end_time <= start_time:
         raise HTTPException(status_code=400, detail="Invalid time range")
 
-    if conversation.audio_total_duration and end_time > conversation.audio_total_duration:
+    if (
+        conversation.audio_total_duration
+        and end_time > conversation.audio_total_duration
+    ):
         end_time = conversation.audio_total_duration
 
     # Use the dedicated segment reconstruction function
     from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segment
 
     try:
-        wav_data = await reconstruct_audio_segment(conversation_id, start_time, end_time)
-        logger.info(f"✅ Returning WAV: {len(wav_data)} bytes for range {start_time:.2f}s - {end_time:.2f}s")
+        wav_data = await reconstruct_audio_segment(
+            conversation_id, start_time, end_time
+        )
+        logger.info(
+            f"✅ Returning WAV: {len(wav_data)} bytes for range {start_time:.2f}s - {end_time:.2f}s"
+        )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to reconstruct audio segment: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to reconstruct audio: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to reconstruct audio: {str(e)}"
+        )
 
     return StreamingResponse(
         io.BytesIO(wav_data),
@@ -381,7 +407,7 @@ async def get_audio_chunk_range(
             "X-Audio-Duration": str(end_time - start_time),
             "X-Start-Time": str(start_time),
             "X-End-Time": str(end_time),
-        }
+        },
     )
 
 
@@ -389,7 +415,9 @@ async def get_audio_chunk_range(
 async def upload_audio_files(
     current_user: User = Depends(current_superuser),
     files: list[UploadFile] = File(...),
-    device_name: str = Query(default="upload", description="Device name for uploaded files"),
+    device_name: str = Query(
+        default="upload", description="Device name for uploaded files"
+    ),
 ):
     """
     Upload and process audio files. Admin only.

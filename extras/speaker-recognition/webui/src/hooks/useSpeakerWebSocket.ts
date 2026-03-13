@@ -4,10 +4,10 @@
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { 
-  SpeakerWebSocketService, 
-  UtteranceBoundaryEvent, 
-  SpeakerWebSocketOptions 
+import {
+  SpeakerWebSocketService,
+  UtteranceBoundaryEvent,
+  SpeakerWebSocketOptions
 } from '../services/speakerWebSocket'
 
 export interface TranscriptSegment {
@@ -30,11 +30,11 @@ export interface UseSpeakerWebSocketReturn {
   // Connection state
   isConnected: boolean
   connectionStatus: 'connecting' | 'connected' | 'disconnected' | 'error'
-  
+
   // Streaming state
   isStreaming: boolean
   transcriptSegments: TranscriptSegment[]
-  
+
   // Controls
   connect: () => Promise<void>
   disconnect: () => void
@@ -42,10 +42,10 @@ export interface UseSpeakerWebSocketReturn {
   stopStreaming: () => void
   sendAudio: (audioData: ArrayBuffer | Uint8Array) => boolean
   clearTranscripts: () => void
-  
+
   // Settings
   updateSettings: (settings: Partial<SpeakerWebSocketOptions>) => void
-  
+
   // Statistics
   stats: {
     totalSegments: number
@@ -53,7 +53,7 @@ export interface UseSpeakerWebSocketReturn {
     sessionDuration: number
     averageConfidence: number
   }
-  
+
   // Raw Deepgram access
   setRawDeepgramCallback: (callback: (data: any) => void) => void
 }
@@ -64,11 +64,11 @@ export const useSpeakerWebSocket = (
   // Connection state
   const [isConnected, setIsConnected] = useState(false)
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('disconnected')
-  
-  // Streaming state  
+
+  // Streaming state
   const [isStreaming, setIsStreaming] = useState(false)
   const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([])
-  
+
   // Statistics
   const [stats, setStats] = useState({
     totalSegments: 0,
@@ -127,8 +127,8 @@ export const useSpeakerWebSocket = (
         }
       } else {
         // For final transcripts, always add (and remove any trailing interim)
-        const withoutTrailingInterim = prev[prev.length - 1]?.status === 'interim' 
-          ? prev.slice(0, -1) 
+        const withoutTrailingInterim = prev[prev.length - 1]?.status === 'interim'
+          ? prev.slice(0, -1)
           : prev
         return [...withoutTrailingInterim, segment]
       }
@@ -138,7 +138,7 @@ export const useSpeakerWebSocket = (
     setStats(prev => {
       const totalSegments = prev.totalSegments + 1
       const identifiedSpeakers = new Set(prev.identifiedSpeakers)
-      
+
       if (segment.speaker_name && segment.status === 'identified') {
         identifiedSpeakers.add(segment.speaker_name)
       }
@@ -146,7 +146,7 @@ export const useSpeakerWebSocket = (
       // Calculate average confidence (only for segments with identification attempts)
       const segments = [...transcriptSegments, segment]
       const segmentsWithConfidence = segments.filter(s => s.confidence > 0)
-      const averageConfidence = segmentsWithConfidence.length > 0 
+      const averageConfidence = segmentsWithConfidence.length > 0
         ? segmentsWithConfidence.reduce((sum, s) => sum + s.confidence, 0) / segmentsWithConfidence.length
         : 0
 
@@ -186,7 +186,7 @@ export const useSpeakerWebSocket = (
   // Connect to WebSocket
   const connect = useCallback(async () => {
     initializeService()
-    
+
     if (wsServiceRef.current) {
       try {
         await wsServiceRef.current.connect()
@@ -212,13 +212,13 @@ export const useSpeakerWebSocket = (
   const startStreaming = useCallback(() => {
     const serviceConnected = wsServiceRef.current?.connectionStatus === 'connected'
     console.log(`🎙️ [WS] Attempting to start streaming - React isConnected: ${isConnected}, Service connected: ${serviceConnected}`)
-    
+
     // Check WebSocket service state directly to avoid React state timing issues
     if (!wsServiceRef.current || !serviceConnected) {
       console.warn('Cannot start streaming: WebSocket service not connected')
       return
     }
-    
+
     sessionStartRef.current = Date.now()
     setIsStreaming(true)
     console.log(`🎙️ [WS] Set isStreaming to true`)
@@ -244,7 +244,7 @@ export const useSpeakerWebSocket = (
       console.warn('❌ [sendAudio] No WebSocket service')
       return false
     }
-    
+
     // Let the WebSocket service handle streaming state checks internally
     // Removed React state dependency to avoid timing issues
     return wsServiceRef.current.sendAudio(audioData)
@@ -287,11 +287,11 @@ export const useSpeakerWebSocket = (
     // Connection state
     isConnected,
     connectionStatus,
-    
+
     // Streaming state
     isStreaming,
     transcriptSegments,
-    
+
     // Controls
     connect,
     disconnect,
@@ -299,13 +299,13 @@ export const useSpeakerWebSocket = (
     stopStreaming,
     sendAudio,
     clearTranscripts,
-    
+
     // Settings
     updateSettings,
-    
+
     // Statistics
     stats,
-    
+
     // Raw Deepgram access
     setRawDeepgramCallback
   }

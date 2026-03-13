@@ -1,6 +1,6 @@
 /**
  * SettingsPanel Component - Unified settings interface
- * Provides consistent settings UI across all processing pages  
+ * Provides consistent settings UI across all processing pages
  * Handles confidence thresholds, API keys, and processing options
  */
 
@@ -11,29 +11,29 @@ export interface SettingsPanelProps {
   // Confidence threshold
   confidenceThreshold: number
   onConfidenceThresholdChange: (threshold: number) => void
-  
+
   // API key management
   deepgramApiKey?: string
   onDeepgramApiKeyChange?: (key: string) => void
   deepgramApiKeySource?: 'server' | 'manual' | 'loading'
-  
+
   // Processing options
   enableSpeakerIdentification?: boolean
   onEnableSpeakerIdentificationChange?: (enabled: boolean) => void
-  
+
   enableTranscription?: boolean
   onEnableTranscriptionChange?: (enabled: boolean) => void
-  
+
   // Audio settings
   sampleRate?: number
   onSampleRateChange?: (rate: number) => void
-  
+
   // Timing settings
   utteranceEndMs?: number
   onUtteranceEndMsChange?: (ms: number) => void
   endpointingMs?: number
   onEndpointingMsChange?: (ms: number) => void
-  
+
   // Display options
   compact?: boolean
   collapsible?: boolean
@@ -41,7 +41,7 @@ export interface SettingsPanelProps {
   showApiKeySection?: boolean
   showAudioSettings?: boolean
   showProcessingOptions?: boolean
-  
+
   // Styling
   className?: string
 }
@@ -108,7 +108,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   }
 
   const renderHeader = () => (
-    <div 
+    <div
       className={`flex items-center justify-between ${collapsible ? 'cursor-pointer' : ''}`}
       onClick={collapsible ? () => setIsExpanded(!isExpanded) : undefined}
     >
@@ -164,7 +164,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               {getApiKeyStatusText()}
             </span>
           </div>
-          
+
           {deepgramApiKeySource === 'manual' && (
             <div className="space-y-2">
               <div className="relative">
@@ -185,10 +185,10 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               </div>
               <p className="text-xs text-gray-600">
                 Get your key from{' '}
-                <a 
-                  href="https://console.deepgram.com/" 
-                  target="_blank" 
-                  rel="noopener noreferrer" 
+                <a
+                  href="https://console.deepgram.com/"
+                  target="_blank"
+                  rel="noopener noreferrer"
                   className="text-blue-600 underline"
                 >
                   Deepgram Console
@@ -196,7 +196,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               </p>
             </div>
           )}
-          
+
           {deepgramApiKeySource === 'server' && (
             <div className="flex items-center space-x-2 text-sm text-gray-600">
               <Key className="h-4 w-4" />
@@ -210,7 +210,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       {showProcessingOptions && (
         <div className="space-y-3">
           <h5 className="text-sm font-medium text-gray-700">Processing Options</h5>
-          
+
           {/* Speaker Identification Toggle */}
           {onEnableSpeakerIdentificationChange && (
             <div className="flex items-center justify-between">
@@ -255,7 +255,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       {(onUtteranceEndMsChange || onEndpointingMsChange) && (
         <div className="space-y-3">
           <h5 className="text-sm font-medium text-gray-700">Completion Timing</h5>
-          
+
           {/* Utterance End Timeout */}
           {onUtteranceEndMsChange && (
             <div>
@@ -355,7 +355,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       {showAudioSettings && (
         <div className="space-y-3">
           <h5 className="text-sm font-medium text-gray-700">Audio Settings</h5>
-          
+
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               Sample Rate
@@ -428,7 +428,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   <span>Speaker ID</span>
                 </label>
               )}
-              
+
               {onEnableTranscriptionChange && (
                 <label className="flex items-center">
                   <input

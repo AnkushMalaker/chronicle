@@ -5,9 +5,9 @@
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { 
-  DeepgramStreaming, 
-  StreamingConfig, 
+import {
+  DeepgramStreaming,
+  StreamingConfig,
   StreamingTranscript,
   SpeechStartedEvent,
   UtteranceEndEvent
@@ -48,17 +48,17 @@ export interface UseDeepgramIntegrationReturn {
   // Connection state
   isConnected: boolean
   connectionStatus: 'disconnected' | 'connecting' | 'connected' | 'error'
-  
+
   // Streaming state
   isStreaming: boolean
   transcriptSegments: TranscriptSegment[]
   audioBuffers: Float32Array[]
-  
+
   // API key management
   apiKey: string | null
   apiKeySource: 'server' | 'manual' | 'loading'
   setApiKey: (key: string) => void
-  
+
   // Controls
   connect: () => Promise<void>
   disconnect: () => void
@@ -66,11 +66,11 @@ export interface UseDeepgramIntegrationReturn {
   stopStreaming: () => void
   sendAudio: (audioData: ArrayBuffer, sampleRate?: number) => void
   clearTranscripts: () => void
-  
+
   // Sample rate management
   setActualSampleRate: (sampleRate: number) => void
   actualSampleRate: number
-  
+
   // Settings
   confidenceThreshold: number
   setConfidenceThreshold: (threshold: number) => void
@@ -80,7 +80,7 @@ export interface UseDeepgramIntegrationReturn {
   setUtteranceEndMs: (ms: number) => void
   endpointingMs: number
   setEndpointingMs: (ms: number) => void
-  
+
   // Statistics
   stats: {
     totalWords: number
@@ -113,25 +113,25 @@ export const useDeepgramIntegration = (
   // Connection state
   const [isConnected, setIsConnected] = useState(false)
   const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected')
-  
-  // Streaming state  
+
+  // Streaming state
   const [isStreaming, setIsStreaming] = useState(false)
   const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([])
   const [audioBuffers, setAudioBuffers] = useState<Float32Array[]>([])
-  
+
   // API key management - prioritize manual key over session key
   const apiKey = initialApiKey || deepgramSession.deepgramApiKey || null
   const apiKeySource = initialApiKey ? 'manual' : deepgramSession.apiKeySource
-  
+
   // Settings
   const [confidenceThreshold, setConfidenceThreshold] = useState(initialConfidence)
   const [enableSpeakerIdentification, setEnableSpeakerIdentification] = useState(initialEnableId)
   const [utteranceEndMs, setUtteranceEndMs] = useState(initialUtteranceEndMs)
   const [endpointingMs, setEndpointingMs] = useState(initialEndpointingMs)
-  
+
   // Sample rate management
   const [actualSampleRate, setActualSampleRate] = useState<number>(16000)
-  
+
   // Statistics
   const [stats, setStats] = useState({
     totalWords: 0,
@@ -251,7 +251,7 @@ export const useDeepgramIntegration = (
       }
 
       deepgramRef.current = new DeepgramStreaming(config)
-      
+
       // Set up event handlers
       deepgramRef.current.onStatus(setConnectionStatus)
       deepgramRef.current.onError((error) => {
@@ -283,7 +283,7 @@ export const useDeepgramIntegration = (
         if (!segment.isInterim) {
           utteranceTranscriptsRef.current.push(transcript.transcript)
           currentUtteranceSegmentIds.current.push(segment.id)
-          
+
           if (utteranceTranscriptsRef.current.length === 1 && transcript.words.length > 0) {
             utteranceStartTimeRef.current = transcript.words[0].start
           }
@@ -305,8 +305,8 @@ export const useDeepgramIntegration = (
           setStats(prev => {
             const wordCount = transcript.words.length
             const totalWords = prev.totalWords + wordCount
-            const avgConfidence = totalWords > 0 ? 
-              (prev.averageConfidence * prev.totalWords + transcript.confidence * wordCount) / totalWords : 
+            const avgConfidence = totalWords > 0 ?
+              (prev.averageConfidence * prev.totalWords + transcript.confidence * wordCount) / totalWords :
               transcript.confidence
 
             return {
@@ -327,7 +327,7 @@ export const useDeepgramIntegration = (
 
       deepgramRef.current.onUtteranceEnd(async (event: UtteranceEndEvent) => {
         if (!enableSpeakerIdentification) return
-        
+
         if (processingUtteranceRef.current) return
         processingUtteranceRef.current = true
 
@@ -335,7 +335,7 @@ export const useDeepgramIntegration = (
           console.log(`🎤 [UTTERANCE END] Processing utterance end event`)
           console.log(`📝 [UTTERANCE] Transcript segments: ${utteranceTranscriptsRef.current.length}`)
           console.log(`🔗 [UTTERANCE] Segment IDs: ${currentUtteranceSegmentIds.current.length}`)
-          
+
           if (utteranceTranscriptsRef.current.length === 0 || currentUtteranceSegmentIds.current.length === 0) {
             console.log(`⚠️ [UTTERANCE] No transcripts or segment IDs, skipping`)
             return
@@ -360,7 +360,7 @@ export const useDeepgramIntegration = (
             utteranceStartTime,
             utteranceEndTime
           )
-          
+
           console.log(`🎯 [SPEAKER ID] Result:`, {
             found: identification.found,
             speaker_name: identification.speaker_name,
@@ -371,14 +371,14 @@ export const useDeepgramIntegration = (
           // Update transcript segments with speaker information
           setTranscriptSegments(prev => {
             const updatedSegments = [...prev]
-            
+
             segmentIdsToUpdate.forEach((segmentId) => {
               const segmentIndex = updatedSegments.findIndex(seg => seg.id === segmentId)
-              
+
               if (segmentIndex >= 0) {
-                const speakerName = identification.found ? 
+                const speakerName = identification.found ?
                   identification.speaker_name : 'Unknown'
-                
+
                 updatedSegments[segmentIndex] = {
                   ...updatedSegments[segmentIndex],
                   speakerParts: [{
@@ -389,7 +389,7 @@ export const useDeepgramIntegration = (
                 }
               }
             })
-            
+
             return updatedSegments
           })
 
@@ -440,7 +440,7 @@ export const useDeepgramIntegration = (
     if (!isConnected) {
       await connect()
     }
-    
+
     sessionStartRef.current = Date.now()
     streamStartTimeRef.current = Date.now() / 1000
     setIsStreaming(true)
@@ -462,16 +462,16 @@ export const useDeepgramIntegration = (
   const sendAudio = useCallback((audioData: ArrayBuffer, sampleRate?: number) => {
     if (deepgramRef.current && isConnected && isStreaming) {
       deepgramRef.current.sendAudio(audioData)
-      
+
       // Also buffer the audio for speaker identification
       const int16Array = new Int16Array(audioData)
       const float32Array = new Float32Array(int16Array.length)
-      
+
       // Convert Int16 to Float32
       for (let i = 0; i < int16Array.length; i++) {
         float32Array[i] = int16Array[i] / 0x7FFF
       }
-      
+
       setAudioBuffers(prev => {
         const updated = audioProcessingService.manageAudioBufferArray(prev, float32Array, actualSampleRate)
         // Update ref as well to avoid stale closure in callbacks
@@ -512,17 +512,17 @@ export const useDeepgramIntegration = (
     // Connection state
     isConnected,
     connectionStatus,
-    
+
     // Streaming state
     isStreaming,
     transcriptSegments,
     audioBuffers,
-    
+
     // API key management
     apiKey,
     apiKeySource,
     setApiKey: deepgramSession.setDeepgramApiKey,
-    
+
     // Controls
     connect,
     disconnect,
@@ -530,11 +530,11 @@ export const useDeepgramIntegration = (
     stopStreaming,
     sendAudio,
     clearTranscripts,
-    
+
     // Sample rate management
     setActualSampleRate,
     actualSampleRate,
-    
+
     // Settings
     confidenceThreshold,
     setConfidenceThreshold,
@@ -544,7 +544,7 @@ export const useDeepgramIntegration = (
     setUtteranceEndMs,
     endpointingMs,
     setEndpointingMs,
-    
+
     // Statistics
     stats
   }

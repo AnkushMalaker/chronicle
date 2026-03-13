@@ -329,4 +329,3 @@ Speaker Configuration Workflow Test
     ${speakers_list}=  Set Variable    ${updated_config}[primary_speakers]
     ${length}=         Get Length    ${speakers_list}
     Should Be Equal As Integers    ${length}    0
-

@@ -12,7 +12,6 @@ import tempfile
 from typing import Optional
 
 import uvicorn
-
 from common.base_service import BaseASRService, create_asr_app
 from common.response_models import TranscriptionResult
 from providers.faster_whisper.transcriber import FasterWhisperTranscriber

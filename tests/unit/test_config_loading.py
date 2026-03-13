@@ -5,7 +5,7 @@ and provides proper caching and reload mechanisms.
 """
 
 import pytest
-from pathlib import Path
+
 from advanced_omi_backend.config import get_config, merge_configs, reload_config
 
 
@@ -23,17 +23,8 @@ def test_merge_configs_basic():
 
 def test_merge_configs_nested():
     """Test nested dictionary merging."""
-    defaults = {
-        "memory": {
-            "provider": "chronicle",
-            "timeout": 120
-        }
-    }
-    overrides = {
-        "memory": {
-            "provider": "openmemory_mcp"
-        }
-    }
+    defaults = {"memory": {"provider": "chronicle", "timeout": 120}}
+    overrides = {"memory": {"provider": "openmemory_mcp"}}
 
     result = merge_configs(defaults, overrides)
 
@@ -49,20 +40,12 @@ def test_merge_configs_deep_nested():
                 "openai": {
                     "model": "gpt-4o-mini",
                     "temperature": 0.2,
-                    "max_tokens": 2000
+                    "max_tokens": 2000,
                 }
             }
         }
     }
-    overrides = {
-        "models": {
-            "llm": {
-                "openai": {
-                    "temperature": 0.5
-                }
-            }
-        }
-    }
+    overrides = {"models": {"llm": {"openai": {"temperature": 0.5}}}}
 
     result = merge_configs(defaults, overrides)
 
@@ -109,7 +92,9 @@ def test_get_config_structure():
 
     # Should have main sections
     assert isinstance(config, dict)
-    assert "defaults" in config or "models" in config  # At least one of these should exist
+    assert (
+        "defaults" in config or "models" in config
+    )  # At least one of these should exist
 
 
 def test_get_config_caching():
@@ -147,35 +132,21 @@ def test_merge_configs_none_handling():
 def test_merge_configs_complex_scenario():
     """Test complex real-world scenario with mixed types."""
     defaults = {
-        "defaults": {
-            "llm": "openai-llm",
-            "stt": "stt-deepgram"
-        },
+        "defaults": {"llm": "openai-llm", "stt": "stt-deepgram"},
         "models": [
             {"name": "model1", "type": "llm"},
-            {"name": "model2", "type": "embedding"}
+            {"name": "model2", "type": "embedding"},
         ],
         "memory": {
             "provider": "chronicle",
             "timeout_seconds": 1200,
-            "extraction": {
-                "enabled": True,
-                "prompt": "Default prompt"
-            }
-        }
+            "extraction": {"enabled": True, "prompt": "Default prompt"},
+        },
     }
     overrides = {
-        "defaults": {
-            "llm": "local-llm"
-        },
-        "models": [
-            {"name": "model3", "type": "llm"}
-        ],
-        "memory": {
-            "extraction": {
-                "prompt": "Custom prompt"
-            }
-        }
+        "defaults": {"llm": "local-llm"},
+        "models": [{"name": "model3", "type": "llm"}],
+        "memory": {"extraction": {"prompt": "Custom prompt"}},
     }
 
     result = merge_configs(defaults, overrides)

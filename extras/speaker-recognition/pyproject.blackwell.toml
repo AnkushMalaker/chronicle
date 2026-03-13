@@ -34,7 +34,7 @@ gpu = [
 ]
 
 [tool.isort]
-profile = "black" 
+profile = "black"
 
 
 [tool.uv]

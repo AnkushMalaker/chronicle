@@ -37,6 +37,7 @@ router = APIRouter(prefix="/knowledge-graph", tags=["knowledge-graph"])
 
 class UpdateEntityRequest(BaseModel):
     """Request model for updating entity fields."""
+
     name: Optional[str] = None
     details: Optional[str] = None
     icon: Optional[str] = None
@@ -44,6 +45,7 @@ class UpdateEntityRequest(BaseModel):
 
 class UpdatePromiseRequest(BaseModel):
     """Request model for updating promise status."""
+
     status: str  # pending, in_progress, completed, cancelled
 
 

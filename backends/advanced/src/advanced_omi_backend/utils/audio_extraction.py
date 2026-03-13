@@ -28,10 +28,7 @@ def parse_chunk_range(chunk_id: str) -> Tuple[int, int]:
 
 
 async def extract_audio_for_results(
-    redis_client,
-    client_id: str,
-    session_id: str,
-    transcription_results: List[dict]
+    redis_client, client_id: str, session_id: str, transcription_results: List[dict]
 ) -> bytes:
     """
     Extract audio chunks for transcription results.
@@ -47,8 +44,12 @@ async def extract_audio_for_results(
     Returns:
         Combined audio bytes for all chunks in results
     """
-    logger.info(f"🎵 [AUDIO EXTRACT] Starting audio extraction for session {session_id}")
-    logger.info(f"🎵 [AUDIO EXTRACT] Client: {client_id}, Results count: {len(transcription_results)}")
+    logger.info(
+        f"🎵 [AUDIO EXTRACT] Starting audio extraction for session {session_id}"
+    )
+    logger.info(
+        f"🎵 [AUDIO EXTRACT] Client: {client_id}, Results count: {len(transcription_results)}"
+    )
 
     if not transcription_results:
         logger.warning(f"🎵 [AUDIO EXTRACT] No transcription results provided")
@@ -64,7 +65,9 @@ async def extract_audio_for_results(
             chunk_ranges.append((start, end))
 
     if not chunk_ranges:
-        logger.warning("🎵 [AUDIO EXTRACT] No chunk ranges found in transcription results")
+        logger.warning(
+            "🎵 [AUDIO EXTRACT] No chunk ranges found in transcription results"
+        )
         return b""
 
     # Find overall range
@@ -108,7 +111,9 @@ async def extract_audio_for_results(
         if min_chunk <= chunk_num <= max_chunk:
             audio_data = fields.get(b"audio_data", b"")
             audio_chunks[chunk_num] = audio_data
-            logger.debug(f"🎵 [AUDIO EXTRACT] Collected chunk {chunk_num}: {len(audio_data)} bytes")
+            logger.debug(
+                f"🎵 [AUDIO EXTRACT] Collected chunk {chunk_num}: {len(audio_data)} bytes"
+            )
 
     # Combine chunks in order
     sorted_chunks = sorted(audio_chunks.items())
@@ -123,7 +128,8 @@ async def extract_audio_for_results(
         logger.warning(f"🎵 [AUDIO EXTRACT] ⚠️ No audio data collected!")
     elif len(sorted_chunks) < (max_chunk - min_chunk + 1):
         missing_chunks = (max_chunk - min_chunk + 1) - len(sorted_chunks)
-        logger.warning(f"🎵 [AUDIO EXTRACT] ⚠️ Missing {missing_chunks} chunks from expected range")
+        logger.warning(
+            f"🎵 [AUDIO EXTRACT] ⚠️ Missing {missing_chunks} chunks from expected range"
+        )
 
     return combined_audio
-

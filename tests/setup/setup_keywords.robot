@@ -210,4 +210,3 @@ Check Environment Variables
         END
     END
     RETURN    ${missing_vars}
-

@@ -62,7 +62,9 @@ class Qwen3ASRService(BaseASRService):
         """Transcribe audio file via vLLM."""
         if self.transcriber is None:
             raise RuntimeError("Service not initialized")
-        return await self.transcriber.transcribe(audio_file_path, context_info=context_info)
+        return await self.transcriber.transcribe(
+            audio_file_path, context_info=context_info
+        )
 
     def get_capabilities(self) -> list[str]:
         capabilities = ["multilingual", "language_detection"]

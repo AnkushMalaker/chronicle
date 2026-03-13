@@ -33,7 +33,7 @@ class MockSpeakerRecognitionClient:
                 "speaker": 0,
                 "identified_as": "Unknown",
                 "text": "The pumpkin that'll last for forever. Finally. Does it count? Today, we're taking a glass blowing class.",
-                "confidence": 0.95
+                "confidence": 0.95,
             },
             {
                 "start": 10.28,
@@ -41,7 +41,7 @@ class MockSpeakerRecognitionClient:
                 "speaker": 0,
                 "identified_as": "Unknown",
                 "text": "I'm sweating already. We've worked with a lot of materials before, but we've only scratched the surface",
-                "confidence": 0.93
+                "confidence": 0.93,
             },
             {
                 "start": 20.455,
@@ -49,7 +49,7 @@ class MockSpeakerRecognitionClient:
                 "speaker": 1,
                 "identified_as": "Unknown",
                 "text": "when it comes to glass",
-                "confidence": 0.91
+                "confidence": 0.91,
             },
             {
                 "start": 22.095,
@@ -57,7 +57,7 @@ class MockSpeakerRecognitionClient:
                 "speaker": 0,
                 "identified_as": "Unknown",
                 "text": "and that's because",
-                "confidence": 0.94
+                "confidence": 0.94,
             },
             {
                 "start": 23.815,
@@ -65,7 +65,7 @@ class MockSpeakerRecognitionClient:
                 "speaker": 1,
                 "identified_as": "Unknown",
                 "text": "a little intimidating. We've got about 400 pounds",
-                "confidence": 0.92
+                "confidence": 0.92,
             },
             {
                 "start": 28.335,
@@ -73,7 +73,7 @@ class MockSpeakerRecognitionClient:
                 "speaker": 0,
                 "identified_as": "Unknown",
                 "text": "of liquid glass in this furnace right here. Nick's gonna really help us out. Nick, I'm excited and nervous. Me too.",
-                "confidence": 0.96
+                "confidence": 0.96,
             },
             {
                 "start": 43.28,
@@ -81,7 +81,7 @@ class MockSpeakerRecognitionClient:
                 "speaker": 1,
                 "identified_as": "Unknown",
                 "text": "So we're gonna",
-                "confidence": 0.90
+                "confidence": 0.90,
             },
             {
                 "start": 44.68,
@@ -89,7 +89,7 @@ class MockSpeakerRecognitionClient:
                 "speaker": 0,
                 "identified_as": "Unknown",
                 "text": "make what's called a trumpet",
-                "confidence": 0.95
+                "confidence": 0.95,
             },
             {
                 "start": 46.96,
@@ -97,8 +97,8 @@ class MockSpeakerRecognitionClient:
                 "speaker": 0,
                 "identified_as": "Unknown",
                 "text": "flower. We're using gravity as a tool.",
-                "confidence": 0.93
-            }
+                "confidence": 0.93,
+            },
         ]
     }
 
@@ -111,7 +111,7 @@ class MockSpeakerRecognitionClient:
         conversation_id: str,
         backend_token: str,
         transcript_data: Dict,
-        user_id: Optional[str] = None
+        user_id: Optional[str] = None,
     ) -> Dict:
         """
         Return pre-computed mock segments for known test audio files.
@@ -125,7 +125,9 @@ class MockSpeakerRecognitionClient:
         Returns:
             Dictionary with 'segments' array matching speaker service format
         """
-        logger.info(f"🎤 Mock speaker client processing conversation: {conversation_id[:12]}...")
+        logger.info(
+            f"🎤 Mock speaker client processing conversation: {conversation_id[:12]}..."
+        )
 
         # Try to identify which test audio this is from the transcript
         transcript_text = transcript_data.get("text", "").lower()
@@ -135,11 +137,15 @@ class MockSpeakerRecognitionClient:
             filename = "DIY_Experts_Glass_Blowing_16khz_mono_1min.wav"
             if filename in self.MOCK_SEGMENTS:
                 segments = self.MOCK_SEGMENTS[filename]
-                logger.info(f"🎤 Mock returning {len(segments)} segments for DIY Glass Blowing audio")
+                logger.info(
+                    f"🎤 Mock returning {len(segments)} segments for DIY Glass Blowing audio"
+                )
                 return {"segments": segments}
 
         # Fallback: Create single generic segment
-        logger.warning(f"🎤 Mock: No pre-computed segments found, creating generic segment")
+        logger.warning(
+            f"🎤 Mock: No pre-computed segments found, creating generic segment"
+        )
 
         # Get duration from words if available
         words = transcript_data.get("words", [])
@@ -149,14 +155,16 @@ class MockSpeakerRecognitionClient:
             duration = 60.0
 
         return {
-            "segments": [{
-                "start": 0.0,
-                "end": duration,
-                "speaker": 0,
-                "identified_as": "Unknown",
-                "text": transcript_data.get("text", ""),
-                "confidence": 0.85
-            }]
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": duration,
+                    "speaker": 0,
+                    "identified_as": "Unknown",
+                    "text": transcript_data.get("text", ""),
+                    "confidence": 0.85,
+                }
+            ]
         }
 
     async def identify_segment(

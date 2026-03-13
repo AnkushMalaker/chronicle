@@ -103,14 +103,19 @@ def build_worker_definitions() -> List[WorkerDefinition]:
     # Log worker configuration
     try:
         from advanced_omi_backend.model_registry import get_models_registry
+
         registry = get_models_registry()
         if registry:
             stt_stream = registry.get_default("stt_stream")
             stt_batch = registry.get_default("stt")
             if stt_stream:
-                logger.info(f"Streaming STT configured: {stt_stream.name} ({stt_stream.model_provider})")
+                logger.info(
+                    f"Streaming STT configured: {stt_stream.name} ({stt_stream.model_provider})"
+                )
             if stt_batch:
-                logger.info(f"Batch STT configured: {stt_batch.name} ({stt_batch.model_provider}) - handled by RQ workers")
+                logger.info(
+                    f"Batch STT configured: {stt_batch.name} ({stt_batch.model_provider}) - handled by RQ workers"
+                )
     except Exception as e:
         logger.warning(f"Failed to log STT configuration: {e}")
 
@@ -119,9 +124,7 @@ def build_worker_definitions() -> List[WorkerDefinition]:
 
     logger.info(f"Total workers configured: {len(workers)}")
     logger.info(f"Enabled workers: {len(enabled_workers)}")
-    logger.info(
-        f"Enabled worker names: {', '.join([w.name for w in enabled_workers])}"
-    )
+    logger.info(f"Enabled worker names: {', '.join([w.name for w in enabled_workers])}")
 
     if disabled_workers:
         logger.info(

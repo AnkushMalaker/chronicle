@@ -30,76 +30,95 @@ from advanced_omi_backend.config import get_config
 
 class ModelDef(BaseModel):
     """Model definition with validation.
-    
+
     Represents a single model configuration (LLM, embedding, STT, TTS, etc.)
     from config.yml with automatic validation and type checking.
     """
-    
+
     model_config = ConfigDict(
-        extra='allow',  # Allow extra fields for extensibility
+        extra="allow",  # Allow extra fields for extensibility
         validate_assignment=True,  # Validate on attribute assignment
         arbitrary_types_allowed=True,
     )
-    
+
     name: str = Field(..., min_length=1, description="Unique model identifier")
-    model_type: str = Field(..., description="Model type: llm, embedding, stt, tts, etc.")
-    model_provider: str = Field(default="unknown", description="Provider name: openai, ollama, deepgram, parakeet, vibevoice, etc.")
-    api_family: str = Field(default="openai", description="API family: openai, http, websocket, etc.")
+    model_type: str = Field(
+        ..., description="Model type: llm, embedding, stt, tts, etc."
+    )
+    model_provider: str = Field(
+        default="unknown",
+        description="Provider name: openai, ollama, deepgram, parakeet, vibevoice, etc.",
+    )
+    api_family: str = Field(
+        default="openai", description="API family: openai, http, websocket, etc."
+    )
     model_name: str = Field(default="", description="Provider-specific model name")
     model_url: str = Field(default="", description="Base URL for API requests")
-    api_key: Optional[str] = Field(default=None, description="API key or authentication token")
-    description: Optional[str] = Field(default=None, description="Human-readable description")
-    model_params: Dict[str, Any] = Field(default_factory=dict, description="Model-specific parameters")
-    model_output: Optional[str] = Field(default=None, description="Output format: json, text, vector, etc.")
-    embedding_dimensions: Optional[int] = Field(default=None, ge=1, description="Embedding vector dimensions")
-    operations: Dict[str, Any] = Field(default_factory=dict, description="API operation definitions")
+    api_key: Optional[str] = Field(
+        default=None, description="API key or authentication token"
+    )
+    description: Optional[str] = Field(
+        default=None, description="Human-readable description"
+    )
+    model_params: Dict[str, Any] = Field(
+        default_factory=dict, description="Model-specific parameters"
+    )
+    model_output: Optional[str] = Field(
+        default=None, description="Output format: json, text, vector, etc."
+    )
+    embedding_dimensions: Optional[int] = Field(
+        default=None, ge=1, description="Embedding vector dimensions"
+    )
+    operations: Dict[str, Any] = Field(
+        default_factory=dict, description="API operation definitions"
+    )
     capabilities: List[str] = Field(
         default_factory=list,
-        description="Provider capabilities: word_timestamps, segments, diarization (for STT providers)"
+        description="Provider capabilities: word_timestamps, segments, diarization (for STT providers)",
     )
-    
-    @field_validator('model_name', mode='before')
+
+    @field_validator("model_name", mode="before")
     @classmethod
     def default_model_name(cls, v: Any, info) -> str:
         """Default model_name to name if not provided."""
-        if not v and info.data.get('name'):
-            return info.data['name']
+        if not v and info.data.get("name"):
+            return info.data["name"]
         return v or ""
-    
-    @field_validator('model_url', mode='before')
+
+    @field_validator("model_url", mode="before")
     @classmethod
     def validate_url(cls, v: Any) -> str:
         """Ensure URL doesn't have trailing whitespace."""
         if isinstance(v, str):
             return v.strip()
         return v or ""
-    
-    @field_validator('api_key', mode='before')
+
+    @field_validator("api_key", mode="before")
     @classmethod
     def sanitize_api_key(cls, v: Any) -> Optional[str]:
         """Sanitize API key, treat empty strings as None."""
         if isinstance(v, str):
             v = v.strip()
-            if not v or v.lower() in ['dummy', 'none', 'null']:
+            if not v or v.lower() in ["dummy", "none", "null"]:
                 return None
             return v
         return v
-    
-    @model_validator(mode='after')
+
+    @model_validator(mode="after")
     def validate_model(self) -> ModelDef:
         """Cross-field validation."""
         # Ensure embedding models have dimensions specified
-        if self.model_type == 'embedding' and not self.embedding_dimensions:
+        if self.model_type == "embedding" and not self.embedding_dimensions:
             # Common defaults
             defaults = {
-                'text-embedding-3-small': 1536,
-                'text-embedding-3-large': 3072,
-                'text-embedding-ada-002': 1536,
-                'nomic-embed-text-v1.5': 768,
+                "text-embedding-3-small": 1536,
+                "text-embedding-3-large": 3072,
+                "text-embedding-ada-002": 1536,
+                "nomic-embed-text-v1.5": 768,
             }
             if self.model_name in defaults:
                 self.embedding_dimensions = defaults[self.model_name]
-        
+
         return self
 
 
@@ -180,52 +199,49 @@ class AppModels(BaseModel):
     """
 
     model_config = ConfigDict(
-        extra='allow',
+        extra="allow",
         validate_assignment=True,
     )
 
     defaults: Dict[str, str] = Field(
-        default_factory=dict,
-        description="Default model names for each model_type"
+        default_factory=dict, description="Default model names for each model_type"
     )
     models: Dict[str, ModelDef] = Field(
         default_factory=dict,
-        description="All available model definitions keyed by name"
+        description="All available model definitions keyed by name",
     )
     memory: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Memory service configuration"
+        default_factory=dict, description="Memory service configuration"
     )
     speaker_recognition: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Speaker recognition service configuration"
+        default_factory=dict, description="Speaker recognition service configuration"
     )
     chat: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Chat service configuration including system prompt"
+        description="Chat service configuration including system prompt",
     )
     llm_operations: Dict[str, LLMOperationConfig] = Field(
         default_factory=dict,
-        description="Per-operation LLM configuration (temperature, model override, etc.)"
+        description="Per-operation LLM configuration (temperature, model override, etc.)",
     )
-    
+
     def get_by_name(self, name: str) -> Optional[ModelDef]:
         """Get a model by its unique name.
-        
+
         Args:
             name: Model name to look up
-            
+
         Returns:
             ModelDef if found, None otherwise
         """
         return self.models.get(name)
-    
+
     def get_default(self, model_type: str) -> Optional[ModelDef]:
         """Get the default model for a given type.
-        
+
         Args:
             model_type: Type of model (llm, embedding, stt, tts, etc.)
-            
+
         Returns:
             Default ModelDef for the type, or first available model of that type,
             or None if no models of that type exist
@@ -236,25 +252,25 @@ class AppModels(BaseModel):
             model = self.get_by_name(name)
             if model:
                 return model
-        
+
         # Fallback: first model of that type
         for m in self.models.values():
             if m.model_type == model_type:
                 return m
-        
+
         return None
-    
+
     def get_all_by_type(self, model_type: str) -> List[ModelDef]:
         """Get all models of a specific type.
-        
+
         Args:
             model_type: Type of model to filter by
-            
+
         Returns:
             List of ModelDef objects matching the type
         """
         return [m for m in self.models.values() if m.model_type == model_type]
-    
+
     def list_model_types(self) -> List[str]:
         """Get all unique model types in the registry.
 
@@ -340,6 +356,7 @@ def _find_config_path() -> Path:
         Path to config.yml
     """
     from advanced_omi_backend.config import get_config_yml_path
+
     return get_config_yml_path()
 
 
@@ -413,13 +430,13 @@ def load_models_config(force_reload: bool = False) -> Optional[AppModels]:
 
 def get_models_registry() -> Optional[AppModels]:
     """Get the global models registry.
-    
+
     This is the primary interface for accessing model configurations.
     The registry is loaded once and cached for performance.
-    
+
     Returns:
         AppModels instance, or None if config.yml not found
-        
+
     Example:
         >>> registry = get_models_registry()
         >>> if registry:

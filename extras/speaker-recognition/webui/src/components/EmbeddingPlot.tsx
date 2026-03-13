@@ -68,7 +68,7 @@ interface AnnotationSegment {
 }
 
 interface EmbeddingPlotProps {
-  dataSource: 
+  dataSource:
     | { type: 'speakers'; userId?: number }
     | { type: 'segments'; segments: AnnotationSegment[]; audioFile: File }
     | { type: 'combined'; segments: AnnotationSegment[]; audioFile: File; userId?: number; expectedSpeakers?: number }
@@ -79,13 +79,13 @@ interface EmbeddingPlotProps {
   onAnalysisComplete?: (analysis: AnalysisData) => void
 }
 
-export default function EmbeddingPlot({ 
-  dataSource, 
-  compact = false, 
-  title, 
+export default function EmbeddingPlot({
+  dataSource,
+  compact = false,
+  title,
   autoAnalyze = true,
-  onRefresh, 
-  onAnalysisComplete 
+  onRefresh,
+  onAnalysisComplete
 }: EmbeddingPlotProps) {
   const plotRef = useRef<HTMLDivElement>(null)
   const [analysisData, setAnalysisData] = useState<AnalysisData | null>(null)
@@ -138,21 +138,21 @@ export default function EmbeddingPlot({
         // Create FormData for the API request
         const formData = new FormData()
         formData.append('audio_file', audioFile)
-        
+
         // Add segments data as JSON
         const segmentsData = validSegments.map(seg => ({
           start: seg.start,
           end: seg.end,
           speaker_label: seg.speakerLabel
         }))
-        
+
         // Add analysis parameters
         formData.append('method', settings.method)
         formData.append('cluster_method', settings.clusterMethod)
         formData.append('similarity_threshold', settings.similarityThreshold.toString())
         formData.append('segments', JSON.stringify(segmentsData))
         formData.append('expected_speakers', (expectedSpeakers || 2).toString())
-        
+
         if (userId) {
           formData.append('user_id', userId.toString())
         }
@@ -178,14 +178,14 @@ export default function EmbeddingPlot({
         // Create FormData for the API request
         const formData = new FormData()
         formData.append('audio_file', audioFile)
-        
+
         // Add segments data as JSON
         const segmentsData = validSegments.map(seg => ({
           start: seg.start,
           end: seg.end,
           speaker_label: seg.speakerLabel
         }))
-        
+
         // Add analysis parameters
         formData.append('method', settings.method)
         formData.append('cluster_method', settings.clusterMethod)
@@ -197,14 +197,14 @@ export default function EmbeddingPlot({
           body: formData
         })
       }
-      
+
       if (!response.ok) {
         const errorText = await response.text()
         throw new Error(`Analysis failed: ${response.status} - ${errorText}`)
       }
 
       const data = await response.json()
-      
+
       if (data.error || data.status === 'error') {
         const errorMessage = data.error || data.message || 'Analysis failed'
         const details = data.details
@@ -216,7 +216,7 @@ export default function EmbeddingPlot({
 
       setAnalysisData(data)
       createPlot(data)
-      
+
       // Call completion callback if provided
       if (onAnalysisComplete) {
         onAnalysisComplete(data)
@@ -235,19 +235,19 @@ export default function EmbeddingPlot({
 
     const { visualization } = data
     const embeddings = view3D ? visualization.embeddings_3d : visualization.embeddings_2d
-    
+
     if (!embeddings.length) return
 
     // Check if this is a combined analysis with dual-color visualization
     const hasDualColors = data.embedding_types && dataSource.type === 'combined'
-    
+
     let traces: any[] = []
 
     if (hasDualColors && data.embedding_types) {
       // Dual-color visualization for combined analysis
       const segmentIndices: number[] = []
       const enrolledIndices: number[] = []
-      
+
       // Separate indices for segments vs enrolled speakers
       visualization.speakers.forEach((speakerId, index) => {
         if (data.embedding_types!.segments.includes(speakerId)) {
@@ -266,9 +266,9 @@ export default function EmbeddingPlot({
           mode: 'markers+text',
           type: view3D ? 'scatter3d' : 'scatter',
           name: 'Annotation Segments',
-          text: segmentIndices.map(i => 
-            visualization.speaker_names?.[visualization.speakers[i]] || 
-            visualization.speakers[i].split('_').pop() || 
+          text: segmentIndices.map(i =>
+            visualization.speaker_names?.[visualization.speakers[i]] ||
+            visualization.speakers[i].split('_').pop() ||
             visualization.speakers[i]
           ),
           textposition: 'top center',
@@ -280,7 +280,7 @@ export default function EmbeddingPlot({
             opacity: 0.8,
             symbol: 'circle'
           },
-          hovertemplate: 
+          hovertemplate:
             '<b>%{text}</b><br>' +
             'Type: Annotation Segment<br>' +
             'X: %{x:.3f}<br>' +
@@ -299,9 +299,9 @@ export default function EmbeddingPlot({
           mode: 'markers+text',
           type: view3D ? 'scatter3d' : 'scatter',
           name: 'Enrolled Speakers',
-          text: enrolledIndices.map(i => 
-            visualization.speaker_names?.[visualization.speakers[i]] || 
-            visualization.speakers[i].split('_').pop() || 
+          text: enrolledIndices.map(i =>
+            visualization.speaker_names?.[visualization.speakers[i]] ||
+            visualization.speakers[i].split('_').pop() ||
             visualization.speakers[i]
           ),
           textposition: 'top center',
@@ -313,7 +313,7 @@ export default function EmbeddingPlot({
             opacity: 0.8,
             symbol: 'diamond'
           },
-          hovertemplate: 
+          hovertemplate:
             '<b>%{text}</b><br>' +
             'Type: Enrolled Speaker<br>' +
             'X: %{x:.3f}<br>' +
@@ -340,7 +340,7 @@ export default function EmbeddingPlot({
         z: view3D ? embeddings.map(point => point[2]) : undefined,
         mode: 'markers+text',
         type: view3D ? 'scatter3d' : 'scatter',
-        text: visualization.speakers.map(speaker => 
+        text: visualization.speakers.map(speaker =>
           visualization.speaker_names?.[speaker] || speaker.split('_').pop() || speaker
         ),
         textposition: 'top center',
@@ -351,14 +351,14 @@ export default function EmbeddingPlot({
           line: { width: 1, color: '#000' },
           opacity: 0.8
         },
-        hovertemplate: 
+        hovertemplate:
           '<b>%{text}</b><br>' +
           'X: %{x:.3f}<br>' +
           'Y: %{y:.3f}<br>' +
           (view3D ? 'Z: %{z:.3f}<br>' : '') +
           'Cluster: %{customdata}<br>' +
           '<extra></extra>',
-        customdata: visualization.cluster_labels.map(label => 
+        customdata: visualization.cluster_labels.map(label =>
           label === -1 ? 'Noise' : `Cluster ${label}`
         )
       })
@@ -389,7 +389,7 @@ export default function EmbeddingPlot({
       xaxis: { title: 'Component 1' },
       yaxis: { title: 'Component 2' },
       zaxis: view3D ? { title: 'Component 3' } : undefined,
-      margin: compact 
+      margin: compact
         ? { l: 30, r: 30, t: 50, b: 30 }
         : { l: 40, r: 40, t: 60, b: 40 },
       plot_bgcolor: '#fafafa',
@@ -428,9 +428,9 @@ export default function EmbeddingPlot({
   useEffect(() => {
     // Only auto-analyze for speakers or when explicitly enabled
     const shouldAutoAnalyze = autoAnalyze && (dataSource.type === 'speakers' || autoAnalyze === true)
-    
+
     if (!shouldAutoAnalyze) return
-    
+
     // Load Plotly and then load analysis
     const loadPlotlyAndAnalysis = async () => {
       if (!Plotly) {
@@ -440,7 +440,7 @@ export default function EmbeddingPlot({
       }
       loadAnalysis()
     }
-    
+
     loadPlotlyAndAnalysis()
   }, [dataSource, settings, autoAnalyze])
 
@@ -559,8 +559,8 @@ export default function EmbeddingPlot({
             <button
               onClick={() => setView3D(false)}
               className={`px-3 py-1 text-sm rounded-md ${
-                !view3D 
-                  ? 'bg-blue-600 text-white' 
+                !view3D
+                  ? 'bg-blue-600 text-white'
                   : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
               }`}
             >
@@ -569,8 +569,8 @@ export default function EmbeddingPlot({
             <button
               onClick={() => setView3D(true)}
               className={`px-3 py-1 text-sm rounded-md ${
-                view3D 
-                  ? 'bg-blue-600 text-white' 
+                view3D
+                  ? 'bg-blue-600 text-white'
                   : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
               }`}
             >
@@ -690,7 +690,7 @@ export default function EmbeddingPlot({
                     <div className="text-sm text-blue-800 font-medium">Suggested Threshold</div>
                   </div>
                 </div>
-                
+
                 <div className="space-y-2 text-sm">
                   <div className="flex justify-between">
                     <span className="text-gray-600">Confidence:</span>
@@ -701,7 +701,7 @@ export default function EmbeddingPlot({
                     <span className="font-medium">{analysisData.smart_suggestion.detected_clusters}</span>
                   </div>
                 </div>
-                
+
                 <div className="text-xs text-gray-600 bg-gray-50 p-2 rounded">
                   <strong>Reasoning:</strong> {analysisData.smart_suggestion.reasoning}
                 </div>
@@ -731,8 +731,8 @@ export default function EmbeddingPlot({
           {/* Similar Speakers */}
           {analysisData.similar_speakers.length > 0 && (
             <div className={`card p-4 ${
-              dataSource.type === 'combined' ? 'lg:col-span-4' : 
-              dataSource.type === 'segments' ? 'lg:col-span-3' : 
+              dataSource.type === 'combined' ? 'lg:col-span-4' :
+              dataSource.type === 'segments' ? 'lg:col-span-3' :
               'lg:col-span-2'
             }`}>
               <h4 className="text-md font-semibold text-primary mb-3">⚠️ Similar Speakers</h4>

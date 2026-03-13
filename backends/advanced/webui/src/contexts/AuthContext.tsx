@@ -33,7 +33,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       console.log('🔐 AuthContext: Initializing authentication...')
       const savedToken = localStorage.getItem(getStorageKey('token'))
       console.log('🔐 AuthContext: Saved token exists:', !!savedToken)
-      
+
       if (savedToken) {
         try {
           console.log('🔐 AuthContext: Verifying token with API call...')
@@ -74,11 +74,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return { success: true }
     } catch (error: any) {
       console.error('Login failed:', error)
-      
+
       // Parse structured error response from backend
       let errorMessage = 'Login failed. Please try again.'
       let errorType = 'unknown'
-      
+
       if (error.response?.data) {
         const errorData = error.response.data
         errorMessage = errorData.detail || errorMessage
@@ -87,9 +87,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         errorMessage = 'Unable to connect to server. Please check your connection and try again.'
         errorType = 'connection_failure'
       }
-      
-      return { 
-        success: false, 
+
+      return {
+        success: false,
         error: errorMessage,
         errorType: errorType
       }

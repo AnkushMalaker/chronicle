@@ -30,7 +30,7 @@ export default function WaveformPlot({
     const step = Math.max(1, Math.floor(samples.length / maxPoints))
     const downsampledSamples: number[] = []
     const timePoints: number[] = []
-    
+
     for (let i = 0; i < samples.length; i += step) {
       downsampledSamples.push(samples[i])
       timePoints.push(i / sampleRate)

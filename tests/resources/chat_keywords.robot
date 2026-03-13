@@ -85,6 +85,3 @@ Send Chat Message
     ${response}=        POST On Session    api    /api/chat/completions    json=${body}    expected_status=${expected_status}
 
     RETURN    ${response}
-
-
-

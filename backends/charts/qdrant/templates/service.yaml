@@ -17,4 +17,3 @@ spec:
       name: grpc
   selector:
     {{- include "qdrant.selectorLabels" . | nindent 4 }}
-

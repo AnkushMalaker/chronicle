@@ -21,15 +21,15 @@ export interface UseAudioRecordingReturn {
   // State
   recordingState: RecordingState
   processedAudio: ProcessedAudio | null
-  
+
   // Controls
   startRecording: () => Promise<void>
   stopRecording: () => Promise<void>
   clearRecording: () => void
-  
+
   // Processing
   processCurrentRecording: () => Promise<ProcessedAudio | null>
-  
+
   // Audio stream access (for live processing)
   mediaStream: MediaStream | null
   audioContext: AudioContext | null
@@ -78,7 +78,7 @@ export const useAudioRecording = (options: UseAudioRecordingOptions = {}): UseAu
       recordingTimerRef.current = setInterval(() => {
         const elapsed = (Date.now() - startTimeRef.current) / 1000
         setRecordingState(prev => ({ ...prev, duration: elapsed }))
-        
+
         // Auto-stop if max duration reached
         if (elapsed >= maxDuration) {
           stopRecording()
@@ -140,7 +140,7 @@ export const useAudioRecording = (options: UseAudioRecordingOptions = {}): UseAu
       return stream
     } catch (error: any) {
       let errorMessage = 'Failed to access microphone. '
-      
+
       if (error.name === 'NotAllowedError') {
         errorMessage += 'Please allow microphone access and try again.'
       } else if (error.name === 'NotFoundError') {
@@ -150,7 +150,7 @@ export const useAudioRecording = (options: UseAudioRecordingOptions = {}): UseAu
       } else {
         errorMessage += 'Please check permissions and try again.'
       }
-      
+
       throw new Error(errorMessage)
     }
   }
@@ -166,7 +166,7 @@ export const useAudioRecording = (options: UseAudioRecordingOptions = {}): UseAu
     }
 
     const mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
-    
+
     mediaRecorder.ondataavailable = (event) => {
       if (event.data.size > 0) {
         audioChunksRef.current.push(event.data)
@@ -175,10 +175,10 @@ export const useAudioRecording = (options: UseAudioRecordingOptions = {}): UseAu
 
     mediaRecorder.onstop = async () => {
       try {
-        const blob = new Blob(audioChunksRef.current, { 
-          type: mimeType || 'audio/webm' 
+        const blob = new Blob(audioChunksRef.current, {
+          type: mimeType || 'audio/webm'
         })
-        
+
         // Auto-process if enabled
         if (autoProcess) {
           await processRecordingBlob(blob)
@@ -203,13 +203,13 @@ export const useAudioRecording = (options: UseAudioRecordingOptions = {}): UseAu
     try {
       const timestamp = new Date().toLocaleString()
       const processed = await audioProcessingService.processRecordingBlob(
-        blob, 
+        blob,
         `Recording ${timestamp}`
       )
-      
+
       setProcessedAudio(processed)
       onAudioProcessed?.(processed)
-      
+
       return processed
     } catch (error) {
       const errorMsg = `Failed to process recording: ${error.message}`
@@ -295,11 +295,11 @@ export const useAudioRecording = (options: UseAudioRecordingOptions = {}): UseAu
 
     } catch (error: any) {
       const errorMsg = `Failed to stop recording: ${error.message}`
-      setRecordingState(prev => ({ 
-        ...prev, 
-        isRecording: false, 
-        status: 'error', 
-        error: errorMsg 
+      setRecordingState(prev => ({
+        ...prev,
+        isRecording: false,
+        status: 'error',
+        error: errorMsg
       }))
       onError?.(errorMsg)
     }
@@ -328,15 +328,15 @@ export const useAudioRecording = (options: UseAudioRecordingOptions = {}): UseAu
     // State
     recordingState,
     processedAudio,
-    
+
     // Controls
     startRecording,
     stopRecording,
     clearRecording,
-    
+
     // Processing
     processCurrentRecording,
-    
+
     // Access to streams (for live processing)
     mediaStream: mediaStreamRef.current,
     audioContext: audioContextRef.current

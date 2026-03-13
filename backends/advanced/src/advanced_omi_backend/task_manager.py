@@ -68,7 +68,9 @@ class BackgroundTaskManager:
         if active_tasks:
             tasks = [info.task for info in active_tasks]
             try:
-                await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=30.0)
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True), timeout=30.0
+                )
             except asyncio.TimeoutError:
                 logger.warning("Some tasks did not complete within shutdown timeout")
 
@@ -172,7 +174,9 @@ class BackgroundTaskManager:
                                 long_running.append(f"{task_info.name} ({age:.0f}s)")
 
                         if long_running:
-                            logger.info(f"Long-running tasks: {', '.join(long_running[:5])}")
+                            logger.info(
+                                f"Long-running tasks: {', '.join(long_running[:5])}"
+                            )
 
                 except Exception as e:
                     logger.error(f"Error in periodic cleanup: {e}", exc_info=True)
@@ -237,7 +241,9 @@ class BackgroundTaskManager:
         for task_info in client_tasks:
             task_type = task_info.metadata.get("type", "")
             # Check if this is a processing task that should continue
-            is_processing_task = any(task_type.startswith(pt) for pt in PROCESSING_TASK_TYPES)
+            is_processing_task = any(
+                task_type.startswith(pt) for pt in PROCESSING_TASK_TYPES
+            )
 
             if is_processing_task:
                 tasks_to_preserve.append(task_info)
@@ -278,7 +284,9 @@ class BackgroundTaskManager:
                     asyncio.gather(*tasks, return_exceptions=True), timeout=timeout
                 )
             except asyncio.TimeoutError:
-                logger.warning(f"Some tasks for client {client_id} did not complete within timeout")
+                logger.warning(
+                    f"Some tasks for client {client_id} did not complete within timeout"
+                )
 
     def get_health_status(self) -> Dict[str, Any]:
         """Get health status of the task manager."""
@@ -333,5 +341,7 @@ def init_task_manager() -> BackgroundTaskManager:
 def get_task_manager() -> BackgroundTaskManager:
     """Get the global task manager instance."""
     if _task_manager is None:
-        raise RuntimeError("BackgroundTaskManager not initialized. Call init_task_manager first.")
+        raise RuntimeError(
+            "BackgroundTaskManager not initialized. Call init_task_manager first."
+        )
     return _task_manager

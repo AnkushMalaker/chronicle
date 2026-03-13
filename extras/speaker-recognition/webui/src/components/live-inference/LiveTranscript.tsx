@@ -27,10 +27,10 @@ export interface LiveTranscriptProps {
 
 function TranscriptSegmentComponent({ segment }: { segment: TranscriptSegment }) {
   return (
-    <div 
+    <div
       className={`p-3 rounded-lg transition-all ${
-        segment.isInterim 
-          ? 'bg-gray-50 border-l-4 border-yellow-400 opacity-70' 
+        segment.isInterim
+          ? 'bg-gray-50 border-l-4 border-yellow-400 opacity-70'
           : 'bg-blue-50 border-l-4 border-blue-400'
       }`}
     >
@@ -46,13 +46,13 @@ function TranscriptSegmentComponent({ segment }: { segment: TranscriptSegment })
           {new Date(segment.timestamp).toLocaleTimeString()}
         </div>
       </div>
-      
+
       <div className={`${segment.isInterim ? 'text-gray-600 italic' : 'text-gray-900'}`}>
         {segment.speakerParts?.map((part, partIndex) => (
           <span key={partIndex} className="inline-block mr-2">
             <span className={`font-semibold ${
-              part.speaker === 'N/A' 
-                ? 'text-gray-500' 
+              part.speaker === 'N/A'
+                ? 'text-gray-500'
                 : 'text-blue-700'
             }`}>
               {part.speaker}:
@@ -101,7 +101,7 @@ export function LiveTranscript({ segments }: LiveTranscriptProps) {
       <div className="p-4 border-b">
         <h3 className="text-lg font-medium text-gray-900">Live Transcript</h3>
       </div>
-      
+
       <div className="p-4 max-h-96 overflow-y-auto">
         {segments.length === 0 ? (
           <EmptyTranscriptState />

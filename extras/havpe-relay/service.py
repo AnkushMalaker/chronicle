@@ -31,7 +31,9 @@ def _find_uv() -> str:
     ]:
         if candidate.exists():
             return str(candidate)
-    print("Error: could not find 'uv' binary. Install it: curl -LsSf https://astral.sh/uv/install.sh | sh")
+    print(
+        "Error: could not find 'uv' binary. Install it: curl -LsSf https://astral.sh/uv/install.sh | sh"
+    )
     sys.exit(1)
 
 
@@ -43,7 +45,8 @@ def _create_app_bundle() -> None:
     applescript = f'do shell script "launchctl kickstart gui/" & (do shell script "id -u") & "/{LABEL}"'
     result = subprocess.run(
         ["osacompile", "-o", str(APP_BUNDLE), "-e", applescript],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         print(f"osacompile failed: {result.stderr.strip()}")
@@ -52,14 +55,16 @@ def _create_app_bundle() -> None:
     info_plist = APP_BUNDLE / "Contents" / "Info.plist"
     with open(info_plist, "rb") as f:
         info = plistlib.load(f)
-    info.update({
-        "CFBundleName": "Chronicle HAVPE Relay",
-        "CFBundleDisplayName": "Chronicle HAVPE Relay",
-        "CFBundleIdentifier": LABEL,
-        "CFBundleVersion": "1.0",
-        "CFBundleShortVersionString": "1.0",
-        "LSUIElement": True,
-    })
+    info.update(
+        {
+            "CFBundleName": "Chronicle HAVPE Relay",
+            "CFBundleDisplayName": "Chronicle HAVPE Relay",
+            "CFBundleIdentifier": LABEL,
+            "CFBundleVersion": "1.0",
+            "CFBundleShortVersionString": "1.0",
+            "LSUIElement": True,
+        }
+    )
     with open(info_plist, "wb") as f:
         plistlib.dump(info, f)
 
@@ -87,9 +92,13 @@ def _build_plist() -> dict:
     plist = {
         "Label": LABEL,
         "ProgramArguments": [
-            uv, "run",
-            "--project", str(PROJECT_DIR),
-            "python", str(PROJECT_DIR / "main.py"), "menu",
+            uv,
+            "run",
+            "--project",
+            str(PROJECT_DIR),
+            "python",
+            str(PROJECT_DIR / "main.py"),
+            "menu",
         ],
         "WorkingDirectory": str(PROJECT_DIR),
         "RunAtLoad": True,
@@ -124,7 +133,8 @@ def install() -> None:
 
     result = subprocess.run(
         ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST_PATH)],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode == 0:
         print(f"Service '{LABEL}' installed and loaded.")
@@ -146,7 +156,8 @@ def uninstall() -> None:
 
     result = subprocess.run(
         ["launchctl", "bootout", f"gui/{os.getuid()}", str(PLIST_PATH)],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode == 0:
         print(f"Service '{LABEL}' unloaded.")
@@ -166,7 +177,8 @@ def kickstart() -> None:
 
     result = subprocess.run(
         ["launchctl", "kickstart", f"gui/{os.getuid()}/{LABEL}"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode == 0:
         print(f"Service '{LABEL}' started.")
@@ -182,12 +194,15 @@ def status() -> None:
 
     result = subprocess.run(
         ["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode == 0:
         for line in result.stdout.splitlines():
             stripped = line.strip()
-            if any(k in stripped.lower() for k in ["state", "pid", "last exit", "runs"]):
+            if any(
+                k in stripped.lower() for k in ["state", "pid", "last exit", "runs"]
+            ):
                 print(stripped)
     else:
         print(f"Service '{LABEL}' is not running.")

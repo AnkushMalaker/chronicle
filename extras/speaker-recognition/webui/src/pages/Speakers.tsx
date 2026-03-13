@@ -54,10 +54,10 @@ export default function Speakers() {
     setIsLoading(true)
     try {
       const speakersResponse = await apiService.get('/speakers')
-      
+
       // Backend returns { speakers: [...] }, extract the speakers array
       const allSpeakers = speakersResponse.data.speakers || []
-      
+
       // Filter speakers by user - treat users as "folders" by using speaker ID prefixes
       const userPrefix = `user_${user.id}_`
       const userSpeakers = allSpeakers.filter((speaker: any) => {
@@ -76,7 +76,7 @@ export default function Speakers() {
         enrollment_status: 'completed' as const, // If speaker exists, it's completed
         last_enrollment: null // Not provided by backend yet
       }))
-      
+
       // Calculate stats from filtered speakers
       const stats = {
         total_speakers: userSpeakers.length,
@@ -144,14 +144,14 @@ export default function Speakers() {
 
   const deleteSpeaker = useCallback(async (speakerId: string) => {
     if (!user) return
-    
+
     // Ensure user can only delete their own speakers
     const userPrefix = `user_${user.id}_`
     if (!speakerId.startsWith(userPrefix)) {
       alert('You can only delete your own speakers.')
       return
     }
-    
+
     try {
       await apiService.delete(`/speakers/${speakerId}`)
       setSpeakers(prev => prev.filter(s => s.id !== speakerId))
@@ -239,7 +239,7 @@ export default function Speakers() {
 
       const result = response.data
       alert(`Import successful!\n\nImported: ${result.imported}\nSkipped: ${result.skipped}\nReplaced: ${result.replaced}\n${result.errors.length > 0 ? '\nErrors:\n' + result.errors.join('\n') : ''}`)
-      
+
       // Reload speakers list
       await loadSpeakers()
       setShowImportDialog(false)
@@ -409,7 +409,7 @@ export default function Speakers() {
               />
             </div>
           </div>
-          
+
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Status</label>
             <select
@@ -423,7 +423,7 @@ export default function Speakers() {
               <option value="failed">Failed</option>
             </select>
           </div>
-          
+
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Sort By</label>
             <select
@@ -438,7 +438,7 @@ export default function Speakers() {
               <option value="average_quality">Quality</option>
             </select>
           </div>
-          
+
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Order</label>
             <select
@@ -559,8 +559,8 @@ export default function Speakers() {
           <User className="h-16 w-16 text-gray-300 dark:text-gray-500 mx-auto mb-4" />
           <h3 className="heading-sm mb-2">No Speakers Found</h3>
           <p className="text-muted">
-            {speakers.length === 0 
-              ? "No speakers have been enrolled yet." 
+            {speakers.length === 0
+              ? "No speakers have been enrolled yet."
               : "No speakers match your current filters."}
           </p>
         </div>
@@ -630,9 +630,9 @@ export default function Speakers() {
 
       {/* Analysis Tab */}
       {activeTab === 'analysis' && (
-        <EmbeddingPlot 
-          dataSource={{ type: 'speakers', userId: user?.id }} 
-          onRefresh={loadSpeakers} 
+        <EmbeddingPlot
+          dataSource={{ type: 'speakers', userId: user?.id }}
+          onRefresh={loadSpeakers}
         />
       )}
 
@@ -681,7 +681,7 @@ export default function Speakers() {
                   ×
                 </button>
               </div>
-              
+
               {importFile && (
                 <div className="mb-6">
                   <div className="flex items-center space-x-3 p-3 bg-gray-50 rounded-lg dark:bg-gray-700">

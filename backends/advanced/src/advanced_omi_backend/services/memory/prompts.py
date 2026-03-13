@@ -33,32 +33,32 @@ Here are the details of the task:
 
 DEFAULT_UPDATE_MEMORY_PROMPT = f"""
 You are a memory manager for a system.
-You must compare a list of **retrieved facts** with the **existing memory** (an array of `{{id, text}}` objects).  
-For each memory item, decide one of four operations: **ADD**, **UPDATE**, **DELETE**, or **NONE**.  
+You must compare a list of **retrieved facts** with the **existing memory** (an array of `{{id, text}}` objects).
+For each memory item, decide one of four operations: **ADD**, **UPDATE**, **DELETE**, or **NONE**.
 Your output must follow the exact XML format described.
 
 ---
 
 ## Rules
-1. **ADD**:  
+1. **ADD**:
    - If a retrieved fact is new (no existing memory on that topic), create a new `<item>` with a new `id` (numeric, non-colliding).
    - Always include `<text>` with the new fact.
 
-2. **UPDATE**:  
-   - If a retrieved fact replaces, contradicts, or refines an existing memory, update that memory instead of deleting and adding.  
-   - Keep the same `id`.  
-   - Always include `<text>` with the new fact.  
-   - Always include `<old_memory>` with the previous memory text.  
+2. **UPDATE**:
+   - If a retrieved fact replaces, contradicts, or refines an existing memory, update that memory instead of deleting and adding.
+   - Keep the same `id`.
+   - Always include `<text>` with the new fact.
+   - Always include `<old_memory>` with the previous memory text.
    - If multiple memories are about the same topic, update **all of them** to the new fact (consolidation).
 
-3. **DELETE**:  
-   - Use only when a retrieved fact explicitly invalidates or negates a memory (e.g., “I no longer like pizza”).  
-   - Keep the same `id`.  
+3. **DELETE**:
+   - Use only when a retrieved fact explicitly invalidates or negates a memory (e.g., “I no longer like pizza”).
+   - Keep the same `id`.
    - Always include `<text>` with the old memory value so the XML remains well-formed.
 
-4. **NONE**:  
-   - If the memory is unchanged and still valid.  
-   - Keep the same `id`.  
+4. **NONE**:
+   - If the memory is unchanged and still valid.
+   - Keep the same `id`.
    - Always include `<text>` with the existing value.
 
 ---
@@ -80,9 +80,9 @@ Your output must follow the exact XML format described.
 ## Examples
 
 ### Example 1 (Preference Update)
-Old: `[{{"id": "0", "text": "My name is John"}}, {{"id": "1", "text": "My favorite fruit is oranges"}}]`  
+Old: `[{{"id": "0", "text": "My name is John"}}, {{"id": "1", "text": "My favorite fruit is oranges"}}]`
 Facts (each should be a separate XML item):
-  1. My favorite fruit is apple  
+  1. My favorite fruit is apple
 
 Output:
 <result>
@@ -98,9 +98,9 @@ Output:
 </result>
 
 ### Example 2 (Contradiction / Deletion)
-Old: `[{{"id": "0", "text": "I like pizza"}}]`  
+Old: `[{{"id": "0", "text": "I like pizza"}}]`
 Facts (each should be a separate XML item):
-  1. I no longer like pizza  
+  1. I no longer like pizza
 
 Output:
 <result>
@@ -112,7 +112,7 @@ Output:
 </result>
 
 ### Example 3 (Multiple New Facts)
-Old: `[{{"id": "0", "text": "I like hiking"}}]`  
+Old: `[{{"id": "0", "text": "I like hiking"}}]`
 Facts (each should be a separate XML item):
   1. I enjoy rug tufting
   2. I watch YouTube tutorials
@@ -139,9 +139,9 @@ Output:
 ---
 
 **Important constraints**:
-- Never output both DELETE and ADD for the same topic; use UPDATE instead.  
-- Every `<item>` must contain `<text>`.  
-- Only include `<old_memory>` for UPDATE events.  
+- Never output both DELETE and ADD for the same topic; use UPDATE instead.
+- Every `<item>` must contain `<text>`.
+- Only include `<old_memory>` for UPDATE events.
 - Do not output any text outside `<result>...</result>`.
 
 """
@@ -314,81 +314,89 @@ You are a memory summarization system that records and preserves the complete in
 **Task Objective**: Scrape blog post titles and full content from the OpenAI blog.
 **Progress Status**: 10% complete — 5 out of 50 blog posts processed.
 
-1. **Agent Action**: Opened URL "https://openai.com"  
-   **Action Result**:  
-      "HTML Content of the homepage including navigation bar with links: 'Blog', 'API', 'ChatGPT', etc."  
-   **Key Findings**: Navigation bar loaded correctly.  
-   **Navigation History**: Visited homepage: "https://openai.com"  
+1. **Agent Action**: Opened URL "https://openai.com"
+   **Action Result**:
+      "HTML Content of the homepage including navigation bar with links: 'Blog', 'API', 'ChatGPT', etc."
+   **Key Findings**: Navigation bar loaded correctly.
+   **Navigation History**: Visited homepage: "https://openai.com"
    **Current Context**: Homepage loaded; ready to click on the 'Blog' link.
 
-2. **Agent Action**: Clicked on the "Blog" link in the navigation bar.  
-   **Action Result**:  
-      "Navigated to 'https://openai.com/blog/' with the blog listing fully rendered."  
-   **Key Findings**: Blog listing shows 10 blog previews.  
-   **Navigation History**: Transitioned from homepage to blog listing page.  
+2. **Agent Action**: Clicked on the "Blog" link in the navigation bar.
+   **Action Result**:
+      "Navigated to 'https://openai.com/blog/' with the blog listing fully rendered."
+   **Key Findings**: Blog listing shows 10 blog previews.
+   **Navigation History**: Transitioned from homepage to blog listing page.
    **Current Context**: Blog listing page displayed.
 
-3. **Agent Action**: Extracted the first 5 blog post links from the blog listing page.  
-   **Action Result**:  
-      "[ '/blog/chatgpt-updates', '/blog/ai-and-education', '/blog/openai-api-announcement', '/blog/gpt-4-release', '/blog/safety-and-alignment' ]"  
-   **Key Findings**: Identified 5 valid blog post URLs.  
+3. **Agent Action**: Extracted the first 5 blog post links from the blog listing page.
+   **Action Result**:
+      "[ '/blog/chatgpt-updates', '/blog/ai-and-education', '/blog/openai-api-announcement', '/blog/gpt-4-release', '/blog/safety-and-alignment' ]"
+   **Key Findings**: Identified 5 valid blog post URLs.
    **Current Context**: URLs stored in memory for further processing.
 
-4. **Agent Action**: Visited URL "https://openai.com/blog/chatgpt-updates"  
-   **Action Result**:  
-      "HTML content loaded for the blog post including full article text."  
-   **Key Findings**: Extracted blog title "ChatGPT Updates – March 2025" and article content excerpt.  
+4. **Agent Action**: Visited URL "https://openai.com/blog/chatgpt-updates"
+   **Action Result**:
+      "HTML content loaded for the blog post including full article text."
+   **Key Findings**: Extracted blog title "ChatGPT Updates – March 2025" and article content excerpt.
    **Current Context**: Blog post content extracted and stored.
 
-5. **Agent Action**: Extracted blog title and full article content from "https://openai.com/blog/chatgpt-updates"  
-   **Action Result**:  
-      "{{ 'title': 'ChatGPT Updates – March 2025', 'content': 'We\'re introducing new updates to ChatGPT, including improved browsing capabilities and memory recall... (full content)' }}"  
-   **Key Findings**: Full content captured for later summarization.  
+5. **Agent Action**: Extracted blog title and full article content from "https://openai.com/blog/chatgpt-updates"
+   **Action Result**:
+      "{{ 'title': 'ChatGPT Updates – March 2025', 'content': 'We\'re introducing new updates to ChatGPT, including improved browsing capabilities and memory recall... (full content)' }}"
+   **Key Findings**: Full content captured for later summarization.
    **Current Context**: Data stored; ready to proceed to next blog post.
 
 ... (Additional numbered steps for subsequent actions)
 ```
 """
 
-def build_update_memory_messages(retrieved_old_memory_dict, response_content, custom_update_memory_prompt=None):
-   if custom_update_memory_prompt is None:
+
+def build_update_memory_messages(
+    retrieved_old_memory_dict, response_content, custom_update_memory_prompt=None
+):
+    if custom_update_memory_prompt is None:
         custom_update_memory_prompt = DEFAULT_UPDATE_MEMORY_PROMPT
-    
-   if not retrieved_old_memory_dict or len(retrieved_old_memory_dict) == 0:
-      retrieved_old_memory_dict = "None"
-   
-   # Format facts individually to encourage separate XML items
-   if isinstance(response_content, list) and len(response_content) > 1:
-       facts_str = "Facts (each should be a separate XML item):\n"
-       for i, fact in enumerate(response_content):
-           facts_str += f"  {i+1}. {fact}\n"
-       facts_str = facts_str.strip()
-   else:
-       # Single fact or non-list, use original JSON format
-       facts_str = "Facts: " + json.dumps(response_content, ensure_ascii=False)
-   
-   prompt = (
-        "Old: " + json.dumps(retrieved_old_memory_dict, ensure_ascii=False) + "\n" +
-        facts_str + "\n" +
-        "Output:"
+
+    if not retrieved_old_memory_dict or len(retrieved_old_memory_dict) == 0:
+        retrieved_old_memory_dict = "None"
+
+    # Format facts individually to encourage separate XML items
+    if isinstance(response_content, list) and len(response_content) > 1:
+        facts_str = "Facts (each should be a separate XML item):\n"
+        for i, fact in enumerate(response_content):
+            facts_str += f"  {i+1}. {fact}\n"
+        facts_str = facts_str.strip()
+    else:
+        # Single fact or non-list, use original JSON format
+        facts_str = "Facts: " + json.dumps(response_content, ensure_ascii=False)
+
+    prompt = (
+        "Old: "
+        + json.dumps(retrieved_old_memory_dict, ensure_ascii=False)
+        + "\n"
+        + facts_str
+        + "\n"
+        + "Output:"
     )
 
-   messages = [
+    messages = [
         {"role": "system", "content": custom_update_memory_prompt.strip()},
-        {"role": "user", "content": prompt}
+        {"role": "user", "content": prompt},
     ]
-   return messages
+    return messages
 
 
-def get_update_memory_messages(retrieved_old_memory_dict, response_content, custom_update_memory_prompt=None):
+def get_update_memory_messages(
+    retrieved_old_memory_dict, response_content, custom_update_memory_prompt=None
+):
     """
     Generate a formatted message for the LLM to update memory with new facts.
-    
+
     Args:
         retrieved_old_memory_dict: List of existing memory entries with id and text
         response_content: List of new facts to integrate
         custom_update_memory_prompt: Optional custom prompt to override default
-        
+
     Returns:
         str: Formatted prompt for the LLM
     """
@@ -409,7 +417,7 @@ For each new fact, create an ADD action with the following JSON structure:
             "event" : "ADD"
         }},
         {{
-            "id" : "1", 
+            "id" : "1",
             "text" : "<fact_content>",
             "event" : "ADD"
         }}
@@ -419,7 +427,7 @@ For each new fact, create an ADD action with the following JSON structure:
 New facts to add:
 {response_content}
 
-IMPORTANT: 
+IMPORTANT:
 - When memory is empty, ALL actions must be "ADD" events
 - Use sequential IDs starting from 0: "0", "1", "2", etc.
 - Return ONLY valid JSON with NO extra text or thinking
@@ -470,23 +478,49 @@ Example response:
 
 # ===== Temporal and Entity Extraction =====
 
+
 class TimeRange(BaseModel):
     """Represents a time range with start and end timestamps."""
-    start: datetime = Field(description="ISO 8601 timestamp when the event/activity starts")
+
+    start: datetime = Field(
+        description="ISO 8601 timestamp when the event/activity starts"
+    )
     end: datetime = Field(description="ISO 8601 timestamp when the event/activity ends")
-    name: Optional[str] = Field(default=None, description="Optional name/label for this time range (e.g., 'wedding ceremony', 'party')")
+    name: Optional[str] = Field(
+        default=None,
+        description="Optional name/label for this time range (e.g., 'wedding ceremony', 'party')",
+    )
 
 
 class TemporalEntity(BaseModel):
     """Structured temporal and entity information extracted from a memory fact."""
-    isEvent: bool = Field(description="Whether this memory describes a scheduled event or time-bound activity")
-    isPerson: bool = Field(description="Whether this memory is primarily about a person or people")
-    isPlace: bool = Field(description="Whether this memory is primarily about a location or place")
-    isPromise: bool = Field(description="Whether this memory contains a commitment, promise, or agreement")
-    isRelationship: bool = Field(description="Whether this memory describes a relationship between people")
-    entities: List[str] = Field(default_factory=list, description="List of people, places, or things mentioned (e.g., ['John', 'Botanical Gardens', 'wedding'])")
-    timeRanges: List[TimeRange] = Field(default_factory=list, description="List of time ranges if this is a temporal memory")
-    emoji: Optional[str] = Field(default=None, description="Single emoji that best represents this memory")
+
+    isEvent: bool = Field(
+        description="Whether this memory describes a scheduled event or time-bound activity"
+    )
+    isPerson: bool = Field(
+        description="Whether this memory is primarily about a person or people"
+    )
+    isPlace: bool = Field(
+        description="Whether this memory is primarily about a location or place"
+    )
+    isPromise: bool = Field(
+        description="Whether this memory contains a commitment, promise, or agreement"
+    )
+    isRelationship: bool = Field(
+        description="Whether this memory describes a relationship between people"
+    )
+    entities: List[str] = Field(
+        default_factory=list,
+        description="List of people, places, or things mentioned (e.g., ['John', 'Botanical Gardens', 'wedding'])",
+    )
+    timeRanges: List[TimeRange] = Field(
+        default_factory=list,
+        description="List of time ranges if this is a temporal memory",
+    )
+    emoji: Optional[str] = Field(
+        default=None, description="Single emoji that best represents this memory"
+    )
 
 
 def build_temporal_extraction_prompt(current_date: datetime) -> str:

@@ -51,7 +51,7 @@ export interface SpeakerWebSocketOptions {
   userId?: number
   confidenceThreshold?: number
   deepgramApiKey?: string
-  
+
   // Deepgram parameters (forwarded to Deepgram API)
   model?: string
   language?: string
@@ -75,7 +75,7 @@ export interface SpeakerWebSocketOptions {
   filler_words?: boolean
   tag?: string
   // ... additional Deepgram parameters can be added as needed
-  
+
   // Event callbacks
   onUtteranceBoundary?: (event: UtteranceBoundaryEvent) => void
   onSpeakerIdentified?: (event: SpeakerWebSocketEvent) => void
@@ -94,7 +94,7 @@ export class SpeakerWebSocketService {
 
   constructor(options: SpeakerWebSocketOptions = {}) {
     this.options = options
-    
+
     // Use nginx proxy for WebSocket connections (HTTPS requirement)
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const host = window.location.host
@@ -117,7 +117,7 @@ export class SpeakerWebSocketService {
 
     // Build WebSocket URL with all parameters
     const params = new URLSearchParams()
-    
+
     // Enhancement parameters
     if (this.options.userId) {
       params.set('user_id', this.options.userId.toString())
@@ -125,7 +125,7 @@ export class SpeakerWebSocketService {
     if (this.options.confidenceThreshold !== undefined) {
       params.set('confidence_threshold', this.options.confidenceThreshold.toString())
     }
-    
+
     // Deepgram parameters
     if (this.options.model) params.set('model', this.options.model)
     if (this.options.language) params.set('language', this.options.language)
@@ -157,14 +157,14 @@ export class SpeakerWebSocketService {
     }
 
     const wsUrl = `${this.baseUrl}/v1/ws_listen?${params.toString()}`
-    
+
     console.log(`🔌 Connecting to Speaker WebSocket: ${wsUrl}`)
     console.log(`🔧 Base URL: ${this.baseUrl}`)
     console.log(`🔧 Parameters: ${params.toString()}`)
 
     return new Promise((resolve, reject) => {
       let connectionResolved = false
-      
+
       try {
         // Use WebSocket subprotocols for API key authentication (like Deepgram does)
         const protocols = this.options.deepgramApiKey ? ['token', this.options.deepgramApiKey] : undefined
@@ -180,7 +180,7 @@ export class SpeakerWebSocketService {
           try {
             const data: SpeakerWebSocketEvent = JSON.parse(event.data)
             this.handleMessage(data)
-            
+
             // Resolve promise when ready message is received
             if (data.type === 'ready' && !connectionResolved) {
               connectionResolved = true
@@ -237,7 +237,7 @@ export class SpeakerWebSocketService {
             transcript: data.transcript,
             speaker_identification: data.speaker_identification
           }
-          
+
           console.log(`🎙️ Utterance boundary: "${event.transcript}" (${event.audio_segment.duration.toFixed(2)}s)`)
           if (event.speaker_identification?.speaker_name) {
             console.log(`👤 Speaker: ${event.speaker_identification.speaker_name} (${event.speaker_identification.confidence.toFixed(3)})`)
@@ -266,17 +266,17 @@ export class SpeakerWebSocketService {
       case 'raw_deepgram':
         console.log('🎤 Raw Deepgram event:', data.data?.type || 'unknown')
         this.options.onRawDeepgram?.(data.data)
-        
+
         // Extract transcript from Deepgram Results and forward as interim transcript
         if (data.data?.type === 'Results' && data.data?.channel?.alternatives?.[0]?.transcript) {
           const transcript = data.data.channel.alternatives[0].transcript
           const confidence = data.data.channel.alternatives[0].confidence || 0
           const isFinal = data.data.is_final || false
-          
+
           // Only show transcripts with actual content
           if (transcript.trim()) {
             console.log(`📝 ${isFinal ? 'Final' : 'Interim'} transcript: "${transcript}" (${confidence.toFixed(3)})`)
-            
+
             // Create interim transcript event
             const interimEvent: UtteranceBoundaryEvent = {
               type: 'utterance_boundary',
@@ -294,7 +294,7 @@ export class SpeakerWebSocketService {
                 status: isFinal ? 'unknown' : 'interim'
               }
             }
-            
+
             // Forward as utterance boundary for display
             this.options.onUtteranceBoundary?.(interimEvent)
           }

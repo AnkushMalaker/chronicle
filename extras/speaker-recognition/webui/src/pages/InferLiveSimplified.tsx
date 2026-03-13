@@ -13,12 +13,12 @@ import SettingsPanel from '../components/SettingsPanel'
 
 export default function InferLiveSimplified() {
   const { user } = useUser()
-  
+
   // Audio processing refs
   const mediaStreamRef = useRef<MediaStream | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
   const processorRef = useRef<ScriptProcessorNode | null>(null)
-  
+
   // Refs to track real-time state for audio processor (avoids closure capture issues)
   const isConnectedRef = useRef(false)
   const isStreamingRef = useRef(false)
@@ -55,9 +55,9 @@ export default function InferLiveSimplified() {
   useEffect(() => {
     // Only update if we have a user and WebSocket is initialized
     if (user?.id && deepgramSession.deepgramApiKey) {
-      console.log('🔧 [Settings] Updating WebSocket settings:', { 
-        userId: user.id, 
-        confidenceThreshold, 
+      console.log('🔧 [Settings] Updating WebSocket settings:', {
+        userId: user.id,
+        confidenceThreshold,
         hasApiKey: !!deepgramSession.deepgramApiKey,
         isConnected: speakerWS.isConnected,
         isStreaming: speakerWS.isStreaming
@@ -99,7 +99,7 @@ export default function InferLiveSimplified() {
       processor.onaudioprocess = (event) => {
         // Use refs for real-time state (avoids React closure capture issues)
         const shouldSend = isConnectedRef.current && isStreamingRef.current
-        
+
         if (shouldSend) {
           const inputBuffer = event.inputBuffer
           const inputData = inputBuffer.getChannelData(0)
@@ -134,7 +134,7 @@ export default function InferLiveSimplified() {
 
     } catch (error) {
       console.error('Failed to start audio capture:', error)
-      
+
       let errorMessage = 'Failed to access microphone. '
       if (error.name === 'NotAllowedError') {
         errorMessage += 'Please allow microphone access and try again.'
@@ -143,7 +143,7 @@ export default function InferLiveSimplified() {
       } else {
         errorMessage += 'Please check permissions and try again.'
       }
-      
+
       alert(errorMessage)
     }
   }
@@ -179,7 +179,7 @@ export default function InferLiveSimplified() {
         if (!speakerWS.isConnected) {
           await speakerWS.connect()
         }
-        
+
         // Start streaming and audio capture
         speakerWS.startStreaming()
         await startAudioCapture()
@@ -194,7 +194,7 @@ export default function InferLiveSimplified() {
     const seconds = Math.floor(ms / 1000)
     const minutes = Math.floor(seconds / 60)
     const hours = Math.floor(minutes / 60)
-    
+
     if (hours > 0) {
       return `${hours}:${(minutes % 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`
     }
@@ -333,7 +333,7 @@ export default function InferLiveSimplified() {
           <Mic className="h-6 w-6" />
           <span>
             {!deepgramSession.deepgramApiKey ? '⚠️ API Key Required' :
-             speakerWS.connectionStatus === 'connecting' ? '🔄 Connecting...' : 
+             speakerWS.connectionStatus === 'connecting' ? '🔄 Connecting...' :
              speakerWS.isStreaming ? 'Stop Transcribe & Identify' :
              'Start Transcribe & Identify'}
           </span>

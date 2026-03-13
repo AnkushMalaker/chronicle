@@ -28,50 +28,50 @@ memory/
 graph TB
     %% User Interface Layer
     User[User/Application] --> CompatService[compat_service.py<br/>MemoryService]
-    
+
     %% Compatibility Layer
     CompatService --> CoreService[memory_service.py<br/>CoreMemoryService]
-    
+
     %% Configuration
     Config[config.py<br/>MemoryConfig] --> CoreService
     Config --> LLMProviders
     Config --> VectorStores
-    
+
     %% Core Service Layer
     CoreService --> Base[base.py<br/>Abstract Interfaces]
-    
+
     %% Base Abstractions
     Base --> MemoryServiceBase[MemoryServiceBase]
-    Base --> LLMProviderBase[LLMProviderBase] 
+    Base --> LLMProviderBase[LLMProviderBase]
     Base --> VectorStoreBase[VectorStoreBase]
     Base --> MemoryEntry[MemoryEntry<br/>Data Structure]
-    
+
     %% Provider Implementations
     subgraph LLMProviders[LLM Providers]
         OpenAI[OpenAIProvider]
         Ollama[OllamaProvider]
         Qwen[Qwen3EmbeddingProvider]
     end
-    
+
     subgraph VectorStores[Vector Stores]
         Qdrant[QdrantVectorStore]
     end
-    
+
     %% Inheritance relationships
     LLMProviderBase -.-> OpenAI
     LLMProviderBase -.-> Ollama
     VectorStoreBase -.-> Qdrant
-    
+
     %% Core Service uses providers
     CoreService --> LLMProviders
     CoreService --> VectorStores
-    
+
     %% External Services
     OpenAI --> OpenAIAPI[OpenAI API]
     Ollama --> OllamaAPI[Ollama Server]
     Qwen --> LocalModel[Local Qwen Model]
     Qdrant --> QdrantDB[(Qdrant Database)]
-    
+
     %% Memory Flow
     subgraph MemoryFlow[Memory Processing Flow]
         Transcript[Transcript] --> Extract[Extract Memories<br/>via LLM]
@@ -80,15 +80,15 @@ graph TB
         Store --> Search[Semantic Search]
         Search --> Results[Memory Results]
     end
-    
+
     CoreService --> MemoryFlow
-    
+
     %% Styling
     classDef interface fill:#e1f5fe,stroke:#01579b,stroke-width:2px
     classDef implementation fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
     classDef external fill:#fff3e0,stroke:#e65100,stroke-width:2px
     classDef data fill:#e8f5e8,stroke:#2e7d32,stroke-width:2px
-    
+
     class Base,MemoryServiceBase,LLMProviderBase,VectorStoreBase interface
     class CompatService,CoreService,OpenAI,Ollama,Qdrant implementation
     class OpenAIAPI,OllamaAPI,LocalModel,QdrantDB external
@@ -109,7 +109,7 @@ classDiagram
         +string created_at
         +__post_init__()
     }
-    
+
     class MemoryServiceBase {
         <<abstract>>
         +initialize() Promise~void~
@@ -121,7 +121,7 @@ classDiagram
         +test_connection() Promise~bool~
         +shutdown() void
     }
-    
+
     class LLMProviderBase {
         <<abstract>>
         +extract_memories(text, prompt) Promise~List~string~~
@@ -129,7 +129,7 @@ classDiagram
         +propose_memory_actions(old_memory, new_facts, custom_prompt) Promise~Dict~
         +test_connection() Promise~bool~
     }
-    
+
     class VectorStoreBase {
         <<abstract>>
         +initialize() Promise~void~
@@ -141,7 +141,7 @@ classDiagram
         +delete_user_memories(user_id) Promise~int~
         +test_connection() Promise~bool~
     }
-    
+
     %% Configuration Classes
     class MemoryConfig {
         +LLMProvider llm_provider
@@ -153,7 +153,7 @@ classDiagram
         +bool extraction_enabled
         +int timeout_seconds
     }
-    
+
     %% Core Implementation
     class CoreMemoryService {
         -MemoryConfig config
@@ -174,7 +174,7 @@ classDiagram
         -_normalize_actions() List~dict~
         -_apply_memory_actions() Promise~List~string~~
     }
-    
+
     %% Compatibility Layer
     class CompatMemoryService {
         -CoreMemoryService _service
@@ -190,7 +190,7 @@ classDiagram
         +test_connection() Promise~bool~
         +shutdown() void
     }
-    
+
     %% LLM Provider Implementations
     class OpenAIProvider {
         -string api_key
@@ -204,7 +204,7 @@ classDiagram
         +propose_memory_actions() Promise~Dict~
         +test_connection() Promise~bool~
     }
-    
+
     class OllamaProvider {
         -string base_url
         -string model
@@ -217,7 +217,7 @@ classDiagram
         +propose_memory_actions() Promise~Dict~
         +test_connection() Promise~bool~
     }
-    
+
     %% Vector Store Implementation
     class QdrantVectorStore {
         -string host
@@ -234,20 +234,20 @@ classDiagram
         +delete_user_memories() Promise~int~
         +test_connection() Promise~bool~
     }
-    
+
     %% Relationships
     MemoryServiceBase <|-- CoreMemoryService : implements
     LLMProviderBase <|-- OpenAIProvider : implements
     LLMProviderBase <|-- OllamaProvider : implements
     VectorStoreBase <|-- QdrantVectorStore : implements
-    
+
     CoreMemoryService --> MemoryConfig : uses
     CoreMemoryService --> LLMProviderBase : uses
     CoreMemoryService --> VectorStoreBase : uses
     CoreMemoryService --> MemoryEntry : creates
-    
+
     CompatMemoryService --> CoreMemoryService : wraps
-    
+
     OpenAIProvider --> MemoryEntry : creates
     OllamaProvider --> MemoryEntry : creates
     QdrantVectorStore --> MemoryEntry : stores
@@ -263,7 +263,7 @@ sequenceDiagram
     participant LLM as LLM Provider<br/>(OpenAI/Ollama)
     participant Vector as Vector Store<br/>(Qdrant)
     participant Config as Configuration
-    
+
     Note over User, Config: Memory Service Initialization
     User->>Compat: get_memory_service()
     Compat->>Core: __init__(config)
@@ -275,23 +275,23 @@ sequenceDiagram
     Vector-->>Core: ready
     LLM-->>Core: ready
     Core-->>Compat: initialized
-    
+
     Note over User, Config: Adding Memory from Transcript
     User->>Compat: add_memory(transcript, ...)
     Compat->>Core: add_memory(transcript, ...)
-    
+
     Core->>Core: _deduplicate_memories()
     Core->>LLM: generate_embeddings(memory_texts)
     LLM->>LLM: create vector embeddings
     LLM-->>Core: List[embeddings]
-    
+
     alt Memory Updates Enabled
         Core->>Vector: search_memories(embeddings, user_id)
         Vector-->>Core: existing_memories
         Core->>LLM: propose_memory_actions(old, new)
         LLM->>LLM: decide ADD/UPDATE/DELETE
         LLM-->>Core: actions_list
-        
+
         loop For each action
             alt Action: ADD
                 Core->>Core: create MemoryEntry
@@ -306,11 +306,11 @@ sequenceDiagram
         Core->>Core: create MemoryEntry objects
         Core->>Vector: add_memories(entries)
     end
-    
+
     Vector-->>Core: created_ids
     Core-->>Compat: success, memory_ids
     Compat-->>User: success, memory_ids
-    
+
     Note over User, Config: Searching Memories
     User->>Compat: search_memories(query, user_id)
     Compat->>Core: search_memories(query, user_id)
@@ -380,7 +380,7 @@ await memory_service.initialize()
 success, memory_ids = await memory_service.add_memory(
     transcript="User discussed their goals for the next quarter.",
     client_id="client123",
-    audio_uuid="audio456", 
+    audio_uuid="audio456",
     user_id="user789",
     user_email="user@example.com"
 )
@@ -412,7 +412,7 @@ success, memory_ids = await service.add_memory(
     transcript="My favorite destination is now Tokyo instead of Paris.",
     client_id="client123",
     audio_uuid="audio456",
-    user_id="user789", 
+    user_id="user789",
     user_email="user@example.com",
     allow_update=True  # Enable intelligent memory updates
 )
@@ -427,11 +427,11 @@ class CustomLLMProvider(LLMProviderBase):
     async def extract_memories(self, text: str, prompt: str) -> List[str]:
         # Custom implementation
         pass
-    
+
     async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
-        # Custom implementation  
+        # Custom implementation
         pass
-    
+
     # ... implement other abstract methods
 ```
 
@@ -464,7 +464,7 @@ MEMORY_TIMEOUT_SECONDS=30
 ```python
 from advanced_omi_backend.memory.config import (
     MemoryConfig,
-    create_openai_config, 
+    create_openai_config,
     create_qdrant_config
 )
 
@@ -493,7 +493,7 @@ The service supports intelligent memory updates through LLM-driven action propos
 
 - **ADD**: Create new memories for novel information
 - **UPDATE**: Modify existing memories with new details
-- **DELETE**: Remove outdated or incorrect memories  
+- **DELETE**: Remove outdated or incorrect memories
 - **NONE**: No action needed for redundant information
 
 ### Example Flow
@@ -594,7 +594,7 @@ The service includes comprehensive error handling:
 The modular architecture makes it easy to:
 
 1. **Add new LLM providers**: Inherit from `LLMProviderBase`
-2. **Add new vector stores**: Inherit from `VectorStoreBase`  
+2. **Add new vector stores**: Inherit from `VectorStoreBase`
 3. **Customize memory logic**: Override `MemoryServiceBase` methods
 4. **Add new data formats**: Extend `MemoryEntry` or conversion logic
 
@@ -618,7 +618,7 @@ logging.getLogger("memory_service").setLevel(logging.INFO)
 
 Log levels:
 - **INFO**: Service lifecycle, major operations
-- **DEBUG**: Detailed processing information  
+- **DEBUG**: Detailed processing information
 - **WARNING**: Recoverable errors, fallbacks
 - **ERROR**: Serious errors requiring attention
 
@@ -694,15 +694,15 @@ class AnthropicProvider(LLMProviderBase):
     def __init__(self, config: Dict[str, Any]):
         self.api_key = config["api_key"]
         self.model = config.get("model", "claude-3-sonnet")
-    
+
     async def extract_memories(self, text: str, prompt: str) -> List[str]:
         # Implement using Anthropic API
         pass
-    
+
     async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         # Implement using Anthropic embeddings
         pass
-    
+
     # ... implement other abstract methods
 ```
 
@@ -781,15 +781,15 @@ class PineconeVectorStore(VectorStoreBase):
         self.api_key = config["api_key"]
         self.environment = config["environment"]
         self.index_name = config["index_name"]
-    
+
     async def initialize(self) -> None:
         # Initialize Pinecone client
         pass
-    
+
     async def add_memories(self, memories: List[MemoryEntry]) -> List[str]:
         # Add to Pinecone index
         pass
-    
+
     # ... implement other abstract methods
 ```
 
@@ -831,10 +831,10 @@ class CustomMemoryService(CoreMemoryService):
     async def add_memory(self, transcript: str, **kwargs):
         # Pre-process transcript
         processed_transcript = await self._custom_preprocessing(transcript)
-        
+
         # Call parent method
         return await super().add_memory(processed_transcript, **kwargs)
-    
+
     async def _custom_preprocessing(self, transcript: str) -> str:
         # Your custom logic here
         return transcript

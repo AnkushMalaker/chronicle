@@ -38,7 +38,7 @@ export default function FileUploader({
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
     setIsDragOver(false)
-    
+
     if (disabled) return
 
     const files = Array.from(e.dataTransfer.files)
@@ -47,7 +47,7 @@ export default function FileUploader({
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return
-    
+
     const files = Array.from(e.target.files)
     handleFiles(files)
   }
@@ -113,10 +113,10 @@ export default function FileUploader({
         onClick={openFileDialog}
         className={`
           relative border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors
-          ${disabled 
-            ? 'border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-800 cursor-not-allowed' 
-            : isDragOver 
-              ? 'border-blue-400 bg-blue-50 dark:border-blue-500 dark:bg-blue-900' 
+          ${disabled
+            ? 'border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-800 cursor-not-allowed'
+            : isDragOver
+              ? 'border-blue-400 bg-blue-50 dark:border-blue-500 dark:bg-blue-900'
               : 'border-gray-300 dark:border-gray-600 hover:border-gray-400 dark:hover:border-gray-500'
           }
         `}
@@ -125,7 +125,7 @@ export default function FileUploader({
           <div className="mx-auto">
             <Upload className={`h-12 w-12 mx-auto ${disabled ? 'text-gray-300 dark:text-gray-600' : 'text-gray-400 dark:text-gray-500'}`} />
           </div>
-          
+
           <div>
             <p className={`text-lg font-medium ${disabled ? 'text-primary-disabled' : 'text-primary'}`}>
               {isDragOver ? 'Drop files here' : (title || 'Upload Audio Files')}
@@ -140,7 +140,7 @@ export default function FileUploader({
             )}
           </div>
         </div>
-        
+
         {disabled && (
           <div className="absolute inset-0 bg-gray-50 dark:bg-gray-800 bg-opacity-50 rounded-lg"></div>
         )}

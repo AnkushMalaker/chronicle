@@ -21,7 +21,7 @@ Get User Conversations Test
     ${conversations_data}=        Get User Conversations
 
     # Verify conversation structure if any exist
-   
+
     IF    isinstance($conversations_data, dict) and len($conversations_data) > 0
         ${client_ids}=    Get Dictionary Keys    ${conversations_data}
         FOR    ${client_id}    IN    @{client_ids}
@@ -66,7 +66,7 @@ Reprocess test and get Conversation Versions Test
 
     ${expected_count}=    Evaluate    ${start_num_versions} + 1
     Should Be Equal As Integers     ${conversation}[transcript_version_count]    ${expected_count}
-    Should be equal as strings     ${conversation}[active_transcript_version]      ${updated_versions}[-1][version_id]    
+    Should be equal as strings     ${conversation}[active_transcript_version]      ${updated_versions}[-1][version_id]
 
 
 Unauthorized Conversation Access Test
@@ -122,12 +122,12 @@ Reprocess Memory Test
 
     ${memory_versions}=    Get conversation memory versions    ${conversation_id}
     Length Should Be    ${memory_versions}    ${new_memory_count}
-  
+
 
 Close Conversation Test
     [Documentation]    Test closing current conversation for a client
     [Tags]    conversation
-    
+
     Skip     msg=Close conversation needs to be evaluated as to it's purpose from the client side
 
     Get Anonymous Session    anon_session
@@ -181,10 +181,10 @@ Transcript Version activate Test
     # Test activating a different version (activate version index 1)
     ${target_version}=    Set Variable    ${versions}[1][version_id]
     ${response}=       Activate Transcript Version      ${conversation_id}    ${target_version}
-    Should Be Equal As Strings    ${response}[active_transcript_version]   ${target_version}  
+    Should Be Equal As Strings    ${response}[active_transcript_version]   ${target_version}
 
 
-        # ${active_memory}=     Get memory versions  
+        # ${active_memory}=     Get memory versions
         # ...    ${test}[active_memory_version]
         # IF    '${active_memory}' != '${None}' and '${active_memory}' != 'null'
         #     ${response}=       Activate Memory Version       ${conversation_id}    ${active_memory}
@@ -264,4 +264,3 @@ Filter Starred Conversations
     IF    ${conv_check}[starred]
         Star Conversation    ${conversation_id}
     END
-

@@ -83,7 +83,7 @@ export class SpeakerIdentificationService {
     options: ProcessingOptions
   ): Promise<ProcessingResult> {
     const startTime = Date.now()
-    
+
     try {
       let result: ProcessingResult
 
@@ -112,7 +112,7 @@ export class SpeakerIdentificationService {
     } catch (error) {
       // Provide more helpful error messages based on the error type
       let errorMessage = `Processing failed: ${error instanceof Error ? error.message : 'Unknown error'}`
-      
+
       if (error.message?.includes('500') || error.message?.includes('Internal Server Error')) {
         errorMessage = `Server error during ${options.mode} processing. This might be due to a backend issue. Please try again or contact support.`
       } else if (error.message?.includes('404') || error.message?.includes('Not Found')) {
@@ -126,7 +126,7 @@ export class SpeakerIdentificationService {
       } else if (error.message?.includes('Failed to transform Deepgram data')) {
         errorMessage = `Invalid Deepgram JSON format. Please ensure you've uploaded a valid Deepgram API response file.`
       }
-      
+
       throw new Error(errorMessage)
     }
   }
@@ -142,7 +142,7 @@ export class SpeakerIdentificationService {
       const formData = new FormData()
       formData.append('file', audioFile, 'utterance.wav')
       formData.append('similarity_threshold', (options.confidenceThreshold || 0.15).toString())
-      
+
       if (options.userId) {
         formData.append('user_id', options.userId.toString())
       }
@@ -175,7 +175,7 @@ export class SpeakerIdentificationService {
   ): Promise<ProcessingResult> {
     try {
       const filename = audioFile instanceof File ? audioFile.name : 'Audio'
-      
+
       // Use shared Deepgram service
       const deepgramResponse = await transcribeWithDeepgram(audioFile, {
         enhanceSpeakers: options.enhanceSpeakers !== false,
@@ -321,11 +321,11 @@ export class SpeakerIdentificationService {
   ): Promise<ProcessingResult> {
     try {
       const filename = audioFile instanceof File ? audioFile.name : 'Audio'
-      
+
       const formData = new FormData()
       formData.append('file', audioFile)
       formData.append('min_duration', (options.minDuration || 0.5).toString())
-      
+
       if (options.minSpeakers) {
         formData.append('min_speakers', options.minSpeakers.toString())
       }
@@ -341,7 +341,7 @@ export class SpeakerIdentificationService {
 
       const backendSegments = response.data.segments || []
 
-      // Convert backend format to frontend format  
+      // Convert backend format to frontend format
       const speakers: SpeakerSegment[] = backendSegments.map((segment: any) => ({
         start: segment.start,
         end: segment.end,
@@ -381,10 +381,10 @@ export class SpeakerIdentificationService {
   ): Promise<ProcessingResult> {
     try {
       const filename = audioFile instanceof File ? audioFile.name : 'Audio'
-      
+
       const formData = new FormData()
       formData.append('file', audioFile)
-      
+
       // Use query parameters instead of form data (like the working /v1/listen endpoint)
       const params = {
         similarity_threshold: (options.confidenceThreshold || 0.15).toString(),
@@ -456,7 +456,7 @@ export class SpeakerIdentificationService {
   ): Promise<ProcessingResult> {
     try {
       const filename = audioFile instanceof File ? audioFile.name : 'Audio'
-      
+
       if (!options.transcriptData) {
         throw new Error('Transcript data is required for diarize-identify-match mode')
       }
@@ -467,7 +467,7 @@ export class SpeakerIdentificationService {
       const formData = new FormData()
       formData.append('file', audioFile)
       formData.append('transcript_data', transformedTranscriptData)
-      
+
       // Add speaker processing parameters
       if (options.userId) {
         formData.append('user_id', options.userId.toString())
@@ -574,10 +574,10 @@ export class SpeakerIdentificationService {
       // Extract words from Deepgram format: results.channels[0].alternatives[0].words
       let words: Array<{word: string, start: number, end: number}> = []
       let fullText = ""
-      
+
       if (deepgramData?.results?.channels?.[0]?.alternatives?.[0]) {
         const alternative = deepgramData.results.channels[0].alternatives[0]
-        
+
         // Extract words with timestamps
         if (alternative.words) {
           words = alternative.words.map((wordData: any) => ({
@@ -586,17 +586,17 @@ export class SpeakerIdentificationService {
             end: parseFloat(wordData.end || 0)
           })).filter((word: any) => word.word) // Remove empty words
         }
-        
+
         // Extract full transcript
         fullText = alternative.transcript || ''
       }
-      
+
       // Format for backend API
       const formattedData = {
         words: words,
         text: fullText
       }
-      
+
       return JSON.stringify(formattedData)
     } catch (error) {
       throw new Error(`Failed to transform Deepgram data: ${error instanceof Error ? error.message : 'Unknown error'}`)

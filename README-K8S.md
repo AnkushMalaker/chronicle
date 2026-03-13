@@ -47,7 +47,7 @@ This guide walks you through setting up Chronicle from scratch on a fresh Ubuntu
 2. **Install Ubuntu Server**
    - Boot from USB/DVD
    - Choose "Install Ubuntu Server"
-   - Configure network with static IP (recommended: 192.168.1.42) 
+   - Configure network with static IP (recommended: 192.168.1.42)
    - Set hostname (e.g., `k8s_control_plane`)
    - Create user account
    - Install OpenSSH server
@@ -56,10 +56,10 @@ This guide walks you through setting up Chronicle from scratch on a fresh Ubuntu
    ```bash
    # Update system
    sudo apt update && sudo apt upgrade -y
-   
+
    # Install essential packages
    sudo apt install -y curl wget git vim htop tree
-   
+
    # Configure firewall
    sudo ufw allow ssh
    sudo ufw allow 6443  # Kubernetes API
@@ -75,11 +75,11 @@ This guide walks you through setting up Chronicle from scratch on a fresh Ubuntu
    ```bash
    # Install MicroK8s
    sudo snap install microk8s --classic
-   
+
    # Add user to microk8s group
    sudo usermod -a -G microk8s $USER
    sudo chown -f -R $USER ~/.kube
-   
+
    # Log out and back in, or run:
    newgrp microk8s
    ```
@@ -88,10 +88,10 @@ This guide walks you through setting up Chronicle from scratch on a fresh Ubuntu
    ```bash
    # Start MicroK8s
    sudo microk8s start
-   
+
    # Wait for all services to be ready
    sudo microk8s status --wait-ready
-   
+
    # Generate join token for worker nodes
    sudo microk8s add-node
    # This will output a command like:
@@ -103,7 +103,7 @@ This guide walks you through setting up Chronicle from scratch on a fresh Ubuntu
    ```bash
    # Start MicroK8s
    sudo microk8s start
-   
+
    # Wait for all services to be ready
    sudo microk8s status --wait-ready
    ```
@@ -115,7 +115,7 @@ This guide walks you through setting up Chronicle from scratch on a fresh Ubuntu
    sudo microk8s enable ingress
    sudo microk8s enable storage
    sudo microk8s enable metrics-server
-   
+
    # Wait for add-ons to be ready
    sudo microk8s status --wait-ready
    ```
@@ -125,7 +125,7 @@ This guide walks you through setting up Chronicle from scratch on a fresh Ubuntu
    # Create kubectl alias
    echo 'alias kubectl="microk8s kubectl"' >> ~/.bashrc
    source ~/.bashrc
-   
+
    # Verify installation
    kubectl get nodes
    kubectl get pods -A
@@ -147,11 +147,11 @@ This guide walks you through setting up Chronicle from scratch on a fresh Ubuntu
    ```bash
    # Install MicroK8s
    sudo snap install microk8s --classic
-   
+
    # Add user to microk8s group
    sudo usermod -a -G microk8s $USER
    sudo chown -f -R $USER ~/.kube
-   
+
    # Log out and back in, or run:
    newgrp microk8s
    ```
@@ -161,7 +161,7 @@ This guide walks you through setting up Chronicle from scratch on a fresh Ubuntu
    # Use the join command from the control plane
    # Replace with your actual join token
    sudo microk8s join 192.168.1.42:25000/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-   
+
    # Wait for node to join
    sudo microk8s status --wait-ready
    ```
@@ -170,7 +170,7 @@ This guide walks you through setting up Chronicle from scratch on a fresh Ubuntu
    ```bash
    # On the control plane, verify the worker node joined
    kubectl get nodes
-   
+
    # The worker node should show as Ready
    # Example output:
    # NAME                STATUS   ROLES    AGE   VERSION
@@ -182,7 +182,7 @@ This guide walks you through setting up Chronicle from scratch on a fresh Ubuntu
    ```bash
    # From your build machine, configure the worker node
    ./configure-insecure-registry-remote.sh 192.168.1.43
-   
+
    # Repeat for each worker node with their respective IPs
    ```
 
@@ -194,10 +194,10 @@ This guide walks you through setting up Chronicle from scratch on a fresh Ubuntu
    ```bash
    # Enable the built-in MicroK8s registry (not enabled by default)
    sudo microk8s enable registry
-   
+
    # Wait for registry to be ready
    sudo microk8s status --wait-ready
-   
+
    # Verify registry is running
    kubectl get pods -n container-registry
    ```
@@ -213,11 +213,11 @@ This guide walks you through setting up Chronicle from scratch on a fresh Ubuntu
    ```bash
    # From your build machine, configure MicroK8s to trust the insecure registry
    chmod +x scripts/configure-insecure-registry-remote.sh
-   
+
    # Run the configuration script with your node IP address
    # Usage: ./scripts/configure-insecure-registry-remote.sh <ip_address> [ssh_user]
    ./scripts/configure-insecure-registry-remote.sh 192.168.1.42
-   
+
    # Or with custom SSH user:
    # ./scripts/configure-insecure-registry-remote.sh 192.168.1.42 myuser
    ```
@@ -234,7 +234,7 @@ This guide walks you through setting up Chronicle from scratch on a fresh Ubuntu
    ```bash
    # Apply the hostpath provisioner
    kubectl apply -f k8s-manifests/hostpath-provisioner-official.yaml
-   
+
    # Verify storage class
    kubectl get storageclass
    ```
@@ -281,19 +281,19 @@ chronicle/
    > **Note:** The `--recursive` flag downloads the optional Mycelia submodule (an alternative memory backend with timeline visualization). Most deployments use the default Chronicle memory system and don't need Mycelia.
 
 2. **Install Required Tools**
-   
+
    **kubectl** (required for Skaffold and Helm):
    - Visit: https://kubernetes.io/docs/tasks/tools/
    - Follow the official installation guide for your platform
-   
+
    **Skaffold**:
    - Visit: https://skaffold.dev/docs/install/
-   - Follow the official installation guide 
-   
+   - Follow the official installation guide
+
    **Helm**:
    - Visit: https://helm.sh/docs/intro/install/
-   - Follow the official installation guide 
-   
+   - Follow the official installation guide
+
    **Verify installations:**
    ```bash
    kubectl version --client
@@ -311,7 +311,7 @@ chronicle/
    ```bash
    # Copy template (if it exists)
    # cp backends/advanced/.env.template backends/advanced/.env
-   
+
    # Note: Most environment variables are automatically set by Skaffold during deployment
    # including MONGODB_URI, QDRANT_BASE_URL, and other Kubernetes-specific values
    ```
@@ -320,27 +320,27 @@ chronicle/
    ```bash
    # Copy the template file
    cp skaffold.env.template skaffold.env
-   
+
    # Edit skaffold.env with your specific values
    vim skaffold.env
-   
+
    # Essential variables to configure:
    REGISTRY=192.168.1.42:32000  # Use IP address for immediate access
    # Alternative: REGISTRY=k8s_control_plane:32000 (requires adding 'k8s_control_plane 192.168.1.42' to /etc/hosts)
    BACKEND_IP=192.168.1.42
    BACKEND_NODEPORT=30270
    WEBUI_NODEPORT=31011
-   
+
    # Optional: Configure speaker recognition service
    HF_TOKEN=hf_your_huggingface_token_here
    DEEPGRAM_API_KEY=your_deepgram_api_key_here
-   
+
    # Note: MONGODB_URI and QDRANT_BASE_URL are automatically generated
    # by Skaffold based on your infrastructure namespace and service names
    ```
 
 3. **Configuration Variables Reference**
-   
+
    **Required Variables:**
    - `REGISTRY`: Docker registry for image storage
    - `BACKEND_IP`: IP address of your Kubernetes control plane
@@ -348,13 +348,13 @@ chronicle/
    - `WEBUI_NODEPORT`: Port for WebUI service (30000-32767)
    - `INFRASTRUCTURE_NAMESPACE`: Namespace for MongoDB and Qdrant
    - `APPLICATION_NAMESPACE`: Namespace for your application
-   
+
    **Optional Variables (for Speaker Recognition):**
    - `HF_TOKEN`: Hugging Face token for Pyannote models
    - `DEEPGRAM_API_KEY`: Deepgram API key for speech-to-text
    - `COMPUTE_MODE`: GPU or CPU mode for ML services
    - `SIMILARITY_THRESHOLD`: Speaker identification threshold
-   
+
    **Automatically Generated:**
    - `MONGODB_URI`: Generated from infrastructure namespace
    - `QDRANT_BASE_URL`: Generated from infrastructure namespace
@@ -365,11 +365,11 @@ chronicle/
    ```bash
    # Note: Most environment variables are handled by Skaffold automatically
    # If you need custom environment variables, you can:
-   
+
    # Option 1: Use the script (if it exists)
    # chmod +x scripts/generate-helm-configmap.sh
    # ./scripts/generate-helm-configmap.sh
-   
+
    # Option 2: Add them directly to the Helm chart values
    # Edit backends/charts/advanced-backend/values.yaml
    ```
@@ -460,7 +460,7 @@ This directory contains standalone Kubernetes manifests that are not managed by 
    ```bash
    # Deploy everything in the correct order
    ./scripts/deploy-all-services.sh
-   
+
    # This will automatically:
    # - Deploy infrastructure (MongoDB, Qdrant)
    # - Deploy main application (Backend, WebUI)
@@ -473,13 +473,13 @@ This directory contains standalone Kubernetes manifests that are not managed by 
    ```bash
    # Deploy infrastructure first
    skaffold run --profile=infrastructure
-   
+
    # Wait for infrastructure to be ready
    kubectl get pods -n root
-   
+
    # Deploy main application
    skaffold run --profile=advanced-backend --default-repo=192.168.1.42:32000
-   
+
    # Monitor deployment
    skaffold run --profile=advanced-backend --default-repo=192.168.1.42:32000 --tail
    ```
@@ -489,10 +489,10 @@ This directory contains standalone Kubernetes manifests that are not managed by 
    # Check all resources
    kubectl get all -n chronicle
    kubectl get all -n root
-   
+
    # Check Ingress
    kubectl get ingress -n chronicle
-   
+
    # Check services
    kubectl get svc -n chronicle
    ```
@@ -636,7 +636,7 @@ spec:
    ```bash
    # Check backend health
    curl -k https://chronicle.192-168-1-42.nip.io:32623/health
-   
+
    # Check WebUI
    curl -k https://chronicle.192-168-1-42.nip.io:32623/
    ```
@@ -660,7 +660,7 @@ spec:
    ```bash
    # Test registry connectivity (run on Kubernetes node)
    curl http://k8s_control_plane:32000/v2/
-   
+
    # Check MicroK8s containerd config (run on Kubernetes node)
    sudo cat /var/snap/microk8s/current/args/certs.d/k8s_control_plane:32000/hosts.toml
    ```
@@ -669,7 +669,7 @@ spec:
    ```bash
    # Check storage class (run on build machine)
    kubectl get storageclass
-   
+
    # Check persistent volumes (run on build machine)
    kubectl get pv
    kubectl get pvc -A
@@ -679,7 +679,7 @@ spec:
    ```bash
    # Check Ingress controller (run on build machine)
    kubectl get pods -n ingress-nginx
-   
+
    # Check Ingress configuration (run on build machine)
    kubectl describe ingress -n chronicle
    ```
@@ -696,13 +696,13 @@ spec:
    # Check GPU operator status (run on build machine)
    kubectl get pods -n gpu-operator
    kubectl describe pod -n gpu-operator <pod-name>
-   
+
    # Check GPU detection on nodes
    kubectl get nodes -o json | jq '.items[] | {name: .metadata.name, gpu: .status.allocatable."nvidia.com/gpu"}'
-   
+
    # Check GPU operator logs
    kubectl logs -n gpu-operator deployment/gpu-operator
-   
+
    # Verify NVIDIA drivers on host (run on Kubernetes node)
    nvidia-smi
    ```
@@ -712,18 +712,18 @@ spec:
    # Check node connectivity (run on build machine)
    kubectl get nodes
    kubectl describe node <node-name>
-   
+
    # Check node status and conditions
    kubectl get nodes -o json | jq '.items[] | {name: .metadata.name, status: .status.conditions[] | select(.type=="Ready") | .status, message: .message}'
-   
+
    # Check if pods can be scheduled
    kubectl get pods -A -o wide
    kubectl describe pod <pod-name> -n <namespace>
-   
+
    # Check node resources and capacity
    kubectl top nodes
    kubectl describe node <node-name> | grep -A 10 "Allocated resources"
-   
+
    # Verify network connectivity between nodes
    # Run on each node:
    ping <other-node-ip>
@@ -766,7 +766,7 @@ kubectl rollout restart deployment/webui -n chronicle
    ```bash
    # Update system packages
    sudo apt update && sudo apt upgrade -y
-   
+
    # Update MicroK8s
    sudo snap refresh microk8s
    ```
@@ -776,7 +776,7 @@ kubectl rollout restart deployment/webui -n chronicle
    # Backup environment files (run on build machine)
    cp backends/advanced/.env backends/advanced/.env.backup
    cp skaffold.env skaffold.env.backup
-   
+
    # Backup Kubernetes manifests (run on build machine)
    kubectl get all -n chronicle -o yaml > chronicle-backup.yaml
    kubectl get all -n root -o yaml > infrastructure-backup.yaml

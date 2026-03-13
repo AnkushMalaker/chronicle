@@ -153,4 +153,3 @@ Unauthorized Memory Access Test
     &{params}=     Create Dictionary    query=test
     ${response}=   GET On Session    session    /api/memories/search    params=${params}    expected_status=401
     Should Be Equal As Integers    ${response.status_code}    401
-

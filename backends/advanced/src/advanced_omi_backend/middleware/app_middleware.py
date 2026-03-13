@@ -26,7 +26,9 @@ def setup_cors_middleware(app: FastAPI) -> None:
     config = get_app_config()
 
     logger.info(f"🌐 CORS configured with origins: {config.allowed_origins}")
-    logger.info(f"🌐 CORS also allows Tailscale IPs via regex: {config.tailscale_regex}")
+    logger.info(
+        f"🌐 CORS also allows Tailscale IPs via regex: {config.tailscale_regex}"
+    )
 
     app.add_middleware(
         CORSMiddleware,
@@ -157,6 +159,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
                 # Recreate response with the body we consumed
                 from starlette.responses import Response
+
                 return Response(
                     content=response_body,
                     status_code=response.status_code,
@@ -191,8 +194,8 @@ def setup_exception_handlers(app: FastAPI) -> None:
             content={
                 "detail": "Unable to connect to server. Please check your connection and try again.",
                 "error_type": "connection_failure",
-                "error_category": "database"
-            }
+                "error_category": "database",
+            },
         )
 
     @app.exception_handler(ConnectionError)
@@ -204,8 +207,8 @@ def setup_exception_handlers(app: FastAPI) -> None:
             content={
                 "detail": "Unable to connect to server. Please check your connection and try again.",
                 "error_type": "connection_failure",
-                "error_category": "network"
-            }
+                "error_category": "network",
+            },
         )
 
     @app.exception_handler(HTTPException)
@@ -218,15 +221,12 @@ def setup_exception_handlers(app: FastAPI) -> None:
                 content={
                     "detail": exc.detail,
                     "error_type": "authentication_failure",
-                    "error_category": "security"
-                }
+                    "error_category": "security",
+                },
             )
 
         # For other HTTP exceptions, return as normal
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"detail": exc.detail}
-        )
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
 def setup_middleware(app: FastAPI) -> None:

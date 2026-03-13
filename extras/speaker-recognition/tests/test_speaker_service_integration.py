@@ -44,7 +44,11 @@ COMPOSE_FILE = SPEAKER_DIR / os.environ.get(
     "docker-compose-test.yml",
 )
 
-SPEAKER_SERVICE_PORT = int(os.environ.get("SPEAKER_SERVICE_TEST_PORT", os.environ.get("SPEAKER_SERVICE_PORT", "8086")))
+SPEAKER_SERVICE_PORT = int(
+    os.environ.get(
+        "SPEAKER_SERVICE_TEST_PORT", os.environ.get("SPEAKER_SERVICE_PORT", "8086")
+    )
+)
 SPEAKER_SERVICE_URL = f"http://localhost:{SPEAKER_SERVICE_PORT}"
 
 
@@ -64,7 +68,9 @@ def _wait_for_health(url: str, timeout_seconds: int = 300) -> None:
         except Exception as e:
             last_error = str(e)
         time.sleep(3)
-    raise TimeoutError(f"Speaker service not healthy at {url} within {timeout_seconds}s: {last_error}")
+    raise TimeoutError(
+        f"Speaker service not healthy at {url} within {timeout_seconds}s: {last_error}"
+    )
 
 
 def _compose_up():
@@ -79,7 +85,9 @@ def _compose_up():
     if "HF_TOKEN" not in env:
         pytest.skip("HF_TOKEN not set; skipping speaker recognition integration tests")
     if not _command_exists("docker"):
-        pytest.skip("Docker not available; skipping speaker recognition integration tests")
+        pytest.skip(
+            "Docker not available; skipping speaker recognition integration tests"
+        )
 
     # Determine build flag based on REBUILD setting
     compose_args = [
@@ -90,18 +98,20 @@ def _compose_up():
         "up",
         "-d",
     ]
-    
+
     if REBUILD:
         compose_args.append("--build")
         print(f"🔨 Rebuilding images from source (REBUILD=True)")
     else:
         print(f"🏗️ Using existing images (REBUILD=False)")
-    
+
     # Service name varies by compose file
     compose_args.append(
-        "speaker-service-test" if COMPOSE_FILE.name.endswith("docker-compose-test.yml") else "speaker-service"
+        "speaker-service-test"
+        if COMPOSE_FILE.name.endswith("docker-compose-test.yml")
+        else "speaker-service"
     )
-    
+
     try:
         subprocess.run(
             compose_args,
@@ -114,7 +124,10 @@ def _compose_up():
         print(f"Docker Compose build failed with exit code {e.returncode}")
         print("Attempting to show Docker logs...")
         try:
-            subprocess.run(["docker", "compose", "-f", str(COMPOSE_FILE), "logs"], cwd=str(SPEAKER_DIR))
+            subprocess.run(
+                ["docker", "compose", "-f", str(COMPOSE_FILE), "logs"],
+                cwd=str(SPEAKER_DIR),
+            )
         except Exception:
             pass
         raise
@@ -139,11 +152,15 @@ def _compose_down():
 def speaker_service():
     try:
         if FRESH_RUN:
-            print(f"🔄 Fresh run: starting with clean containers and data (FRESH_RUN=True)")
+            print(
+                f"🔄 Fresh run: starting with clean containers and data (FRESH_RUN=True)"
+            )
             _compose_down()  # Ensure clean state
         else:
-            print(f"♻️ Reuse mode: keeping existing containers and data if available (FRESH_RUN=False)")
-        
+            print(
+                f"♻️ Reuse mode: keeping existing containers and data if available (FRESH_RUN=False)"
+            )
+
         _compose_up()
         _wait_for_health(SPEAKER_SERVICE_URL, timeout_seconds=600)
         yield
@@ -153,129 +170,165 @@ def speaker_service():
             print(f"🧹 Cleaning up containers (CLEANUP_CONTAINERS=True)")
             _compose_down()
         else:
-            print(f"🗂️ Keeping containers running for debugging (CLEANUP_CONTAINERS=False)")
+            print(
+                f"🗂️ Keeping containers running for debugging (CLEANUP_CONTAINERS=False)"
+            )
 
 
 def test_speaker_recognition_pipeline(speaker_service):
     """Test the complete speaker recognition pipeline - enrollment, identification, and conversation analysis."""
-    
+
     print("=" * 80)
     print("🚀 STARTING SPEAKER RECOGNITION INTEGRATION TEST")
     print("=" * 80)
-    
+
     # Phase 1: Service Health Check
     print("📋 Phase 1: Service health check...")
     health_response = requests.get(f"{SPEAKER_SERVICE_URL}/health", timeout=10)
-    assert health_response.status_code == 200, f"Health check failed: {health_response.status_code}"
+    assert (
+        health_response.status_code == 200
+    ), f"Health check failed: {health_response.status_code}"
     print("✅ Speaker service is healthy")
-    
+
     # Phase 2: Test Assets Verification
     print("📁 Phase 2: Verifying test assets...")
     evan_dir = TEST_ASSETS_DIR / "evan"
     katelyn_dir = TEST_ASSETS_DIR / "katelyn"
     conversation_file = TEST_ASSETS_DIR / "conversation_evan_katelyn_2min.wav"
-    
+
     assert evan_dir.exists(), f"Evan test assets not found at {evan_dir}"
     assert katelyn_dir.exists(), f"Katelyn test assets not found at {katelyn_dir}"
-    assert conversation_file.exists(), f"Conversation file not found at {conversation_file}"
-    
+    assert (
+        conversation_file.exists()
+    ), f"Conversation file not found at {conversation_file}"
+
     evan_files = list(evan_dir.glob("*.wav"))
     katelyn_files = list(katelyn_dir.glob("*.wav"))
     assert len(evan_files) > 0, "No Evan audio files found"
     assert len(katelyn_files) > 0, "No Katelyn audio files found"
-    
-    print(f"✅ Found {len(evan_files)} Evan files and {len(katelyn_files)} Katelyn files")
-    
+
+    print(
+        f"✅ Found {len(evan_files)} Evan files and {len(katelyn_files)} Katelyn files"
+    )
+
     # Phase 3: Speaker Enrollment
     print("👤 Phase 3: Speaker enrollment...")
-    
+
     # 3a. Batch enroll Evan
     print(f"  Enrolling Evan with {len(evan_files)} audio files...")
     files = []
     for i, file_path in enumerate(sorted(evan_files)):
-        files.append(("files", (f"evan_{i:03d}.wav", open(file_path, "rb"), "audio/wav")))
-    
+        files.append(
+            ("files", (f"evan_{i:03d}.wav", open(file_path, "rb"), "audio/wav"))
+        )
+
     data = {"speaker_id": "user_1_evan_test", "speaker_name": "Evan Test"}
-    r = requests.post(f"{SPEAKER_SERVICE_URL}/enroll/batch", files=files, data=data, timeout=120)
-    
+    r = requests.post(
+        f"{SPEAKER_SERVICE_URL}/enroll/batch", files=files, data=data, timeout=120
+    )
+
     # Close file handles
     for _, file_tuple in files:
         file_tuple[1].close()
-    
-    assert r.status_code == 200, f"Evan enrollment failed: {r.status_code} {r.text[:500]}"
+
+    assert (
+        r.status_code == 200
+    ), f"Evan enrollment failed: {r.status_code} {r.text[:500]}"
     evan_result = r.json()
     assert evan_result.get("speaker_id") == "user_1_evan_test"
     print(f"  ✅ Evan enrolled successfully")
-    
+
     # 3b. Batch enroll Katelyn
     print(f"  Enrolling Katelyn with {len(katelyn_files)} audio files...")
     files = []
     for i, file_path in enumerate(sorted(katelyn_files)):
-        files.append(("files", (f"katelyn_{i:03d}.wav", open(file_path, "rb"), "audio/wav")))
-    
+        files.append(
+            ("files", (f"katelyn_{i:03d}.wav", open(file_path, "rb"), "audio/wav"))
+        )
+
     data = {"speaker_id": "user_1_katelyn_test", "speaker_name": "Katelyn Test"}
-    r = requests.post(f"{SPEAKER_SERVICE_URL}/enroll/batch", files=files, data=data, timeout=120)
-    
+    r = requests.post(
+        f"{SPEAKER_SERVICE_URL}/enroll/batch", files=files, data=data, timeout=120
+    )
+
     # Close file handles
     for _, file_tuple in files:
         file_tuple[1].close()
-    
-    assert r.status_code == 200, f"Katelyn enrollment failed: {r.status_code} {r.text[:500]}"
+
+    assert (
+        r.status_code == 200
+    ), f"Katelyn enrollment failed: {r.status_code} {r.text[:500]}"
     katelyn_result = r.json()
     assert katelyn_result.get("speaker_id") == "user_1_katelyn_test"
     print(f"  ✅ Katelyn enrolled successfully")
-    
+
     # Phase 4: Speaker Database Verification
     print("💾 Phase 4: Speaker database verification...")
-    speakers_response = requests.get(f"{SPEAKER_SERVICE_URL}/speakers?user_id=1", timeout=10)
-    assert speakers_response.status_code == 200, f"Failed to get speakers: {speakers_response.status_code}"
+    speakers_response = requests.get(
+        f"{SPEAKER_SERVICE_URL}/speakers?user_id=1", timeout=10
+    )
+    assert (
+        speakers_response.status_code == 200
+    ), f"Failed to get speakers: {speakers_response.status_code}"
     speakers_data = speakers_response.json()
-    
+
     assert "speakers" in speakers_data, "No speakers field in response"
     speakers = speakers_data["speakers"]
     assert len(speakers) == 2, f"Expected 2 speakers, got {len(speakers)}"
-    
+
     speaker_ids = [s["id"] for s in speakers]
     assert "user_1_evan_test" in speaker_ids, "Evan not found in speaker list"
     assert "user_1_katelyn_test" in speaker_ids, "Katelyn not found in speaker list"
     print("✅ Both speakers persisted correctly in database")
-    
+
     # Phase 5: Individual Speaker Identification
     print("🔍 Phase 5: Individual speaker identification...")
-    
+
     # 5a. Test Evan identification
     evan_test_file = sorted(evan_files)[0]
     with open(evan_test_file, "rb") as f:
         files = {"file": (evan_test_file.name, f, "audio/wav")}
         data = {"similarity_threshold": "0.10", "user_id": "1"}
-        r = requests.post(f"{SPEAKER_SERVICE_URL}/identify", files=files, data=data, timeout=60)
-    
+        r = requests.post(
+            f"{SPEAKER_SERVICE_URL}/identify", files=files, data=data, timeout=60
+        )
+
     assert r.status_code == 200, f"Evan identify failed: {r.status_code} {r.text[:500]}"
     result = r.json()
     assert result.get("found") is True, "Evan not identified"
-    assert result.get("speaker_id") == "user_1_evan_test", f"Wrong speaker identified: {result.get('speaker_id')}"
+    assert (
+        result.get("speaker_id") == "user_1_evan_test"
+    ), f"Wrong speaker identified: {result.get('speaker_id')}"
     evan_confidence = result.get("confidence")
     assert isinstance(evan_confidence, (int, float)), "Invalid confidence value"
     print(f"  ✅ Evan correctly identified with confidence {evan_confidence:.3f}")
-    
+
     # 5b. Test Katelyn identification
     katelyn_test_file = sorted(katelyn_files)[0]
     with open(katelyn_test_file, "rb") as f:
         files = {"file": (katelyn_test_file.name, f, "audio/wav")}
         data = {"similarity_threshold": "0.10", "user_id": "1"}
-        r = requests.post(f"{SPEAKER_SERVICE_URL}/identify", files=files, data=data, timeout=60)
-    
-    assert r.status_code == 200, f"Katelyn identify failed: {r.status_code} {r.text[:500]}"
+        r = requests.post(
+            f"{SPEAKER_SERVICE_URL}/identify", files=files, data=data, timeout=60
+        )
+
+    assert (
+        r.status_code == 200
+    ), f"Katelyn identify failed: {r.status_code} {r.text[:500]}"
     result = r.json()
     assert result.get("found") is True, "Katelyn not identified"
-    assert result.get("speaker_id") == "user_1_katelyn_test", f"Wrong speaker identified: {result.get('speaker_id')}"
+    assert (
+        result.get("speaker_id") == "user_1_katelyn_test"
+    ), f"Wrong speaker identified: {result.get('speaker_id')}"
     katelyn_confidence = result.get("confidence")
     assert isinstance(katelyn_confidence, (int, float)), "Invalid confidence value"
     print(f"  ✅ Katelyn correctly identified with confidence {katelyn_confidence:.3f}")
-    
+
     # Phase 6: Conversation Processing (Basic API Functionality)
     print("🗣️ Phase 6: Conversation processing...")
-    print("  Note: Testing API functionality, not requiring perfect speaker identification")
+    print(
+        "  Note: Testing API functionality, not requiring perfect speaker identification"
+    )
 
     with open(conversation_file, "rb") as f:
         files = {"file": (conversation_file.name, f, "audio/wav")}
@@ -287,10 +340,19 @@ def test_speaker_recognition_pipeline(speaker_service):
             "max_speakers": "4",
         }
 
-        print(f"  Processing conversation audio (file size: {conversation_file.stat().st_size / (1024*1024):.1f}MB)...")
-        r = requests.post(f"{SPEAKER_SERVICE_URL}/diarize-and-identify", files=files, params=params, timeout=300)
+        print(
+            f"  Processing conversation audio (file size: {conversation_file.stat().st_size / (1024*1024):.1f}MB)..."
+        )
+        r = requests.post(
+            f"{SPEAKER_SERVICE_URL}/diarize-and-identify",
+            files=files,
+            params=params,
+            timeout=300,
+        )
 
-    assert r.status_code == 200, f"Conversation processing failed: {r.status_code} {r.text[:500]}"
+    assert (
+        r.status_code == 200
+    ), f"Conversation processing failed: {r.status_code} {r.text[:500]}"
     result = r.json()
 
     # Basic structure validation
@@ -304,7 +366,9 @@ def test_speaker_recognition_pipeline(speaker_service):
     identified_speakers = set()
 
     for seg in result["segments"]:
-        assert "start" in seg and "end" in seg and "speaker" in seg, "Invalid segment structure"
+        assert (
+            "start" in seg and "end" in seg and "speaker" in seg
+        ), "Invalid segment structure"
 
         # Check if speaker was identified (correct field names)
         if seg.get("status") == "identified" and seg.get("identified_id"):
@@ -313,9 +377,13 @@ def test_speaker_recognition_pipeline(speaker_service):
             speaker_name = seg.get("identified_as", "")
             confidence = seg.get("confidence", 0.0)
             identified_speakers.add(speaker_id)
-            print(f"    Segment identified: {speaker_name} ({speaker_id}) confidence={confidence:.3f}")
+            print(
+                f"    Segment identified: {speaker_name} ({speaker_id}) confidence={confidence:.3f}"
+            )
 
-    print(f"  ✅ Found {total_segments} segments, {identified_segments} with speaker identification")
+    print(
+        f"  ✅ Found {total_segments} segments, {identified_segments} with speaker identification"
+    )
     print(f"  ✅ Identified speakers: {identified_speakers}")
 
     # Success criteria: API works and produces valid output
@@ -343,16 +411,24 @@ def test_speaker_recognition_pipeline(speaker_service):
                 assert "start" in word, f"Word missing 'start' field: {word}"
                 assert "end" in word, f"Word missing 'end' field: {word}"
                 # confidence is optional
-                assert isinstance(word["start"], (int, float)), f"Word 'start' should be numeric: {word}"
-                assert isinstance(word["end"], (int, float)), f"Word 'end' should be numeric: {word}"
+                assert isinstance(
+                    word["start"], (int, float)
+                ), f"Word 'start' should be numeric: {word}"
+                assert isinstance(
+                    word["end"], (int, float)
+                ), f"Word 'end' should be numeric: {word}"
 
-    print(f"  ✅ Word-level data: {segments_with_words}/{total_segments} segments have words ({total_words_found} total words)")
+    print(
+        f"  ✅ Word-level data: {segments_with_words}/{total_segments} segments have words ({total_words_found} total words)"
+    )
     assert segments_with_words > 0, "No segments contain word-level timestamp data"
     assert total_words_found > 0, "No words found across all segments"
     print("✅ Word-level timestamp data validated successfully")
 
     # Phase 8: Diarize-Identify-Match Endpoint (Backend Integration Mode)
-    print("🔗 Phase 8: Testing /v1/diarize-identify-match endpoint (backend integration mode)...")
+    print(
+        "🔗 Phase 8: Testing /v1/diarize-identify-match endpoint (backend integration mode)..."
+    )
     print("  This endpoint matches transcript words to diarization segments")
 
     # Create sample transcript_data with word-level timestamps
@@ -366,7 +442,7 @@ def test_speaker_recognition_pipeline(speaker_service):
             {"word": "a", "start": 2.5, "end": 2.6, "confidence": 0.97},
             {"word": "test", "start": 2.7, "end": 3.0, "confidence": 0.94},
             {"word": "conversation", "start": 3.1, "end": 3.8, "confidence": 0.93},
-        ]
+        ],
     }
 
     with open(conversation_file, "rb") as f:
@@ -380,9 +456,16 @@ def test_speaker_recognition_pipeline(speaker_service):
             "max_speakers": "4",
         }
 
-        r = requests.post(f"{SPEAKER_SERVICE_URL}/v1/diarize-identify-match", files=files, data=data, timeout=300)
+        r = requests.post(
+            f"{SPEAKER_SERVICE_URL}/v1/diarize-identify-match",
+            files=files,
+            data=data,
+            timeout=300,
+        )
 
-    assert r.status_code == 200, f"/v1/diarize-identify-match failed: {r.status_code} {r.text[:500]}"
+    assert (
+        r.status_code == 200
+    ), f"/v1/diarize-identify-match failed: {r.status_code} {r.text[:500]}"
     match_result = r.json()
 
     # Validate response structure
@@ -396,7 +479,9 @@ def test_speaker_recognition_pipeline(speaker_service):
 
     for seg in match_segments:
         assert "text" in seg, "Segment missing 'text' field"
-        assert "words" in seg, "Segment missing 'words' field (should include matched transcript words)"
+        assert (
+            "words" in seg
+        ), "Segment missing 'words' field (should include matched transcript words)"
         words = seg.get("words", [])
 
         if len(words) > 0:
@@ -409,7 +494,9 @@ def test_speaker_recognition_pipeline(speaker_service):
                 assert "start" in word, f"Word missing 'start' field: {word}"
                 assert "end" in word, f"Word missing 'end' field: {word}"
 
-    print(f"  ✅ Diarize-identify-match: {match_segments_with_words}/{len(match_segments)} segments have matched words ({match_total_words} total)")
+    print(
+        f"  ✅ Diarize-identify-match: {match_segments_with_words}/{len(match_segments)} segments have matched words ({match_total_words} total)"
+    )
     assert match_segments_with_words > 0, "No segments contain matched transcript words"
     print("✅ /v1/diarize-identify-match endpoint validated successfully")
 
@@ -422,9 +509,15 @@ def test_speaker_recognition_pipeline(speaker_service):
     print(f"✅ Katelyn enrollment: PASS (confidence: {katelyn_confidence:.3f})")
     print(f"✅ Database persistence: PASS (2 speakers)")
     print(f"✅ Individual identification: PASS (both speakers)")
-    print(f"✅ Conversation processing: PASS ({total_segments} segments, {identified_segments} identified)")
-    print(f"✅ Word-level timestamps: PASS ({total_words_found} words in {segments_with_words} segments)")
-    print(f"✅ Diarize-identify-match: PASS ({match_total_words} matched words in {match_segments_with_words} segments)")
+    print(
+        f"✅ Conversation processing: PASS ({total_segments} segments, {identified_segments} identified)"
+    )
+    print(
+        f"✅ Word-level timestamps: PASS ({total_words_found} words in {segments_with_words} segments)"
+    )
+    print(
+        f"✅ Diarize-identify-match: PASS ({match_total_words} matched words in {match_segments_with_words} segments)"
+    )
     print("=" * 80)
 
 

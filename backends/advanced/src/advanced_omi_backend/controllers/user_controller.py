@@ -9,11 +9,7 @@ from bson import ObjectId
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
-from advanced_omi_backend.auth import (
-    ADMIN_EMAIL,
-    UserManager,
-    get_user_db,
-)
+from advanced_omi_backend.auth import ADMIN_EMAIL, UserManager, get_user_db
 from advanced_omi_backend.client_manager import get_user_clients_all
 from advanced_omi_backend.database import db, users_col
 from advanced_omi_backend.models.conversation import Conversation
@@ -50,7 +46,9 @@ async def create_user(user_data: UserCreate):
             # If we get here, user exists
             return JSONResponse(
                 status_code=409,
-                content={"message": f"User with email {user_data.email} already exists"},
+                content={
+                    "message": f"User with email {user_data.email} already exists"
+                },
             )
         except Exception:
             # User doesn't exist, continue with creation
@@ -61,15 +59,17 @@ async def create_user(user_data: UserCreate):
 
         # Return the full user object (serialized via UserRead schema)
         from advanced_omi_backend.models.user import UserRead
+
         user_read = UserRead.model_validate(user)
 
         return JSONResponse(
             status_code=201,
-            content=user_read.model_dump(mode='json'),
+            content=user_read.model_dump(mode="json"),
         )
 
     except Exception as e:
         import traceback
+
         error_details = traceback.format_exc()
         logger.error(f"Error creating user: {e}")
         logger.error(f"Full traceback: {error_details}")
@@ -89,15 +89,16 @@ async def update_user(user_id: str, user_data: UserUpdate):
             logger.error(f"Invalid ObjectId format for user_id {user_id}: {e}")
             return JSONResponse(
                 status_code=400,
-                content={"message": f"Invalid user_id format: {user_id}. Must be a valid ObjectId."},
+                content={
+                    "message": f"Invalid user_id format: {user_id}. Must be a valid ObjectId."
+                },
             )
 
         # Check if user exists
         existing_user = await users_col.find_one({"_id": object_id})
         if not existing_user:
             return JSONResponse(
-                status_code=404, 
-                content={"message": f"User {user_id} not found"}
+                status_code=404, content={"message": f"User {user_id} not found"}
             )
 
         # Get user database and create user manager
@@ -114,15 +115,17 @@ async def update_user(user_id: str, user_data: UserUpdate):
 
         # Return the full user object (serialized via UserRead schema)
         from advanced_omi_backend.models.user import UserRead
+
         user_read = UserRead.model_validate(updated_user)
 
         return JSONResponse(
             status_code=200,
-            content=user_read.model_dump(mode='json'),
+            content=user_read.model_dump(mode="json"),
         )
 
     except Exception as e:
         import traceback
+
         error_details = traceback.format_exc()
         logger.error(f"Error updating user: {e}")
         logger.error(f"Full traceback: {error_details}")
@@ -154,7 +157,9 @@ async def delete_user(
         # Check if user exists
         existing_user = await users_col.find_one({"_id": object_id})
         if not existing_user:
-            return JSONResponse(status_code=404, content={"message": f"User {user_id} not found"})
+            return JSONResponse(
+                status_code=404, content={"message": f"User {user_id} not found"}
+            )
 
         # Prevent deletion of administrator user
         user_email = existing_user.get("email", "")
@@ -176,7 +181,9 @@ async def delete_user(
 
         if delete_conversations:
             # Delete all conversations for this user
-            conversations_result = await Conversation.find(Conversation.user_id == user_id).delete()
+            conversations_result = await Conversation.find(
+                Conversation.user_id == user_id
+            ).delete()
             deleted_data["conversations_deleted"] = conversations_result.deleted_count
 
         if delete_memories:
@@ -196,7 +203,9 @@ async def delete_user(
         message = f"User {user_id} deleted successfully"
         deleted_items = []
         if delete_conversations and deleted_data.get("conversations_deleted", 0) > 0:
-            deleted_items.append(f"{deleted_data['conversations_deleted']} conversations")
+            deleted_items.append(
+                f"{deleted_data['conversations_deleted']} conversations"
+            )
         if delete_memories and deleted_data.get("memories_deleted", 0) > 0:
             deleted_items.append(f"{deleted_data['memories_deleted']} memories")
 

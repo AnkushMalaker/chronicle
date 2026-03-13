@@ -175,7 +175,7 @@ The enrollment quality score helps ensure reliable speaker recognition:
    ```bash
    docker-compose up --build
    ```
-   
+
    This starts:
    - Speaker service on http://localhost:8001
    - Web UI on http://localhost:8501
@@ -184,7 +184,7 @@ The enrollment quality score helps ensure reliable speaker recognition:
    ```bash
    # Terminal 1 - Start speaker service
    uv run python speaker_service.py
-   
+
    # Terminal 2 - Start web UI
    uv run streamlit run web_ui.py
    ```

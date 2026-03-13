@@ -32,12 +32,10 @@ class WaveformData(Document):
     # Metadata
     duration_seconds: float = Field(description="Total audio duration in seconds")
     created_at: datetime = Field(
-        default_factory=datetime.utcnow,
-        description="When this waveform was generated"
+        default_factory=datetime.utcnow, description="When this waveform was generated"
     )
     processing_time_seconds: Optional[float] = Field(
-        None,
-        description="Time taken to generate waveform"
+        None, description="Time taken to generate waveform"
     )
 
     class Settings:

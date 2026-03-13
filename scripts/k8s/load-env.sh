@@ -26,7 +26,7 @@ load_config_env() {
     set -a  # automatically export all variables
     source "$CONFIG_ENV"
     set +a  # stop automatically exporting
-    
+
     # Export commonly used variables for k8s scripts
     export SPEAKER_NODE="${SPEAKER_NODE:-}"
     export CONTAINER_REGISTRY="${CONTAINER_REGISTRY:-localhost:32000}"
@@ -39,13 +39,13 @@ load_config_env() {
 get_config_var() {
     local var_name="$1"
     local default_value="${2:-}"
-    
+
     # Load config if not already loaded
     if [ -z "${CONFIG_LOADED:-}" ]; then
         load_config_env
         export CONFIG_LOADED=1
     fi
-    
+
     # Return the variable value or default
     eval "echo \${$var_name:-$default_value}"
 }
@@ -53,16 +53,16 @@ get_config_var() {
 # Function to validate required variables
 validate_required_vars() {
     local missing_vars=()
-    
+
     # Check for required variables
     if [ -z "${SPEAKER_NODE:-}" ]; then
         missing_vars+=("SPEAKER_NODE")
     fi
-    
+
     if [ -z "${CONTAINER_REGISTRY:-}" ]; then
         missing_vars+=("CONTAINER_REGISTRY")
     fi
-    
+
     if [ ${#missing_vars[@]} -gt 0 ]; then
         echo "❌ Error: Missing required environment variables:"
         for var in "${missing_vars[@]}"; do

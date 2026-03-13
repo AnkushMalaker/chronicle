@@ -22,179 +22,238 @@ class Conversation(Document):
 
     class MemoryProvider(str, Enum):
         """Supported memory providers."""
+
         CHRONICLE = "chronicle"
         OPENMEMORY_MCP = "openmemory_mcp"
         FRIEND_LITE = "friend_lite"  # Legacy value
 
     class ConversationStatus(str, Enum):
         """Conversation processing status."""
+
         ACTIVE = "active"  # Has running jobs or open websocket
         COMPLETED = "completed"  # All jobs succeeded
         FAILED = "failed"  # One or more jobs failed
 
     class EndReason(str, Enum):
         """Reason for conversation ending."""
+
         USER_STOPPED = "user_stopped"  # User manually stopped recording
-        INACTIVITY_TIMEOUT = "inactivity_timeout"  # No speech detected for threshold period
-        WEBSOCKET_DISCONNECT = "websocket_disconnect"  # Connection lost (Bluetooth, network, etc.)
+        INACTIVITY_TIMEOUT = (
+            "inactivity_timeout"  # No speech detected for threshold period
+        )
+        WEBSOCKET_DISCONNECT = (
+            "websocket_disconnect"  # Connection lost (Bluetooth, network, etc.)
+        )
         MAX_DURATION = "max_duration"  # Hit maximum conversation duration
-        CLOSE_REQUESTED = "close_requested"  # External close signal (API, plugin, button)
+        CLOSE_REQUESTED = (
+            "close_requested"  # External close signal (API, plugin, button)
+        )
         ERROR = "error"  # Processing error forced conversation end
         UNKNOWN = "unknown"  # Unknown or legacy reason
 
     # Nested Models
     class Word(BaseModel):
         """Individual word with timestamp in a transcript."""
+
         word: str = Field(description="Word text")
         start: float = Field(description="Start time in seconds")
         end: float = Field(description="End time in seconds")
         confidence: Optional[float] = Field(None, description="Confidence score (0-1)")
         speaker: Optional[int] = Field(None, description="Speaker ID from diarization")
-        speaker_confidence: Optional[float] = Field(None, description="Speaker diarization confidence")
+        speaker_confidence: Optional[float] = Field(
+            None, description="Speaker diarization confidence"
+        )
 
     class SegmentType(str, Enum):
         """Type of transcript segment."""
+
         SPEECH = "speech"
-        EVENT = "event"    # Non-speech: [laughter], [music], etc.
-        NOTE = "note"      # User-inserted annotation/tag
+        EVENT = "event"  # Non-speech: [laughter], [music], etc.
+        NOTE = "note"  # User-inserted annotation/tag
 
     class SpeakerSegment(BaseModel):
         """Individual speaker segment in a transcript."""
+
         start: float = Field(description="Start time in seconds")
         end: float = Field(description="End time in seconds")
         text: str = Field(description="Transcript text for this segment")
         speaker: str = Field(description="Speaker identifier")
         segment_type: str = Field(
             default="speech",
-            description="Type: speech, event (non-speech from ASR), or note (user-inserted)"
+            description="Type: speech, event (non-speech from ASR), or note (user-inserted)",
         )
-        identified_as: Optional[str] = Field(None, description="Speaker name from speaker recognition (None if not identified)")
+        identified_as: Optional[str] = Field(
+            None,
+            description="Speaker name from speaker recognition (None if not identified)",
+        )
         confidence: Optional[float] = Field(None, description="Confidence score (0-1)")
-        words: List["Conversation.Word"] = Field(default_factory=list, description="Word-level timestamps for this segment")
+        words: List["Conversation.Word"] = Field(
+            default_factory=list, description="Word-level timestamps for this segment"
+        )
 
     class TranscriptVersion(BaseModel):
         """Version of a transcript with processing metadata."""
+
         version_id: str = Field(description="Unique version identifier")
         transcript: Optional[str] = Field(None, description="Full transcript text")
         words: List["Conversation.Word"] = Field(
             default_factory=list,
-            description="Word-level timestamps for entire transcript"
+            description="Word-level timestamps for entire transcript",
         )
         segments: List["Conversation.SpeakerSegment"] = Field(
             default_factory=list,
-            description="Speaker segments (filled by speaker recognition)"
+            description="Speaker segments (filled by speaker recognition)",
         )
-        provider: Optional[str] = Field(None, description="Transcription provider used (deepgram, parakeet, vibevoice, etc.)")
-        model: Optional[str] = Field(None, description="Model used (e.g., nova-3, parakeet)")
+        provider: Optional[str] = Field(
+            None,
+            description="Transcription provider used (deepgram, parakeet, vibevoice, etc.)",
+        )
+        model: Optional[str] = Field(
+            None, description="Model used (e.g., nova-3, parakeet)"
+        )
         created_at: datetime = Field(description="When this version was created")
-        processing_time_seconds: Optional[float] = Field(None, description="Time taken to process")
+        processing_time_seconds: Optional[float] = Field(
+            None, description="Time taken to process"
+        )
         diarization_source: Optional[str] = Field(
             None,
-            description="Source of speaker diarization: 'provider' (transcription service), 'pyannote' (speaker recognition), or None"
+            description="Source of speaker diarization: 'provider' (transcription service), 'pyannote' (speaker recognition), or None",
         )
-        metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional provider-specific metadata")
+        metadata: Dict[str, Any] = Field(
+            default_factory=dict, description="Additional provider-specific metadata"
+        )
 
     class MemoryVersion(BaseModel):
         """Version of memory extraction with processing metadata."""
+
         version_id: str = Field(description="Unique version identifier")
         memory_count: int = Field(description="Number of memories extracted")
-        transcript_version_id: str = Field(description="Which transcript version was used")
-        provider: "Conversation.MemoryProvider" = Field(description="Memory provider used")
-        model: Optional[str] = Field(None, description="Model used (e.g., gpt-4o-mini, llama3)")
+        transcript_version_id: str = Field(
+            description="Which transcript version was used"
+        )
+        provider: "Conversation.MemoryProvider" = Field(
+            description="Memory provider used"
+        )
+        model: Optional[str] = Field(
+            None, description="Model used (e.g., gpt-4o-mini, llama3)"
+        )
         created_at: datetime = Field(description="When this version was created")
-        processing_time_seconds: Optional[float] = Field(None, description="Time taken to process")
-        metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional provider-specific metadata")
+        processing_time_seconds: Optional[float] = Field(
+            None, description="Time taken to process"
+        )
+        metadata: Dict[str, Any] = Field(
+            default_factory=dict, description="Additional provider-specific metadata"
+        )
 
     # Core identifiers
-    conversation_id: Indexed(str, unique=True) = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique conversation identifier")
+    conversation_id: Indexed(str, unique=True) = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        description="Unique conversation identifier",
+    )
     user_id: Indexed(str) = Field(description="User who owns this conversation")
     client_id: Indexed(str) = Field(description="Client device identifier")
 
     # External file tracking (for deduplication of imported files)
     external_source_id: Optional[str] = Field(
         None,
-        description="External file identifier (e.g., Google Drive file_id) for deduplication"
+        description="External file identifier (e.g., Google Drive file_id) for deduplication",
     )
     external_source_type: Optional[str] = Field(
-        None,
-        description="Type of external source (gdrive, dropbox, s3, etc.)"
+        None, description="Type of external source (gdrive, dropbox, s3, etc.)"
     )
 
     # MongoDB chunk-based audio storage (new system)
     audio_chunks_count: Optional[int] = Field(
-        None,
-        description="Total number of 10-second audio chunks stored in MongoDB"
+        None, description="Total number of 10-second audio chunks stored in MongoDB"
     )
     audio_total_duration: Optional[float] = Field(
-        None,
-        description="Total audio duration in seconds (sum of all chunks)"
+        None, description="Total audio duration in seconds (sum of all chunks)"
     )
     audio_compression_ratio: Optional[float] = Field(
         None,
-        description="Compression ratio (compressed_size / original_size), typically ~0.047 for Opus"
+        description="Compression ratio (compressed_size / original_size), typically ~0.047 for Opus",
     )
 
     # Markers (e.g., button events) captured during the session
     markers: List[Dict[str, Any]] = Field(
         default_factory=list,
-        description="Markers captured during audio session (button events, bookmarks, etc.)"
+        description="Markers captured during audio session (button events, bookmarks, etc.)",
     )
 
     # Creation metadata
-    created_at: Indexed(datetime) = Field(default_factory=datetime.utcnow, description="When the conversation was created")
+    created_at: Indexed(datetime) = Field(
+        default_factory=datetime.utcnow, description="When the conversation was created"
+    )
 
     # Processing status tracking
-    deleted: bool = Field(False, description="Whether this conversation was deleted due to processing failure")
-    deletion_reason: Optional[str] = Field(None, description="Reason for deletion (no_meaningful_speech, audio_file_not_ready, etc.)")
-    deleted_at: Optional[datetime] = Field(None, description="When the conversation was marked as deleted")
+    deleted: bool = Field(
+        False,
+        description="Whether this conversation was deleted due to processing failure",
+    )
+    deletion_reason: Optional[str] = Field(
+        None,
+        description="Reason for deletion (no_meaningful_speech, audio_file_not_ready, etc.)",
+    )
+    deleted_at: Optional[datetime] = Field(
+        None, description="When the conversation was marked as deleted"
+    )
 
     # Always persist audio flag and processing status
     processing_status: Optional[str] = Field(
         None,
-        description="Processing status: pending_transcription, transcription_failed, completed"
+        description="Processing status: pending_transcription, transcription_failed, completed",
     )
     always_persist: bool = Field(
         default=False,
-        description="Flag indicating conversation was created for audio persistence"
+        description="Flag indicating conversation was created for audio persistence",
     )
 
     # Conversation completion tracking
-    end_reason: Optional["Conversation.EndReason"] = Field(None, description="Reason why the conversation ended")
-    completed_at: Optional[datetime] = Field(None, description="When the conversation was completed/closed")
+    end_reason: Optional["Conversation.EndReason"] = Field(
+        None, description="Reason why the conversation ended"
+    )
+    completed_at: Optional[datetime] = Field(
+        None, description="When the conversation was completed/closed"
+    )
 
     # Star/favorite
-    starred: bool = Field(False, description="Whether this conversation is starred/favorited")
-    starred_at: Optional[datetime] = Field(None, description="When the conversation was starred")
+    starred: bool = Field(
+        False, description="Whether this conversation is starred/favorited"
+    )
+    starred_at: Optional[datetime] = Field(
+        None, description="When the conversation was starred"
+    )
 
     # Summary fields (auto-generated from transcript)
     title: Optional[str] = Field(None, description="Auto-generated conversation title")
-    summary: Optional[str] = Field(None, description="Auto-generated short summary (1-2 sentences)")
-    detailed_summary: Optional[str] = Field(None, description="Auto-generated detailed summary (comprehensive, corrected content)")
+    summary: Optional[str] = Field(
+        None, description="Auto-generated short summary (1-2 sentences)"
+    )
+    detailed_summary: Optional[str] = Field(
+        None,
+        description="Auto-generated detailed summary (comprehensive, corrected content)",
+    )
 
     # Versioned processing
     transcript_versions: List["Conversation.TranscriptVersion"] = Field(
-        default_factory=list,
-        description="All transcript processing attempts"
+        default_factory=list, description="All transcript processing attempts"
     )
     memory_versions: List["Conversation.MemoryVersion"] = Field(
-        default_factory=list,
-        description="All memory extraction attempts"
+        default_factory=list, description="All memory extraction attempts"
     )
 
     # Active version pointers
     active_transcript_version: Optional[str] = Field(
-        None,
-        description="Version ID of currently active transcript"
+        None, description="Version ID of currently active transcript"
     )
     active_memory_version: Optional[str] = Field(
-        None,
-        description="Version ID of currently active memory extraction"
+        None, description="Version ID of currently active memory extraction"
     )
 
     # Legacy fields removed - use transcript_versions[active_transcript_version] and memory_versions[active_memory_version]
     # Frontend should access: conversation.active_transcript.segments, conversation.active_transcript.transcript
 
-    @model_validator(mode='before')
+    @model_validator(mode="before")
     @classmethod
     def clean_legacy_data(cls, data: Any) -> Any:
         """Clean up legacy/malformed data before Pydantic validation."""
@@ -203,26 +262,32 @@ class Conversation(Document):
             return data
 
         # Fix malformed transcript_versions (from old schema versions)
-        if 'transcript_versions' in data and isinstance(data['transcript_versions'], list):
-            for version in data['transcript_versions']:
+        if "transcript_versions" in data and isinstance(
+            data["transcript_versions"], list
+        ):
+            for version in data["transcript_versions"]:
                 if isinstance(version, dict):
                     # If segments is not a list, clear it
-                    if 'segments' in version and not isinstance(version['segments'], list):
-                        version['segments'] = []
+                    if "segments" in version and not isinstance(
+                        version["segments"], list
+                    ):
+                        version["segments"] = []
                     # If transcript is a dict, clear it
-                    if 'transcript' in version and isinstance(version['transcript'], dict):
-                        version['transcript'] = None
+                    if "transcript" in version and isinstance(
+                        version["transcript"], dict
+                    ):
+                        version["transcript"] = None
                     # Normalize provider to lowercase (legacy data had "Deepgram" instead of "deepgram")
-                    if 'provider' in version and isinstance(version['provider'], str):
-                        version['provider'] = version['provider'].lower()
+                    if "provider" in version and isinstance(version["provider"], str):
+                        version["provider"] = version["provider"].lower()
                     # Fix speaker IDs in segments (legacy data had integers, need strings)
-                    if 'segments' in version and isinstance(version['segments'], list):
-                        for segment in version['segments']:
-                            if isinstance(segment, dict) and 'speaker' in segment:
-                                if isinstance(segment['speaker'], int):
-                                    segment['speaker'] = f"Speaker {segment['speaker']}"
-                                elif not isinstance(segment['speaker'], str):
-                                    segment['speaker'] = "unknown"
+                    if "segments" in version and isinstance(version["segments"], list):
+                        for segment in version["segments"]:
+                            if isinstance(segment, dict) and "speaker" in segment:
+                                if isinstance(segment["speaker"], int):
+                                    segment["speaker"] = f"Speaker {segment['speaker']}"
+                                elif not isinstance(segment["speaker"], str):
+                                    segment["speaker"] = "unknown"
 
         return data
 
@@ -325,7 +390,7 @@ class Conversation(Document):
         model: Optional[str] = None,
         processing_time_seconds: Optional[float] = None,
         metadata: Optional[Dict[str, Any]] = None,
-        set_as_active: bool = True
+        set_as_active: bool = True,
     ) -> "Conversation.TranscriptVersion":
         """Add a new transcript version and optionally set it as active."""
         new_version = Conversation.TranscriptVersion(
@@ -337,7 +402,7 @@ class Conversation(Document):
             model=model,
             created_at=datetime.now(),
             processing_time_seconds=processing_time_seconds,
-            metadata=metadata or {}
+            metadata=metadata or {},
         )
 
         self.transcript_versions.append(new_version)
@@ -356,7 +421,7 @@ class Conversation(Document):
         model: Optional[str] = None,
         processing_time_seconds: Optional[float] = None,
         metadata: Optional[Dict[str, Any]] = None,
-        set_as_active: bool = True
+        set_as_active: bool = True,
     ) -> "Conversation.MemoryVersion":
         """Add a new memory version and optionally set it as active."""
         new_version = Conversation.MemoryVersion(
@@ -367,7 +432,7 @@ class Conversation(Document):
             model=model,
             created_at=datetime.now(),
             processing_time_seconds=processing_time_seconds,
-            metadata=metadata or {}
+            metadata=metadata or {},
         )
 
         self.memory_versions.append(new_version)
@@ -399,12 +464,27 @@ class Conversation(Document):
             "conversation_id",
             "user_id",
             "created_at",
-            [("user_id", 1), ("deleted", 1), ("created_at", -1)],  # Compound index for paginated list queries
-            IndexModel([("external_source_id", 1)], sparse=True),  # Sparse index for deduplication
+            [
+                ("user_id", 1),
+                ("deleted", 1),
+                ("created_at", -1),
+            ],  # Compound index for paginated list queries
             IndexModel(
-                [("title", "text"), ("summary", "text"), ("detailed_summary", "text"),
-                 ("transcript_versions.transcript", "text")],
-                weights={"title": 10, "summary": 5, "detailed_summary": 3, "transcript_versions.transcript": 1},
+                [("external_source_id", 1)], sparse=True
+            ),  # Sparse index for deduplication
+            IndexModel(
+                [
+                    ("title", "text"),
+                    ("summary", "text"),
+                    ("detailed_summary", "text"),
+                    ("transcript_versions.transcript", "text"),
+                ],
+                weights={
+                    "title": 10,
+                    "summary": 5,
+                    "detailed_summary": 3,
+                    "transcript_versions.transcript": 1,
+                },
                 name="conversation_text_search",
             ),
         ]

@@ -44,5 +44,3 @@ def get_collections():
     return {
         "users_col": users_col,
     }
-
-

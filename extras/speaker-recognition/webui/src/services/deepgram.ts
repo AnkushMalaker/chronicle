@@ -84,14 +84,14 @@ export async function transcribeWithDeepgram(
   options: DeepgramTranscriptionOptions = {}
 ): Promise<DeepgramResponse> {
   const opts = { ...DEFAULT_DEEPGRAM_OPTIONS, ...options }
-  
+
   const formData = new FormData()
   formData.append('file', file)
-  
+
   // Always use /v1/listen for transcription
   // Hybrid mode (transcribe + internal diarization) is handled by speakerIdentification service
   const endpoint = '/v1/listen'
-  
+
   const params: Record<string, any> = {
     model: opts.model,
     language: opts.language,
@@ -99,19 +99,19 @@ export async function transcribeWithDeepgram(
     smart_format: opts.smartFormat,
     punctuate: opts.punctuate
   }
-  
+
   // Add enhancement parameters if enabled
   if (opts.enhanceSpeakers) {
     params.enhance_speakers = true
     params.user_id = opts.userId
     params.speaker_confidence_threshold = opts.speakerConfidenceThreshold
   }
-  
+
   // Plain mode parameter for internal processing
   if (opts.enablePlainMode) {
     params.enable_plain_mode = true
   }
-  
+
   const response = await apiService.post(endpoint, formData, {
     headers: {
       'Content-Type': 'multipart/form-data',
@@ -119,7 +119,7 @@ export async function transcribeWithDeepgram(
     params,
     timeout: 300000, // 5 minutes for transcription operations
   })
-  
+
   return response.data as DeepgramResponse
 }
 
@@ -128,13 +128,13 @@ export async function transcribeWithDeepgram(
  */
 export function groupWordsBySpeaker(words: DeepgramResponse['results']['channels'][0]['alternatives'][0]['words']): DeepgramSegment[] {
   if (!words || words.length === 0) return []
-  
+
   const segments: DeepgramSegment[] = []
   let currentSegment: any = null
-  
+
   for (const word of words) {
     const speaker = word.speaker || 0
-    
+
     if (!currentSegment || currentSegment.speaker !== speaker) {
       // Start new segment
       if (currentSegment) {
@@ -160,17 +160,17 @@ export function groupWordsBySpeaker(words: DeepgramResponse['results']['channels
       currentSegment.text += ' ' + (word.punctuated_word || word.word)
     }
   }
-  
+
   // Add final segment
   if (currentSegment) {
     segments.push(currentSegment)
   }
-  
+
   // Calculate durations
   segments.forEach(segment => {
     segment.duration = segment.end - segment.start
   })
-  
+
   return segments
 }
 
@@ -180,14 +180,14 @@ export function groupWordsBySpeaker(words: DeepgramResponse['results']['channels
 export function processDeepgramResponse(response: DeepgramResponse): DeepgramSegment[] {
   const results = response.results || {}
   const channels = results.channels || []
-  
+
   if (!channels.length) return []
-  
+
   const channel = channels[0]
   const alternatives = channel.alternatives || []
-  
+
   if (!alternatives.length) return []
-  
+
   const words = alternatives[0].words || []
   return groupWordsBySpeaker(words)
 }
@@ -201,7 +201,7 @@ export function calculateConfidenceSummary(segments: DeepgramSegment[]) {
   const medium = segments.filter(s => s.confidence >= 0.6 && s.confidence < 0.8).length
   const low = segments.filter(s => s.confidence >= 0.4 && s.confidence < 0.6).length
   const veryLow = total - high - medium - low
-  
+
   return {
     total_segments: total,
     high_confidence: high,
@@ -351,7 +351,7 @@ export class DeepgramStreaming {
 
         // Create WebSocket URL without token (token goes in subprotocol)
         const wsUrl = `wss://api.deepgram.com/v1/listen?${params.toString()}`
-        
+
         console.log('🌐 [DEEPGRAM] WebSocket URL:', wsUrl)
         console.log('🌐 [DEEPGRAM] VAD Configuration:', {
           interim_results: this.config.interim_results,
@@ -365,7 +365,7 @@ export class DeepgramStreaming {
 
         // Create WebSocket connection with subprotocol authentication (official method)
         this.ws = new WebSocket(wsUrl, ['token', this.config.apiKey])
-        
+
         console.log('🌐 [DEEPGRAM] WebSocket created with subprotocol auth, readyState:', this.ws.readyState)
 
         // This is already handled above in the timeout section
@@ -400,7 +400,7 @@ export class DeepgramStreaming {
           this.isConnected = false
           console.log('🌐 [DEEPGRAM] Calling status callback with "error"')
           this.onStatusCallback?.('error')
-          
+
           const err = new Error(`WebSocket connection failed. Check your Deepgram API key and internet connection.`)
           console.error('🌐 [DEEPGRAM] Calling error callback with error:', err.message)
           this.onErrorCallback?.(err)
@@ -411,7 +411,7 @@ export class DeepgramStreaming {
         this.ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data)
-            
+
             // Enhanced logging for VAD events and transcripts
             if (data.type === 'Results' && data.channel?.alternatives?.[0]?.transcript) {
               console.log('📝 [DEEPGRAM] TRANSCRIPT:', data.channel.alternatives[0].transcript, {
@@ -430,11 +430,11 @@ export class DeepgramStreaming {
               // Log any other message types we might be receiving
               console.log('🌐 [DEEPGRAM] Other message:', data.type, data)
             }
-            
+
             // Handle different message types
             if (data.type === 'Results' && data.channel?.alternatives?.[0]) {
               const transcript = data.channel.alternatives[0]
-              
+
               // Only emit if we have actual content
               if (transcript.transcript && transcript.transcript.trim()) {
                 this.onTranscriptCallback?.({
@@ -464,13 +464,13 @@ export class DeepgramStreaming {
           if (!this.isConnected && this.ws) {
             console.error('🌐 [DEEPGRAM] ⏰ Connection timeout after 5 seconds')
             console.error('🌐 [DEEPGRAM] WebSocket readyState at timeout:', this.ws?.readyState)
-            
+
             // Clean up the failed connection
             if (this.ws) {
               this.ws.close()
               this.ws = null
             }
-            
+
             const timeoutError = new Error('Connection timeout - Deepgram did not respond within 5 seconds. Check your API key and internet connection.')
             console.error('🌐 [DEEPGRAM] Rejecting with timeout error')
             this.onStatusCallback?.('error')
@@ -519,7 +519,7 @@ export class DeepgramStreaming {
   sendAudio(audioData: ArrayBuffer): void {
     if (this.ws && this.isConnected && this.ws.readyState === WebSocket.OPEN) {
       this.audioPacketCount++
-      
+
       // Track first audio packet timing
       if (!this.firstAudioTime && this.connectionTime) {
         this.firstAudioTime = Date.now()
@@ -531,12 +531,12 @@ export class DeepgramStreaming {
           console.warn('🌐 [DEEPGRAM] ⚠️ Audio delay > 8s - may cause timeout!')
         }
       }
-      
+
       // Minimal logging for audio packets
       if (this.audioPacketCount % 200 === 0) {
         console.log('🌐 [DEEPGRAM] Audio packets sent:', this.audioPacketCount)
       }
-      
+
       this.ws.send(audioData)
     } else {
       console.warn('🌐 [DEEPGRAM] ⚠️ Cannot send audio - WebSocket not connected:', {
@@ -577,7 +577,7 @@ export class DeepgramStreaming {
 
   getConnectionStatus(): 'connecting' | 'connected' | 'disconnected' | 'error' {
     if (!this.ws) return 'disconnected'
-    
+
     switch (this.ws.readyState) {
       case WebSocket.CONNECTING:
         return 'connecting'
@@ -598,13 +598,13 @@ export class DeepgramStreaming {
 export function convertAudioForDeepgram(audioBuffer: Float32Array, sampleRate: number = 16000): ArrayBuffer {
   // Convert float32 samples to int16
   const int16Array = new Int16Array(audioBuffer.length)
-  
+
   for (let i = 0; i < audioBuffer.length; i++) {
     // Clamp to [-1, 1] and convert to 16-bit integer
     const sample = Math.max(-1, Math.min(1, audioBuffer[i]))
     int16Array[i] = sample * 0x7FFF
   }
-  
+
   return int16Array.buffer
 }
 
@@ -612,8 +612,8 @@ export function convertAudioForDeepgram(audioBuffer: Float32Array, sampleRate: n
  * Resample audio to 16kHz if needed
  */
 export function resampleAudio(
-  audioBuffer: Float32Array, 
-  originalSampleRate: number, 
+  audioBuffer: Float32Array,
+  originalSampleRate: number,
   targetSampleRate: number = 16000
 ): Float32Array {
   if (originalSampleRate === targetSampleRate) {

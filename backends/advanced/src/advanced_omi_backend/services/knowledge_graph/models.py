@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 class EntityType(str, Enum):
     """Supported entity types in the knowledge graph."""
+
     PERSON = "person"
     PLACE = "place"
     ORGANIZATION = "organization"
@@ -26,6 +27,7 @@ class EntityType(str, Enum):
 
 class RelationshipType(str, Enum):
     """Supported relationship types between entities."""
+
     MENTIONED_IN = "MENTIONED_IN"
     WORKS_AT = "WORKS_AT"
     LIVES_IN = "LIVES_IN"
@@ -41,6 +43,7 @@ class RelationshipType(str, Enum):
 
 class PromiseStatus(str, Enum):
     """Status of a promise/task."""
+
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
@@ -55,6 +58,7 @@ class Entity(BaseModel):
     Each entity belongs to a specific user and can have relationships with
     other entities.
     """
+
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     type: EntityType
@@ -113,6 +117,7 @@ class Relationship(BaseModel):
     Relationships are edges in the graph connecting entities with
     typed connections (e.g., WORKS_AT, KNOWS, MENTIONED_IN).
     """
+
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     type: RelationshipType
     source_id: str  # Entity ID
@@ -164,6 +169,7 @@ class Promise(BaseModel):
     Promises are commitments made during conversations that can be
     tracked and followed up on.
     """
+
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str
     action: str  # What was promised
@@ -191,7 +197,9 @@ class Promise(BaseModel):
             "to_entity_name": self.to_entity_name,
             "status": self.status,
             "due_date": self.due_date.isoformat() if self.due_date else None,
-            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "completed_at": (
+                self.completed_at.isoformat() if self.completed_at else None
+            ),
             "source_conversation_id": self.source_conversation_id,
             "context": self.context,
             "metadata": self.metadata,
@@ -202,6 +210,7 @@ class Promise(BaseModel):
 
 class ExtractedEntity(BaseModel):
     """Entity as extracted by LLM before Neo4j storage."""
+
     name: str
     type: str  # Will be validated against EntityType
     details: Optional[str] = None
@@ -212,6 +221,7 @@ class ExtractedEntity(BaseModel):
 
 class ExtractedRelationship(BaseModel):
     """Relationship as extracted by LLM."""
+
     subject: str  # Entity name or "speaker"
     relation: str  # Relationship type
     object: str  # Entity name
@@ -219,6 +229,7 @@ class ExtractedRelationship(BaseModel):
 
 class ExtractedPromise(BaseModel):
     """Promise as extracted by LLM."""
+
     action: str
     to: Optional[str] = None  # Entity name
     deadline: Optional[str] = None  # Natural language deadline
@@ -226,6 +237,7 @@ class ExtractedPromise(BaseModel):
 
 class ExtractionResult(BaseModel):
     """Result of entity extraction from a conversation."""
+
     entities: List[ExtractedEntity] = Field(default_factory=list)
     relationships: List[ExtractedRelationship] = Field(default_factory=list)
     promises: List[ExtractedPromise] = Field(default_factory=list)

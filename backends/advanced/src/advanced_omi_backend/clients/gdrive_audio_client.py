@@ -7,6 +7,7 @@ from advanced_omi_backend.app_config import get_app_config
 
 _drive_client_cache = None
 
+
 def get_google_drive_client():
     """Singleton Google Drive client."""
     global _drive_client_cache
@@ -22,8 +23,7 @@ def get_google_drive_client():
         )
 
     creds = Credentials.from_service_account_file(
-        config.gdrive_credentials_path,
-        scopes=config.gdrive_scopes
+        config.gdrive_credentials_path, scopes=config.gdrive_scopes
     )
 
     _drive_client_cache = build("drive", "v3", credentials=creds)

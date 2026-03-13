@@ -12,10 +12,10 @@ import { TranscriptSegment } from '../hooks/useDeepgramIntegration'
 export interface SpeakerResultsDisplayProps {
   // Processing results
   result?: ProcessingResult
-  
+
   // Live streaming segments (alternative to result)
   liveSegments?: TranscriptSegment[]
-  
+
   // Display options
   showTranscription?: boolean
   showAudioPlayback?: boolean
@@ -23,11 +23,11 @@ export interface SpeakerResultsDisplayProps {
   showStats?: boolean
   compact?: boolean
   maxHeight?: string
-  
+
   // Interaction handlers
   onExport?: (result: ProcessingResult) => void
   onPlaySegment?: (segment: SpeakerSegment | TranscriptSegment) => void
-  
+
   // Styling
   className?: string
 }
@@ -81,28 +81,28 @@ export const SpeakerResultsDisplay: React.FC<SpeakerResultsDisplayProps> = ({
   const renderSegment = (segment: SpeakerSegment | TranscriptSegment, index: number) => {
     const isProcessingSegment = 'speaker_id' in segment
     const isLiveSegment = 'isInterim' in segment
-    
+
     // Extract common fields
     const start = segment.start || 0
-    const end = isProcessingSegment 
-      ? segment.end 
+    const end = isProcessingSegment
+      ? segment.end
       : start // For live segments, we don't have a proper end time yet
     const duration = isProcessingSegment ? (end - start) : 0 // Only calculate duration for processed segments
     const text = isProcessingSegment ? (segment as SpeakerSegment).text : (segment as TranscriptSegment).text
     const confidence = segment.confidence
-    const speakerName = isProcessingSegment 
-      ? (segment as SpeakerSegment).speaker_name 
+    const speakerName = isProcessingSegment
+      ? (segment as SpeakerSegment).speaker_name
       : (segment as TranscriptSegment).speakerParts?.[0]?.speaker || 'N/A'
 
     const isInterim = isLiveSegment ? (segment as TranscriptSegment).isInterim : false
 
     // Create unique key to avoid React key conflicts when multiple segments have same speaker_id
-    const uniqueKey = isProcessingSegment 
+    const uniqueKey = isProcessingSegment
       ? `${(segment as SpeakerSegment).speaker_id}_${index}_${start.toFixed(3)}`
       : `${(segment as TranscriptSegment).id}_${index}`
 
     return (
-      <div 
+      <div
         key={uniqueKey}
         className={`border rounded-lg p-4 ${isInterim ? 'bg-gray-50 border-gray-300' : 'bg-white border-gray-200'} ${compact ? 'p-3' : 'p-4'}`}
       >
@@ -116,14 +116,14 @@ export const SpeakerResultsDisplay: React.FC<SpeakerResultsDisplayProps> = ({
                 {speakerName}
               </span>
             </div>
-            
+
             {/* Confidence Badge */}
             {confidence > 0 && (
               <span className={`px-2 py-1 rounded-full text-xs font-medium ${getConfidenceColor(confidence)}`}>
                 {getConfidenceText(confidence)} ({(confidence * 100).toFixed(0)}%)
               </span>
             )}
-            
+
             {/* Interim Badge */}
             {isInterim && (
               <span className="px-2 py-1 rounded-full text-xs font-medium text-blue-600 bg-blue-100">
@@ -131,7 +131,7 @@ export const SpeakerResultsDisplay: React.FC<SpeakerResultsDisplayProps> = ({
               </span>
             )}
           </div>
-          
+
           {/* Timing Info */}
           <div className="flex items-center space-x-2 text-sm text-gray-500">
             <Clock className="h-3 w-3" />
@@ -174,7 +174,7 @@ export const SpeakerResultsDisplay: React.FC<SpeakerResultsDisplayProps> = ({
               </button>
             )}
           </div>
-          
+
           {/* Additional segment info for processing results */}
           {isProcessingSegment && (segment as SpeakerSegment).identified_speaker_name && (
             <div className="text-xs text-gray-500">
@@ -202,7 +202,7 @@ export const SpeakerResultsDisplay: React.FC<SpeakerResultsDisplayProps> = ({
       highConfidence = result.confidence_summary.high_confidence
       mediumConfidence = result.confidence_summary.medium_confidence
       lowConfidence = result.confidence_summary.low_confidence
-      
+
       result.speakers.forEach(seg => {
         uniqueSpeakers.add(seg.speaker_name)
         totalDuration = Math.max(totalDuration, seg.end)
@@ -213,7 +213,7 @@ export const SpeakerResultsDisplay: React.FC<SpeakerResultsDisplayProps> = ({
         if (seg.confidence >= 0.8) highConfidence++
         else if (seg.confidence >= 0.6) mediumConfidence++
         else if (seg.confidence >= 0.4) lowConfidence++
-        
+
         if (seg.speakerParts) {
           seg.speakerParts.forEach(part => {
             if (part.speaker !== 'N/A') uniqueSpeakers.add(part.speaker)
@@ -225,7 +225,7 @@ export const SpeakerResultsDisplay: React.FC<SpeakerResultsDisplayProps> = ({
     return (
       <div className={`bg-gray-50 border rounded-lg p-4 ${compact ? 'p-3' : 'p-4'}`}>
         <h4 className="font-medium text-gray-900 mb-3">📊 Analysis Summary</h4>
-        
+
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
           <div className="text-center">
             <div className="text-2xl font-bold text-blue-600">{totalSegments}</div>
@@ -267,7 +267,7 @@ export const SpeakerResultsDisplay: React.FC<SpeakerResultsDisplayProps> = ({
           {isLiveMode ? 'No Live Transcription Yet' : 'No Results'}
         </h3>
         <p className="text-muted">
-          {isLiveMode 
+          {isLiveMode
             ? 'Start speaking to see live transcription and speaker identification'
             : 'Process audio to see speaker identification results'}
         </p>
@@ -282,7 +282,7 @@ export const SpeakerResultsDisplay: React.FC<SpeakerResultsDisplayProps> = ({
         <h3 className="text-lg font-medium text-gray-900">
           {isLiveMode ? '🎙️ Live Results' : '🎯 Speaker Analysis Results'}
         </h3>
-        
+
         {/* Export Button */}
         {showExport && result && onExport && (
           <button

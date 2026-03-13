@@ -69,11 +69,11 @@ case $choice in
     1)
         echo "🧹 Attempting registry garbage collection..."
         echo "Looking for registry garbage collection methods..."
-        
+
         # Try to find registry processes or containers
         echo "Registry processes:"
         ssh "$NODE_NAME" "ps aux | grep registry || echo 'No registry processes found'"
-        
+
         echo ""
         echo "💡 Manual cleanup needed:"
         echo "1. Find the registry container/pod:"
@@ -81,7 +81,7 @@ case $choice in
         echo "2. Run garbage collection in the registry:"
         echo "   kubectl exec -it <registry-pod> -- registry garbage-collect /etc/docker/registry/config.yml"
         ;;
-        
+
     2)
         echo "📦 Repository cleanup..."
         run_ssh_sudo "ls -la '$REGISTRY_PVC/docker/registry/v2/repositories/'"
@@ -89,13 +89,13 @@ case $choice in
         echo "💡 To delete specific repositories:"
         echo "   sudo rm -rf '$REGISTRY_PVC/docker/registry/v2/repositories/<repo-name>'"
         ;;
-        
+
     3)
         echo "☢️  NUCLEAR OPTION - This will delete ALL registry data!"
         echo "You will lose all your container images in the registry!"
         echo ""
         read -p "Are you ABSOLUTELY sure? Type 'DELETE_ALL_REGISTRY_DATA': " confirm
-        
+
         if [[ "$confirm" == "DELETE_ALL_REGISTRY_DATA" ]]; then
             echo "💣 Deleting all registry data..."
             run_ssh_sudo "rm -rf '$REGISTRY_PVC'/*"
@@ -106,7 +106,7 @@ case $choice in
             echo "❌ Cancelled - incorrect confirmation"
         fi
         ;;
-        
+
     *)
         echo "👋 Exiting without changes"
         ;;
