@@ -559,30 +559,6 @@ export default function Settings() {
               />
             </div>
 
-            {/* Max Conversation Duration */}
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
-                  Max Conversation Duration
-                </div>
-                <div className="text-sm text-gray-600 dark:text-gray-400">
-                  Max seconds per conversation ({Math.round(miscSettings.max_conversation_duration_seconds / 3600 * 10) / 10} hr). Audio beyond this is transcribed in chunks.
-                </div>
-              </div>
-              <input
-                type="number"
-                min={600}
-                max={86400}
-                step={600}
-                value={miscSettings.max_conversation_duration_seconds}
-                onChange={(e) => setMiscSettings(prev => ({
-                  ...prev,
-                  max_conversation_duration_seconds: Math.max(600, Math.min(86400, parseInt(e.target.value) || 7200))
-                }))}
-                className="ml-4 w-24 px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              />
-            </div>
-
 
             {/* Status Message */}
             {miscMessage && (

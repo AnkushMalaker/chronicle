@@ -306,7 +306,6 @@ export const systemApi = {
     use_provider_segments?: boolean;
     per_segment_speaker_id?: boolean;
     streaming_fallback_timeout_seconds?: number;
-    max_conversation_duration_seconds?: number;
     always_batch_retranscribe?: boolean;
   }) => api.post('/api/misc-settings', settings),
 

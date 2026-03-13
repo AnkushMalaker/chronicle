@@ -33,6 +33,19 @@ logger = logging.getLogger(__name__)
 MAX_STREAMING_START_ATTEMPTS = 2
 
 
+def _is_connection_error(e: Exception) -> bool:
+    """Check if exception indicates WebSocket connection death."""
+    from websockets.exceptions import ConnectionClosed
+
+    if isinstance(e, (ConnectionClosed, ConnectionError, OSError)):
+        return True
+    # Check wrapped exceptions
+    cause = getattr(e, "__cause__", None) or getattr(e, "__context__", None)
+    if cause and isinstance(cause, (ConnectionClosed, ConnectionError, OSError)):
+        return True
+    return False
+
+
 def _normalize_words(words: list) -> None:
     """Normalize provider-specific word field names in-place.
 
@@ -439,6 +452,16 @@ class StreamingTranscriptionConsumer:
                     await self.publish_to_client(session_id, result, is_final=False)
 
         except Exception as e:
+            if _is_connection_error(e):
+                logger.error(f"Transcription connection lost for {session_id}: {e}")
+                try:
+                    session_key = f"audio:session:{session_id}"
+                    await self.redis_client.hset(
+                        session_key, "transcription_error", f"connection_lost: {e}"
+                    )
+                except Exception:
+                    pass
+                raise  # Let process_stream handle the break
             logger.error(
                 f"Error processing audio chunk for {session_id}: {e}", exc_info=True
             )
@@ -553,6 +576,9 @@ class StreamingTranscriptionConsumer:
             result: Final transcription result
             chunk_id: Optional chunk identifier
         """
+        from advanced_omi_backend.observability.otel_setup import set_span_attrs
+
+        set_span_attrs(pipeline_stage="transcription_streaming")
         try:
             stream_name = f"transcription:results:{session_id}"
 
@@ -779,17 +805,26 @@ class StreamingTranscriptionConsumer:
                                     f"Processing audio chunk {msg_id} ({len(audio_chunk)} bytes)"
                                 )
                                 # Process audio chunk through streaming provider
-                                await self.process_audio_chunk(
-                                    session_id=session_id,
-                                    audio_chunk=audio_chunk,
-                                    chunk_id=msg_id,
-                                )
+                                try:
+                                    await self.process_audio_chunk(
+                                        session_id=session_id,
+                                        audio_chunk=audio_chunk,
+                                        chunk_id=msg_id,
+                                    )
+                                except Exception as e:
+                                    if _is_connection_error(e):
+                                        logger.error(
+                                            f"Connection lost — stopping stream {session_id}"
+                                        )
+                                        stream_ended = True
+                                        break  # Don't ACK — leave chunks pending
+                                    # Non-connection error: fall through to ACK
                             else:
                                 logger.warning(
                                     f"Message {msg_id} has no audio_data field"
                                 )
 
-                            # ACK the message after processing
+                            # ACK only on success or non-fatal error
                             await self.redis_client.xack(
                                 stream_name, self.group_name, msg_id
                             )
