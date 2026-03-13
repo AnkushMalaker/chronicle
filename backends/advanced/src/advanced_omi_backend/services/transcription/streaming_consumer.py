@@ -237,7 +237,9 @@ class StreamingTranscriptionConsumer:
                 if not self._provider_has_diarization:
                     self._audio_buffers[session_id] = bytearray()
 
-                logger.info(f"Started streaming transcription for session: {session_id}")
+                logger.info(
+                    f"Started streaming transcription for session: {session_id}"
+                )
                 return
 
             except Exception as e:
@@ -250,13 +252,16 @@ class StreamingTranscriptionConsumer:
                     await asyncio.sleep(5)
                 else:
                     logger.error(
-                        f"Failed to start stream for {session_id} (attempt 2/2): {e}", exc_info=True
+                        f"Failed to start stream for {session_id} (attempt 2/2): {e}",
+                        exc_info=True,
                     )
 
         # Both attempts failed — set error flag and raise
         session_key = f"audio:session:{session_id}"
         try:
-            await self.redis_client.hset(session_key, "transcription_error", str(last_error))
+            await self.redis_client.hset(
+                session_key, "transcription_error", str(last_error)
+            )
             logger.info(f"Set transcription error flag for {session_id}")
         except Exception as redis_error:
             logger.warning(f"Failed to set error flag in Redis: {redis_error}")

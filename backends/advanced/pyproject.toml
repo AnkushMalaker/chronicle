@@ -63,9 +63,6 @@ where = ["src"]
 [tool.isort]
 profile = "black"
 
-[tool.black]
-line-length = 100
-
 [tool.uv.sources]
 mem0ai = { git = "https://github.com/AnkushMalaker/mem0.git", rev = "main" }
 

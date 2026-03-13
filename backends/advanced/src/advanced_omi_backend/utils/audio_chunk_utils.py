@@ -202,7 +202,9 @@ async def decode_opus_to_pcm(
             with open(pcm_path, "rb") as f:
                 pcm_data = f.read()
 
-            logger.debug(f"Decoded Opus ({len(opus_data)} bytes) → PCM ({len(pcm_data)} bytes)")
+            logger.debug(
+                f"Decoded Opus ({len(opus_data)} bytes) → PCM ({len(pcm_data)} bytes)"
+            )
 
             return pcm_data
 
@@ -441,7 +443,9 @@ async def reconstruct_audio_segments(
     from advanced_omi_backend.models.conversation import Conversation
 
     # Get conversation metadata
-    conversation = await Conversation.find_one(Conversation.conversation_id == conversation_id)
+    conversation = await Conversation.find_one(
+        Conversation.conversation_id == conversation_id
+    )
 
     if not conversation:
         raise ValueError(f"Conversation {conversation_id} not found")
@@ -553,7 +557,9 @@ async def reconstruct_audio_segment(
         raise ValueError(f"start_time must be >= 0, got {start_time}")
 
     # Get conversation metadata
-    conversation = await Conversation.find_one(Conversation.conversation_id == conversation_id)
+    conversation = await Conversation.find_one(
+        Conversation.conversation_id == conversation_id
+    )
 
     if not conversation:
         raise ValueError(f"Conversation {conversation_id} not found")
@@ -818,7 +824,8 @@ async def convert_audio_to_chunks(
         offset = chunk_end
 
         logger.debug(
-            f"💾 Prepared chunk {chunk_index}: " f"{len(chunk_pcm)} → {len(opus_data)} bytes"
+            f"💾 Prepared chunk {chunk_index}: "
+            f"{len(chunk_pcm)} → {len(opus_data)} bytes"
         )
 
         # Flush batch to MongoDB when batch size reached
@@ -839,7 +846,9 @@ async def convert_audio_to_chunks(
         )
 
     # Update conversation metadata
-    conversation = await Conversation.find_one(Conversation.conversation_id == conversation_id)
+    conversation = await Conversation.find_one(
+        Conversation.conversation_id == conversation_id
+    )
 
     if conversation:
         compression_ratio = (
@@ -995,7 +1004,8 @@ async def convert_wav_to_chunks(
         offset = chunk_end
 
         logger.debug(
-            f"💾 Prepared chunk {chunk_index}: " f"{len(chunk_pcm)} → {len(opus_data)} bytes"
+            f"💾 Prepared chunk {chunk_index}: "
+            f"{len(chunk_pcm)} → {len(opus_data)} bytes"
         )
 
         # Flush batch to MongoDB when batch size reached
@@ -1016,7 +1026,9 @@ async def convert_wav_to_chunks(
         )
 
     # Update conversation metadata
-    conversation = await Conversation.find_one(Conversation.conversation_id == conversation_id)
+    conversation = await Conversation.find_one(
+        Conversation.conversation_id == conversation_id
+    )
 
     if conversation:
         compression_ratio = (

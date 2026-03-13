@@ -89,7 +89,9 @@ async def upload_and_process_audio_files(
 
                 is_video_source = ext in VIDEO_EXTENSIONS
 
-                audio_logger.info(f"📁 Uploading file {file_index + 1}/{len(files)}: {filename}")
+                audio_logger.info(
+                    f"📁 Uploading file {file_index + 1}/{len(files)}: {filename}"
+                )
 
                 # Read file content
                 content = await file.read()
@@ -333,8 +335,12 @@ async def upload_and_process_audio_files(
     except (OSError, IOError) as e:
         # File system errors during upload handling
         audio_logger.exception("File I/O error in upload_and_process_audio_files")
-        return JSONResponse(status_code=500, content={"error": f"File upload failed: {str(e)}"})
+        return JSONResponse(
+            status_code=500, content={"error": f"File upload failed: {str(e)}"}
+        )
     except Exception as e:
         # Unexpected errors in upload handler
         audio_logger.exception("Unexpected error in upload_and_process_audio_files")
-        return JSONResponse(status_code=500, content={"error": f"File upload failed: {str(e)}"})
+        return JSONResponse(
+            status_code=500, content={"error": f"File upload failed: {str(e)}"}
+        )

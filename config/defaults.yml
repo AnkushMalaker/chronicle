@@ -467,8 +467,8 @@ backend:
     # When true: Use segments from transcription provider (e.g., mock provider in tests)
     # When false: Expect speaker service to create segments via diarization (default production behavior)
     use_provider_segments: false
-    # Streaming fallback timeout in seconds (how long the fallback check waits for batch transcription)
-    streaming_fallback_timeout_seconds: 120
+    # Transcription job timeout in seconds (how long to wait for batch transcription)
+    job_timeout_seconds: 900
     # When enabled, automatically re-transcribe every streaming conversation with the batch provider
     # Streaming transcript is shown as a preview; memories/summaries only generated from batch result
     always_batch_retranscribe: false
