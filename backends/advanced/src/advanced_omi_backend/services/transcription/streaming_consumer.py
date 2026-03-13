@@ -767,9 +767,9 @@ class StreamingTranscriptionConsumer:
                                 break
 
                             # Extract audio data (producer sends as 'audio_data', not 'audio_chunk')
-                            audio_chunk = fields.get(
-                                b"audio_data"
-                            ) or fields.get("audio_data")
+                            audio_chunk = fields.get(b"audio_data") or fields.get(
+                                "audio_data"
+                            )
                             if audio_chunk:
                                 logger.debug(
                                     f"Processing audio chunk {msg_id} ({len(audio_chunk)} bytes)"

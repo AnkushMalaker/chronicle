@@ -249,9 +249,7 @@ def get_misc_settings() -> dict:
         "use_provider_segments": transcription_settings.get(
             "use_provider_segments", False
         ),
-        "per_segment_speaker_id": speaker_settings.get(
-            "per_segment_speaker_id", False
-        ),
+        "per_segment_speaker_id": speaker_settings.get("per_segment_speaker_id", False),
         "streaming_fallback_timeout_seconds": int(
             transcription_settings.get(
                 "streaming_fallback_timeout_seconds",
@@ -307,7 +305,6 @@ def save_misc_settings(settings: dict) -> bool:
         }
         if not save_config_section("backend.transcription", timeout_settings):
             success = False
-
 
     # Save always_batch_retranscribe if provided
     if "always_batch_retranscribe" in settings:
