@@ -1,0 +1,21 @@
+[project]
+name = "smart-turn-service"
+version = "0.1.0"
+description = "Smart turn-taking detection service for Chronicle"
+requires-python = ">=3.11"
+
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.34.0",
+    "numpy>=1.26.0",
+    "onnxruntime>=1.16.0",
+    "transformers>=4.36.0",
+    "huggingface-hub>=0.20.0",
+]
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

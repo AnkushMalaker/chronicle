@@ -1,0 +1,33 @@
+services:
+  smart-turn:
+    build: .
+    image: ${CHRONICLE_REGISTRY:-}chronicle-smart-turn:${CHRONICLE_TAG:-latest}
+    ports:
+      - "${SMART_TURN_PORT:-8766}:${SMART_TURN_PORT:-8766}"
+    environment:
+      - PORT=${SMART_TURN_PORT:-8766}
+      - HOST=0.0.0.0
+      - MODEL_DIR=/app/models
+      - MODEL_FILENAME=smart-turn-v3.2-cpu.onnx
+    volumes:
+      - ./src:/app/src
+      - smart_turn_models:/app/models
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8766/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      default:
+        aliases:
+          - smart-turn
+
+networks:
+  default:
+    name: chronicle-network
+    external: true
+
+volumes:
+  smart_turn_models:
+    driver: local
