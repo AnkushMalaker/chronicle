@@ -1,0 +1,49 @@
+services:
+  llama-cpp-llm:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    ports:
+      - "${LLM_PORT:-8083}:8080"
+    volumes:
+      - ./models:/models:ro
+    environment:
+      LLAMA_ARG_MODEL: /models/${LLM_MODEL_FILE:-model.gguf}
+      LLAMA_ARG_CTX_SIZE: ${CTX_SIZE:-8192}
+      LLAMA_ARG_N_GPU_LAYERS: ${N_GPU_LAYERS:--1}
+      LLAMA_ARG_HOST: "0.0.0.0"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    networks:
+      - chronicle-network
+
+  llama-cpp-embed:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    ports:
+      - "${EMBED_PORT:-8082}:8080"
+    volumes:
+      - ./models:/models:ro
+    environment:
+      LLAMA_ARG_MODEL: /models/${EMBED_MODEL_FILE:-embed-model.gguf}
+      LLAMA_ARG_CTX_SIZE: ${EMBED_CTX_SIZE:-2048}
+      LLAMA_ARG_N_GPU_LAYERS: ${N_GPU_LAYERS:--1}
+      LLAMA_ARG_EMBEDDINGS: "true"
+      LLAMA_ARG_HOST: "0.0.0.0"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    networks:
+      - chronicle-network
+
+networks:
+  chronicle-network:
+    external: true

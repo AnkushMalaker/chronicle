@@ -19,6 +19,7 @@ class LLMProvider(Enum):
 
     OPENAI = "openai"
     OLLAMA = "ollama"
+    LLAMACPP = "llamacpp"
     CUSTOM = "custom"
 
 

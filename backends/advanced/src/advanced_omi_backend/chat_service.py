@@ -8,10 +8,8 @@ This module provides:
 - Integration with existing mem0 memory infrastructure
 """
 
-import asyncio
-import json
+import contextlib
 import logging
-import os
 import time
 from datetime import datetime
 from typing import AsyncGenerator, Dict, List, Optional, Tuple
@@ -428,100 +426,122 @@ If no relevant memories are available, respond normally based on the conversatio
         include_obsidian_memory: bool = False,
     ) -> AsyncGenerator[Dict, None]:
         """Generate streaming response with memory context."""
-        if not self._initialized:
-            await self.initialize()
+        from advanced_omi_backend.observability.otel_setup import (
+            get_tracer,
+            is_otel_enabled,
+            set_otel_session,
+            set_trace_io,
+        )
 
-        try:
-            # Save user message
-            user_message = ChatMessage(
-                message_id=str(uuid4()),
-                session_id=session_id,
-                user_id=user_id,
-                role="user",
-                content=message_content,
-            )
-            await self.add_message(user_message)
+        set_otel_session(session_id)
 
-            # Format context with memories
-            context, memory_ids = await self.format_conversation_context(
-                session_id,
-                user_id,
-                message_content,
-                include_obsidian_memory=include_obsidian_memory,
-            )
-
-            # Send memory context used
-            yield {
-                "type": "memory_context",
-                "data": {"memory_ids": memory_ids, "memory_count": len(memory_ids)},
-                "timestamp": time.time(),
-            }
-
-            # Get system prompt from config
-            system_prompt = await self._get_system_prompt()
-
-            # Prepare full prompt
-            full_prompt = f"{system_prompt}\n\n{context}"
-
-            # Generate streaming response
-            logger.info(
-                f"Generating response for session {session_id} with {len(memory_ids)} memories"
-            )
-
-            # Resolve chat operation temperature from config
-            chat_temp = None
-            registry = get_models_registry()
-            if registry:
-                chat_op = registry.get_llm_operation("chat")
-                chat_temp = chat_op.temperature
-
-            # Note: For now, we'll use the regular generate method
-            # In the future, this should be replaced with actual streaming
-            response_content = self.llm_client.generate(
-                prompt=full_prompt,
-                temperature=chat_temp,
-            )
-
-            # Simulate streaming by yielding chunks
-            words = response_content.split()
-            current_text = ""
-
-            for i, word in enumerate(words):
-                current_text += word + " "
-
-                # Yield every few words to simulate streaming
-                if i % 3 == 0 or i == len(words) - 1:
-                    yield {
-                        "type": "token",
-                        "data": current_text.strip(),
-                        "timestamp": time.time(),
-                    }
-                    await asyncio.sleep(0.05)  # Small delay for realistic streaming
-
-            # Save assistant message
-            assistant_message = ChatMessage(
-                message_id=str(uuid4()),
-                session_id=session_id,
-                user_id=user_id,
-                role="assistant",
-                content=response_content.strip(),
-                memories_used=memory_ids,
-            )
-            await self.add_message(assistant_message)
-
-            # Send completion signal
-            yield {
-                "type": "complete",
-                "data": {
-                    "message_id": assistant_message.message_id,
-                    "memories_used": memory_ids,
+        tracer = get_tracer() if is_otel_enabled() else None
+        span_ctx = (
+            tracer.start_as_current_span(
+                "chat",
+                attributes={
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.conversation.id": session_id,
+                    "chronicle.user_id": user_id,
+                    "langfuse.user.id": user_id,
+                    "chronicle.pipeline.stage": "chat",
                 },
-                "timestamp": time.time(),
-            }
+            )
+            if tracer
+            else contextlib.nullcontext()
+        )
 
-        except Exception as e:
-            logger.error(f"Error generating response for session {session_id}: {e}")
-            yield {"type": "error", "data": {"error": str(e)}, "timestamp": time.time()}
+        with span_ctx:
+            set_trace_io(input={"message": message_content})
+
+            if not self._initialized:
+                await self.initialize()
+
+            try:
+                # Save user message
+                user_message = ChatMessage(
+                    message_id=str(uuid4()),
+                    session_id=session_id,
+                    user_id=user_id,
+                    role="user",
+                    content=message_content,
+                )
+                await self.add_message(user_message)
+
+                # Format context with memories
+                context, memory_ids = await self.format_conversation_context(
+                    session_id,
+                    user_id,
+                    message_content,
+                    include_obsidian_memory=include_obsidian_memory,
+                )
+
+                # Send memory context used
+                yield {
+                    "type": "memory_context",
+                    "data": {"memory_ids": memory_ids, "memory_count": len(memory_ids)},
+                    "timestamp": time.time(),
+                }
+
+                # Get system prompt from config
+                system_prompt = await self._get_system_prompt()
+
+                # Prepare full prompt
+                full_prompt = f"{system_prompt}\n\n{context}"
+
+                # Generate streaming response
+                logger.info(
+                    f"Generating response for session {session_id} with {len(memory_ids)} memories"
+                )
+
+                # Resolve chat operation temperature from config
+                chat_temp = None
+                registry = get_models_registry()
+                if registry:
+                    chat_op = registry.get_llm_operation("chat")
+                    chat_temp = chat_op.temperature
+
+                response_content = self.llm_client.generate(
+                    prompt=full_prompt,
+                    temperature=chat_temp,
+                )
+
+                yield {
+                    "type": "token",
+                    "data": response_content.strip(),
+                    "timestamp": time.time(),
+                }
+
+                # Save assistant message
+                assistant_message = ChatMessage(
+                    message_id=str(uuid4()),
+                    session_id=session_id,
+                    user_id=user_id,
+                    role="assistant",
+                    content=response_content.strip(),
+                    memories_used=memory_ids,
+                )
+                await self.add_message(assistant_message)
+
+                set_trace_io(output={"response": response_content.strip()})
+
+                # Send completion signal
+                yield {
+                    "type": "complete",
+                    "data": {
+                        "message_id": assistant_message.message_id,
+                        "memories_used": memory_ids,
+                    },
+                    "timestamp": time.time(),
+                }
+
+            except Exception as e:
+                logger.error(f"Error generating response for session {session_id}: {e}")
+                yield {
+                    "type": "error",
+                    "data": {"error": str(e)},
+                    "timestamp": time.time(),
+                }
 
     async def update_session_title(
         self, session_id: str, user_id: str, title: str

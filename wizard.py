@@ -113,6 +113,18 @@ SERVICES = {
             ],
             "description": "LLM observability and prompt management (local)",
         },
+        "llm-services": {
+            "path": "extras/llm-services",
+            "cmd": [
+                "uv",
+                "run",
+                "--with-requirements",
+                "../../setup-requirements.txt",
+                "python",
+                "init.py",
+            ],
+            "description": "Local LLM via llama.cpp (chat + embeddings)",
+        },
     },
 }
 
@@ -165,7 +177,13 @@ def check_service_exists(service_name, service_config):
         return False, f"Directory {service_path} does not exist"
 
     # For services with Python init scripts, check if init.py exists
-    if service_name in ["advanced", "speaker-recognition", "asr-services", "langfuse"]:
+    if service_name in [
+        "advanced",
+        "speaker-recognition",
+        "asr-services",
+        "langfuse",
+        "llm-services",
+    ]:
         script_path = service_path / "init.py"
         if not script_path.exists():
             return False, f"Script {script_path} does not exist"
@@ -181,7 +199,12 @@ def check_service_exists(service_name, service_config):
     return True, "OK"
 
 
-def select_services(transcription_provider=None, config_yml=None, memory_provider=None):
+def select_services(
+    transcription_provider=None,
+    config_yml=None,
+    memory_provider=None,
+    llm_provider=None,
+):
     """Let user select which services to setup"""
     config_yml = config_yml or {}
     console.print("🚀 [bold cyan]Chronicle Service Setup[/bold cyan]")
@@ -194,23 +217,28 @@ def select_services(transcription_provider=None, config_yml=None, memory_provide
     console.print("  ✅ Advanced Backend - Full AI features")
     selected.append("advanced")
 
-    # Services that will be auto-added based on transcription provider choice
+    # Services that will be auto-added based on provider choices
     auto_added = set()
     if transcription_provider in ("parakeet", "vibevoice", "qwen3-asr"):
         auto_added.add("asr-services")
+    if llm_provider == "llamacpp":
+        auto_added.add("llm-services")
 
     # Optional extras
     console.print("\n🔧 [bold]Optional Services:[/bold]")
     for service_name, service_config in SERVICES["extras"].items():
         # Skip services that will be auto-added based on earlier choices
         if service_name in auto_added:
-            provider_label = {
-                "vibevoice": "VibeVoice",
-                "parakeet": "Parakeet",
-                "qwen3-asr": "Qwen3-ASR",
-            }.get(transcription_provider, transcription_provider)
+            if service_name == "llm-services":
+                label = "llama.cpp"
+            else:
+                label = {
+                    "vibevoice": "VibeVoice",
+                    "parakeet": "Parakeet",
+                    "qwen3-asr": "Qwen3-ASR",
+                }.get(transcription_provider, transcription_provider)
             console.print(
-                f"  ✅ {service_config['description']} ({provider_label}) [dim](auto-selected)[/dim]"
+                f"  ✅ {service_config['description']} ({label}) [dim](auto-selected)[/dim]"
             )
             continue
 
@@ -1086,13 +1114,14 @@ def select_hardware_profile(
 def select_llm_provider(config_yml: dict = None) -> str:
     """Ask user which LLM provider to use for memory extraction.
 
+    Uses Langfuse-style flow: "Do you have your own LLM?" → Yes: custom URL → No: pick managed option.
+
     Returns:
-        "openai", "ollama", or "none"
+        "openai", "ollama", "llamacpp", or "none"
     """
     config_yml = config_yml or {}
     existing_llm = config_yml.get("defaults", {}).get("llm", "")
-    llm_to_choice = {"openai-llm": "1", "local-llm": "2"}
-    default_choice = llm_to_choice.get(existing_llm, "1")
+    existing_is_custom = existing_llm in ("custom-llm",)
 
     console.print("\n🤖 [bold cyan]LLM Provider[/bold cyan]")
     console.print(
@@ -1100,10 +1129,35 @@ def select_llm_provider(config_yml: dict = None) -> str:
     )
     console.print()
 
+    # Step 1: Do you have your own LLM endpoint?
+    try:
+        has_own = Confirm.ask(
+            "Do you have your own OpenAI-compatible LLM endpoint?",
+            default=existing_is_custom,
+        )
+    except EOFError:
+        has_own = existing_is_custom
+
+    if has_own:
+        # User has their own endpoint — this maps to the existing "custom" flow in init.py
+        console.print(
+            "[green]✅[/green] Will configure custom LLM endpoint in backend setup"
+        )
+        return "custom"
+
+    # Step 2: Pick from managed options
+    llm_to_choice = {
+        "openai-llm": "1",
+        "local-llm": "2",
+        "llamacpp-llm": "3",
+    }
+    default_choice = llm_to_choice.get(existing_llm, "1")
+
     choices = {
         "1": "OpenAI (GPT-4o-mini, requires API key)",
         "2": "Ollama (local models, runs on your machine)",
-        "3": "None (skip memory extraction)",
+        "3": "llama.cpp (Chronicle-managed, local GGUF models, GPU recommended)",
+        "4": "None (skip memory extraction)",
     }
 
     for key, desc in choices.items():
@@ -1115,13 +1169,15 @@ def select_llm_provider(config_yml: dict = None) -> str:
         try:
             choice = Prompt.ask("Enter choice", default=default_choice)
             if choice in choices:
-                return {"1": "openai", "2": "ollama", "3": "none"}[choice]
+                return {"1": "openai", "2": "ollama", "3": "llamacpp", "4": "none"}[
+                    choice
+                ]
             console.print(
                 f"[red]Invalid choice. Please select from {list(choices.keys())}[/red]"
             )
         except EOFError:
             console.print(f"Using default: {choices.get(default_choice, 'OpenAI')}")
-            return {"1": "openai", "2": "ollama", "3": "none"}.get(
+            return {"1": "openai", "2": "ollama", "3": "llamacpp", "4": "none"}.get(
                 default_choice, "openai"
             )
 
@@ -1230,9 +1286,9 @@ def main():
     # Memory Provider selection (asked once here, passed to init.py — avoids double-ask)
     memory_provider = select_memory_provider(config_yml)
 
-    # Service Selection (pass transcription_provider so we skip asking about ASR when already chosen)
+    # Service Selection (pass provider choices so we skip asking about auto-added services)
     selected_services = select_services(
-        transcription_provider, config_yml, memory_provider
+        transcription_provider, config_yml, memory_provider, llm_provider
     )
 
     # Auto-add asr-services if any local ASR was chosen (batch or streaming)
@@ -1250,6 +1306,17 @@ def main():
             f"[blue][INFO][/blue] Auto-adding ASR services for {reason} transcription"
         )
         selected_services.append("asr-services")
+
+    # Auto-add llm-services if llama.cpp was selected as LLM provider
+    if llm_provider == "llamacpp" and "llm-services" not in selected_services:
+        exists, _ = check_service_exists(
+            "llm-services", SERVICES["extras"]["llm-services"]
+        )
+        if exists:
+            console.print(
+                "[blue][INFO][/blue] LLM provider is llama.cpp — auto-adding llm-services"
+            )
+            selected_services.append("llm-services")
 
     # Auto-add openmemory-mcp service if openmemory_mcp was selected as memory provider
     if (
@@ -1322,9 +1389,17 @@ def main():
                     console.print(
                         f"[green][AUTO-DETECTED][/green] Tailscale IP:  {ts_ip}"
                     )
+                console.print(
+                    "[green][AUTO-DETECTED][/green] Minidisc service discovery enabled — "
+                    "cross-machine services will find each other automatically"
+                )
                 default_address = ts_dns
             elif ts_ip:
                 console.print(f"\n[green][AUTO-DETECTED][/green] Tailscale IP: {ts_ip}")
+                console.print(
+                    "[green][AUTO-DETECTED][/green] Minidisc service discovery enabled — "
+                    "cross-machine services will find each other automatically"
+                )
                 default_address = ts_ip
             else:
                 console.print("\n[blue][INFO][/blue] Tailscale not detected")
@@ -1595,6 +1670,20 @@ def main():
     console.print(
         "   [dim]Or: uv run --with-requirements setup-requirements.txt python services.py stop --all[/dim]"
     )
+
+    # Show minidisc discovery info if Tailscale is available
+    ts_dns_final, ts_ip_final = detect_tailscale_info()
+    if ts_dns_final or ts_ip_final:
+        console.print("")
+        console.print(
+            "🔍 [bold cyan]Distributed Setup:[/bold cyan] Minidisc service discovery is active"
+        )
+        console.print(
+            "   Services on other Tailnet machines (HAVPE relay, ASR, etc.) will"
+        )
+        console.print(
+            "   auto-discover this backend — no manual URL configuration needed"
+        )
 
     console.print(f"\n🚀 [bold]Enjoy Chronicle![/bold]")
 

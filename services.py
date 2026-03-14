@@ -65,6 +65,12 @@ SERVICES = {
         "description": "OpenMemory MCP Server",
         "ports": ["8765"],
     },
+    "llm-services": {
+        "path": "extras/llm-services",
+        "compose_file": "docker-compose.yml",
+        "description": "Local LLM via llama.cpp (chat + embeddings)",
+        "ports": ["8083", "8082"],
+    },
 }
 
 

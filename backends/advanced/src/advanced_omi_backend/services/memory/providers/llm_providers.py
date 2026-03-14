@@ -211,6 +211,9 @@ class OpenAIProvider(LLMProviderBase):
         Returns:
             List of extracted memory strings
         """
+        from advanced_omi_backend.observability.otel_setup import set_span_attrs
+
+        set_span_attrs(gen_ai_operation="chat", user_id=user_id)
         try:
             # Use the provided prompt or fall back to registry default
             if prompt and prompt.strip():
@@ -375,6 +378,9 @@ class OpenAIProvider(LLMProviderBase):
         Returns:
             Dictionary containing proposed memory actions
         """
+        from advanced_omi_backend.observability.otel_setup import set_span_attrs
+
+        set_span_attrs(gen_ai_operation="chat")
         try:
             # Generate the complete prompt using the helper function
             memory_logger.debug(f"🧠 Facts passed to prompt builder: {new_facts}")

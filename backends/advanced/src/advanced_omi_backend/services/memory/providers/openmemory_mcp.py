@@ -66,9 +66,17 @@ class OpenMemoryMCPService(MemoryServiceBase):
             timeout: HTTP request timeout in seconds
         """
         super().__init__()
-        self.server_url = server_url or os.getenv(
-            "OPENMEMORY_MCP_URL", "http://localhost:8765"
-        )
+        resolved_url = server_url or os.getenv("OPENMEMORY_MCP_URL")
+        if not resolved_url:
+            try:
+                from discovery import CHRONICLE_OPENMEMORY, resolve_service_url
+
+                resolved_url = resolve_service_url(
+                    None, CHRONICLE_OPENMEMORY, default="http://localhost:8765"
+                )
+            except ImportError:
+                resolved_url = "http://localhost:8765"
+        self.server_url = resolved_url
         self.client_name = client_name or os.getenv(
             "OPENMEMORY_CLIENT_NAME", "chronicle"
         )
