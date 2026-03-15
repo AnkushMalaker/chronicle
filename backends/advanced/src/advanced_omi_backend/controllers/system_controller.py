@@ -40,8 +40,8 @@ audio_logger = logging.getLogger("audio_processing")
 async def get_network_discovery(app):
     """Return Tailscale status and discovered minidisc services.
 
-    The *app* parameter is the FastAPI application instance, used to read
-    ``app.state.minidisc_registry`` (set during startup in app_factory).
+    The *app* parameter is the FastAPI application instance (kept for API
+    compatibility but no longer used — discovery-agent handles advertising).
     """
     import asyncio as _asyncio
 
@@ -66,27 +66,22 @@ async def get_network_discovery(app):
 
     result["tailscale_available"] = is_tailscale_available()
 
-    # Report what this node is *actually* advertising via the minidisc
-    # registry that was initialised at startup (app_factory Phase 2).
-    registry = getattr(app.state, "minidisc_registry", None)
-    if registry is not None:
-        # The backend always advertises itself when the registry exists.
-        result["advertising"].append({"name": CHRONICLE_BACKEND, "port": 8000})
+    # Report what the discovery-agent *should* be advertising based on the
+    # same env-var logic it uses.  The actual advertising is handled by
+    # the discovery-agent container (network_mode: host).
+    result["advertising"].append({"name": CHRONICLE_BACKEND, "port": 8000})
 
-        # Optional co-located services — app_factory only advertises them
-        # when the env-var URL points at host.docker.internal, so we
-        # mirror that same check here.
-        speaker_url = os.environ.get("SPEAKER_SERVICE_URL", "")
-        if speaker_url and "host.docker.internal" in speaker_url:
-            result["advertising"].append({"name": CHRONICLE_SPEAKER, "port": 8085})
+    speaker_url = os.environ.get("SPEAKER_SERVICE_URL", "")
+    if speaker_url and "host.docker.internal" in speaker_url:
+        result["advertising"].append({"name": CHRONICLE_SPEAKER, "port": 8085})
 
-        asr_url = os.environ.get("PARAKEET_ASR_URL", "")
-        if asr_url and "host.docker.internal" in asr_url:
-            result["advertising"].append({"name": CHRONICLE_ASR, "port": 8767})
+    asr_url = os.environ.get("PARAKEET_ASR_URL", "")
+    if asr_url and "host.docker.internal" in asr_url:
+        result["advertising"].append({"name": CHRONICLE_ASR, "port": 8767})
 
-        openmemory_url = os.environ.get("OPENMEMORY_MCP_URL", "")
-        if openmemory_url and "host.docker.internal" in openmemory_url:
-            result["advertising"].append({"name": CHRONICLE_OPENMEMORY, "port": 8765})
+    openmemory_url = os.environ.get("OPENMEMORY_MCP_URL", "")
+    if openmemory_url and "host.docker.internal" in openmemory_url:
+        result["advertising"].append({"name": CHRONICLE_OPENMEMORY, "port": 8765})
 
     if not result["tailscale_available"]:
         return result

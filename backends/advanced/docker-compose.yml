@@ -282,6 +282,18 @@ services:
       retries: 5
       start_period: 30s
 
+  # Discovery agent — advertises backend + co-located services on the Tailnet
+  discovery-agent:
+    build:
+      context: ../../edge
+    network_mode: host
+    env_file: .env
+    environment:
+      - ADVERTISE_BACKEND=true
+    volumes:
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock:ro
+    restart: unless-stopped
+
   # ollama:
   #   image: ollama/ollama:latest
   #   container_name: ollama

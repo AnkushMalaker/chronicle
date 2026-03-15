@@ -7,7 +7,6 @@ and service initializations.
 
 import asyncio
 import logging
-import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -216,51 +215,12 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             application_logger.warning(f"Prompt registry initialization failed: {e}")
 
-    async def _init_service_discovery():
-        try:
-            from discovery import (
-                CHRONICLE_ASR,
-                CHRONICLE_BACKEND,
-                CHRONICLE_SPEAKER,
-                advertise_service,
-                is_tailscale_available,
-            )
-
-            if not is_tailscale_available():
-                application_logger.debug(
-                    "Tailscale socket not found — skipping service advertisement"
-                )
-                return
-
-            registry = advertise_service(8000, CHRONICLE_BACKEND)
-            if registry:
-                app.state.minidisc_registry = registry
-
-                # Also advertise co-located optional services if configured
-                speaker_url = os.environ.get("SPEAKER_SERVICE_URL", "")
-                if speaker_url and "host.docker.internal" in speaker_url:
-                    advertise_service(8085, CHRONICLE_SPEAKER)
-
-                asr_url = os.environ.get("PARAKEET_ASR_URL", "")
-                if asr_url and "host.docker.internal" in asr_url:
-                    advertise_service(8767, CHRONICLE_ASR)
-
-        except ImportError:
-            application_logger.debug(
-                "discovery module not available — skipping service advertisement"
-            )
-        except Exception as e:
-            application_logger.debug(
-                "Service discovery initialization failed (non-fatal): %s", e
-            )
-
     await asyncio.gather(
         _init_redis_rq(),
         _init_task_manager(),
         _init_client_manager(),
         _init_otel(),
         _init_prompt_registry(),
-        _init_service_discovery(),
     )
 
     application_logger.info(
@@ -526,14 +486,6 @@ async def lifespan(app: FastAPI):
             application_logger.info("Cron scheduler stopped")
         except Exception as e:
             application_logger.error(f"Error stopping cron scheduler: {e}")
-
-        # Stop minidisc service advertisement
-        if hasattr(app.state, "minidisc_registry") and app.state.minidisc_registry:
-            try:
-                app.state.minidisc_registry = None
-                application_logger.info("Minidisc service advertisement stopped")
-            except Exception as e:
-                application_logger.debug("Error stopping minidisc registry: %s", e)
 
         # Shutdown memory service and speaker service
         shutdown_memory_service()
