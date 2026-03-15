@@ -176,21 +176,22 @@ class OpenAIProvider(LLMProviderBase):
             self.embed_def.model_url if self.embed_def else self.base_url
         )
 
-        # CRITICAL: Validate API keys are present - fail fast instead of hanging
-        if not self.api_key or self.api_key.strip() == "":
-            raise RuntimeError(
-                f"API key is missing or empty for LLM provider '{self.llm_def.model_provider}' (model: {self.model}). "
-                f"Please set the API key in config.yml or environment variables. "
-                f"Cannot proceed without valid API credentials."
-            )
+        # Validate API keys for cloud providers - local providers (llamacpp, ollama) don't need real keys
+        _local_providers = {"llamacpp", "ollama"}
+        if self.llm_def.model_provider not in _local_providers:
+            if not self.api_key or self.api_key.strip() == "":
+                raise RuntimeError(
+                    f"API key is missing or empty for LLM provider '{self.llm_def.model_provider}' (model: {self.model}). "
+                    f"Please set the API key in config.yml or environment variables. "
+                    f"Cannot proceed without valid API credentials."
+                )
 
-        if self.embed_def and (
-            not self.embedding_api_key or self.embedding_api_key.strip() == ""
-        ):
-            raise RuntimeError(
-                f"API key is missing or empty for embedding provider '{self.embed_def.model_provider}' (model: {self.embedding_model}). "
-                f"Please set the API key in config.yml or environment variables."
-            )
+        if self.embed_def and self.embed_def.model_provider not in _local_providers:
+            if not self.embedding_api_key or self.embedding_api_key.strip() == "":
+                raise RuntimeError(
+                    f"API key is missing or empty for embedding provider '{self.embed_def.model_provider}' (model: {self.embedding_model}). "
+                    f"Please set the API key in config.yml or environment variables."
+                )
 
         # Lazy client creation
         self._client = None
@@ -330,8 +331,8 @@ class OpenAIProvider(LLMProviderBase):
         try:
             return await generate_openai_embeddings(
                 texts,
-                api_key=self.api_key,
-                base_url=self.base_url,
+                api_key=self.embedding_api_key,
+                base_url=self.embedding_base_url,
                 model=self.embedding_model,
             )
         except Exception as e:
