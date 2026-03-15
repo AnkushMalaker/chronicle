@@ -19,27 +19,31 @@ else
 fi
 echo ""
 
+declare -A SERVICE_PATHS=(
+    [speaker-recognition]=extras/speaker-recognition
+    [asr-services]=extras/asr-services
+    [tts]=extras/tts
+    [llm-services]=extras/llm-services
+    [havpe-relay]=extras/havpe-relay
+)
+
 if [[ $# -lt 1 ]]; then
     echo "Usage: $0 <service-name> to see container status"
-    echo "Available services: speaker-recognition asr-services tts llm-services havpe-relay"
+    echo "Available services: ${!SERVICE_PATHS[*]}"
     exit 0
 fi
 
 SERVICE_NAME="$1"
 
-COMPOSE_PATH=$(cd "$CHRONICLE_HOME" && uv run --with-requirements setup-requirements.txt python3 -c "
-import yaml, sys
-with open('edge/services.yml') as f:
-    data = yaml.safe_load(f)
-svc = data.get('services', {}).get('$SERVICE_NAME')
-if not svc:
-    print('NOT_FOUND', file=sys.stderr); sys.exit(1)
-print(svc['compose_path'])
-" 2>/dev/null || echo "")
+if [[ -z "${SERVICE_PATHS[$SERVICE_NAME]+_}" ]]; then
+    echo "Unknown service: $SERVICE_NAME"
+    echo "Available: ${!SERVICE_PATHS[*]}"
+    exit 1
+fi
 
-SERVICE_DIR="$CHRONICLE_HOME/$COMPOSE_PATH"
+SERVICE_DIR="$CHRONICLE_HOME/${SERVICE_PATHS[$SERVICE_NAME]}"
 
-if [[ -z "$COMPOSE_PATH" || ! -d "$SERVICE_DIR" ]]; then
+if [[ ! -d "$SERVICE_DIR" ]]; then
     echo "Service not found or not installed: $SERVICE_NAME"
     exit 1
 fi

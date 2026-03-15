@@ -17,11 +17,20 @@ if [[ -n "${CHRONICLE_HOME:-}" ]]; then
     : # User explicitly set it
 elif [[ -d "$HOME/chronicle/.git" ]]; then
     CHRONICLE_HOME="$HOME/chronicle"
-elif [[ -d "$PWD/.git" && -f "$PWD/edge/services.yml" ]]; then
+elif [[ -d "$PWD/.git" && -d "$PWD/edge" ]]; then
     CHRONICLE_HOME="$PWD"
 else
     CHRONICLE_HOME="$HOME/chronicle"
 fi
+
+# ── Service → compose path mapping ───────────────────────────────────
+declare -A SERVICE_PATHS=(
+    [speaker-recognition]=extras/speaker-recognition
+    [asr-services]=extras/asr-services
+    [tts]=extras/tts
+    [llm-services]=extras/llm-services
+    [havpe-relay]=extras/havpe-relay
+)
 
 # ── Colours ───────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -40,11 +49,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 <service-name> [--branch <branch>] [--repo <url>]"
             echo ""
             echo "Available services:"
-            echo "  speaker-recognition   Speaker Recognition Service"
-            echo "  asr-services          ASR Speech-to-Text Service"
-            echo "  tts                   Text-to-Speech Service"
-            echo "  llm-services          Local LLM via llama.cpp"
-            echo "  havpe-relay           HAVPE Audio Relay"
+            for svc in "${!SERVICE_PATHS[@]}"; do echo "  $svc"; done | sort
             exit 0
             ;;
         -*) err "Unknown option: $1"; exit 1 ;;
@@ -57,14 +62,14 @@ if [[ -z "$SERVICE_NAME" ]]; then
     exit 1
 fi
 
-# ── Validate service name against registry ────────────────────────────
-# We'll validate after clone, but do a quick sanity check here.
-KNOWN_SERVICES="speaker-recognition asr-services tts llm-services havpe-relay"
-if ! echo "$KNOWN_SERVICES" | grep -qw "$SERVICE_NAME"; then
+# ── Validate service name ────────────────────────────────────────────
+if [[ -z "${SERVICE_PATHS[$SERVICE_NAME]+_}" ]]; then
     err "Unknown service: $SERVICE_NAME"
-    err "Available: $KNOWN_SERVICES"
+    err "Available: ${!SERVICE_PATHS[*]}"
     exit 1
 fi
+
+COMPOSE_PATH="${SERVICE_PATHS[$SERVICE_NAME]}"
 
 # ── Check prerequisites ──────────────────────────────────────────────
 check_cmd() {
@@ -105,16 +110,12 @@ TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "unknown")
 ok "Prerequisites OK (Tailscale IP: $TAILSCALE_IP)"
 
 # ── Clone / update repo ──────────────────────────────────────────────
-if [[ -f "$CHRONICLE_HOME/edge/services.yml" ]]; then
-    # Already inside a working repo — skip git entirely
+if [[ -d "$CHRONICLE_HOME/.git" && -d "$CHRONICLE_HOME/edge" ]]; then
     info "Using existing repo at $CHRONICLE_HOME"
-elif [[ -d "$CHRONICLE_HOME/.git" ]]; then
-    info "Updating existing clone at $CHRONICLE_HOME..."
     cd "$CHRONICLE_HOME"
-    git fetch origin "$BRANCH"
-    # Switch to branch if not already on it
     current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
     if [[ "$current_branch" != "$BRANCH" ]]; then
+        git fetch origin "$BRANCH"
         git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH" "origin/$BRANCH"
     fi
     git pull --rebase --autostash origin "$BRANCH" || {
@@ -127,42 +128,30 @@ fi
 cd "$CHRONICLE_HOME"
 ok "Repository ready at $CHRONICLE_HOME"
 
-# ── Read service metadata from registry ───────────────────────────────
-COMPOSE_PATH=$(uv run --with-requirements setup-requirements.txt python3 -c "
-import yaml, sys
-with open('edge/services.yml') as f:
-    data = yaml.safe_load(f)
-svc = data.get('services', {}).get('$SERVICE_NAME')
-if not svc:
-    print('NOT_FOUND', file=sys.stderr); sys.exit(1)
-print(svc['compose_path'])
-")
+# ── Resolve compose path ─────────────────────────────────────────────
+SERVICE_DIR="$CHRONICLE_HOME/$COMPOSE_PATH"
 
-if [[ -z "$COMPOSE_PATH" || ! -d "$COMPOSE_PATH" ]]; then
-    err "Service directory not found: $COMPOSE_PATH"
+if [[ ! -d "$SERVICE_DIR" ]]; then
+    err "Service directory not found: $SERVICE_DIR"
     exit 1
 fi
 
-SERVICE_DIR="$CHRONICLE_HOME/$COMPOSE_PATH"
 info "Service directory: $SERVICE_DIR"
 
 # ── Resolve backend URL for edge services ─────────────────────────────
 # On edge nodes, host.docker.internal doesn't reach the backend.
 # Try minidisc discovery first, then prompt if needed.
 info "Looking for Chronicle backend on Tailnet..."
-BACKEND_URL=$(uv run --with-requirements "$CHRONICLE_HOME/setup-requirements.txt" python3 -c "
-import sys
-sys.path.insert(0, '$CHRONICLE_HOME')
+BACKEND_URL=$(cd "$CHRONICLE_HOME" && PYTHONPATH="$CHRONICLE_HOME" uv run --with-requirements "$CHRONICLE_HOME/setup-requirements.txt" python3 -c "
 try:
     from discovery import CHRONICLE_BACKEND, discover_service
     url = discover_service(CHRONICLE_BACKEND)
     if url:
         print(url, end='')
     else:
-        print('', end='', file=sys.stderr)
-        print('minidisc found no chronicle-backend service on Tailnet', file=sys.stderr)
+        print('minidisc found no chronicle-backend service on Tailnet', file=__import__('sys').stderr)
 except Exception as e:
-    print(f'discovery failed: {e}', file=sys.stderr)
+    print(f'discovery failed: {e}', file=__import__('sys').stderr)
 ")
 
 if [[ -n "$BACKEND_URL" ]]; then

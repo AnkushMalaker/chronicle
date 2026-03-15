@@ -1,10 +1,18 @@
 """
-Edge agent sidecar — advertises a Chronicle service on the Tailnet via minidisc.
+Edge discovery agent — advertises Chronicle services on the Tailnet via minidisc.
 
-Runs as a Docker container alongside the service it advertises.
-Env vars:
-  EDGE_SERVICE_NAME  — minidisc service name (e.g. chronicle-speaker)
-  EDGE_SERVICE_PORT  — port to advertise (e.g. 8085)
+Config-driven: reads what to advertise from environment variables instead of
+probing ports. One agent per machine.
+
+Two input modes (both contribute to a single service list):
+
+  ADVERTISE          — comma-separated name:port pairs (edge nodes + overrides)
+                       e.g. ADVERTISE=chronicle-speaker:8085,chronicle-asr:8767
+
+  ADVERTISE_BACKEND  — when "true", always includes chronicle-backend:8000 and
+                       inspects SPEAKER_SERVICE_URL / PARAKEET_ASR_URL /
+                       OPENMEMORY_MCP_URL / TTS_SERVICE_URL to detect co-located
+                       services (main server mode).
 """
 
 import logging
@@ -16,12 +24,20 @@ import time
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [edge-agent] %(message)s",
+    format="%(asctime)s [discovery-agent] %(message)s",
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 
 shutdown = False
+
+# Mapping from env-var URL → (service name, port)
+_BACKEND_SERVICE_MAP = {
+    "SPEAKER_SERVICE_URL": ("chronicle-speaker", 8085),
+    "PARAKEET_ASR_URL": ("chronicle-asr", 8767),
+    "OPENMEMORY_MCP_URL": ("chronicle-openmemory", 8765),
+    "TTS_SERVICE_URL": ("chronicle-tts", 8770),
+}
 
 
 def _handle_signal(signum, frame):
@@ -30,17 +46,56 @@ def _handle_signal(signum, frame):
     shutdown = True
 
 
+def _collect_services() -> list[tuple[str, int]]:
+    """Build the list of (name, port) pairs to advertise."""
+    services: list[tuple[str, int]] = []
+    seen: set[str] = set()
+
+    def _add(name: str, port: int):
+        if name not in seen:
+            services.append((name, port))
+            seen.add(name)
+
+    # Mode 1: explicit ADVERTISE env var
+    advertise = os.environ.get("ADVERTISE", "").strip()
+    if advertise:
+        for entry in advertise.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            if ":" not in entry:
+                logger.warning(
+                    "Skipping invalid ADVERTISE entry (missing port): %s", entry
+                )
+                continue
+            name, port_str = entry.rsplit(":", 1)
+            try:
+                _add(name.strip(), int(port_str.strip()))
+            except ValueError:
+                logger.warning("Skipping invalid ADVERTISE entry (bad port): %s", entry)
+
+    # Mode 2: backend mode — read service URLs from .env
+    if os.environ.get("ADVERTISE_BACKEND", "").lower() in ("true", "1", "yes"):
+        _add("chronicle-backend", 8000)
+
+        for env_var, (svc_name, svc_port) in _BACKEND_SERVICE_MAP.items():
+            url = os.environ.get(env_var, "")
+            if url and "host.docker.internal" in url:
+                _add(svc_name, svc_port)
+
+    return services
+
+
 def main():
     global shutdown
 
-    service_name = os.environ.get("EDGE_SERVICE_NAME")
-    service_port = os.environ.get("EDGE_SERVICE_PORT")
-
-    if not service_name or not service_port:
-        logger.error("EDGE_SERVICE_NAME and EDGE_SERVICE_PORT must be set")
+    services = _collect_services()
+    if not services:
+        logger.error(
+            "Nothing to advertise. Set ADVERTISE=name:port and/or ADVERTISE_BACKEND=true"
+        )
         sys.exit(1)
 
-    port = int(service_port)
     hostname = socket.gethostname()
 
     signal.signal(signal.SIGTERM, _handle_signal)
@@ -55,14 +110,17 @@ def main():
     logger.info("Starting minidisc registry...")
     registry = minidisc.start_registry()
 
-    labels = {"type": "edge", "host": hostname}
-    registry.advertise_service(port, service_name, labels)
-    logger.info("Advertising %s on port %d (labels: %s)", service_name, port, labels)
+    labels = {"type": "discovery-agent", "host": hostname}
+    for name, port in services:
+        registry.advertise_service(port, name, labels)
+        logger.info("Advertising %s on port %d", name, port)
+
+    logger.info("Discovery agent running — %d service(s) advertised", len(services))
 
     while not shutdown:
         time.sleep(60)
 
-    logger.info("Edge agent stopped")
+    logger.info("Discovery agent stopped")
 
 
 if __name__ == "__main__":

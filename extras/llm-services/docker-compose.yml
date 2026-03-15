@@ -48,11 +48,9 @@ services:
   edge-agent:
     build:
       context: ../../edge
+    network_mode: host
     environment:
-      - EDGE_SERVICE_NAME=chronicle-llm
-      - EDGE_SERVICE_PORT=8083
-    volumes:
-      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock:ro
+      - ADVERTISE=chronicle-llm:8083
     restart: unless-stopped
     profiles:
       - edge

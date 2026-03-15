@@ -29,11 +29,9 @@ services:
   edge-agent:
     build:
       context: ../../edge
+    network_mode: host
     environment:
-      - EDGE_SERVICE_NAME=chronicle-relay
-      - EDGE_SERVICE_PORT=8989
-    volumes:
-      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock:ro
+      - ADVERTISE=chronicle-relay:8989
     restart: unless-stopped
     profiles:
       - edge

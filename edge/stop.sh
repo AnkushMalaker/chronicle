@@ -14,20 +14,23 @@ fi
 
 SERVICE_NAME="$1"
 
-# Parse compose_path from registry
-COMPOSE_PATH=$(cd "$CHRONICLE_HOME" && uv run --with-requirements setup-requirements.txt python3 -c "
-import yaml, sys
-with open('edge/services.yml') as f:
-    data = yaml.safe_load(f)
-svc = data.get('services', {}).get('$SERVICE_NAME')
-if not svc:
-    print('NOT_FOUND', file=sys.stderr); sys.exit(1)
-print(svc['compose_path'])
-" 2>/dev/null || echo "")
+declare -A SERVICE_PATHS=(
+    [speaker-recognition]=extras/speaker-recognition
+    [asr-services]=extras/asr-services
+    [tts]=extras/tts
+    [llm-services]=extras/llm-services
+    [havpe-relay]=extras/havpe-relay
+)
 
-SERVICE_DIR="$CHRONICLE_HOME/$COMPOSE_PATH"
+if [[ -z "${SERVICE_PATHS[$SERVICE_NAME]+_}" ]]; then
+    echo "Unknown service: $SERVICE_NAME"
+    echo "Available: ${!SERVICE_PATHS[*]}"
+    exit 1
+fi
 
-if [[ -z "$COMPOSE_PATH" || ! -d "$SERVICE_DIR" ]]; then
+SERVICE_DIR="$CHRONICLE_HOME/${SERVICE_PATHS[$SERVICE_NAME]}"
+
+if [[ ! -d "$SERVICE_DIR" ]]; then
     echo "Service not found or not installed: $SERVICE_NAME"
     exit 1
 fi

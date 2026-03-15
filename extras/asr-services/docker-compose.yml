@@ -352,11 +352,9 @@ services:
   edge-agent:
     build:
       context: ../../edge
+    network_mode: host
     environment:
-      - EDGE_SERVICE_NAME=chronicle-asr
-      - EDGE_SERVICE_PORT=8767
-    volumes:
-      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock:ro
+      - ADVERTISE=chronicle-asr:8767
     restart: unless-stopped
     profiles:
       - edge
