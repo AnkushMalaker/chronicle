@@ -105,7 +105,10 @@ TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "unknown")
 ok "Prerequisites OK (Tailscale IP: $TAILSCALE_IP)"
 
 # ── Clone / update repo ──────────────────────────────────────────────
-if [[ -d "$CHRONICLE_HOME/.git" ]]; then
+if [[ -f "$CHRONICLE_HOME/edge/services.yml" ]]; then
+    # Already inside a working repo — skip git entirely
+    info "Using existing repo at $CHRONICLE_HOME"
+elif [[ -d "$CHRONICLE_HOME/.git" ]]; then
     info "Updating existing clone at $CHRONICLE_HOME..."
     cd "$CHRONICLE_HOME"
     git fetch origin "$BRANCH"
@@ -114,7 +117,6 @@ if [[ -d "$CHRONICLE_HOME/.git" ]]; then
     if [[ "$current_branch" != "$BRANCH" ]]; then
         git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH" "origin/$BRANCH"
     fi
-    # Pull with rebase, but don't fail if there are local changes
     git pull --rebase --autostash origin "$BRANCH" || {
         warn "Could not auto-update (you may have local changes). Continuing with current state."
     }
