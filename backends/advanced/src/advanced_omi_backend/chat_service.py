@@ -21,6 +21,13 @@ from motor.motor_asyncio import AsyncIOMotorCollection
 from advanced_omi_backend.database import get_database
 from advanced_omi_backend.llm_client import get_llm_client
 from advanced_omi_backend.model_registry import get_models_registry
+from advanced_omi_backend.observability.otel_setup import (
+    get_tracer,
+    is_otel_enabled,
+    set_otel_session,
+    set_trace_io,
+)
+from advanced_omi_backend.prompt_registry import get_prompt_registry
 from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.services.memory.base import MemoryEntry
 from advanced_omi_backend.services.obsidian_service import (
@@ -164,8 +171,6 @@ class ChatService:
 
         # Fallback to prompt registry
         try:
-            from advanced_omi_backend.prompt_registry import get_prompt_registry
-
             registry = get_prompt_registry()
             prompt = await registry.get_prompt("chat.system")
             logger.info("Using chat system prompt from prompt registry")
@@ -426,13 +431,6 @@ If no relevant memories are available, respond normally based on the conversatio
         include_obsidian_memory: bool = False,
     ) -> AsyncGenerator[Dict, None]:
         """Generate streaming response with memory context."""
-        from advanced_omi_backend.observability.otel_setup import (
-            get_tracer,
-            is_otel_enabled,
-            set_otel_session,
-            set_trace_io,
-        )
-
         set_otel_session(session_id)
 
         tracer = get_tracer() if is_otel_enabled() else None

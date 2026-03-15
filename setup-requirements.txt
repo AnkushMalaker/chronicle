@@ -5,3 +5,4 @@ requests>=2.31.0
 pyyaml>=6.0.0
 ruamel-yaml>=0.18.0
 omegaconf>=2.3.0
+minidisc-python>=0.1.0
