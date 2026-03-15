@@ -9,9 +9,19 @@
 set -euo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────
-CHRONICLE_HOME="${CHRONICLE_HOME:-$HOME/.chronicle}"
 BRANCH="main"
 REPO_URL="https://github.com/SimpleOpenSoftware/chronicle.git"
+
+# Resolve CHRONICLE_HOME: explicit env var > detect existing clone > default
+if [[ -n "${CHRONICLE_HOME:-}" ]]; then
+    : # User explicitly set it
+elif [[ -d "$HOME/chronicle/.git" ]]; then
+    CHRONICLE_HOME="$HOME/chronicle"
+elif [[ -d "$PWD/.git" && -f "$PWD/edge/services.yml" ]]; then
+    CHRONICLE_HOME="$PWD"
+else
+    CHRONICLE_HOME="$HOME/chronicle"
+fi
 
 # ── Colours ───────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -98,9 +108,16 @@ ok "Prerequisites OK (Tailscale IP: $TAILSCALE_IP)"
 if [[ -d "$CHRONICLE_HOME/.git" ]]; then
     info "Updating existing clone at $CHRONICLE_HOME..."
     cd "$CHRONICLE_HOME"
-    git fetch origin "$BRANCH" --depth 1
-    git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH" "origin/$BRANCH"
-    git reset --hard "origin/$BRANCH"
+    git fetch origin "$BRANCH"
+    # Switch to branch if not already on it
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    if [[ "$current_branch" != "$BRANCH" ]]; then
+        git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH" "origin/$BRANCH"
+    fi
+    # Pull with rebase, but don't fail if there are local changes
+    git pull --rebase --autostash origin "$BRANCH" || {
+        warn "Could not auto-update (you may have local changes). Continuing with current state."
+    }
 else
     info "Cloning Chronicle (branch: $BRANCH) to $CHRONICLE_HOME..."
     git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$CHRONICLE_HOME"

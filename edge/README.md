@@ -38,13 +38,13 @@ curl -sSL https://raw.githubusercontent.com/SimpleOpenSoftware/chronicle/main/ed
 curl -sSL https://raw.githubusercontent.com/SimpleOpenSoftware/chronicle/feat/tailscale-discovery/edge/install.sh \
   | bash -s -- havpe-relay --branch feat/tailscale-discovery
 
-# Custom install directory (default: ~/.chronicle)
+# Custom install directory (default: ~/chronicle)
 CHRONICLE_HOME=~/my-services curl -sSL ... | bash -s -- havpe-relay
 ```
 
 ## What Happens
 
-1. Clones the repo to `~/.chronicle/` (or `$CHRONICLE_HOME`)
+1. Clones the repo to `~/chronicle/` (or `$CHRONICLE_HOME`)
 2. Runs the service's interactive config wizard (API keys, credentials, etc.)
 3. Starts the service + an edge-agent sidecar container
 4. The edge-agent advertises the service on your Tailnet via minidisc
@@ -53,7 +53,7 @@ CHRONICLE_HOME=~/my-services curl -sSL ... | bash -s -- havpe-relay
 ## Manage Edge Services
 
 ```bash
-cd ~/.chronicle/extras/<service-dir>
+cd ~/chronicle/extras/<service-dir>
 
 # Status
 docker compose --profile edge ps

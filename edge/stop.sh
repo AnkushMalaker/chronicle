@@ -4,7 +4,7 @@
 # Usage: ./stop.sh <service-name>
 set -euo pipefail
 
-CHRONICLE_HOME="${CHRONICLE_HOME:-$HOME/.chronicle}"
+CHRONICLE_HOME="${CHRONICLE_HOME:-$HOME/chronicle}"
 
 if [[ $# -lt 1 ]]; then
     echo "Usage: $0 <service-name>"

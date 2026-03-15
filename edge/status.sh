@@ -5,7 +5,7 @@
 #   If no service name given, shows Tailscale IP only.
 set -euo pipefail
 
-CHRONICLE_HOME="${CHRONICLE_HOME:-$HOME/.chronicle}"
+CHRONICLE_HOME="${CHRONICLE_HOME:-$HOME/chronicle}"
 
 echo "=== Chronicle Edge Status ==="
 echo ""
