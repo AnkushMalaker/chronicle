@@ -15,13 +15,22 @@ import asyncio
 import json
 import logging
 import os
+import traceback
+import uuid
+import wave
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import aiohttp
 from aiohttp import ClientConnectorError
 
+from advanced_omi_backend.config import get_diarization_settings
 from advanced_omi_backend.model_registry import get_models_registry
+from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segment
+from advanced_omi_backend.utils.audio_extraction import extract_audio_for_results
+from advanced_omi_backend.utils.audio_utils import pcm_to_wav_bytes
+from advanced_omi_backend.utils.segment_utils import is_non_speech
 
 logger = logging.getLogger(__name__)
 
@@ -76,12 +85,23 @@ class SpeakerRecognitionClient:
             )
             return
 
-        # Enabled - determine URL (priority: param > config > env var)
+        # Enabled - determine URL (priority: param > config > env var > minidisc)
         self.service_url = (
             service_url
             or speaker_config.get("service_url")
             or os.getenv("SPEAKER_SERVICE_URL")
         )
+
+        if not self.service_url:
+            try:
+                from discovery import CHRONICLE_SPEAKER, resolve_service_url
+
+                self.service_url = resolve_service_url(
+                    None, CHRONICLE_SPEAKER, default=None
+                )
+            except ImportError:
+                pass
+
         self.enabled = bool(self.service_url)
 
         if self.enabled:
@@ -157,8 +177,6 @@ class SpeakerRecognitionClient:
             return {"segments": []}
 
         # Fetch conversation to get audio duration for timeout calculation
-        from advanced_omi_backend.models.conversation import Conversation
-
         conversation = await Conversation.find_one(
             Conversation.conversation_id == conversation_id
         )
@@ -173,8 +191,6 @@ class SpeakerRecognitionClient:
             )
 
             # Read diarization source from config system
-            from advanced_omi_backend.config import get_diarization_settings
-
             config = get_diarization_settings()
             diarization_source = config.get("diarization_source", "pyannote")
 
@@ -432,17 +448,10 @@ class SpeakerRecognitionClient:
         if not self.enabled:
             return {"segments": []}
 
-        from advanced_omi_backend.config import get_diarization_settings
-        from advanced_omi_backend.utils.audio_chunk_utils import (
-            reconstruct_audio_segment,
-        )
-
         config = get_diarization_settings()
         similarity_threshold = config.get("similarity_threshold", 0.45)
 
         MAX_SAMPLES_PER_LABEL = 3
-
-        from advanced_omi_backend.utils.segment_utils import is_non_speech
 
         def _is_non_speech(seg: Dict) -> bool:
             return is_non_speech(
@@ -633,10 +642,6 @@ class SpeakerRecognitionClient:
         Returns:
             Dict with 'segments' list matching diarize_identify_match() format
         """
-        from advanced_omi_backend.utils.audio_chunk_utils import (
-            reconstruct_audio_segment,
-        )
-
         logger.info(
             f"🎤 Per-segment identification: {len(speech_segments)} speech segments "
             f"(min_duration={min_segment_duration}s)"
@@ -849,8 +854,6 @@ class SpeakerRecognitionClient:
                 )
 
                 # Get current diarization settings from config
-                from advanced_omi_backend.config import get_diarization_settings
-
                 diarization_settings = get_diarization_settings()
 
                 # Add all diarization parameters for the diarize-and-identify endpoint
@@ -947,8 +950,6 @@ class SpeakerRecognitionClient:
             logger.error(
                 f"🎤 [DIARIZE] ❌ Error during speaker diarization and identification: {e}"
             )
-            import traceback
-
             logger.debug(traceback.format_exc())
             return {"error": "unknown_error", "message": str(e), "segments": []}
 
@@ -979,8 +980,6 @@ class SpeakerRecognitionClient:
             logger.info(f"Identifying {len(unique_speakers)} speakers in {audio_path}")
 
             # Get audio duration for timeout calculation
-            import wave
-
             try:
                 with wave.open(audio_path, "rb") as wav_file:
                     frame_count = wav_file.getnframes()
@@ -1007,8 +1006,6 @@ class SpeakerRecognitionClient:
                         content_type="audio/wav",
                     )
                     # Get current diarization settings
-                    from advanced_omi_backend.config import get_diarization_settings
-
                     _diarization_settings = get_diarization_settings()
 
                     # Add all diarization parameters for the diarize-and-identify endpoint
@@ -1239,8 +1236,6 @@ class SpeakerRecognitionClient:
             return {"error": "speaker_recognition_disabled"}
 
         try:
-            import uuid
-
             # Generate speaker ID: user_{user_id}_speaker_{random_hex}
             speaker_id = f"user_{user_id}_speaker_{uuid.uuid4().hex[:12]}"
 
@@ -1356,10 +1351,6 @@ class SpeakerRecognitionClient:
             - enrolled_present: True if enrolled speaker detected, False otherwise
             - speaker_result: Full speaker recognition result dict with segments
         """
-        from advanced_omi_backend.utils.audio_extraction import (
-            extract_audio_for_results,
-        )
-
         logger.info(
             f"🎤 [SPEAKER CHECK] Starting speaker check for session {session_id}"
         )
@@ -1407,7 +1398,6 @@ class SpeakerRecognitionClient:
         )
 
         # Convert PCM to WAV in memory (no disk I/O!)
-        from advanced_omi_backend.utils.audio_utils import pcm_to_wav_bytes
 
         logger.info(f"🎤 [SPEAKER CHECK] Converting PCM to WAV in memory...")
         wav_data = pcm_to_wav_bytes(

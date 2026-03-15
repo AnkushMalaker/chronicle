@@ -22,7 +22,12 @@ from advanced_omi_backend.controllers.queue_controller import (
 )
 from advanced_omi_backend.controllers.session_controller import mark_session_complete
 from advanced_omi_backend.models.job import async_job
-from advanced_omi_backend.observability.otel_setup import set_otel_session
+from advanced_omi_backend.observability.otel_setup import (
+    set_otel_session,
+    set_span_attrs,
+    set_trace_io,
+    traced_job,
+)
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.services.plugin_service import (
     dispatch_plugin_event,
@@ -1153,6 +1158,7 @@ async def open_conversation_job(
 
 
 @async_job(redis=True, beanie=True)
+@traced_job("title_summary", pipeline_stage="title_summary", gen_ai_operation="chat")
 async def generate_title_summary_job(
     conversation_id: str, *, redis_client=None
 ) -> Dict[str, Any]:
@@ -1193,6 +1199,8 @@ async def generate_title_summary_job(
         logger.error(f"Conversation {conversation_id} not found")
         return {"success": False, "error": "Conversation not found"}
 
+    set_span_attrs(user_id=str(conversation.user_id))
+
     # Get transcript and segments (properties return data from active transcript version)
     transcript_text = conversation.transcript or ""
     segments = conversation.segments or []
@@ -1206,6 +1214,8 @@ async def generate_title_summary_job(
             "error": "No transcript or segments available",
             "conversation_id": conversation_id,
         }
+
+    set_trace_io(input={"transcript": transcript_text})
 
     # Generate title, short summary, and detailed summary using unified utilities
     try:
@@ -1318,7 +1328,7 @@ async def generate_title_summary_job(
         f"✅ Title/summary generation completed for {conversation_id} in {processing_time:.2f}s"
     )
 
-    return {
+    result = {
         "success": True,
         "conversation_id": conversation_id,
         "title": conversation.title,
@@ -1326,6 +1336,8 @@ async def generate_title_summary_job(
         "detailed_summary": conversation.detailed_summary,
         "processing_time_seconds": processing_time,
     }
+    set_trace_io(output=result)
+    return result
 
 
 @async_job(redis=True, beanie=True)

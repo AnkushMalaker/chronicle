@@ -548,7 +548,13 @@ class ChronicleSetup:
             self.console.print(
                 f"[green]✅[/green] LLM provider: {provider} (configured via wizard)"
             )
-            choice = {"openai": "1", "ollama": "2", "none": "3"}.get(provider, "1")
+            choice = {
+                "openai": "1",
+                "ollama": "2",
+                "none": "4",
+                "llamacpp": "5",
+                "custom": "3",
+            }.get(provider, "1")
         else:
             # Standalone init.py run — read existing config as default
             existing_choice = "1"
@@ -558,6 +564,8 @@ class ChronicleSetup:
                 existing_choice = "2"
             elif existing_llm == "openai-llm":
                 existing_choice = "1"
+            elif existing_llm == "llamacpp-llm":
+                existing_choice = "5"
 
             self.print_section("LLM Provider Configuration")
             self.console.print(
@@ -568,7 +576,9 @@ class ChronicleSetup:
             choices = {
                 "1": "OpenAI (GPT-4, GPT-3.5 - requires API key)",
                 "2": "Ollama (local models - runs locally)",
-                "3": "Skip (no memory extraction)",
+                "3": "OpenAI-Compatible custom endpoint",
+                "4": "Skip (no memory extraction)",
+                "5": "llama.cpp (Chronicle-managed, local GGUF models)",
             }
 
             choice = self.prompt_choice(
@@ -746,6 +756,25 @@ class ChronicleSetup:
             )
             # Disable memory extraction in config.yml
             self.config_manager.update_memory_config({"extraction": {"enabled": False}})
+
+        elif choice == "5":
+            self.console.print(
+                "[blue][INFO][/blue] llama.cpp selected (Chronicle-managed)"
+            )
+            # Update config.yml to use llama.cpp models
+            self.config_manager.update_config_defaults(
+                {"llm": "llamacpp-llm", "embedding": "llamacpp-embed"}
+            )
+            self.console.print(
+                "[green][SUCCESS][/green] llama.cpp configured in config.yml"
+            )
+            self.console.print("[blue][INFO][/blue] Set defaults.llm: llamacpp-llm")
+            self.console.print(
+                "[blue][INFO][/blue] Set defaults.embedding: llamacpp-embed"
+            )
+            self.console.print(
+                "[blue][INFO][/blue] LLM services will be configured via extras/llm-services"
+            )
 
     def setup_memory(self):
         """Configure memory provider - updates config.yml"""
@@ -1553,7 +1582,7 @@ def main():
     )
     parser.add_argument(
         "--llm-provider",
-        choices=["openai", "ollama", "none"],
+        choices=["openai", "ollama", "llamacpp", "custom", "none"],
         help="LLM provider for memory extraction (default: prompt user)",
     )
     parser.add_argument(

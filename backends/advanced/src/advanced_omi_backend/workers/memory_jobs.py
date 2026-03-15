@@ -23,8 +23,10 @@ from advanced_omi_backend.controllers.queue_controller import (
 )
 from advanced_omi_backend.models.job import JobPriority, async_job
 from advanced_omi_backend.observability.otel_setup import (
-    clear_otel_session,
     set_otel_session,
+    set_span_attrs,
+    set_trace_io,
+    traced_job,
 )
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
@@ -114,6 +116,9 @@ def compute_speaker_diff(
 
 
 @async_job(redis=True, beanie=True)
+@traced_job(
+    "memory_extraction", pipeline_stage="memory_extraction", gen_ai_operation="chat"
+)
 async def process_memory_job(
     conversation_id: str, *, redis_client=None
 ) -> Dict[str, Any]:
@@ -164,6 +169,7 @@ async def process_memory_job(
         logger.warning(f"Could not find user {user_id}")
         user_email = ""
 
+    set_span_attrs(user_id=str(user_id), client_id=client_id)
     logger.info(
         f"🔄 Processing memory for conversation {conversation_id}, client={client_id}, user={user_id}"
     )
@@ -210,6 +216,8 @@ async def process_memory_job(
             f"Conversation too short for memory processing: {conversation_id}"
         )
         return {"success": False, "error": "Conversation too short"}
+
+    set_trace_io(input={"transcript": full_conversation})
 
     # Check primary speakers filter (reuse `user` from above — no duplicate DB call)
     if user and user.primary_speakers:
@@ -416,13 +424,15 @@ async def process_memory_job(
             except Exception as e:
                 logger.warning(f"⚠️ Error triggering memory-level plugins: {e}")
 
-            return {
+            result = {
                 "success": True,
                 "memories_created": (
                     len(created_memory_ids) if created_memory_ids else 0
                 ),
                 "processing_time": processing_time,
             }
+            set_trace_io(output=result)
+            return result
         else:
             # Memory extraction failed
             return {"success": False, "error": "Memory extraction returned failure"}

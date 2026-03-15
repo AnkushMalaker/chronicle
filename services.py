@@ -40,30 +40,55 @@ SERVICES = {
         "compose_file": "docker-compose.yml",
         "description": "LangFuse Observability & Prompt Management",
         "ports": ["3002"],
+        "health_endpoints": [
+            ("langfuse", None, "3002", "/api/public/health"),
+        ],
     },
     "backend": {
         "path": "backends/advanced",
         "compose_file": "docker-compose.yml",
         "description": "Advanced Backend + WebUI",
         "ports": ["8000", "5173"],
+        "health_endpoints": [
+            ("backend", "BACKEND_PUBLIC_PORT", "8000", "/readiness"),
+        ],
     },
     "speaker-recognition": {
         "path": "extras/speaker-recognition",
         "compose_file": "docker-compose.yml",
         "description": "Speaker Recognition Service",
         "ports": ["8085", "5174/8444"],
+        "health_endpoints": [
+            ("speaker", "SPEAKER_SERVICE_PORT", "8085", "/health"),
+        ],
     },
     "asr-services": {
         "path": "extras/asr-services",
         "compose_file": "docker-compose.yml",
         "description": "Parakeet ASR Service",
         "ports": ["8767"],
+        "health_endpoints": [
+            ("asr", "ASR_PORT", "8767", "/health"),
+        ],
     },
     "openmemory-mcp": {
         "path": "extras/openmemory-mcp",
         "compose_file": "docker-compose.yml",
         "description": "OpenMemory MCP Server",
         "ports": ["8765"],
+        "health_endpoints": [
+            ("openmemory", None, "8765", "/docs"),
+        ],
+    },
+    "llm-services": {
+        "path": "extras/llm-services",
+        "compose_file": "docker-compose.yml",
+        "description": "Local LLM via llama.cpp (chat + embeddings)",
+        "ports": ["8083", "8082"],
+        "health_endpoints": [
+            ("chat", "LLM_PORT", "8083", "/health"),
+            ("embeddings", "EMBED_PORT", "8082", "/health"),
+        ],
     },
 }
 
@@ -154,6 +179,54 @@ def check_service_configured(service_name):
         return (service_path / ".env").exists()
     else:
         return (service_path / ".env").exists()
+
+
+def check_service_health(service_name):
+    """Check runtime health of a service by hitting its health endpoints.
+
+    Returns (status, detail) where status is one of:
+        "healthy"  — all endpoints responding with < 400
+        "partial"  — some endpoints down (detail says which)
+        "unhealthy" — responding but returning errors
+        "stopped"  — not reachable at all
+    """
+    import requests
+
+    service = SERVICES[service_name]
+    endpoints = service.get("health_endpoints", [])
+    if not endpoints:
+        return ("stopped", "no endpoints defined")
+
+    env_path = Path(service["path"]) / ".env"
+    env_values = dotenv_values(env_path) if env_path.exists() else {}
+
+    results = []  # list of (label, ok: bool)
+    any_unhealthy = False
+
+    for label, port_env, default_port, path in endpoints:
+        port = env_values.get(port_env, default_port) if port_env else default_port
+        url = f"http://localhost:{port}{path}"
+        try:
+            resp = requests.get(url, timeout=2)
+            if resp.status_code < 400:
+                results.append((label, True))
+            else:
+                results.append((label, False))
+                any_unhealthy = True
+        except (requests.ConnectionError, requests.Timeout):
+            results.append((label, False))
+
+    up = [r for r in results if r[1]]
+    down = [r for r in results if not r[1]]
+
+    if len(up) == len(results):
+        return ("healthy", "")
+    if len(down) == len(results):
+        if any_unhealthy:
+            return ("unhealthy", "")
+        return ("stopped", "")
+    down_labels = ", ".join(r[0] for r in down)
+    return ("partial", f"{down_labels} down")
 
 
 def run_compose_command(service_name, command, build=False, force_recreate=False):
@@ -599,13 +672,28 @@ def show_status():
     table = Table()
     table.add_column("Service", style="cyan")
     table.add_column("Configured", justify="center")
+    table.add_column("Running", justify="center")
     table.add_column("Description", style="dim")
     table.add_column("Ports", style="green")
 
     for service_name, service_info in SERVICES.items():
         configured = "✅" if check_service_configured(service_name) else "❌"
         ports = ", ".join(service_info["ports"])
-        table.add_row(service_name, configured, service_info["description"], ports)
+
+        # Check runtime health
+        status, detail = check_service_health(service_name)
+        if status == "healthy":
+            running = "[green]✅ healthy[/green]"
+        elif status == "partial":
+            running = f"[yellow]⚠ partial[/yellow] [dim]({detail})[/dim]"
+        elif status == "unhealthy":
+            running = "[red]⚠ unhealthy[/red]"
+        else:
+            running = "[dim]— stopped[/dim]"
+
+        table.add_row(
+            service_name, configured, running, service_info["description"], ports
+        )
 
     console.print(table)
 

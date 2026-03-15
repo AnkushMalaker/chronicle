@@ -31,6 +31,7 @@ from advanced_omi_backend.models.job import async_job
 from advanced_omi_backend.observability.otel_setup import (
     set_otel_session,
     set_span_attrs,
+    set_trace_io,
     traced_job,
 )
 from advanced_omi_backend.plugins.events import PluginEvent
@@ -585,7 +586,7 @@ async def process_transcription_result(
         processing_time=processing_time,
     )
 
-    return {
+    result = {
         "success": True,
         "conversation_id": conversation_id,
         "version_id": version_id,
@@ -599,6 +600,15 @@ async def process_transcription_result(
         "processing_time_seconds": processing_time,
         "trigger": trigger,
     }
+    set_trace_io(
+        output={
+            "transcript": transcript_text,
+            "word_count": len(words),
+            "segment_count": len(speaker_segments),
+            "provider": provider_name,
+        }
+    )
+    return result
 
 
 @async_job(redis=True, beanie=True)
@@ -648,27 +658,32 @@ async def transcribe_full_audio_job(
     user_id = str(conversation.user_id) if conversation.user_id else None
     client_id = conversation.client_id if hasattr(conversation, "client_id") else None
     set_span_attrs(user_id=user_id, client_id=client_id)
+    set_trace_io(
+        input={
+            "conversation_id": conversation_id,
+            "version_id": version_id,
+            "trigger": trigger,
+        }
+    )
 
     # Build ASR context
     context_info = None
     try:
-        from advanced_omi_backend.services.transcription.context import get_asr_context
+        from advanced_omi_backend.services.transcription.context import (
+            gather_transcription_context,
+        )
 
-        context_info = await get_asr_context(user_id=user_id)
+        asr_ctx = await gather_transcription_context(user_id=user_id)
+        context_info = asr_ctx.combined
+
+        # Log ASR context as span attributes
+        set_span_attrs(
+            asr_hot_words=asr_ctx.hot_words[:200] if asr_ctx.hot_words else "",
+            asr_user_jargon=asr_ctx.user_jargon[:200] if asr_ctx.user_jargon else "",
+            asr_context_length=len(context_info),
+        )
     except Exception as e:
         logger.warning(f"Failed to build ASR context: {e}")
-
-    # Log ASR context as span attributes
-    if context_info:
-        set_span_attrs(
-            asr_hot_words=(
-                context_info.hot_words[:200] if context_info.hot_words else ""
-            ),
-            asr_user_jargon=(
-                context_info.user_jargon[:200] if context_info.user_jargon else ""
-            ),
-            asr_context_length=len(context_info.combined),
-        )
 
     # Progress callback for RQ job metadata.
     # RQ job_timeout=-1 disables the parent-side kill, so the job runs as long

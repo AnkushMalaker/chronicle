@@ -1,0 +1,6 @@
+# Model files (large GGUF files)
+models/*.gguf
+
+# Environment file (contains config)
+.env
+.env.backup.*

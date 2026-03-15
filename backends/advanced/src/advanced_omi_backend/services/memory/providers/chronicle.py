@@ -72,6 +72,7 @@ class MemoryService(MemoryServiceBase):
             if self.config.llm_provider in [
                 LLMProviderEnum.OPENAI,
                 LLMProviderEnum.OLLAMA,
+                LLMProviderEnum.LLAMACPP,
             ]:
                 self.llm_provider = OpenAIProvider(self.config.llm_config)
             else:
