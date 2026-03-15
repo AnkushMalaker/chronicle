@@ -33,6 +33,14 @@ class MemoryConfigRequest(BaseModel):
     config_yaml: str
 
 
+@router.get("/system/network")
+async def get_network_discovery(
+    request: Request, current_user: User = Depends(current_superuser)
+):
+    """Get Tailscale and minidisc service discovery status. Admin only."""
+    return await system_controller.get_network_discovery(request.app)
+
+
 @router.get("/config/diagnostics")
 async def get_config_diagnostics(current_user: User = Depends(current_superuser)):
     """Get configuration diagnostics including errors, warnings, and status. Admin only."""

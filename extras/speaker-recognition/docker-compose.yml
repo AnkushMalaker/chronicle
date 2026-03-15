@@ -137,6 +137,19 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Edge agent sidecar — advertises this service on the Tailnet
+  edge-agent:
+    build:
+      context: ../../edge
+    environment:
+      - EDGE_SERVICE_NAME=chronicle-speaker
+      - EDGE_SERVICE_PORT=8085
+    volumes:
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock:ro
+    restart: unless-stopped
+    profiles:
+      - edge
+
 # Shared network for cross-project communication
 networks:
   default:

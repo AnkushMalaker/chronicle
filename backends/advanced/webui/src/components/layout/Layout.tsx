@@ -1,5 +1,5 @@
 import { Link, useLocation, Outlet } from 'react-router-dom'
-import { Music, MessageSquare, MessageCircle, Brain, Users, Upload, Settings, LogOut, Sun, Moon, Shield, Radio, Layers, Puzzle, Zap, Activity } from 'lucide-react'
+import { Music, MessageSquare, MessageCircle, Brain, Users, Upload, Settings, LogOut, Sun, Moon, Shield, Radio, Layers, Puzzle, Zap, Activity, Network } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
 import GlobalRecordingIndicator from './GlobalRecordingIndicator'
@@ -22,6 +22,7 @@ export default function Layout() {
       { path: '/queue', label: 'Queue & Events', icon: Layers },
       { path: '/plugins', label: 'Plugins', icon: Puzzle },
       { path: '/finetuning', label: 'Fine-tuning', icon: Zap },
+      { path: '/network', label: 'Network', icon: Network },
       { path: '/system', label: 'System Status', icon: Activity },
       { path: '/settings', label: 'Settings', icon: Settings },
     ] : []),

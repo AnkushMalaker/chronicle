@@ -42,6 +42,8 @@ services:
       - ./data:/app/data
       - ../../config:/app/config  # Mount entire config directory (includes config.yml, defaults.yml, plugins.yml)
       - ../../plugins:/app/plugins  # External plugins directory
+      - ../../discovery.py:/app/discovery.py:ro  # Service discovery module
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock:ro  # Tailscale socket for minidisc
     environment:
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
@@ -99,6 +101,8 @@ services:
       - ./data:/app/data
       - ../../config:/app/config  # Mount entire config directory (includes config.yml, defaults.yml, plugins.yml)
       - ../../plugins:/app/plugins  # External plugins directory
+      - ../../discovery.py:/app/discovery.py:ro  # Service discovery module
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock:ro  # Tailscale socket for minidisc
     environment:
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}

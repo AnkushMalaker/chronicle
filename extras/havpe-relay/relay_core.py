@@ -33,9 +33,37 @@ class RelayConfig:
 
     @classmethod
     def from_env(cls) -> "RelayConfig":
+        backend_url = os.getenv("BACKEND_URL")
+        backend_ws_url = os.getenv("BACKEND_WS_URL")
+
+        # Try minidisc service discovery when env vars are not set
+        if not backend_url:
+            try:
+                import sys
+                from pathlib import Path
+
+                # discovery.py lives at the repo root (two levels up)
+                _repo_root = str(Path(__file__).resolve().parent.parent.parent)
+                if _repo_root not in sys.path:
+                    sys.path.insert(0, _repo_root)
+
+                from discovery import CHRONICLE_BACKEND, discover_service
+
+                discovered = discover_service(CHRONICLE_BACKEND)
+                if discovered:
+                    backend_url = discovered
+                    backend_ws_url = discovered.replace("http://", "ws://").replace(
+                        "https://", "wss://"
+                    )
+                    logger.info(
+                        "Discovered Chronicle backend via minidisc: %s", discovered
+                    )
+            except ImportError:
+                pass
+
         return cls(
-            backend_url=os.getenv("BACKEND_URL", "http://localhost:8000"),
-            backend_ws_url=os.getenv("BACKEND_WS_URL", "ws://localhost:8000"),
+            backend_url=backend_url or "http://localhost:8000",
+            backend_ws_url=backend_ws_url or "ws://localhost:8000",
             auth_username=os.getenv("AUTH_USERNAME", ""),
             auth_password=os.getenv("AUTH_PASSWORD", ""),
             device_name=os.getenv("DEVICE_NAME", "havpe"),

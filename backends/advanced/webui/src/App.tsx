@@ -23,6 +23,7 @@ const Queue = lazy(() => import('./pages/Queue'))
 const LiveRecord = lazy(() => import('./pages/LiveRecord'))
 const Plugins = lazy(() => import('./pages/Plugins'))
 const Finetuning = lazy(() => import('./pages/Finetuning'))
+const Network = lazy(() => import('./pages/Network'))
 
 
 function PageSkeleton() {
@@ -157,6 +158,13 @@ function App() {
                   <PageErrorBoundary>
                     <Suspense fallback={<PageSkeleton />}>
                       <Finetuning />
+                    </Suspense>
+                  </PageErrorBoundary>
+                } />
+                <Route path="network" element={
+                  <PageErrorBoundary>
+                    <Suspense fallback={<PageSkeleton />}>
+                      <Network />
                     </Suspense>
                   </PageErrorBoundary>
                 } />

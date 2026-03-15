@@ -45,7 +45,7 @@ COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Source layout needs PYTHONPATH
-ENV PYTHONPATH=/app/src
+ENV PYTHONPATH=/app/src:/app
 
 # Copy application code
 COPY . .
@@ -83,7 +83,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements.txt && \
     rm /bin/uv /bin/uvx
 
-ENV PYTHONPATH=/app/src
+ENV PYTHONPATH=/app/src:/app
 
 # Copy application code
 COPY . .

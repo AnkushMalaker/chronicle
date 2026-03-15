@@ -1,0 +1,33 @@
+# Edge service registry
+# Maps CLI service names to deployment metadata for edge node deployment.
+services:
+  speaker-recognition:
+    minidisc_name: chronicle-speaker
+    port: 8085
+    health_path: /health
+    compose_path: extras/speaker-recognition
+    description: Speaker Recognition Service
+  asr-services:
+    minidisc_name: chronicle-asr
+    port: 8767
+    health_path: /health
+    compose_path: extras/asr-services
+    description: ASR Speech-to-Text Service
+  tts:
+    minidisc_name: chronicle-tts
+    port: 8770
+    health_path: /health
+    compose_path: extras/tts
+    description: Text-to-Speech Service
+  llm-services:
+    minidisc_name: chronicle-llm
+    port: 8083
+    health_path: /health
+    compose_path: extras/llm-services
+    description: Local LLM via llama.cpp
+  havpe-relay:
+    minidisc_name: chronicle-relay
+    port: 0
+    health_path: /
+    compose_path: extras/havpe-relay
+    description: HAVPE Audio Relay

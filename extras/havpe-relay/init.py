@@ -91,6 +91,21 @@ class HavpeRelaySetup:
                 f"[blue][INFO][/blue] Backed up existing .env file to {backup_path}"
             )
 
+    def _try_discover_backend(self) -> str | None:
+        """Try to auto-discover the Chronicle backend via minidisc on Tailnet."""
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+            from discovery import CHRONICLE_BACKEND, discover_service
+
+            url = discover_service(CHRONICLE_BACKEND)
+            if url:
+                self.console.print(
+                    f"[green][SUCCESS][/green] Auto-discovered backend on Tailnet: {url}"
+                )
+            return url
+        except Exception:
+            return None
+
     def setup_backend_urls(self):
         """Configure backend URL and WebSocket URL"""
         self.print_section("Backend Connection")
@@ -99,6 +114,11 @@ class HavpeRelaySetup:
 
         default_http = "http://host.docker.internal:8000"
         default_ws = "ws://host.docker.internal:8000"
+
+        # Try auto-discovery via minidisc first
+        discovered = self._try_discover_backend()
+        if discovered:
+            default_http = discovered
 
         # Check CLI args first
         if hasattr(self.args, "backend_url") and self.args.backend_url:

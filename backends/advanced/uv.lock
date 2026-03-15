@@ -27,6 +27,7 @@ dependencies = [
     { name = "langchain-neo4j" },
     { name = "langfuse" },
     { name = "mem0ai" },
+    { name = "minidisc-python" },
     { name = "motor" },
     { name = "neo4j" },
     { name = "ollama" },
@@ -99,6 +100,7 @@ requires-dist = [
     { name = "langchain-neo4j" },
     { name = "langfuse", specifier = ">=4.0.0" },
     { name = "mem0ai", git = "https://github.com/AnkushMalaker/mem0.git?rev=main" },
+    { name = "minidisc-python", specifier = ">=0.1.0" },
     { name = "motor", specifier = ">=3.7.1" },
     { name = "neo4j", specifier = ">=5.0.0,<6.0.0" },
     { name = "ollama", specifier = ">=0.4.8" },
@@ -2193,6 +2195,18 @@ dependencies = [
     { name = "pytz" },
     { name = "qdrant-client" },
     { name = "sqlalchemy" },
+]
+
+[[package]]
+name = "minidisc-python"
+version = "0.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0a/f0/19ed522aecb5da6921710948e48cdf564b076690413092c0236a417bca67/minidisc_python-0.1.1.tar.gz", hash = "sha256:f0edb7279179e0b6fa15d2a1c0261dbf957345bef44df23d340a49553a23c102", size = 6758, upload_time = "2025-04-25T11:35:24.938Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1a/3b/9bf00d28c5baf64556a96c71c82f3094b3b3bca2a6ece60957446328962a/minidisc_python-0.1.1-py3-none-any.whl", hash = "sha256:634ca246e74944f87637a38c0764ba93829f4c516ece575e8ad7219a0f600a9e", size = 6022, upload_time = "2025-04-25T11:35:23.497Z" },
 ]
 
 [[package]]

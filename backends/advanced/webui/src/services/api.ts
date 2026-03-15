@@ -375,6 +375,9 @@ export const systemApi = {
   testLLMModel: (modelName: string | null) =>
     api.post('/api/admin/llm-operations/test', { model_name: modelName }),
 
+  // Network discovery
+  getNetworkDiscovery: () => api.get('/api/system/network'),
+
   // System restart operations
   restartWorkers: () => api.post('/api/admin/system/restart-workers'),
   restartBackend: () => api.post('/api/admin/system/restart-backend'),

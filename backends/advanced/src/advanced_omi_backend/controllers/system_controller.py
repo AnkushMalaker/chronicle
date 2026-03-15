@@ -36,6 +36,102 @@ from advanced_omi_backend.models.user import User
 logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
 
+
+async def get_network_discovery(app):
+    """Return Tailscale status and discovered minidisc services.
+
+    The *app* parameter is the FastAPI application instance, used to read
+    ``app.state.minidisc_registry`` (set during startup in app_factory).
+    """
+    import asyncio as _asyncio
+
+    result = {
+        "tailscale_available": False,
+        "advertising": [],
+        "discovered_services": [],
+    }
+
+    try:
+        from discovery import (
+            CHRONICLE_ASR,
+            CHRONICLE_BACKEND,
+            CHRONICLE_OPENMEMORY,
+            CHRONICLE_SPEAKER,
+            is_tailscale_available,
+            list_all_services,
+        )
+    except ImportError:
+        result["error"] = "discovery module not available"
+        return result
+
+    result["tailscale_available"] = is_tailscale_available()
+
+    # Report what this node is *actually* advertising via the minidisc
+    # registry that was initialised at startup (app_factory Phase 2).
+    registry = getattr(app.state, "minidisc_registry", None)
+    if registry is not None:
+        # The backend always advertises itself when the registry exists.
+        result["advertising"].append({"name": CHRONICLE_BACKEND, "port": 8000})
+
+        # Optional co-located services — app_factory only advertises them
+        # when the env-var URL points at host.docker.internal, so we
+        # mirror that same check here.
+        speaker_url = os.environ.get("SPEAKER_SERVICE_URL", "")
+        if speaker_url and "host.docker.internal" in speaker_url:
+            result["advertising"].append({"name": CHRONICLE_SPEAKER, "port": 8085})
+
+        asr_url = os.environ.get("PARAKEET_ASR_URL", "")
+        if asr_url and "host.docker.internal" in asr_url:
+            result["advertising"].append({"name": CHRONICLE_ASR, "port": 8767})
+
+        openmemory_url = os.environ.get("OPENMEMORY_MCP_URL", "")
+        if openmemory_url and "host.docker.internal" in openmemory_url:
+            result["advertising"].append({"name": CHRONICLE_OPENMEMORY, "port": 8765})
+
+    if not result["tailscale_available"]:
+        return result
+
+    # Discover all chronicle-* services on the Tailnet via list_all_services()
+    loop = _asyncio.get_running_loop()
+    all_services = await loop.run_in_executor(None, list_all_services)
+
+    async def _health_check(svc: dict):
+        name = svc["name"]
+        address = svc.get("address", "")
+        port = svc.get("port", 0)
+        labels = svc.get("labels", {})
+        host = labels.get("host", address)
+
+        url = f"http://{address}:{port}" if address and port else None
+        reachable = False
+        if url:
+            try:
+                import httpx
+
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    resp = await client.get(f"{url}/health")
+                    reachable = resp.status_code < 500
+            except Exception:
+                pass
+        return {
+            "name": name,
+            "url": url,
+            "reachable": reachable,
+            "labels": labels,
+            "host": host,
+        }
+
+    if all_services:
+        discovered = await _asyncio.gather(
+            *[_health_check(svc) for svc in all_services]
+        )
+        result["discovered_services"] = list(discovered)
+    else:
+        result["discovered_services"] = []
+
+    return result
+
+
 _yaml = YAML()
 _yaml.preserve_quotes = True
 

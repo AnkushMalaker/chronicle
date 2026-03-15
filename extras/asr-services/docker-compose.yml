@@ -347,3 +347,16 @@ services:
       - MIN_AUDIO_FOR_CHUNKING=${MIN_AUDIO_FOR_CHUNKING:-60.0}
       - CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD:-0.8}
     restart: unless-stopped
+
+  # Edge agent sidecar — advertises this service on the Tailnet
+  edge-agent:
+    build:
+      context: ../../edge
+    environment:
+      - EDGE_SERVICE_NAME=chronicle-asr
+      - EDGE_SERVICE_PORT=8767
+    volumes:
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock:ro
+    restart: unless-stopped
+    profiles:
+      - edge

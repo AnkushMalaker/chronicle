@@ -24,3 +24,16 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./audio_chunks:/app/audio_chunks
+
+  # Edge agent sidecar — advertises this service on the Tailnet
+  edge-agent:
+    build:
+      context: ../../edge
+    environment:
+      - EDGE_SERVICE_NAME=chronicle-relay
+      - EDGE_SERVICE_PORT=8989
+    volumes:
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock:ro
+    restart: unless-stopped
+    profiles:
+      - edge
