@@ -169,6 +169,7 @@ async def stream_to_backend(
                     "width": 2,
                     "channels": 1,
                     "mode": "streaming",
+                    "opus_header_stripped": True,
                 },
                 "payload_length": None,
             }

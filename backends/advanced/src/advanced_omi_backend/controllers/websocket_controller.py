@@ -31,6 +31,7 @@ from advanced_omi_backend.services.audio_stream import AudioStreamProducer
 from advanced_omi_backend.services.audio_stream.producer import (
     get_audio_stream_producer,
 )
+from advanced_omi_backend.utils.omi_codec_utils import is_opus_header_stripped
 
 # Thread pool executors for audio decoding
 _DEC_IO_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
@@ -678,6 +679,7 @@ async def _handle_omi_audio_chunk(
     audio_stream_producer,
     opus_payload: bytes,
     decode_packet_fn,
+    strip_header: bool,
     user_id: str,
     client_id: str,
     packet_count: int,
@@ -690,6 +692,7 @@ async def _handle_omi_audio_chunk(
         audio_stream_producer: Audio stream producer instance
         opus_payload: Opus-encoded audio bytes
         decode_packet_fn: Opus decoder function
+        strip_header: Whether to strip 3-byte BLE header before decoding
         user_id: User ID
         client_id: Client ID
         packet_count: Current packet number for logging
@@ -698,7 +701,7 @@ async def _handle_omi_audio_chunk(
     start_time = time.time()
     loop = asyncio.get_running_loop()
     pcm_data = await loop.run_in_executor(
-        _DEC_IO_EXECUTOR, decode_packet_fn, opus_payload
+        _DEC_IO_EXECUTOR, decode_packet_fn, opus_payload, strip_header
     )
     decode_time = time.time() - start_time
 
@@ -1042,8 +1045,7 @@ async def _handle_button_event(
     audio_uuid = client_state.current_audio_uuid
 
     application_logger.info(
-        f"🔘 Button event from {client_id}: {button_state} "
-        f"(audio_uuid={audio_uuid})"
+        f"🔘 Button event from {client_id}: {button_state} (audio_uuid={audio_uuid})"
     )
 
     # Store marker on client state for later persistence to conversation
@@ -1363,7 +1365,7 @@ async def handle_omi_websocket(
 
         # OMI-specific: Setup Opus decoder
         decoder = OmiOpusDecoder()
-        _decode_packet = partial(decoder.decode_packet, strip_header=False)
+        _decode_packet = decoder.decode_packet
 
         packet_count = 0
         total_bytes = 0
@@ -1378,20 +1380,26 @@ async def handle_omi_websocket(
                 )
                 application_logger.info(f"🎙️ OMI audio session started for {client_id}")
 
+                audio_start_data = header.get("data", {})
+                # Most current clients (mobile app, local wearable relay) send Opus
+                # payloads with BLE header already removed.
+                # Allow explicit override for raw BLE packet sources.
+                client_state.opus_header_stripped = is_opus_header_stripped(
+                    audio_start_data
+                )
+
                 interim_holder[0] = await _initialize_streaming_session(
                     client_state,
                     audio_stream_producer,
                     user.user_id,
                     user.email,
                     client_id,
-                    header.get(
-                        "data",
-                        {
-                            "rate": OMI_SAMPLE_RATE,
-                            "width": OMI_SAMPLE_WIDTH,
-                            "channels": OMI_CHANNELS,
-                        },
-                    ),
+                    audio_start_data
+                    or {
+                        "rate": OMI_SAMPLE_RATE,
+                        "width": OMI_SAMPLE_WIDTH,
+                        "channels": OMI_CHANNELS,
+                    },
                     websocket=ws,
                 )
 
@@ -1409,6 +1417,7 @@ async def handle_omi_websocket(
                     audio_stream_producer,
                     payload,
                     _decode_packet,
+                    not getattr(client_state, "opus_header_stripped", False),
                     user.user_id,
                     client_id,
                     packet_count,
@@ -1486,13 +1495,14 @@ async def handle_pcm_websocket(
                         )
 
                         # Handle audio session start (pass websocket for error handling)
-                        audio_streaming, recording_mode = (
-                            await _handle_audio_session_start(
-                                client_state,
-                                header.get("data", {}),
-                                client_id,
-                                websocket=ws,
-                            )
+                        (
+                            audio_streaming,
+                            recording_mode,
+                        ) = await _handle_audio_session_start(
+                            client_state,
+                            header.get("data", {}),
+                            client_id,
+                            websocket=ws,
                         )
 
                         # Initialize streaming session
