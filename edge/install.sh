@@ -146,12 +146,47 @@ fi
 SERVICE_DIR="$CHRONICLE_HOME/$COMPOSE_PATH"
 info "Service directory: $SERVICE_DIR"
 
+# ── Resolve backend URL for edge services ─────────────────────────────
+# On edge nodes, host.docker.internal doesn't reach the backend.
+# Try minidisc discovery first, then prompt if needed.
+info "Looking for Chronicle backend on Tailnet..."
+BACKEND_URL=$(uv run --with-requirements "$CHRONICLE_HOME/setup-requirements.txt" python3 -c "
+import sys
+sys.path.insert(0, '$CHRONICLE_HOME')
+try:
+    from discovery import CHRONICLE_BACKEND, discover_service
+    url = discover_service(CHRONICLE_BACKEND)
+    if url:
+        print(url, end='')
+    else:
+        print('', end='', file=sys.stderr)
+        print('minidisc found no chronicle-backend service on Tailnet', file=sys.stderr)
+except Exception as e:
+    print(f'discovery failed: {e}', file=sys.stderr)
+")
+
+if [[ -n "$BACKEND_URL" ]]; then
+    ok "Auto-discovered backend at $BACKEND_URL"
+else
+    warn "Could not auto-discover backend. Make sure your Chronicle backend is running with Tailscale."
+    read -rp "[edge] Enter your Chronicle backend URL (e.g. http://100.x.x.x:8000): " BACKEND_URL
+    if [[ -z "$BACKEND_URL" ]]; then
+        err "Backend URL is required for edge deployment."
+        exit 1
+    fi
+fi
+
 # ── Run init.py if it exists (interactive config) ─────────────────────
+INIT_ARGS=""
+if [[ -n "$BACKEND_URL" ]]; then
+    INIT_ARGS="--backend-url $BACKEND_URL"
+fi
+
 INIT_SCRIPT="$SERVICE_DIR/init.py"
 if [[ -f "$INIT_SCRIPT" ]]; then
     info "Running configuration wizard for $SERVICE_NAME..."
     cd "$SERVICE_DIR"
-    uv run --with-requirements "$CHRONICLE_HOME/setup-requirements.txt" python init.py
+    uv run --with-requirements "$CHRONICLE_HOME/setup-requirements.txt" python init.py $INIT_ARGS
     cd "$CHRONICLE_HOME"
 elif [[ -f "$SERVICE_DIR/setup.sh" ]]; then
     info "Running setup script for $SERVICE_NAME..."
