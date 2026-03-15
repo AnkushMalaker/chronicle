@@ -126,8 +126,7 @@ cd "$CHRONICLE_HOME"
 ok "Repository ready at $CHRONICLE_HOME"
 
 # ── Read service metadata from registry ───────────────────────────────
-# Parse compose_path from edge/services.yml using Python (available via uv)
-COMPOSE_PATH=$(uv run python3 -c "
+COMPOSE_PATH=$(uv run --with-requirements setup-requirements.txt python3 -c "
 import yaml, sys
 with open('edge/services.yml') as f:
     data = yaml.safe_load(f)

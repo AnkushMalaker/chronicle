@@ -15,9 +15,9 @@ fi
 SERVICE_NAME="$1"
 
 # Parse compose_path from registry
-COMPOSE_PATH=$(uv run python3 -c "
+COMPOSE_PATH=$(cd "$CHRONICLE_HOME" && uv run --with-requirements setup-requirements.txt python3 -c "
 import yaml, sys
-with open('$CHRONICLE_HOME/edge/services.yml') as f:
+with open('edge/services.yml') as f:
     data = yaml.safe_load(f)
 svc = data.get('services', {}).get('$SERVICE_NAME')
 if not svc:
