@@ -416,10 +416,11 @@ microphone:
               session_started = true;
             }
 
-            // Extract right channel (ch0 = AGC-processed speech) and convert 32→16 bit.
-            // Input: interleaved stereo 32-bit samples [R0, L0, R1, L1, ...]
-            // Output: mono 16-bit samples [R0_16, R1_16, ...]
-            // Each stereo frame = 8 bytes (4 bytes right + 4 bytes left).
+            // Extract channel 0 (AGC-processed speech) and convert 32→16 bit.
+            // Input: interleaved stereo 32-bit samples [L0, R0, L1, R1, ...]
+            // XMOS channel 0 (AGC) maps to right (odd indices),
+            // channel 1 (NS/pre-AGC) maps to left (even indices).
+            // Output: mono 16-bit samples
             const int32_t* samples = reinterpret_cast<const int32_t*>(x.data());
             size_t total_samples = x.size() / sizeof(int32_t);    // total L+R samples
             size_t num_frames = total_samples / 2;                 // stereo frames
@@ -431,7 +432,7 @@ microphone:
             }
 
             for (size_t i = 0; i < num_frames; i++) {
-              int32_t right = samples[i * 2];       // channel 0 (right) = AGC output
+              int32_t right = samples[i * 2 + 1];   // channel 0 (right) = AGC output
               mono_buf[i] = (int16_t)(right >> 16);  // 32→16 bit: take upper 16 bits
             }
 
