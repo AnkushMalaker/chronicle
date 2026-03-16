@@ -361,20 +361,20 @@ i2s_audio:
       number: GPIO13
 
 # ─────────── Microphone (TCP streaming to relay) ───────────
-# The XMOS voice kit outputs stereo 32-bit I2S (secondary mode). Channel 0
-# (right) carries the fully-processed speech signal (AEC→IC→NS→AGC), while
-# channel 1 (left) is a pre-AGC tap useful for wake-word engines.
+# The XMOS voice kit outputs stereo 32-bit I2S (secondary mode).
+# ESPHome interleaves stereo as [L, R, L, R, ...] where channel 0 = left (even)
+# and channel 1 = right (odd).
+#   Source: esphome/components/microphone/microphone_source.h
+#   https://github.com/esphome/esphome/blob/dev/esphome/components/microphone/microphone_source.h
 #
-# We match the official HA Voice PE microphone config (stereo, 32-bit) and
-# extract+downconvert in the on_data lambda before sending over TCP.
+# The official HA Voice PE firmware uses channels: 0 (left) for voice assistant
+# and channels: 1 (right) with gain_factor: 4 for wake word.
+#   Source: home-assistant-voice.yaml
+#   https://github.com/esphome/home-assistant-voice-pe/blob/dev/home-assistant-voice.yaml
 #
-# References:
-#   Official Voice PE config:
-#     https://github.com/esphome/home-assistant-voice-pe/blob/dev/home-assistant-voice.yaml
-#   XMOS voice kit audio pipeline:
-#     https://deepwiki.com/esphome/home-assistant-voice-pe/3.2-audio-processing-pipeline
-#   I2S microphone component docs:
-#     https://esphome.io/components/microphone/i2s_audio/
+# With voice_kit channel_0_stage=AGC, channel 0 (left) carries the
+# fully-processed speech signal (AEC→IC→NS→AGC), while channel 1 (right)
+# is a pre-AGC tap (NS stage) useful for wake-word engines.
 microphone:
   - platform: i2s_audio
     id: mic_in
@@ -409,46 +409,56 @@ microphone:
 
             // Send audio-start once per connection (mono 16-bit after conversion)
             if (!session_started) {
-              if (!chronicle::send_audio_start(16000, 2, 1)) {
+              if (!chronicle::send_audio_start(16000, 2, 2)) {  // DEBUG: stereo
                 id(tcp_ok) = false;
                 return;
               }
               session_started = true;
             }
 
-            // Extract channel 0 (AGC-processed speech) and convert 32→16 bit.
-            // Input: interleaved stereo 32-bit samples [L0, R0, L1, R1, ...]
-            // XMOS channel 0 (AGC) maps to right (odd indices),
-            // channel 1 (NS/pre-AGC) maps to left (even indices).
-            // Output: mono 16-bit samples
+            // DEBUG: Send STEREO to relay so we can compare both channels.
+            // Channel 0 (left/even) = AGC, Channel 1 (right/odd) = NS.
+            // Relay will receive 2-channel 16-bit audio — record and compare.
             const int32_t* samples = reinterpret_cast<const int32_t*>(x.data());
-            size_t total_samples = x.size() / sizeof(int32_t);    // total L+R samples
-            size_t num_frames = total_samples / 2;                 // stereo frames
+            size_t total_samples = x.size() / sizeof(int32_t);
+            size_t num_frames = total_samples / 2;
 
-            // Temporary buffer for mono 16-bit output (2 bytes per frame)
-            static std::vector<int16_t> mono_buf;
-            if (mono_buf.size() < num_frames) {
-              mono_buf.resize(num_frames);
+            static std::vector<int16_t> stereo_buf;
+            if (stereo_buf.size() < num_frames * 2) {
+              stereo_buf.resize(num_frames * 2);
             }
 
             for (size_t i = 0; i < num_frames; i++) {
-              int32_t right = samples[i * 2 + 1];   // channel 0 (right) = AGC output
-              int32_t s16 = right >> 14;             // 32→16 bit with 4x gain (>> 14 vs >> 16)
-              if (s16 > 32767) s16 = 32767;
-              if (s16 < -32768) s16 = -32768;
-              mono_buf[i] = (int16_t)s16;
+              stereo_buf[i * 2]     = (int16_t)(samples[i * 2] >> 16);      // left  (ch0 AGC)
+              stereo_buf[i * 2 + 1] = (int16_t)(samples[i * 2 + 1] >> 16);  // right (ch1 NS)
             }
 
-            size_t mono_bytes = num_frames * sizeof(int16_t);
+            // Log peak amplitude of each channel every ~2 seconds
+            static uint32_t last_log = 0;
+            static int16_t peak_l = 0, peak_r = 0;
+            for (size_t i = 0; i < num_frames; i++) {
+              int16_t al = abs(stereo_buf[i * 2]);
+              int16_t ar = abs(stereo_buf[i * 2 + 1]);
+              if (al > peak_l) peak_l = al;
+              if (ar > peak_r) peak_r = ar;
+            }
+            if (millis() - last_log > 2000) {
+              ESP_LOGI("audio", "Peak L(ch0/AGC)=%d  R(ch1/NS)=%d", peak_l, peak_r);
+              peak_l = 0;
+              peak_r = 0;
+              last_log = millis();
+            }
 
-            // Send converted mono 16-bit PCM
-            if (!chronicle::send_audio(reinterpret_cast<const uint8_t*>(mono_buf.data()),
-                                       mono_bytes, 16000, 2, 1)) {
+            size_t stereo_bytes = num_frames * 2 * sizeof(int16_t);
+
+            // Send as stereo (channels=2) so relay saves both
+            if (!chronicle::send_audio(reinterpret_cast<const uint8_t*>(stereo_buf.data()),
+                                       stereo_bytes, 16000, 2, 2)) {
               announced = false;
               session_started = false;
               id(tcp_ok) = false;
             } else if (!announced) {
-              ESP_LOGI("tcp", "Streaming audio to relay (stereo 32bit → mono 16bit, %d frames)", num_frames);
+              ESP_LOGI("tcp", "DEBUG: Streaming STEREO 32→16bit, %d frames per channel", num_frames);
               announced = true;
             }
 
