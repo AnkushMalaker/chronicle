@@ -229,6 +229,25 @@ class HavpeRelaySetup:
 
         self.config["TCP_PORT"] = tcp_port
 
+    def setup_esphome_config(self):
+        """Configure optional static ESPHome device IP"""
+        self.print_section("ESPHome Device IP (Optional)")
+        self.console.print(
+            "If set, the relay always connects ESPHome API to this IP instead of"
+        )
+        self.console.print(
+            "the TCP client's IP. Recommended when non-ESP32 clients also connect."
+        )
+        self.console.print()
+
+        existing = self.read_existing_env_value("ESPHOME_DEVICE_IP")
+        esphome_ip = self.prompt_value(
+            "ESPHome device IP (leave blank to auto-detect from TCP client)",
+            existing or "",
+        )
+        if esphome_ip:
+            self.config["ESPHOME_DEVICE_IP"] = esphome_ip
+
     def setup_firmware_secrets(self):
         """Optionally configure ESP32 firmware secrets"""
         self.print_section("ESP32 Firmware Configuration (Optional)")
@@ -352,6 +371,10 @@ class HavpeRelaySetup:
         )
         self.console.print(f"  Device Name:    {self.config.get('DEVICE_NAME', '')}")
         self.console.print(f"  TCP Port:       {self.config.get('TCP_PORT', '')}")
+        esphome_ip = self.config.get("ESPHOME_DEVICE_IP", "")
+        self.console.print(
+            f"  ESPHome IP:     {esphome_ip or '(auto-detect from TCP client)'}"
+        )
 
     def show_next_steps(self):
         """Show next steps"""
@@ -377,6 +400,7 @@ class HavpeRelaySetup:
             self.setup_backend_urls()
             self.setup_auth_credentials()
             self.setup_device_config()
+            self.setup_esphome_config()
             self.setup_firmware_secrets()
 
             # Generate files

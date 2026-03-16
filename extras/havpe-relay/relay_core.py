@@ -30,6 +30,7 @@ class RelayConfig:
     auth_username: str
     auth_password: str
     device_name: str
+    esphome_device_ip: str = ""
 
     @classmethod
     def from_env(cls) -> "RelayConfig":
@@ -67,6 +68,7 @@ class RelayConfig:
             auth_username=os.getenv("AUTH_USERNAME", ""),
             auth_password=os.getenv("AUTH_PASSWORD", ""),
             device_name=os.getenv("DEVICE_NAME", "havpe"),
+            esphome_device_ip=os.getenv("ESPHOME_DEVICE_IP", ""),
         )
 
 
@@ -261,11 +263,24 @@ async def run_device_session(
         async with websockets.connect(backend_uri) as ws:
             logger.info("Backend WS connected, starting bidirectional bridge")
 
-            api_ok = await device.connect(device_ip)
+            esphome_ip = config.esphome_device_ip or device_ip
+            try:
+                api_ok = await asyncio.wait_for(device.connect(esphome_ip), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "ESPHome API connect to %s timed out (5s) — audio-only mode",
+                    esphome_ip,
+                )
+                api_ok = False
             if api_ok:
-                logger.info("ESPHome API connected — button/dial/LED/speaker enabled")
+                logger.info(
+                    "ESPHome API connected at %s — button/dial/LED/speaker enabled",
+                    esphome_ip,
+                )
             else:
-                logger.info("ESPHome API unavailable — audio-only mode")
+                logger.info(
+                    "ESPHome API unavailable at %s — audio-only mode", esphome_ip
+                )
 
             ws_lock = asyncio.Lock()
             tasks = [

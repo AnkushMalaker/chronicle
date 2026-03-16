@@ -8,6 +8,7 @@ services:
     env_file: .env
     environment:
       - TCP_PORT=${TCP_PORT:-8989}
+      - ESPHOME_DEVICE_IP=${ESPHOME_DEVICE_IP:-}
       - DEBUG=${DEBUG:-0}
     restart: unless-stopped
     command: ["uv", "run", "python3", "main.py", "-v",

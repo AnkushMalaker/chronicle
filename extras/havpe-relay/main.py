@@ -135,6 +135,12 @@ async def main():
     parser.add_argument(
         "--device-name", type=str, default=os.getenv("DEVICE_NAME", "havpe")
     )
+    parser.add_argument(
+        "--esphome-device-ip",
+        type=str,
+        default=os.getenv("ESPHOME_DEVICE_IP", ""),
+        help="Static ESPHome device IP (default: use TCP client IP)",
+    )
     parser.add_argument("-v", "--verbose", action="count", default=0)
     parser.add_argument(
         "--dump-audio",
@@ -150,6 +156,7 @@ async def main():
         auth_username=args.username or "",
         auth_password=args.password or "",
         device_name=args.device_name,
+        esphome_device_ip=args.esphome_device_ip or "",
     )
 
     level = logging.WARNING - (10 * min(args.verbose, 2))
