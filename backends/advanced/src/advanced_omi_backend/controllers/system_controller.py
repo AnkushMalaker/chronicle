@@ -110,6 +110,25 @@ async def get_network_discovery(app):
     else:
         result["discovered_services"] = []
 
+    # Connected WebSocket clients (phones, relays, etc.)
+    from advanced_omi_backend.client_manager import get_client_manager
+
+    mgr = get_client_manager()
+    connected_devices = []
+    for client_id, state in mgr.get_all_clients().items():
+        device_name = client_id.split("-", 1)[1] if "-" in client_id else client_id
+        connected_devices.append(
+            {
+                "client_id": client_id,
+                "device_name": device_name,
+                "user_email": getattr(state, "user_email", None),
+                "connected": getattr(state, "connected", False),
+                "has_active_conversation": getattr(state, "current_audio_uuid", None)
+                is not None,
+            }
+        )
+    result["connected_devices"] = connected_devices
+
     return result
 
 

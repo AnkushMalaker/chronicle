@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Network as NetworkIcon, RefreshCw, CheckCircle, XCircle, Wifi, WifiOff, Radio, Search, Server } from 'lucide-react'
+import { Network as NetworkIcon, RefreshCw, CheckCircle, XCircle, Wifi, WifiOff, Radio, Search, Server, Smartphone } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { useAuth } from '../contexts/AuthContext'
 import { systemApi } from '../services/api'
@@ -19,10 +19,19 @@ interface AdvertisedService {
   label?: string
 }
 
+interface ConnectedDevice {
+  client_id: string
+  device_name: string
+  user_email?: string
+  connected: boolean
+  has_active_conversation: boolean
+}
+
 interface NetworkData {
   tailscale_available: boolean
   advertising: AdvertisedService[]
   discovered_services: DiscoveredService[]
+  connected_devices?: ConnectedDevice[]
   error?: string
 }
 
@@ -277,6 +286,49 @@ export default function Network() {
               : data?.tailscale_available
                 ? 'No services discovered. Make sure other machines are running Chronicle services.'
                 : 'Tailscale required for service discovery'}
+          </p>
+        )}
+      </div>
+
+      {/* Connected Devices */}
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center">
+          <Smartphone className="h-5 w-5 mr-2 text-blue-600" />
+          Connected Devices
+        </h3>
+        {data?.connected_devices && data.connected_devices.length > 0 ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {data.connected_devices.map((device) => (
+              <div key={device.client_id} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-md">
+                <div>
+                  <div className="font-medium text-gray-900 dark:text-gray-100">{device.device_name}</div>
+                  {device.user_email && (
+                    <div className="text-sm text-gray-500 dark:text-gray-400">{device.user_email}</div>
+                  )}
+                  <code className="text-xs text-gray-400 dark:text-gray-500 font-mono">{device.client_id}</code>
+                </div>
+                <div className="ml-3 flex-shrink-0 flex flex-col items-end space-y-1">
+                  {device.connected ? (
+                    <span className="text-xs px-2 py-1 bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 rounded">
+                      connected
+                    </span>
+                  ) : (
+                    <span className="text-xs px-2 py-1 bg-gray-100 text-gray-600 dark:bg-gray-600 dark:text-gray-300 rounded">
+                      disconnected
+                    </span>
+                  )}
+                  {device.has_active_conversation && (
+                    <span className="text-xs px-2 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded">
+                      streaming
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-gray-500 dark:text-gray-400 text-center py-4">
+            No devices connected via WebSocket
           </p>
         )}
       </div>
