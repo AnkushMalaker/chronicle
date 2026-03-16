@@ -56,6 +56,17 @@ class ChatCompletionRequest(BaseModel):
     include_obsidian_memory: Optional[bool] = Field(
         False, description="Whether to include Obsidian vault context"
     )
+    memory_limit: Optional[int] = Field(
+        None,
+        ge=0,
+        le=100,
+        description="Maximum number of memories to include in context (default: 5)",
+    )
+    memory_mode: Optional[str] = Field(
+        "always",
+        pattern="^(always|tool|off)$",
+        description='Memory retrieval mode: "always" (inject upfront), "tool" (LLM decides), or "off" (no memory)',
+    )
 
 
 class ChatCompletionChunkDelta(BaseModel):
@@ -390,6 +401,8 @@ async def chat_completions(
                     completion_id,
                     created,
                     model_name,
+                    memory_limit=request.memory_limit,
+                    memory_mode=request.memory_mode or "always",
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -408,6 +421,8 @@ async def chat_completions(
                 completion_id,
                 created,
                 model_name,
+                memory_limit=request.memory_limit,
+                memory_mode=request.memory_mode or "always",
             )
 
     except HTTPException:
@@ -429,6 +444,8 @@ async def _stream_openai_format(
     completion_id: str,
     created: int,
     model_name: str,
+    memory_limit: Optional[int] = None,
+    memory_mode: str = "always",
 ):
     """Map internal streaming events to OpenAI SSE chunk format."""
     previous_text = ""
@@ -438,6 +455,8 @@ async def _stream_openai_format(
             user_id=user_id,
             message_content=message_content,
             include_obsidian_memory=include_obsidian_memory,
+            memory_limit=memory_limit,
+            memory_mode=memory_mode,
         ):
             event_type = event.get("type")
 
@@ -522,6 +541,8 @@ async def _non_streaming_response(
     completion_id: str,
     created: int,
     model_name: str,
+    memory_limit: Optional[int] = None,
+    memory_mode: str = "always",
 ) -> ChatCompletionResponse:
     """Collect all events and return a single ChatCompletionResponse."""
     full_content = ""
@@ -532,6 +553,8 @@ async def _non_streaming_response(
         user_id=user_id,
         message_content=message_content,
         include_obsidian_memory=include_obsidian_memory,
+        memory_limit=memory_limit,
+        memory_mode=memory_mode,
     ):
         event_type = event.get("type")
 
