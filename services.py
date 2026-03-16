@@ -5,14 +5,18 @@ Start, stop, and manage configured services
 """
 
 import argparse
+import json
 import os
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 import yaml
 from dotenv import dotenv_values
 from rich.console import Console
 from rich.table import Table
+
 from setup_utils import read_env_value
 
 console = Console()
@@ -91,6 +95,88 @@ SERVICES = {
         ],
     },
 }
+
+
+_DISCOVERY_NAMES = {
+    "backend": "chronicle-backend",
+    "speaker-recognition": "chronicle-speaker",
+    "asr-services": "chronicle-asr",
+    "openmemory-mcp": "chronicle-openmemory",
+    "llm-services": "chronicle-llm",
+}
+
+
+_ADVERTISED_SERVICES_PATH = (
+    Path(__file__).parent / "config" / "advertised-services.json"
+)
+
+_ASR_PROVIDER_LABELS = {
+    "vibevoice": "VibeVoice ASR",
+    "vibevoice-strixhalo": "VibeVoice ASR",
+    "faster-whisper": "Faster Whisper ASR",
+    "transformers": "Transformers ASR",
+    "nemo": "NeMo ASR",
+    "nemo-strixhalo": "NeMo ASR",
+    "parakeet": "Parakeet ASR",
+    "qwen3-asr": "Qwen3 ASR",
+}
+
+
+def _get_advertised_services() -> list[tuple[str, int, str]]:
+    """Return list of (discovery_name, port, label) for configured services."""
+    triples: list[tuple[str, int, str]] = []
+    for svc_name, discovery_name in _DISCOVERY_NAMES.items():
+        if svc_name not in SERVICES or not check_service_configured(svc_name):
+            continue
+        service = SERVICES[svc_name]
+        endpoints = service.get("health_endpoints", [])
+        if not endpoints:
+            continue
+        _label, port_env, default_port, _path = endpoints[0]
+        if port_env:
+            env_path = Path(service["path"]) / ".env"
+            if env_path.exists():
+                port = int(dotenv_values(env_path).get(port_env, default_port))
+            else:
+                port = int(default_port)
+        else:
+            port = int(default_port)
+
+        # Derive display label
+        if svc_name == "asr-services":
+            env_path = Path(service["path"]) / ".env"
+            asr_provider = ""
+            if env_path.exists():
+                asr_provider = (
+                    dotenv_values(env_path).get("ASR_PROVIDER", "").strip("'\"")
+                )
+            label = _ASR_PROVIDER_LABELS.get(asr_provider, service["description"])
+        else:
+            label = service["description"]
+
+        triples.append((discovery_name, port, label))
+    return triples
+
+
+def _build_advertise_string() -> str:
+    """Build ADVERTISE=name:port,... string from configured services."""
+    return ",".join(
+        f"{name}:{port}" for name, port, _label in _get_advertised_services()
+    )
+
+
+def _write_advertised_services(triples: list[tuple[str, int, str]]) -> None:
+    """Write advertised services to config/advertised-services.json for the backend."""
+    data = [
+        {"name": name, "port": port, "label": label} for name, port, label in triples
+    ]
+    _ADVERTISED_SERVICES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _ADVERTISED_SERVICES_PATH.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def _remove_advertised_services() -> None:
+    """Remove advertised-services.json when discovery agent stops."""
+    _ADVERTISED_SERVICES_PATH.unlink(missing_ok=True)
 
 
 def _get_backend_env_path() -> Path:
@@ -525,6 +611,94 @@ def ensure_docker_network():
         return False
 
 
+# --- Discovery agent (native process, not Docker) ---
+
+_DISCOVERY_PID = Path(__file__).parent / "edge" / ".discovery-agent.pid"
+_DISCOVERY_LOG = Path(__file__).parent / "edge" / "discovery-agent.log"
+
+
+def _discovery_agent_running() -> bool:
+    """Check if discovery agent process is alive."""
+    if not _DISCOVERY_PID.exists():
+        return False
+    try:
+        pid = int(_DISCOVERY_PID.read_text().strip())
+        os.kill(pid, 0)
+        return True
+    except (ValueError, OSError):
+        _DISCOVERY_PID.unlink(missing_ok=True)
+        return False
+
+
+def _start_discovery_agent():
+    """Start discovery agent as a native background process.
+
+    Runs outside Docker so it can bind to the Tailscale interface directly
+    (Docker Desktop VMs cannot see tailscale0).
+    """
+    if _discovery_agent_running():
+        console.print("[dim]📡 Discovery agent already running[/dim]")
+        return True
+
+    agent_script = Path(__file__).parent / "edge" / "agent.py"
+    if not agent_script.exists():
+        console.print("[yellow]⚠️  edge/agent.py not found, skipping discovery[/yellow]")
+        return False
+
+    pairs = _get_advertised_services()
+    if not pairs:
+        console.print("[dim]📡 No services to advertise, skipping discovery[/dim]")
+        return False
+
+    _write_advertised_services(pairs)
+    advertise = ",".join(f"{name}:{port}" for name, port, _label in pairs)
+
+    env = dict(os.environ)
+    env["ADVERTISE"] = advertise
+
+    log_file = open(_DISCOVERY_LOG, "a")
+    try:
+        proc = subprocess.Popen(
+            ["uv", "run", "--with", "minidisc-python", "python", str(agent_script)],
+            env=env,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except Exception as e:
+        console.print(f"[red]❌ Failed to start discovery agent: {e}[/red]")
+        log_file.close()
+        return False
+
+    log_file.close()
+    _DISCOVERY_PID.write_text(str(proc.pid))
+    console.print(f"[green]✅ Discovery agent started (PID {proc.pid})[/green]")
+    return True
+
+
+def _stop_discovery_agent():
+    """Stop the discovery agent process."""
+    if not _DISCOVERY_PID.exists():
+        _remove_advertised_services()
+        return
+
+    try:
+        pid = int(_DISCOVERY_PID.read_text().strip())
+        os.killpg(pid, signal.SIGTERM)
+        for _ in range(10):
+            try:
+                os.kill(pid, 0)
+                time.sleep(0.5)
+            except OSError:
+                break
+        console.print(f"[green]✅ Discovery agent stopped (PID {pid})[/green]")
+    except (ValueError, OSError):
+        console.print("[dim]Discovery agent already stopped[/dim]")
+    finally:
+        _DISCOVERY_PID.unlink(missing_ok=True)
+        _remove_advertised_services()
+
+
 def start_services(services, build=False, force_recreate=False):
     """Start specified services"""
     console.print(f"🚀 [bold]Starting {len(services)} services...[/bold]")
@@ -561,6 +735,10 @@ def start_services(services, build=False, force_recreate=False):
         f"\n[green]🎉 {success_count}/{len(services)} services started successfully[/green]"
     )
 
+    # Start discovery agent alongside backend
+    if "backend" in services and check_service_configured("backend"):
+        _start_discovery_agent()
+
     # Show access URLs if backend was started
     if "backend" in services and check_service_configured("backend"):
         backend_env = _get_backend_env_path()
@@ -595,6 +773,10 @@ def start_services(services, build=False, force_recreate=False):
 def stop_services(services):
     """Stop specified services"""
     console.print(f"🛑 [bold]Stopping {len(services)} services...[/bold]")
+
+    # Stop discovery agent when stopping backend
+    if "backend" in services:
+        _stop_discovery_agent()
 
     success_count = 0
     for service_name in services:
@@ -664,6 +846,11 @@ def restart_services(services, recreate=False):
         f"\n[green]🎉 {success_count}/{len(services)} services restarted successfully[/green]"
     )
 
+    # Restart discovery agent alongside backend
+    if "backend" in services and check_service_configured("backend"):
+        _stop_discovery_agent()
+        _start_discovery_agent()
+
 
 def show_status():
     """Show status of all services"""
@@ -696,6 +883,13 @@ def show_status():
         )
 
     console.print(table)
+
+    # Discovery agent status
+    if _discovery_agent_running():
+        pid = int(_DISCOVERY_PID.read_text().strip())
+        console.print(f"\n[green]📡 Discovery agent running (PID {pid})[/green]")
+    else:
+        console.print("\n[dim]📡 Discovery agent not running[/dim]")
 
     console.print("\n💡 [dim]Use './start.sh' to start all configured services[/dim]")
 

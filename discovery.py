@@ -135,6 +135,17 @@ def resolve_service_url(
     return default
 
 
+def _parse_endpoint(endpoint: str) -> tuple[str, int]:
+    """Parse a minidisc endpoint string like '100.99.62.5:8989' into (address, port)."""
+    if not endpoint:
+        return ("", 0)
+    try:
+        host, port_str = endpoint.rsplit(":", 1)
+        return (host, int(port_str))
+    except (ValueError, AttributeError):
+        return (endpoint, 0)
+
+
 def list_all_services() -> list[dict]:
     """List all chronicle-* services on the Tailnet via minidisc.
 
@@ -152,24 +163,27 @@ def list_all_services() -> list[dict]:
             )
             if not name or not name.startswith("chronicle-"):
                 continue
-            if isinstance(svc, dict):
-                results.append(
-                    {
-                        "name": name,
-                        "address": svc.get("address", ""),
-                        "port": svc.get("port", 0),
-                        "labels": svc.get("labels", {}),
-                    }
-                )
-            else:
-                results.append(
-                    {
-                        "name": name,
-                        "address": getattr(svc, "address", ""),
-                        "port": getattr(svc, "port", 0),
-                        "labels": getattr(svc, "labels", {}),
-                    }
-                )
+            labels = (
+                getattr(svc, "labels", {})
+                if not isinstance(svc, dict)
+                else svc.get("labels", {})
+            )
+            # minidisc Service objects use 'endpoint' (e.g. "100.x.x.x:8000"),
+            # not separate address/port fields.
+            endpoint = (
+                getattr(svc, "endpoint", "")
+                if not isinstance(svc, dict)
+                else svc.get("endpoint", "")
+            )
+            address, port = _parse_endpoint(str(endpoint))
+            results.append(
+                {
+                    "name": name,
+                    "address": address,
+                    "port": port,
+                    "labels": labels,
+                }
+            )
         return results
     except ImportError:
         logger.debug("minidisc not installed — cannot list services")
