@@ -82,6 +82,8 @@ esp32:
 
 wifi:
   id: wifi_id
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
   fast_connect: ${hidden_ssid}
   on_connect:
     - lambda: id(improv_ble_in_progress) = false;
