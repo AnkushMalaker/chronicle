@@ -65,6 +65,9 @@ extras/test-audios/*
 extras/speaker-omni-experimental/data/*
 extras/speaker-omni-experimental/cache/*
 
+# Discovery agent PID file
+edge/.discovery-agent.pid
+
 # AI Stuff
 .claude
 

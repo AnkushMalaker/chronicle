@@ -4,6 +4,7 @@ System controller for handling system-related business logic.
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 import re
@@ -52,36 +53,21 @@ async def get_network_discovery(app):
     }
 
     try:
-        from discovery import (
-            CHRONICLE_ASR,
-            CHRONICLE_BACKEND,
-            CHRONICLE_OPENMEMORY,
-            CHRONICLE_SPEAKER,
-            is_tailscale_available,
-            list_all_services,
-        )
+        from discovery import is_tailscale_available, list_all_services
     except ImportError:
         result["error"] = "discovery module not available"
         return result
 
     result["tailscale_available"] = is_tailscale_available()
 
-    # Report what the discovery-agent *should* be advertising based on the
-    # same env-var logic it uses.  The actual advertising is handled by
-    # the discovery-agent container (network_mode: host).
-    result["advertising"].append({"name": CHRONICLE_BACKEND, "port": 8000})
-
-    speaker_url = os.environ.get("SPEAKER_SERVICE_URL", "")
-    if speaker_url and "host.docker.internal" in speaker_url:
-        result["advertising"].append({"name": CHRONICLE_SPEAKER, "port": 8085})
-
-    asr_url = os.environ.get("PARAKEET_ASR_URL", "")
-    if asr_url and "host.docker.internal" in asr_url:
-        result["advertising"].append({"name": CHRONICLE_ASR, "port": 8767})
-
-    openmemory_url = os.environ.get("OPENMEMORY_MCP_URL", "")
-    if openmemory_url and "host.docker.internal" in openmemory_url:
-        result["advertising"].append({"name": CHRONICLE_OPENMEMORY, "port": 8765})
+    # Read advertised services written by services.py's discovery agent.
+    # The file is at config/advertised-services.json (volume-mounted from repo root).
+    _advertised_path = Path("/app/config/advertised-services.json")
+    if _advertised_path.exists():
+        try:
+            result["advertising"] = json.loads(_advertised_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Could not read advertised-services.json: %s", exc)
 
     if not result["tailscale_available"]:
         return result

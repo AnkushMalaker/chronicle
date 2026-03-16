@@ -16,6 +16,7 @@ interface DiscoveredService {
 interface AdvertisedService {
   name: string
   port: number
+  label?: string
 }
 
 interface NetworkData {
@@ -28,7 +29,7 @@ interface NetworkData {
 const SERVICE_DISPLAY: Record<string, { label: string; description: string }> = {
   'chronicle-backend': { label: 'Chronicle Backend', description: 'Core API and audio processing' },
   'chronicle-speaker': { label: 'Speaker Recognition', description: 'Voice identification service' },
-  'chronicle-asr': { label: 'Parakeet ASR', description: 'Offline speech-to-text' },
+  'chronicle-asr': { label: 'ASR Service', description: 'Offline speech-to-text' },
   'chronicle-openmemory': { label: 'OpenMemory MCP', description: 'Cross-client memory server' },
   'chronicle-llm': { label: 'Local LLM', description: 'Local LLM via llama.cpp' },
   'chronicle-tts': { label: 'Text-to-Speech', description: 'TTS synthesis service' },
@@ -169,10 +170,11 @@ export default function Network() {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {data.advertising.map((svc) => {
               const display = getServiceDisplay(svc.name)
+              const displayLabel = svc.label || display.label
               return (
                 <div key={svc.name} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-md">
                   <div>
-                    <div className="font-medium text-gray-900 dark:text-gray-100">{display.label}</div>
+                    <div className="font-medium text-gray-900 dark:text-gray-100">{displayLabel}</div>
                     <div className="text-sm text-gray-500 dark:text-gray-400">Port {svc.port}</div>
                   </div>
                   <span className="text-xs px-2 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded">
