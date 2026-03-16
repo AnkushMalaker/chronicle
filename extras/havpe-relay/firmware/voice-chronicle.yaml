@@ -433,7 +433,10 @@ microphone:
 
             for (size_t i = 0; i < num_frames; i++) {
               int32_t right = samples[i * 2 + 1];   // channel 0 (right) = AGC output
-              mono_buf[i] = (int16_t)(right >> 16);  // 32→16 bit: take upper 16 bits
+              int32_t s16 = right >> 14;             // 32→16 bit with 4x gain (>> 14 vs >> 16)
+              if (s16 > 32767) s16 = 32767;
+              if (s16 < -32768) s16 = -32768;
+              mono_buf[i] = (int16_t)s16;
             }
 
             size_t mono_bytes = num_frames * sizeof(int16_t);
