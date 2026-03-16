@@ -158,7 +158,7 @@ if [[ -n "$BACKEND_URL" ]]; then
     ok "Auto-discovered backend at $BACKEND_URL"
 else
     warn "Could not auto-discover backend. Make sure your Chronicle backend is running with Tailscale."
-    read -rp "[edge] Enter your Chronicle backend URL (e.g. http://100.x.x.x:8000): " BACKEND_URL
+    read -rp "[edge] Enter your Chronicle backend URL (e.g. http://100.x.x.x:8000): " BACKEND_URL </dev/tty
     if [[ -z "$BACKEND_URL" ]]; then
         err "Backend URL is required for edge deployment."
         exit 1
@@ -175,12 +175,12 @@ INIT_SCRIPT="$SERVICE_DIR/init.py"
 if [[ -f "$INIT_SCRIPT" ]]; then
     info "Running configuration wizard for $SERVICE_NAME..."
     cd "$SERVICE_DIR"
-    uv run --with-requirements "$CHRONICLE_HOME/setup-requirements.txt" python init.py $INIT_ARGS
+    uv run --with-requirements "$CHRONICLE_HOME/setup-requirements.txt" python init.py $INIT_ARGS </dev/tty
     cd "$CHRONICLE_HOME"
 elif [[ -f "$SERVICE_DIR/setup.sh" ]]; then
     info "Running setup script for $SERVICE_NAME..."
     cd "$SERVICE_DIR"
-    bash setup.sh
+    bash setup.sh </dev/tty
     cd "$CHRONICLE_HOME"
 else
     warn "No init script found — using defaults."
