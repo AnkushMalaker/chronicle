@@ -228,7 +228,7 @@ services:
     ports:
       - "27017:27017"
     volumes:
-      - mongo_data:/data/db
+      - ./data/mongo_data:/data/db
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand({ ping: 1 })"]
       interval: 10s
@@ -302,17 +302,9 @@ networks:
     external: true
 
 volumes:
-  ollama_data:
-    driver: local
-  mongo_data:
-    driver: local
   caddy_data:
     driver: local
   caddy_config:
-    driver: local
-  neo4j_data:
-    driver: local
-  neo4j_logs:
     driver: local
   tailscale-state:
     driver: local
