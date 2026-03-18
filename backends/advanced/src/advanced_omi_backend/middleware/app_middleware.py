@@ -63,6 +63,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         "/auth/health",
         "/readiness",
         "/api/queue/dashboard",  # Auto-refresh endpoint, too noisy
+        "/api/events/stream",  # SSE endpoint — BaseHTTPMiddleware breaks streaming
     }
 
     # Binary content types to exclude

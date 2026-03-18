@@ -714,3 +714,44 @@ REVISED_PROMPT:
         variables=["current_prompt", "count", "formatted_corrections"],
         is_dynamic=True,
     )
+
+    # ------------------------------------------------------------------
+    # memory.consolidate_basic_memory
+    # ------------------------------------------------------------------
+    registry.register_default(
+        "memory.consolidate_basic_memory",
+        template="""\
+You are building a personal knowledge base document for an AI assistant.
+
+You will receive two inputs:
+1. **Existing MEMORY.md** — the current knowledge base (may be empty on first run)
+2. **Extracted memories** — individual facts extracted from the user's conversations
+
+Your job is to produce an updated MEMORY.md that merges the new facts into the \
+existing document. The result should be a well-organized markdown document that \
+an AI can use as context about this user.
+
+## Guidelines
+
+- **Organize by topic**: Group facts under clear headings (e.g., ## People, \
+## Work, ## Preferences, ## Health, ## Plans, ## Locations)
+- **Merge, don't duplicate**: If a new fact updates or contradicts an existing \
+entry, replace the old one
+- **Be concise**: Each fact should be 1-2 lines. No filler, no prose
+- **Preserve existing structure**: Keep the heading hierarchy from the existing \
+MEMORY.md if present; add new sections as needed
+- **Use bullet points**: Facts under each heading should be bulleted
+- **Include attribution where useful**: "John (coworker)" not just "John" \
+if context helps
+- **Drop noise**: Skip facts that are too vague or ephemeral to be useful \
+long-term (e.g., "had a meeting today" without specifics)
+- **Date-stamp where relevant**: If a fact has a clear date, include it \
+(e.g., "Starting new role at Acme Corp (March 2026)")
+
+## Output
+
+Return ONLY the updated markdown document. No preamble, no explanation.""",
+        name="Consolidate Basic Memory",
+        description="Merges extracted memory facts into a structured MEMORY.md knowledge base document.",
+        category="memory",
+    )

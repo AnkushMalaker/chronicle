@@ -261,106 +261,127 @@ async def run_asr_finetuning_job() -> dict:
         if a.conversation_id:
             by_conversation.setdefault(a.conversation_id, []).append(a)
 
-    exported = 0
-    consumed = 0
     errors = 0
+
+    # Accumulate all conversations into a single batch for one POST
+    all_files = []  # list of ("audio_files", (filename, BytesIO, mime))
+    all_labels = []  # list of label dicts
+    pending_annotations = []  # annotations to mark after success
 
     # Optionally load cached jargon for customized_context
     redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
 
     try:
-        async with httpx.AsyncClient(timeout=300) as client:
-            for conv_id, conv_annotations in by_conversation.items():
-                try:
-                    conversation = await Conversation.find_one(
-                        Conversation.conversation_id == conv_id
-                    )
-                    if not conversation or not conversation.active_transcript:
-                        logger.warning(
-                            f"ASR finetuning: conversation {conv_id} not found or no transcript"
-                        )
-                        errors += 1
-                        continue
-
-                    if not conversation.active_transcript.segments:
-                        logger.info(
-                            f"ASR finetuning: conversation {conv_id} has no segments, skipping"
-                        )
-                        continue
-
-                    # Reconstruct full WAV audio
-                    wav_data = await reconstruct_wav_from_conversation(conv_id)
-                    if not wav_data:
-                        logger.warning(
-                            f"ASR finetuning: no audio for conversation {conv_id}"
-                        )
-                        errors += 1
-                        continue
-
-                    # Build training label
-                    label = _build_vibevoice_label(conversation)
-                    if not label.get("segments"):
-                        logger.info(
-                            f"ASR finetuning: no segments in label for {conv_id}, skipping"
-                        )
-                        continue
-
-                    # Try to add jargon context from Redis cache
-                    if conversation.user_id:
-                        jargon = await redis_client.get(
-                            f"asr:jargon:{conversation.user_id}"
-                        )
-                        if jargon:
-                            label["customized_context"] = [
-                                t.strip() for t in jargon.split(",") if t.strip()
-                            ]
-
-                    # POST to VibeVoice /fine-tune endpoint
-                    files = {
-                        "audio_files": (
-                            f"{conv_id}.wav",
-                            io.BytesIO(wav_data),
-                            "audio/wav",
-                        ),
-                    }
-                    data = {"labels": json.dumps([label])}
-
-                    response = await client.post(
-                        f"{vibevoice_url}/fine-tune",
-                        files=files,
-                        data=data,
-                    )
-
-                    if response.status_code == 200:
-                        exported += 1
-                        logger.info(f"ASR finetuning: exported conversation {conv_id}")
-                    else:
-                        logger.error(
-                            f"ASR finetuning: failed to export {conv_id}: "
-                            f"{response.status_code} {response.text[:200]}"
-                        )
-                        errors += 1
-                        continue
-
-                    # Mark annotations as consumed
-                    for ann in conv_annotations:
-                        ann.processed_by = (
-                            f"{ann.processed_by},{_ASR_TRAINING_MARKER}"
-                            if ann.processed_by
-                            else _ASR_TRAINING_MARKER
-                        )
-                        ann.updated_at = datetime.now(timezone.utc)
-                        await ann.save()
-                        consumed += 1
-
-                except Exception as e:
-                    logger.error(
-                        f"ASR finetuning: error processing conversation {conv_id}: {e}"
+        for conv_id, conv_annotations in by_conversation.items():
+            try:
+                conversation = await Conversation.find_one(
+                    Conversation.conversation_id == conv_id
+                )
+                if not conversation or not conversation.active_transcript:
+                    logger.warning(
+                        f"ASR finetuning: conversation {conv_id} not found or no transcript"
                     )
                     errors += 1
+                    continue
+
+                if not conversation.active_transcript.segments:
+                    logger.info(
+                        f"ASR finetuning: conversation {conv_id} has no segments, skipping"
+                    )
+                    continue
+
+                # Reconstruct full WAV audio
+                wav_data = await reconstruct_wav_from_conversation(conv_id)
+                if not wav_data:
+                    logger.warning(
+                        f"ASR finetuning: no audio for conversation {conv_id}"
+                    )
+                    errors += 1
+                    continue
+
+                # Build training label
+                label = _build_vibevoice_label(conversation)
+                if not label.get("segments"):
+                    logger.info(
+                        f"ASR finetuning: no segments in label for {conv_id}, skipping"
+                    )
+                    continue
+
+                # Try to add jargon context from Redis cache
+                if conversation.user_id:
+                    jargon = await redis_client.get(
+                        f"asr:jargon:{conversation.user_id}"
+                    )
+                    if jargon:
+                        label["customized_context"] = [
+                            t.strip() for t in jargon.split(",") if t.strip()
+                        ]
+
+                all_files.append(
+                    (
+                        "audio_files",
+                        (f"{conv_id}.wav", io.BytesIO(wav_data), "audio/wav"),
+                    )
+                )
+                all_labels.append(label)
+                pending_annotations.extend(conv_annotations)
+
+            except Exception as e:
+                logger.error(
+                    f"ASR finetuning: error processing conversation {conv_id}: {e}"
+                )
+                errors += 1
 
     finally:
         await redis_client.close()
+
+    if not all_files:
+        logger.info("ASR finetuning: no valid conversations to export")
+        return {
+            "conversations_exported": 0,
+            "annotations_consumed": 0,
+            "errors": errors,
+            "message": "No valid conversations to export",
+        }
+
+    # Single POST with all audio files and labels
+    exported = 0
+    consumed = 0
+
+    async with httpx.AsyncClient(timeout=600) as client:
+        try:
+            response = await client.post(
+                f"{vibevoice_url}/fine-tune",
+                files=all_files,
+                data={"labels": json.dumps(all_labels)},
+            )
+
+            if response.status_code == 200:
+                exported = len(all_files)
+                logger.info(
+                    f"ASR finetuning: exported {exported} conversations in single batch"
+                )
+
+                # Mark all annotations as consumed
+                for ann in pending_annotations:
+                    ann.processed_by = (
+                        f"{ann.processed_by},{_ASR_TRAINING_MARKER}"
+                        if ann.processed_by
+                        else _ASR_TRAINING_MARKER
+                    )
+                    ann.updated_at = datetime.now(timezone.utc)
+                    await ann.save()
+                    consumed += 1
+            else:
+                logger.error(
+                    f"ASR finetuning: batch POST failed: "
+                    f"{response.status_code} {response.text[:200]}"
+                )
+                errors += len(all_files)
+
+        except Exception as e:
+            logger.error(f"ASR finetuning: batch POST error: {e}")
+            errors += len(all_files)
 
     logger.info(
         f"ASR finetuning complete: {exported} conversations exported, "

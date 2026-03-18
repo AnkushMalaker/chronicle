@@ -22,6 +22,7 @@ from .modules import (
     memory_router,
     obsidian_router,
     queue_router,
+    sse_router,
     system_router,
     user_router,
 )
@@ -45,6 +46,7 @@ router.include_router(finetuning_router)
 router.include_router(knowledge_graph_router)
 router.include_router(memory_router)
 router.include_router(obsidian_router)
+router.include_router(sse_router)
 router.include_router(system_router)
 router.include_router(queue_router)
 router.include_router(

@@ -120,6 +120,12 @@ services:
       - QUANTIZATION=${QUANTIZATION:-4bit}
       # LoRA adapter: path to pre-trained adapter to auto-load on startup (optional)
       - LORA_ADAPTER_PATH=${LORA_ADAPTER_PATH:-}
+      # Fine-tuning
+      - FINETUNE_ENABLED=${FINETUNE_ENABLED:-false}
+      # Weights & Biases logging (optional)
+      - WANDB_ENABLED=${WANDB_ENABLED:-false}
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - WANDB_PROJECT=${WANDB_PROJECT:-chronicle-asr-finetuning}
       # Batching config: managed via config/defaults.yml (asr_services.vibevoice)
     dns:
       - 8.8.8.8
@@ -270,6 +276,12 @@ services:
       # Strix Halo has lot of unified memory, quantization is not needed
       - QUANTIZATION=
       - LORA_ADAPTER_PATH=${LORA_ADAPTER_PATH:-}
+      # Fine-tuning
+      - FINETUNE_ENABLED=${FINETUNE_ENABLED:-false}
+      # Weights & Biases logging (optional)
+      - WANDB_ENABLED=${WANDB_ENABLED:-false}
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - WANDB_PROJECT=${WANDB_PROJECT:-chronicle-asr-finetuning}
       - HSA_OVERRIDE_GFX_VERSION=11.5.1
     dns:
       - 8.8.8.8

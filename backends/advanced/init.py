@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
-from dotenv import set_key
+from dotenv import dotenv_values, set_key
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
@@ -1248,11 +1248,22 @@ class ChronicleSetup:
             self.config["HTTPS_ENABLED"] = "false"
 
     def generate_env_file(self):
-        """Generate .env file from template and update with configuration"""
+        """Generate .env file from template and update with configuration.
+
+        Preserves existing .env values that weren't explicitly set during this
+        wizard run, preventing silent data loss on re-runs.
+        """
         env_path = Path(".env")
         env_template = Path(".env.template")
 
-        # Backup existing .env if it exists
+        # Read ALL existing .env values before overwriting so we can preserve
+        # keys that weren't touched during this wizard run (e.g., API keys
+        # configured in a previous run for services not reconfigured now).
+        preserved_values = {}
+        if env_path.exists():
+            preserved_values = dotenv_values(str(env_path))
+
+        # Backup existing .env
         self.backup_existing_env()
 
         # Copy template to .env
@@ -1265,9 +1276,13 @@ class ChronicleSetup:
             )
             env_path.touch(mode=0o600)
 
-        # Update configured values using set_key
         env_path_str = str(env_path)
-        for key, value in self.config.items():
+
+        # Merge: self.config (this run) takes priority over preserved (previous run).
+        # This ensures new values win, but old values survive if untouched.
+        merged = {**preserved_values, **self.config}
+
+        for key, value in merged.items():
             if value:  # Only set non-empty values
                 set_key(env_path_str, key, value)
 

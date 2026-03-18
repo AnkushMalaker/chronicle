@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from ..neo4j_client import Neo4jClient, Neo4jReadInterface, Neo4jWriteInterface
 from . import queries
 from .entity_extractor import extract_entities_from_transcript, parse_natural_datetime
+from .kb import KnowledgeBaseManager
 from .models import (
     Entity,
     EntityType,
@@ -73,6 +74,7 @@ class KnowledgeGraphService:
         self._read: Optional[Neo4jReadInterface] = None
         self._write: Optional[Neo4jWriteInterface] = None
         self._initialized = False
+        self._kb = KnowledgeBaseManager()
 
     def _ensure_initialized(self) -> None:
         """Ensure Neo4j client is initialized."""
@@ -834,6 +836,23 @@ class KnowledgeGraphService:
             except (json.JSONDecodeError, ValueError):
                 return {}
         return {}
+
+    # -------------------------------------------------------------------------
+    # Basic Memory (MEMORY.md) — delegates to KnowledgeBaseManager
+    # No Neo4j required; works even if graph DB is down.
+    # -------------------------------------------------------------------------
+
+    def get_basic_memory(self, user_id: str) -> str:
+        """Read the user's basic memory (MEMORY.md content)."""
+        return self._kb.get_basic_memory(user_id)
+
+    def write_basic_memory(self, user_id: str, content: str) -> bool:
+        """Write/replace the user's basic memory (MEMORY.md content)."""
+        return self._kb.write_basic_memory(user_id, content)
+
+    async def consolidate_basic_memory(self, user_id: str, memories: list[str]) -> str:
+        """Consolidate memory facts into a structured MEMORY.md."""
+        return await self._kb.consolidate_basic_memory(user_id, memories)
 
     def shutdown(self) -> None:
         """Shutdown the service and close connections."""

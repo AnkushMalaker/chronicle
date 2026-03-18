@@ -114,3 +114,5 @@ report.html
 .secrets
 
 sdk/
+
+edge/.discovery-agent.pid

@@ -31,6 +31,7 @@ from advanced_omi_backend.services.audio_stream import AudioStreamProducer
 from advanced_omi_backend.services.audio_stream.producer import (
     get_audio_stream_producer,
 )
+from advanced_omi_backend.services.sse_publisher import publish_sse_event
 
 # Thread pool executors for audio decoding
 _DEC_IO_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
@@ -307,6 +308,17 @@ async def cleanup_client_state(client_id: str):
                     )
                     sessions_closed += 1
 
+                    # Notify frontend that session ended
+                    publish_sse_event(
+                        user_id,
+                        "session.ended",
+                        {
+                            "session_id": session_id,
+                            "client_id": client_id,
+                            "reason": "websocket_disconnect",
+                        },
+                    )
+
             if cursor == 0:
                 break
 
@@ -537,6 +549,16 @@ async def _initialize_streaming_session(
         session_id=client_state.stream_session_id,
         speech_detection_job_id=job_ids["speech_detection"],
         audio_persistence_job_id=job_ids["audio_persistence"],
+    )
+
+    # Notify frontend that a new streaming session has started
+    publish_sse_event(
+        user_id,
+        "session.started",
+        {
+            "session_id": client_state.stream_session_id,
+            "client_id": client_id,
+        },
     )
 
     # Note: Placeholder conversation creation is handled by the audio persistence job,

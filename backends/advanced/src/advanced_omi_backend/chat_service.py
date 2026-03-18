@@ -29,6 +29,7 @@ from advanced_omi_backend.observability.otel_setup import (
     set_trace_io,
 )
 from advanced_omi_backend.prompt_registry import get_prompt_registry
+from advanced_omi_backend.services.knowledge_graph.kb import KnowledgeBaseManager
 from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.services.memory.base import MemoryEntry
 from advanced_omi_backend.services.obsidian_service import (
@@ -174,6 +175,7 @@ class ChatService:
         self.llm_client = None
         self.memory_service = None
         self._initialized = False
+        self._kb = KnowledgeBaseManager()
 
     async def _get_system_prompt(self) -> str:
         """
@@ -403,6 +405,13 @@ If no relevant memories are available, respond normally based on the conversatio
         # Build context string
         context_parts = []
 
+        # Add basic memory (user's MEMORY.md) if available
+        basic_memory = self._kb.get_basic_memory(user_id)
+        if basic_memory:
+            context_parts.append("# User Knowledge Base:")
+            context_parts.append(basic_memory)
+            context_parts.append("")
+
         # Add memory context if available
         if memories:
             context_parts.append("# Relevant Personal Memories:")
@@ -499,6 +508,12 @@ If no relevant memories are available, respond normally based on the conversatio
 
             # Build messages list with proper message objects
             system_prompt = await self._get_tool_mode_system_prompt()
+
+            # Inject basic memory into system prompt
+            basic_memory = self._kb.get_basic_memory(user_id)
+            if basic_memory:
+                system_prompt += f"\n\n# User Knowledge Base:\n{basic_memory}"
+
             messages = [{"role": "system", "content": system_prompt}]
 
             # Add conversation history

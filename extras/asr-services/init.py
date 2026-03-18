@@ -380,6 +380,33 @@ class ASRServicesSetup:
                 "[blue][INFO][/blue] VibeVoice provides built-in speaker diarization (no pyannote needed)"
             )
 
+            # Fine-tuning configuration (optional)
+            if Confirm.ask("Enable LoRA fine-tuning?", default=False):
+                self.config["FINETUNE_ENABLED"] = "true"
+
+                if Confirm.ask(
+                    "Enable Weights & Biases (wandb) logging?", default=False
+                ):
+                    self.config["WANDB_ENABLED"] = "true"
+                    wandb_key = self.prompt_value(
+                        "wandb API key",
+                        default=read_env_value(str(Path(".env")), "WANDB_API_KEY")
+                        or "",
+                    )
+                    if wandb_key:
+                        self.config["WANDB_API_KEY"] = wandb_key
+                    wandb_project = self.prompt_value(
+                        "wandb project name", default="chronicle-asr-finetuning"
+                    )
+                    self.config["WANDB_PROJECT"] = wandb_project
+                    self.console.print(
+                        "[blue][INFO][/blue] W&B will log training loss, learning rate, and epoch metrics"
+                    )
+                else:
+                    self.config["WANDB_ENABLED"] = "false"
+            else:
+                self.config["FINETUNE_ENABLED"] = "false"
+
         elif provider == "vibevoice-strixhalo":
             # Strix Halo uses ROCm; sdpa attention, bfloat16 for gfx1151
             self.config["TORCH_DTYPE"] = "bfloat16"
@@ -392,6 +419,33 @@ class ASRServicesSetup:
             self.console.print(
                 "[blue][INFO][/blue] VibeVoice provides built-in speaker diarization (no pyannote needed)"
             )
+
+            # Fine-tuning configuration (optional)
+            if Confirm.ask("Enable LoRA fine-tuning?", default=False):
+                self.config["FINETUNE_ENABLED"] = "true"
+
+                if Confirm.ask(
+                    "Enable Weights & Biases (wandb) logging?", default=False
+                ):
+                    self.config["WANDB_ENABLED"] = "true"
+                    wandb_key = self.prompt_value(
+                        "wandb API key",
+                        default=read_env_value(str(Path(".env")), "WANDB_API_KEY")
+                        or "",
+                    )
+                    if wandb_key:
+                        self.config["WANDB_API_KEY"] = wandb_key
+                    wandb_project = self.prompt_value(
+                        "wandb project name", default="chronicle-asr-finetuning"
+                    )
+                    self.config["WANDB_PROJECT"] = wandb_project
+                    self.console.print(
+                        "[blue][INFO][/blue] W&B will log training loss, learning rate, and epoch metrics"
+                    )
+                else:
+                    self.config["WANDB_ENABLED"] = "false"
+            else:
+                self.config["FINETUNE_ENABLED"] = "false"
 
         elif provider == "transformers":
             self.config["TORCH_DTYPE"] = "float16"
@@ -567,6 +621,16 @@ class ASRServicesSetup:
         table.add_row("Port", self.config.get("ASR_PORT", "8767"))
         table.add_row("CUDA Version", self.config.get("PYTORCH_CUDA_VERSION", "N/A"))
         table.add_row("Capabilities", ", ".join(provider_info["capabilities"]))
+
+        if self.config.get("FINETUNE_ENABLED") == "true":
+            table.add_row("Fine-tuning", "Enabled (LoRA)")
+            if self.config.get("WANDB_ENABLED") == "true":
+                wandb_project = self.config.get(
+                    "WANDB_PROJECT", "chronicle-asr-finetuning"
+                )
+                table.add_row("W&B Logging", f"Enabled (project: {wandb_project})")
+            else:
+                table.add_row("W&B Logging", "Disabled")
 
         self.console.print(table)
 

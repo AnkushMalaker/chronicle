@@ -1,11 +1,10 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { queueApi } from '../services/api'
 
-export function useQueueDashboard(expandedSessions: string[], autoRefresh: boolean) {
+export function useQueueDashboard(expandedSessions: string[]) {
   return useQuery({
     queryKey: ['queue', 'dashboard', expandedSessions],
     queryFn: () => queueApi.getDashboard(expandedSessions).then(r => r.data),
-    refetchInterval: autoRefresh ? 5000 : false,
   })
 }
 
@@ -13,7 +12,6 @@ export function useQueueEvents(limit: number = 50, eventType?: string) {
   return useQuery({
     queryKey: ['queue', 'events', limit, eventType],
     queryFn: () => queueApi.getEvents(limit, eventType).then(r => r.data),
-    staleTime: 10_000,
   })
 }
 

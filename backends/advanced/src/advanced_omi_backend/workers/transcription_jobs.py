@@ -37,6 +37,7 @@ from advanced_omi_backend.observability.otel_setup import (
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggregator
 from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
+from advanced_omi_backend.services.sse_publisher import publish_sse_event_throttled
 from advanced_omi_backend.services.transcription import (
     get_transcription_provider,
     is_transcription_available,
@@ -698,13 +699,26 @@ async def transcribe_full_audio_job(
         if job:
             current = event.get("current", 0)
             total = event.get("total", 0)
-            job.meta["batch_progress"] = {
+            batch_progress = {
                 "current": current,
                 "total": total,
                 "percent": int(current / total * 100) if total else 0,
                 "message": f"Transcribing segment {current} of {total}",
             }
+            job.meta["batch_progress"] = batch_progress
             job.save_meta()
+
+            # Push batch progress to frontend via SSE (throttled to every 3s)
+            if user_id:
+                publish_sse_event_throttled(
+                    user_id,
+                    "job.progress",
+                    {
+                        "conversation_id": conversation_id,
+                        "job_type": "transcribe_full_audio_job",
+                        "batch_progress": batch_progress,
+                    },
+                )
 
     # Transcribe full audio
     try:

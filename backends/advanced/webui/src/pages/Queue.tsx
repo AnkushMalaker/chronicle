@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Clock,
   Play,
@@ -22,6 +22,8 @@ import {
   Repeat,
   Zap
 } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
+import { useQueueDashboard } from '../hooks/useQueue';
 import { queueApi, conversationsApi } from '../services/api';
 
 interface QueueStats {
@@ -131,10 +133,9 @@ const DEFAULT_EVENT_COLOR = 'bg-gray-100 text-gray-700';
 const getEventColor = (eventType: string) => EVENT_TYPE_COLORS[eventType] || DEFAULT_EVENT_COLOR;
 
 const Queue: React.FC = () => {
-  const [jobs, setJobs] = useState<any[]>([]);
-  const [stats, setStats] = useState<QueueStats | null>(null);
-  const [streamingStatus, setStreamingStatus] = useState<StreamingStatus | null>(null);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
+
+  // UI-only state
   const [selectedJob, setSelectedJob] = useState<any | null>(null);
   const [loadingJobDetails, setLoadingJobDetails] = useState(false);
   const [filters, setFilters] = useState<Filters>({
@@ -148,7 +149,6 @@ const Queue: React.FC = () => {
     total: 0,
     has_more: false
   });
-  const [refreshing, setRefreshing] = useState(false);
   const [showFlushModal, setShowFlushModal] = useState(false);
   const [flushSettings, setFlushSettings] = useState({
     older_than_hours: 24,
@@ -160,17 +160,9 @@ const Queue: React.FC = () => {
   const [flushing, setFlushing] = useState(false);
   const [expandedConversations, setExpandedConversations] = useState<Set<string>>(new Set());
   const [expandedJobs, setExpandedJobs] = useState<Set<string>>(new Set());
-  const [conversationJobs, setConversationJobs] = useState<{[conversationId: string]: any[]}>({});
-  const [lastUpdate, setLastUpdate] = useState<number>(Date.now());
   const [selectedEvent, setSelectedEvent] = useState<EventRecord | null>(null);
-  const [autoRefreshEnabled, setAutoRefreshEnabled] = useState<boolean>(() => {
-    // Load from localStorage, default to true
-    const saved = localStorage.getItem('queue_auto_refresh');
-    return saved !== null ? saved === 'true' : true;
-  });
 
   // System events
-  const [events, setEvents] = useState<EventRecord[]>([]);
   const [eventFilters, setEventFilters] = useState<Record<string, 'include' | 'exclude'>>({});
 
   const cycleEventFilter = (eventType: string) => {
@@ -197,162 +189,106 @@ const Queue: React.FC = () => {
   const [completedConvItemsPerPage] = useState(10);
   const [completedConvTimeRange, setCompletedConvTimeRange] = useState(24); // hours
 
-  // Use refs to track current state in interval
-  const expandedConversationsRef = useRef<Set<string>>(new Set());
-  const streamingStatusRef = useRef<StreamingStatus | null>(null);
-  const refreshingRef = useRef<boolean>(false);
-
-  // Update refs when state changes
+  // 1-second tick for live time elapsed display (no API calls)
+  const [, setTick] = useState(0);
   useEffect(() => {
-    expandedConversationsRef.current = expandedConversations;
-  }, [expandedConversations]);
+    const id = setInterval(() => setTick(t => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
 
-  useEffect(() => {
-    streamingStatusRef.current = streamingStatus;
-  }, [streamingStatus]);
+  // React Query: SSE events invalidate ['queue'] automatically
+  const expandedConversationIds = useMemo(
+    () => Array.from(expandedConversations),
+    [expandedConversations]
+  );
+  const { data: dashboardData, isLoading: loading, isFetching: refreshing } = useQueueDashboard(expandedConversationIds);
 
-  useEffect(() => {
-    refreshingRef.current = refreshing;
-  }, [refreshing]);
-
-  // Main data fetch function - uses consolidated dashboard endpoint
-  const fetchData = useCallback(async () => {
-    if (refreshingRef.current) {
-      return;
+  // Derive state from dashboard data
+  const { jobs, conversationJobs, stats, streamingStatus, events } = useMemo<{
+    jobs: any[];
+    conversationJobs: {[conversationId: string]: any[]};
+    stats: QueueStats | null;
+    streamingStatus: StreamingStatus | null;
+    events: EventRecord[];
+  }>(() => {
+    if (!dashboardData) {
+      return { jobs: [], conversationJobs: {}, stats: null, streamingStatus: null, events: [] };
     }
 
-    setRefreshing(true);
+    // Extract jobs from response (using RQ standard status names)
+    const queuedJobs = dashboardData.jobs?.queued || [];
+    const startedJobs = dashboardData.jobs?.started || [];
+    const finishedJobs = dashboardData.jobs?.finished || [];
+    const failedJobs = dashboardData.jobs?.failed || [];
+    const allFetchedJobs = [...queuedJobs, ...startedJobs, ...finishedJobs, ...failedJobs];
 
-    try {
-      const currentExpanded = expandedConversationsRef.current;
-      const expandedConversationIds = Array.from(currentExpanded);
-
-      // Single API call to get all dashboard data
-      const response = await queueApi.getDashboard(expandedConversationIds);
-      const dashboardData = response.data;
-
-      // Extract jobs from response (using RQ standard status names)
-      const queuedJobs = dashboardData.jobs.queued || [];
-      const startedJobs = dashboardData.jobs.started || [];  // RQ standard, not "processing"
-      const finishedJobs = dashboardData.jobs.finished || [];  // RQ standard, not "completed"
-      const failedJobs = dashboardData.jobs.failed || [];
-
-      // Combine all jobs
-      const allFetchedJobs = [...queuedJobs, ...startedJobs, ...finishedJobs, ...failedJobs];
-
-      // Group jobs by conversation_id (primary identifier for conversations)
-      const jobsByConversation: {[conversationId: string]: any[]} = {};
-
-      allFetchedJobs.forEach(job => {
-        if (!job || !job.job_id) return; // Skip invalid jobs
-
-        // Extract conversation_id from metadata
-        const conversationId = job.meta?.conversation_id;
-        if (conversationId) {
-          if (!jobsByConversation[conversationId]) {
-            jobsByConversation[conversationId] = [];
-          }
-          jobsByConversation[conversationId].push(job);
-
-          // Debug logging for grouping
-        } else {
-          // Only log warning for non-session-level jobs
-          // Audio persistence jobs are expected to not have conversation_id
-          // Job has no conversation_id - cannot group (expected for session-level and audio persistence jobs)
+    // Group jobs by conversation_id
+    const jobsByConversation: {[conversationId: string]: any[]} = {};
+    allFetchedJobs.forEach(job => {
+      if (!job || !job.job_id) return;
+      const conversationId = job.meta?.conversation_id;
+      if (conversationId) {
+        if (!jobsByConversation[conversationId]) {
+          jobsByConversation[conversationId] = [];
         }
-      });
-
-      // Merge conversation jobs from dashboard response (for backward compatibility, check both session_jobs and conversation_jobs)
-      const dashboardConvJobs = dashboardData.conversation_jobs || dashboardData.session_jobs;
-      if (dashboardConvJobs) {
-        Object.entries(dashboardConvJobs).forEach(([conversationId, jobs]: [string, any]) => {
-          // Merge with existing jobs and deduplicate by job_id
-          const existingJobs = jobsByConversation[conversationId] || [];
-          const existingJobIds = new Set(existingJobs.map((j: any) => j.job_id));
-          const newJobs = jobs.filter((j: any) => !existingJobIds.has(j.job_id));
-          jobsByConversation[conversationId] = [...existingJobs, ...newJobs];
-        });
+        jobsByConversation[conversationId].push(job);
       }
+    });
 
-      // Update state
-      setJobs(allFetchedJobs);
-      setConversationJobs(jobsByConversation);
-      setStats(dashboardData.stats);
-      setStreamingStatus(dashboardData.streaming_status);
-      setEvents(dashboardData.events || []);
-      setLastUpdate(Date.now());
+    // Merge conversation jobs from dashboard response
+    const dashboardConvJobs = dashboardData.conversation_jobs || dashboardData.session_jobs;
+    if (dashboardConvJobs) {
+      Object.entries(dashboardConvJobs).forEach(([conversationId, cJobs]: [string, any]) => {
+        const existingJobs = jobsByConversation[conversationId] || [];
+        const existingJobIds = new Set(existingJobs.map((j: any) => j.job_id));
+        const newJobs = cJobs.filter((j: any) => !existingJobIds.has(j.job_id));
+        jobsByConversation[conversationId] = [...existingJobs, ...newJobs];
+      });
+    }
 
-      // Auto-expand active conversations (those with open_conversation_job in progress)
-      const newExpanded = new Set(expandedConversations);
-      const newExpandedJobs = new Set(expandedJobs);
-      let expandedCount = 0;
-      let expandedJobsCount = 0;
+    return {
+      jobs: allFetchedJobs,
+      conversationJobs: jobsByConversation,
+      stats: dashboardData.stats || null,
+      streamingStatus: dashboardData.streaming_status || null,
+      events: dashboardData.events || [],
+    };
+  }, [dashboardData]);
 
-      // Find all conversations with active open_conversation_job
-      Object.entries(jobsByConversation).forEach(([_conversationId, jobs]) => {
-        const openConvJob = jobs.find((j: any) => j.job_type === 'open_conversation_job');
-        if (openConvJob && openConvJob.status === 'started') {
-          const conversationId = openConvJob.meta?.conversation_id;
-          if (conversationId && !expandedConversations.has(conversationId)) {
-            newExpanded.add(conversationId);
-            expandedCount++;
-          }
+  // Auto-expand active conversations when data changes
+  const prevAutoExpandedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!conversationJobs || Object.keys(conversationJobs).length === 0) return;
 
-          // Also expand all job cards in active conversations
-          jobs.forEach((job: any) => {
-            if (!expandedJobs.has(job.job_id)) {
+    const newExpanded = new Set(expandedConversations);
+    const newExpandedJobs = new Set(expandedJobs);
+    let changed = false;
+    let jobsChanged = false;
+
+    Object.entries(conversationJobs).forEach(([, cJobs]) => {
+      const openConvJob = (cJobs as any[]).find((j: any) => j.job_type === 'open_conversation_job');
+      if (openConvJob && openConvJob.status === 'started') {
+        const convId = openConvJob.meta?.conversation_id;
+        if (convId && !newExpanded.has(convId) && !prevAutoExpandedRef.current.has(convId)) {
+          newExpanded.add(convId);
+          prevAutoExpandedRef.current.add(convId);
+          changed = true;
+
+          (cJobs as any[]).forEach((job: any) => {
+            if (!newExpandedJobs.has(job.job_id)) {
               newExpandedJobs.add(job.job_id);
-              expandedJobsCount++;
+              jobsChanged = true;
             }
           });
         }
-      });
-
-      if (expandedCount > 0) {
-        setExpandedConversations(newExpanded);
       }
+    });
 
-      if (expandedJobsCount > 0) {
-        setExpandedJobs(newExpandedJobs);
-      }
-    } catch (error: any) {
-      console.error('❌ Error fetching dashboard data:', error);
+    if (changed) setExpandedConversations(newExpanded);
+    if (jobsChanged) setExpandedJobs(newExpandedJobs);
+  }, [conversationJobs]);
 
-      // If it's a 401 error, stop auto-refresh to prevent repeated failed requests
-      if (error?.response?.status === 401) {
-        console.warn('🔐 Authentication error detected - disabling auto-refresh');
-        setAutoRefreshEnabled(false);
-      }
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
-
-  // Save auto-refresh preference to localStorage
-  useEffect(() => {
-    localStorage.setItem('queue_auto_refresh', autoRefreshEnabled.toString());
-  }, [autoRefreshEnabled]);
-
-  // Auto-refresh interval using useRef
-  useEffect(() => {
-    if (!autoRefreshEnabled) {
-      return;
-    }
-
-    const intervalId = setInterval(() => {
-      fetchData();
-    }, 5000); // Refresh every 5 seconds
-
-    return () => {
-      clearInterval(intervalId);
-    };
-  }, [fetchData, autoRefreshEnabled]);
-
-  // Initial data fetch
-  useEffect(() => {
-    fetchData();
-  }, [filters, pagination.offset, fetchData]);
+  const invalidateQueue = () => queryClient.invalidateQueries({ queryKey: ['queue'] });
 
 
   const viewJobDetails = async (jobId: string) => {
@@ -386,27 +322,6 @@ const Queue: React.FC = () => {
     return () => document.removeEventListener('keydown', handleEscape);
   }, [selectedJob, showFlushModal, selectedEvent]);
 
-  // Commented out - keeping for future use
-  // const retryJob = async (jobId: string) => {
-  //   try {
-  //     await queueApi.retryJob(jobId, false);
-  //     fetchData();
-  //   } catch (error) {
-  //     console.error('Error retrying job:', error);
-  //   }
-  // };
-
-  // const cancelJob = async (jobId: string) => {
-  //   if (!confirm('Are you sure you want to cancel this job?')) return;
-
-  //   try {
-  //     await queueApi.cancelJob(jobId);
-  //     fetchData();
-  //   } catch (error) {
-  //     console.error('Error cancelling job:', error);
-  //   }
-  // };
-
   const cleanupStuckWorkers = async () => {
     if (!confirm('This will clean up all stuck workers and pending messages. Continue?')) return;
 
@@ -420,8 +335,7 @@ const Queue: React.FC = () => {
         ).join('\n')
       }`);
 
-      // Refresh data to show updated counts
-      fetchData();
+      invalidateQueue();
     } catch (error: any) {
       console.error('❌ Error during cleanup:', error);
       alert(`Failed to cleanup workers: ${error.response?.data?.error || error.message}`);
@@ -437,8 +351,7 @@ const Queue: React.FC = () => {
 
       alert(`✅ Cleanup complete!\n\nRemoved ${data.cleaned_count} old session(s)`);
 
-      // Refresh data to show updated counts
-      fetchData();
+      invalidateQueue();
     } catch (error: any) {
       console.error('❌ Error during cleanup:', error);
       alert(`Failed to cleanup sessions: ${error.response?.data?.error || error.message}`);
@@ -447,7 +360,7 @@ const Queue: React.FC = () => {
 
   const applyFilters = () => {
     setPagination(prev => ({ ...prev, offset: 0 }));
-    fetchData();
+    invalidateQueue();
   };
 
   const clearFilters = () => {
@@ -579,7 +492,7 @@ const Queue: React.FC = () => {
       const response = await queueApi.flushJobs(flushSettings.flush_all, body);
       alert(`Successfully flushed ${response.data.total_removed} jobs!`);
       setShowFlushModal(false);
-      fetchData(); // Refresh the data
+      invalidateQueue();
     } catch (error: any) {
       console.error('Error flushing jobs:', error);
       if (error.response?.status === 403) {
@@ -616,7 +529,7 @@ const Queue: React.FC = () => {
   const retryJob = async (jobId: string) => {
     try {
       await queueApi.retryJob(jobId);
-      fetchData();
+      invalidateQueue();
     } catch (error) {
       console.error('Failed to retry job:', error);
     }
@@ -625,7 +538,7 @@ const Queue: React.FC = () => {
   const cancelJob = async (jobId: string) => {
     try {
       await queueApi.cancelJob(jobId);
-      fetchData();
+      invalidateQueue();
     } catch (error) {
       console.error('Failed to cancel job:', error);
     }
@@ -669,14 +582,9 @@ const Queue: React.FC = () => {
       newExpanded.delete(conversationId);
       setExpandedConversations(newExpanded);
     } else {
-      // Expand and trigger refresh to fetch jobs via dashboard endpoint
+      // Expand — React Query will refetch with the new expanded list
       newExpanded.add(conversationId);
       setExpandedConversations(newExpanded);
-
-      // Trigger a refresh if jobs not already loaded
-      if (!conversationJobs[conversationId]) {
-        fetchData();
-      }
     }
   };
 
@@ -707,32 +615,11 @@ const Queue: React.FC = () => {
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Queue & Events</h1>
             <p className="text-xs text-gray-500">
-              Last updated: {new Date(lastUpdate).toLocaleTimeString()} • Auto-refresh every 2s
+              Live updates via SSE
             </p>
           </div>
         </div>
         <div className="flex items-center space-x-2">
-          <button
-            onClick={() => setAutoRefreshEnabled(!autoRefreshEnabled)}
-            className={`flex items-center space-x-2 px-4 py-2 rounded-lg transition-colors ${
-              autoRefreshEnabled
-                ? 'bg-green-600 hover:bg-green-700 text-white'
-                : 'bg-gray-600 hover:bg-gray-700 text-white'
-            }`}
-            title={autoRefreshEnabled ? 'Auto-refresh enabled (click to disable)' : 'Auto-refresh disabled (click to enable)'}
-          >
-            {autoRefreshEnabled ? (
-              <>
-                <Pause className="w-4 h-4" />
-                <span>Auto-refresh ON</span>
-              </>
-            ) : (
-              <>
-                <Play className="w-4 h-4" />
-                <span>Auto-refresh OFF</span>
-              </>
-            )}
-          </button>
           <button
             onClick={() => setShowFlushModal(true)}
             className="flex items-center space-x-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
@@ -741,7 +628,7 @@ const Queue: React.FC = () => {
             <span>Flush Jobs</span>
           </button>
           <button
-            onClick={() => fetchData()}
+            onClick={invalidateQueue}
             disabled={refreshing}
             className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
           >
@@ -850,7 +737,7 @@ const Queue: React.FC = () => {
                       const response = await queueApi.cleanupOldSessions(0); // 0 seconds = all sessions
                       const data = response.data;
                       alert(`✅ Removed ${data.cleaned_count} stream(s)`);
-                      fetchData();
+                      invalidateQueue();
                     } catch (error: any) {
                       console.error('❌ Error removing streams:', error);
                       alert(`Failed to remove streams: ${error.response?.data?.error || error.message}`);
@@ -1189,7 +1076,7 @@ const Queue: React.FC = () => {
                                     if (!confirm(`Close the active conversation for ${clientId}? This will end the current conversation and trigger post-processing.`)) return;
                                     try {
                                       await conversationsApi.closeActiveConversation(clientId);
-                                      fetchData();
+                                      invalidateQueue();
                                     } catch (error: any) {
                                       console.error('Failed to close conversation:', error);
                                       alert(`Failed to close conversation: ${error.response?.data?.error || error.message}`);
@@ -2098,8 +1985,8 @@ const Queue: React.FC = () => {
                 onClick={(e) => {
                   e.stopPropagation();
                   queueApi.clearEvents().then(() => {
-                    setEvents([]);
                     setEventFilters({});
+                    invalidateQueue();
                   });
                 }}
                 className="inline-flex items-center px-2 py-1 rounded text-xs text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors"
@@ -2315,7 +2202,7 @@ const Queue: React.FC = () => {
             <button
               onClick={() => {
                 queueApi.clearJobs().then(() => {
-                  fetchData();
+                  invalidateQueue();
                 });
               }}
               className="inline-flex items-center px-2 py-1 rounded text-xs text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors"

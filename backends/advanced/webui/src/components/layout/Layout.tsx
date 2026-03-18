@@ -2,6 +2,7 @@ import { Link, useLocation, Outlet } from 'react-router-dom'
 import { Music, MessageSquare, MessageCircle, Brain, Users, Upload, Settings, LogOut, Sun, Moon, Shield, Radio, Layers, Puzzle, Zap, Activity } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
+import { useSSE, SSEStatus } from '../../hooks/useSSE'
 import GlobalRecordingIndicator from './GlobalRecordingIndicator'
 import UserLoopModal from '../UserLoopModal'
 
@@ -9,6 +10,9 @@ export default function Layout() {
   const location = useLocation()
   const { user, logout, isAdmin } = useAuth()
   const { isDark, toggleTheme } = useTheme()
+
+  // Single SSE connection for real-time updates across all pages
+  const sseStatus = useSSE()
 
   const navigationItems = [
     { path: '/live-record', label: 'Live Record', icon: Radio },
@@ -40,6 +44,9 @@ export default function Layout() {
               </h1>
             </div>
             <div className="flex items-center space-x-4">
+              {/* SSE connection status */}
+              <SSEIndicator status={sseStatus} />
+
               {/* Global Recording Indicator */}
               <GlobalRecordingIndicator />
 
@@ -117,6 +124,23 @@ export default function Layout() {
 
       {/* User Loop: AI suggestion review modal (auto-opens when suggestions exist) */}
       <UserLoopModal />
+    </div>
+  )
+}
+
+const sseStatusConfig: Record<SSEStatus, { color: string; label: string }> = {
+  connected:    { color: 'bg-green-500', label: 'Live' },
+  connecting:   { color: 'bg-gray-400',  label: 'Connecting' },
+  reconnecting: { color: 'bg-gray-400',  label: 'Reconnecting' },
+  error:        { color: 'bg-red-500',   label: 'Disconnected' },
+}
+
+function SSEIndicator({ status }: { status: SSEStatus }) {
+  const { color, label } = sseStatusConfig[status]
+  return (
+    <div className="flex items-center space-x-1.5" title={`Live updates: ${label}`}>
+      <span className={`h-2 w-2 rounded-full ${color}`} />
+      <span className="text-xs text-gray-500 dark:text-gray-400">{label}</span>
     </div>
   )
 }

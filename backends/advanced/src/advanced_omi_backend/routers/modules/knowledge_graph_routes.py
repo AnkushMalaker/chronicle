@@ -49,6 +49,12 @@ class UpdatePromiseRequest(BaseModel):
     status: str  # pending, in_progress, completed, cancelled
 
 
+class UpdateKBRequest(BaseModel):
+    """Request model for updating the user's basic memory."""
+
+    content: str
+
+
 # =============================================================================
 # ENTITY ENDPOINTS
 # =============================================================================
@@ -469,6 +475,94 @@ async def get_timeline(
         return JSONResponse(
             status_code=500,
             content={"message": f"Error getting timeline: {str(e)}"},
+        )
+
+
+# =============================================================================
+# BASIC MEMORY (MEMORY.md)
+# =============================================================================
+
+
+@router.get("/kb")
+async def get_knowledge_base(
+    current_user: User = Depends(current_active_user),
+):
+    """Get the user's basic memory (MEMORY.md content)."""
+    try:
+        service = get_knowledge_graph_service()
+        content = service.get_basic_memory(user_id=str(current_user.id))
+        return {"content": content, "user_id": str(current_user.id)}
+    except Exception as e:
+        logger.error(f"Error reading basic memory: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"message": f"Error reading basic memory: {str(e)}"},
+        )
+
+
+@router.put("/kb")
+async def update_knowledge_base(
+    request: UpdateKBRequest,
+    current_user: User = Depends(current_active_user),
+):
+    """Write/update the user's basic memory (MEMORY.md content)."""
+    try:
+        service = get_knowledge_graph_service()
+        success = service.write_basic_memory(
+            user_id=str(current_user.id),
+            content=request.content,
+        )
+        if not success:
+            return JSONResponse(
+                status_code=500,
+                content={"message": "Failed to write basic memory"},
+            )
+        return {"message": "Basic memory updated", "user_id": str(current_user.id)}
+    except Exception as e:
+        logger.error(f"Error writing basic memory: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"message": f"Error writing basic memory: {str(e)}"},
+        )
+
+
+@router.post("/kb/consolidate")
+async def consolidate_knowledge_base(
+    current_user: User = Depends(current_active_user),
+):
+    """Consolidate all user memories into a structured MEMORY.md.
+
+    Reads all extracted facts from the memory store, sends them to the
+    LLM with the existing MEMORY.md, and writes back a merged document.
+    """
+    from advanced_omi_backend.services.memory import get_memory_service
+
+    try:
+        user_id = str(current_user.id)
+        memory_service = get_memory_service()
+        all_memories = await memory_service.get_all_memories(user_id=user_id, limit=500)
+        facts = [m.content for m in all_memories if m.content]
+
+        if not facts:
+            return JSONResponse(
+                status_code=400,
+                content={"message": "No memories found to consolidate"},
+            )
+
+        service = get_knowledge_graph_service()
+        updated_content = await service.consolidate_basic_memory(user_id, facts)
+
+        return {
+            "message": "Basic memory consolidated",
+            "user_id": user_id,
+            "facts_processed": len(facts),
+            "content_length": len(updated_content),
+        }
+    except Exception as e:
+        logger.error(f"Error consolidating basic memory: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"message": f"Error consolidating basic memory: {str(e)}"},
         )
 
 
