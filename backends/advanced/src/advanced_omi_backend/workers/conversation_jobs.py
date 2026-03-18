@@ -638,7 +638,7 @@ async def _monitor_conversation_loop(
 
         # Push live progress to frontend via SSE (throttled to every 3s)
         publish_sse_event_throttled(
-            user_id,
+            state.user_id,
             "job.progress",
             {
                 "conversation_id": state.conversation_id,
