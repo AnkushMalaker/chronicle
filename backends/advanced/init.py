@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
-from dotenv import set_key
+from dotenv import dotenv_values, set_key
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
@@ -981,78 +981,20 @@ class ChronicleSetup:
             self.console.print("[blue][INFO][/blue] Obsidian integration disabled")
 
     def setup_knowledge_graph(self):
-        """Configure Knowledge Graph (Neo4j-based entity/relationship extraction - enabled by default)"""
-        has_enable = (
-            hasattr(self.args, "enable_knowledge_graph")
-            and self.args.enable_knowledge_graph
-        )
-        has_disable = (
-            hasattr(self.args, "no_knowledge_graph") and self.args.no_knowledge_graph
-        )
-
-        if has_enable:
-            enable_kg = True
-            self.console.print(
-                f"[green]✅[/green] Knowledge Graph: enabled (configured via wizard)"
-            )
-        elif has_disable:
-            enable_kg = False
-            self.console.print(
-                f"[blue][INFO][/blue] Knowledge Graph: disabled (configured via wizard)"
-            )
-        else:
-            # Standalone init.py run — read existing config as default
-            full_config = self.config_manager.get_full_config()
-            existing_enabled = (
-                full_config.get("memory", {})
-                .get("knowledge_graph", {})
-                .get("enabled", True)
-            )
-
-            self.console.print()
-            self.console.print(
-                "[bold cyan]Knowledge Graph (Entity Extraction)[/bold cyan]"
-            )
-            self.console.print(
-                "Extract people, places, organizations, events, and tasks from conversations"
-            )
-            self.console.print()
-
-            try:
-                enable_kg = Confirm.ask(
-                    "Enable Knowledge Graph?", default=existing_enabled
-                )
-            except EOFError:
-                self.console.print(
-                    f"Using default: {'Yes' if existing_enabled else 'No'}"
-                )
-                enable_kg = existing_enabled
-
-        if enable_kg:
-            self.config_manager.update_memory_config(
-                {
-                    "knowledge_graph": {
-                        "enabled": True,
-                        "neo4j_host": "neo4j",
-                        "timeout": 30,
-                    }
+        """Configure Knowledge Graph (Neo4j-based entity/relationship extraction - always enabled)"""
+        self.config_manager.update_memory_config(
+            {
+                "knowledge_graph": {
+                    "enabled": True,
+                    "neo4j_host": "neo4j",
+                    "timeout": 30,
                 }
-            )
-            self.console.print("[green][SUCCESS][/green] Knowledge Graph enabled")
-            self.console.print(
-                "[blue][INFO][/blue] Entities and relationships will be extracted from conversations"
-            )
-        else:
-            self.config_manager.update_memory_config(
-                {
-                    "knowledge_graph": {
-                        "enabled": False,
-                        "neo4j_host": "neo4j",
-                        "timeout": 30,
-                    }
-                }
-            )
-            self.console.print("[blue][INFO][/blue] Knowledge Graph disabled")
+            }
+        )
+        self.console.print("[green][SUCCESS][/green] Knowledge Graph enabled")
+        self.console.print(
+            "[blue][INFO][/blue] Entities and relationships will be extracted from conversations"
+        )
 
     def setup_langfuse(self):
         """Configure LangFuse observability and prompt management"""
@@ -1306,11 +1248,22 @@ class ChronicleSetup:
             self.config["HTTPS_ENABLED"] = "false"
 
     def generate_env_file(self):
-        """Generate .env file from template and update with configuration"""
+        """Generate .env file from template and update with configuration.
+
+        Preserves existing .env values that weren't explicitly set during this
+        wizard run, preventing silent data loss on re-runs.
+        """
         env_path = Path(".env")
         env_template = Path(".env.template")
 
-        # Backup existing .env if it exists
+        # Read ALL existing .env values before overwriting so we can preserve
+        # keys that weren't touched during this wizard run (e.g., API keys
+        # configured in a previous run for services not reconfigured now).
+        preserved_values = {}
+        if env_path.exists():
+            preserved_values = dotenv_values(str(env_path))
+
+        # Backup existing .env
         self.backup_existing_env()
 
         # Copy template to .env
@@ -1323,9 +1276,13 @@ class ChronicleSetup:
             )
             env_path.touch(mode=0o600)
 
-        # Update configured values using set_key
         env_path_str = str(env_path)
-        for key, value in self.config.items():
+
+        # Merge: self.config (this run) takes priority over preserved (previous run).
+        # This ensures new values win, but old values survive if untouched.
+        merged = {**preserved_values, **self.config}
+
+        for key, value in merged.items():
             if value:  # Only set non-empty values
                 set_key(env_path_str, key, value)
 
@@ -1396,11 +1353,10 @@ class ChronicleSetup:
             neo4j_host = obsidian_config.get("neo4j_host", "not set")
             self.console.print(f"✅ Obsidian/Neo4j: Enabled ({neo4j_host})")
 
-        # Show Knowledge Graph status (read from config.yml)
+        # Show Knowledge Graph status (always enabled)
         kg_config = config_yml.get("memory", {}).get("knowledge_graph", {})
-        if kg_config.get("enabled", False):
-            neo4j_host = kg_config.get("neo4j_host", "not set")
-            self.console.print(f"✅ Knowledge Graph: Enabled ({neo4j_host})")
+        neo4j_host = kg_config.get("neo4j_host", "neo4j")
+        self.console.print(f"✅ Knowledge Graph: Enabled ({neo4j_host})")
 
         # Auto-determine URLs based on HTTPS configuration
         if self.config.get("HTTPS_ENABLED") == "true":
@@ -1552,11 +1508,6 @@ def main():
         help="Enable Obsidian/Neo4j integration (default: prompt user)",
     )
     parser.add_argument(
-        "--enable-knowledge-graph",
-        action="store_true",
-        help="Enable Knowledge Graph entity extraction (default: prompt user)",
-    )
-    parser.add_argument(
         "--neo4j-password", help="Neo4j password (default: prompt user)"
     )
     parser.add_argument(
@@ -1594,11 +1545,6 @@ def main():
         "--no-obsidian",
         action="store_true",
         help="Explicitly disable Obsidian integration (complementary to --enable-obsidian)",
-    )
-    parser.add_argument(
-        "--no-knowledge-graph",
-        action="store_true",
-        help="Explicitly disable Knowledge Graph (complementary to --enable-knowledge-graph)",
     )
 
     args = parser.parse_args()

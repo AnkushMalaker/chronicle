@@ -326,7 +326,6 @@ def run_service_setup(
     streaming_provider=None,
     llm_provider=None,
     memory_provider=None,
-    knowledge_graph_enabled=None,
     hardware_profile=None,
 ):
     """Execute individual service setup script"""
@@ -361,12 +360,6 @@ def run_service_setup(
             cmd.extend(["--enable-obsidian"])
         else:
             cmd.extend(["--no-obsidian"])
-
-        # Always pass knowledge graph choice to avoid double-ask
-        if knowledge_graph_enabled is True:
-            cmd.extend(["--enable-knowledge-graph"])
-        elif knowledge_graph_enabled is False:
-            cmd.extend(["--no-knowledge-graph"])
 
         # Pass LLM provider choice
         if llm_provider:
@@ -1223,33 +1216,6 @@ def select_memory_provider(config_yml: dict = None) -> str:
             )
 
 
-def select_knowledge_graph(config_yml: dict = None) -> bool:
-    """Ask user if Knowledge Graph should be enabled.
-
-    Returns:
-        True if Knowledge Graph should be enabled, False otherwise.
-    """
-    config_yml = config_yml or {}
-    existing_enabled = (
-        config_yml.get("memory", {}).get("knowledge_graph", {}).get("enabled", True)
-    )
-
-    console.print("\n🕸️  [bold cyan]Knowledge Graph[/bold cyan]")
-    console.print(
-        "Extracts people, places, organizations, events, and tasks from conversations"
-    )
-    console.print("Uses Neo4j (included in the stack)")
-    console.print()
-
-    try:
-        enabled = Confirm.ask("Enable Knowledge Graph?", default=existing_enabled)
-    except EOFError:
-        console.print(f"Using default: {'Yes' if existing_enabled else 'No'}")
-        enabled = existing_enabled
-
-    return enabled
-
-
 def main():
     """Main orchestration logic"""
     console.print("🎉 [bold green]Welcome to Chronicle![/bold green]\n")
@@ -1447,7 +1413,6 @@ def main():
     # Neo4j Configuration (always required - used by Knowledge Graph)
     neo4j_password = None
     obsidian_enabled = False
-    knowledge_graph_enabled = None
 
     if "advanced" in selected_services:
         console.print("\n🗄️ [bold cyan]Neo4j Configuration[/bold cyan]")
@@ -1495,9 +1460,6 @@ def main():
 
         if obsidian_enabled:
             console.print("[green]✅[/green] Obsidian integration will be configured")
-
-        # Knowledge Graph configuration (asked here once, passed to init.py)
-        knowledge_graph_enabled = select_knowledge_graph(config_yml)
 
     # Pure Delegation - Run Each Service Setup
     console.print(f"\n📋 [bold]Setting up {len(selected_services)} services...[/bold]")
@@ -1548,7 +1510,6 @@ def main():
             streaming_provider=streaming_provider,
             llm_provider=llm_provider,
             memory_provider=memory_provider,
-            knowledge_graph_enabled=knowledge_graph_enabled,
             hardware_profile=hardware_profile,
         ):
             success_count += 1

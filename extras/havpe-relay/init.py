@@ -388,7 +388,9 @@ class HavpeRelaySetup:
         self.console.print("   [cyan]uv run python main.py[/cyan]")
         self.console.print()
         self.console.print("3. If you configured firmware, flash your ESP32:")
-        self.console.print("   [cyan]cd firmware && esphome run voice-tcp.yaml[/cyan]")
+        self.console.print(
+            "   [cyan]cd firmware && esphome run voice-chronicle.yaml[/cyan]"
+        )
 
     def run(self):
         """Run the complete setup process"""

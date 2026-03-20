@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { MessageCircle, Send, Plus, Trash2, Brain, Clock, User, Bot, BookOpen, Loader2 } from 'lucide-react'
+import { MessageCircle, Send, Plus, Trash2, Brain, Clock, User, Bot, BookOpen, Loader2, Wrench } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { chatApi } from '../services/api'
 import { useChatSessions, useChatMessages, useCreateChatSession, useDeleteChatSession, useExtractChatMemories } from '../hooks/useChat'
@@ -38,6 +38,8 @@ export default function Chat() {
   const [showMemoryPanel, setShowMemoryPanel] = useState(false)
   const [extractionMessage, setExtractionMessage] = useState('')
   const [includeObsidian, setIncludeObsidian] = useState(false)
+  const [memoryLimit, setMemoryLimit] = useState(5)
+  const [memoryMode, setMemoryMode] = useState<'always' | 'tool' | 'off'>('always')
 
   // Query for messages of current session
   const { data: queryMessages } = useChatMessages(currentSessionId)
@@ -158,7 +160,7 @@ export default function Chat() {
       setLocalMessages(prev => [...(prev ?? []), userMessage])
 
       // Send message and handle streaming response
-      const response = await chatApi.sendMessage(messageText, sessionId!, includeObsidian)
+      const response = await chatApi.sendMessage(messageText, sessionId!, includeObsidian, memoryLimit, memoryMode)
 
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`)
@@ -479,17 +481,59 @@ export default function Chat() {
                 </button>
               </div>
 
-              <div className="mt-2 flex items-center">
-                <input
-                  type="checkbox"
-                  id="includeObsidian"
-                  checked={includeObsidian}
-                  onChange={(e) => setIncludeObsidian(e.target.checked)}
-                  className="h-4 w-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
-                />
-                <label htmlFor="includeObsidian" className="ml-2 text-sm text-gray-700 dark:text-gray-300 cursor-pointer select-none">
-                  Include Obsidian Memory
-                </label>
+              <div className="mt-2 flex items-center justify-between">
+                <div className="flex items-center space-x-4">
+                  <div className="flex items-center">
+                    <input
+                      type="checkbox"
+                      id="includeObsidian"
+                      checked={includeObsidian}
+                      onChange={(e) => setIncludeObsidian(e.target.checked)}
+                      className="h-4 w-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                    />
+                    <label htmlFor="includeObsidian" className="ml-2 text-sm text-gray-700 dark:text-gray-300 cursor-pointer select-none">
+                      Include Obsidian Memory
+                    </label>
+                  </div>
+
+                  <button
+                    onClick={() => setMemoryMode(prev => prev === 'always' ? 'tool' : prev === 'tool' ? 'off' : 'always')}
+                    className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
+                      memoryMode === 'off'
+                        ? 'bg-gray-200 text-gray-500 dark:bg-gray-600 dark:text-gray-400'
+                        : memoryMode === 'tool'
+                          ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300'
+                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-400 dark:hover:bg-gray-600'
+                    }`}
+                    title={memoryMode === 'off'
+                      ? 'Off: no memory search'
+                      : memoryMode === 'tool'
+                        ? 'Auto: LLM decides when to search memories'
+                        : 'Always: memories are always fetched upfront'}
+                  >
+                    {memoryMode === 'off'
+                      ? <Brain className="h-3.5 w-3.5 opacity-50" />
+                      : memoryMode === 'tool'
+                        ? <Wrench className="h-3.5 w-3.5" />
+                        : <Brain className="h-3.5 w-3.5" />}
+                    <span>Memory: {memoryMode === 'off' ? 'Off' : memoryMode === 'tool' ? 'Auto' : 'Always'}</span>
+                  </button>
+                </div>
+
+                <div className="flex items-center space-x-2">
+                  <Brain className="h-4 w-4 text-gray-500 dark:text-gray-400" />
+                  <input
+                    type="range"
+                    min={0}
+                    max={20}
+                    value={memoryLimit}
+                    onChange={(e) => setMemoryLimit(parseInt(e.target.value))}
+                    className="w-24 h-1.5 accent-blue-600"
+                  />
+                  <span className="text-sm text-gray-600 dark:text-gray-400 w-20 text-right">
+                    {memoryLimit} {memoryLimit === 1 ? 'memory' : 'memories'}
+                  </span>
+                </div>
               </div>
             </div>
           </>

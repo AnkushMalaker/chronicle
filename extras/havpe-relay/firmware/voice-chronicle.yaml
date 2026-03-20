@@ -322,8 +322,7 @@ voice_kit:
   id: voice_kit_component
   i2c_id: internal_i2c
   reset_pin: GPIO4
-  channel_0_stage: AGC   # Speech-ready output (AEC→IC→NS→AGC)
-  channel_1_stage: NS    # Pre-AGC tap (useful for wake word or analysis)
+  # No channel_0_stage/channel_1_stage — use XMOS defaults (matches official HA firmware)
   firmware:
     url: https://github.com/esphome/voice-kit-xmos-firmware/releases/download/v1.3.1/ffva_v1.3.1_upgrade.bin
     version: "1.3.1"
@@ -361,20 +360,16 @@ i2s_audio:
       number: GPIO13
 
 # ─────────── Microphone (TCP streaming to relay) ───────────
-# The XMOS voice kit outputs stereo 32-bit I2S (secondary mode). Channel 0
-# (right) carries the fully-processed speech signal (AEC→IC→NS→AGC), while
-# channel 1 (left) is a pre-AGC tap useful for wake-word engines.
+# The XMOS voice kit outputs stereo 32-bit I2S (secondary mode).
+# ESPHome interleaves stereo as [L, R, L, R, ...] where channel 0 = left (even)
+# and channel 1 = right (odd).
+#   Source: esphome/components/microphone/microphone_source.h
+#   https://github.com/esphome/esphome/blob/dev/esphome/components/microphone/microphone_source.h
 #
-# We match the official HA Voice PE microphone config (stereo, 32-bit) and
-# extract+downconvert in the on_data lambda before sending over TCP.
-#
-# References:
-#   Official Voice PE config:
-#     https://github.com/esphome/home-assistant-voice-pe/blob/dev/home-assistant-voice.yaml
-#   XMOS voice kit audio pipeline:
-#     https://deepwiki.com/esphome/home-assistant-voice-pe/3.2-audio-processing-pipeline
-#   I2S microphone component docs:
-#     https://esphome.io/components/microphone/i2s_audio/
+# The official HA Voice PE firmware uses channels: 0 (left) for voice assistant
+# and channels: 1 (right) with gain_factor: 4 for wake word.
+#   Source: home-assistant-voice.yaml
+#   https://github.com/esphome/home-assistant-voice-pe/blob/dev/home-assistant-voice.yaml
 microphone:
   - platform: i2s_audio
     id: mic_in
@@ -416,10 +411,9 @@ microphone:
               session_started = true;
             }
 
-            // Extract right channel (ch0 = AGC-processed speech) and convert 32→16 bit.
-            // Input: interleaved stereo 32-bit samples [R0, L0, R1, L1, ...]
-            // Output: mono 16-bit samples [R0_16, R1_16, ...]
-            // Each stereo frame = 8 bytes (4 bytes right + 4 bytes left).
+            // Extract channel 0 (AGC-processed speech) and convert 32→16 bit.
+            // ESPHome stereo interleave: channel 0 = left (even), channel 1 = right (odd).
+            // XMOS voice_kit: channel_0_stage=AGC → left, channel_1_stage=NS → right.
             const int32_t* samples = reinterpret_cast<const int32_t*>(x.data());
             size_t total_samples = x.size() / sizeof(int32_t);    // total L+R samples
             size_t num_frames = total_samples / 2;                 // stereo frames
@@ -431,8 +425,8 @@ microphone:
             }
 
             for (size_t i = 0; i < num_frames; i++) {
-              int32_t right = samples[i * 2];       // channel 0 (right) = AGC output
-              mono_buf[i] = (int16_t)(right >> 16);  // 32→16 bit: take upper 16 bits
+              int32_t left = samples[i * 2];          // channel 0 (left) = AGC output
+              mono_buf[i] = (int16_t)(left >> 16);    // 32→16 bit: take upper 16 bits
             }
 
             size_t mono_bytes = num_frames * sizeof(int16_t);

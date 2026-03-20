@@ -139,6 +139,7 @@ vibevoice = [
     "bitsandbytes>=0.43.0",
     "peft>=0.17.0",
     "omegaconf>=2.3.0",
+    "wandb>=0.18.0",
 ]
 
 qwen3-asr = [

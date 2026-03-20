@@ -487,6 +487,19 @@ class PluginRouter:
             pipe.lpush(self._EVENT_LOG_KEY, record)
             pipe.ltrim(self._EVENT_LOG_KEY, 0, self._EVENT_LOG_MAX - 1)
             pipe.execute()
+
+            # Publish SSE event for queue page live updates
+            from advanced_omi_backend.services.sse_publisher import publish_sse_event
+
+            if user_id:
+                publish_sse_event(
+                    user_id,
+                    "plugin.event",
+                    {
+                        "event": event,
+                        "plugins_executed": len(plugins_executed),
+                    },
+                )
         except Exception:
             logger.debug("Failed to log event to Redis", exc_info=True)
 

@@ -30,6 +30,7 @@ from advanced_omi_backend.observability.otel_setup import (
 )
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
+from advanced_omi_backend.services.sse_publisher import publish_sse_event
 
 logger = logging.getLogger(__name__)
 
@@ -308,6 +309,15 @@ async def process_memory_job(
                         set_as_active=True,
                     )
                     await conversation_model.save()
+
+                publish_sse_event(
+                    user_id,
+                    "memory.processed",
+                    {
+                        "conversation_id": conversation_id,
+                        "memory_count": len(created_memory_ids),
+                    },
+                )
 
                 logger.info(
                     f"✅ Completed memory processing for conversation {conversation_id} - created {len(created_memory_ids)} memories in {processing_time:.2f}s"

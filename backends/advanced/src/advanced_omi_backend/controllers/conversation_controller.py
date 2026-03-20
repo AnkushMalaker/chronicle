@@ -765,6 +765,35 @@ async def restore_conversation(conversation_id: str, user: User) -> JSONResponse
         )
 
 
+async def _restore_if_deleted_and_prepare(
+    conversation: Conversation,
+    conversation_id: str,
+    processing_status: str | None = "reprocessing",
+) -> None:
+    """Restore soft-deleted conversation/chunks and optionally set processing_status."""
+    changed = False
+
+    if conversation.deleted:
+        await AudioChunkDocument.find(
+            AudioChunkDocument.conversation_id == conversation_id,
+            AudioChunkDocument.deleted == True,
+        ).update_many({"$set": {"deleted": False, "deleted_at": None}})
+        conversation.deleted = False
+        conversation.deletion_reason = None
+        conversation.deleted_at = None
+        changed = True
+
+    if (
+        processing_status is not None
+        and conversation.processing_status != processing_status
+    ):
+        conversation.processing_status = processing_status
+        changed = True
+
+    if changed:
+        await conversation.save()
+
+
 def _enqueue_transcript_reprocessing(
     conversation_id: str,
     user_id: str,
@@ -1036,6 +1065,8 @@ async def reprocess_transcript(conversation_id: str, user: User):
         if error:
             return error
 
+        await _restore_if_deleted_and_prepare(conversation_model, conversation_id)
+
         # Get audio_uuid from conversation
         # Validate audio chunks exist in MongoDB
         chunks = await AudioChunkDocument.find(
@@ -1092,6 +1123,11 @@ async def reprocess_memory(
         )
         if error:
             return error
+
+        await _restore_if_deleted_and_prepare(
+            conversation_model, conversation_id, processing_status=None
+        )
+
         # Resolve transcript version ID (handle "active" special case)
         error, transcript_version_id, transcript_version = _resolve_transcript_version(
             conversation_model, transcript_version_id
@@ -1147,6 +1183,9 @@ async def reprocess_speakers(
         )
         if error:
             return error
+
+        await _restore_if_deleted_and_prepare(conversation_model, conversation_id)
+
         # 2-3. Resolve source transcript version ID and find version object
         error, source_version_id, source_version = _resolve_transcript_version(
             conversation_model, transcript_version_id

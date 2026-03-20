@@ -88,7 +88,7 @@ To view device logs:
 
 ### Hardware Wiring
 
-The ESPHome config (`voice-tcp.yaml`) expects an I2S microphone on these pins:
+The ESPHome config (`voice-chronicle.yaml`) expects an I2S microphone on these pins:
 
 | Signal | GPIO |
 |--------|------|
@@ -96,7 +96,7 @@ The ESPHome config (`voice-tcp.yaml`) expects an I2S microphone on these pins:
 | LRCLK  | 14   |
 | DIN    | 15   |
 
-These match the default Voice-PE board pinout. If your board differs, edit the pin numbers in `voice-tcp.yaml`.
+These match the default Voice-PE board pinout. If your board differs, edit the pin numbers in `voice-chronicle.yaml`.
 
 ### Verify Connection
 
@@ -159,8 +159,8 @@ havpe-relay/
 ├── docker-compose.yml             # Docker config
 ├── Dockerfile                     # Container build
 ├── firmware/
-│   ├── voice-tcp.yaml             # ESPHome config for ESP32-S3
-│   ├── tcp_stream.h               # lwIP socket header
+│   ├── voice-chronicle.yaml       # ESPHome config for ESP32-S3
+│   ├── chronicle-sdk/chronicle.h  # Wyoming protocol TCP client
 │   ├── secrets.template.yaml      # Secrets template
 │   └── secrets.yaml               # Your secrets (gitignored)
 └── pyproject.toml                 # Python dependencies
@@ -171,7 +171,7 @@ havpe-relay/
 ### ESP32 won't connect to relay
 - Verify `relay_ip_address` in `firmware/secrets.yaml` matches this machine's LAN IP
 - Ensure the relay is running and port 8989 is not firewalled
-- Check ESP32 serial logs: `esphome logs firmware/voice-tcp.yaml`
+- Check ESP32 serial logs: `esphome logs firmware/voice-chronicle.yaml`
 
 ### Authentication failures
 - Verify credentials: try logging in at `BACKEND_URL/docs` with the same email/password

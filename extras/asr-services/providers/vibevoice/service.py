@@ -129,11 +129,13 @@ def _run_lora_training(
     lora_alpha: int,
     num_epochs: int,
     job_id: str,
+    service: VibeVoiceService,
 ) -> None:
     """Run LoRA fine-tuning in a background thread.
 
     Imports VibeVoice's finetuning-asr/lora_finetune.py and calls its train()
-    function programmatically. On completion, saves the adapter and updates state.
+    function programmatically. On completion, saves the adapter, auto-reloads it
+    into the running model, and updates state.
     """
     global _finetune_state
     try:
@@ -165,14 +167,48 @@ def _run_lora_training(
 
         _finetune_state["progress"] = "training"
 
-        # Call the training function
-        lora_module.train(
+        # Construct dataclass arguments expected by train()
+        model_args = lora_module.ModelArguments(
+            model_path=os.getenv("ASR_MODEL", "microsoft/VibeVoice-ASR"),
+        )
+        data_args = lora_module.DataArguments(
             data_dir=data_dir,
-            output_dir=adapter_output_dir,
+            use_customized_context=True,
+        )
+        lora_args_obj = lora_module.LoraArguments(
             lora_r=lora_r,
             lora_alpha=lora_alpha,
-            num_epochs=num_epochs,
         )
+
+        from transformers import TrainingArguments
+
+        # Determine logging backend from env
+        wandb_enabled = os.getenv("WANDB_ENABLED", "false").lower() == "true"
+        report_to = "wandb" if wandb_enabled else "none"
+
+        training_args = TrainingArguments(
+            output_dir=adapter_output_dir,
+            num_train_epochs=num_epochs,
+            per_device_train_batch_size=1,
+            learning_rate=1e-4,
+            bf16=True,
+            report_to=report_to,
+            run_name=f"chronicle-lora-{job_id}",
+            gradient_checkpointing=True,
+            logging_steps=10,
+        )
+
+        lora_module.train(model_args, data_args, lora_args_obj, training_args)
+
+        # Auto-reload the adapter into the running model
+        _finetune_state["progress"] = "reloading_adapter"
+        if service.transcriber is not None:
+            try:
+                service.transcriber.load_lora_adapter(adapter_output_dir)
+                logger.info(f"LoRA adapter auto-loaded from {adapter_output_dir}")
+            except Exception as e:
+                logger.error(f"Adapter reload failed (training succeeded): {e}")
+                _finetune_state["error"] = f"Training OK, reload failed: {e}"
 
         _finetune_state["status"] = "completed"
         _finetune_state["progress"] = "done"
@@ -229,9 +265,14 @@ def add_finetune_routes(app, service: VibeVoiceService) -> None:
             content = await audio_file.read()
             file_path.write_bytes(content)
 
-        # Save labels JSON
-        labels_path = job_dir / "labels.json"
-        labels_path.write_text(json.dumps(label_data, indent=2))
+        # Write individual label files (one per sample, matching audio stem)
+        for label in label_data:
+            audio_filename = label.get("audio_path", "")
+            stem = Path(audio_filename).stem
+            if not stem:
+                continue
+            label_path = job_dir / f"{stem}.json"
+            label_path.write_text(json.dumps(label, indent=2))
 
         # Output adapter directory
         adapter_output_dir = str(adapter_base_dir / "latest")
@@ -256,6 +297,7 @@ def add_finetune_routes(app, service: VibeVoiceService) -> None:
             lora_alpha,
             num_epochs,
             job_id,
+            service,
         )
 
         return JSONResponse(

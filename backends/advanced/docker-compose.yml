@@ -178,6 +178,8 @@ services:
       chronicle-backend:
         condition: service_healthy
     restart: unless-stopped
+    profiles:
+      - prod
 
   # Caddy reverse proxy - provides HTTPS for microphone access
   # Access at: https://localhost (accepts self-signed cert warning)
@@ -200,23 +202,22 @@ services:
     profiles:
       - https
 
-  # Development webui service (use with docker-compose --profile dev up)
+  # Development webui with hot reload (default)
+  # Source is volume-mounted, changes appear instantly without rebuilds
+  # Production static build available via: docker compose --profile prod up webui
   webui-dev:
     build:
       context: ./webui
       dockerfile: Dockerfile.dev
     ports:
-      - "${WEBUI_DEV_PORT:-5173}:5173"
-    environment:
-      - VITE_BACKEND_URL=http://${HOST_IP}:${BACKEND_PUBLIC_PORT:-8000}
+      - "${WEBUI_PORT:-3010}:5173"
     volumes:
       - ./webui/src:/app/src
       - ./webui/public:/app/public
     depends_on:
       chronicle-backend:
         condition: service_healthy
-    profiles:
-      - dev
+    restart: unless-stopped
 
   qdrant:
     image: qdrant/qdrant:latest
@@ -232,7 +233,7 @@ services:
     ports:
       - "27017:27017"
     volumes:
-      - mongo_data:/data/db
+      - ./data/mongo_data:/data/db
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand({ ping: 1 })"]
       interval: 10s
@@ -306,17 +307,9 @@ networks:
     external: true
 
 volumes:
-  ollama_data:
-    driver: local
-  mongo_data:
-    driver: local
   caddy_data:
     driver: local
   caddy_config:
-    driver: local
-  neo4j_data:
-    driver: local
-  neo4j_logs:
     driver: local
   tailscale-state:
     driver: local

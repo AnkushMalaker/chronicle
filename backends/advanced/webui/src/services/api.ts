@@ -489,7 +489,7 @@ export const chatApi = {
   getHealth: () => api.get('/api/chat/health'),
 
   // Streaming chat — OpenAI-compatible completions endpoint
-  sendMessage: (message: string, sessionId?: string, includeObsidianMemory?: boolean) => {
+  sendMessage: (message: string, sessionId?: string, includeObsidianMemory?: boolean, memoryLimit?: number, memoryMode?: string) => {
     const requestBody: Record<string, unknown> = {
       messages: [{ role: 'user', content: message }],
       stream: true,
@@ -499,6 +499,12 @@ export const chatApi = {
     }
     if (includeObsidianMemory) {
       requestBody.include_obsidian_memory = includeObsidianMemory
+    }
+    if (memoryLimit !== undefined) {
+      requestBody.memory_limit = memoryLimit
+    }
+    if (memoryMode) {
+      requestBody.memory_mode = memoryMode
     }
 
     return fetch(`${BACKEND_URL}/api/chat/completions`, {

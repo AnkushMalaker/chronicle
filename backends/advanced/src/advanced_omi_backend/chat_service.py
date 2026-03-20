@@ -9,6 +9,7 @@ This module provides:
 """
 
 import contextlib
+import json
 import logging
 import time
 from datetime import datetime
@@ -19,7 +20,7 @@ from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorCollection
 
 from advanced_omi_backend.database import get_database
-from advanced_omi_backend.llm_client import get_llm_client
+from advanced_omi_backend.llm_client import async_chat_with_tools, get_llm_client
 from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.observability.otel_setup import (
     get_tracer,
@@ -28,6 +29,7 @@ from advanced_omi_backend.observability.otel_setup import (
     set_trace_io,
 )
 from advanced_omi_backend.prompt_registry import get_prompt_registry
+from advanced_omi_backend.services.knowledge_graph.kb import KnowledgeBaseManager
 from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.services.memory.base import MemoryEntry
 from advanced_omi_backend.services.obsidian_service import (
@@ -41,6 +43,32 @@ logger = logging.getLogger(__name__)
 # Configuration
 MAX_MEMORY_CONTEXT = 5  # Maximum number of memories to include in context
 MAX_CONVERSATION_HISTORY = 10  # Maximum conversation turns to keep in context
+MAX_TOOL_ROUNDS = 5  # Maximum tool-calling rounds in tool mode
+
+MEMORY_SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search_memories",
+        "description": (
+            "Search the user's personal memory database for relevant information. "
+            "Use when the question might benefit from personal context."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query for finding relevant memories",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results to return (default 5, max 20)",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
 
 
 class ChatMessage:
@@ -147,6 +175,7 @@ class ChatService:
         self.llm_client = None
         self.memory_service = None
         self._initialized = False
+        self._kb = KnowledgeBaseManager()
 
     async def _get_system_prompt(self) -> str:
         """
@@ -337,12 +366,13 @@ If no relevant memories are available, respond normally based on the conversatio
             return False
 
     async def get_relevant_memories(
-        self, query: str, user_id: str
+        self, query: str, user_id: str, limit: Optional[int] = None
     ) -> List[MemoryEntry]:
         """Get relevant memories for the user's query."""
         try:
+            memory_limit = limit if limit is not None else MAX_MEMORY_CONTEXT
             memories = await self.memory_service.search_memories(
-                query=query, user_id=user_id, limit=MAX_MEMORY_CONTEXT
+                query=query, user_id=user_id, limit=memory_limit
             )
             logger.info(
                 f"Retrieved {len(memories)} relevant memories for query: {query[:50]}..."
@@ -358,6 +388,7 @@ If no relevant memories are available, respond normally based on the conversatio
         user_id: str,
         current_message: str,
         include_obsidian_memory: bool = False,
+        memory_limit: Optional[int] = None,
     ) -> Tuple[str, List[str]]:
         """Format conversation context with memory integration."""
         # Get recent conversation history
@@ -366,11 +397,20 @@ If no relevant memories are available, respond normally based on the conversatio
         )
 
         # Get relevant memories
-        memories = await self.get_relevant_memories(current_message, user_id)
+        memories = await self.get_relevant_memories(
+            current_message, user_id, limit=memory_limit
+        )
         memory_ids = [memory.id for memory in memories if memory.id]
 
         # Build context string
         context_parts = []
+
+        # Add basic memory (user's MEMORY.md) if available
+        basic_memory = self._kb.get_basic_memory(user_id)
+        if basic_memory:
+            context_parts.append("# User Knowledge Base:")
+            context_parts.append(basic_memory)
+            context_parts.append("")
 
         # Add memory context if available
         if memories:
@@ -423,12 +463,207 @@ If no relevant memories are available, respond normally based on the conversatio
         context = "\n".join(context_parts)
         return context, memory_ids
 
+    async def _get_tool_mode_system_prompt(self) -> str:
+        """Get system prompt for tool-based memory mode."""
+        try:
+            registry = get_prompt_registry()
+            prompt = await registry.get_prompt("chat.system.tool_mode")
+            logger.info("Using tool-mode chat system prompt from prompt registry")
+            return prompt
+        except Exception:
+            pass
+
+        return (
+            "You are a helpful AI assistant. You have access to a tool called "
+            "`search_memories` that searches the user's personal memory database.\n\n"
+            "Use the tool when the user's question might benefit from personal context "
+            "(e.g., preferences, past events, people they know, things they've said before). "
+            "Do NOT use the tool for general knowledge questions, greetings, or simple tasks "
+            "like math.\n\n"
+            "When memories are returned, weave them naturally into your response without "
+            "listing them mechanically."
+        )
+
+    async def _generate_response_tool_mode(
+        self,
+        session_id: str,
+        user_id: str,
+        message_content: str,
+        memory_limit: Optional[int] = None,
+    ) -> AsyncGenerator[Dict, None]:
+        """Generate response using tool-based memory retrieval (LLM decides when to search)."""
+        if not self._initialized:
+            await self.initialize()
+
+        try:
+            # Save user message
+            user_message = ChatMessage(
+                message_id=str(uuid4()),
+                session_id=session_id,
+                user_id=user_id,
+                role="user",
+                content=message_content,
+            )
+            await self.add_message(user_message)
+
+            # Build messages list with proper message objects
+            system_prompt = await self._get_tool_mode_system_prompt()
+
+            # Inject basic memory into system prompt
+            basic_memory = self._kb.get_basic_memory(user_id)
+            if basic_memory:
+                system_prompt += f"\n\n# User Knowledge Base:\n{basic_memory}"
+
+            messages = [{"role": "system", "content": system_prompt}]
+
+            # Add conversation history
+            history = await self.get_session_messages(
+                session_id, user_id, MAX_CONVERSATION_HISTORY
+            )
+            for msg in history:
+                # Skip the message we just saved (it's the current one)
+                if msg.message_id == user_message.message_id:
+                    continue
+                messages.append({"role": msg.role, "content": msg.content})
+
+            # Add current user message
+            messages.append({"role": "user", "content": message_content})
+
+            all_memory_ids = []
+
+            # Tool-calling loop
+            for _ in range(MAX_TOOL_ROUNDS):
+                response = await async_chat_with_tools(
+                    messages,
+                    tools=[MEMORY_SEARCH_TOOL],
+                    operation="chat",
+                )
+                choice = response.choices[0]
+
+                if choice.finish_reason == "tool_calls" or choice.message.tool_calls:
+                    # Append assistant message with tool calls
+                    assistant_msg = choice.message.model_dump()
+                    messages.append(assistant_msg)
+
+                    for tool_call in choice.message.tool_calls:
+                        fn_name = tool_call.function.name
+                        try:
+                            fn_args = json.loads(tool_call.function.arguments)
+                        except json.JSONDecodeError:
+                            fn_args = {}
+
+                        if fn_name == "search_memories":
+                            query = fn_args.get("query", message_content)
+                            limit = min(fn_args.get("limit", 5), 20)
+                            if memory_limit is not None:
+                                limit = min(limit, memory_limit)
+
+                            memories = await self.get_relevant_memories(
+                                query, user_id, limit=limit
+                            )
+                            memory_ids = [m.id for m in memories if m.id]
+                            all_memory_ids.extend(memory_ids)
+
+                            result = [
+                                {"content": m.content, "id": m.id}
+                                for m in memories
+                                if m.content
+                            ]
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "content": json.dumps(result, default=str),
+                                }
+                            )
+                        else:
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "content": json.dumps(
+                                        {"error": f"Unknown tool: {fn_name}"}
+                                    ),
+                                }
+                            )
+                    continue
+
+                # Plain text response — done
+                response_content = (choice.message.content or "").strip()
+
+                # Deduplicate memory IDs
+                unique_memory_ids = list(dict.fromkeys(all_memory_ids))
+
+                yield {
+                    "type": "memory_context",
+                    "data": {
+                        "memory_ids": unique_memory_ids,
+                        "memory_count": len(unique_memory_ids),
+                    },
+                    "timestamp": time.time(),
+                }
+
+                yield {
+                    "type": "token",
+                    "data": response_content,
+                    "timestamp": time.time(),
+                }
+
+                # Save assistant message
+                assistant_message = ChatMessage(
+                    message_id=str(uuid4()),
+                    session_id=session_id,
+                    user_id=user_id,
+                    role="assistant",
+                    content=response_content,
+                    memories_used=unique_memory_ids,
+                )
+                await self.add_message(assistant_message)
+
+                set_trace_io(output={"response": response_content})
+
+                yield {
+                    "type": "complete",
+                    "data": {
+                        "message_id": assistant_message.message_id,
+                        "memories_used": unique_memory_ids,
+                    },
+                    "timestamp": time.time(),
+                }
+                return
+
+            # Exhausted tool rounds without a text response
+            logger.warning(
+                f"Tool mode exhausted {MAX_TOOL_ROUNDS} rounds for session {session_id}"
+            )
+            yield {
+                "type": "memory_context",
+                "data": {"memory_ids": [], "memory_count": 0},
+                "timestamp": time.time(),
+            }
+            yield {
+                "type": "token",
+                "data": "I'm sorry, I wasn't able to formulate a response. Please try again.",
+                "timestamp": time.time(),
+            }
+            yield {"type": "complete", "data": {}, "timestamp": time.time()}
+
+        except Exception as e:
+            logger.error(f"Error in tool-mode response for session {session_id}: {e}")
+            yield {
+                "type": "error",
+                "data": {"error": str(e)},
+                "timestamp": time.time(),
+            }
+
     async def generate_response_stream(
         self,
         session_id: str,
         user_id: str,
         message_content: str,
         include_obsidian_memory: bool = False,
+        memory_limit: Optional[int] = None,
+        memory_mode: str = "always",
     ) -> AsyncGenerator[Dict, None]:
         """Generate streaming response with memory context."""
         set_otel_session(session_id)
@@ -452,6 +687,16 @@ If no relevant memories are available, respond normally based on the conversatio
         with span_ctx:
             set_trace_io(input={"message": message_content})
 
+            if memory_mode == "tool":
+                async for event in self._generate_response_tool_mode(
+                    session_id=session_id,
+                    user_id=user_id,
+                    message_content=message_content,
+                    memory_limit=memory_limit,
+                ):
+                    yield event
+                return
+
             if not self._initialized:
                 await self.initialize()
 
@@ -466,13 +711,31 @@ If no relevant memories are available, respond normally based on the conversatio
                 )
                 await self.add_message(user_message)
 
-                # Format context with memories
-                context, memory_ids = await self.format_conversation_context(
-                    session_id,
-                    user_id,
-                    message_content,
-                    include_obsidian_memory=include_obsidian_memory,
-                )
+                if memory_mode == "off":
+                    # No memory search — just conversation history
+                    messages = await self.get_session_messages(
+                        session_id, user_id, MAX_CONVERSATION_HISTORY
+                    )
+                    context_parts = []
+                    if messages:
+                        context_parts.append("# Recent Conversation:")
+                        for msg in messages[-MAX_CONVERSATION_HISTORY:]:
+                            role_label = "You" if msg.role == "user" else "Assistant"
+                            context_parts.append(f"{role_label}: {msg.content}")
+                        context_parts.append("")
+                    context_parts.append("# Current Message:")
+                    context_parts.append(f"You: {message_content}")
+                    context = "\n".join(context_parts)
+                    memory_ids = []
+                else:
+                    # Format context with memories (always mode)
+                    context, memory_ids = await self.format_conversation_context(
+                        session_id,
+                        user_id,
+                        message_content,
+                        include_obsidian_memory=include_obsidian_memory,
+                        memory_limit=memory_limit,
+                    )
 
                 # Send memory context used
                 yield {

@@ -33,6 +33,10 @@ from advanced_omi_backend.services.plugin_service import (
     dispatch_plugin_event,
     get_plugin_router,
 )
+from advanced_omi_backend.services.sse_publisher import (
+    publish_sse_event,
+    publish_sse_event_throttled,
+)
 from advanced_omi_backend.utils.conversation_utils import (
     analyze_speech,
     extract_speakers_from_segments,
@@ -227,6 +231,17 @@ async def handle_end_of_conversation(
     else:
         logger.info(f"Session {session_id} not found, not restarting (session ended)")
 
+    # Notify frontend that conversation has closed and post-processing will start
+    publish_sse_event(
+        user_id,
+        "conversation.closed",
+        {
+            "conversation_id": conversation_id,
+            "client_id": client_id,
+            "end_reason": end_reason,
+        },
+    )
+
     return {
         "conversation_id": conversation_id,
         "conversation_count": conversation_count,
@@ -388,6 +403,15 @@ async def _initialize_conversation(
         conversation_id = conversation.conversation_id
         logger.info(
             f"✅ Created streaming conversation {conversation_id} for session {session_id}"
+        )
+        publish_sse_event(
+            user_id,
+            "conversation.created",
+            {
+                "conversation_id": conversation_id,
+                "client_id": client_id,
+                "title": "Recording...",
+            },
         )
 
     # Attach markers from Redis session (e.g., button events captured during streaming)
@@ -610,6 +634,26 @@ async def _monitor_conversation_loop(
             speech_analysis=speech_analysis,
             speakers=speakers,
             last_meaningful_speech_time=state.last_meaningful_speech_time,
+        )
+
+        # Push live progress to frontend via SSE (throttled to every 3s)
+        publish_sse_event_throttled(
+            state.user_id,
+            "job.progress",
+            {
+                "conversation_id": state.conversation_id,
+                "job_type": "open_conversation_job",
+                "word_count": combined.get("word_count", 0) if combined else 0,
+                "duration_seconds": (
+                    speech_analysis.get("duration", 0) if speech_analysis else 0
+                ),
+                "speakers": speakers,
+                "has_speech": (
+                    speech_analysis.get("has_speech", False)
+                    if speech_analysis
+                    else False
+                ),
+            },
         )
 
         # Check inactivity timeout using audio time (not wall-clock time)
@@ -1312,6 +1356,16 @@ async def generate_title_summary_job(
 
     processing_time = time.time() - start_time
 
+    publish_sse_event(
+        str(conversation.user_id),
+        "conversation.updated",
+        {
+            "conversation_id": conversation_id,
+            "title": conversation.title,
+            "summary": conversation.summary,
+        },
+    )
+
     # Update job metadata
     update_job_meta(
         conversation_id=conversation_id,
@@ -1429,6 +1483,15 @@ async def dispatch_conversation_complete_event_job(
         processing_time = time.time() - start_time
         logger.info(
             f"✅ Conversation complete event dispatched for {conversation_id} in {processing_time:.2f}s"
+        )
+
+        publish_sse_event(
+            user_id,
+            "conversation.completed",
+            {
+                "conversation_id": conversation_id,
+                "end_reason": actual_end_reason,
+            },
         )
 
         return {

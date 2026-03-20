@@ -20,6 +20,7 @@ from rq.job import Job, JobStatus
 from rq.registry import DeferredJobRegistry, ScheduledJobRegistry
 
 from advanced_omi_backend.config_loader import get_service_config
+from advanced_omi_backend.services.sse_publisher import publish_sse_event
 
 logger = logging.getLogger(__name__)
 
@@ -471,6 +472,17 @@ def start_streaming_jobs(
         f"queue_length={audio_queue.count}, client_id={client_id}"
     )
 
+    # Notify frontend that streaming jobs are queued
+    publish_sse_event(
+        user_id,
+        "jobs.queued",
+        {
+            "client_id": client_id,
+            "session_id": session_id,
+            "jobs": ["speech_detection", "audio_persistence"],
+        },
+    )
+
     return {"speech_detection": speech_job.id, "audio_persistence": audio_job.id}
 
 
@@ -682,6 +694,26 @@ def start_post_conversation_jobs(
         logger.info(
             f"📥 RQ: Enqueued conversation complete event job {event_dispatch_job.id}, meta={event_dispatch_job.meta} (no dependencies, starts immediately)"
         )
+
+    # Notify frontend that post-conversation pipeline is queued
+    publish_sse_event(
+        user_id,
+        "jobs.queued",
+        {
+            "conversation_id": conversation_id,
+            "client_id": client_id or "",
+            "jobs": [
+                j
+                for j in [
+                    "speaker_recognition" if speaker_job else None,
+                    "memory_extraction" if memory_job else None,
+                    "title_summary",
+                    "event_dispatch",
+                ]
+                if j
+            ],
+        },
+    )
 
     return {
         "speaker_recognition": speaker_job.id if speaker_job else None,

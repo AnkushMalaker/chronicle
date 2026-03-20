@@ -84,11 +84,11 @@ async def audio_streaming_persistence_job(
         conversation_key = f"conversation:current:{session_id}"
         existing_conversation_id = await redis_client.get(conversation_key)
 
-        # Guard against stale Redis keys: the conversation:current key has a 1-hour
-        # TTL and can survive container rebuilds (Redis uses appendonly persistence
-        # with a bind mount). If the key points to a MongoDB document that was deleted
-        # (e.g., data directory cleared during rebuild), we must create a fresh
-        # placeholder instead of silently reusing a non-existent conversation.
+        # Guard against stale Redis keys: the conversation:current key has no TTL
+        # for always_persist and can survive container rebuilds (Redis uses appendonly
+        # persistence with a bind mount). If the key points to a MongoDB document
+        # that was deleted (e.g., data directory cleared during rebuild), we must
+        # create a fresh placeholder instead of silently reusing a non-existent conversation.
         if existing_conversation_id:
             existing_id_str = existing_conversation_id.decode()
             from advanced_omi_backend.models.conversation import Conversation
@@ -112,6 +112,7 @@ async def audio_streaming_persistence_job(
             # Import conversation model
             from advanced_omi_backend.models.conversation import Conversation
 
+            # TODO: Route to ERRLOG and create interface to create conversation
             # Create placeholder conversation
             conversation = Conversation(
                 user_id=user_id,
@@ -125,10 +126,11 @@ async def audio_streaming_persistence_job(
             )
             await conversation.insert()
 
-            # Set conversation:current Redis key
-            await redis_client.set(
-                conversation_key, conversation.conversation_id, ex=3600  # 1 hour expiry
-            )
+            # Set conversation:current Redis key.
+            # No TTL for always_persist — key lives until the session ends or is
+            # explicitly cleaned up.  Stale keys from crashed sessions are handled
+            # by the guard above (checks MongoDB on next startup).
+            await redis_client.set(conversation_key, conversation.conversation_id)
 
             logger.info(
                 f"✅ Created placeholder conversation {conversation.conversation_id} "
@@ -443,8 +445,41 @@ async def audio_streaming_persistence_job(
 
         # Wait for conversation to be created
         if not current_conversation_id:
-            await asyncio.sleep(0.0001)
-            continue
+            # For always_persist sessions where the key was deleted (e.g. by
+            # open_conversation_job rotation), recreate a placeholder so audio
+            # is never silently dropped.
+            if always_persist:
+                conversation_key = f"conversation:current:{session_id}"
+                logger.warning(
+                    f"⚠️ always_persist=True but no conversation key — recreating placeholder"
+                )
+                from advanced_omi_backend.models.conversation import Conversation
+
+                # TODO: Route to ERRLOG and create interface to create conversation
+                conversation = Conversation(
+                    user_id=user_id,
+                    client_id=client_id,
+                    title="Audio Recording (Processing...)",
+                    summary="Transcription in progress...",
+                    transcript_versions=[],
+                    memory_versions=[],
+                    processing_status="pending_transcription",
+                    always_persist=True,
+                )
+                await conversation.insert()
+                await redis_client.set(conversation_key, conversation.conversation_id)
+                current_conversation_id = conversation.conversation_id
+                conversation_count += 1
+                conversation_start_time = time.time()
+                chunk_index = 0
+                chunk_start_time = 0.0
+                pcm_buffer = bytearray()
+                logger.info(
+                    f"✅ Recreated placeholder conversation {conversation.conversation_id[:12]}"
+                )
+            else:
+                await asyncio.sleep(0.0001)
+                continue
 
         # Read audio chunks from Redis Stream
         try:
@@ -535,7 +570,8 @@ async def audio_streaming_persistence_job(
 
     # NOTE: Do NOT delete conversation:current:{session_id} key here!
     # It's needed for speech detection to reuse placeholder conversations (always_persist feature).
-    # The key already has a TTL (3600s) set when created and will expire automatically.
+    # For always_persist sessions the key has no TTL (cleaned up by the stale-key guard on next startup).
+    # For non-always_persist sessions, open_conversation_job manages the key lifecycle.
     logger.info(f"🧹 Cleaned up tracking keys for session {session_id}")
 
     return {
