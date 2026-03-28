@@ -14,6 +14,14 @@
     "production": {
       "autoIncrement": true
     },
+    "testflight": {
+      "distribution": "store",
+      "autoIncrement": true,
+      "channel": "testflight",
+      "ios": {
+        "simulator": false
+      }
+    },
     "local": {
       "distribution": "internal",
       "android": {
@@ -26,6 +34,13 @@
     }
   },
   "submit": {
-    "production": {}
+    "production": {},
+    "testflight": {
+      "ios": {
+        "ascApiKeyIssuerId": "70f6a927-18f2-46a8-be51-d72a6bef8e45",
+        "ascApiKeyId": "P792P49263",
+        "ascApiKeyPath": "./asc-api-key.p8"
+      }
+    }
   }
 }
