@@ -309,15 +309,17 @@ async def cleanup_client_state(client_id: str):
                     sessions_closed += 1
 
                     # Notify frontend that session ended
-                    publish_sse_event(
-                        user_id,
-                        "session.ended",
-                        {
-                            "session_id": session_id,
-                            "client_id": client_id,
-                            "reason": "websocket_disconnect",
-                        },
-                    )
+                    session_user_id_bytes = await async_redis.hget(key, "user_id")
+                    if session_user_id_bytes:
+                        publish_sse_event(
+                            session_user_id_bytes.decode(),
+                            "session.ended",
+                            {
+                                "session_id": session_id,
+                                "client_id": client_id,
+                                "reason": "websocket_disconnect",
+                            },
+                        )
 
             if cursor == 0:
                 break

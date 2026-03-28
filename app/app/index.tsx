@@ -56,6 +56,8 @@ export default function App() {
   // Refs for disconnect cleanup
   const isOmiAudioListenerActiveRef = useRef(isOmiAudioListenerActive);
   const isAudioStreamingRef = useRef(audioStreamer.isStreaming);
+  // Track if audio pipeline was active before BLE disconnect (for auto-restart on reconnect)
+  const wasStreamingBeforeDisconnectRef = useRef(false);
   useEffect(() => { isOmiAudioListenerActiveRef.current = isOmiAudioListenerActive; }, [isOmiAudioListenerActive]);
   useEffect(() => { isAudioStreamingRef.current = audioStreamer.isStreaming; }, [audioStreamer.isStreaming]);
 
@@ -67,12 +69,33 @@ export default function App() {
       autoReconnect.setLastKnownDeviceId(deviceIdToSave);
       autoReconnect.setTriedAutoReconnectForCurrentId(false);
     }
-  }, [omiConnection]);
+
+    // Auto-restart audio pipeline if it was active before BLE disconnect
+    if (wasStreamingBeforeDisconnectRef.current) {
+      wasStreamingBeforeDisconnectRef.current = false;
+      console.log('[App] BLE reconnected — auto-restarting audio pipeline');
+      // Short delay to let BLE connection stabilize
+      setTimeout(() => {
+        orchestrator.handleStartAudioListeningAndStreaming().catch(err => {
+          console.error('[App] Failed to auto-restart audio pipeline:', err);
+        });
+      }, 1000);
+    }
+  }, [omiConnection, orchestrator.handleStartAudioListeningAndStreaming]);
 
   const onDeviceDisconnect = useCallback(async () => {
+    // Remember if audio was active so we can auto-restart on reconnect
+    if (isOmiAudioListenerActiveRef.current || isAudioStreamingRef.current) {
+      wasStreamingBeforeDisconnectRef.current = true;
+    }
+
+    // Stop audio listener (BLE is gone, can't read audio)
     if (isOmiAudioListenerActiveRef.current) await originalStopAudioListener();
-    if (isAudioStreamingRef.current) audioStreamer.stopStreaming();
+
+    // Keep WebSocket alive — it will reconnect or idle until BLE comes back.
+    // Only stop WebSocket for phone audio mode (no BLE needed there).
     if (phoneAudioRecorder.isRecording) {
+      audioStreamer.stopStreaming();
       await phoneAudioRecorder.stopRecording();
       orchestrator.setIsPhoneAudioMode(false);
     }
