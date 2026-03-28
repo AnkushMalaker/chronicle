@@ -6,7 +6,6 @@ defaults:
   # - stt-deepgram: Cloud-based (requires DEEPGRAM_API_KEY in .env)
   # - stt-parakeet-batch: Local ASR (requires Parakeet service running)
   tts: tts-http
-  vector_store: vs-qdrant
 models:
 - name: emberfang-llm
   description: Emberfang One LLM
@@ -84,16 +83,6 @@ models:
     temperature: 0.2
     max_tokens: 2000
   model_output: json
-- name: vs-qdrant
-  description: Qdrant vector database
-  model_type: vector_store
-  model_provider: qdrant
-  api_family: qdrant
-  model_url: http://${oc.env:QDRANT_BASE_URL,qdrant}:${oc.env:QDRANT_PORT,6333}
-  model_params:
-    host: ${oc.env:QDRANT_BASE_URL,qdrant}
-    port: ${oc.env:QDRANT_PORT,6333}
-    collection_name: omi_memories
 - name: stt-parakeet-batch
   description: Parakeet NeMo ASR (batch)
   model_type: stt

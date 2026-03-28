@@ -66,12 +66,20 @@ Audio Playback And Segment Timing Test
     # Refresh conversation data
     ${conversation}=    Get Conversation By ID    ${conversation_id}
 
-    # Verify original audio is accessible
+    # Verify default audio format is opus/ogg
     ${audio_response}=    GET On Session    api    /api/audio/get_audio/${conversation_id}    expected_status=200
-    Should Be Equal As Strings    ${audio_response.headers}[content-type]    audio/wav
+    Should Be Equal As Strings    ${audio_response.headers}[content-type]    audio/ogg
     ${original_audio_size}=    Get Length    ${audio_response.content}
     Should Be True    ${original_audio_size} > 1000    Original audio file too small: ${original_audio_size} bytes
-    Log    Original audio accessible: ${original_audio_size} bytes    INFO
+    Log    Original audio (opus) accessible: ${original_audio_size} bytes    INFO
+
+    # Verify explicit wav format returns audio/wav
+    ${wav_params}=    Create Dictionary    format=wav
+    ${wav_response}=    GET On Session    api    /api/audio/get_audio/${conversation_id}    params=${wav_params}    expected_status=200
+    Should Be Equal As Strings    ${wav_response.headers}[content-type]    audio/wav
+    ${wav_audio_size}=    Get Length    ${wav_response.content}
+    Should Be True    ${wav_audio_size} > 1000    WAV audio file too small: ${wav_audio_size} bytes
+    Log    WAV audio accessible: ${wav_audio_size} bytes    INFO
 
     # Verify segments exist and have valid timestamps
     Dictionary Should Contain Key    ${conversation}    segments

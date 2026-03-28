@@ -1,7 +1,7 @@
 """LLM-based entity and relationship extraction from conversations.
 
-This module uses the configured LLM provider to extract entities,
-relationships, and promises from conversation transcripts.
+This module uses the configured LLM provider to extract entities
+and relationships from conversation transcripts.
 """
 
 import json
@@ -15,7 +15,6 @@ from advanced_omi_backend.openai_factory import create_openai_client
 from .models import (
     EntityType,
     ExtractedEntity,
-    ExtractedPromise,
     ExtractedRelationship,
     ExtractionResult,
     RelationshipType,
@@ -24,7 +23,7 @@ from .models import (
 logger = logging.getLogger("knowledge_graph")
 
 
-ENTITY_EXTRACTION_PROMPT = """You are an entity extraction system. Extract entities, relationships, and promises from conversation transcripts.
+ENTITY_EXTRACTION_PROMPT = """You are an entity extraction system. Extract entities and relationships from conversation transcripts.
 
 ENTITY TYPES:
 - person: Named individuals (not generic roles)
@@ -46,10 +45,9 @@ EXTRACTION RULES:
 1. Only extract NAMED entities (not "my friend" but "John")
 2. Use "speaker" as the subject when the user mentions themselves
 3. Extract temporal info for events (dates, times)
-4. Capture promises/commitments with deadlines
-5. Skip filler words, small talk, and vague references
-6. Normalize names (capitalize properly)
-7. Assign appropriate emoji icons to entities
+4. Skip filler words, small talk, and vague references
+5. Normalize names (capitalize properly)
+6. Assign appropriate emoji icons to entities
 
 Return a JSON object with this structure:
 {
@@ -68,17 +66,10 @@ Return a JSON object with this structure:
       "relation": "works_at|lives_in|knows|attended|located_at|part_of|related_to",
       "object": "Target entity name"
     }
-  ],
-  "promises": [
-    {
-      "action": "What was promised",
-      "to": "Person promised to (optional)",
-      "deadline": "When it should be done (optional)"
-    }
   ]
 }
 
-If no entities, relationships, or promises are found, return empty arrays.
+If no entities or relationships are found, return empty arrays.
 Only return valid JSON, no additional text."""
 
 
@@ -95,7 +86,7 @@ async def extract_entities_from_transcript(
     conversation_id: Optional[str] = None,
     custom_prompt: Optional[str] = None,
 ) -> ExtractionResult:
-    """Extract entities, relationships, and promises from a transcript.
+    """Extract entities and relationships from a transcript.
 
     Args:
         transcript: The conversation transcript text
@@ -103,7 +94,7 @@ async def extract_entities_from_transcript(
         custom_prompt: Optional custom prompt to override default
 
     Returns:
-        ExtractionResult containing extracted entities, relationships, and promises
+        ExtractionResult containing extracted entities and relationships
     """
     if not transcript or not transcript.strip():
         logger.debug("Empty transcript, returning empty extraction result")
@@ -185,25 +176,12 @@ def _parse_extraction_response(content: str) -> ExtractionResult:
                     )
                 )
 
-        # Parse promises
-        promises = []
-        for p in data.get("promises", []):
-            if isinstance(p, dict) and p.get("action"):
-                promises.append(
-                    ExtractedPromise(
-                        action=p["action"].strip(),
-                        to=p.get("to"),
-                        deadline=p.get("deadline"),
-                    )
-                )
-
         logger.info(
-            f"Extracted {len(entities)} entities, {len(relationships)} relationships, {len(promises)} promises"
+            f"Extracted {len(entities)} entities, {len(relationships)} relationships"
         )
         return ExtractionResult(
             entities=entities,
             relationships=relationships,
-            promises=promises,
         )
 
     except json.JSONDecodeError as e:
@@ -278,7 +256,6 @@ def _get_default_icon(entity_type: str) -> str:
         "event": "📅",
         "thing": "📦",
         "conversation": "💬",
-        "promise": "✅",
         "fact": "💡",
     }
     return icons.get(entity_type, "📌")

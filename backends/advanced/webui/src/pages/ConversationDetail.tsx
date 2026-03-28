@@ -16,6 +16,15 @@ import { WaveformDisplay } from '../components/audio/WaveformDisplay'
 import SpeakerNameDropdown from '../components/SpeakerNameDropdown'
 import { getStorageKey } from '../utils/storage'
 
+// Detect browser opus/ogg playback support once at module load
+const SUPPORTS_OPUS = (() => {
+  try {
+    const a = document.createElement('audio')
+    return a.canPlayType('audio/ogg; codecs=opus') !== ''
+  } catch { return false }
+})()
+const AUDIO_FORMAT = SUPPORTS_OPUS ? 'opus' : 'wav'
+
 const SPEAKER_COLOR_PALETTE = [
   'text-blue-600 dark:text-blue-400',
   'text-green-600 dark:text-green-400',
@@ -251,7 +260,7 @@ export default function ConversationDetail() {
 
     // Fetch audio chunk via authenticated API
     const token = localStorage.getItem(getStorageKey('token')) || ''
-    fetch(`${BACKEND_URL}/api/conversations/${id}/audio-segments?start=${windowStart}&duration=${CHUNK_WINDOW}`, {
+    fetch(`${BACKEND_URL}/api/conversations/${id}/audio-segments?start=${windowStart}&duration=${CHUNK_WINDOW}&format=${AUDIO_FORMAT}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then(r => {
@@ -323,7 +332,7 @@ export default function ConversationDetail() {
     let audio = audioRefs.current[segmentId]
     if (!audio || audio.error) {
       const token = localStorage.getItem(getStorageKey('token')) || ''
-      const audioUrl = `${BACKEND_URL}/api/audio/chunks/${id}?start_time=${segment.start}&end_time=${segment.end}&token=${token}`
+      const audioUrl = `${BACKEND_URL}/api/audio/chunks/${id}?start_time=${segment.start}&end_time=${segment.end}&format=${AUDIO_FORMAT}&token=${token}`
       audio = new Audio(audioUrl)
       audioRefs.current[segmentId] = audio
       audio.addEventListener('ended', () => setPlayingSegment(null))
@@ -338,7 +347,7 @@ export default function ConversationDetail() {
     setOpenDropdown(false)
     try {
       const token = localStorage.getItem(getStorageKey('token')) || ''
-      const resp = await fetch(`${BACKEND_URL}/api/audio/get_audio/${id}`, {
+      const resp = await fetch(`${BACKEND_URL}/api/audio/get_audio/${id}?format=${AUDIO_FORMAT}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       if (!resp.ok) throw new Error(`Download failed: ${resp.status}`)

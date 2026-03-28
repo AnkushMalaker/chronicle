@@ -1,30 +1,4 @@
 services:
-  tailscale:
-    image: tailscale/tailscale:latest
-    container_name: advanced-tailscale
-    hostname: chronicle-tailscale
-    environment:
-      - TS_AUTHKEY=${TS_AUTHKEY}
-      - TS_STATE_DIR=/var/lib/tailscale
-      - TS_USERSPACE=false
-      - TS_ACCEPT_DNS=true
-    volumes:
-      - tailscale-state:/var/lib/tailscale
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - NET_ADMIN
-    restart: unless-stopped
-    profiles:
-      - tailscale  # Optional profile
-    ports:
-      - "18123:18123"  # HA proxy port
-    command: >
-      sh -c "tailscaled &
-             tailscale up --authkey=$${TS_AUTHKEY} --accept-dns=true &&
-             apk add --no-cache socat 2>/dev/null || true &&
-             socat TCP-LISTEN:18123,fork,reuseaddr TCP:100.99.62.5:8123"
-
   chronicle-backend:
     image: ${CHRONICLE_REGISTRY:-}chronicle-backend:${CHRONICLE_TAG:-latest}
     build:
@@ -62,8 +36,8 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - MONGODB_URI=mongodb://mongo:27017
     depends_on:
-      qdrant:
-        condition: service_started
+      neo4j:
+        condition: service_healthy
       mongo:
         condition: service_healthy
       redis:
@@ -127,8 +101,8 @@ services:
         condition: service_healthy
       mongo:
         condition: service_healthy
-      qdrant:
-        condition: service_started
+      neo4j:
+        condition: service_healthy
     restart: unless-stopped
 
   # Annotation Cron Scheduler
@@ -210,7 +184,11 @@ services:
       context: ./webui
       dockerfile: Dockerfile.dev
     ports:
-      - "${WEBUI_PORT:-3010}:5173"
+      - "${WEBUI_DEV_PORT:-5173}:5173"
+    environment:
+      - VITE_BACKEND_URL=${VITE_BACKEND_URL-http://${HOST_IP}:${BACKEND_PUBLIC_PORT:-8000}}
+      - VITE_ALLOWED_HOSTS=${VITE_ALLOWED_HOSTS:-localhost 127.0.0.1}
+      - VITE_HMR_PORT=${VITE_HMR_PORT:-5173}
     volumes:
       - ./webui/src:/app/src
       - ./webui/public:/app/public
@@ -227,6 +205,8 @@ services:
     volumes:
       - ./data/qdrant_data:/qdrant/storage
     restart: unless-stopped
+    profiles:
+      - qdrant  # Optional — Chronicle now uses Neo4j for memory search
 
   mongo:
     image: mongo:8.0.14
@@ -257,7 +237,7 @@ services:
       retries: 5
 
   neo4j:
-    image: neo4j:5.15-community
+    image: neo4j:2026-community
     hostname: neo4j
     ports:
       - "7474:7474" # HTTP
@@ -283,6 +263,29 @@ services:
       retries: 5
       start_period: 30s
 
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: advanced-tailscale
+    hostname: chronicle-tailscale
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=false
+      - TS_ACCEPT_DNS=true
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+    profiles:
+      - tailscale  # Optional profile
+    command: >
+      sh -c "tailscaled &
+             tailscale up --authkey=$${TS_AUTHKEY} --accept-dns=true &&
+             sleep infinity"
+
   # ollama:
   #   image: ollama/ollama:latest
   #   container_name: ollama
@@ -307,6 +310,8 @@ networks:
     external: true
 
 volumes:
+  ollama_data:
+    driver: local
   caddy_data:
     driver: local
   caddy_config:

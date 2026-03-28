@@ -10,10 +10,11 @@ Architecture:
 - base.py: Abstract base classes and interfaces
 - config.py: Configuration management
 - service_factory.py: Provider selection and instantiation
-- providers/chronicle.py: Chronicle native provider (LLM + Qdrant)
+- providers/chronicle.py: Chronicle native provider (LLM + Neo4j hybrid search + vault)
 - providers/openmemory_mcp.py: OpenMemory MCP provider
 - providers/llm_providers.py: LLM implementations (OpenAI, Ollama)
-- providers/vector_stores.py: Vector store implementations (Qdrant)
+- neo4j_utils.py: Utility functions for markdown parsing and hybrid scoring
+- vault_manager.py: Conversation document vault (.md file I/O)
 """
 
 import logging

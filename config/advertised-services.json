@@ -1,0 +1,17 @@
+[
+  {
+    "name": "chronicle-backend",
+    "port": 8000,
+    "label": "Advanced Backend + WebUI"
+  },
+  {
+    "name": "chronicle-speaker",
+    "port": 8085,
+    "label": "Speaker Recognition Service"
+  },
+  {
+    "name": "chronicle-asr",
+    "port": 8767,
+    "label": "VibeVoice ASR"
+  }
+]

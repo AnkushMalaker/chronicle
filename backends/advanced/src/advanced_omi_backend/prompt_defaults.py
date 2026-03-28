@@ -315,72 +315,6 @@ Do not output any text outside the JSON object.
     )
 
     # ------------------------------------------------------------------
-    # memory.temporal_extraction
-    # ------------------------------------------------------------------
-    registry.register_default(
-        "memory.temporal_extraction",
-        template="""\
-You are an expert at extracting temporal and entity information from memory facts.
-
-Your task is to analyze a memory fact and extract structured information in JSON format:
-1. **Entity Types**: Determine if the memory is about events, people, places, promises, or relationships
-2. **Temporal Information**: Extract and resolve any time references to actual ISO 8601 timestamps
-3. **Named Entities**: List all people, places, and things mentioned
-4. **Representation**: Choose a single emoji that captures the essence of the memory
-
-You must return a valid JSON object with the following structure.
-
-**Current Date Context:**
-- Today's date: {{current_date}}
-- Current time: {{current_time}}
-- Day of week: {{day_of_week}}
-
-**Time Resolution Guidelines:**
-
-Relative Time References:
-- "tomorrow" -> Add 1 day to current date
-- "next week" -> Add 7 days to current date
-- "in X days/weeks/months" -> Add X time units to current date
-- "yesterday" -> Subtract 1 day from current date
-
-Time of Day:
-- "4pm" or "16:00" -> Use current date with that time
-- "tomorrow at 4pm" -> Use tomorrow's date at 16:00
-- "morning" -> 09:00 on the referenced day
-- "afternoon" -> 14:00 on the referenced day
-- "evening" -> 18:00 on the referenced day
-- "night" -> 21:00 on the referenced day
-
-Duration Estimation (when only start time is mentioned):
-- Events like "wedding", "meeting", "party" -> Default 2 hours duration
-- "lunch", "dinner", "breakfast" -> Default 1 hour duration
-- "class", "workshop" -> Default 1.5 hours duration
-- "appointment", "call" -> Default 30 minutes duration
-
-**Entity Type Guidelines:**
-
-- **isEvent**: True for scheduled activities, appointments, meetings, parties, ceremonies, classes, etc.
-- **isPerson**: True when the primary focus is on a person (e.g., "Met John", "Sarah is my friend")
-- **isPlace**: True when the primary focus is a location (e.g., "Botanical Gardens is beautiful", "Favorite restaurant is...")
-- **isPromise**: True for commitments, promises, or agreements (e.g., "I'll call you tomorrow", "We agreed to meet")
-- **isRelationship**: True for statements about relationships (e.g., "John is my brother", "We're getting married")
-
-**Instructions:**
-- Return structured data following the TemporalEntity schema
-- Convert all temporal references to ISO 8601 format
-- Be conservative: if there's no temporal information, leave timeRanges empty
-- Multiple tags can be true (e.g., isEvent and isPerson both true for "meeting with John")
-- Extract all meaningful entities (people, places, things) mentioned in the fact
-- Choose an emoji that best represents the core meaning of the memory
-""",
-        name="Temporal Extraction",
-        description="Extracts temporal and entity information from memory facts with date resolution.",
-        category="memory",
-        variables=["current_date", "current_time", "day_of_week"],
-        is_dynamic=True,
-    )
-
-    # ------------------------------------------------------------------
     # chat.system
     # ------------------------------------------------------------------
     registry.register_default(
@@ -458,7 +392,7 @@ DETAILED SUMMARY:""",
     registry.register_default(
         "knowledge_graph.entity_extraction",
         template="""\
-You are an entity extraction system. Extract entities, relationships, and promises from conversation transcripts.
+You are an entity extraction system. Extract entities and relationships from conversation transcripts.
 
 ENTITY TYPES:
 - person: Named individuals (not generic roles)
@@ -480,10 +414,9 @@ EXTRACTION RULES:
 1. Only extract NAMED entities (not "my friend" but "John")
 2. Use "speaker" as the subject when the user mentions themselves
 3. Extract temporal info for events (dates, times)
-4. Capture promises/commitments with deadlines
-5. Skip filler words, small talk, and vague references
-6. Normalize names (capitalize properly)
-7. Assign appropriate emoji icons to entities
+4. Skip filler words, small talk, and vague references
+5. Normalize names (capitalize properly)
+6. Assign appropriate emoji icons to entities
 
 Return a JSON object with this structure:
 {
@@ -502,20 +435,13 @@ Return a JSON object with this structure:
       "relation": "works_at|lives_in|knows|attended|located_at|part_of|related_to",
       "object": "Target entity name"
     }
-  ],
-  "promises": [
-    {
-      "action": "What was promised",
-      "to": "Person promised to (optional)",
-      "deadline": "When it should be done (optional)"
-    }
   ]
 }
 
-If no entities, relationships, or promises are found, return empty arrays.
+If no entities or relationships are found, return empty arrays.
 Only return valid JSON, no additional text.""",
         name="Entity Extraction",
-        description="Extracts entities, relationships, and promises from conversation transcripts.",
+        description="Extracts entities and relationships from conversation transcripts.",
         category="knowledge_graph",
     )
 
@@ -712,6 +638,55 @@ REVISED_PROMPT:
         description="Meta-prompt that analyzes memory corrections and produces an improved fact extraction prompt.",
         category="prompt_optimization",
         variables=["current_prompt", "count", "formatted_corrections"],
+        is_dynamic=True,
+    )
+
+    # ------------------------------------------------------------------
+    # memory.generate_conversation_doc
+    # ------------------------------------------------------------------
+    registry.register_default(
+        "memory.generate_conversation_doc",
+        template="""\
+You are generating a structured conversation document from a transcript.
+
+Given a transcript with speaker labels, produce a markdown document with this EXACT structure:
+
+---
+conversation_id: {{conversation_id}}
+date: {{date}}
+speakers: [{{speakers}}]
+duration_minutes: {{duration}}
+---
+
+## {Title - descriptive, 3-8 words}
+
+### Summary
+{2-3 sentence summary of what was discussed}
+
+### Key Facts
+{Bulleted list of specific facts, decisions, numbers, dates mentioned}
+
+### People
+{Bulleted list in format: - Name (role/relationship, context)}
+Include ALL named individuals — speakers, people mentioned, people referenced.
+If a speaker is identified by name (e.g., "John" not "Speaker 0"), they MUST appear here.
+Do not include unnamed roles or generic labels like "Speaker 0".
+
+### Action Items
+{Bulleted list in format: - [ ] Action item description}
+Use [x] for items already completed in the conversation.
+
+Rules:
+- Every ### section MUST be present, even if empty (use "- None" for empty sections)
+- People section: ONLY named individuals, format MUST be "- Name (description)"
+- Key Facts: be specific — include dates, numbers, names
+- Action Items: use checkbox format [ ] or [x]
+- Do NOT add any sections beyond the four listed above
+""",
+        name="Conversation Document Generator",
+        description="Generates a structured markdown conversation document from a transcript with frontmatter, summary, key facts, people, and action items.",
+        category="memory",
+        variables=["conversation_id", "date", "speakers", "duration"],
         is_dynamic=True,
     )
 

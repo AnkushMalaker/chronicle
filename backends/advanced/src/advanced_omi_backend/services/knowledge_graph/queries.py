@@ -1,7 +1,7 @@
 """Cypher query templates for Knowledge Graph operations.
 
 This module contains all Cypher queries used by the KnowledgeGraphService
-for CRUD operations on entities, relationships, and promises in Neo4j.
+for CRUD operations on entities and relationships in Neo4j.
 """
 
 # =============================================================================
@@ -50,17 +50,11 @@ CALL apoc.do.when(
     {e: e, conversation_id: $conversation_id}
 ) YIELD value AS v5
 CALL apoc.do.when(
-    $type = 'promise',
-    'SET e:Promise RETURN e',
-    'RETURN e',
-    {e: e}
-) YIELD value AS v6
-CALL apoc.do.when(
     $type = 'fact',
     'SET e:Fact RETURN e',
     'RETURN e',
     {e: e}
-) YIELD value AS v7
+) YIELD value AS v6
 RETURN e
 """
 
@@ -176,70 +170,6 @@ RETURN count(r) as deleted_count
 """
 
 # =============================================================================
-# PROMISE QUERIES
-# =============================================================================
-
-CREATE_PROMISE = """
-MERGE (p:Promise:Entity {id: $id})
-SET p.user_id = $user_id,
-    p.action = $action,
-    p.name = $action,
-    p.type = 'promise',
-    p.to_entity_id = $to_entity_id,
-    p.to_entity_name = $to_entity_name,
-    p.status = $status,
-    p.due_date = CASE WHEN $due_date IS NOT NULL THEN datetime($due_date) ELSE NULL END,
-    p.completed_at = CASE WHEN $completed_at IS NOT NULL THEN datetime($completed_at) ELSE NULL END,
-    p.source_conversation_id = $source_conversation_id,
-    p.context = $context,
-    p.metadata = $metadata,
-    p.created_at = datetime($created_at),
-    p.updated_at = datetime($updated_at)
-WITH p
-OPTIONAL MATCH (target:Entity {id: $to_entity_id, user_id: $user_id})
-FOREACH (_ IN CASE WHEN target IS NOT NULL THEN [1] ELSE [] END |
-    MERGE (p)-[:PROMISED_TO]->(target)
-)
-OPTIONAL MATCH (conv:Entity {conversation_id: $source_conversation_id, user_id: $user_id})
-FOREACH (_ IN CASE WHEN conv IS NOT NULL THEN [1] ELSE [] END |
-    MERGE (p)-[:EXTRACTED_FROM]->(conv)
-)
-RETURN p
-"""
-
-GET_PROMISES_BY_USER = """
-MATCH (p:Promise {user_id: $user_id})
-WHERE $status IS NULL OR p.status = $status
-OPTIONAL MATCH (p)-[:PROMISED_TO]->(target:Entity)
-RETURN p, target
-ORDER BY
-    CASE WHEN p.due_date IS NOT NULL THEN p.due_date ELSE datetime('9999-12-31') END ASC,
-    p.created_at DESC
-LIMIT $limit
-"""
-
-GET_PROMISE_BY_ID = """
-MATCH (p:Promise {id: $id, user_id: $user_id})
-OPTIONAL MATCH (p)-[:PROMISED_TO]->(target:Entity)
-OPTIONAL MATCH (p)-[:EXTRACTED_FROM]->(conv:Entity)
-RETURN p, target, conv
-"""
-
-UPDATE_PROMISE_STATUS = """
-MATCH (p:Promise {id: $id, user_id: $user_id})
-SET p.status = $status,
-    p.updated_at = datetime(),
-    p.completed_at = CASE WHEN $status = 'completed' THEN datetime() ELSE p.completed_at END
-RETURN p
-"""
-
-DELETE_PROMISE = """
-MATCH (p:Promise {id: $id, user_id: $user_id})
-DETACH DELETE p
-RETURN count(p) as deleted_count
-"""
-
-# =============================================================================
 # TIMELINE QUERIES
 # =============================================================================
 
@@ -306,6 +236,48 @@ OPTIONAL MATCH (e)-[r]->(e2:Entity {user_id: $user_id})
 WITH collect(DISTINCT e) as nodes, collect(DISTINCT {source: startNode(r).id, target: endNode(r).id, type: type(r), properties: properties(r)}) as edges
 RETURN nodes, edges
 LIMIT $limit
+"""
+
+# =============================================================================
+# CONVERSATION DOC QUERIES (ConvDoc / ConvEntity nodes from chronicle memory)
+# =============================================================================
+
+GET_CONVERSATION_DOCS = """
+MATCH (d:ConvDoc {user_id: $user_id})
+OPTIONAL MATCH (d)-[:MENTIONS]->(e:ConvEntity)
+RETURN d.conversation_id AS conversation_id,
+       d.title AS title,
+       d.summary AS summary,
+       d.date AS date,
+       d.updated_at AS updated_at,
+       collect(CASE WHEN e IS NOT NULL
+               THEN {name: e.name, description: e.description}
+               ELSE NULL END) AS people
+ORDER BY d.date DESC
+LIMIT $limit
+"""
+
+GET_CONVERSATION_DOCS_BY_PERSON = """
+MATCH (d:ConvDoc {user_id: $user_id})-[:MENTIONS]->(e:ConvEntity)
+WHERE toLower(e.name) CONTAINS toLower($person)
+WITH d, collect({name: e.name, description: e.description}) AS matched_people
+OPTIONAL MATCH (d)-[:MENTIONS]->(e2:ConvEntity)
+RETURN d.conversation_id AS conversation_id,
+       d.title AS title,
+       d.summary AS summary,
+       d.date AS date,
+       d.updated_at AS updated_at,
+       collect(CASE WHEN e2 IS NOT NULL
+               THEN {name: e2.name, description: e2.description}
+               ELSE NULL END) AS people
+ORDER BY d.date DESC
+LIMIT $limit
+"""
+
+GET_PEOPLE = """
+MATCH (e:ConvEntity {user_id: $user_id})<-[:MENTIONS]-(d:ConvDoc)
+RETURN e.name AS name, e.description AS description, count(d) AS mention_count
+ORDER BY mention_count DESC
 """
 
 # =============================================================================

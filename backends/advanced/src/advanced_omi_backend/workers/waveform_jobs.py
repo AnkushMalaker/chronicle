@@ -4,14 +4,108 @@ Waveform generation workers for audio visualization.
 This module provides async functions to generate waveform data from
 audio chunks stored in MongoDB. Waveforms are computed on-demand
 and cached for subsequent requests.
+
+Audio is processed in 5-minute batches (30 x 10s chunks) to bound memory usage.
 """
 
 import logging
 import struct
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# 5 minutes of 10s chunks
+BATCH_SIZE = 30
+BYTES_PER_SAMPLE = 2  # 16-bit PCM
+
+
+def _pcm_to_peaks(pcm_data: bytes, bytes_per_window: int) -> List[float]:
+    """Extract normalized peak amplitudes from PCM data at the given window size."""
+    peaks: List[float] = []
+    offset = 0
+
+    while offset < len(pcm_data):
+        window_bytes = pcm_data[offset : offset + bytes_per_window]
+        if not window_bytes:
+            break
+
+        n_samples = len(window_bytes) // BYTES_PER_SAMPLE
+        try:
+            samples = struct.unpack(f"{n_samples}h", window_bytes)
+        except struct.error:
+            offset += bytes_per_window
+            continue
+
+        if samples:
+            peaks.append(max(abs(s) for s in samples) / 32768.0)
+
+        offset += bytes_per_window
+
+    return peaks
+
+
+async def _process_batch(
+    conversation_id: str,
+    batch_index: int,
+    sample_rate: int,
+    pcm_sample_rate: Optional[int],
+    channels: Optional[int],
+) -> tuple[List[float], float, int, int, int, float, float]:
+    """
+    Fetch and process one batch of chunks.
+
+    Returns (peaks, duration, chunk_count, pcm_sample_rate, channels, fetch_dt, decode_dt).
+    """
+    from advanced_omi_backend.utils.audio_chunk_utils import (
+        decode_opus_to_pcm,
+        retrieve_audio_chunks,
+    )
+
+    start_index = batch_index * BATCH_SIZE
+
+    fetch_start = time.time()
+    chunks = await retrieve_audio_chunks(
+        conversation_id=conversation_id,
+        start_index=start_index,
+        limit=BATCH_SIZE,
+    )
+    fetch_dt = time.time() - fetch_start
+
+    if not chunks:
+        return [], 0.0, 0, pcm_sample_rate or 0, channels or 0, fetch_dt, 0.0
+
+    # Derive format from first chunk if not yet known
+    if pcm_sample_rate is None:
+        pcm_sample_rate = chunks[0].sample_rate
+        channels = chunks[0].channels
+
+    window_bytes = (pcm_sample_rate // sample_rate) * BYTES_PER_SAMPLE * channels
+    batch_peaks: List[float] = []
+    batch_duration = 0.0
+    decode_dt = 0.0
+
+    for chunk in chunks:
+        t0 = time.time()
+        pcm_data = await decode_opus_to_pcm(
+            opus_data=chunk.audio_data,
+            sample_rate=pcm_sample_rate,
+            channels=channels,
+        )
+        decode_dt += time.time() - t0
+
+        batch_peaks.extend(_pcm_to_peaks(pcm_data, window_bytes))
+        batch_duration += chunk.duration
+
+    return (
+        batch_peaks,
+        batch_duration,
+        len(chunks),
+        pcm_sample_rate,
+        channels,
+        fetch_dt,
+        decode_dt,
+    )
 
 
 async def generate_waveform_data(
@@ -21,163 +115,84 @@ async def generate_waveform_data(
     """
     Generate waveform visualization data from conversation audio chunks.
 
-    This function:
-    1. Retrieves Opus-compressed audio chunks from MongoDB
-    2. Decodes each chunk to PCM
-    3. Downsamples PCM to target sample rate (e.g., 10 samples/sec)
-    4. Calculates amplitude peaks for each sample window
-    5. Normalizes to [-1.0, 1.0] range
-    6. Stores in WaveformData collection
+    Processes chunks in 5-minute batches (30 x 10s chunks) to keep memory bounded.
+    Each batch is fetched, decoded, downsampled to `sample_rate` peaks/sec,
+    and the results are concatenated into the final waveform.
 
-    Args:
-        conversation_id: Conversation ID to generate waveform for
-        sample_rate: Samples per second for waveform (default: 10)
-
-    Returns:
-        Dict with:
-            - success: bool
-            - samples: List[float] (if successful)
-            - sample_rate: int (if successful)
-            - duration_seconds: float (if successful)
-            - error: str (if failed)
+    Returns dict with success/samples/sample_rate/duration_seconds or success/error.
     """
     from advanced_omi_backend.models.waveform import WaveformData
-    from advanced_omi_backend.utils.audio_chunk_utils import (
-        decode_opus_to_pcm,
-        retrieve_audio_chunks,
-    )
 
     start_time = time.time()
-    fetch_time = 0.0
-    decode_time = 0.0
-    waveform_gen_time = 0.0
+    total_fetch = 0.0
+    total_decode = 0.0
 
     try:
         logger.info(
-            f"🎵 Generating waveform for conversation {conversation_id[:12]}... (sample_rate={sample_rate} samples/sec)"
+            f"Generating waveform for {conversation_id[:12]}... ({sample_rate} samples/sec)"
         )
 
-        # Retrieve all audio chunks for conversation
-        fetch_start = time.time()
-        chunks = await retrieve_audio_chunks(conversation_id=conversation_id)
-        fetch_time = time.time() - fetch_start
+        all_peaks: List[float] = []
+        total_duration = 0.0
+        total_chunks = 0
+        pcm_sr: Optional[int] = None
+        ch: Optional[int] = None
+        batch_idx = 0
 
-        logger.info(
-            f"📦 Fetched {len(chunks) if chunks else 0} chunks from MongoDB in {fetch_time:.2f}s"
-        )
-
-        if not chunks:
-            logger.warning(f"No audio chunks found for conversation {conversation_id}")
-            return {
-                "success": False,
-                "error": "No audio chunks found for this conversation",
-            }
-
-        # Get audio format from first chunk
-        pcm_sample_rate = chunks[0].sample_rate  # Usually 16000 Hz
-        channels = chunks[0].channels  # Usually 1 (mono)
-        bytes_per_sample = 2  # 16-bit PCM
-
-        # Calculate total duration
-        total_duration = sum(chunk.duration for chunk in chunks)
-
-        # Calculate window size for downsampling
-        # e.g., 16000 samples/sec ÷ 10 waveform_samples/sec = 1600 PCM samples per waveform point
-        window_size_samples = pcm_sample_rate // sample_rate
-        bytes_per_window = window_size_samples * bytes_per_sample * channels
-
-        logger.info(
-            f"Processing {len(chunks)} chunks, "
-            f"total duration: {total_duration:.1f}s, "
-            f"window size: {window_size_samples} samples"
-        )
-
-        # Process chunks and extract amplitude peaks
-        waveform_samples: List[float] = []
-
-        for chunk_idx, chunk in enumerate(chunks):
-            # Decode Opus to PCM
-            decode_start = time.time()
-            pcm_data = await decode_opus_to_pcm(
-                opus_data=chunk.audio_data,
-                sample_rate=pcm_sample_rate,
-                channels=channels,
+        while True:
+            peaks, dur, n, pcm_sr, ch, f_dt, d_dt = await _process_batch(
+                conversation_id,
+                batch_idx,
+                sample_rate,
+                pcm_sr,
+                ch,
             )
-            decode_time += time.time() - decode_start
+            total_fetch += f_dt
+            total_decode += d_dt
 
-            # Process PCM data in windows
-            waveform_gen_start = time.time()
-            offset = 0
-            while offset < len(pcm_data):
-                # Extract window
-                window_end = min(offset + bytes_per_window, len(pcm_data))
-                window_bytes = pcm_data[offset:window_end]
-
-                if len(window_bytes) == 0:
-                    break
-
-                # Convert bytes to signed 16-bit integers
-                num_samples_in_window = len(window_bytes) // bytes_per_sample
-                format_str = f"{num_samples_in_window}h"  # 'h' = signed short (16-bit)
-
-                try:
-                    pcm_samples = struct.unpack(format_str, window_bytes)
-                except struct.error as e:
-                    logger.warning(f"Struct unpack error: {e}, skipping window")
-                    offset += bytes_per_window
-                    continue
-
-                # Calculate peak amplitude in this window
-                # Normalize from 16-bit range (-32768 to 32767) to [-1.0, 1.0]
-                if pcm_samples:
-                    max_abs_amplitude = max(abs(s) for s in pcm_samples)
-                    normalized_amplitude = max_abs_amplitude / 32768.0
-                    waveform_samples.append(normalized_amplitude)
-
-                offset += bytes_per_window
-
-            waveform_gen_time += time.time() - waveform_gen_start
-
-            # Log progress for long conversations
-            if (chunk_idx + 1) % 20 == 0:
-                logger.info(
-                    f"Processed {chunk_idx + 1}/{len(chunks)} chunks "
-                    f"({len(waveform_samples)} waveform samples so far)"
+            if not peaks and batch_idx == 0:
+                logger.warning(
+                    f"No audio chunks found for conversation {conversation_id}"
                 )
+                return {
+                    "success": False,
+                    "error": "No audio chunks found for this conversation",
+                }
+
+            if not peaks:
+                break
+
+            all_peaks.extend(peaks)
+            total_duration += dur
+            total_chunks += n
+
+            logger.info(
+                f"Batch {batch_idx}: {n} chunks, {dur:.0f}s, {len(peaks)} peaks"
+            )
+            batch_idx += 1
+
+            if n < BATCH_SIZE:
+                break
 
         processing_time = time.time() - start_time
-        other_time = processing_time - (fetch_time + decode_time + waveform_gen_time)
-
         logger.info(
-            f"✅ Generated waveform: {len(waveform_samples)} samples "
-            f"for {total_duration:.1f}s audio in {processing_time:.2f}s total"
-        )
-        logger.info(
-            f"   ⏱️  Timing breakdown: "
-            f"Fetch={fetch_time:.2f}s, "
-            f"Decode={decode_time:.2f}s, "
-            f"Waveform={waveform_gen_time:.2f}s, "
-            f"Other={other_time:.2f}s"
+            f"Waveform done: {len(all_peaks)} samples, {total_duration:.0f}s audio, "
+            f"{total_chunks} chunks in {batch_idx} batches ({processing_time:.2f}s) "
+            f"[fetch={total_fetch:.2f}s decode={total_decode:.2f}s]"
         )
 
-        # Store in MongoDB
         waveform_doc = WaveformData(
             conversation_id=conversation_id,
-            samples=waveform_samples,
+            samples=all_peaks,
             sample_rate=sample_rate,
             duration_seconds=total_duration,
             processing_time_seconds=processing_time,
         )
-
         await waveform_doc.insert()
-
-        logger.info(
-            f"💾 Saved waveform to MongoDB for conversation {conversation_id[:12]}"
-        )
 
         return {
             "success": True,
-            "samples": waveform_samples,
+            "samples": all_peaks,
             "sample_rate": sample_rate,
             "duration_seconds": total_duration,
             "processing_time_seconds": processing_time,
@@ -186,7 +201,7 @@ async def generate_waveform_data(
     except Exception as e:
         processing_time = time.time() - start_time
         logger.error(
-            f"❌ Waveform generation failed for {conversation_id}: {e}", exc_info=True
+            f"Waveform generation failed for {conversation_id}: {e}", exc_info=True
         )
         return {
             "success": False,

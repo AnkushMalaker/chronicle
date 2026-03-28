@@ -62,6 +62,15 @@ const SPEAKER_COLOR_PALETTE = [
   'text-cyan-600 dark:text-cyan-400',
 ];
 
+// Detect browser opus/ogg playback support once at module load
+const SUPPORTS_OPUS = (() => {
+  try {
+    const a = document.createElement('audio')
+    return a.canPlayType('audio/ogg; codecs=opus') !== ''
+  } catch { return false }
+})()
+const AUDIO_FORMAT = SUPPORTS_OPUS ? 'opus' : 'wav'
+
 const PAGE_SIZE = 20
 
 const SORT_OPTIONS = [
@@ -241,7 +250,7 @@ export default function Conversations() {
 
     // Fetch audio chunk via authenticated API, then create blob URL for Audio element
     const token = localStorage.getItem(getStorageKey('token')) || ''
-    fetch(`${BACKEND_URL}/api/conversations/${conversationId}/audio-segments?start=${windowStart}&duration=${CHUNK_WINDOW}`, {
+    fetch(`${BACKEND_URL}/api/conversations/${conversationId}/audio-segments?start=${windowStart}&duration=${CHUNK_WINDOW}&format=${AUDIO_FORMAT}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then(r => {
@@ -927,7 +936,7 @@ export default function Conversations() {
     if (!audio || audio.error) {
       const token = localStorage.getItem(getStorageKey('token')) || '';
       // Use chunks endpoint with time range for instant loading (only fetches needed chunks)
-      const audioUrl = `${BACKEND_URL}/api/audio/chunks/${conversationId}?start_time=${segment.start}&end_time=${segment.end}&token=${token}`;
+      const audioUrl = `${BACKEND_URL}/api/audio/chunks/${conversationId}?start_time=${segment.start}&end_time=${segment.end}&format=${AUDIO_FORMAT}&token=${token}`;
       audio = new Audio(audioUrl);
       audioRefs.current[segmentId] = audio;
 

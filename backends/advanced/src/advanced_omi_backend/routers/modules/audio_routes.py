@@ -24,6 +24,8 @@ from advanced_omi_backend.models.user import User
 from advanced_omi_backend.utils.audio_chunk_utils import (
     build_wav_from_pcm,
     concatenate_chunks_to_pcm,
+    get_opus_for_conversation,
+    get_opus_for_time_range,
     reconstruct_wav_from_conversation,
     retrieve_audio_chunks,
 )
@@ -70,6 +72,7 @@ async def upload_audio_from_drive_folder(
 async def get_conversation_audio(
     conversation_id: str,
     request: Request,
+    format: str = Query(default="opus", description="Audio format: opus or wav"),
     token: Optional[str] = Query(
         default=None, description="JWT token for audio element access"
     ),
@@ -78,27 +81,17 @@ async def get_conversation_audio(
     """
     Serve complete audio file for a conversation from MongoDB chunks.
 
-    Reconstructs audio by:
-    1. Retrieving all Opus-compressed chunks from MongoDB
-    2. Decoding each chunk to PCM
-    3. Concatenating PCM data
-    4. Building complete WAV file with headers
-
-    Supports both header-based auth (Authorization: Bearer) and query param token
-    for <audio> element compatibility.
+    With format=opus (default), serves raw ogg/opus data directly — no
+    server-side decoding needed. With format=wav, decodes to WAV.
 
     Args:
         conversation_id: The conversation ID
+        format: Audio format - "opus" (default, compressed) or "wav" (uncompressed)
         token: Optional JWT token as query param (for audio elements)
         current_user: Authenticated user (from header)
 
     Returns:
-        StreamingResponse with complete WAV file
-
-    Raises:
-        404: If conversation or audio chunks not found
-        403: If user doesn't own the conversation
-        401: If not authenticated
+        StreamingResponse with audio data
     """
     # Try token param if header auth failed
     if not current_user and token:
@@ -121,24 +114,70 @@ async def get_conversation_audio(
     ):
         raise HTTPException(status_code=403, detail="Access denied")
 
-    # Reconstruct WAV from MongoDB chunks
+    filename = _safe_filename(conversation)
+
+    if format == "opus":
+        try:
+            opus_data = await get_opus_for_conversation(conversation_id)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        file_size = len(opus_data)
+        range_header = request.headers.get("range")
+
+        if not range_header:
+            return Response(
+                content=opus_data,
+                media_type="audio/ogg",
+                headers={
+                    "Content-Disposition": f'inline; filename="{filename}.ogg"',
+                    "Content-Length": str(file_size),
+                    "Accept-Ranges": "bytes",
+                    "X-Audio-Source": "mongodb-chunks-direct",
+                    "X-Chunk-Count": str(conversation.audio_chunks_count or 0),
+                },
+            )
+
+        # Handle Range requests
+        try:
+            range_str = range_header.replace("bytes=", "")
+            range_start, range_end = range_str.split("-")
+            range_start = int(range_start) if range_start else 0
+            range_end = int(range_end) if range_end else file_size - 1
+            range_start = max(0, range_start)
+            range_end = min(file_size - 1, range_end)
+            content_length = range_end - range_start + 1
+
+            return Response(
+                content=opus_data[range_start : range_end + 1],
+                status_code=206,
+                media_type="audio/ogg",
+                headers={
+                    "Content-Range": f"bytes {range_start}-{range_end}/{file_size}",
+                    "Content-Length": str(content_length),
+                    "Accept-Ranges": "bytes",
+                    "Content-Disposition": f'inline; filename="{filename}.ogg"',
+                },
+            )
+        except (ValueError, IndexError):
+            return Response(
+                status_code=416,
+                headers={"Content-Range": f"bytes */{file_size}"},
+            )
+
+    # format=wav: decode to WAV (legacy path)
     try:
         wav_data = await reconstruct_wav_from_conversation(conversation_id)
     except ValueError as e:
-        # No chunks found for conversation
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
-        # Reconstruction failed
         raise HTTPException(
             status_code=500, detail=f"Failed to reconstruct audio: {str(e)}"
         )
 
-    # Handle Range requests for seeking support
     file_size = len(wav_data)
     range_header = request.headers.get("range")
-    filename = _safe_filename(conversation)
 
-    # If no Range header, return complete file
     if not range_header:
         return StreamingResponse(
             io.BytesIO(wav_data),
@@ -152,24 +191,17 @@ async def get_conversation_audio(
             },
         )
 
-    # Parse Range header (e.g., "bytes=0-1023")
     try:
         range_str = range_header.replace("bytes=", "")
         range_start, range_end = range_str.split("-")
         range_start = int(range_start) if range_start else 0
         range_end = int(range_end) if range_end else file_size - 1
-
-        # Ensure valid range
         range_start = max(0, range_start)
         range_end = min(file_size - 1, range_end)
         content_length = range_end - range_start + 1
 
-        # Extract requested byte range
-        range_data = wav_data[range_start : range_end + 1]
-
-        # Return 206 Partial Content with Range headers
         return Response(
-            content=range_data,
+            content=wav_data[range_start : range_end + 1],
             status_code=206,
             media_type="audio/wav",
             headers={
@@ -177,11 +209,9 @@ async def get_conversation_audio(
                 "Content-Length": str(content_length),
                 "Accept-Ranges": "bytes",
                 "Content-Disposition": f'inline; filename="{filename}.wav"',
-                "X-Audio-Source": "mongodb-chunks",
             },
         )
-    except (ValueError, IndexError) as e:
-        # Invalid Range header, return 416 Range Not Satisfiable
+    except (ValueError, IndexError):
         return Response(
             status_code=416, headers={"Content-Range": f"bytes */{file_size}"}
         )
@@ -311,43 +341,25 @@ async def get_audio_chunk_range(
     conversation_id: str,
     start_time: float = Query(..., description="Start time in seconds"),
     end_time: float = Query(..., description="End time in seconds"),
+    format: str = Query(default="opus", description="Audio format: opus or wav"),
     token: Optional[str] = Query(
         default=None, description="JWT token for audio element access"
     ),
     current_user: Optional[User] = Depends(current_active_user_optional),
 ):
     """
-    Serve specific audio chunks by time range for seekable audio player.
+    Serve audio for a time range.
 
-    Returns PCM audio data for the requested time range without decoding
-    the entire conversation. Enables efficient seeking in the UI player.
+    With format=opus (default), serves raw ogg/opus chunks directly — zero
+    server-side decoding. Time boundaries are chunk-aligned (~10s granularity).
+    With format=wav, decodes to exact time-clipped WAV.
 
     Example:
         GET /api/audio/chunks/uuid?start_time=15.5&end_time=25.5&token=xxx
-        Returns: 10 seconds of audio from 15.5s to 25.5s
-
-    Args:
-        conversation_id: The conversation ID
-        start_time: Start time in seconds (inclusive)
-        end_time: End time in seconds (inclusive)
-        token: Optional JWT token as query param
-        current_user: Authenticated user (from header)
-
-    Returns:
-        StreamingResponse with WAV file for requested range
-
-    Raises:
-        404: If conversation or audio chunks not found
-        403: If user doesn't own the conversation
-        401: If not authenticated
-        400: If time range is invalid
     """
     import logging
 
     logger = logging.getLogger(__name__)
-    logger.info(
-        f"🎵 Audio chunk request: conversation={conversation_id[:8]}..., start={start_time:.2f}s, end={end_time:.2f}s"
-    )
 
     # Try token param if header auth failed
     if not current_user and token:
@@ -380,15 +392,32 @@ async def get_audio_chunk_range(
     ):
         end_time = conversation.audio_total_duration
 
-    # Use the dedicated segment reconstruction function
+    if format == "opus":
+        try:
+            opus_data = await get_opus_for_time_range(
+                conversation_id, start_time, end_time
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        return Response(
+            content=opus_data,
+            media_type="audio/ogg",
+            headers={
+                "Content-Disposition": f"inline; filename=chunk_{start_time}_{end_time}.ogg",
+                "Content-Length": str(len(opus_data)),
+                "X-Audio-Duration": str(end_time - start_time),
+                "X-Start-Time": str(start_time),
+                "X-End-Time": str(end_time),
+            },
+        )
+
+    # format=wav: decode to exact time-clipped WAV
     from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segment
 
     try:
         wav_data = await reconstruct_audio_segment(
             conversation_id, start_time, end_time
-        )
-        logger.info(
-            f"✅ Returning WAV: {len(wav_data)} bytes for range {start_time:.2f}s - {end_time:.2f}s"
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -398,8 +427,8 @@ async def get_audio_chunk_range(
             status_code=500, detail=f"Failed to reconstruct audio: {str(e)}"
         )
 
-    return StreamingResponse(
-        io.BytesIO(wav_data),
+    return Response(
+        content=wav_data,
         media_type="audio/wav",
         headers={
             "Content-Disposition": f"inline; filename=chunk_{start_time}_{end_time}.wav",

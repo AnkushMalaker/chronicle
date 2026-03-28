@@ -74,7 +74,6 @@ defaults:
   llm: provider-llm
   embedding: provider-embed
   stt: stt-provider
-  vector_store: vs-qdrant
 
 models:
   - name: provider-llm

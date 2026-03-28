@@ -1230,6 +1230,13 @@ class ChronicleSetup:
                         self.config["HTTPS_ENABLED"] = "true"
                         self.config["SERVER_IP"] = server_ip
 
+                        # Configure webui-dev for same-origin API calls through Caddy
+                        self.config["VITE_BACKEND_URL"] = ""
+                        self.config["VITE_HMR_PORT"] = "443"
+                        self.config["VITE_ALLOWED_HOSTS"] = (
+                            f"localhost 127.0.0.1 {server_ip}"
+                        )
+
                 except Exception as e:
                     self.console.print(
                         f"[red]❌ ERROR: Caddyfile generation failed: {e}[/red]"
@@ -1283,7 +1290,7 @@ class ChronicleSetup:
         merged = {**preserved_values, **self.config}
 
         for key, value in merged.items():
-            if value:  # Only set non-empty values
+            if value is not None:  # Only set values that were explicitly configured
                 set_key(env_path_str, key, value)
 
         # Ensure secure permissions

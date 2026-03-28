@@ -402,28 +402,44 @@ async def _setup_websocket_connection(
     await ws.accept()
 
     # Authenticate user after accepting connection
-    user = await websocket_auth(ws, token)
+    user, auth_failure_reason = await websocket_auth(ws, token)
     if not user:
+        # Build specific error message based on failure reason
+        if auth_failure_reason == "token_expired":
+            error_type = "token_expired"
+            message = "Your session has expired. Please log in again."
+            close_reason = "Token expired"
+        elif auth_failure_reason == "user_not_found":
+            error_type = "user_not_found"
+            message = "User account not found or inactive. Please log in again."
+            close_reason = "User not found"
+        else:
+            error_type = "authentication_failed"
+            message = "Authentication failed. Please log in again and ensure your token is valid."
+            close_reason = "Authentication failed"
+
         # Send error message to client before closing
         try:
             error_msg = (
                 json.dumps(
                     {
                         "type": "error",
-                        "error": "authentication_failed",
-                        "message": "Authentication failed. Please log in again and ensure your token is valid.",
+                        "error": error_type,
+                        "message": message,
                         "code": 1008,
                     }
                 )
                 + "\n"
             )
             await ws.send_text(error_msg)
-            application_logger.info("Sent authentication error message to client")
+            application_logger.info(
+                f"Sent auth error to client: {error_type} ({close_reason})"
+            )
         except Exception as send_error:
             application_logger.warning(f"Failed to send error message: {send_error}")
 
         # Close connection with appropriate code
-        await ws.close(code=1008, reason="Authentication failed")
+        await ws.close(code=1008, reason=close_reason)
         return None, None, None
 
     # Generate proper client_id using user and device_name

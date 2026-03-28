@@ -253,10 +253,36 @@ async def create_admin_user_if_needed():
         logger.error(f"Failed to create admin user: {e}", exc_info=True)
 
 
-async def websocket_auth(websocket, token: Optional[str] = None) -> Optional[User]:
+def _check_token_expired(token_str: str) -> bool:
+    """Check if a JWT token is expired without full verification.
+
+    Decodes without signature verification to inspect the exp claim.
+    Returns True if the token is expired, False otherwise.
+    """
+    try:
+        payload = jwt.decode(
+            token_str, options={"verify_signature": False, "verify_exp": False}
+        )
+        exp = payload.get("exp")
+        if exp is not None:
+            from datetime import datetime, timezone
+
+            return datetime.now(timezone.utc).timestamp() > exp
+    except Exception:
+        pass
+    return False
+
+
+async def websocket_auth(
+    websocket, token: Optional[str] = None
+) -> tuple[Optional[User], str]:
     """
     WebSocket authentication that supports both cookie and token-based auth.
-    Returns None if authentication fails (allowing graceful handling).
+
+    Returns:
+        tuple of (User or None, failure_reason string).
+        failure_reason is empty string on success, or one of:
+        "token_expired", "user_not_found", "token_invalid", "no_credentials"
     """
     strategy = get_jwt_strategy()
 
@@ -274,16 +300,25 @@ async def websocket_auth(websocket, token: Optional[str] = None) -> Optional[Use
                 logger.info(
                     f"WebSocket auth successful for user {user.user_id} using query token."
                 )
-                return user
+                return user, ""
             else:
-                logger.warning(
-                    f"Token validated but user inactive or not found: user={user}"
-                )
+                # read_token returned None — figure out why
+                if _check_token_expired(token):
+                    logger.warning("WebSocket auth failed: JWT token is expired")
+                    return None, "token_expired"
+                else:
+                    logger.warning(
+                        f"WebSocket auth failed: user inactive or not found (user={user})"
+                    )
+                    return None, "user_not_found"
         except Exception as e:
             logger.error(
                 f"WebSocket auth with query token failed: {type(e).__name__}: {e}",
                 exc_info=True,
             )
+            if _check_token_expired(token):
+                return None, "token_expired"
+            return None, "token_invalid"
 
     # Try cookie authentication
     logger.debug("Attempting WebSocket auth with cookie.")
@@ -299,17 +334,21 @@ async def websocket_auth(websocket, token: Optional[str] = None) -> Optional[Use
         if cookie_header:
             match = re.search(r"fastapiusersauth=([^;]+)", cookie_header)
             if match:
+                cookie_token = match.group(1)
                 user_db_gen = get_user_db()
                 user_db = await user_db_gen.__anext__()
                 user_manager = UserManager(user_db)
-                user = await strategy.read_token(match.group(1), user_manager)
+                user = await strategy.read_token(cookie_token, user_manager)
                 if user and user.is_active:
                     logger.info(
                         f"WebSocket auth successful for user {user.user_id} using cookie."
                     )
-                    return user
+                    return user, ""
+                elif _check_token_expired(cookie_token):
+                    logger.warning("WebSocket auth failed: cookie JWT token is expired")
+                    return None, "token_expired"
     except Exception as e:
         logger.warning(f"WebSocket auth with cookie failed: {e}")
 
-    logger.warning("WebSocket authentication failed.")
-    return None
+    logger.warning("WebSocket authentication failed: no valid credentials provided.")
+    return None, "no_credentials"

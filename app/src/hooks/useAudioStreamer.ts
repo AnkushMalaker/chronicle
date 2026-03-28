@@ -3,6 +3,12 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { PermissionsAndroid, Platform } from 'react-native';
 import notifee, { AndroidImportance } from '@notifee/react-native';
 import NetInfo from '@react-native-community/netinfo';
+import { getAuthEmail, getAuthPassword, getWebSocketUrl, saveJwtToken } from '../utils/storage';
+
+interface UseAudioStreamerOptions {
+  /** Called when a new JWT token is obtained via auto-re-login */
+  onTokenRefreshed?: (token: string) => void;
+}
 
 interface UseAudioStreamer {
   isStreaming: boolean;
@@ -90,7 +96,7 @@ async function stopForegroundServiceNotification() {
 
 /** -------------------- Hook -------------------- */
 
-export const useAudioStreamer = (): UseAudioStreamer => {
+export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStreamer => {
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
   const [isConnecting, setIsConnecting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -107,6 +113,9 @@ export const useAudioStreamer = (): UseAudioStreamer => {
   const BASE_RECONNECT_MS = 3000;
   const MAX_RECONNECT_MS = 30000;
   const HEARTBEAT_MS = 25000;
+
+  // Track if we received an auth error so onclose doesn't blindly reconnect
+  const authFailedRef = useRef<boolean>(false);
 
   // Guard state updates after unmount
   const mountedRef = useRef<boolean>(true);
@@ -132,6 +141,57 @@ export const useAudioStreamer = (): UseAudioStreamer => {
       // ignore if not available
     }
   }, []);
+
+  // Helper: re-login with saved credentials when token expires, then rebuild the WebSocket URL and reconnect
+  const attemptReLogin = useCallback(async (): Promise<boolean> => {
+    try {
+      const email = await getAuthEmail();
+      const password = await getAuthPassword();
+      const wsUrl = await getWebSocketUrl();
+      if (!email || !password || !wsUrl) {
+        console.log('[AudioStreamer] Cannot re-login: missing saved credentials');
+        return false;
+      }
+
+      // Derive base HTTP URL from WebSocket URL
+      let baseUrl = wsUrl.replace('ws://', 'http://').replace('wss://', 'https://').split('/ws')[0];
+      const loginUrl = `${baseUrl}/auth/jwt/login`;
+
+      const formData = `username=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}`;
+      const response = await fetch(loginUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: formData,
+      });
+
+      if (!response.ok) {
+        console.warn(`[AudioStreamer] Re-login failed: HTTP ${response.status}`);
+        return false;
+      }
+
+      const data = await response.json();
+      const newToken = data.access_token;
+      if (!newToken) {
+        console.warn('[AudioStreamer] Re-login: no access_token in response');
+        return false;
+      }
+
+      await saveJwtToken(newToken);
+      options?.onTokenRefreshed?.(newToken);
+
+      // Rebuild the current URL with the new token
+      currentUrlRef.current = currentUrlRef.current.replace(
+        /([?&])token=[^&]*/,
+        `$1token=${encodeURIComponent(newToken)}`
+      );
+
+      console.log('[AudioStreamer] Re-login successful, token refreshed');
+      return true;
+    } catch (e) {
+      console.error('[AudioStreamer] Re-login error:', e);
+      return false;
+    }
+  }, [options]);
 
   // Helper: send Wyoming protocol events (UNCHANGED logic)
   const sendWyomingEvent = useCallback(async (event: WyomingEvent, payload?: Uint8Array) => {
@@ -231,6 +291,7 @@ export const useAudioStreamer = (): UseAudioStreamer => {
 
     currentUrlRef.current = trimmed;
     manuallyStoppedRef.current = false;
+    authFailedRef.current = false;
 
     // Network gate
     const netState = await NetInfo.fetch();
@@ -284,8 +345,19 @@ export const useAudioStreamer = (): UseAudioStreamer => {
         };
 
         ws.onmessage = (event) => {
-          // Handle server messages if needed
-          console.log('[AudioStreamer] Message:', event.data);
+          // Parse server messages to detect auth errors
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'error' && (msg.error === 'token_expired' || msg.error === 'authentication_failed' || msg.error === 'user_not_found')) {
+              console.warn(`[AudioStreamer] Auth error from server: ${msg.error} — ${msg.message}`);
+              authFailedRef.current = true;
+              setStateSafe(setError, msg.message || 'Session expired. Re-authenticating...');
+              return;
+            }
+          } catch {
+            // Not JSON, that's fine (e.g. binary messages)
+          }
+          console.log('[AudioStreamer] Message:', typeof event.data === 'string' ? event.data.substring(0, 200) : '(binary)');
         };
 
         ws.onerror = (e) => {
@@ -307,6 +379,28 @@ export const useAudioStreamer = (): UseAudioStreamer => {
 
           if (websocketRef.current === ws) websocketRef.current = null;
 
+          // Auth failure: try re-login instead of blind reconnect
+          if (authFailedRef.current && !manuallyStoppedRef.current) {
+            authFailedRef.current = false;
+            console.log('[AudioStreamer] Auth failure detected, attempting re-login...');
+            setStateSafe(setError, 'Session expired. Re-authenticating...');
+            attemptReLogin().then(success => {
+              if (success && currentUrlRef.current) {
+                console.log('[AudioStreamer] Re-login succeeded, reconnecting...');
+                reconnectAttemptsRef.current = 0;
+                startStreaming(currentUrlRef.current).catch(err => {
+                  console.error('[AudioStreamer] Reconnect after re-login failed:', err);
+                  setStateSafe(setError, 'Re-authentication succeeded but reconnection failed.');
+                });
+              } else {
+                console.warn('[AudioStreamer] Re-login failed. Please log in manually.');
+                setStateSafe(setError, 'Session expired. Please log in again in Settings.');
+                notifyInfo('Session Expired', 'Please open the app and log in again.');
+              }
+            });
+            return;
+          }
+
           if (!isManual && !manuallyStoppedRef.current) {
             setStateSafe(setError, 'Connection closed; attempting to reconnect.');
             attemptReconnect();
@@ -321,7 +415,7 @@ export const useAudioStreamer = (): UseAudioStreamer => {
         reject(new Error(msg));
       }
     });
-  }, [attemptReconnect, sendWyomingEvent, setStateSafe, stopStreaming]);
+  }, [attemptReconnect, attemptReLogin, notifyInfo, sendWyomingEvent, setStateSafe, stopStreaming]);
 
   const sendAudio = useCallback(async (audioBytes: Uint8Array) => {
     if (websocketRef.current && websocketRef.current.readyState === WebSocket.OPEN && audioBytes.length > 0) {

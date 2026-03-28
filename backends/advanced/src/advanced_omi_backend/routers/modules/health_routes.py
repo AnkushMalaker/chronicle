@@ -44,12 +44,10 @@ REGISTRY = get_models_registry()
 if REGISTRY:
     _llm_def = REGISTRY.get_default("llm")
     _embed_def = REGISTRY.get_default("embedding")
-    _vs_def = REGISTRY.get_default("vector_store")
 else:
-    _llm_def = _embed_def = _vs_def = None
+    _llm_def = _embed_def = None
 
-QDRANT_BASE_URL = _vs_def.model_params.get("host") if _vs_def else "qdrant"
-QDRANT_PORT = str(_vs_def.model_params.get("port") if _vs_def else "6333")
+NEO4J_HOST = os.getenv("NEO4J_HOST", "neo4j")
 
 
 @router.get("/auth/health")
@@ -117,7 +115,7 @@ async def health_check():
         "services": {},
         "config": {
             "mongodb_uri": MONGODB_URI,
-            "qdrant_url": f"http://{QDRANT_BASE_URL}:{QDRANT_PORT}",
+            "neo4j_host": NEO4J_HOST,
             "transcription_service": (
                 f"Speech to Text ({transcription_provider.name})"
                 if transcription_provider
@@ -292,7 +290,7 @@ async def health_check():
                 overall_healthy = False
         except asyncio.TimeoutError:
             health_status["services"]["memory_service"] = {
-                "status": "⚠️ Chronicle Memory Timeout (8s) - Check Qdrant",
+                "status": "⚠️ Chronicle Memory Timeout (8s) - Check Neo4j",
                 "healthy": False,
                 "provider": "chronicle",
                 "critical": False,

@@ -436,28 +436,18 @@ async def run_asr_jargon_extraction_job() -> dict:
 
 
 async def _extract_jargon_for_user(user_id: str) -> Optional[str]:
-    """Pull recent memories from Qdrant, call LLM to extract jargon terms.
+    """Pull recent memories, call LLM to extract jargon terms.
 
     Returns a comma-separated string of jargon terms, or None if nothing found.
     """
     from advanced_omi_backend.services.memory import get_memory_service
-    from advanced_omi_backend.services.memory.providers.chronicle import MemoryService
 
     memory_service = get_memory_service()
-
-    # Only works with Chronicle provider (has Qdrant vector store)
-    if not isinstance(memory_service, MemoryService):
-        logger.debug("Jargon extraction requires Chronicle memory provider, skipping")
+    if memory_service is None:
         return None
 
-    if memory_service.vector_store is None:
-        return None
-
-    since_ts = int(time.time()) - MEMORY_LOOKBACK_SECONDS
-
-    memories = await memory_service.vector_store.get_recent_memories(
+    memories = await memory_service.get_all_memories(
         user_id=user_id,
-        since_timestamp=since_ts,
         limit=MAX_RECENT_MEMORIES,
     )
 

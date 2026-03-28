@@ -24,6 +24,18 @@ Fine-tune a Whisper LoRA adapter for domain-specific ASR improvements (e.g., det
 
 See `whisper-adapter-finetuning/README.md` for full usage.
 
+### `autoresearch-asr/`
+
+Autonomous LoRA fine-tuning loop for VibeVoice-ASR, adapted from [karpathy/autoresearch](https://github.com/karpathy/autoresearch). Give an AI agent the training setup and let it experiment overnight on Google Colab.
+
+- `prepare.py` - Fixed data loading, model caching, train/val/test split (DO NOT MODIFY)
+- `evaluate.py` - Fixed evaluation harness: WER + SWER + boundary MAE (DO NOT MODIFY)
+- `train.py` - The file the agent modifies: LoRA config, hyperparams, curriculum
+- `program.md` - Agent instructions for the autonomous experiment loop
+- `export_data.py` - Export training data from Chronicle API to VibeVoice format
+
+See `autoresearch-asr/program.md` for full usage.
+
 ## Prerequisites
 
 ```bash

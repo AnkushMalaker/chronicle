@@ -1,7 +1,7 @@
 """Pydantic models for Knowledge Graph entities and relationships.
 
 This module defines the data structures used throughout the knowledge graph
-service for storing and retrieving entities, relationships, and promises.
+service for storing and retrieving entities and relationships.
 """
 
 import uuid
@@ -20,7 +20,6 @@ class EntityType(str, Enum):
     ORGANIZATION = "organization"
     EVENT = "event"
     CONVERSATION = "conversation"
-    PROMISE = "promise"
     FACT = "fact"
     THING = "thing"  # Generic fallback
 
@@ -32,23 +31,12 @@ class RelationshipType(str, Enum):
     WORKS_AT = "WORKS_AT"
     LIVES_IN = "LIVES_IN"
     KNOWS = "KNOWS"
-    PROMISED_TO = "PROMISED_TO"
     EXTRACTED_FROM = "EXTRACTED_FROM"
     ABOUT = "ABOUT"
     ATTENDED = "ATTENDED"
     LOCATED_AT = "LOCATED_AT"
     PART_OF = "PART_OF"
     RELATED_TO = "RELATED_TO"
-
-
-class PromiseStatus(str, Enum):
-    """Status of a promise/task."""
-
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    CANCELLED = "cancelled"
-    OVERDUE = "overdue"
 
 
 class Entity(BaseModel):
@@ -163,51 +151,6 @@ class Relationship(BaseModel):
         return data
 
 
-class Promise(BaseModel):
-    """Represents a promise or task extracted from conversations.
-
-    Promises are commitments made during conversations that can be
-    tracked and followed up on.
-    """
-
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    user_id: str
-    action: str  # What was promised
-    to_entity_id: Optional[str] = None  # Who the promise was made to
-    to_entity_name: Optional[str] = None  # Name for display
-    status: PromiseStatus = PromiseStatus.PENDING
-    due_date: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    source_conversation_id: Optional[str] = None  # Where this was extracted from
-    context: Optional[str] = None  # Additional context
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
-
-    class Config:
-        use_enum_values = True
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
-        return {
-            "id": self.id,
-            "user_id": self.user_id,
-            "action": self.action,
-            "to_entity_id": self.to_entity_id,
-            "to_entity_name": self.to_entity_name,
-            "status": self.status,
-            "due_date": self.due_date.isoformat() if self.due_date else None,
-            "completed_at": (
-                self.completed_at.isoformat() if self.completed_at else None
-            ),
-            "source_conversation_id": self.source_conversation_id,
-            "context": self.context,
-            "metadata": self.metadata,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-        }
-
-
 class ExtractedEntity(BaseModel):
     """Entity as extracted by LLM before Neo4j storage."""
 
@@ -227,22 +170,12 @@ class ExtractedRelationship(BaseModel):
     object: str  # Entity name
 
 
-class ExtractedPromise(BaseModel):
-    """Promise as extracted by LLM."""
-
-    action: str
-    to: Optional[str] = None  # Entity name
-    deadline: Optional[str] = None  # Natural language deadline
-
-
 class ExtractionResult(BaseModel):
     """Result of entity extraction from a conversation."""
 
     entities: List[ExtractedEntity] = Field(default_factory=list)
     relationships: List[ExtractedRelationship] = Field(default_factory=list)
-    promises: List[ExtractedPromise] = Field(default_factory=list)
 
     # Populated after storage
     stored_entity_ids: List[str] = Field(default_factory=list)
     stored_relationship_ids: List[str] = Field(default_factory=list)
-    stored_promise_ids: List[str] = Field(default_factory=list)

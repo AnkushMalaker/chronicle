@@ -50,7 +50,7 @@ Health Check Test
 
     ${config}=    Set Variable    ${health}[config]
     Dictionary Should Contain Key    ${config}    mongodb_uri
-    Dictionary Should Contain Key    ${config}    qdrant_url
+    Dictionary Should Contain Key    ${config}    neo4j_host
     Dictionary Should Contain Key    ${config}    transcription_service
     Dictionary Should Contain Key    ${config}    asr_uri
     Dictionary Should Contain Key    ${config}    provider_type
@@ -63,7 +63,7 @@ Health Check Test
 
     # Verify config values are not empty
     Should Not Be Empty    ${config}[mongodb_uri]
-    Should Not Be Empty    ${config}[qdrant_url]
+    Should Not Be Empty    ${config}[neo4j_host]
     Should Not Be Empty    ${config}[transcription_service]
     Should Not Be Empty    ${config}[asr_uri]
     Should Not Be Empty    ${config}[provider_type]

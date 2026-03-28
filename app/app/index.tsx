@@ -37,8 +37,18 @@ export default function App() {
   // Bluetooth
   const { bleManager, bluetoothState, permissionGranted, requestBluetoothPermission, isPermissionsLoading } = useBluetoothManager();
 
+  // Settings (must be before audioStreamer so the token refresh callback can reference it)
+  const settings = useAppSettings();
+
   // Audio
-  const audioStreamer = useAudioStreamer();
+  const audioStreamer = useAudioStreamer({
+    onTokenRefreshed: (newToken) => {
+      // Update app-level auth state when auto-re-login refreshes the token
+      if (settings.currentUserEmail) {
+        settings.handleAuthStatusChange(true, settings.currentUserEmail, newToken);
+      }
+    },
+  });
   const phoneAudioRecorder = usePhoneAudioRecorder();
 
   const { isListeningAudio: isOmiAudioListenerActive, audioPacketsReceived, startAudioListener: originalStartAudioListener, stopAudioListener: originalStopAudioListener, isRetrying: isAudioListenerRetrying, retryAttempts: audioListenerRetryAttempts } = useAudioListener(omiConnection, () => !!deviceConnection.connectedDeviceId);
@@ -48,9 +58,6 @@ export default function App() {
   const isAudioStreamingRef = useRef(audioStreamer.isStreaming);
   useEffect(() => { isOmiAudioListenerActiveRef.current = isOmiAudioListenerActive; }, [isOmiAudioListenerActive]);
   useEffect(() => { isAudioStreamingRef.current = audioStreamer.isStreaming; }, [audioStreamer.isStreaming]);
-
-  // Settings
-  const settings = useAppSettings();
 
   // Device callbacks
   const onDeviceConnect = useCallback(async () => {

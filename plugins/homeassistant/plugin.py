@@ -5,12 +5,19 @@ Enables control of Home Assistant devices through natural language commands
 triggered by a keyword anywhere in the transcript.
 """
 
+import asyncio
 import json
 import logging
+import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from advanced_omi_backend.llm_client import get_llm_client
 from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
+from advanced_omi_backend.plugins.events import PluginEvent
+from advanced_omi_backend.prompt_registry import get_prompt_registry
 
+from .command_parser import COMMAND_PARSER_SYSTEM_PROMPT, ParsedCommand
 from .entity_cache import EntityCache
 from .mcp_client import HAMCPClient, MCPError
 
@@ -65,8 +72,6 @@ class HomeAssistantPlugin(BasePlugin):
 
     def register_prompts(self, registry) -> None:
         """Register Home Assistant prompts with the prompt registry."""
-        from .command_parser import COMMAND_PARSER_SYSTEM_PROMPT
-
         registry.register_default(
             "plugin.homeassistant.command_parser",
             template=COMMAND_PARSER_SYSTEM_PROMPT,
@@ -299,8 +304,6 @@ class HomeAssistantPlugin(BasePlugin):
             )
 
         try:
-            from .command_parser import ParsedCommand
-
             # Build a ParsedCommand from the action data
             target_type = context.data.get("target_type", "area")
             target = context.data.get("target", "")
@@ -364,10 +367,6 @@ class HomeAssistantPlugin(BasePlugin):
         using the button_actions config. Reuses the same entity resolution and
         service call logic as on_plugin_action().
         """
-        from advanced_omi_backend.plugins.events import PluginEvent
-
-        from .command_parser import ParsedCommand
-
         # Map event to config key
         if context.event == PluginEvent.BUTTON_DOUBLE_PRESS:
             action_key = "double_press"
@@ -447,8 +446,6 @@ class HomeAssistantPlugin(BasePlugin):
 
     async def health_check(self) -> dict:
         """Ping Home Assistant API using the initialized client."""
-        import time
-
         if not self.mcp_client:
             return {"ok": False, "message": "MCP client not initialized"}
 
@@ -524,8 +521,6 @@ class HomeAssistantPlugin(BasePlugin):
             logger.debug(f"Fetched {len(entity_details)} entity states")
 
             # Create cache
-            from datetime import datetime
-
             self.entity_cache = EntityCache(
                 areas=areas,
                 area_entities=area_entities,
@@ -566,8 +561,6 @@ class HomeAssistantPlugin(BasePlugin):
             return None
 
         try:
-            from advanced_omi_backend.llm_client import get_llm_client
-
             llm_client = get_llm_client()
 
             system_prompt = (
@@ -634,11 +627,6 @@ class HomeAssistantPlugin(BasePlugin):
             )
         """
         try:
-            from advanced_omi_backend.llm_client import get_llm_client
-            from advanced_omi_backend.prompt_registry import get_prompt_registry
-
-            from .command_parser import ParsedCommand
-
             llm_client = get_llm_client()
             registry = get_prompt_registry()
             system_prompt = await registry.get_prompt(
@@ -743,8 +731,6 @@ class HomeAssistantPlugin(BasePlugin):
             ... ))
             ["light.tubelight_3"]
         """
-        from .command_parser import ParsedCommand
-
         # Ensure cache is ready
         await self._ensure_cache_initialized()
 
@@ -904,10 +890,6 @@ class HomeAssistantPlugin(BasePlugin):
             >>> await self._parse_command_hybrid("turn off study lights")
             ParsedCommand(action="turn_off", target_type="area", target="study", ...)
         """
-        import asyncio
-
-        from .command_parser import ParsedCommand
-
         # Try LLM parsing with timeout
         try:
             logger.debug("Attempting LLM-based command parsing...")
@@ -981,8 +963,6 @@ class HomeAssistantPlugin(BasePlugin):
             >>> result['success']
             True
         """
-        import time
-
         try:
             # Validate required config fields
             required_fields = ["ha_url", "ha_token"]

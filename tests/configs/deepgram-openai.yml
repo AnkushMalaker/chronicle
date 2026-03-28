@@ -6,7 +6,6 @@ defaults:
   llm: openai-llm
   stt: stt-deepgram
   stt_stream: stt-deepgram-stream
-  vector_store: vs-qdrant
 memory:
   extraction:
     enabled: true
@@ -44,16 +43,6 @@ models:
   model_type: embedding
   model_url: https://api.openai.com/v1
   name: openai-embed
-- api_family: qdrant
-  description: Qdrant vector database
-  model_params:
-    collection_name: omi_memories
-    host: ${oc.env:QDRANT_BASE_URL,qdrant}
-    port: ${oc.env:QDRANT_PORT,6333}
-  model_provider: qdrant
-  model_type: vector_store
-  model_url: http://${oc.env:QDRANT_BASE_URL,qdrant}:${oc.env:QDRANT_PORT,6333}
-  name: vs-qdrant
 - api_family: http
   api_key: ${oc.env:DEEPGRAM_API_KEY,}
   description: Deepgram Nova 3 (batch)

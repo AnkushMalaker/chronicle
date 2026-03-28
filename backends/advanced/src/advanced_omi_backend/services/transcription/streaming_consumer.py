@@ -298,7 +298,7 @@ class StreamingTranscriptionConsumer:
 
             # If there's a final result, publish it
             if final_result and final_result.get("text"):
-                words = final_result.get("words", [])
+                words = final_result.get("words") or []
                 _normalize_words(words)
 
                 # Check if words carry per-word speaker labels (provider diarization)
@@ -388,7 +388,7 @@ class StreamingTranscriptionConsumer:
             if result:
                 is_final = result.get("is_final", False)
                 text = result.get("text", "")
-                words = result.get("words", [])
+                words = result.get("words") or []
                 word_count = len(words)
 
                 # Normalize provider-specific word field names (e.g. start_time → start)
@@ -541,7 +541,7 @@ class StreamingTranscriptionConsumer:
             message = {
                 "text": result.get("text", ""),
                 "is_final": is_final,
-                "words": result.get("words", []),
+                "words": result.get("words") or [],
                 "segments": result.get("segments", []),
                 "confidence": result.get("confidence", 0.0),
                 "timestamp": time.time(),
@@ -583,7 +583,7 @@ class StreamingTranscriptionConsumer:
             stream_name = f"transcription:results:{session_id}"
 
             # Get words and segments directly
-            words = result.get("words", [])
+            words = result.get("words") or []
             segments = result.get("segments", [])
 
             # Prepare result entry
@@ -681,7 +681,7 @@ class StreamingTranscriptionConsumer:
             plugin_data = {
                 "transcript": result.get("text", ""),
                 "session_id": session_id,
-                "words": result.get("words", []),
+                "words": result.get("words") or [],
                 "segments": result.get("segments", []),
                 "confidence": result.get("confidence", 0.0),
                 "is_final": True,

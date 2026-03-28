@@ -230,11 +230,14 @@ def setup_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
-def setup_middleware(app: FastAPI) -> None:
+def setup_middleware(app: FastAPI, *, disable_request_logging: bool = False) -> None:
     """Set up all middleware for the FastAPI application."""
     # Add request logging middleware
-    app.add_middleware(RequestLoggingMiddleware)
-    logger.info("📝 Request logging middleware enabled")
+    if not disable_request_logging:
+        app.add_middleware(RequestLoggingMiddleware)
+        logger.info("📝 Request logging middleware enabled")
+    else:
+        logger.info("📝 Request logging middleware DISABLED (profiling)")
 
     setup_cors_middleware(app)
     setup_exception_handlers(app)

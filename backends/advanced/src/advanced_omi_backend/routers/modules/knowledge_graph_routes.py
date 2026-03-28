@@ -1,7 +1,7 @@
 """
 Knowledge Graph API routes for Chronicle.
 
-Handles entity, relationship, promise, and timeline operations.
+Handles entity, relationship, conversation doc, and timeline operations.
 """
 
 import logging
@@ -20,7 +20,6 @@ from advanced_omi_backend.models.annotation import (
 )
 from advanced_omi_backend.services.knowledge_graph import (
     KnowledgeGraphService,
-    PromiseStatus,
     get_knowledge_graph_service,
 )
 from advanced_omi_backend.users import User
@@ -301,122 +300,69 @@ async def search_entities(
 
 
 # =============================================================================
-# PROMISE ENDPOINTS
+# CONVERSATION DOC ENDPOINTS
 # =============================================================================
 
 
-@router.get("/promises")
-async def get_promises(
+@router.get("/conversations")
+async def get_conversation_docs(
     current_user: User = Depends(current_active_user),
-    status: Optional[str] = Query(
+    person: Optional[str] = Query(
         default=None,
-        description="Filter by status (pending, in_progress, completed, cancelled)",
+        description="Filter by person name (case-insensitive substring match)",
     ),
     limit: int = Query(default=50, ge=1, le=200),
 ):
-    """Get promises/tasks for the current user.
+    """Get conversation documents with linked people.
 
-    Optionally filter by status. Returns promises ordered by
-    due date (ascending) then created date (descending).
+    Returns ConvDoc nodes from the chronicle memory system with
+    their titles, summaries, dates, and mentioned people.
+    Optionally filter by person name.
     """
     try:
-        # Validate status if provided
-        if status:
-            try:
-                PromiseStatus(status)
-            except ValueError:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid status. Must be one of: {[s.value for s in PromiseStatus]}",
-                )
-
         service = get_knowledge_graph_service()
-        promises = await service.get_promises(
+        docs = await service.get_conversation_docs(
             user_id=str(current_user.id),
-            status=status,
+            person=person,
             limit=limit,
         )
 
         return {
-            "promises": [p.to_dict() for p in promises],
-            "count": len(promises),
-            "user_id": str(current_user.id),
+            "conversations": docs,
+            "count": len(docs),
         }
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"Error getting promises: {e}")
+        logger.error(f"Error getting conversation docs: {e}")
         return JSONResponse(
             status_code=500,
-            content={"message": f"Error getting promises: {str(e)}"},
+            content={"message": f"Error getting conversation docs: {str(e)}"},
         )
 
 
-@router.patch("/promises/{promise_id}")
-async def update_promise_status(
-    promise_id: str,
-    request: UpdatePromiseRequest,
+@router.get("/people")
+async def get_people(
     current_user: User = Depends(current_active_user),
 ):
-    """Update a promise's status.
+    """Get distinct people mentioned across conversation documents.
 
-    Valid statuses: pending, in_progress, completed, cancelled
+    Returns ConvEntity names with descriptions and mention counts,
+    ordered by mention count descending. Used for filter dropdowns.
     """
     try:
-        # Validate status
-        try:
-            PromiseStatus(request.status)
-        except ValueError:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid status. Must be one of: {[s.value for s in PromiseStatus]}",
-            )
-
         service = get_knowledge_graph_service()
-        promise = await service.update_promise_status(
-            promise_id=promise_id,
-            user_id=str(current_user.id),
-            status=request.status,
-        )
-
-        if not promise:
-            raise HTTPException(status_code=404, detail="Promise not found")
-
-        return {"promise": promise.to_dict()}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error updating promise {promise_id}: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"message": f"Error updating promise: {str(e)}"},
-        )
-
-
-@router.delete("/promises/{promise_id}")
-async def delete_promise(
-    promise_id: str,
-    current_user: User = Depends(current_active_user),
-):
-    """Delete a promise."""
-    try:
-        service = get_knowledge_graph_service()
-        deleted = await service.delete_promise(
-            promise_id=promise_id,
+        people = await service.get_people(
             user_id=str(current_user.id),
         )
 
-        if not deleted:
-            raise HTTPException(status_code=404, detail="Promise not found")
-
-        return {"message": "Promise deleted successfully"}
-    except HTTPException:
-        raise
+        return {
+            "people": people,
+            "count": len(people),
+        }
     except Exception as e:
-        logger.error(f"Error deleting promise {promise_id}: {e}")
+        logger.error(f"Error getting people: {e}")
         return JSONResponse(
             status_code=500,
-            content={"message": f"Error deleting promise: {str(e)}"},
+            content={"message": f"Error getting people: {str(e)}"},
         )
 
 

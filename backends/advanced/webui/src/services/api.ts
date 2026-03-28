@@ -561,20 +561,17 @@ export const knowledgeGraphApi = {
       params: { query, limit }
     }),
 
-  // Promise operations
-  getPromises: (status?: string, limit: number = 50) =>
-    api.get('/api/knowledge-graph/promises', {
+  // Conversation doc browsing
+  getConversationDocs: (person?: string, limit: number = 50) =>
+    api.get('/api/knowledge-graph/conversations', {
       params: {
-        ...(status && { status }),
+        ...(person && { person }),
         limit
       }
     }),
 
-  updatePromiseStatus: (promiseId: string, status: string) =>
-    api.patch(`/api/knowledge-graph/promises/${promiseId}`, { status }),
-
-  deletePromise: (promiseId: string) =>
-    api.delete(`/api/knowledge-graph/promises/${promiseId}`),
+  getPeople: () =>
+    api.get('/api/knowledge-graph/people'),
 
   // Timeline
   getTimeline: (start: string, end: string, limit: number = 100) =>

@@ -6,7 +6,6 @@ defaults:
   llm: mock-llm
   stt: stt-deepgram-invalid
   stt_stream: stt-deepgram-stream-invalid
-  vector_store: vs-qdrant
 memory:
   extraction:
     enabled: false
@@ -35,16 +34,6 @@ models:
   model_type: embedding
   model_url: https://api.openai.com/v1
   name: mock-embed
-- api_family: qdrant
-  description: Qdrant vector database (local)
-  model_params:
-    collection_name: omi_memories
-    host: ${oc.env:QDRANT_BASE_URL,qdrant}
-    port: ${oc.env:QDRANT_PORT,6333}
-  model_provider: qdrant
-  model_type: vector_store
-  model_url: http://${oc.env:QDRANT_BASE_URL,qdrant}:${oc.env:QDRANT_PORT,6333}
-  name: vs-qdrant
 # Deepgram with invalid API key to trigger transcription failures
 - api_family: http
   api_key: invalid-key-for-testing

@@ -13,7 +13,10 @@ from advanced_omi_backend.auth import current_active_user
 from advanced_omi_backend.controllers import conversation_controller
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.users import User
-from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segment
+from advanced_omi_backend.utils.audio_chunk_utils import (
+    get_opus_for_time_range,
+    reconstruct_audio_segment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -306,22 +309,14 @@ async def get_audio_segment(
     duration: Optional[float] = Query(
         None, description="Duration in seconds (omit for full audio)"
     ),
+    format: str = Query(default="opus", description="Audio format: opus or wav"),
     current_user: User = Depends(current_active_user),
 ) -> Response:
     """
     Get audio segment from a conversation.
 
-    This endpoint enables the speaker service to fetch audio in time-bounded
-    segments without loading the entire file into memory. The speaker service
-    controls chunk size based on its own memory constraints.
-
-    Args:
-        conversation_id: Conversation identifier
-        start: Start time in seconds (default: 0.0)
-        duration: Duration in seconds (if None, returns all audio from start)
-
-    Returns:
-        WAV audio bytes (16kHz, mono) for the requested time range
+    With format=opus (default), serves raw ogg/opus chunks directly — zero
+    decoding. With format=wav, decodes to exact time-clipped WAV.
     """
     import time
 
@@ -358,7 +353,34 @@ async def get_audio_segment(
             detail=f"Invalid start time: {start}s (max: {total_duration}s)",
         )
 
-    # Get audio chunks for time range
+    if format == "opus":
+        try:
+            opus_data = await get_opus_for_time_range(
+                conversation_id=conversation_id, start_time=start, end_time=end
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        request_time = time.time() - request_start
+        logger.info(
+            f"Audio segment (opus) for {conversation_id[:12]}: "
+            f"{start:.1f}s - {end:.1f}s ({len(opus_data)} bytes, "
+            f"{request_time:.3f}s)"
+        )
+
+        return Response(
+            content=opus_data,
+            media_type="audio/ogg",
+            headers={
+                "Content-Disposition": f"inline; filename=segment_{start}_{end}.ogg",
+                "Content-Length": str(len(opus_data)),
+                "X-Audio-Start": str(start),
+                "X-Audio-End": str(end),
+                "X-Audio-Duration": str(end - start),
+            },
+        )
+
+    # format=wav: decode to WAV
     try:
         wav_bytes = await reconstruct_audio_segment(
             conversation_id=conversation_id, start_time=start, end_time=end
@@ -373,10 +395,9 @@ async def get_audio_segment(
 
     request_time = time.time() - request_start
     logger.info(
-        f"Audio segment endpoint completed for {conversation_id[:12]}: "
-        f"{start:.1f}s - {end:.1f}s ({end - start:.1f}s duration, "
-        f"{len(wav_bytes) / 1024 / 1024:.2f} MB, "
-        f"total request time: {request_time:.2f}s)"
+        f"Audio segment (wav) for {conversation_id[:12]}: "
+        f"{start:.1f}s - {end:.1f}s ({len(wav_bytes) / 1024 / 1024:.2f} MB, "
+        f"{request_time:.2f}s)"
     )
 
     return Response(

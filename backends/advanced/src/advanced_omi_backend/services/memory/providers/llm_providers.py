@@ -531,7 +531,6 @@ class OllamaProvider(LLMProviderBase):
 
     os.environ["OPENAI_API_KEY"] = "ollama"
     os.environ["OPENAI_BASE_URL"] = "http://localhost:11434/v1"
-    os.environ["QDRANT_BASE_URL"] = "localhost"
     os.environ["OPENAI_EMBEDDER_MODEL"] = "erwan2/DeepSeek-R1-Distill-Qwen-1.5B:latest"
 
     """

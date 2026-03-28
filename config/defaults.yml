@@ -8,7 +8,6 @@ defaults:
   stt: stt-deepgram
   stt_stream: stt-deepgram-stream
   tts: tts-http
-  vector_store: vs-qdrant
 
 models:
   # ===========================
@@ -336,20 +335,6 @@ models:
           text: transcript
           words: words
           segments: utterances
-
-  # ===========================
-  # Vector Store
-  # ===========================
-  - name: vs-qdrant
-    description: Qdrant vector database
-    model_type: vector_store
-    model_provider: qdrant
-    api_family: qdrant
-    model_url: http://${oc.env:QDRANT_BASE_URL,qdrant}:${oc.env:QDRANT_PORT,6333}
-    model_params:
-      host: ${oc.env:QDRANT_BASE_URL,qdrant}
-      port: ${oc.env:QDRANT_PORT,6333}
-      collection_name: omi_memories
 
 # ===========================
 # Memory Configuration

@@ -7,6 +7,7 @@ and service initializations.
 
 import asyncio
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -500,7 +501,11 @@ def create_app() -> FastAPI:
     app = FastAPI(lifespan=lifespan)
 
     # Set up middleware (CORS, exception handlers)
-    setup_middleware(app)
+    setup_middleware(
+        app,
+        disable_request_logging=os.getenv("DISABLE_REQUEST_LOGGING", "").lower()
+        == "true",
+    )
 
     # Include all routers
     app.include_router(api_router)

@@ -399,8 +399,7 @@ async def process_memory_job(
                     if kg_result.get("entities", 0) > 0:
                         logger.info(
                             f"🔗 Knowledge graph: extracted {kg_result.get('entities', 0)} entities, "
-                            f"{kg_result.get('relationships', 0)} relationships, "
-                            f"{kg_result.get('promises', 0)} promises from {conversation_id}"
+                            f"{kg_result.get('relationships', 0)} relationships from {conversation_id}"
                         )
                 else:
                     logger.debug("Knowledge graph extraction disabled in config")

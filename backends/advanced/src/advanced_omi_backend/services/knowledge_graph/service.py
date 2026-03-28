@@ -3,7 +3,6 @@
 This module provides the main service for:
 - Extracting entities and relationships from conversations
 - Storing and retrieving entities from Neo4j
-- Managing promises and tracking their status
 - Querying the knowledge graph
 """
 
@@ -18,15 +17,7 @@ from ..neo4j_client import Neo4jClient, Neo4jReadInterface, Neo4jWriteInterface
 from . import queries
 from .entity_extractor import extract_entities_from_transcript, parse_natural_datetime
 from .kb import KnowledgeBaseManager
-from .models import (
-    Entity,
-    EntityType,
-    ExtractionResult,
-    Promise,
-    PromiseStatus,
-    Relationship,
-    RelationshipType,
-)
+from .models import Entity, EntityType, ExtractionResult, Relationship, RelationshipType
 
 logger = logging.getLogger("knowledge_graph")
 
@@ -41,8 +32,8 @@ class KnowledgeGraphService:
     This service handles:
     - Entity extraction from conversation transcripts
     - CRUD operations on entities and relationships
-    - Promise tracking and management
     - Graph queries (timeline, search, related entities)
+    - Conversation document browsing (ConvDoc/ConvEntity from chronicle memory)
     """
 
     def __init__(
@@ -118,7 +109,7 @@ class KnowledgeGraphService:
 
         if not transcript or not transcript.strip():
             logger.debug(f"Empty transcript for conversation {conversation_id}")
-            return {"entities": 0, "relationships": 0, "promises": 0}
+            return {"entities": 0, "relationships": 0}
 
         try:
             # Extract entities using LLM
@@ -127,11 +118,11 @@ class KnowledgeGraphService:
                 conversation_id=conversation_id,
             )
 
-            if not extraction.entities and not extraction.promises:
+            if not extraction.entities:
                 logger.debug(
                     f"No entities extracted from conversation {conversation_id}"
                 )
-                return {"entities": 0, "relationships": 0, "promises": 0}
+                return {"entities": 0, "relationships": 0}
 
             # Create conversation entity node
             conv_entity_id = await self._create_conversation_entity(
@@ -155,14 +146,6 @@ class KnowledgeGraphService:
                 conversation_id=conversation_id,
             )
 
-            # Store promises
-            promise_count = await self._store_promises(
-                extraction=extraction,
-                user_id=user_id,
-                entity_id_map=entity_id_map,
-                conversation_id=conversation_id,
-            )
-
             # Link entities to conversation
             await self._link_entities_to_conversation(
                 entity_ids=list(entity_id_map.values()),
@@ -172,19 +155,18 @@ class KnowledgeGraphService:
 
             logger.info(
                 f"Processed conversation {conversation_id}: "
-                f"{len(entity_id_map)} entities, {rel_count} relationships, {promise_count} promises"
+                f"{len(entity_id_map)} entities, {rel_count} relationships"
             )
 
             return {
                 "entities": len(entity_id_map),
                 "relationships": rel_count,
-                "promises": promise_count,
                 "entity_ids": list(entity_id_map.values()),
             }
 
         except Exception as e:
             logger.error(f"Error processing conversation {conversation_id}: {e}")
-            return {"entities": 0, "relationships": 0, "promises": 0, "error": str(e)}
+            return {"entities": 0, "relationships": 0, "error": str(e)}
 
     async def _create_conversation_entity(
         self,
@@ -308,55 +290,6 @@ class KnowledgeGraphService:
 
             self._write.run(queries.CREATE_RELATIONSHIP, **params)
             extraction.stored_relationship_ids.append(rel_id)
-            count += 1
-
-        return count
-
-    async def _store_promises(
-        self,
-        extraction: ExtractionResult,
-        user_id: str,
-        entity_id_map: Dict[str, str],
-        conversation_id: str,
-    ) -> int:
-        """Store extracted promises in Neo4j."""
-        count = 0
-        now = datetime.utcnow().isoformat()
-
-        for promise in extraction.promises:
-            promise_id = str(uuid.uuid4())
-
-            # Find target entity if specified
-            to_entity_id = None
-            to_entity_name = promise.to
-            if promise.to:
-                to_entity_id = entity_id_map.get(promise.to.lower())
-
-            # Parse deadline
-            due_date = None
-            if promise.deadline:
-                parsed = parse_natural_datetime(promise.deadline)
-                if parsed:
-                    due_date = parsed.isoformat()
-
-            params = {
-                "id": promise_id,
-                "user_id": user_id,
-                "action": promise.action,
-                "to_entity_id": to_entity_id,
-                "to_entity_name": to_entity_name,
-                "status": PromiseStatus.PENDING.value,
-                "due_date": due_date,
-                "completed_at": None,
-                "source_conversation_id": conversation_id,
-                "context": None,
-                "metadata": "{}",
-                "created_at": now,
-                "updated_at": now,
-            }
-
-            self._write.run(queries.CREATE_PROMISE, **params)
-            extraction.stored_promise_ids.append(promise_id)
             count += 1
 
         return count
@@ -603,97 +536,98 @@ class KnowledgeGraphService:
         return deleted > 0
 
     # =========================================================================
-    # PROMISE OPERATIONS
+    # CONVERSATION DOC BROWSING (ConvDoc / ConvEntity from chronicle memory)
     # =========================================================================
 
-    async def get_promises(
+    async def get_conversation_docs(
         self,
         user_id: str,
-        status: Optional[str] = None,
+        person: Optional[str] = None,
         limit: int = 50,
-    ) -> List[Promise]:
-        """Get promises for a user.
+    ) -> List[Dict[str, Any]]:
+        """Get conversation documents with linked people.
 
         Args:
             user_id: User ID to filter by
-            status: Optional status filter (pending, completed, etc.)
+            person: Optional person name filter
             limit: Maximum results to return
 
         Returns:
-            List of Promise objects
+            List of conversation doc dicts with people arrays
+        """
+        self._ensure_initialized()
+
+        if person:
+            results = self._read.run(
+                queries.GET_CONVERSATION_DOCS_BY_PERSON,
+                user_id=user_id,
+                person=person,
+                limit=limit,
+            )
+        else:
+            results = self._read.run(
+                queries.GET_CONVERSATION_DOCS,
+                user_id=user_id,
+                limit=limit,
+            )
+
+        docs = []
+        for row in results:
+            # Filter out null entries from collect()
+            people = [
+                p for p in (row.get("people") or []) if p is not None and p.get("name")
+            ]
+            # Deduplicate people by name
+            seen_names = set()
+            unique_people = []
+            for p in people:
+                if p["name"] not in seen_names:
+                    seen_names.add(p["name"])
+                    unique_people.append(p)
+
+            docs.append(
+                {
+                    "conversation_id": row.get("conversation_id"),
+                    "title": row.get("title"),
+                    "summary": row.get("summary"),
+                    "date": row.get("date"),
+                    "updated_at": row.get("updated_at"),
+                    "people": unique_people,
+                }
+            )
+
+        return docs
+
+    async def get_people(
+        self,
+        user_id: str,
+    ) -> List[Dict[str, Any]]:
+        """Get distinct people (ConvEntity) with mention counts.
+
+        Args:
+            user_id: User ID to filter by
+
+        Returns:
+            List of people dicts with name, description, mention_count
         """
         self._ensure_initialized()
 
         results = self._read.run(
-            queries.GET_PROMISES_BY_USER,
+            queries.GET_PEOPLE,
             user_id=user_id,
-            status=status,
-            limit=limit,
         )
 
-        promises = []
+        people = []
         for row in results:
-            promise_data = dict(row["p"])
-            if row.get("target"):
-                promise_data["to_entity_name"] = row["target"].get("name")
-            promises.append(self._row_to_promise(promise_data))
+            people.append(
+                {
+                    "name": row.get("name"),
+                    "description": row.get("description"),
+                    "mention_count": row.get("mention_count", 0),
+                }
+            )
 
-        return promises
-
-    async def update_promise_status(
-        self,
-        promise_id: str,
-        user_id: str,
-        status: str,
-    ) -> Optional[Promise]:
-        """Update a promise's status.
-
-        Args:
-            promise_id: Promise UUID
-            user_id: User ID for permission check
-            status: New status value
-
-        Returns:
-            Updated Promise object or None if not found
-        """
-        self._ensure_initialized()
-
-        results = self._write.run(
-            queries.UPDATE_PROMISE_STATUS,
-            id=promise_id,
-            user_id=user_id,
-            status=status,
-        )
-
-        if not results:
-            return None
-
-        return self._row_to_promise(dict(results[0]["p"]))
-
-    async def delete_promise(
-        self,
-        promise_id: str,
-        user_id: str,
-    ) -> bool:
-        """Delete a promise.
-
-        Args:
-            promise_id: Promise UUID to delete
-            user_id: User ID for permission check
-
-        Returns:
-            True if deleted, False if not found
-        """
-        self._ensure_initialized()
-
-        results = self._write.run(
-            queries.DELETE_PROMISE,
-            id=promise_id,
-            user_id=user_id,
-        )
-
-        deleted = results[0]["deleted_count"] if results else 0
-        return deleted > 0
+        return people
 
     # =========================================================================
     # TIMELINE
@@ -780,30 +714,6 @@ class KnowledgeGraphService:
             end_date=self._parse_datetime(data.get("end_date")),
             source_entity=data.get("source_entity"),
             target_entity=data.get("target_entity"),
-        )
-
-    def _row_to_promise(self, data: Dict[str, Any]) -> Promise:
-        """Convert Neo4j row data to Promise model."""
-        status = data.get("status", "pending")
-        try:
-            status_enum = PromiseStatus(status)
-        except ValueError:
-            status_enum = PromiseStatus.PENDING
-
-        return Promise(
-            id=data.get("id", ""),
-            user_id=data.get("user_id", ""),
-            action=data.get("action", ""),
-            to_entity_id=data.get("to_entity_id"),
-            to_entity_name=data.get("to_entity_name"),
-            status=status_enum,
-            due_date=self._parse_datetime(data.get("due_date")),
-            completed_at=self._parse_datetime(data.get("completed_at")),
-            source_conversation_id=data.get("source_conversation_id"),
-            context=data.get("context"),
-            metadata=self._parse_metadata(data.get("metadata")),
-            created_at=self._parse_datetime(data.get("created_at")),
-            updated_at=self._parse_datetime(data.get("updated_at")),
         )
 
     def _parse_datetime(self, value: Any) -> Optional[datetime]:

@@ -25,8 +25,9 @@ services:
     environment:
       # Override with test-specific settings
       - MONGODB_URI=mongodb://mongo-test:27017/test_db
-      - QDRANT_BASE_URL=qdrant-test
-      - QDRANT_PORT=6333
+      - NEO4J_HOST=neo4j-test
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=testpassword
       - REDIS_URL=redis://redis-test:6379/0
       - DEBUG_DIR=/app/debug  # Fixed: match plugin database mount path
       # Test configuration file
@@ -66,8 +67,8 @@ services:
       - LANGFUSE_PUBLIC_KEY=pk-lf-test-public-key
       - LANGFUSE_SECRET_KEY=sk-lf-test-secret-key
     depends_on:
-      qdrant-test:
-        condition: service_started
+      neo4j-test:
+        condition: service_healthy
       mongo-test:
         condition: service_healthy
       redis-test:
@@ -98,18 +99,30 @@ services:
         condition: service_healthy
       mongo-test:
         condition: service_healthy
-      qdrant-test:
-        condition: service_started
       redis-test:
         condition: service_started
 
-  qdrant-test:
-    image: qdrant/qdrant:latest
+  neo4j-test:
+    image: neo4j:2026-community
     ports:
-      - "6337:6333"  # gRPC - avoid conflict with dev 6333
-      - "6338:6334"  # HTTP - avoid conflict with dev 6334
+      - "7475:7474"  # HTTP - avoid conflict with dev 7474
+      - "7688:7687"  # Bolt - avoid conflict with dev 7687
+    environment:
+      - NEO4J_AUTH=neo4j/testpassword
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+      - NEO4J_dbms_security_procedures_allowlist=apoc.*
+      - NEO4J_server_default__listen__address=0.0.0.0
+      - NEO4J_server_bolt_listen__address=0.0.0.0:7687
+      - NEO4J_server_http_listen__address=0.0.0.0:7474
     volumes:
-      - ./data/test_qdrant_data:/qdrant/storage
+      - ./data/test_neo4j_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:7474"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   mongo-test:
     image: mongo:8.0.14
@@ -373,8 +386,9 @@ services:
     environment:
       # Same environment as backend
       - MONGODB_URI=mongodb://mongo-test:27017/test_db
-      - QDRANT_BASE_URL=qdrant-test
-      - QDRANT_PORT=6333
+      - NEO4J_HOST=neo4j-test
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=testpassword
       - REDIS_URL=redis://redis-test:6379/0
       - DEBUG_DIR=/app/debug  # Fixed: match plugin database mount path
       # Test configuration file
@@ -415,8 +429,8 @@ services:
         condition: service_healthy
       redis-test:
         condition: service_started
-      qdrant-test:
-        condition: service_started
+      neo4j-test:
+        condition: service_healthy
     restart: unless-stopped
 
   # caddy:

@@ -108,7 +108,10 @@ async def handle_end_of_conversation(
     await redis_client.delete(open_job_key)
     logger.info(f"🧹 Cleaned up tracking key {open_job_key}")
 
-    # Delete the conversation:current signal so audio persistence knows conversation ended
+    # Delete the conversation:current signal so audio persistence knows conversation ended.
+    # May already be deleted by open_conversation_job for close_requested/timeout cases
+    # (early delete to stop audio persistence writing to the closed conversation).
+    # Redis DEL on a non-existent key is a no-op.
     current_conversation_key = f"conversation:current:{session_id}"
     await redis_client.delete(current_conversation_key)
     logger.info(f"🧹 Deleted conversation:current signal for session {session_id[:12]}")
@@ -1049,6 +1052,21 @@ async def open_conversation_job(
     )
 
     await _monitor_conversation_loop(state, aggregator, current_job, redis_client)
+
+    # When session stays active (timeout or close_requested), immediately clear
+    # conversation:current so audio persistence stops writing to this conversation.
+    # Without this, audio persistence keeps adding chunks during phases 4-7
+    # (potentially 30+ seconds), corrupting the closed conversation's data and
+    # delaying the start of the next speech detection cycle.
+    # For session finalization (disconnect), audio persistence exits on its own
+    # via the session status check, so this is not needed.
+    if state.timeout_triggered:
+        current_conversation_key = f"conversation:current:{session_id}"
+        await redis_client.delete(current_conversation_key)
+        logger.info(
+            f"🔄 Cleared conversation:current for {conversation_id[:12]} — "
+            f"audio persistence will flush buffer and wait for next conversation"
+        )
 
     logger.info(
         f"✅ Conversation {conversation_id} updates complete, checking for meaningful speech..."
