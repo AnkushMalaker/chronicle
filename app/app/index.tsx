@@ -3,6 +3,7 @@ import { Text, View, SafeAreaView, ScrollView, Platform, FlatList, ActivityIndic
 import { OmiConnection } from 'friend-lite-react-native';
 import { State as BluetoothState } from 'react-native-ble-plx';
 import { Link } from 'expo-router';
+import Constants from 'expo-constants';
 import { useTheme, ThemeColors } from '@/theme';
 
 // Hooks
@@ -196,7 +197,10 @@ export default function App() {
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={Platform.OS === 'ios' ? 100 : 0}>
         <ScrollView contentContainerStyle={s.content} keyboardShouldPersistTaps="handled">
           <View style={s.titleRow}>
-            <Text style={s.title}>Chronicle</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'baseline' }}>
+              <Text style={s.title}>Chronicle</Text>
+              <Text style={s.versionText}>v{Constants.expoConfig?.version ?? ''}</Text>
+            </View>
             <Link href="/diagnostics" asChild>
               <TouchableOpacity style={s.diagButton}>
                 <Text style={s.diagButtonText}>Logs</Text>
@@ -362,6 +366,11 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     fontSize: 24,
     fontWeight: 'bold',
     color: colors.text,
+  },
+  versionText: {
+    fontSize: 12,
+    color: colors.textTertiary,
+    marginLeft: 8,
   },
   diagButton: {
     paddingVertical: 6,
