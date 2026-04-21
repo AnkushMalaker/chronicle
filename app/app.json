@@ -53,10 +53,8 @@
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.RECORD_AUDIO",
         "android.permission.CAMERA"
-      ],
-      "usesCleartextTraffic": true
+      ]
     },
-    "newArchEnabled": true,
     "plugins": [
       [
         "@siteed/expo-audio-studio",
