@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useCallback, useRef, useState } from 'react';
+import { logInfo } from '@/utils/logger';
 
 export interface ConnectionEvent {
   id: string;
@@ -57,6 +58,14 @@ export const ConnectionLogProvider: React.FC<{ children: React.ReactNode }> = ({
 
     eventsRef.current = [event, ...eventsRef.current].slice(0, MAX_EVENTS);
     setEvents(eventsRef.current);
+
+    const extras = [
+      event.deviceName ? `device="${event.deviceName}"` : null,
+      event.deviceId ? `id=${event.deviceId}` : null,
+      event.rssi != null ? `rssi=${event.rssi}` : null,
+      details ? `details="${details}"` : null,
+    ].filter(Boolean).join(' ');
+    logInfo('ConnectionLog', `${type}${extras ? ' ' + extras : ''}`);
   }, []);
 
   const clearEvents = useCallback(() => {
