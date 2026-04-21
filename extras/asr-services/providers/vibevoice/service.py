@@ -46,8 +46,7 @@ class VibeVoiceService(BaseASRService):
     VibeVoice provides speech-to-text with built-in speaker diarization.
 
     Environment variables:
-        ASR_MODEL: Model identifier (default: microsoft/VibeVoice-ASR)
-        VIBEVOICE_LLM_MODEL: LLM backbone for processor (default: Qwen/Qwen2.5-7B)
+        ASR_MODEL: Model identifier (default: microsoft/VibeVoice-ASR-HF-HF)
         VIBEVOICE_ATTN_IMPL: Attention implementation (default: sdpa)
         DEVICE: Device to use (default: cuda)
         TORCH_DTYPE: Torch dtype (default: bfloat16)
@@ -79,6 +78,7 @@ class VibeVoiceService(BaseASRService):
         self,
         audio_file_path: str,
         context_info: Optional[str] = None,
+        prompt: Optional[str] = None,
     ) -> TranscriptionResult:
         """Transcribe audio file."""
         if self.transcriber is None:
@@ -108,7 +108,13 @@ class VibeVoiceService(BaseASRService):
             return False
         return self.transcriber.supports_batch_progress(audio_duration)
 
-    def transcribe_with_progress(self, audio_file_path: str, context_info=None):
+    def transcribe_with_progress(
+        self, audio_file_path: str, context_info=None, **kwargs
+    ):
+        if kwargs:
+            logger.warning(
+                f"transcribe_with_progress: ignoring unsupported kwargs: {list(kwargs.keys())}"
+            )
         """Yield progress counters then final result for long audio.
 
         Delegates to the transcriber's _transcribe_batched_with_progress() generator.
@@ -169,7 +175,7 @@ def _run_lora_training(
 
         # Construct dataclass arguments expected by train()
         model_args = lora_module.ModelArguments(
-            model_path=os.getenv("ASR_MODEL", "microsoft/VibeVoice-ASR"),
+            model_path=os.getenv("ASR_MODEL", "microsoft/VibeVoice-ASR-HF"),
         )
         data_args = lora_module.DataArguments(
             data_dir=data_dir,
@@ -358,7 +364,7 @@ def main():
         os.environ["ASR_MODEL"] = args.model
 
     # Get model ID
-    model_id = os.getenv("ASR_MODEL", "microsoft/VibeVoice-ASR")
+    model_id = os.getenv("ASR_MODEL", "microsoft/VibeVoice-ASR-HF")
 
     # Create service and app
     service = VibeVoiceService(model_id)

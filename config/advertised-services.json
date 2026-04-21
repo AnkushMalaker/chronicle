@@ -12,6 +12,6 @@
   {
     "name": "chronicle-asr",
     "port": 8767,
-    "label": "VibeVoice ASR"
+    "label": "Gemma 4 ASR"
   }
 ]

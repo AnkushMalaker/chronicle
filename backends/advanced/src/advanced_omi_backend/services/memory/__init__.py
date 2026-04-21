@@ -10,10 +10,10 @@ Architecture:
 - base.py: Abstract base classes and interfaces
 - config.py: Configuration management
 - service_factory.py: Provider selection and instantiation
-- providers/chronicle.py: Chronicle native provider (LLM + Neo4j hybrid search + vault)
+- providers/chronicle.py: Chronicle native provider (LLM + FalkorDB hybrid search + vault)
 - providers/openmemory_mcp.py: OpenMemory MCP provider
 - providers/llm_providers.py: LLM implementations (OpenAI, Ollama)
-- neo4j_utils.py: Utility functions for markdown parsing and hybrid scoring
+- graph_utils.py: Utility functions for markdown parsing and hybrid scoring
 - vault_manager.py: Conversation document vault (.md file I/O)
 """
 

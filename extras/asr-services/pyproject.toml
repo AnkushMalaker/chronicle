@@ -63,6 +63,8 @@ conflicts = [
     { group = "vibevoice" },
     { group = "qwen3-asr" },
     { group = "qwen3-asr-full" },
+    { group = "gemma4" },
+    { group = "parakeet" },
   ],
   [
     { extra = "cu121" },
@@ -129,17 +131,26 @@ nemo-rocm = [
 ]
 
 vibevoice = [
-    "transformers>=4.51.0,<5.0.0",
+    "transformers>=5.3.0,<6.0.0",
     "accelerate>=0.30.0",
-    "diffusers>=0.30.0",
+    "librosa>=0.10.0",
     "torch>=2.3",
     "torchaudio>=2.3",
-    "einops>=0.7.0",
-    "librosa>=0.10.0",
-    "bitsandbytes>=0.43.0",
+    "bitsandbytes>=0.46.1",
     "peft>=0.17.0",
     "omegaconf>=2.3.0",
     "wandb>=0.18.0",
+]
+
+gemma4 = [
+    "transformers>=5.5.0,<6.0.0",
+    "accelerate>=0.30.0",
+    "librosa>=0.10.0",
+    "torch>=2.3",
+    "torchaudio>=2.3",
+    "torchvision>=0.18",
+    "pillow>=10.0.0",
+    "soundfile>=0.12",
 ]
 
 qwen3-asr = [
@@ -180,4 +191,4 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["common", "providers", "providers.faster_whisper", "providers.transformers", "providers.nemo", "providers.vibevoice", "providers.qwen3_asr"]
+packages = ["common", "providers", "providers.faster_whisper", "providers.transformers", "providers.nemo", "providers.vibevoice", "providers.qwen3_asr", "providers.gemma4"]

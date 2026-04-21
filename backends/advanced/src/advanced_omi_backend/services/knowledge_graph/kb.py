@@ -4,7 +4,7 @@ Provides read/write access to a per-user markdown file that serves as
 the user's "basic memory" — always injected into LLM calls for chat
 and memory extraction to provide persistent user context.
 
-This module is intentionally free of Neo4j or any heavy dependencies.
+This module is intentionally free of FalkorDB or any heavy dependencies.
 It performs pure file I/O with an mtime-based cache to avoid redundant reads.
 """
 

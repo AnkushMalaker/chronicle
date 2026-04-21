@@ -7,6 +7,7 @@ This module manages Redis-based audio streaming sessions, including:
 - Session lifecycle tracking
 """
 
+import json
 import logging
 import time
 from typing import Dict, List, Literal, Optional
@@ -68,6 +69,11 @@ async def mark_session_complete(
         session_key,
         mapping=mapping,
     )
+
+    # Notify monitoring loop via pub/sub
+    signal = json.dumps({"type": "session_complete", "reason": reason})
+    await redis_client.publish(f"session:signal:{session_id}", signal)
+
     logger.info(
         f"✅ Session {session_id[:12]} marked finished: {reason} [TIME: {mark_time:.3f}]"
     )
@@ -100,6 +106,11 @@ async def request_conversation_close(
     if not await redis_client.exists(session_key):
         return False
     await redis_client.hset(session_key, "conversation_close_requested", reason)
+
+    # Notify monitoring loop via pub/sub
+    signal = json.dumps({"type": "close_requested", "reason": reason})
+    await redis_client.publish(f"session:signal:{session_id}", signal)
+
     logger.info(
         f"🔒 Conversation close requested for session {session_id[:12]}: {reason}"
     )

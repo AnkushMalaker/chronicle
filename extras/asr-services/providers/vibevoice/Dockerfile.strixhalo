@@ -33,7 +33,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --output-file /tmp/requirements.txt \
     && uv pip install --python /opt/venv/bin/python --no-managed-python --prerelease=if-necessary-or-explicit \
         --requirements /tmp/requirements.txt \
-    && uv pip install --python /opt/venv/bin/python --no-managed-python "einops>=0.7.0"
+    && true
 
 # Install ROCm flash-attention (AMD Triton path)
 ENV FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
@@ -50,10 +50,7 @@ RUN /opt/venv/bin/python -c "import torch; assert torch.version.hip is not None,
 COPY common/ ./common/
 COPY providers/vibevoice/ ./providers/vibevoice/
 
-# Pre-clone VibeVoice repository for faster startup
 ENV HF_HOME="/models"
-RUN mkdir -p /models \
-    && git clone --depth 1 https://github.com/microsoft/VibeVoice.git /models/vibevoice
 
 ARG VIBE_UID=10002
 ARG VIBE_GID=10002
@@ -66,8 +63,7 @@ RUN groupadd --system --gid ${VIBE_GID} vibeuser \
 
 # Default environment variables
 ENV PATH="/opt/venv/bin:${PATH}"
-ENV ASR_MODEL="microsoft/VibeVoice-ASR"
-ENV VIBEVOICE_LLM_MODEL="Qwen/Qwen2.5-7B"
+ENV ASR_MODEL="microsoft/VibeVoice-ASR-HF"
 ENV VIBEVOICE_ATTN_IMPL="sdpa"
 ENV DEVICE="cuda"
 ENV TORCH_DTYPE="bfloat16"

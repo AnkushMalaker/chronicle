@@ -1,4 +1,4 @@
-"""Utility functions for Neo4j-based conversation memory.
+"""Utility functions for FalkorDB-based conversation memory.
 
 Pure functions for parsing conversation documents (markdown), computing
 hybrid search scores, and related helpers. No I/O or external dependencies

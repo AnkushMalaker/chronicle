@@ -1,4 +1,4 @@
-import { Mic, Square, Loader2 } from 'lucide-react'
+import { Mic, Square, Loader2, Monitor } from 'lucide-react'
 import { RecordingContextType } from '../../contexts/RecordingContext'
 
 interface SimplifiedControlsProps {
@@ -9,6 +9,7 @@ const getStepText = (step: string): string => {
   switch (step) {
     case 'idle': return 'Ready to Record'
     case 'mic': return 'Getting Microphone Access...'
+    case 'display-audio': return 'Requesting Tab Audio Access...'
     case 'websocket': return 'Connecting to Server...'
     case 'audio-start': return 'Initializing Audio Session...'
     case 'streaming': return 'Starting Audio Stream...'
@@ -19,7 +20,7 @@ const getStepText = (step: string): string => {
 }
 
 const isProcessing = (step: string): boolean => {
-  return ['mic', 'websocket', 'audio-start', 'streaming', 'stopping'].includes(step)
+  return ['mic', 'display-audio', 'websocket', 'audio-start', 'streaming', 'stopping'].includes(step)
 }
 
 export default function SimplifiedControls({ recording }: SimplifiedControlsProps) {
@@ -63,6 +64,8 @@ export default function SimplifiedControls({ recording }: SimplifiedControlsProp
                 <Square className="h-10 w-10 fill-current" />
               ) : processing ? (
                 <Loader2 className="h-10 w-10 animate-spin" />
+              ) : recording.audioSource === 'tab' ? (
+                <Monitor className="h-10 w-10" />
               ) : (
                 <Mic className="h-10 w-10" />
               )}

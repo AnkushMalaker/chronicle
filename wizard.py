@@ -39,6 +39,7 @@ def get_existing_stt_provider(config_yml: dict):
         "stt-qwen3-asr": "qwen3-asr",
         "stt-smallest": "smallest",
         "stt-smallest-stream": "smallest",
+        "stt-gemma4": "gemma4",
     }
     return mapping.get(stt)
 
@@ -219,7 +220,7 @@ def select_services(
 
     # Services that will be auto-added based on provider choices
     auto_added = set()
-    if transcription_provider in ("parakeet", "vibevoice", "qwen3-asr"):
+    if transcription_provider in ("parakeet", "vibevoice", "qwen3-asr", "gemma4"):
         auto_added.add("asr-services")
     if llm_provider == "llamacpp":
         auto_added.add("llm-services")
@@ -236,6 +237,7 @@ def select_services(
                     "vibevoice": "VibeVoice",
                     "parakeet": "Parakeet",
                     "qwen3-asr": "Qwen3-ASR",
+                    "gemma4": "Gemma 4",
                 }.get(transcription_provider, transcription_provider)
             console.print(
                 f"  ✅ {service_config['description']} ({label}) [dim](auto-selected)[/dim]"
@@ -315,7 +317,6 @@ def run_service_setup(
     https_enabled=False,
     server_ip=None,
     obsidian_enabled=False,
-    neo4j_password=None,
     hf_token=None,
     transcription_provider="deepgram",
     admin_email=None,
@@ -350,10 +351,6 @@ def run_service_setup(
         # Add HTTPS configuration
         if https_enabled and server_ip:
             cmd.extend(["--enable-https", "--server-ip", server_ip])
-
-        # Always pass Neo4j password (neo4j is a required service)
-        if neo4j_password:
-            cmd.extend(["--neo4j-password", neo4j_password])
 
         # Always pass obsidian choice to avoid double-ask
         if obsidian_enabled:
@@ -432,12 +429,14 @@ def run_service_setup(
                     "vibevoice": "vibevoice-strixhalo",
                     "parakeet": "nemo-strixhalo",
                     "qwen3-asr": "qwen3-asr",
+                    "gemma4": "gemma4",
                 }
             else:
                 wizard_to_asr_provider = {
                     "vibevoice": "vibevoice",
                     "parakeet": "nemo",
                     "qwen3-asr": "qwen3-asr",
+                    "gemma4": "gemma4",
                 }
             asr_provider = wizard_to_asr_provider.get(transcription_provider)
             if asr_provider:
@@ -817,6 +816,9 @@ def setup_hf_token_if_needed(selected_services):
 # Providers that support real-time streaming
 STREAMING_CAPABLE = {"deepgram", "smallest", "qwen3-asr"}
 
+# STT providers that can also serve as LLM (unified multimodal models)
+UNIFIED_CAPABLE_STT = {"gemma4"}
+
 
 def select_transcription_provider(config_yml: dict = None):
     """Ask user which transcription provider they want (batch/primary)."""
@@ -829,7 +831,8 @@ def select_transcription_provider(config_yml: dict = None):
         "vibevoice": "3",
         "qwen3-asr": "4",
         "smallest": "5",
-        "none": "6",
+        "gemma4": "6",
+        "none": "7",
     }
     choice_to_provider = {v: k for k, v in provider_to_choice.items()}
     default_choice = provider_to_choice.get(existing_provider, "1")
@@ -848,6 +851,7 @@ def select_transcription_provider(config_yml: dict = None):
             "vibevoice": "VibeVoice ASR",
             "qwen3-asr": "Qwen3-ASR",
             "smallest": "Smallest.ai Pulse",
+            "gemma4": "Gemma 4",
         }
         console.print(
             f"[blue][INFO][/blue] Current: {provider_labels.get(existing_provider, existing_provider)}"
@@ -860,7 +864,8 @@ def select_transcription_provider(config_yml: dict = None):
         "3": "VibeVoice ASR (offline, batch only, built-in diarization, GPU)",
         "4": "Qwen3-ASR (offline, streaming + batch, 52 languages, GPU)",
         "5": "Smallest.ai Pulse (cloud, streaming + batch)",
-        "6": "None (skip transcription setup)",
+        "6": "Gemma 4 (offline, batch only, prompt-based diarization, GPU)",
+        "7": "None (skip transcription setup)",
     }
 
     for key, desc in choices.items():
@@ -1104,23 +1109,55 @@ def select_hardware_profile(
             return None
 
 
-def select_llm_provider(config_yml: dict = None) -> str:
+def select_llm_provider(
+    config_yml: dict = None, transcription_provider: str = None
+) -> str:
     """Ask user which LLM provider to use for memory extraction.
 
     Uses Langfuse-style flow: "Do you have your own LLM?" → Yes: custom URL → No: pick managed option.
+    When transcription_provider is a unified-capable model (e.g. Gemma 4), offers to reuse
+    it for LLM tasks too.
 
     Returns:
-        "openai", "ollama", "llamacpp", or "none"
+        "openai", "ollama", "llamacpp", "gemma4-unified", or "none"
     """
     config_yml = config_yml or {}
     existing_llm = config_yml.get("defaults", {}).get("llm", "")
     existing_is_custom = existing_llm in ("custom-llm",)
+    existing_is_unified = existing_llm == "gemma4-llm"
 
     console.print("\n🤖 [bold cyan]LLM Provider[/bold cyan]")
     console.print(
         "Choose your language model provider for memory extraction and analysis:"
     )
     console.print()
+
+    # If the STT provider is a unified-capable model, offer to reuse it for LLM
+    if transcription_provider in UNIFIED_CAPABLE_STT:
+        provider_labels = {"gemma4": "Gemma 4"}
+        label = provider_labels.get(transcription_provider, transcription_provider)
+        console.print(
+            f"[green]💡[/green] {label} is a multimodal model that can also handle LLM tasks "
+            "(memory extraction, chat, summaries)."
+        )
+        console.print(
+            f"[dim]This reuses the same model already loaded for STT — no extra GPU memory needed.[/dim]"
+        )
+        default_unified = existing_is_unified or True
+        try:
+            use_unified = Confirm.ask(
+                f"Use {label} for both STT and LLM?",
+                default=default_unified,
+            )
+        except EOFError:
+            use_unified = default_unified
+        if use_unified:
+            console.print(
+                f"[green]✅[/green] {label} will handle both STT and LLM (unified mode)"
+            )
+            return "gemma4-unified"
+        console.print(f"[dim]OK, choosing a separate LLM provider instead.[/dim]")
+        console.print()
 
     # Step 1: Do you have your own LLM endpoint?
     try:
@@ -1247,7 +1284,7 @@ def main():
     streaming_provider = select_streaming_provider(transcription_provider, config_yml)
 
     # LLM Provider selection (asked once here, passed to init.py — avoids double-ask)
-    llm_provider = select_llm_provider(config_yml)
+    llm_provider = select_llm_provider(config_yml, transcription_provider)
 
     # Memory Provider selection (asked once here, passed to init.py — avoids double-ask)
     memory_provider = select_memory_provider(config_yml)
@@ -1258,7 +1295,7 @@ def main():
     )
 
     # Auto-add asr-services if any local ASR was chosen (batch or streaming)
-    local_asr_providers = ("parakeet", "vibevoice", "qwen3-asr")
+    local_asr_providers = ("parakeet", "vibevoice", "qwen3-asr", "gemma4")
     needs_asr = transcription_provider in local_asr_providers or (
         streaming_provider and streaming_provider in local_asr_providers
     )
@@ -1410,35 +1447,9 @@ def main():
                     "Generate manually: cd certs && ./generate-ssl.sh <address>[/yellow]"
                 )
 
-    # Neo4j Configuration (always required - used by Knowledge Graph)
-    neo4j_password = None
     obsidian_enabled = False
 
     if "advanced" in selected_services:
-        console.print("\n🗄️ [bold cyan]Neo4j Configuration[/bold cyan]")
-        console.print(
-            "Neo4j is used for Knowledge Graph (entity/relationship extraction from conversations)"
-        )
-        console.print()
-
-        # Read existing Neo4j password and use as default (masked prompt)
-        existing_neo4j_pw = read_env_value("backends/advanced/.env", "NEO4J_PASSWORD")
-        neo4j_password = prompt_with_existing_masked(
-            prompt_text="Neo4j password (min 8 chars)",
-            existing_value=existing_neo4j_pw,
-            placeholders=[
-                "neo4jpassword",
-                "your_neo4j_password",
-                "your-neo4j-password",
-            ],
-            is_password=True,
-            default="neo4jpassword",
-        )
-        if not neo4j_password:
-            neo4j_password = "neo4jpassword"
-
-        console.print("[green]✅[/green] Neo4j configured")
-
         # Obsidian is optional (graph-based knowledge management for vault notes)
         console.print("\n🗂️ [bold cyan]Obsidian Integration (Optional)[/bold cyan]")
         console.print(
@@ -1499,7 +1510,6 @@ def main():
             https_enabled,
             server_ip,
             obsidian_enabled,
-            neo4j_password,
             hf_token,
             transcription_provider,
             admin_email=wizard_admin_email,

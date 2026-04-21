@@ -47,7 +47,7 @@ if REGISTRY:
 else:
     _llm_def = _embed_def = None
 
-NEO4J_HOST = os.getenv("NEO4J_HOST", "neo4j")
+FALKORDB_HOST = os.getenv("FALKORDB_HOST", "falkordb")
 
 
 @router.get("/auth/health")
@@ -115,7 +115,7 @@ async def health_check():
         "services": {},
         "config": {
             "mongodb_uri": MONGODB_URI,
-            "neo4j_host": NEO4J_HOST,
+            "falkordb_host": FALKORDB_HOST,
             "transcription_service": (
                 f"Speech to Text ({transcription_provider.name})"
                 if transcription_provider
@@ -290,7 +290,7 @@ async def health_check():
                 overall_healthy = False
         except asyncio.TimeoutError:
             health_status["services"]["memory_service"] = {
-                "status": "⚠️ Chronicle Memory Timeout (8s) - Check Neo4j",
+                "status": "⚠️ Chronicle Memory Timeout (8s) - Check FalkorDB",
                 "healthy": False,
                 "provider": "chronicle",
                 "critical": False,

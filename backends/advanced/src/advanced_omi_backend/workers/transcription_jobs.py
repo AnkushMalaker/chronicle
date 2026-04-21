@@ -1049,7 +1049,7 @@ async def transcription_fallback_check_job(
 
     processing_time = time.time() - start_time_wall
 
-    await process_transcription_result(
+    processing_result = await process_transcription_result(
         conversation_id=conv_id,
         version_id=version_id,
         trigger="batch_fallback",
@@ -1064,6 +1064,19 @@ async def transcription_fallback_check_job(
         client_id=client_id,
     )
 
+    # If no meaningful speech, conversation was marked deleted — skip post-processing
+    if processing_result.get("deleted"):
+        logger.info(
+            f"🗑️ Batch fallback found no meaningful speech for {conv_id[:12]}, "
+            f"skipping post-conversation jobs"
+        )
+        return {
+            "status": "batch_fallback_no_speech",
+            "transcript_source": "batch",
+            "conversation_id": conv_id,
+            "reason": processing_result.get("reason"),
+        }
+
     # Enqueue post-conversation jobs
     post_jobs = start_post_conversation_jobs(
         conversation_id=conv_id,
@@ -1071,7 +1084,7 @@ async def transcription_fallback_check_job(
         transcript_version_id=version_id,
         depends_on_job=None,
         client_id=client_id,
-        end_reason="batch_fallback",
+        end_reason="websocket_disconnect",
     )
 
     logger.info(

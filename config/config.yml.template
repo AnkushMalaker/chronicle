@@ -271,7 +271,7 @@ models:
   model_type: stt
   model_provider: smallest
   api_family: http
-  model_url: https://waves-api.smallest.ai/api/v1/pulse
+  model_url: https://api.smallest.ai/waves/v1/pulse
   api_key: ${oc.env:SMALLEST_API_KEY,''}
   capabilities:
     - word_timestamps
@@ -357,7 +357,7 @@ models:
   model_type: stt_stream
   model_provider: smallest
   api_family: websocket
-  model_url: wss://waves-api.smallest.ai/api/v1/pulse/get_text
+  model_url: wss://api.smallest.ai/waves/v1/pulse/get_text
   api_key: ${oc.env:SMALLEST_API_KEY,''}
   capabilities:
     - word_timestamps
@@ -397,11 +397,13 @@ memory:
     timeout: 30
   obsidian:
     enabled: false
-    neo4j_host: neo4j
+    falkordb_host: falkordb
+    falkordb_port: 6379
     timeout: 30
   knowledge_graph:
     enabled: false
-    neo4j_host: neo4j
+    falkordb_host: falkordb
+    falkordb_port: 6379
     timeout: 30
 
 speaker_recognition:

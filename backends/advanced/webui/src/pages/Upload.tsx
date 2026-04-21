@@ -479,7 +479,7 @@ export default function Upload() {
           </div>
 
           <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-            Upload a .zip of your Obsidian vault, then click Start to ingest notes into Neo4j. Progress will be shown below.
+            Upload a .zip of your Obsidian vault, then click Start to ingest notes into FalkorDB. Progress will be shown below.
           </p>
 
           {/* Zip selector */}

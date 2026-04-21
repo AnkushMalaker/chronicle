@@ -65,6 +65,19 @@ models:
       max_tokens: 2000
     model_output: json
 
+  - name: gemma4-llm
+    description: Gemma 4 E4B-it (unified model, reuses ASR service)
+    model_type: llm
+    model_provider: gemma4
+    api_family: openai
+    model_name: gemma-4-E4B-it
+    model_url: http://${oc.env:GEMMA4_ASR_URL,host.docker.internal:8767}/v1
+    api_key: no-key
+    model_params:
+      temperature: 0.2
+      max_tokens: 2000
+    model_output: json
+
   # ===========================
   # Embedding Models
   # ===========================
@@ -153,6 +166,28 @@ models:
             words: words
             segments: segments
 
+  - name: stt-gemma4
+    description: Google Gemma 4 E4B-it (batch, prompt-based diarization)
+    model_type: stt
+    model_provider: gemma4
+    api_family: http
+    model_url: http://${oc.env:GEMMA4_ASR_URL,host.docker.internal:8767}
+    api_key: ''
+    capabilities:
+      - diarization
+    operations:
+      stt_transcribe:
+        method: POST
+        path: /transcribe
+        content_type: multipart/form-data
+        use_provider_segments: true
+        response:
+          type: json
+          extract:
+            text: text
+            words: words
+            segments: segments
+
   - name: stt-qwen3-asr
     description: Qwen3-ASR via vLLM (batch, 52 languages)
     model_type: stt
@@ -198,7 +233,7 @@ models:
     model_type: stt
     model_provider: smallest
     api_family: http
-    model_url: https://waves-api.smallest.ai/api/v1/pulse
+    model_url: https://api.smallest.ai/waves/v1/pulse
     api_key: ${oc.env:SMALLEST_API_KEY,''}
     capabilities:
       - word_timestamps
@@ -311,7 +346,7 @@ models:
     model_type: stt_stream
     model_provider: smallest
     api_family: websocket
-    model_url: wss://waves-api.smallest.ai/api/v1/pulse/get_text
+    model_url: wss://api.smallest.ai/waves/v1/pulse/get_text
     api_key: ${oc.env:SMALLEST_API_KEY,''}
     capabilities:
       - word_timestamps
@@ -356,10 +391,11 @@ memory:
     user_id: default
     timeout: 30
 
-  # Obsidian Neo4j provider settings (legacy)
+  # Obsidian FalkorDB provider settings (legacy)
   obsidian:
     enabled: false
-    neo4j_host: neo4j-mem0
+    falkordb_host: falkordb
+    falkordb_port: 6379
     timeout: 30
 
 # ===========================

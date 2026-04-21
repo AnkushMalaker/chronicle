@@ -110,9 +110,8 @@ services:
               capabilities: [gpu]
     environment:
       - HF_HOME=/models
-      - ASR_MODEL=${ASR_MODEL:-microsoft/VibeVoice-ASR}
-      - VIBEVOICE_LLM_MODEL=${VIBEVOICE_LLM_MODEL:-Qwen/Qwen2.5-7B}
-      - VIBEVOICE_ATTN_IMPL=${VIBEVOICE_ATTN_IMPL:-sdpa}
+      - ASR_MODEL=${ASR_MODEL:-microsoft/VibeVoice-ASR-HF}
+      - VIBEVOICE_ATTN_IMPL=${VIBEVOICE_ATTN_IMPL:-flash_attention_2}
       - DEVICE=${DEVICE:-cuda}
       - TORCH_DTYPE=${TORCH_DTYPE:-bfloat16}
       - MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-8192}
@@ -126,7 +125,48 @@ services:
       - WANDB_ENABLED=${WANDB_ENABLED:-false}
       - WANDB_API_KEY=${WANDB_API_KEY:-}
       - WANDB_PROJECT=${WANDB_PROJECT:-chronicle-asr-finetuning}
-      # Batching config: managed via config/defaults.yml (asr_services.vibevoice)
+      # Batching config: defaults come from config/defaults.yml (asr_services.vibevoice).
+      # Override here to force smaller batches for testing stitching on short audio.
+      - BATCH_THRESHOLD_SECONDS=${BATCH_THRESHOLD_SECONDS:-}
+      - BATCH_DURATION_SECONDS=${BATCH_DURATION_SECONDS:-}
+      - BATCH_OVERLAP_SECONDS=${BATCH_OVERLAP_SECONDS:-}
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    restart: unless-stopped
+
+  # ============================================================================
+  # Gemma 4 Provider (Google Gemma 4 E4B-it with prompt-based diarization)
+  # ============================================================================
+  gemma4-asr:
+    build:
+      context: .
+      dockerfile: providers/gemma4/Dockerfile
+      args:
+        PYTORCH_CUDA_VERSION: ${PYTORCH_CUDA_VERSION:-cu126}
+    image: ${CHRONICLE_REGISTRY:-}chronicle-asr-gemma4:${CHRONICLE_TAG:-latest}
+    ports:
+      - "${ASR_PORT:-8767}:8765"
+    volumes:
+      - ./model_cache:/models
+      - ./debug:/app/debug
+      - ./results:/app/results
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - HF_HOME=/models
+      - ASR_MODEL=${GEMMA4_MODEL:-google/gemma-4-E4B-it}
+      - DEVICE=${DEVICE:-cuda}
+      - TORCH_DTYPE=${TORCH_DTYPE:-bfloat16}
+      - MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-512}
+      - BATCH_THRESHOLD_SECONDS=${BATCH_THRESHOLD_SECONDS:-30}
+      - BATCH_DURATION_SECONDS=${BATCH_DURATION_SECONDS:-30}
+      - BATCH_OVERLAP_SECONDS=${BATCH_OVERLAP_SECONDS:-5}
     dns:
       - 8.8.8.8
       - 8.8.4.4
@@ -265,8 +305,7 @@ services:
       - "${RENDER_GID:-989}"  # render group (Arch default; Ubuntu typically 107)
     environment:
       - HF_HOME=/models
-      - ASR_MODEL=${ASR_MODEL:-microsoft/VibeVoice-ASR}
-      - VIBEVOICE_LLM_MODEL=${VIBEVOICE_LLM_MODEL:-Qwen/Qwen2.5-7B}
+      - ASR_MODEL=${ASR_MODEL:-microsoft/VibeVoice-ASR-HF}
       # sdpa is supported on ROCm; flash_attention_2 requires CUDA
       - VIBEVOICE_ATTN_IMPL=sdpa
       - DEVICE=${VIBEVOICE_DEVICE:-cuda}

@@ -300,69 +300,51 @@ Redis Connection Resilience Test
     Log To Console    \n✅ Redis health check working correctly
 
 WebSocket Disconnect Conversation End Reason Test
-    [Documentation]    Test that WebSocket disconnects are tracked with proper end_reason
+    [Documentation]    Test that abrupt WebSocket disconnects produce end_reason='websocket_disconnect'.
     ...
-    ...                This test simulates a Bluetooth/network dropout scenario:
-    ...                1. Start streaming audio and create conversation
-    ...                2. Keep sending audio to prevent inactivity timeout
-    ...                3. Abruptly close WebSocket (simulating disconnect)
-    ...                4. Verify job exits gracefully (no 3600s timeout)
-    ...                5. Verify conversation has end_reason='websocket_disconnect'
+    ...                Simulates a Bluetooth/network dropout:
+    ...                1. Stream audio in small bursts while waiting for conversation
+    ...                2. Once conversation is created, abruptly close WebSocket
+    ...                3. Verify conversation closes with end_reason=websocket_disconnect
     [Tags]    infra	audio-streaming
+    [Timeout]    180s
 
-    # Start audio stream and send chunks to trigger conversation
+    # Arrange
     ${device_name}=    Set Variable    disconnect
     ${client_id}=    Get Client ID From Device Name    ${device_name}
     ${stream_id}=    Open Audio Stream    device_name=${device_name}
 
-    # Send audio fast (no realtime pacing) to trigger conversation creation
-    Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=200
+    # Baseline: track existing jobs so we only look at the NEW one
+    ${baseline_jobs}=    Get Jobs By Type And Client    open_conversation    ${client_id}
+    ${baseline_count}=    Get Length    ${baseline_jobs}
 
-    # Initialize conversation_id to None (will be set when found)
-    ${conversation_id}=    Set Variable    ${None}
+    # Send audio in small bursts interleaved with job checks.
+    # realtime_pacing + small batches lets Deepgram produce streaming results
+    # while we poll for the conversation job between bursts.
+    ${conversation_id}=    Set Variable    ${EMPTY}
+    FOR    ${i}    IN RANGE    30
+        Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}
+        ...    num_chunks=50    realtime_pacing=True
 
-    # Keep sending audio in a loop to prevent inactivity timeout while waiting for conversation
-    # We need to continuously send audio because SPEECH_INACTIVITY_THRESHOLD_SECONDS=2
-    FOR    ${i}    IN RANGE    20    # Send 20 batches while waiting
-        # Try to get conversation job
-        ${conv_jobs}=    Get Jobs By Type And Client    open_conversation    ${client_id}
-        ${has_job}=    Evaluate    len($conv_jobs) > 0
-
-        IF    ${has_job}
-            # Conversation job exists, try to get conversation_id
-            TRY
-                ${conversation_id}=    Get Conversation ID From Job Meta    open_conversation    ${client_id}
-                # Got conversation_id! Close websocket immediately to trigger disconnect
-                Log To Console    Conversation created (${conversation_id}), closing websocket NOW
-                Close Audio Stream    ${stream_id}
+        ${status}=    Run Keyword And Return Status
+        ...    Wait For New Job To Appear    open_conversation    ${client_id}    ${baseline_count}
+        IF    ${status}
+            ${jobs}=    Get Jobs By Type And Client    open_conversation    ${client_id}
+            ${current_count}=    Get Length    ${jobs}
+            IF    ${current_count} > ${baseline_count}
+                ${conversation_id}=    Evaluate    $jobs[0]['meta'].get('conversation_id', '')
                 BREAK
-            EXCEPT
-                # conversation_id not set yet, keep sending audio
-                Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=50
-                Sleep    1s
             END
-        ELSE
-            # No conversation job yet, keep sending audio
-            Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=50
-            Sleep    1s
         END
     END
+    Should Not Be Empty    ${conversation_id}    msg=Conversation never created within timeout
 
-    # Verify we got the conversation_id before loop ended
-    Should Not Be Equal    ${conversation_id}    ${None}    Failed to get conversation_id within timeout
+    # Act: abrupt disconnect (no audio-stop event → triggers websocket_disconnect)
+    Log To Console    Conversation ${conversation_id} active, disconnecting NOW
+    Close Audio Stream Without Stop Event    ${stream_id}
 
-    # Wait for job to complete (should be fast, not 3600s timeout)
-    ${conv_jobs}=    Get Jobs By Type And Client    open_conversation    ${device_name}
-    ${conv_job}=    Get Most Recent Job    ${conv_jobs}
-    Wait For Job Status    ${conv_job}[job_id]    finished    timeout=60s    interval=2s
-
-    # Wait for end_reason to be saved to database (retry with timeout)
-    ${conversation}=    Wait Until Keyword Succeeds    10s    0.5s
-    ...    Check Conversation Has End Reason    ${conversation_id}
-
-    # Verify conversation was saved with correct end_reason
-    ${end_reason}=    Set Variable    ${conversation}[end_reason]
-    Should Be Equal As Strings    ${end_reason}    websocket_disconnect
-    Should Not Be Equal    ${conversation}[completed_at]    ${None}
+    # Assert: conversation closes with correct end_reason
+    Wait Until Keyword Succeeds    30s    2s
+    ...    Conversation Should Have End Reason    ${conversation_id}    websocket_disconnect
 
     [Teardown]    Run Keyword And Ignore Error    Close Audio Stream    ${stream_id}

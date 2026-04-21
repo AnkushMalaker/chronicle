@@ -32,9 +32,9 @@ PROVIDERS = {
         "name": "VibeVoice",
         "description": "Microsoft VibeVoice-ASR with built-in speaker diarization",
         "models": {
-            "microsoft/VibeVoice-ASR": "VibeVoice-ASR (7B, speaker diarization, 60-min audio)",
+            "microsoft/VibeVoice-ASR-HF": "VibeVoice-ASR (7B, speaker diarization, 60-min audio)",
         },
-        "default_model": "microsoft/VibeVoice-ASR",
+        "default_model": "microsoft/VibeVoice-ASR-HF",
         "service": "vibevoice-asr",
         # Note: VibeVoice provides diarization but NOT word_timestamps
         "capabilities": [
@@ -48,9 +48,9 @@ PROVIDERS = {
         "name": "VibeVoice (Strix Halo)",
         "description": "Microsoft VibeVoice-ASR for AMD Strix Halo (gfx1151 / Ryzen AI Max) with ROCm",
         "models": {
-            "microsoft/VibeVoice-ASR": "VibeVoice-ASR (7B, speaker diarization, 60-min audio)",
+            "microsoft/VibeVoice-ASR-HF": "VibeVoice-ASR (7B, speaker diarization, 60-min audio)",
         },
-        "default_model": "microsoft/VibeVoice-ASR",
+        "default_model": "microsoft/VibeVoice-ASR-HF",
         "service": "vibevoice-asr-strixhalo",
         "capabilities": [
             "timestamps",
@@ -81,6 +81,7 @@ PROVIDERS = {
         "name": "Transformers",
         "description": "HuggingFace models (Hindi Whisper, custom models)",
         "models": {
+            "shunyalabs/zero-stt-hinglish": "Zero STT Hinglish (Whisper Medium, Hindi-English code-switching)",
             "Oriserve/Whisper-Hindi2Hinglish-Prime": "Hindi/Hinglish Whisper (Fine-tuned Large V3)",
             "openai/whisper-large-v3": "OpenAI Whisper Large V3",
         },
@@ -109,6 +110,16 @@ PROVIDERS = {
         "default_model": "nvidia/parakeet-tdt-0.6b-v3",
         "service": "nemo-asr-strixhalo",
         "capabilities": ["timestamps", "word_timestamps", "chunked_processing"],
+    },
+    "gemma4": {
+        "name": "Gemma 4",
+        "description": "Google Gemma 4 E4B-it multimodal (prompt-based diarization, 30s chunks)",
+        "models": {
+            "google/gemma-4-E4B-it": "Gemma 4 E4B-it (8B, ~17GB VRAM at BF16)",
+        },
+        "default_model": "google/gemma-4-E4B-it",
+        "service": "gemma4-asr",
+        "capabilities": ["timestamps", "diarization"],
     },
     "qwen3-asr": {
         "name": "Qwen3-ASR",
@@ -519,6 +530,7 @@ class ASRServicesSetup:
             "nemo": "stt-nemo",
             "nemo-strixhalo": "stt-nemo",
             "qwen3-asr": "stt-qwen3-asr",
+            "gemma4": "stt-gemma4",
         }
 
         # Providers that also have a streaming model
@@ -724,6 +736,7 @@ def main():
             "nemo",
             "nemo-strixhalo",
             "qwen3-asr",
+            "gemma4",
         ],
         help="ASR provider to use",
     )

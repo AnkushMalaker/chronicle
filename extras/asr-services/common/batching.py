@@ -154,12 +154,17 @@ def stitch_transcription_results(
                 cutoff = next_start + overlap_seconds / 2
                 offset_segs = [s for s in offset_segs if _seg_midpoint(s) < cutoff]
                 offset_words = [w for w in offset_words if _word_midpoint(w) < cutoff]
+                # Clip to batch territory so segments don't bleed past cutoff
+                offset_segs = _clip_segments(offset_segs, None, cutoff)
+                offset_words = _clip_words(offset_words, None, cutoff)
         elif i == len(batch_results) - 1:
             # Last batch: keep segments after the overlap midpoint with previous batch
             _, prev_start, prev_end = batch_results[i - 1]
             cutoff = batch_start + overlap_seconds / 2
             offset_segs = [s for s in offset_segs if _seg_midpoint(s) >= cutoff]
             offset_words = [w for w in offset_words if _word_midpoint(w) >= cutoff]
+            offset_segs = _clip_segments(offset_segs, cutoff, None)
+            offset_words = _clip_words(offset_words, cutoff, None)
         else:
             # Middle batch: trim both sides
             _, prev_start, prev_end = batch_results[i - 1]
@@ -176,6 +181,8 @@ def stitch_transcription_results(
                 for w in offset_words
                 if _word_midpoint(w) >= left_cutoff and _word_midpoint(w) < right_cutoff
             ]
+            offset_segs = _clip_segments(offset_segs, left_cutoff, right_cutoff)
+            offset_words = _clip_words(offset_words, left_cutoff, right_cutoff)
 
         all_segments.extend(offset_segs)
         all_words.extend(offset_words)
@@ -284,3 +291,48 @@ def _seg_midpoint(seg: Segment) -> float:
 def _word_midpoint(word: Word) -> float:
     """Get the temporal midpoint of a word."""
     return (word.start + word.end) / 2
+
+
+def _clip_segments(
+    segments: List[Segment],
+    left_bound: Optional[float],
+    right_bound: Optional[float],
+) -> List[Segment]:
+    """Clip segment timestamps to batch territory boundaries.
+
+    Segments that bleed past the cutoff into the adjacent batch's territory
+    get their start/end trimmed.  Segments that become degenerate
+    (start >= end) after clipping are dropped.
+
+    Within-batch overlaps are NOT affected — this only clips against the
+    batch boundary, not against sibling segments.
+    """
+    clipped = []
+    for s in segments:
+        start = s.start if left_bound is None else max(s.start, left_bound)
+        end = s.end if right_bound is None else min(s.end, right_bound)
+        if start < end:
+            clipped.append(
+                Segment(text=s.text, start=start, end=end, speaker=s.speaker)
+            )
+    return clipped
+
+
+def _clip_words(
+    words: List[Word],
+    left_bound: Optional[float],
+    right_bound: Optional[float],
+) -> List[Word]:
+    """Clip word timestamps to batch territory boundaries.
+
+    Same logic as _clip_segments but for Word objects.
+    """
+    clipped = []
+    for w in words:
+        start = w.start if left_bound is None else max(w.start, left_bound)
+        end = w.end if right_bound is None else min(w.end, right_bound)
+        if start < end:
+            clipped.append(
+                Word(word=w.word, start=start, end=end, confidence=w.confidence)
+            )
+    return clipped

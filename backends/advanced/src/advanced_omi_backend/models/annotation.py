@@ -80,7 +80,7 @@ class Annotation(Document):
     # For ENTITY annotations:
     # Dual purpose: feeds both the jargon pipeline (entity name corrections = domain vocabulary
     # the ASR should know) and the entity extraction pipeline (corrections improve future accuracy).
-    entity_id: Optional[str] = None  # Neo4j entity ID
+    entity_id: Optional[str] = None  # FalkorDB entity ID
     entity_field: Optional[str] = None  # Which field was changed ("name" or "details")
 
     # For SPEECH_SUGGESTION_CORRECTION annotations:

@@ -1,0 +1,36 @@
+FROM vllm/vllm-openai:v0.14.1
+
+# System dependencies
+RUN apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends ffmpeg libsndfile1 git && \
+    rm -rf /var/lib/apt/lists/*
+
+# Model weights (~14 GB, cached as a Docker layer)
+RUN python3 -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('microsoft/VibeVoice-ASR', local_dir='/models/VibeVoice-ASR')"
+
+# VibeVoice package + tokenizer files
+RUN git clone --depth 1 https://github.com/microsoft/VibeVoice.git /build/VibeVoice && \
+    pip install --no-cache-dir /build/VibeVoice && \
+    python3 /build/VibeVoice/vllm_plugin/tools/generate_tokenizer_files.py \
+        --output /models/VibeVoice-ASR && \
+    rm -rf /build
+
+ENV VIBEVOICE_FFMPEG_MAX_CONCURRENCY=64
+ENV PYTORCH_ALLOC_CONF=expandable_segments:True
+
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server", \
+            "--model", "/models/VibeVoice-ASR"]
+
+CMD ["--served-model-name", "vibevoice", \
+     "--trust-remote-code", \
+     "--dtype", "bfloat16", \
+     "--max-num-seqs", "2", \
+     "--max-model-len", "4096", \
+     "--gpu-memory-utilization", "0.90", \
+     "--no-enable-prefix-caching", \
+     "--enable-chunked-prefill", \
+     "--chat-template-content-format", "openai", \
+     "--allowed-local-media-path", "/tmp", \
+     "--port", "8000"]
