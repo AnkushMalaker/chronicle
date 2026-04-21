@@ -1,15 +1,15 @@
-"""Obsidian vault ingestion service for Neo4j graph database.
+"""Obsidian vault ingestion service for FalkorDB graph database.
 
 This module provides functionality to parse, chunk, embed, and ingest Obsidian markdown
-notes into a Neo4j graph database. It extracts notes, chunks them for vector search,
-generates embeddings, and stores them with relationships (folders, tags, links) in Neo4j.
+notes into a FalkorDB graph database. It extracts notes, chunks them for vector search,
+generates embeddings, and stores them with relationships (folders, tags, links) in FalkorDB.
 
 The service supports:
 - Parsing Obsidian markdown files with frontmatter
 - Character-based chunking with overlap
 - Embedding generation using configured models
 - Graph storage with Note, Chunk, Folder, Tag, and Link relationships
-- Vector similarity search via Neo4j vector indexes
+- Vector similarity search via FalkorDB vector indexes
 """
 
 import hashlib
@@ -18,16 +18,16 @@ import os
 import re
 from typing import List, Literal, Optional, TypedDict
 
+from advanced_omi_backend.services.graph_client import (
+    GraphClient,
+    GraphReadInterface,
+    GraphWriteInterface,
+)
 from advanced_omi_backend.services.memory.config import (
     load_config_yml as load_root_config,
 )
 from advanced_omi_backend.services.memory.providers.llm_providers import (
     generate_openai_embeddings,
-)
-from advanced_omi_backend.services.neo4j_client import (
-    Neo4jClient,
-    Neo4jReadInterface,
-    Neo4jWriteInterface,
 )
 from advanced_omi_backend.utils.config_utils import resolve_value
 from advanced_omi_backend.utils.model_utils import get_model_config
@@ -64,7 +64,7 @@ class ObsidianSearchError(Exception):
 
 
 class ObsidianService:
-    """Service for ingesting Obsidian vaults into Neo4j graph database."""
+    """Service for ingesting Obsidian vaults into FalkorDB graph database."""
 
     def __init__(self):
         """Initialize the Obsidian service with configuration from config.yml and environment."""
@@ -84,11 +84,9 @@ class ObsidianService:
                 "Configuration for 'defaults.embedding' not found in config.yml"
             )
 
-        # Neo4j Connection - environment variables passed by Docker Compose
-        neo4j_host = os.getenv("NEO4J_HOST", "neo4j")
-        self.neo4j_uri = f"bolt://{neo4j_host}:7687"
-        self.neo4j_user = os.getenv("NEO4J_USER", "neo4j")
-        self.neo4j_password = os.getenv("NEO4J_PASSWORD", "password")
+        # FalkorDB Connection - environment variables passed by Docker Compose
+        falkordb_host = os.getenv("FALKORDB_HOST", "falkordb")
+        falkordb_port = int(os.getenv("FALKORDB_PORT", "6379"))
 
         # Models / API - Loaded strictly from config.yml
         self.embedding_model = str(resolve_value(embed_config["model_name"]))
@@ -107,40 +105,47 @@ class ObsidianService:
         )
         self.max_chunk_words = int(chunking_config.get("max_chunk_words", 300))
 
-        self.neo4j_client = Neo4jClient(
-            self.neo4j_uri, self.neo4j_user, self.neo4j_password
+        self.graph_client = GraphClient(
+            host=falkordb_host, port=falkordb_port, graph_name="chronicle"
         )
-        self.read_interface = Neo4jReadInterface(self.neo4j_client)
-        self.write_interface = Neo4jWriteInterface(self.neo4j_client)
+        self.read_interface = GraphReadInterface(self.graph_client)
+        self.write_interface = GraphWriteInterface(self.graph_client)
 
     def close(self):
-        """Close the Neo4j driver connection and clean up resources."""
-        self.neo4j_client.close()
+        """Close the FalkorDB connection and clean up resources."""
+        self.graph_client.close()
 
     def reset_driver(self):
-        """Reset the driver connection, forcing it to be recreated with current credentials."""
-        self.neo4j_client.reset()
+        """Reset the connection, forcing it to be recreated."""
+        self.graph_client.reset()
 
     def setup_database(self) -> None:
         """Create database constraints and vector index for notes and chunks."""
         # Reset driver to ensure we use current credentials
         self.reset_driver()
         with self.write_interface.session() as session:
-            session.run(
-                "CREATE CONSTRAINT note_path IF NOT EXISTS FOR (n:Note) REQUIRE n.path IS UNIQUE"
-            )
-            session.run(
-                "CREATE CONSTRAINT chunk_id IF NOT EXISTS FOR (c:Chunk) REQUIRE c.id IS UNIQUE"
-            )
-            index_query = f"""
-            CREATE VECTOR INDEX chunk_embeddings IF NOT EXISTS
-            FOR (c:Chunk) ON (c.embedding)
-            OPTIONS {{indexConfig: {{
-             `vector.dimensions`: {self.embedding_dimensions},
-             `vector.similarity_function`: 'cosine'
-            }}}}
-            """
-            session.run(index_query)
+            # FalkorDB doesn't support IF NOT EXISTS for constraints/indexes,
+            # so wrap each in try/except for idempotency
+            try:
+                session.run(
+                    "CREATE CONSTRAINT note_path FOR (n:Note) REQUIRE n.path IS UNIQUE"
+                )
+            except Exception:
+                logger.debug("Constraint note_path already exists, skipping")
+            try:
+                session.run(
+                    "CREATE CONSTRAINT chunk_id FOR (c:Chunk) REQUIRE c.id IS UNIQUE"
+                )
+            except Exception:
+                logger.debug("Constraint chunk_id already exists, skipping")
+            try:
+                index_query = f"""
+                CREATE VECTOR INDEX FOR (c:Chunk) ON (c.embedding)
+                OPTIONS {{dimension: {self.embedding_dimensions}, similarityFunction: 'cosine'}}
+                """
+                session.run(index_query)
+            except Exception:
+                logger.debug("Vector index on Chunk.embedding already exists, skipping")
 
     @staticmethod
     def _clean_text(text: str) -> str:
@@ -268,7 +273,7 @@ class ObsidianService:
     def ingest_note_and_chunks(
         self, note_data: NoteData, chunks: List[ChunkPayload]
     ) -> None:
-        """Store note and chunks in Neo4j with relationships to folders, tags, and links.
+        """Store note and chunks in FalkorDB with relationships to folders, tags, and links.
 
         Args:
             note_data: Parsed note data to store.
@@ -319,10 +324,10 @@ class ObsidianService:
                 )
 
     async def ingest_vault(self, vault_path: str) -> dict:
-        """Ingest an entire Obsidian vault into Neo4j.
+        """Ingest an entire Obsidian vault into FalkorDB.
 
         Processes all markdown files in the vault, chunks them, generates embeddings,
-        and stores them in Neo4j with relationships.
+        and stores them in FalkorDB with relationships.
 
         Args:
             vault_path: Path to the Obsidian vault directory.
@@ -385,7 +390,7 @@ class ObsidianService:
             return {"results": []}
 
         cypher_query = """
-        CALL db.index.vector.queryNodes('chunk_embeddings', $limit, $vector)
+        CALL db.idx.vector.queryNodes('Chunk', 'embedding', $limit, vecf32($vector))
         YIELD node AS chunk, score
 
         // Find the parent Note

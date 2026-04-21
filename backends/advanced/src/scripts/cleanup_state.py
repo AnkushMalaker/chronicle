@@ -8,7 +8,7 @@ Features:
 - Strict backup verification before cleanup proceeds
 - Conversation-filtered audio export (only conversations with transcripts)
 - Comprehensive backup manifest with checksums
-- MongoDB, Qdrant, Neo4j, Redis cleanup
+- MongoDB, Qdrant, FalkorDB, Redis cleanup
 """
 
 import argparse
@@ -29,8 +29,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 try:
     import redis
     from beanie import init_beanie
+    from falkordb import FalkorDB
     from motor.motor_asyncio import AsyncIOMotorClient
-    from neo4j import GraphDatabase
     from qdrant_client import AsyncQdrantClient
     from qdrant_client.models import Distance, VectorParams
     from rich.console import Console
@@ -118,9 +118,9 @@ class Stats:
         self.chat_messages = 0
         self.annotations = 0
         self.memories = 0
-        self.neo4j_nodes = 0
-        self.neo4j_relationships = 0
-        self.neo4j_promises = 0
+        self.falkordb_nodes = 0
+        self.falkordb_relationships = 0
+        self.falkordb_promises = 0
         self.redis_jobs = 0
         self.legacy_wav = 0
         self.users = 0
@@ -131,7 +131,7 @@ async def gather_stats(
     mongo_db: Any,
     redis_conn: Any,
     qdrant_client: Optional[AsyncQdrantClient],
-    neo4j_driver: Any = None,
+    falkordb_graph: Any = None,
     langfuse_client: Any = None,
 ) -> Stats:
     """Gather current system statistics."""
@@ -157,16 +157,17 @@ async def gather_stats(
         except Exception:
             pass
 
-    # Neo4j
-    if neo4j_driver:
+    # FalkorDB
+    if falkordb_graph:
         try:
-            with neo4j_driver.session() as session:
-                r = session.run("MATCH (n) RETURN count(n) AS c").single()
-                s.neo4j_nodes = r["c"] if r else 0
-                r = session.run("MATCH ()-[r]->() RETURN count(r) AS c").single()
-                s.neo4j_relationships = r["c"] if r else 0
-                r = session.run("MATCH (p:Promise) RETURN count(p) AS c").single()
-                s.neo4j_promises = r["c"] if r else 0
+            result = falkordb_graph.ro_query("MATCH (n) RETURN count(n) AS c")
+            s.falkordb_nodes = result.result_set[0][0] if result.result_set else 0
+            result = falkordb_graph.ro_query("MATCH ()-[r]->() RETURN count(r) AS c")
+            s.falkordb_relationships = (
+                result.result_set[0][0] if result.result_set else 0
+            )
+            result = falkordb_graph.ro_query("MATCH (p:Promise) RETURN count(p) AS c")
+            s.falkordb_promises = result.result_set[0][0] if result.result_set else 0
         except Exception:
             pass
 
@@ -241,8 +242,8 @@ def render_stats_table(stats: Stats, title: str = "Current State") -> Table:
     row("Annotations", str(stats.annotations), "green" if stats.annotations else "dim")
     table.add_section()
     row("Memories (Qdrant)", str(stats.memories), "yellow" if stats.memories else "dim")
-    row("Neo4j Nodes", str(stats.neo4j_nodes), "dim")
-    row("Neo4j Relationships", str(stats.neo4j_relationships), "dim")
+    row("FalkorDB Nodes", str(stats.falkordb_nodes), "dim")
+    row("FalkorDB Relationships", str(stats.falkordb_relationships), "dim")
     row(
         "LangFuse Prompts",
         str(stats.langfuse_prompts),
@@ -330,13 +331,13 @@ class BackupManager:
         backup_dir: str,
         export_audio: bool,
         mongo_db: Any,
-        neo4j_driver: Any = None,
+        falkordb_graph: Any = None,
         langfuse_client: Any = None,
     ):
         self.backup_dir = Path(backup_dir)
         self.export_audio = export_audio
         self.mongo_db = mongo_db
-        self.neo4j_driver = neo4j_driver
+        self.falkordb_graph = falkordb_graph
         self.langfuse_client = langfuse_client
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.backup_path = self.backup_dir / f"backup_{self.timestamp}"
@@ -374,8 +375,8 @@ class BackupManager:
                     ("memories", lambda r: self._export_memories(qdrant_client, r))
                 )
 
-            if self.neo4j_driver:
-                steps.append(("neo4j_graph", self._export_neo4j))
+            if self.falkordb_graph:
+                steps.append(("falkordb_graph", self._export_falkordb))
 
             if self.langfuse_client:
                 steps.append(("langfuse_prompts", self._export_langfuse_prompts))
@@ -651,34 +652,33 @@ class BackupManager:
         result.record("memories", path, True)
         return path
 
-    def _export_neo4j(self, result: BackupResult) -> Path:
-        path = self.backup_path / "neo4j_graph.json"
+    def _export_falkordb(self, result: BackupResult) -> Path:
+        path = self.backup_path / "falkordb_graph.json"
         try:
-            with self.neo4j_driver.session() as session:
-                nodes_data = []
-                for record in session.run(
-                    "MATCH (n) RETURN n, labels(n) AS labels, elementId(n) AS eid"
-                ):
-                    node = dict(record["n"])
-                    node["_labels"] = record["labels"]
-                    node["_element_id"] = record["eid"]
-                    nodes_data.append(node)
+            nodes_data = []
+            node_result = self.falkordb_graph.ro_query(
+                "MATCH (n) RETURN n, labels(n) AS labels, ID(n) AS nid"
+            )
+            for row in node_result.result_set:
+                node = dict(row[0].properties) if hasattr(row[0], "properties") else {}
+                node["_labels"] = row[1]
+                node["_id"] = row[2]
+                nodes_data.append(node)
 
-                rels_data = []
-                for record in session.run(
-                    "MATCH (a)-[r]->(b) RETURN elementId(a) AS src, type(r) AS rel_type, "
-                    "properties(r) AS props, elementId(b) AS dst"
-                ):
-                    rels_data.append(
-                        {
-                            "source": record["src"],
-                            "type": record["rel_type"],
-                            "properties": (
-                                dict(record["props"]) if record["props"] else {}
-                            ),
-                            "target": record["dst"],
-                        }
-                    )
+            rels_data = []
+            rel_result = self.falkordb_graph.ro_query(
+                "MATCH (a)-[r]->(b) RETURN ID(a) AS src, type(r) AS rel_type, "
+                "properties(r) AS props, ID(b) AS dst"
+            )
+            for row in rel_result.result_set:
+                rels_data.append(
+                    {
+                        "source": row[0],
+                        "type": row[1],
+                        "properties": row[2] if row[2] else {},
+                        "target": row[3],
+                    }
+                )
 
             with open(path, "w") as f:
                 json.dump(
@@ -687,9 +687,9 @@ class BackupManager:
                     indent=2,
                     default=str,
                 )
-            result.record("neo4j_graph", path, True)
+            result.record("falkordb_graph", path, True)
         except Exception as e:
-            result.record("neo4j_graph", None, False, str(e))
+            result.record("falkordb_graph", None, False, str(e))
 
         return path
 
@@ -749,14 +749,14 @@ class CleanupManager:
         qdrant_client: Optional[AsyncQdrantClient],
         include_wav: bool,
         delete_users: bool,
-        neo4j_driver: Any = None,
+        falkordb_graph: Any = None,
     ):
         self.mongo_db = mongo_db
         self.redis_conn = redis_conn
         self.qdrant_client = qdrant_client
         self.include_wav = include_wav
         self.delete_users = delete_users
-        self.neo4j_driver = neo4j_driver
+        self.falkordb_graph = falkordb_graph
 
     async def run(self, stats: Stats) -> bool:
         """Perform cleanup with progress display."""
@@ -765,8 +765,8 @@ class CleanupManager:
         ]
         if self.qdrant_client:
             steps.append(("Qdrant memories", self._cleanup_qdrant))
-        if self.neo4j_driver:
-            steps.append(("Neo4j graph", self._cleanup_neo4j))
+        if self.falkordb_graph:
+            steps.append(("FalkorDB graph", self._cleanup_falkordb))
         steps.append(("Redis queues", self._cleanup_redis))
         if self.include_wav:
             steps.append(("Legacy WAV files", self._cleanup_legacy_wav))
@@ -816,12 +816,11 @@ class CleanupManager:
             vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
         )
 
-    def _cleanup_neo4j(self, stats: Stats):
+    def _cleanup_falkordb(self, stats: Stats):
         try:
-            with self.neo4j_driver.session() as session:
-                session.run("MATCH (n) DETACH DELETE n")
+            self.falkordb_graph.query("MATCH (n) DETACH DELETE n")
         except Exception as e:
-            logger.warning(f"Neo4j cleanup failed: {e}")
+            logger.warning(f"FalkorDB cleanup failed: {e}")
 
     def _cleanup_redis(self, stats: Stats):
         for qname in ("transcription", "memory", "audio", "default"):
@@ -855,7 +854,7 @@ class CleanupManager:
 
 
 async def connect_services():
-    """Initialize all service connections. Returns (mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client)."""
+    """Initialize all service connections. Returns (mongo_db, redis_conn, qdrant_client, falkordb_graph, langfuse_client)."""
     # MongoDB
     mongodb_uri = os.getenv("MONGODB_URI", "mongodb://mongo:27017")
     mongodb_database = os.getenv("MONGODB_DATABASE", "chronicle")
@@ -885,19 +884,17 @@ async def connect_services():
     except Exception:
         pass
 
-    # Neo4j
-    neo4j_driver = None
-    neo4j_host = os.getenv("NEO4J_HOST")
-    if neo4j_host:
+    # FalkorDB
+    falkordb_graph = None
+    falkordb_host = os.getenv("FALKORDB_HOST")
+    if falkordb_host:
         try:
-            neo4j_user = os.getenv("NEO4J_USER", "neo4j")
-            neo4j_password = os.getenv("NEO4J_PASSWORD", "password")
-            neo4j_driver = GraphDatabase.driver(
-                f"bolt://{neo4j_host}:7687", auth=(neo4j_user, neo4j_password)
-            )
-            neo4j_driver.verify_connectivity()
+            falkordb_port = int(os.getenv("FALKORDB_PORT", "6379"))
+            db = FalkorDB(host=falkordb_host, port=falkordb_port)
+            falkordb_graph = db.select_graph("chronicle")
+            falkordb_graph.ro_query("RETURN 1")
         except Exception:
-            neo4j_driver = None
+            falkordb_graph = None
 
     # LangFuse
     langfuse_client = None
@@ -912,7 +909,7 @@ async def connect_services():
         except Exception:
             langfuse_client = None
 
-    return mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client
+    return mongo_db, redis_conn, qdrant_client, falkordb_graph, langfuse_client
 
 
 # ---------------------------------------------------------------------------
@@ -964,9 +961,9 @@ def print_dry_run(stats: Stats, args):
         table.add_row("Chat Messages", str(stats.chat_messages))
         table.add_row("Annotations", str(stats.annotations))
         table.add_row("Memories (Qdrant)", str(stats.memories))
-        if stats.neo4j_nodes:
-            table.add_row("Neo4j Nodes", str(stats.neo4j_nodes))
-            table.add_row("Neo4j Relationships", str(stats.neo4j_relationships))
+        if stats.falkordb_nodes:
+            table.add_row("FalkorDB Nodes", str(stats.falkordb_nodes))
+            table.add_row("FalkorDB Relationships", str(stats.falkordb_relationships))
         table.add_row("Redis Jobs", str(stats.redis_jobs))
         if args.include_wav:
             table.add_row("Legacy WAV Files", str(stats.legacy_wav))
@@ -1019,9 +1016,9 @@ def print_confirmation(stats: Stats, args) -> bool:
             f"  {stats.annotations} annotations",
             f"  {stats.memories} memories",
         ]
-        if stats.neo4j_nodes:
+        if stats.falkordb_nodes:
             items.append(
-                f"  {stats.neo4j_nodes} Neo4j nodes + {stats.neo4j_relationships} relationships"
+                f"  {stats.falkordb_nodes} FalkorDB nodes + {stats.falkordb_relationships} relationships"
             )
         items.append(f"  {stats.redis_jobs} Redis jobs")
         if args.include_wav:
@@ -1105,14 +1102,14 @@ Examples:
 
     # Connect
     with console.status("[bold cyan]Connecting to services...", spinner="dots"):
-        mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client = (
+        mongo_db, redis_conn, qdrant_client, falkordb_graph, langfuse_client = (
             await connect_services()
         )
 
     # Gather stats
     with console.status("[bold cyan]Gathering statistics...", spinner="dots"):
         stats = await gather_stats(
-            mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client
+            mongo_db, redis_conn, qdrant_client, falkordb_graph, langfuse_client
         )
 
     console.print()
@@ -1135,7 +1132,11 @@ Examples:
     if do_backup:
         console.print()
         backup_mgr = BackupManager(
-            args.backup_dir, args.export_audio, mongo_db, neo4j_driver, langfuse_client
+            args.backup_dir,
+            args.export_audio,
+            mongo_db,
+            falkordb_graph,
+            langfuse_client,
         )
         result = await backup_mgr.run(qdrant_client, stats)
 
@@ -1186,7 +1187,7 @@ Examples:
         qdrant_client,
         args.include_wav,
         args.delete_users,
-        neo4j_driver,
+        falkordb_graph,
     )
     success = await cleanup_mgr.run(stats)
 
@@ -1202,7 +1203,7 @@ Examples:
     console.print()
     with console.status("[bold cyan]Verifying cleanup...", spinner="dots"):
         final_stats = await gather_stats(
-            mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client
+            mongo_db, redis_conn, qdrant_client, falkordb_graph, langfuse_client
         )
 
     console.print(render_stats_table(final_stats, "After Cleanup"))
@@ -1213,9 +1214,7 @@ Examples:
         msg += f"\n[green]Backup saved to:[/green] {backup_mgr.backup_path}"
     console.print(Panel(msg, border_style="green"))
 
-    # Cleanup Neo4j driver
-    if neo4j_driver:
-        neo4j_driver.close()
+    # FalkorDB graph objects don't need explicit close
 
 
 if __name__ == "__main__":

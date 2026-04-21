@@ -26,7 +26,7 @@ ${GPU_ASR_URL}       http://localhost:8767
 ${TEST_AUDIO_FILE}   ${CURDIR}/../test_assets/DIY_Experts_Glass_Blowing_16khz_mono_1min.wav
 # ASR service configuration
 ${ASR_SERVICE}       transformers-asr
-${ASR_MODEL}         microsoft/VibeVoice-ASR
+${ASR_MODEL}         microsoft/VibeVoice-ASR-HF
 ${ASR_PORT}          8767
 
 *** Keywords ***

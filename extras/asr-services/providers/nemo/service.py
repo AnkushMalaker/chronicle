@@ -75,6 +75,7 @@ class NemoService(BaseASRService):
         self,
         audio_file_path: str,
         context_info: Optional[str] = None,
+        prompt: Optional[str] = None,
     ) -> TranscriptionResult:
         """Transcribe audio file. context_info is not used by this provider."""
         if self.transcriber is None:

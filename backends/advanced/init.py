@@ -249,8 +249,10 @@ class ChronicleSetup:
                 choice = "4"
             elif provider == "smallest":
                 choice = "5"
-            elif provider == "none":
+            elif provider == "gemma4":
                 choice = "6"
+            elif provider == "none":
+                choice = "7"
             else:
                 choice = "1"  # Default to Deepgram
         else:
@@ -280,13 +282,18 @@ class ChronicleSetup:
 
             smallest_desc = "Smallest.ai Pulse (cloud-based, fast, requires API key)"
 
+            gemma4_desc = (
+                "Offline (Gemma 4 E4B-it - GPU required, prompt-based diarization)"
+            )
+
             choices = {
                 "1": "Deepgram (recommended - high quality, cloud-based)",
                 "2": parakeet_desc,
                 "3": vibevoice_desc,
                 "4": qwen3_desc,
                 "5": smallest_desc,
-                "6": "None (skip transcription setup)",
+                "6": gemma4_desc,
+                "7": "None (skip transcription setup)",
             }
 
             choice = self.prompt_choice(
@@ -440,6 +447,27 @@ class ChronicleSetup:
                 )
 
         elif choice == "6":
+            self.console.print(
+                "[blue][INFO][/blue] Gemma 4 E4B-it selected (prompt-based diarization)"
+            )
+            existing_gemma4_url = (
+                read_env_value(".env", "GEMMA4_ASR_URL") or "host.docker.internal:8767"
+            )
+            gemma4_url = self.prompt_value("Gemma 4 ASR URL", existing_gemma4_url)
+
+            self.config["GEMMA4_ASR_URL"] = gemma4_url
+
+            self.config_manager.update_config_defaults({"stt": "stt-gemma4"})
+
+            self.console.print(
+                "[green][SUCCESS][/green] Gemma 4 configured in config.yml and .env"
+            )
+            self.console.print("[blue][INFO][/blue] Set defaults.stt: stt-gemma4")
+            self.console.print(
+                "[yellow][WARNING][/yellow] Remember to start Gemma 4 ASR: cd ../../extras/asr-services && docker compose up gemma4-asr -d"
+            )
+
+        elif choice == "7":
             self.console.print("[blue][INFO][/blue] Skipping transcription setup")
 
     def setup_streaming_provider(self):
@@ -554,6 +582,7 @@ class ChronicleSetup:
                 "none": "4",
                 "llamacpp": "5",
                 "custom": "3",
+                "gemma4-unified": "6",
             }.get(provider, "1")
         else:
             # Standalone init.py run — read existing config as default
@@ -776,6 +805,28 @@ class ChronicleSetup:
                 "[blue][INFO][/blue] LLM services will be configured via extras/llm-services"
             )
 
+        elif choice == "6":
+            self.console.print(
+                "[blue][INFO][/blue] Gemma 4 unified STT+LLM mode selected"
+            )
+            self.console.print(
+                "[blue][INFO][/blue] LLM requests will use the same Gemma 4 ASR service"
+            )
+            # gemma4-llm model definition exists in defaults.yml, pointing to GEMMA4_ASR_URL
+            self.config_manager.update_config_defaults(
+                {"llm": "gemma4-llm", "embedding": "local-embed"}
+            )
+            self.console.print(
+                "[green][SUCCESS][/green] Gemma 4 unified mode configured in config.yml"
+            )
+            self.console.print("[blue][INFO][/blue] Set defaults.llm: gemma4-llm")
+            self.console.print(
+                "[blue][INFO][/blue] Set defaults.embedding: local-embed (Ollama)"
+            )
+            self.console.print(
+                "[yellow][WARNING][/yellow] Embeddings require Ollama running with nomic-embed-text model"
+            )
+
     def setup_memory(self):
         """Configure memory provider - updates config.yml"""
         # Check if memory provider was provided via command line (from wizard.py)
@@ -901,37 +952,14 @@ class ChronicleSetup:
                 f"[green][SUCCESS][/green] Tailscale auth key configured (Docker integration enabled)"
             )
 
-    def setup_neo4j(self):
-        """Configure Neo4j credentials (always required - used by Knowledge Graph)"""
-        neo4j_password = getattr(self.args, "neo4j_password", None)
-
-        if neo4j_password:
-            self.console.print(
-                f"[green]✅[/green] Neo4j: password configured via wizard"
-            )
-        else:
-            # Interactive prompt (standalone init.py run)
-            self.console.print()
-            self.console.print("[bold cyan]Neo4j Configuration[/bold cyan]")
-            self.console.print(
-                "Neo4j is used for Knowledge Graph (entity/relationship extraction)"
-            )
-            self.console.print()
-            neo4j_password = self.prompt_with_existing_masked(
-                "Neo4j password (min 8 chars)",
-                env_key="NEO4J_PASSWORD",
-                placeholders=["", "your-neo4j-password"],
-                is_password=True,
-                default="neo4jpassword",
-            )
-
-        self.config["NEO4J_HOST"] = "neo4j"
-        self.config["NEO4J_USER"] = "neo4j"
-        self.config["NEO4J_PASSWORD"] = neo4j_password
-        self.console.print("[green][SUCCESS][/green] Neo4j credentials configured")
+    def setup_falkordb(self):
+        """Configure FalkorDB connection (always required - used by Knowledge Graph)"""
+        self.config["FALKORDB_HOST"] = "falkordb"
+        self.config["FALKORDB_PORT"] = "6379"
+        self.console.print("[green][SUCCESS][/green] FalkorDB configured")
 
     def setup_obsidian(self):
-        """Configure Obsidian integration (optional feature flag only - Neo4j credentials handled by setup_neo4j)"""
+        """Configure Obsidian integration (optional feature flag only - FalkorDB credentials handled by setup_falkordb)"""
         has_enable = hasattr(self.args, "enable_obsidian") and self.args.enable_obsidian
         has_disable = hasattr(self.args, "no_obsidian") and self.args.no_obsidian
 
@@ -971,22 +999,37 @@ class ChronicleSetup:
 
         if enable_obsidian:
             self.config_manager.update_memory_config(
-                {"obsidian": {"enabled": True, "neo4j_host": "neo4j", "timeout": 30}}
+                {
+                    "obsidian": {
+                        "enabled": True,
+                        "falkordb_host": "falkordb",
+                        "falkordb_port": 6379,
+                        "timeout": 30,
+                    }
+                }
             )
             self.console.print("[green][SUCCESS][/green] Obsidian integration enabled")
         else:
             self.config_manager.update_memory_config(
-                {"obsidian": {"enabled": False, "neo4j_host": "neo4j", "timeout": 30}}
+                {
+                    "obsidian": {
+                        "enabled": False,
+                        "falkordb_host": "falkordb",
+                        "falkordb_port": 6379,
+                        "timeout": 30,
+                    }
+                }
             )
             self.console.print("[blue][INFO][/blue] Obsidian integration disabled")
 
     def setup_knowledge_graph(self):
-        """Configure Knowledge Graph (Neo4j-based entity/relationship extraction - always enabled)"""
+        """Configure Knowledge Graph (FalkorDB-based entity/relationship extraction - always enabled)"""
         self.config_manager.update_memory_config(
             {
                 "knowledge_graph": {
                     "enabled": True,
-                    "neo4j_host": "neo4j",
+                    "falkordb_host": "falkordb",
+                    "falkordb_port": 6379,
                     "timeout": 30,
                 }
             }
@@ -1348,22 +1391,26 @@ class ChronicleSetup:
         llm_default = config_yml.get("defaults", {}).get("llm", "not set")
         embedding_default = config_yml.get("defaults", {}).get("embedding", "not set")
         self.console.print(f"✅ LLM: {llm_default} (config.yml)")
+        if llm_default == "gemma4-llm" and stt_default == "stt-gemma4":
+            self.console.print(
+                "   [dim](unified: STT and LLM share the same Gemma 4 model)[/dim]"
+            )
         self.console.print(f"✅ Embedding: {embedding_default} (config.yml)")
 
         # Show memory provider from config.yml
         memory_provider = config_yml.get("memory", {}).get("provider", "chronicle")
         self.console.print(f"✅ Memory Provider: {memory_provider} (config.yml)")
 
-        # Show Obsidian/Neo4j status (read from config.yml)
+        # Show Obsidian/FalkorDB status (read from config.yml)
         obsidian_config = config_yml.get("memory", {}).get("obsidian", {})
         if obsidian_config.get("enabled", False):
-            neo4j_host = obsidian_config.get("neo4j_host", "not set")
-            self.console.print(f"✅ Obsidian/Neo4j: Enabled ({neo4j_host})")
+            falkordb_host = obsidian_config.get("falkordb_host", "not set")
+            self.console.print(f"✅ Obsidian/FalkorDB: Enabled ({falkordb_host})")
 
         # Show Knowledge Graph status (always enabled)
         kg_config = config_yml.get("memory", {}).get("knowledge_graph", {})
-        neo4j_host = kg_config.get("neo4j_host", "neo4j")
-        self.console.print(f"✅ Knowledge Graph: Enabled ({neo4j_host})")
+        falkordb_host = kg_config.get("falkordb_host", "falkordb")
+        self.console.print(f"✅ Knowledge Graph: Enabled ({falkordb_host})")
 
         # Auto-determine URLs based on HTTPS configuration
         if self.config.get("HTTPS_ENABLED") == "true":
@@ -1446,7 +1493,7 @@ class ChronicleSetup:
             self.setup_llm()
             self.setup_memory()
             self.setup_optional_services()
-            self.setup_neo4j()
+            self.setup_falkordb()
             self.setup_obsidian()
             self.setup_knowledge_graph()
             self.setup_langfuse()
@@ -1497,7 +1544,15 @@ def main():
     )
     parser.add_argument(
         "--transcription-provider",
-        choices=["deepgram", "parakeet", "vibevoice", "qwen3-asr", "smallest", "none"],
+        choices=[
+            "deepgram",
+            "parakeet",
+            "vibevoice",
+            "qwen3-asr",
+            "smallest",
+            "gemma4",
+            "none",
+        ],
         help="Transcription provider (default: prompt user)",
     )
     parser.add_argument(
@@ -1512,10 +1567,7 @@ def main():
     parser.add_argument(
         "--enable-obsidian",
         action="store_true",
-        help="Enable Obsidian/Neo4j integration (default: prompt user)",
-    )
-    parser.add_argument(
-        "--neo4j-password", help="Neo4j password (default: prompt user)"
+        help="Enable Obsidian/FalkorDB integration (default: prompt user)",
     )
     parser.add_argument(
         "--ts-authkey",
@@ -1540,7 +1592,7 @@ def main():
     )
     parser.add_argument(
         "--llm-provider",
-        choices=["openai", "ollama", "llamacpp", "custom", "none"],
+        choices=["openai", "ollama", "llamacpp", "custom", "gemma4-unified", "none"],
         help="LLM provider for memory extraction (default: prompt user)",
     )
     parser.add_argument(

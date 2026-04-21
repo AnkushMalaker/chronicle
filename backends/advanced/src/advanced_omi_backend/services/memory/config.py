@@ -26,7 +26,7 @@ class LLMProvider(Enum):
 class MemoryProvider(Enum):
     """Supported memory service providers."""
 
-    CHRONICLE = "chronicle"  # Default — Neo4j hybrid search + vault
+    CHRONICLE = "chronicle"  # Default — FalkorDB hybrid search + vault
     OPENMEMORY_MCP = "openmemory_mcp"  # OpenMemory MCP backend
 
 
@@ -178,7 +178,7 @@ def build_memory_config_from_env() -> MemoryConfig:
         timeout_seconds = int(mem_settings.get("timeout_seconds", 1200))
 
         memory_logger.info(
-            f"🔧 Memory config: Provider=Chronicle (Neo4j), LLM={llm_def.model_provider}, Extraction={extraction_enabled}"
+            f"🔧 Memory config: Provider=Chronicle (FalkorDB), LLM={llm_def.model_provider}, Extraction={extraction_enabled}"
         )
 
         return MemoryConfig(

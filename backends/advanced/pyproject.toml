@@ -9,8 +9,7 @@ dependencies = [
     "fastapi>=0.115.12",
     "fastmcp>=0.5.0", # MCP server for conversation access
     "mem0ai", # Using main branch with PR #3250 AsyncMemory fix
-    "langchain_neo4j",
-    "neo4j>=5.0.0,<6.0.0",
+    "falkordb==1.2.2",
     "motor>=3.7.1",
     "ollama>=0.4.8",
     "friend-lite-sdk",
@@ -99,6 +98,7 @@ markers = [
     "auth: marks tests that test authentication",
     "database: marks tests that require database access",
 ]
+asyncio_mode = "auto"
 filterwarnings = [
     "error",
     "ignore::UserWarning",

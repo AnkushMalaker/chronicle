@@ -91,7 +91,7 @@ extras/speaker-recognition/outputs/*
 
 # my backup
 backends/advanced/src/_webui_original/*
-backends/advanced-backend/data/neo4j_data/*
+backends/advanced-backend/data/falkordb_data/*
 backends/advanced-backend/data/speaker_model_cache/
 
 *.bin

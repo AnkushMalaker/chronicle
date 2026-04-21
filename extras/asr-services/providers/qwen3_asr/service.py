@@ -58,6 +58,7 @@ class Qwen3ASRService(BaseASRService):
         self,
         audio_file_path: str,
         context_info: Optional[str] = None,
+        prompt: Optional[str] = None,
     ) -> TranscriptionResult:
         """Transcribe audio file via vLLM."""
         if self.transcriber is None:

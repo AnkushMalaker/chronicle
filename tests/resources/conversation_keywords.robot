@@ -220,7 +220,17 @@ Verify Conversation Processing Status
     Should Be Equal As Strings    ${conversation}[processing_status]    ${expected_status}
     ...    Expected processing_status='${expected_status}', got '${conversation}[processing_status]'
 
-    Log    ✅ Conversation ${conversation_id} has processing_status='${expected_status}'
+    Log    ��� Conversation ${conversation_id} has processing_status='${expected_status}'
+
+Conversation Should Have Live Transcript
+    [Documentation]    Verify conversation has active live-v0 transcript version with content.
+    ...                Returns the conversation dict if successful.
+    [Arguments]    ${conversation_id}
+
+    ${conversation}=    Get Conversation By ID    ${conversation_id}
+    Should Be Equal As Strings    ${conversation}[active_transcript_version]    live-v0
+    ...    msg=Expected active_transcript_version='live-v0', got '${conversation}[active_transcript_version]'
+    RETURN    ${conversation}
 
 Verify Conversation Always Persist Flag
     [Documentation]    Verify conversation has always_persist=True

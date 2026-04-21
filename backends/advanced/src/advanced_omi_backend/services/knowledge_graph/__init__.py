@@ -2,7 +2,7 @@
 
 This module provides:
 - Entity extraction from conversations using LLM
-- Storage of entities and relationships in Neo4j
+- Storage of entities and relationships in FalkorDB
 - API for querying knowledge graph (entities, relationships, timeline)
 """
 

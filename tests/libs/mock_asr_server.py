@@ -76,7 +76,7 @@ PROVIDER_CONFIGS = {
         "has_word_timestamps": True,
     },
     "vibevoice": {
-        "model_id": "microsoft/VibeVoice-ASR",
+        "model_id": "microsoft/VibeVoice-ASR-HF",
         "provider": "vibevoice",
         "capabilities": ["segments", "diarization", "timestamps"],
         "has_diarization": True,

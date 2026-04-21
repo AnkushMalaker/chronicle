@@ -152,7 +152,7 @@ class Relationship(BaseModel):
 
 
 class ExtractedEntity(BaseModel):
-    """Entity as extracted by LLM before Neo4j storage."""
+    """Entity as extracted by LLM before graph storage."""
 
     name: str
     type: str  # Will be validated against EntityType

@@ -16,7 +16,6 @@ import yaml
 from dotenv import dotenv_values
 from rich.console import Console
 from rich.table import Table
-
 from setup_utils import read_env_value
 
 console = Console()
@@ -119,6 +118,7 @@ _ASR_PROVIDER_LABELS = {
     "nemo-strixhalo": "NeMo ASR",
     "parakeet": "Parakeet ASR",
     "qwen3-asr": "Qwen3 ASR",
+    "gemma4": "Gemma 4 ASR",
 }
 
 
@@ -372,6 +372,7 @@ def run_compose_command(service_name, command, build=False, force_recreate=False
                     "nemo-strixhalo": "nemo-asr-strixhalo",
                     "parakeet": "parakeet-asr",
                     "qwen3-asr": "qwen3-asr-wrapper",
+                    "gemma4": "gemma4-asr",
                 }
                 asr_service_to_build = provider_to_service.get(asr_provider)
 
@@ -508,6 +509,7 @@ def run_compose_command(service_name, command, build=False, force_recreate=False
                 "nemo-strixhalo": "nemo-asr-strixhalo",
                 "parakeet": "parakeet-asr",
                 "qwen3-asr": "qwen3-asr-wrapper",
+                "gemma4": "gemma4-asr",
             }
             asr_service_name = provider_to_service.get(asr_provider)
 

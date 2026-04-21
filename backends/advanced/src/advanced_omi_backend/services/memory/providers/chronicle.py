@@ -1,9 +1,9 @@
-"""Chronicle memory service — Neo4j hybrid search + Markdown vault.
+"""Chronicle memory service — FalkorDB hybrid search + Markdown vault.
 
 This module provides the core MemoryService class that:
 - Generates rich conversation documents (.md) via LLM
 - Stores them in an Obsidian-compatible vault (data/conversation_docs/)
-- Indexes chunks in Neo4j for hybrid search (vector + BM25 + recency bias)
+- Indexes chunks in FalkorDB for hybrid search (vector + BM25 + recency bias)
 - Links mentioned entities via ConvEntity nodes in the graph
 """
 
@@ -16,7 +16,7 @@ from typing import Any, List, Optional, Tuple
 
 from ..base import MemoryEntry, MemoryServiceBase
 from ..config import MemoryConfig
-from ..neo4j_utils import compute_hybrid_scores, parse_conversation_doc
+from ..graph_utils import compute_hybrid_scores, parse_conversation_doc
 from ..vault_manager import ConvDocVaultManager
 from .llm_providers import OpenAIProvider
 
@@ -24,11 +24,11 @@ memory_logger = logging.getLogger("memory_service")
 
 
 class MemoryService(MemoryServiceBase):
-    """Memory service backed by Neo4j (search index) + Markdown vault (ground truth).
+    """Memory service backed by FalkorDB (search index) + Markdown vault (ground truth).
 
     Each conversation produces a structured .md document. The document is
     split on ### headers into chunks, embedded, and stored as ConvChunk
-    nodes in Neo4j. Search combines vector similarity, BM25 full-text,
+    nodes in FalkorDB. Search combines vector similarity, BM25 full-text,
     and recency scoring.
     """
 
@@ -42,36 +42,34 @@ class MemoryService(MemoryServiceBase):
         self.llm_provider: Optional[OpenAIProvider] = None
         self.vault = ConvDocVaultManager()
 
-        # Neo4j — lazy-initialized like KnowledgeGraphService
-        self._neo4j_client = None
-        self._neo4j_read = None
-        self._neo4j_write = None
+        # FalkorDB — lazy-initialized like KnowledgeGraphService
+        self._graph_client = None
+        self._graph_read = None
+        self._graph_write = None
 
     async def initialize(self) -> None:
         if self._initialized:
             return
 
         try:
-            from advanced_omi_backend.services.neo4j_client import (
-                Neo4jClient,
-                Neo4jReadInterface,
-                Neo4jWriteInterface,
+            from advanced_omi_backend.services.graph_client import (
+                GraphClient,
+                GraphReadInterface,
+                GraphWriteInterface,
             )
 
             # LLM provider (OpenAI-compatible — used for embeddings + doc generation)
             self.llm_provider = OpenAIProvider(self.config.llm_config)
 
-            # Neo4j connection (same env vars as KnowledgeGraphService)
-            neo4j_host = os.getenv("NEO4J_HOST", "neo4j")
-            neo4j_uri = os.getenv("NEO4J_URI") or f"bolt://{neo4j_host}:7687"
-            neo4j_user = os.getenv("NEO4J_USER", "neo4j")
-            neo4j_password = os.getenv("NEO4J_PASSWORD", "password")
+            # FalkorDB connection (same env vars as KnowledgeGraphService)
+            falkordb_host = os.getenv("FALKORDB_HOST", "falkordb")
+            falkordb_port = int(os.getenv("FALKORDB_PORT", "6379"))
 
-            self._neo4j_client = Neo4jClient(
-                uri=neo4j_uri, user=neo4j_user, password=neo4j_password
+            self._graph_client = GraphClient(
+                host=falkordb_host, port=falkordb_port, graph_name="chronicle"
             )
-            self._neo4j_read = Neo4jReadInterface(self._neo4j_client)
-            self._neo4j_write = Neo4jWriteInterface(self._neo4j_client)
+            self._graph_read = GraphReadInterface(self._graph_client)
+            self._graph_write = GraphWriteInterface(self._graph_client)
 
             # Create schema (idempotent)
             await asyncio.to_thread(self._create_schema)
@@ -84,18 +82,18 @@ class MemoryService(MemoryServiceBase):
                     "Check API keys, network connectivity, and service availability."
                 )
 
-            # Direct Neo4j test (avoid calling self.test_connection which triggers initialize)
-            neo4j_test = await asyncio.to_thread(
-                self._neo4j_read.run, "RETURN 1 AS test"
+            # Direct FalkorDB test (avoid calling self.test_connection which triggers initialize)
+            graph_test = await asyncio.to_thread(
+                self._graph_read.run, "RETURN 1 AS test"
             )
-            if not neo4j_test or neo4j_test[0].get("test") != 1:
+            if not graph_test or graph_test[0].get("test") != 1:
                 raise RuntimeError(
-                    "Neo4j connection failed. Check that Neo4j is running and accessible."
+                    "FalkorDB connection failed. Check that FalkorDB is running and accessible."
                 )
 
             self._initialized = True
             memory_logger.info(
-                "✅ Chronicle memory service initialized (Neo4j + Vault). "
+                "✅ Chronicle memory service initialized (FalkorDB + Vault). "
                 "Existing Qdrant memories are not migrated."
             )
 
@@ -104,7 +102,7 @@ class MemoryService(MemoryServiceBase):
             raise
 
     def _create_schema(self) -> None:
-        """Create Neo4j constraints and indexes (idempotent)."""
+        """Create FalkorDB constraints and indexes (idempotent)."""
         from advanced_omi_backend.model_registry import get_models_registry
 
         reg = get_models_registry()
@@ -115,38 +113,43 @@ class MemoryService(MemoryServiceBase):
             else 1536
         )
 
-        with self._neo4j_client.session() as session:
-            session.run(
-                "CREATE CONSTRAINT conv_doc_id IF NOT EXISTS "
-                "FOR (d:ConvDoc) REQUIRE d.conversation_id IS UNIQUE"
-            )
-            session.run(
-                "CREATE CONSTRAINT conv_chunk_id IF NOT EXISTS "
-                "FOR (c:ConvChunk) REQUIRE c.id IS UNIQUE"
-            )
-            session.run(
-                "CREATE CONSTRAINT conv_entity_id IF NOT EXISTS "
-                "FOR (e:ConvEntity) REQUIRE e.id IS UNIQUE"
-            )
-            session.run(
-                f"""
-                CREATE VECTOR INDEX conv_chunk_embeddings IF NOT EXISTS
-                FOR (c:ConvChunk) ON (c.embedding)
-                OPTIONS {{indexConfig: {{
-                    `vector.dimensions`: {dims},
-                    `vector.similarity_function`: 'cosine'
-                }}}}
-            """
-            )
-            session.run(
-                """
-                CREATE FULLTEXT INDEX conv_chunk_fulltext IF NOT EXISTS
-                FOR (c:ConvChunk) ON EACH [c.text, c.section_title]
-            """
-            )
+        with self._graph_client.session() as session:
+            try:
+                session.run(
+                    "CREATE CONSTRAINT FOR (d:ConvDoc) REQUIRE d.conversation_id IS UNIQUE"
+                )
+            except Exception:
+                pass  # Already exists
+            try:
+                session.run(
+                    "CREATE CONSTRAINT FOR (c:ConvChunk) REQUIRE c.id IS UNIQUE"
+                )
+            except Exception:
+                pass  # Already exists
+            try:
+                session.run(
+                    "CREATE CONSTRAINT FOR (e:ConvEntity) REQUIRE e.id IS UNIQUE"
+                )
+            except Exception:
+                pass  # Already exists
+            try:
+                session.run(
+                    f"""
+                    CREATE VECTOR INDEX FOR (c:ConvChunk) ON (c.embedding)
+                    OPTIONS {{dimension: {dims}, similarityFunction: 'cosine'}}
+                    """
+                )
+            except Exception:
+                pass  # Already exists
+            try:
+                session.run(
+                    "CALL db.idx.fulltext.createNodeIndex('ConvChunk', 'text', 'section_title')"
+                )
+            except Exception:
+                pass  # Already exists
 
         memory_logger.info(
-            "Neo4j schema verified/created (ConvDoc/ConvChunk/ConvEntity)"
+            "FalkorDB schema verified/created (ConvDoc/ConvChunk/ConvEntity)"
         )
 
     # =========================================================================
@@ -206,7 +209,7 @@ class MemoryService(MemoryServiceBase):
 
             # 5. Delete old data for this conversation (idempotent for first-time)
             await asyncio.to_thread(
-                self._neo4j_write.run,
+                self._graph_write.run,
                 """
                 OPTIONAL MATCH (d:ConvDoc {conversation_id: $source_id})
                 OPTIONAL MATCH (c:ConvChunk {conversation_id: $source_id})
@@ -215,9 +218,9 @@ class MemoryService(MemoryServiceBase):
                 source_id=source_id,
             )
 
-            # 6. Store in Neo4j
+            # 6. Store in FalkorDB
             chunk_ids = await asyncio.to_thread(
-                self._store_in_neo4j,
+                self._store_in_graph,
                 source_id=source_id,
                 user_id=user_id,
                 doc=doc,
@@ -285,7 +288,7 @@ class MemoryService(MemoryServiceBase):
 
         return doc_md
 
-    def _store_in_neo4j(
+    def _store_in_graph(
         self,
         source_id: str,
         user_id: str,
@@ -293,8 +296,8 @@ class MemoryService(MemoryServiceBase):
         embeddings: List[List[float]],
         file_path: str,
     ) -> List[str]:
-        """Store conversation doc and sections in Neo4j (sync, runs in thread)."""
-        from ..neo4j_utils import ConversationDoc
+        """Store conversation doc and sections in FalkorDB (sync, runs in thread)."""
+        from ..graph_utils import ConversationDoc
 
         now_iso = datetime.now(timezone.utc).isoformat()
         chunk_ids = []
@@ -306,7 +309,7 @@ class MemoryService(MemoryServiceBase):
                 summary_text = section.body
                 break
 
-        with self._neo4j_client.session() as session:
+        with self._graph_client.session() as session:
             # CREATE ConvDoc node
             session.run(
                 """
@@ -398,7 +401,7 @@ class MemoryService(MemoryServiceBase):
 
             # Vector search
             vector_results = await asyncio.to_thread(
-                self._neo4j_vector_search,
+                self._vector_search,
                 query_embeddings[0],
                 user_id,
                 limit * 2,
@@ -406,7 +409,7 @@ class MemoryService(MemoryServiceBase):
 
             # Full-text search
             fulltext_results = await asyncio.to_thread(
-                self._neo4j_fulltext_search,
+                self._fulltext_search,
                 query,
                 user_id,
                 limit * 2,
@@ -444,13 +447,13 @@ class MemoryService(MemoryServiceBase):
             memory_logger.error(f"Search memories failed: {e}")
             return []
 
-    def _neo4j_vector_search(
+    def _vector_search(
         self, embedding: List[float], user_id: str, limit: int
     ) -> List[dict]:
-        """Run vector similarity search in Neo4j."""
-        data = self._neo4j_read.run(
+        """Run vector similarity search in FalkorDB."""
+        data = self._graph_read.run(
             """
-            CALL db.index.vector.queryNodes('conv_chunk_embeddings', $limit, $embedding)
+            CALL db.idx.vector.queryNodes('ConvChunk', 'embedding', $limit, vecf32($embedding))
             YIELD node, score
             WHERE node.user_id = $user_id
             RETURN node.id AS chunk_id,
@@ -467,13 +470,11 @@ class MemoryService(MemoryServiceBase):
         )
         return data
 
-    def _neo4j_fulltext_search(
-        self, query_text: str, user_id: str, limit: int
-    ) -> List[dict]:
-        """Run full-text BM25 search in Neo4j."""
-        data = self._neo4j_read.run(
+    def _fulltext_search(self, query_text: str, user_id: str, limit: int) -> List[dict]:
+        """Run full-text BM25 search in FalkorDB."""
+        data = self._graph_read.run(
             """
-            CALL db.index.fulltext.queryNodes('conv_chunk_fulltext', $search_text)
+            CALL db.idx.fulltext.queryNodes('ConvChunk', $search_text)
             YIELD node, score
             WHERE node.user_id = $user_id
             RETURN node.id AS chunk_id,
@@ -503,7 +504,7 @@ class MemoryService(MemoryServiceBase):
 
         try:
             data = await asyncio.to_thread(
-                self._neo4j_read.run,
+                self._graph_read.run,
                 """
                 MATCH (c:ConvChunk {user_id: $user_id})
                 RETURN c.id AS id, c.text AS text, c.section_title AS section_title,
@@ -541,7 +542,7 @@ class MemoryService(MemoryServiceBase):
 
         try:
             data = await asyncio.to_thread(
-                self._neo4j_read.run,
+                self._graph_read.run,
                 "MATCH (c:ConvChunk {user_id: $uid}) RETURN count(c) AS cnt",
                 uid=user_id,
             )
@@ -569,7 +570,7 @@ class MemoryService(MemoryServiceBase):
                 "c.conversation_id AS conversation_id, c.created_at AS created_at, c.user_id AS user_id"
             )
 
-            data = await asyncio.to_thread(self._neo4j_read.run, query, **params)
+            data = await asyncio.to_thread(self._graph_read.run, query, **params)
             if not data:
                 return None
 
@@ -596,7 +597,7 @@ class MemoryService(MemoryServiceBase):
 
         try:
             data = await asyncio.to_thread(
-                self._neo4j_read.run,
+                self._graph_read.run,
                 """
                 MATCH (d:ConvDoc {conversation_id: $source_id})-[:HAS_CHUNK]->(c:ConvChunk)
                 WHERE c.user_id = $user_id
@@ -652,7 +653,7 @@ class MemoryService(MemoryServiceBase):
 
         try:
             data = await asyncio.to_thread(
-                self._neo4j_write.run,
+                self._graph_write.run,
                 "MATCH (c:ConvChunk {id: $id}) DETACH DELETE c RETURN count(c) AS cnt",
                 id=memory_id,
             )
@@ -669,9 +670,9 @@ class MemoryService(MemoryServiceBase):
             await self.initialize()
 
         try:
-            # Delete Neo4j nodes
+            # Delete FalkorDB nodes
             data = await asyncio.to_thread(
-                self._neo4j_write.run,
+                self._graph_write.run,
                 """
                 MATCH (n)
                 WHERE (n:ConvDoc OR n:ConvChunk OR n:ConvEntity) AND n.user_id = $uid
@@ -680,16 +681,16 @@ class MemoryService(MemoryServiceBase):
                 """,
                 uid=user_id,
             )
-            neo4j_count = data[0]["cnt"] if data else 0
+            graph_count = data[0]["cnt"] if data else 0
 
             # Delete vault files
             vault_count = self.vault.delete_all_docs(user_id)
 
             memory_logger.info(
-                f"🗑️ Deleted {neo4j_count} Neo4j nodes and {vault_count} vault files "
+                f"🗑️ Deleted {graph_count} FalkorDB nodes and {vault_count} vault files "
                 f"for user {user_id}"
             )
-            return neo4j_count
+            return graph_count
         except Exception as e:
             memory_logger.error(f"Delete user memories failed: {e}")
             return 0
@@ -710,7 +711,7 @@ class MemoryService(MemoryServiceBase):
         try:
             # Delete old ConvDoc, chunks (including orphans), and vault file
             await asyncio.to_thread(
-                self._neo4j_write.run,
+                self._graph_write.run,
                 """
                 OPTIONAL MATCH (d:ConvDoc {conversation_id: $source_id})
                 OPTIONAL MATCH (c:ConvChunk {conversation_id: $source_id})
@@ -739,18 +740,18 @@ class MemoryService(MemoryServiceBase):
         try:
             if not self._initialized:
                 await self.initialize()
-            data = await asyncio.to_thread(self._neo4j_read.run, "RETURN 1 AS test")
+            data = await asyncio.to_thread(self._graph_read.run, "RETURN 1 AS test")
             return bool(data and data[0]["test"] == 1)
         except Exception as e:
-            memory_logger.error(f"Neo4j connection test failed: {e}")
+            memory_logger.error(f"FalkorDB connection test failed: {e}")
             return False
 
     def shutdown(self) -> None:
         self._initialized = False
         self.llm_provider = None
-        if self._neo4j_client:
-            self._neo4j_client.close()
-            self._neo4j_client = None
-            self._neo4j_read = None
-            self._neo4j_write = None
+        if self._graph_client:
+            self._graph_client.close()
+            self._graph_client = None
+            self._graph_read = None
+            self._graph_write = None
         memory_logger.info("Memory service shut down")

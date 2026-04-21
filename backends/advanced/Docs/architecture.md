@@ -634,7 +634,7 @@ graph LR
 #### Infrastructure Containers
 - **MongoDB 4.4.18**: Primary data storage with persistence
 - **Qdrant Latest**: Vector database for memory embeddings
-- **Neo4j 5.15**: Graph database for memory relationships and entity connections
+- **FalkorDB**: Graph database for memory relationships and entity connections
 - **Nginx Alpine**: Reverse proxy and load balancing (serves React app in production, proxies API calls to backend)
 
 ## Detailed Data Flow Architecture
@@ -904,9 +904,8 @@ OLLAMA_BASE_URL=http://ollama:11434
 QDRANT_BASE_URL=qdrant
 
 # Graph Storage for Memory Relationships
-NEO4J_HOST=neo4j-mem0
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=your-neo4j-password
+FALKORDB_HOST=falkordb
+FALKORDB_PORT=6379
 
 # Transcription Services (Deepgram Primary, Wyoming Fallback)
 DEEPGRAM_API_KEY=your-deepgram-api-key-here
@@ -922,7 +921,7 @@ DEEPGRAM_API_KEY=your-deepgram-api-key-here
 #### Enhanced Services (Optional but Recommended)
 - **Ollama**: Memory processing
 - **Qdrant**: Vector storage for semantic memory search
-- **Neo4j**: Graph database for memory relationships and entity connections
+- **FalkorDB**: Graph database for memory relationships and entity connections
 - **Deepgram**: Primary speech-to-text transcription service (WebSocket streaming)
 - **Wyoming ASR**: Fallback transcription service (self-hosted)
 

@@ -1,7 +1,7 @@
 """Memory service provider implementations.
 
 This package contains all memory service provider implementations:
-- chronicle: Chronicle native implementation with LLM + Neo4j hybrid search
+- chronicle: Chronicle native implementation with LLM + FalkorDB hybrid search
 - openmemory_mcp: OpenMemory MCP backend integration
 - llm_providers: LLM provider implementations (OpenAI, Ollama)
 - mcp_client: MCP client utilities

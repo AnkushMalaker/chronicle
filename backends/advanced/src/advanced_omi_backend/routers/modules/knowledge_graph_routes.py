@@ -191,7 +191,7 @@ async def update_entity(
         if not existing:
             raise HTTPException(status_code=404, detail="Entity not found")
 
-        # Apply update to Neo4j
+        # Apply update to FalkorDB
         updated = await service.update_entity(
             entity_id=entity_id,
             user_id=str(current_user.id),
@@ -521,18 +521,18 @@ async def consolidate_knowledge_base(
 async def knowledge_graph_health():
     """Check knowledge graph service health.
 
-    Tests Neo4j connection and returns status.
+    Tests FalkorDB connection and returns status.
     """
     try:
         service = get_knowledge_graph_service()
         is_healthy = await service.test_connection()
 
         if is_healthy:
-            return {"status": "healthy", "neo4j": "connected"}
+            return {"status": "healthy", "falkordb": "connected"}
         else:
             return JSONResponse(
                 status_code=503,
-                content={"status": "unhealthy", "neo4j": "disconnected"},
+                content={"status": "unhealthy", "falkordb": "disconnected"},
             )
     except Exception as e:
         logger.error(f"Knowledge graph health check failed: {e}")

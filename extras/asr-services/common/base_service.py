@@ -52,6 +52,7 @@ class BaseASRService(ABC):
         self,
         audio_file_path: str,
         context_info: Optional[str] = None,
+        prompt: Optional[str] = None,
     ) -> TranscriptionResult:
         """
         Transcribe audio file and return result.
@@ -59,6 +60,7 @@ class BaseASRService(ABC):
         Args:
             audio_file_path: Path to audio file (WAV format, 16kHz mono preferred)
             context_info: Optional hot words / context string for providers that support it
+            prompt: Optional custom prompt to override the provider's default transcription prompt
 
         Returns:
             TranscriptionResult with text, words, segments, etc.
@@ -183,13 +185,15 @@ def create_asr_app(service: BaseASRService) -> FastAPI:
     async def transcribe(
         file: UploadFile = File(...),
         context_info: Optional[str] = Form(None),
+        prompt: Optional[str] = Form(None),
     ):
         """
         Transcribe uploaded audio file.
 
         Accepts audio files (WAV, MP3, etc.) and returns transcription
         with word-level timestamps. Optionally accepts context_info
-        (hot words, speaker names, topics) for providers that support it.
+        (hot words, speaker names, topics) and a custom prompt for
+        providers that support it.
         """
         if not service.is_ready:
             raise HTTPException(status_code=503, detail="Service not ready")
@@ -234,6 +238,7 @@ def create_asr_app(service: BaseASRService) -> FastAPI:
                         for event in service.transcribe_with_progress(
                             tmp_filename,
                             context_info=context_info,
+                            prompt=prompt,
                         ):
                             yield json.dumps(event) + "\n"
                     finally:
@@ -254,6 +259,7 @@ def create_asr_app(service: BaseASRService) -> FastAPI:
             result = await service.transcribe(
                 tmp_filename,
                 context_info=context_info,
+                prompt=prompt,
             )
             transcribe_time = time.time() - transcribe_start
             logger.info(f"Transcription completed in {transcribe_time:.3f}s")

@@ -2,7 +2,7 @@
 
 This module provides the main service for:
 - Extracting entities and relationships from conversations
-- Storing and retrieving entities from Neo4j
+- Storing and retrieving entities from FalkorDB
 - Querying the knowledge graph
 """
 
@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from ..neo4j_client import Neo4jClient, Neo4jReadInterface, Neo4jWriteInterface
+from ..graph_client import GraphClient, GraphReadInterface, GraphWriteInterface
 from . import queries
 from .entity_extractor import extract_entities_from_transcript, parse_natural_datetime
 from .kb import KnowledgeBaseManager
@@ -38,47 +38,39 @@ class KnowledgeGraphService:
 
     def __init__(
         self,
-        neo4j_uri: Optional[str] = None,
-        neo4j_user: Optional[str] = None,
-        neo4j_password: Optional[str] = None,
+        host: Optional[str] = None,
+        port: Optional[int] = None,
+        graph_name: str = "chronicle",
     ):
         """Initialize the knowledge graph service.
 
         Args:
-            neo4j_uri: Neo4j connection URI (defaults to env var)
-            neo4j_user: Neo4j username (defaults to env var)
-            neo4j_password: Neo4j password (defaults to env var)
+            host: FalkorDB host (defaults to FALKORDB_HOST env var)
+            port: FalkorDB port (defaults to FALKORDB_PORT env var)
+            graph_name: FalkorDB graph name
         """
-        # Construct URI from host if URI not provided
-        if neo4j_uri:
-            self.neo4j_uri = neo4j_uri
-        elif os.getenv("NEO4J_URI"):
-            self.neo4j_uri = os.getenv("NEO4J_URI")
-        else:
-            neo4j_host = os.getenv("NEO4J_HOST", "neo4j")
-            self.neo4j_uri = f"bolt://{neo4j_host}:7687"
+        self.host = host or os.getenv("FALKORDB_HOST", "falkordb")
+        self.port = port or int(os.getenv("FALKORDB_PORT", "6379"))
+        self.graph_name = graph_name
 
-        self.neo4j_user = neo4j_user or os.getenv("NEO4J_USER", "neo4j")
-        self.neo4j_password = neo4j_password or os.getenv("NEO4J_PASSWORD", "password")
-
-        self._client: Optional[Neo4jClient] = None
-        self._read: Optional[Neo4jReadInterface] = None
-        self._write: Optional[Neo4jWriteInterface] = None
+        self._client: Optional[GraphClient] = None
+        self._read: Optional[GraphReadInterface] = None
+        self._write: Optional[GraphWriteInterface] = None
         self._initialized = False
         self._kb = KnowledgeBaseManager()
 
     def _ensure_initialized(self) -> None:
-        """Ensure Neo4j client is initialized."""
+        """Ensure FalkorDB client is initialized."""
         if not self._initialized:
-            self._client = Neo4jClient(
-                uri=self.neo4j_uri,
-                user=self.neo4j_user,
-                password=self.neo4j_password,
+            self._client = GraphClient(
+                host=self.host,
+                port=self.port,
+                graph_name=self.graph_name,
             )
-            self._read = Neo4jReadInterface(self._client)
-            self._write = Neo4jWriteInterface(self._client)
+            self._read = GraphReadInterface(self._client)
+            self._write = GraphWriteInterface(self._client)
             self._initialized = True
-            logger.info("Knowledge Graph Service initialized with Neo4j connection")
+            logger.info("Knowledge Graph Service initialized with FalkorDB connection")
 
     # =========================================================================
     # CONVERSATION PROCESSING
@@ -198,7 +190,7 @@ class KnowledgeGraphService:
         user_id: str,
         conversation_id: str,
     ) -> Dict[str, str]:
-        """Store extracted entities in Neo4j.
+        """Store extracted entities in FalkorDB.
 
         Returns:
             Mapping of entity name (lowercase) to entity ID
@@ -252,7 +244,7 @@ class KnowledgeGraphService:
         entity_id_map: Dict[str, str],
         conversation_id: str,
     ) -> int:
-        """Store extracted relationships in Neo4j."""
+        """Store extracted relationships in FalkorDB."""
         count = 0
         now = datetime.utcnow().isoformat()
 
@@ -502,6 +494,7 @@ class KnowledgeGraphService:
             details=details,
             icon=icon,
             metadata=None,
+            now=datetime.utcnow().isoformat(),
         )
 
         if not results:
@@ -674,7 +667,7 @@ class KnowledgeGraphService:
     # =========================================================================
 
     def _row_to_entity(self, data: Dict[str, Any]) -> Entity:
-        """Convert Neo4j row data to Entity model."""
+        """Convert row data to Entity model."""
         return Entity(
             id=data.get("id", ""),
             name=data.get("name", ""),
@@ -693,7 +686,7 @@ class KnowledgeGraphService:
         )
 
     def _row_to_relationship(self, data: Dict[str, Any]) -> Relationship:
-        """Convert Neo4j row data to Relationship model."""
+        """Convert row data to Relationship model."""
         rel_type = data.get("type", "RELATED_TO")
         try:
             rel_type_enum = RelationshipType(rel_type)
@@ -717,7 +710,7 @@ class KnowledgeGraphService:
         )
 
     def _parse_datetime(self, value: Any) -> Optional[datetime]:
-        """Parse datetime from Neo4j."""
+        """Parse datetime from graph result."""
         if value is None:
             return None
         if isinstance(value, datetime):
@@ -727,13 +720,10 @@ class KnowledgeGraphService:
                 return datetime.fromisoformat(value.replace("Z", "+00:00"))
             except ValueError:
                 return None
-        # Neo4j DateTime object
-        if hasattr(value, "to_native"):
-            return value.to_native()
         return None
 
     def _parse_metadata(self, value: Any) -> Dict[str, Any]:
-        """Parse metadata JSON from Neo4j."""
+        """Parse metadata JSON from graph result."""
         if value is None:
             return {}
         if isinstance(value, dict):
@@ -749,7 +739,7 @@ class KnowledgeGraphService:
 
     # -------------------------------------------------------------------------
     # Basic Memory (MEMORY.md) — delegates to KnowledgeBaseManager
-    # No Neo4j required; works even if graph DB is down.
+    # No FalkorDB required; works even if graph DB is down.
     # -------------------------------------------------------------------------
 
     def get_basic_memory(self, user_id: str) -> str:
@@ -773,14 +763,13 @@ class KnowledgeGraphService:
         logger.info("Knowledge Graph Service shut down")
 
     async def test_connection(self) -> bool:
-        """Test Neo4j connection."""
+        """Test FalkorDB connection."""
         try:
             self._ensure_initialized()
-            # Simple query to test connection
             self._read.run("RETURN 1 as test")
             return True
         except Exception as e:
-            logger.error(f"Neo4j connection test failed: {e}")
+            logger.error(f"FalkorDB connection test failed: {e}")
             return False
 
 

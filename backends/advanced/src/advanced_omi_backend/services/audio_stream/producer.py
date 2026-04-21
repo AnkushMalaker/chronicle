@@ -243,6 +243,12 @@ class AudioStreamProducer:
 
         await self.redis_client.hset(session_key, mapping=mapping)
 
+        # Notify monitoring loop via pub/sub (instant, no polling needed)
+        signal = json.dumps(
+            {"type": "finalize", "reason": completion_reason or "unknown"}
+        )
+        await self.redis_client.publish(f"session:signal:{session_id}", signal)
+
         # Send end_marker to Redis stream so streaming consumer can close the connection
         if session_id in self.session_buffers:
             buffer = self.session_buffers[session_id]

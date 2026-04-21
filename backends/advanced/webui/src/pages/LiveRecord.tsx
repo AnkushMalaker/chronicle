@@ -1,4 +1,4 @@
-import { Radio, Zap, Archive, Settings } from 'lucide-react'
+import { Radio, Zap, Archive, Settings, Monitor, Mic } from 'lucide-react'
 import { useRecording } from '../contexts/RecordingContext'
 import SimplifiedControls from '../components/audio/SimplifiedControls'
 import StatusDisplay from '../components/audio/StatusDisplay'
@@ -54,8 +54,58 @@ export default function LiveRecord() {
         </div>
       </div>
 
-      {/* Microphone Selector */}
-      {recording.availableDevices.length > 1 && (
+      {/* Audio Source Toggle */}
+      <div className="mb-4 flex items-center gap-3">
+        <div className={`inline-flex rounded-lg border border-gray-300 dark:border-gray-600 bg-gray-100 dark:bg-gray-800 p-0.5 ${recording.isRecording ? 'opacity-50 pointer-events-none' : ''}`}>
+          <button
+            onClick={() => recording.setAudioSource('mic')}
+            disabled={recording.isRecording}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
+              recording.audioSource === 'mic'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
+            }`}
+          >
+            <Mic className="h-3.5 w-3.5" />
+            <span>Mic</span>
+          </button>
+          <button
+            onClick={() => recording.setAudioSource('meeting')}
+            disabled={recording.isRecording}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
+              recording.audioSource === 'meeting'
+                ? 'bg-purple-600 text-white shadow-sm'
+                : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
+            }`}
+          >
+            <Mic className="h-3.5 w-3.5" />
+            <Monitor className="h-3.5 w-3.5" />
+            <span>Meeting</span>
+          </button>
+          <button
+            onClick={() => recording.setAudioSource('tab')}
+            disabled={recording.isRecording}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
+              recording.audioSource === 'tab'
+                ? 'bg-indigo-600 text-white shadow-sm'
+                : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
+            }`}
+          >
+            <Monitor className="h-3.5 w-3.5" />
+            <span>Tab</span>
+          </button>
+        </div>
+        <span className="text-sm text-gray-500 dark:text-gray-400">
+          {recording.audioSource === 'mic'
+            ? 'Microphone only'
+            : recording.audioSource === 'meeting'
+              ? 'Mic + tab audio (you\'ll be asked to select a tab)'
+              : 'Browser tab audio only (no microphone)'}
+        </span>
+      </div>
+
+      {/* Microphone Selector (hidden in tab-only mode) */}
+      {recording.audioSource !== 'tab' && recording.availableDevices.length > 1 && (
         <div className="mb-4 flex items-center gap-2">
           <Settings className="h-4 w-4 text-gray-500 dark:text-gray-400 flex-shrink-0" />
           <label className="text-sm font-medium text-gray-700 dark:text-gray-300 flex-shrink-0">

@@ -394,7 +394,7 @@ async def update_annotation_status(
                     logger.error(f"Error applying transcript suggestion: {e}")
                     # Don't fail the status update if segment update fails
             elif annotation.is_entity_annotation():
-                # Update entity in Neo4j
+                # Update entity in FalkorDB
                 try:
                     kg_service = get_knowledge_graph_service()
                     update_kwargs = {}
@@ -663,7 +663,7 @@ async def create_entity_annotation(
 
     - Validates user owns the entity
     - Creates annotation record for jargon/finetuning pipeline
-    - Applies correction to Neo4j immediately
+    - Applies correction to FalkorDB immediately
     - Marked as processed=False for downstream cron consumption
 
     Dual purpose: entity name corrections feed both the jargon pipeline
@@ -704,7 +704,7 @@ async def create_entity_annotation(
             f"field={annotation_data.entity_field}"
         )
 
-        # Apply correction to Neo4j immediately
+        # Apply correction to FalkorDB immediately
         try:
             update_kwargs = {}
             if annotation_data.entity_field == "name":
@@ -718,11 +718,11 @@ async def create_entity_annotation(
                 **update_kwargs,
             )
             logger.info(
-                f"Applied entity correction to Neo4j for entity {annotation_data.entity_id}"
+                f"Applied entity correction to FalkorDB for entity {annotation_data.entity_id}"
             )
         except Exception as e:
-            logger.error(f"Error applying entity correction to Neo4j: {e}")
-            # Annotation is saved but Neo4j update failed — log but don't fail the request
+            logger.error(f"Error applying entity correction to FalkorDB: {e}")
+            # Annotation is saved but FalkorDB update failed — log but don't fail the request
 
         return AnnotationResponse.model_validate(annotation)
 
@@ -1003,8 +1003,12 @@ async def apply_diarization_annotations(
                 # No correction, keep original
                 corrected_segments.append(segment.model_copy())
 
-        # Add new version
-        conversation.add_transcript_version(
+        # Add new version — carry over provider_capabilities so downstream
+        # processing knows the provider's diarization/word_timestamp support.
+        source_capabilities = active_transcript.metadata.get(
+            "provider_capabilities", {}
+        )
+        new_version = conversation.add_transcript_version(
             version_id=new_version_id,
             transcript=active_transcript.transcript,  # Same transcript text
             words=active_transcript.words,  # Same word timings
@@ -1017,9 +1021,12 @@ async def apply_diarization_annotations(
                 "source_version_id": active_transcript.version_id,
                 "trigger": "manual_annotation_apply",
                 "applied_annotation_count": len(annotations),
+                "provider_capabilities": source_capabilities,
             },
             set_as_active=True,
         )
+        if active_transcript.diarization_source:
+            new_version.diarization_source = active_transcript.diarization_source
 
         await conversation.save()
         logger.info(
@@ -1177,8 +1184,12 @@ async def apply_all_annotations(
                 )
                 corrected_segments.insert(insert_pos, new_segment)
 
-        # Add new version
-        conversation.add_transcript_version(
+        # Add new version — carry over provider_capabilities so downstream
+        # processing knows the provider's diarization/word_timestamp support.
+        source_capabilities = active_transcript.metadata.get(
+            "provider_capabilities", {}
+        )
+        new_version = conversation.add_transcript_version(
             version_id=new_version_id,
             transcript=active_transcript.transcript,
             words=active_transcript.words,  # Preserved (may be misaligned for text edits)
@@ -1192,9 +1203,12 @@ async def apply_all_annotations(
                 "diarization_count": len(diarization_annotations),
                 "transcript_count": len(transcript_annotations),
                 "insert_count": len(insert_annotations),
+                "provider_capabilities": source_capabilities,
             },
             set_as_active=True,
         )
+        if active_transcript.diarization_source:
+            new_version.diarization_source = active_transcript.diarization_source
 
         await conversation.save()
         logger.info(

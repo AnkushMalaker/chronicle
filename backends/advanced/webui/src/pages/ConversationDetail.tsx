@@ -85,6 +85,16 @@ export default function ConversationDetail() {
   } = useConversationDetail(id ?? null)
 
   const conversation = conversationData as Conversation | undefined
+  const isLive = conversation?.active_transcript_version === 'live-v0'
+
+  // Auto-scroll to bottom of transcript when live segments update
+  const transcriptEndRef = useRef<HTMLDivElement>(null)
+  const segments = useMemo(() => conversation?.segments ?? [], [conversation?.segments])
+  useEffect(() => {
+    if (isLive && transcriptEndRef.current) {
+      transcriptEndRef.current.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [segments.length, isLive])
 
   const {
     data: memoriesData,
@@ -616,8 +626,6 @@ export default function ConversationDetail() {
     )
   }
 
-  const segments = conversation.segments || []
-
   return (
     <div className="max-w-5xl mx-auto p-6 space-y-6">
       {/* Header */}
@@ -852,6 +860,12 @@ export default function ConversationDetail() {
           <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-6">
             <h2 className="font-medium text-gray-900 dark:text-gray-100 mb-4">
               Transcript
+              {isLive && (
+                <span className="inline-flex items-center gap-1.5 ml-2">
+                  <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+                  <span className="text-xs text-red-600 dark:text-red-400 font-medium">LIVE</span>
+                </span>
+              )}
               {segments.length > 0 && (
                 <span className="text-sm text-gray-500 dark:text-gray-400 ml-2">
                   ({segments.length} segments)
@@ -987,9 +1001,12 @@ export default function ConversationDetail() {
                     </div>
                   )
                 })}
+                <div ref={transcriptEndRef} />
               </div>
             ) : (
-              <p className="text-sm text-gray-500 dark:text-gray-400 italic">No transcript segments available</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400 italic">
+                {isLive ? 'Waiting for speech...' : 'No transcript segments available'}
+              </p>
             )}
           </div>
         </div>

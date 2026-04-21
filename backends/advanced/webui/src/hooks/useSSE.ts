@@ -22,7 +22,7 @@ export function useSSE(): SSEStatus {
 
   const BASE_DELAY = 1000 // 1s, doubles each retry up to 30s
 
-  const handleEvent = useCallback((eventType: string, _data: unknown) => {
+  const handleEvent = useCallback((eventType: string, data: unknown) => {
     switch (eventType) {
       case 'conversation.created':
       case 'conversation.updated':
@@ -39,6 +39,25 @@ export function useSSE(): SSEStatus {
         queryClient.invalidateQueries({ queryKey: ['conversationMemories'] })
         queryClient.invalidateQueries({ queryKey: ['queue'] })
         break
+
+      case 'transcript.live': {
+        const d = data as { conversation_id?: string; segments?: unknown[]; transcript?: string }
+        if (d.conversation_id) {
+          queryClient.setQueryData(
+            ['conversation', d.conversation_id],
+            (old: Record<string, unknown> | undefined) => {
+              if (!old) return old
+              return {
+                ...old,
+                segments: d.segments ?? [],
+                transcript: d.transcript ?? '',
+                segment_count: d.segments?.length ?? 0,
+              }
+            }
+          )
+        }
+        break
+      }
 
       case 'plugin.event':
       case 'job.progress':

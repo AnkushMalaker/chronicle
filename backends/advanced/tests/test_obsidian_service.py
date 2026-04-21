@@ -47,24 +47,35 @@ class TestObsidianService(unittest.TestCase):
         self.mock_generate_embeddings = self.embedding_patcher.start()
         self.addCleanup(self.embedding_patcher.stop)
 
-        # Patch GraphDatabase
+        # Patch FalkorDB
         self.graph_db_patcher = patch(
-            "advanced_omi_backend.services.neo4j_client.GraphDatabase"
+            "advanced_omi_backend.services.graph_client.FalkorDB"
         )
-        self.mock_graph_db = self.graph_db_patcher.start()
-        self.mock_driver = MagicMock()
+        self.mock_falkordb = self.graph_db_patcher.start()
+        self.mock_graph = MagicMock()
         self.mock_session = MagicMock()
-        self.mock_graph_db.driver.return_value = self.mock_driver
-        self.mock_driver.session.return_value.__enter__.return_value = self.mock_session
+        self.mock_falkordb.return_value.select_graph.return_value = self.mock_graph
+        # _SessionProxy delegates .run() to self._graph.query(), which returns
+        # a result object with .header and .result_set.  For tests that set
+        # self.mock_session.run.return_value we keep using mock_session via
+        # patching GraphClient.session to return it as a context manager.
+        self.session_patcher = patch(
+            "advanced_omi_backend.services.graph_client.GraphClient.session",
+            return_value=MagicMock(
+                __enter__=MagicMock(return_value=self.mock_session),
+                __exit__=MagicMock(return_value=False),
+            ),
+        )
+        self.session_patcher.start()
+        self.addCleanup(self.session_patcher.stop)
         self.addCleanup(self.graph_db_patcher.stop)
 
         # Patch environment variables
         self.env_patcher = patch.dict(
             os.environ,
             {
-                "NEO4J_HOST": "localhost",
-                "NEO4J_USER": "neo4j",
-                "NEO4J_PASSWORD": "password",
+                "FALKORDB_HOST": "localhost",
+                "FALKORDB_PORT": "6379",
             },
         )
         self.env_patcher.start()
@@ -78,7 +89,7 @@ class TestObsidianService(unittest.TestCase):
         mock_embedding = [0.1, 0.2, 0.3]
         self.mock_generate_embeddings.return_value = [mock_embedding]
 
-        # Setup mock Neo4j results
+        # Setup mock FalkorDB results
         mock_record1 = {
             "source": "Note1",
             "content": "Content of chunk 1",
@@ -104,7 +115,7 @@ class TestObsidianService(unittest.TestCase):
         # 1. Check embedding call
         self.mock_generate_embeddings.assert_awaited_once()
 
-        # 2. Check Neo4j query execution
+        # 2. Check FalkorDB query execution
         self.mock_session.run.assert_called_once()
         args, kwargs = self.mock_session.run.call_args
         self.assertIn("CALL db.index.vector.queryNodes", args[0])

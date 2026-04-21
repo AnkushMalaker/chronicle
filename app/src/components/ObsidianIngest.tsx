@@ -65,7 +65,7 @@ export const ObsidianIngest: React.FC<ObsidianIngestProps> = ({
         onPress={handleIngest}
         disabled={loading}
       >
-        <Text style={s.buttonText}>{loading ? 'Starting Ingestion...' : 'Ingest to Neo4j'}</Text>
+        <Text style={s.buttonText}>{loading ? 'Starting Ingestion...' : 'Ingest to FalkorDB'}</Text>
       </TouchableOpacity>
 
       <Text style={s.helpText}>
