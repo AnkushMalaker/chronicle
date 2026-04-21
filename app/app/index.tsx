@@ -62,13 +62,22 @@ export default function App() {
   useEffect(() => { isOmiAudioListenerActiveRef.current = isOmiAudioListenerActive; }, [isOmiAudioListenerActive]);
   useEffect(() => { isAudioStreamingRef.current = audioStreamer.isStreaming; }, [audioStreamer.isStreaming]);
 
+  // Refs to break the declaration-order cycle:
+  // onDeviceConnect/onDeviceDisconnect need orchestrator + autoReconnect,
+  // but deviceConnection (which needs those callbacks) must be declared
+  // before orchestrator and autoReconnect.
+  type OrchestratorHandle = ReturnType<typeof useAudioStreamingOrchestrator>;
+  type AutoReconnectHandle = ReturnType<typeof useAutoReconnect>;
+  const orchestratorRef = useRef<OrchestratorHandle | null>(null);
+  const autoReconnectRef = useRef<AutoReconnectHandle | null>(null);
+
   // Device callbacks
   const onDeviceConnect = useCallback(async () => {
     const deviceIdToSave = omiConnection.connectedDeviceId;
     if (deviceIdToSave) {
       await saveLastConnectedDeviceId(deviceIdToSave);
-      autoReconnect.setLastKnownDeviceId(deviceIdToSave);
-      autoReconnect.setTriedAutoReconnectForCurrentId(false);
+      autoReconnectRef.current?.setLastKnownDeviceId(deviceIdToSave);
+      autoReconnectRef.current?.setTriedAutoReconnectForCurrentId(false);
     }
 
     // Auto-restart audio pipeline if it was active before BLE disconnect
@@ -77,12 +86,12 @@ export default function App() {
       console.log('[App] BLE reconnected — auto-restarting audio pipeline');
       // Short delay to let BLE connection stabilize
       setTimeout(() => {
-        orchestrator.handleStartAudioListeningAndStreaming().catch(err => {
+        orchestratorRef.current?.handleStartAudioListeningAndStreaming().catch(err => {
           console.error('[App] Failed to auto-restart audio pipeline:', err);
         });
       }, 1000);
     }
-  }, [omiConnection, orchestrator.handleStartAudioListeningAndStreaming]);
+  }, [omiConnection]);
 
   const onDeviceDisconnect = useCallback(async () => {
     // Remember if audio was active so we can auto-restart on reconnect
@@ -98,7 +107,7 @@ export default function App() {
     if (phoneAudioRecorder.isRecording) {
       audioStreamer.stopStreaming();
       await phoneAudioRecorder.stopRecording();
-      orchestrator.setIsPhoneAudioMode(false);
+      orchestratorRef.current?.setIsPhoneAudioMode(false);
     }
   }, [originalStopAudioListener, audioStreamer.stopStreaming, phoneAudioRecorder.stopRecording, phoneAudioRecorder.isRecording]);
 
@@ -132,6 +141,10 @@ export default function App() {
     originalStopAudioListener,
     settings,
   });
+
+  // Keep forward-declared refs in sync so device callbacks can call through.
+  orchestratorRef.current = orchestrator;
+  autoReconnectRef.current = autoReconnect;
 
   // Cleanup
   const cleanupRefs = useRef({ omiConnection, bleManager, disconnectFromDevice: deviceConnection.disconnectFromDevice, stopAudioStreaming: audioStreamer.stopStreaming, stopPhoneAudio: phoneAudioRecorder.stopRecording });
