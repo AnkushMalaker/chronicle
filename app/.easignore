@@ -1,0 +1,46 @@
+# NOTE: .easignore fully replaces .gitignore for EAS uploads.
+# Must exclude everything we don't want in the build tarball.
+
+# Dependencies — reinstalled on EAS build server
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+
+# Native build outputs — regenerated on EAS build servers
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+ios/build/
+ios/Pods/
+ios/DerivedData/
+ios/*.xcworkspace/xcuserdata/
+ios/*.xcodeproj/xcuserdata/
+ios/*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# Local artifacts
+*.ipa
+*.apk
+*.aab
+build-*.ipa
+
+# Credentials (EAS uses server-side credentials)
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.pem
+
+# Metro / debug
+.metro-health-check*
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# OS / editor
+.DS_Store
+*.log
