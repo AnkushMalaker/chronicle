@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import threading
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -22,6 +23,23 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 RELAY_PORT = int(os.getenv("RELAY_PORT", "8989"))
+
+
+class MemoryLogHandler(logging.Handler):
+    """Keep recent formatted log lines in memory for display in the menu bar UI."""
+
+    def __init__(self, capacity: int = 500) -> None:
+        super().__init__()
+        self.lines: deque = deque(maxlen=capacity)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.lines.append(self.format(record))
+        except Exception:
+            self.handleError(record)
+
+
+log_buffer = MemoryLogHandler()
 
 
 # --- Shared state ------------------------------------------------------------
@@ -185,11 +203,13 @@ class RelayMenuApp(rumps.App):
 
         self.status_item = rumps.MenuItem("Status: Starting...", callback=None)
         self.toggle_item = rumps.MenuItem("Stop Relay", callback=self.on_toggle)
+        self.logs_item = rumps.MenuItem("View Logs", callback=self.on_view_logs)
 
         self.menu = [
             self.status_item,
             None,
             self.toggle_item,
+            self.logs_item,
             None,
         ]
 
@@ -230,6 +250,19 @@ class RelayMenuApp(rumps.App):
             logger.info("User starting relay")
             self.relay.start()
 
+    def on_view_logs(self, _sender) -> None:
+        """Show recent log output in a scrollable dialog."""
+        text = "\n".join(log_buffer.lines) or "(no logs yet)"
+        window = rumps.Window(
+            title="Chronicle Relay — Logs",
+            message=f"Showing last {len(log_buffer.lines)} log line(s):",
+            default_text=text,
+            ok="Close",
+            cancel=None,
+            dimensions=(720, 400),
+        )
+        window.run()
+
 
 # --- Entry point --------------------------------------------------------------
 
@@ -239,10 +272,10 @@ def main() -> None:
 
     NSApplication.sharedApplication().setActivationPolicy_(1)
 
-    logging.basicConfig(
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        level=logging.INFO,
-    )
+    log_format = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    logging.basicConfig(format=log_format, level=logging.INFO)
+    log_buffer.setFormatter(logging.Formatter(log_format))
+    logging.getLogger().addHandler(log_buffer)
     logging.getLogger("websockets").setLevel(logging.WARNING)
     logging.getLogger("aioesphomeapi").setLevel(logging.WARNING)
 

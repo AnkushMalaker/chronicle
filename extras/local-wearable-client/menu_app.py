@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import threading
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -26,6 +27,23 @@ from main import (
 logger = logging.getLogger(__name__)
 
 load_dotenv()
+
+
+class MemoryLogHandler(logging.Handler):
+    """Keep recent formatted log lines in memory for display in the menu bar UI."""
+
+    def __init__(self, capacity: int = 500) -> None:
+        super().__init__()
+        self.lines: deque = deque(maxlen=capacity)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.lines.append(self.format(record))
+        except Exception:
+            self.handleError(record)
+
+
+log_buffer = MemoryLogHandler()
 
 
 # --- Shared state -----------------------------------------------------------
@@ -336,6 +354,7 @@ class WearableMenuApp(rumps.App):
         self.disconnect_item = rumps.MenuItem("Disconnect", callback=self.on_disconnect)
         self.devices_header = rumps.MenuItem("Nearby Devices:", callback=None)
         self.scan_item = rumps.MenuItem("Scan Now", callback=self.on_scan)
+        self.logs_item = rumps.MenuItem("View Logs", callback=self.on_view_logs)
 
         self.menu = [
             self.status_item,
@@ -345,6 +364,7 @@ class WearableMenuApp(rumps.App):
             rumps.MenuItem("  (scanning...)", callback=None),
             None,  # separator
             self.scan_item,
+            self.logs_item,
             None,  # separator
         ]
         # Disconnect is always clickable — harmless when not connected
@@ -444,6 +464,19 @@ class WearableMenuApp(rumps.App):
         logger.info("User requested disconnect")
         self.ble.request_disconnect()
 
+    def on_view_logs(self, _sender) -> None:
+        """Show recent log output in a scrollable dialog."""
+        text = "\n".join(log_buffer.lines) or "(no logs yet)"
+        window = rumps.Window(
+            title="Chronicle Wearable — Logs",
+            message=f"Showing last {len(log_buffer.lines)} log line(s):",
+            default_text=text,
+            ok="Close",
+            cancel=None,
+            dimensions=(720, 400),
+        )
+        window.run()
+
 
 # --- Entry point --------------------------------------------------------------
 
@@ -456,10 +489,10 @@ def run_menu_app() -> None:
 
     NSApplication.sharedApplication().setActivationPolicy_(1)  # Accessory
 
-    logging.basicConfig(
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        level=logging.INFO,
-    )
+    log_format = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    logging.basicConfig(format=log_format, level=logging.INFO)
+    log_buffer.setFormatter(logging.Formatter(log_format))
+    logging.getLogger().addHandler(log_buffer)
 
     state = SharedState()
     bg = AsyncioThread()
