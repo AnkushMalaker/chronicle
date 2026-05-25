@@ -42,6 +42,53 @@ class MemoryLogHandler(logging.Handler):
 log_buffer = MemoryLogHandler()
 
 
+def _show_logs_dialog(title: str, lines) -> None:
+    """Show log lines in a scrollable modal dialog."""
+    from AppKit import (
+        NSAlert,
+        NSBezelBorder,
+        NSFont,
+        NSScrollView,
+        NSTextView,
+        NSViewWidthSizable,
+    )
+    from Foundation import NSMakeRect, NSMakeSize
+
+    text = "\n".join(lines) or "(no logs yet)"
+    width, height = 720, 380
+
+    scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
+    scroll.setHasVerticalScroller_(True)
+    scroll.setHasHorizontalScroller_(False)
+    scroll.setBorderType_(NSBezelBorder)
+    scroll.setAutohidesScrollers_(False)
+
+    content = scroll.contentSize()
+    text_view = NSTextView.alloc().initWithFrame_(
+        NSMakeRect(0, 0, content.width, content.height)
+    )
+    text_view.setMinSize_(NSMakeSize(0, content.height))
+    text_view.setMaxSize_(NSMakeSize(1e7, 1e7))
+    text_view.setVerticallyResizable_(True)
+    text_view.setHorizontallyResizable_(False)
+    text_view.setAutoresizingMask_(NSViewWidthSizable)
+    text_view.setEditable_(False)
+    text_view.setFont_(NSFont.userFixedPitchFontOfSize_(11))
+    text_view.textContainer().setContainerSize_(NSMakeSize(content.width, 1e7))
+    text_view.textContainer().setWidthTracksTextView_(True)
+    text_view.setString_(text)
+    text_view.scrollRangeToVisible_((len(text), 0))
+
+    scroll.setDocumentView_(text_view)
+
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_(title)
+    alert.setInformativeText_(f"Last {len(lines)} log line(s)")
+    alert.addButtonWithTitle_("Close")
+    alert.setAccessoryView_(scroll)
+    alert.runModal()
+
+
 # --- Shared state ------------------------------------------------------------
 
 
@@ -252,16 +299,7 @@ class RelayMenuApp(rumps.App):
 
     def on_view_logs(self, _sender) -> None:
         """Show recent log output in a scrollable dialog."""
-        text = "\n".join(log_buffer.lines) or "(no logs yet)"
-        window = rumps.Window(
-            title="Chronicle Relay — Logs",
-            message=f"Showing last {len(log_buffer.lines)} log line(s):",
-            default_text=text,
-            ok="Close",
-            cancel=None,
-            dimensions=(720, 400),
-        )
-        window.run()
+        _show_logs_dialog("Chronicle Relay — Logs", list(log_buffer.lines))
 
 
 # --- Entry point --------------------------------------------------------------
