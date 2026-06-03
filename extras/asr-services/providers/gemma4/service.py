@@ -35,7 +35,10 @@ class ChatMessage(BaseModel):
 class ChatCompletionRequest(BaseModel):
     model: str = "gemma-4-E4B-it"
     messages: list[dict]
-    temperature: float = 0.2
+    # Google's recommended sampling configuration for Gemma 4.
+    temperature: float = 1.0
+    top_p: float = 0.95
+    top_k: int = 64
     max_tokens: Optional[int] = None
 
 
@@ -113,6 +116,8 @@ def main():
                 messages=request.messages,
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
+                top_p=request.top_p,
+                top_k=request.top_k,
             ),
         )
 

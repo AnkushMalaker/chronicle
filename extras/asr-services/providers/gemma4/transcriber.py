@@ -23,6 +23,11 @@ MAX_CHUNK_SECONDS = 30
 BATCH_THRESHOLD_SECONDS = 30
 BATCH_OVERLAP_SECONDS = 5
 
+# Google's recommended sampling configuration for Gemma 4 (all use cases).
+GEMMA4_TEMPERATURE = 1.0
+GEMMA4_TOP_P = 0.95
+GEMMA4_TOP_K = 64
+
 DEFAULT_TRANSCRIPTION_PROMPT = (
     "Transcribe the following speech segment in its original language and identify different speakers. "
     "Follow these specific instructions for formatting the answer:\n"
@@ -73,42 +78,21 @@ _JUDGE_INSTRUCTIONS = {
 def _parse_diarized_text(
     text: str, chunk_start: float, chunk_end: float
 ) -> list[Segment]:
-    """Parse LLM diarization output into Segment objects.
+    """Parse Gemma 4 diarized output into a single segment.
 
-    Since the model doesn't provide timestamps, we distribute time
-    proportionally across segments based on character count.
+    Gemma 4 emits speaker-labelled text but no real timestamps. We do NOT fake
+    per-speaker timing or diarization: the speaker labels are stripped and the
+    whole chunk is returned as ONE segment spanning [chunk_start, chunk_end] with
+    an unknown speaker (chunk_start/chunk_end are the real audio boundaries).
     """
     matches = list(SPEAKER_LINE_RE.finditer(text))
-    if not matches:
-        # No speaker labels found — return single segment
+    if matches:
+        clean = " ".join(m.group(2).strip() for m in matches if m.group(2).strip())
+    else:
         clean = text.strip()
-        if not clean or clean == "[NO SPEECH]":
-            return []
-        return [Segment(text=clean, start=chunk_start, end=chunk_end, speaker=None)]
-
-    # Distribute time proportionally by character count
-    total_chars = sum(len(m.group(2)) for m in matches)
-    if total_chars == 0:
+    if not clean or clean == "[NO SPEECH]":
         return []
-
-    duration = chunk_end - chunk_start
-    segments = []
-    cursor = chunk_start
-    for m in matches:
-        speaker = m.group(1)
-        seg_text = m.group(2).strip()
-        seg_duration = (len(seg_text) / total_chars) * duration
-        segments.append(
-            Segment(
-                text=seg_text,
-                start=round(cursor, 3),
-                end=round(cursor + seg_duration, 3),
-                speaker=speaker,
-            )
-        )
-        cursor += seg_duration
-
-    return segments
+    return [Segment(text=clean, start=chunk_start, end=chunk_end, speaker=None)]
 
 
 class Gemma4Transcriber:
@@ -153,6 +137,25 @@ class Gemma4Transcriber:
         )
         logger.info(f"Model loaded on {self.device}")
 
+    def _decode_response(self, outputs, input_len: int) -> str:
+        """Decode generated tokens and strip any thinking/channel blocks.
+
+        Uses the processor's ``parse_response`` (the Gemma 4 recommended flow) so
+        that ``<|channel>thought ... <channel|>`` wrappers never leak into the
+        returned text, regardless of whether thinking was triggered.
+
+        ``parse_response`` returns a chat-message dict ``{"role": "assistant",
+        "thinking"?: ..., "content": ..., "tool_calls"?: ...}`` per the Gemma 4
+        ``response_schema``. We want ``content``; ``thinking`` is dropped.
+        """
+        raw = self.processor.decode(outputs[0][input_len:], skip_special_tokens=False)
+        parsed = self.processor.parse_response(raw)
+        if isinstance(parsed, dict):
+            text = parsed.get("content") or ""
+        else:
+            text = parsed or ""
+        return text.strip()
+
     def _transcribe_single(
         self,
         audio_file_path: str,
@@ -177,12 +180,15 @@ class Gemma4Transcriber:
 
         logger.info(f"Using prompt: {prompt[:100]}...")
 
+        # Gemma 4 guidance: place audio AFTER the text for best multimodal
+        # performance. The prompt text ("the following speech segment") also
+        # reads naturally with the audio coming after it.
         messages = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "audio", "audio": audio_file_path},
                     {"type": "text", "text": prompt},
+                    {"type": "audio", "audio": audio_file_path},
                 ],
             }
         ]
@@ -193,6 +199,7 @@ class Gemma4Transcriber:
             return_dict=True,
             return_tensors="pt",
             add_generation_prompt=True,
+            enable_thinking=False,
         ).to(self.model.device)
 
         input_len = inputs["input_ids"].shape[-1]
@@ -200,9 +207,7 @@ class Gemma4Transcriber:
         with torch.inference_mode():
             outputs = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens)
 
-        raw_text = self.processor.decode(
-            outputs[0][input_len:], skip_special_tokens=True
-        ).strip()
+        raw_text = self._decode_response(outputs, input_len)
         logger.info(f"Raw output ({duration:.1f}s): {raw_text[:200]}")
 
         # Parse into segments
@@ -274,7 +279,9 @@ class Gemma4Transcriber:
         self,
         messages: list[dict],
         max_tokens: int | None = None,
-        temperature: float = 0.2,
+        temperature: float = GEMMA4_TEMPERATURE,
+        top_p: float = GEMMA4_TOP_P,
+        top_k: int = GEMMA4_TOP_K,
     ) -> tuple[str, int, int]:
         """Generate a text-only chat completion reusing the loaded model.
 
@@ -282,6 +289,8 @@ class Gemma4Transcriber:
             messages: OpenAI-format messages list (text-only, no audio).
             max_tokens: Maximum tokens to generate (default 2000).
             temperature: Sampling temperature. <=0 uses greedy decoding.
+            top_p: Nucleus sampling cutoff (only used when sampling).
+            top_k: Top-k sampling cutoff (only used when sampling).
 
         Returns:
             (generated_text, prompt_tokens, completion_tokens)
@@ -311,6 +320,7 @@ class Gemma4Transcriber:
             return_dict=True,
             return_tensors="pt",
             add_generation_prompt=True,
+            enable_thinking=False,
         ).to(self.model.device)
 
         input_len = inputs["input_ids"].shape[-1]
@@ -319,6 +329,8 @@ class Gemma4Transcriber:
         if temperature > 0:
             gen_kwargs["do_sample"] = True
             gen_kwargs["temperature"] = temperature
+            gen_kwargs["top_p"] = top_p
+            gen_kwargs["top_k"] = top_k
         else:
             gen_kwargs["do_sample"] = False
 
@@ -326,9 +338,7 @@ class Gemma4Transcriber:
             outputs = self.model.generate(**inputs, **gen_kwargs)
 
         completion_tokens = outputs.shape[-1] - input_len
-        text = self.processor.decode(
-            outputs[0][input_len:], skip_special_tokens=True
-        ).strip()
+        text = self._decode_response(outputs, input_len)
 
         return text, int(input_len), int(completion_tokens)
 
@@ -359,12 +369,14 @@ class Gemma4Transcriber:
 
         prompt = self._build_judge_prompt(transcript, context, strictness)
 
+        # Gemma 4 guidance: audio goes AFTER the text. The judge prompt also
+        # refers to "the audio clip below", so the audio must follow the text.
         messages = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "audio", "audio": audio_file_path},
                     {"type": "text", "text": prompt},
+                    {"type": "audio", "audio": audio_file_path},
                 ],
             }
         ]
@@ -375,10 +387,13 @@ class Gemma4Transcriber:
             return_dict=True,
             return_tensors="pt",
             add_generation_prompt=True,
+            enable_thinking=False,
         ).to(self.model.device)
 
         input_len = inputs["input_ids"].shape[-1]
 
+        # Greedy decoding here is deliberate: the judge emits a structured JSON
+        # verdict and we want it deterministic across runs.
         with torch.inference_mode():
             outputs = self.model.generate(
                 **inputs,
@@ -386,9 +401,7 @@ class Gemma4Transcriber:
                 do_sample=False,
             )
 
-        raw_text = self.processor.decode(
-            outputs[0][input_len:], skip_special_tokens=True
-        ).strip()
+        raw_text = self._decode_response(outputs, input_len)
         logger.info(f"Judge raw output: {raw_text[:300]}")
 
         return self._parse_judge_output(raw_text)

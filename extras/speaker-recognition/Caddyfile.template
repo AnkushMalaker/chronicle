@@ -2,7 +2,6 @@
 # Provides unified HTTPS endpoint for API and Web UI
 
 localhost TAILSCALE_IP {
-    tls /certs/server.crt /certs/server.key
 
     # Speaker Service API endpoints (strip /api prefix)
     handle /api/* {

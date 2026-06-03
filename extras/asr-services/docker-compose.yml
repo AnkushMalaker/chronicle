@@ -115,8 +115,11 @@ services:
       - DEVICE=${DEVICE:-cuda}
       - TORCH_DTYPE=${TORCH_DTYPE:-bfloat16}
       - MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-8192}
-      # Quantization: "4bit", "8bit", or "" (none). 4bit recommended for <=24GB VRAM.
-      - QUANTIZATION=${QUANTIZATION:-4bit}
+      # Quantization: "none" (default), "8bit", or "4bit". Default is none (full bf16):
+      # 4-bit NF4 causes repetition collapse on hard multi-speaker audio (VibeVoice-ASR-7B is
+      # trained/evaluated unquantized; bf16 is ~10 WER pts better on CoSHE). Use 8bit/4bit
+      # only if VRAM-constrained; the 7B fits in bf16 on a 24GB card.
+      - QUANTIZATION=${QUANTIZATION:-none}
       # LoRA adapter: path to pre-trained adapter to auto-load on startup (optional)
       - LORA_ADAPTER_PATH=${LORA_ADAPTER_PATH:-}
       # Fine-tuning
@@ -160,13 +163,70 @@ services:
               capabilities: [gpu]
     environment:
       - HF_HOME=/models
+      # Once the model is cached, run fully offline so startup never depends on
+      # DNS/HF reachability. huggingface_hub 1.x (httpx) turns a transient name-
+      # resolution failure into a fatal "client has been closed" crash instead of
+      # falling back to the local cache. Default 0 so first-run can still download.
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-0}
       - ASR_MODEL=${GEMMA4_MODEL:-google/gemma-4-E4B-it}
       - DEVICE=${DEVICE:-cuda}
-      - TORCH_DTYPE=${TORCH_DTYPE:-bfloat16}
-      - MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-512}
-      - BATCH_THRESHOLD_SECONDS=${BATCH_THRESHOLD_SECONDS:-30}
-      - BATCH_DURATION_SECONDS=${BATCH_DURATION_SECONDS:-30}
-      - BATCH_OVERLAP_SECONDS=${BATCH_OVERLAP_SECONDS:-5}
+      # Gemma4 ~7B-class: stay on bf16 unless explicitly overridden via GEMMA4_TORCH_DTYPE.
+      # Don't inherit the global TORCH_DTYPE — that fp16-overflows on Gemma4 the same
+      # way it did on AF-Next (see asr_provider_landscape memory).
+      - TORCH_DTYPE=${GEMMA4_TORCH_DTYPE:-bfloat16}
+      - MAX_NEW_TOKENS=${GEMMA4_MAX_NEW_TOKENS:-512}
+      - BATCH_THRESHOLD_SECONDS=${GEMMA4_BATCH_THRESHOLD_SECONDS:-30}
+      - BATCH_DURATION_SECONDS=${GEMMA4_BATCH_DURATION_SECONDS:-30}
+      - BATCH_OVERLAP_SECONDS=${GEMMA4_BATCH_OVERLAP_SECONDS:-5}
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    restart: unless-stopped
+
+  # ============================================================================
+  # NVIDIA Audio Flamingo Next Provider (Think variant by default)
+  # Promptable audio LM with timestamped multi-talker diarization.
+  # License: NVIDIA OneWay Noncommercial — research use only.
+  # Uses ASR_PORT 8767 — alternate to gemma4-asr / vibevoice-asr.
+  # ============================================================================
+  af-next-asr:
+    build:
+      context: .
+      dockerfile: providers/af_next/Dockerfile
+      args:
+        PYTORCH_CUDA_VERSION: ${PYTORCH_CUDA_VERSION:-cu126}
+    image: ${CHRONICLE_REGISTRY:-}chronicle-asr-af-next:${CHRONICLE_TAG:-latest}
+    ports:
+      - "${ASR_PORT:-8767}:8765"
+    volumes:
+      - ./model_cache:/models
+      - ./debug:/app/debug
+      - ./results:/app/results
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - HF_HOME=/models
+      - ASR_MODEL=${AF_NEXT_MODEL:-nvidia/audio-flamingo-next-hf}
+      - DEVICE=${DEVICE:-cuda}
+      # AF-Next must run bf16: at fp16 a ~7B model overflows and on some inputs
+      # the decode collapses into a token-loop ("xtotalzxe xtotaltzxe ..."). The
+      # dedicated var keeps a global TORCH_DTYPE=float16 (set for other providers
+      # in .env) from leaking in here. ~18-24 GB VRAM at bf16.
+      - TORCH_DTYPE=${AF_NEXT_TORCH_DTYPE:-bfloat16}
+      - MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-4096}
+      # 2-min windows: on longer windows AF-Next drops low-priority opening
+      # material (intro montage over music) and slips Devanagari past the
+      # romanize instruction; 2 min stays verbatim + Latin. See
+      # providers/af_next/transcriber.py for the empirical notes.
+      - BATCH_THRESHOLD_SECONDS=${BATCH_THRESHOLD_SECONDS:-120}
+      - BATCH_DURATION_SECONDS=${BATCH_DURATION_SECONDS:-100}
+      - BATCH_OVERLAP_SECONDS=${BATCH_OVERLAP_SECONDS:-20}
     dns:
       - 8.8.8.8
       - 8.8.4.4
