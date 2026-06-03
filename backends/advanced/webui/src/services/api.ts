@@ -128,8 +128,6 @@ export const conversationsApi = {
     params: { permanent: true }
   }),
 
-  getMemories: (id: string) => api.get(`/api/conversations/${id}/memories`),
-
   // Reprocessing endpoints
   reprocessOrphan: (conversationId: string) => api.post(`/api/conversations/${conversationId}/reprocess-orphan`),
   reprocessTranscript: (conversationId: string) => api.post(`/api/conversations/${conversationId}/reprocess-transcript`),
@@ -153,22 +151,6 @@ export const conversationsApi = {
 
   // Active conversation management
   closeActiveConversation: (clientId: string) => api.post(`/api/conversations/${clientId}/close`),
-}
-
-export const memoriesApi = {
-  getAll: (userId?: string) => api.get('/api/memories', { params: userId ? { user_id: userId } : {} }),
-  getById: (id: string, userId?: string) => api.get(`/api/memories/${id}`, { params: userId ? { user_id: userId } : {} }),
-  search: (query: string, userId?: string, limit: number = 20, scoreThreshold?: number) =>
-    api.get('/api/memories/search', {
-      params: {
-        query,
-        ...(userId && { user_id: userId }),
-        limit,
-        ...(scoreThreshold !== undefined && { score_threshold: scoreThreshold / 100 }) // Convert percentage to decimal
-      }
-    }),
-  delete: (id: string) => api.delete(`/api/memories/${id}`),
-  deleteAll: () => api.delete('/api/admin/memory/delete-all'),
 }
 
 export const annotationsApi = {
@@ -531,6 +513,77 @@ export const speakerApi = {
 
   // Check speaker service status (admin only)
   getSpeakerServiceStatus: () => api.get('/api/speaker-service-status'),
+}
+
+export interface CleaningConversation {
+  conversation_id: string
+  title: string | null
+  client_id: string
+  created_at: string | null
+  duration_seconds: number
+  speakers: string[]
+  analyzed: boolean
+  silent_fraction: number | null
+  mean_dbfs: number | null
+  peak_dbfs: number | null
+  audio_archived: boolean
+  audio_archived_at: string | null
+  archive_reason: string | null
+}
+
+export interface CleaningListResponse {
+  conversations: CleaningConversation[]
+  total: number
+  limit: number
+  offset: number
+  scan_capped: boolean
+  silence_threshold_dbfs: number
+}
+
+export const dataCleaningApi = {
+  // Enqueue batch amplitude/silence analysis. Returns { job_id, status }.
+  analyze: (conversationIds?: string[], force: boolean = false) =>
+    api.post('/api/data-cleaning/analyze', {
+      conversation_ids: conversationIds ?? null,
+      force,
+    }),
+
+  // Poll an analysis job's status
+  getJobStatus: (jobId: string) => api.get(`/api/queue/jobs/${jobId}/status`),
+
+  // Filtered listing with amplitude metrics + speaker labels
+  getConversations: (params: {
+    silence_threshold_dbfs?: number
+    min_silent_fraction?: number
+    min_duration?: number
+    include_speakers?: string[]
+    exclude_speakers?: string[]
+    archived_only?: boolean
+    limit?: number
+    offset?: number
+  }) =>
+    api.get<CleaningListResponse>('/api/data-cleaning/conversations', {
+      params: {
+        ...(params.silence_threshold_dbfs !== undefined && { silence_threshold_dbfs: params.silence_threshold_dbfs }),
+        ...(params.min_silent_fraction !== undefined && { min_silent_fraction: params.min_silent_fraction }),
+        ...(params.min_duration !== undefined && { min_duration: params.min_duration }),
+        ...(params.include_speakers && params.include_speakers.length > 0 && { include_speakers: params.include_speakers.join(',') }),
+        ...(params.exclude_speakers && params.exclude_speakers.length > 0 && { exclude_speakers: params.exclude_speakers.join(',') }),
+        ...(params.archived_only !== undefined && { archived_only: params.archived_only }),
+        ...(params.limit !== undefined && { limit: params.limit }),
+        ...(params.offset !== undefined && { offset: params.offset }),
+      },
+    }),
+
+  // Distinct latest-version speaker labels
+  getSpeakers: () => api.get<{ speakers: string[] }>('/api/data-cleaning/speakers'),
+
+  // Archive (hard-delete audio, keep metadata stub)
+  archive: (conversationIds: string[], reason: string) =>
+    api.post('/api/data-cleaning/archive', {
+      conversation_ids: conversationIds,
+      reason,
+    }),
 }
 
 export const knowledgeGraphApi = {

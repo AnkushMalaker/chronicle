@@ -71,7 +71,7 @@ class MCPClient:
         await self.close()
 
     async def add_memories(
-        self, text: str, metadata: Dict[str, Any] = None
+        self, text: str, metadata: Optional[Dict[str, Any]] = None
     ) -> List[str]:
         """Add memories to the OpenMemory server.
 

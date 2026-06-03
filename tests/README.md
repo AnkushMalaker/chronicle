@@ -77,7 +77,6 @@ make logs SERVICE=chronicle-backend-test   # Main backend service
 make logs SERVICE=workers-test              # RQ workers
 make logs SERVICE=mongo-test                # MongoDB
 make logs SERVICE=redis-test                # Redis
-make logs SERVICE=qdrant-test               # Vector database
 make logs SERVICE=speaker-service-test      # Speaker recognition
 ```
 
@@ -112,8 +111,6 @@ Test services run on separate ports from production to avoid conflicts:
 | Backend API | `8001` | `8000` |
 | MongoDB | `27018` | `27017` |
 | Redis | `6380` | `6379` |
-| Qdrant HTTP | `6337` | `6333` |
-| Qdrant gRPC | `6338` | `6334` |
 
 **Test Database:** Uses `test_db` database (isolated from production)
 

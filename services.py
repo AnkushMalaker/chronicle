@@ -16,7 +16,7 @@ import yaml
 from dotenv import dotenv_values
 from rich.console import Console
 from rich.table import Table
-from setup_utils import read_env_value
+from setup_utils import ensure_tailscale_cert, read_env_value
 
 console = Console()
 
@@ -450,6 +450,23 @@ def run_compose_command(service_name, command, build=False, force_recreate=False
         caddyfile_path = service_path / "Caddyfile"
         if caddyfile_path.exists() and caddyfile_path.is_file():
             cmd.extend(["--profile", "https"])
+            # Only the "static" cert mode keeps a host-issued cert file that we must
+            # renew. In "caddy" mode Caddy obtains and auto-renews the cert itself, so
+            # we leave it alone. Renew (if missing/near expiry) before Caddy starts so
+            # it comes up holding a fresh cert. Cheap no-op when still valid; never
+            # blocks startup on failure.
+            cert_mode = read_env_value(str(service_path / ".env"), "HTTPS_CERT_MODE")
+            if command == "up" and cert_mode == "static":
+                certs_dir = Path(__file__).parent / "certs"
+                renewed = ensure_tailscale_cert(str(certs_dir))
+                if renewed is True:
+                    console.print("[green]✅ Renewed Tailscale TLS certificate[/green]")
+                elif renewed is False:
+                    console.print(
+                        "[yellow]⚠️  TLS cert is near expiry but renewal failed "
+                        "(Tailscale unreachable or cert issuance error). Starting with "
+                        "the existing cert; HTTPS clients may see warnings.[/yellow]"
+                    )
 
     # Handle speaker-recognition service specially
     if service_name == "speaker-recognition" and command in ["up", "down"]:

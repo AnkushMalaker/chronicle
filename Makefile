@@ -74,11 +74,11 @@ help: ## Show detailed help for all targets
 	@echo "🏗️  KUBERNETES SETUP:"
 	@echo "  setup-k8s          Complete initial Kubernetes setup"
 	@echo "                     - Configures insecure registry access"
-	@echo "                     - Sets up infrastructure services (MongoDB, Qdrant)"
+	@echo "                     - Sets up infrastructure services (MongoDB, FalkorDB)"
 	@echo "                     - Creates shared models PVC"
 	@echo "                     - Sets up cross-namespace RBAC"
 	@echo "                     - Generates and applies configuration"
-	@echo "  setup-infrastructure Deploy infrastructure services (MongoDB, Qdrant)"
+	@echo "  setup-infrastructure Deploy infrastructure services (MongoDB, FalkorDB)"
 	@echo "  setup-rbac         Set up cross-namespace RBAC"
 	@echo "  setup-storage-pvc  Create shared models PVC"
 	@echo
@@ -149,7 +149,7 @@ setup-k8s: ## Initial Kubernetes setup (registry + infrastructure)
 	@echo
 	@echo "📋 Setup includes:"
 	@echo "  • Insecure registry configuration"
-	@echo "  • Infrastructure services (MongoDB, Qdrant)"
+	@echo "  • Infrastructure services (MongoDB, FalkorDB)"
 	@echo "  • Shared models PVC for speaker recognition"
 	@echo "  • Cross-namespace RBAC"
 	@echo "  • Configuration generation and application"
@@ -178,13 +178,12 @@ setup-k8s: ## Initial Kubernetes setup (registry + infrastructure)
 	@echo "  • Run 'make k8s-status' to check cluster status"
 	@echo "  • Run 'make help' for more options"
 
-setup-infrastructure: ## Set up infrastructure services (MongoDB, Qdrant)
+setup-infrastructure: ## Set up infrastructure services (MongoDB, FalkorDB)
 	@echo "🏗️  Setting up infrastructure services..."
-	@echo "Deploying MongoDB and Qdrant to $(INFRASTRUCTURE_NAMESPACE) namespace..."
+	@echo "Deploying MongoDB and FalkorDB to $(INFRASTRUCTURE_NAMESPACE) namespace..."
 	@set -a; source skaffold.env; set +a; skaffold run --profile=infrastructure --default-repo=$(CONTAINER_REGISTRY)
 	@echo "⏳ Waiting for infrastructure services to be ready..."
 	@kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=mongodb -n $(INFRASTRUCTURE_NAMESPACE) --timeout=300s || echo "⚠️  MongoDB not ready yet"
-	@kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=qdrant -n $(INFRASTRUCTURE_NAMESPACE) --timeout=300s || echo "⚠️  Qdrant not ready yet"
 	@echo "✅ Infrastructure services deployed"
 
 setup-rbac: ## Set up cross-namespace RBAC

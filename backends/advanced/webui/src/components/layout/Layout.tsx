@@ -1,5 +1,5 @@
 import { Link, useLocation, Outlet } from 'react-router-dom'
-import { Music, MessageSquare, MessageCircle, Brain, Users, Upload, Settings, LogOut, Sun, Moon, Shield, Radio, Layers, Puzzle, Zap, Activity, Network } from 'lucide-react'
+import { Music, MessageSquare, MessageCircle, Users, Upload, Settings, LogOut, Sun, Moon, Shield, Radio, Layers, Puzzle, Zap, Activity, Network, Sparkles } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
 import { useSSE, SSEStatus } from '../../hooks/useSSE'
@@ -18,11 +18,11 @@ export default function Layout() {
     { path: '/live-record', label: 'Live Record', icon: Radio },
     { path: '/chat', label: 'Chat', icon: MessageCircle },
     { path: '/conversations', label: 'Conversations', icon: MessageSquare },
-    { path: '/memories', label: 'Memories', icon: Brain },
     { path: '/users', label: 'User Management', icon: Users },
 
     ...(isAdmin ? [
       { path: '/upload', label: 'Upload Audio', icon: Upload },
+      { path: '/data-cleaning', label: 'Data Cleaning', icon: Sparkles },
       { path: '/queue', label: 'Queue & Events', icon: Layers },
       { path: '/plugins', label: 'Plugins', icon: Puzzle },
       { path: '/finetuning', label: 'Fine-tuning', icon: Zap },

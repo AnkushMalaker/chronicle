@@ -6,7 +6,7 @@ audio chunks in MongoDB. Each chunk represents a 10-second segment of audio
 from a conversation.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from beanie import Document, Indexed
@@ -80,7 +80,8 @@ class AudioChunkDocument(Document):
 
     # Metadata
     created_at: datetime = Field(
-        default_factory=datetime.utcnow, description="Chunk creation timestamp"
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Chunk creation timestamp",
     )
 
     # Soft delete fields

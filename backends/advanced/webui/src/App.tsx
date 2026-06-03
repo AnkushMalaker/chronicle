@@ -12,9 +12,7 @@ import { ErrorBoundary, PageErrorBoundary } from './components/ErrorBoundary'
 // Lazy-loaded page components (code-split into separate chunks)
 const Chat = lazy(() => import('./pages/Chat'))
 const ConversationsRouter = lazy(() => import('./pages/ConversationsRouter'))
-const MemoriesRouter = lazy(() => import('./pages/MemoriesRouter'))
 const ConversationDetail = lazy(() => import('./pages/ConversationDetail'))
-const MemoryDetail = lazy(() => import('./pages/MemoryDetail'))
 const Users = lazy(() => import('./pages/Users'))
 const System = lazy(() => import('./pages/System'))
 const Settings = lazy(() => import('./pages/Settings'))
@@ -24,6 +22,7 @@ const LiveRecord = lazy(() => import('./pages/LiveRecord'))
 const Plugins = lazy(() => import('./pages/Plugins'))
 const Finetuning = lazy(() => import('./pages/Finetuning'))
 const Network = lazy(() => import('./pages/Network'))
+const DataCleaning = lazy(() => import('./pages/DataCleaning'))
 
 
 function PageSkeleton() {
@@ -98,20 +97,6 @@ function App() {
                     </Suspense>
                   </PageErrorBoundary>
                 } />
-                <Route path="memories/:id" element={
-                  <PageErrorBoundary>
-                    <Suspense fallback={<PageSkeleton />}>
-                      <MemoryDetail />
-                    </Suspense>
-                  </PageErrorBoundary>
-                } />
-                <Route path="memories" element={
-                  <PageErrorBoundary>
-                    <Suspense fallback={<PageSkeleton />}>
-                      <MemoriesRouter />
-                    </Suspense>
-                  </PageErrorBoundary>
-                } />
                 <Route path="users" element={
                   <PageErrorBoundary>
                     <Suspense fallback={<PageSkeleton />}>
@@ -165,6 +150,13 @@ function App() {
                   <PageErrorBoundary>
                     <Suspense fallback={<PageSkeleton />}>
                       <Network />
+                    </Suspense>
+                  </PageErrorBoundary>
+                } />
+                <Route path="data-cleaning" element={
+                  <PageErrorBoundary>
+                    <Suspense fallback={<PageSkeleton />}>
+                      <DataCleaning />
                     </Suspense>
                   </PageErrorBoundary>
                 } />

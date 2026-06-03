@@ -5,7 +5,6 @@ based on configuration. It supports both the sophisticated Chronicle
 implementation and the OpenMemory MCP backend.
 """
 
-import asyncio
 import logging
 import threading
 from typing import Optional
@@ -57,6 +56,19 @@ def create_memory_service(config: MemoryConfig) -> MemoryServiceBase:
             )
 
         return OpenMemoryMCPService(**config.openmemory_config)
+
+    elif config.memory_provider == MemoryProvider.GRAPHITI:
+        try:
+            from .providers.graphiti import GraphitiMemoryService
+        except ImportError as e:
+            raise RuntimeError(f"Graphiti memory service not available: {e}")
+
+        return GraphitiMemoryService(config)
+
+    elif config.memory_provider == MemoryProvider.ROLLING_SUMMARY:
+        from .providers.rolling_summary import RollingSummaryMemoryService
+
+        return RollingSummaryMemoryService(config)
 
     else:
         raise ValueError(f"Unsupported memory provider: {config.memory_provider}")

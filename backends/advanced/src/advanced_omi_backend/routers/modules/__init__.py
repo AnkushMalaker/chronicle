@@ -25,6 +25,7 @@ from .audio_routes import router as audio_router
 from .chat_routes import router as chat_router
 from .client_routes import router as client_router
 from .conversation_routes import router as conversation_router
+from .data_cleaning_routes import router as data_cleaning_router
 from .finetuning_routes import router as finetuning_router
 from .health_routes import router as health_router
 from .knowledge_graph_routes import router as knowledge_graph_router
@@ -44,6 +45,7 @@ __all__ = [
     "chat_router",
     "client_router",
     "conversation_router",
+    "data_cleaning_router",
     "finetuning_router",
     "health_router",
     "knowledge_graph_router",

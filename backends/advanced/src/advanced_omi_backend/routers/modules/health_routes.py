@@ -267,40 +267,41 @@ async def health_check():
         overall_healthy = False
 
     # Check memory service (provider-dependent)
-    if memory_provider == "chronicle":
+    if memory_provider in ("chronicle", "graphiti"):
+        provider_label = "Graphiti" if memory_provider == "graphiti" else "Chronicle"
         try:
-            # Test Chronicle memory service connection with timeout
+            # Test in-process memory service connection with timeout
             test_success = await asyncio.wait_for(
                 memory_service.test_connection(), timeout=8.0
             )
             if test_success:
                 health_status["services"]["memory_service"] = {
-                    "status": "✅ Chronicle Memory Connected",
+                    "status": f"✅ {provider_label} Memory Connected",
                     "healthy": True,
-                    "provider": "chronicle",
+                    "provider": memory_provider,
                     "critical": False,
                 }
             else:
                 health_status["services"]["memory_service"] = {
-                    "status": "⚠️ Chronicle Memory Test Failed",
+                    "status": f"⚠️ {provider_label} Memory Test Failed",
                     "healthy": False,
-                    "provider": "chronicle",
+                    "provider": memory_provider,
                     "critical": False,
                 }
                 overall_healthy = False
         except asyncio.TimeoutError:
             health_status["services"]["memory_service"] = {
-                "status": "⚠️ Chronicle Memory Timeout (8s) - Check FalkorDB",
+                "status": f"⚠️ {provider_label} Memory Timeout (8s) - Check FalkorDB",
                 "healthy": False,
-                "provider": "chronicle",
+                "provider": memory_provider,
                 "critical": False,
             }
             overall_healthy = False
         except Exception as e:
             health_status["services"]["memory_service"] = {
-                "status": f"⚠️ Chronicle Memory Failed: {str(e)}",
+                "status": f"⚠️ {provider_label} Memory Failed: {str(e)}",
                 "healthy": False,
-                "provider": "chronicle",
+                "provider": memory_provider,
                 "critical": False,
             }
             overall_healthy = False

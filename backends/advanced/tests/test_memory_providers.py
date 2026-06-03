@@ -7,9 +7,14 @@ when converting their native formats to MemoryEntry objects.
 import time
 
 from advanced_omi_backend.services.memory.base import MemoryEntry
+from advanced_omi_backend.services.memory.config import MemoryConfig, MemoryProvider
+from advanced_omi_backend.services.memory.providers.graphiti import (
+    GraphitiMemoryService,
+)
 from advanced_omi_backend.services.memory.providers.openmemory_mcp import (
     OpenMemoryMCPService,
 )
+from advanced_omi_backend.services.memory.service_factory import create_memory_service
 
 
 class TestOpenMemoryMCPProviderTimestamps:
@@ -167,3 +172,61 @@ class TestProviderTimestampConsistency:
             assert (
                 entry.updated_at is not None
             ), f"{provider_name} updated_at should not be None"
+
+
+class TestGraphitiProviderAdapter:
+    """Test Graphiti provider adapter behavior that does not require Graphiti."""
+
+    def test_factory_creates_graphiti_provider(self):
+        config = MemoryConfig(
+            memory_provider=MemoryProvider.GRAPHITI,
+            llm_config={"api_key": "", "model": "test-model"},
+        )
+
+        service = create_memory_service(config)
+
+        assert isinstance(service, GraphitiMemoryService)
+        assert service.provider_identifier == "graphiti"
+
+    def test_row_to_memory_entry_wraps_graphiti_fact(self):
+        service = GraphitiMemoryService(
+            MemoryConfig(
+                memory_provider=MemoryProvider.GRAPHITI,
+                llm_config={"api_key": "", "model": "test-model"},
+            )
+        )
+
+        entry = service._row_to_memory_entry(
+            {
+                "uuid": "edge-1",
+                "fact": "User lives in Bengaluru.",
+                "name": "LIVES_IN",
+                "episodes": ["chat-1"],
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "valid_at": None,
+                "invalid_at": None,
+                "expired_at": None,
+                "reference_time": "2026-01-01T00:00:00+00:00",
+            },
+            user_id="user-1",
+        )
+
+        assert isinstance(entry, MemoryEntry)
+        assert entry.id == "edge-1"
+        assert entry.content == "User lives in Bengaluru."
+        assert entry.metadata["provider"] == "graphiti"
+        assert entry.metadata["episodes"] == ["chat-1"]
+
+    def test_reference_time_uses_benchmark_prefix(self):
+        service = GraphitiMemoryService(
+            MemoryConfig(
+                memory_provider=MemoryProvider.GRAPHITI,
+                llm_config={"api_key": "", "model": "test-model"},
+            )
+        )
+
+        reference_time = service._reference_time_from_transcript(
+            "[2023-05-21 09:27] User: hello"
+        )
+
+        assert reference_time.isoformat() == "2023-05-21T09:27:00+00:00"

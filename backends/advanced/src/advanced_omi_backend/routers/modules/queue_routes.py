@@ -659,7 +659,7 @@ async def flush_jobs(
 
         from advanced_omi_backend.controllers.queue_controller import get_queue
 
-        cutoff_time = datetime.now(timezone.utc) - timedelta(
+        cutoff_time = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
             hours=request.older_than_hours
         )
         total_removed = 0

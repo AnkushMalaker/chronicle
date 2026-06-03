@@ -15,7 +15,7 @@ Supports two processing pathways:
 import logging
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
@@ -35,6 +35,18 @@ from advanced_omi_backend.services.sse_publisher import publish_sse_event
 logger = logging.getLogger(__name__)
 
 MIN_CONVERSATION_LENGTH = 10
+
+
+def _conversation_memory_provider(conversation_model, memory_provider: str):
+    """Map provider identifier strings to persisted conversation enum values."""
+    provider_map = {
+        "chronicle": conversation_model.MemoryProvider.CHRONICLE,
+        "openmemory_mcp": conversation_model.MemoryProvider.OPENMEMORY_MCP,
+        "graphiti": conversation_model.MemoryProvider.GRAPHITI,
+    }
+    return provider_map.get(
+        memory_provider, conversation_model.MemoryProvider.CHRONICLE
+    )
 
 
 def compute_speaker_diff(
@@ -299,10 +311,8 @@ async def process_memory_job(
                         version_id=version_id,
                         memory_count=len(created_memory_ids),
                         transcript_version_id=transcript_version_id,
-                        provider=(
-                            conversation_model.MemoryProvider.OPENMEMORY_MCP
-                            if memory_provider == "openmemory_mcp"
-                            else conversation_model.MemoryProvider.CHRONICLE
+                        provider=_conversation_memory_provider(
+                            conversation_model, memory_provider
                         ),
                         processing_time_seconds=processing_time,
                         metadata={"memory_ids": created_memory_ids},
@@ -368,32 +378,6 @@ async def process_memory_job(
             # NOTE: Listening jobs are restarted by open_conversation_job (not here)
             # This allows users to resume talking immediately after conversation closes,
             # without waiting for memory processing to complete.
-
-            # Extract entities and relationships to knowledge graph
-            try:
-                from advanced_omi_backend.services.knowledge_graph import (
-                    get_knowledge_graph_service,
-                )
-
-                kg_service = get_knowledge_graph_service()
-                kg_result = await kg_service.process_conversation(
-                    conversation_id=conversation_id,
-                    transcript=full_conversation,
-                    user_id=user_id,
-                    conversation_name=(
-                        conversation_model.title
-                        if hasattr(conversation_model, "title")
-                        else None
-                    ),
-                )
-                if kg_result.get("entities", 0) > 0:
-                    logger.info(
-                        f"🔗 Knowledge graph: extracted {kg_result.get('entities', 0)} entities, "
-                        f"{kg_result.get('relationships', 0)} relationships from {conversation_id}"
-                    )
-            except Exception as e:
-                # KG extraction failure shouldn't fail the memory job
-                logger.warning(f"⚠️ Knowledge graph extraction failed (non-fatal): {e}")
 
             # Trigger memory-level plugins (ALWAYS dispatch when success, even with 0 new memories)
             memory_count = len(created_memory_ids) if created_memory_ids else 0

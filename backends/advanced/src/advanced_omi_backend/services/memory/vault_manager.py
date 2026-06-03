@@ -9,8 +9,11 @@ path-traversal guard, pure file I/O.
 
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+from .vault_scaffold import SCAFFOLD_NOTE_NAMES
 
 logger = logging.getLogger("memory_service.vault")
 
@@ -31,6 +34,10 @@ class ConvDocVaultManager:
         self._base_dir = base_dir or _DEFAULT_BASE_DIR
         # mtime cache: "{user_id}/{conv_id}" -> (mtime, content)
         self._cache: Dict[str, Tuple[float, str]] = {}
+
+    def user_root(self, user_id: str) -> Path:
+        """Return the per-user vault root (the directory the memory agent edits)."""
+        return self._base_dir / Path(user_id).name
 
     def _safe_path(self, user_id: str, conv_id: str) -> Path:
         """Get the .md path with path-traversal guard."""
@@ -91,36 +98,36 @@ class ConvDocVaultManager:
             return False
 
     def list_docs(self, user_id: str) -> List[str]:
-        """List all conversation IDs for a user."""
-        safe_uid = Path(user_id).name
-        user_dir = self._base_dir / safe_uid
+        """List all note paths for a user, relative to the user root.
+
+        Recursive so it covers the agent's ``Conversations/``/``People/``/``Topics/``
+        subfolders as well as the flat layout. Scaffold hub notes (``People.md`` etc.)
+        are excluded — they are views, not captured content.
+        """
+        user_dir = self.user_root(user_id)
         if not user_dir.exists():
             return []
-        return [p.stem for p in user_dir.glob("*.md")]
+        return sorted(
+            p.relative_to(user_dir).as_posix()
+            for p in user_dir.rglob("*.md")
+            if p.name not in SCAFFOLD_NOTE_NAMES
+        )
 
     def delete_all_docs(self, user_id: str) -> int:
-        """Delete all conversation documents for a user. Returns count deleted."""
-        safe_uid = Path(user_id).name
-        user_dir = self._base_dir / safe_uid
+        """Delete all of a user's notes (recursively). Returns the count removed."""
+        user_dir = self.user_root(user_id)
         if not user_dir.exists():
             return 0
 
-        count = 0
-        for p in user_dir.glob("*.md"):
-            try:
-                p.unlink()
-                cache_key = f"{user_id}/{p.stem}"
-                self._cache.pop(cache_key, None)
-                count += 1
-            except Exception as e:
-                logger.error(f"Failed to delete {p}: {e}")
-
-        # Remove empty user directory
+        count = sum(1 for _ in user_dir.rglob("*.md"))
         try:
-            if user_dir.exists() and not any(user_dir.iterdir()):
-                user_dir.rmdir()
-        except Exception:
-            pass
-
-        logger.info(f"Deleted {count} conversation docs for user {user_id}")
+            shutil.rmtree(user_dir)
+        except Exception as e:
+            logger.error(f"Failed to delete vault for user {user_id}: {e}")
+            return 0
+        # Drop any cached docs for this user.
+        self._cache = {
+            k: v for k, v in self._cache.items() if not k.startswith(f"{user_id}/")
+        }
+        logger.info(f"Deleted {count} notes for user {user_id}")
         return count

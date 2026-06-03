@@ -188,6 +188,29 @@ models:
             words: words
             segments: segments
 
+  - name: stt-af-next
+    description: NVIDIA Audio Flamingo Next (batch, prompt-based diarization with timestamps; noncommercial license)
+    model_type: stt
+    model_provider: af_next
+    api_family: http
+    model_url: http://${oc.env:AF_NEXT_ASR_URL,host.docker.internal:8767}
+    api_key: ''
+    capabilities:
+      - segments
+      - diarization
+    operations:
+      stt_transcribe:
+        method: POST
+        path: /transcribe
+        content_type: multipart/form-data
+        use_provider_segments: true
+        timeout: 3600
+        response:
+          type: json
+          extract:
+            text: text
+            segments: segments
+
   - name: stt-qwen3-asr
     description: Qwen3-ASR via vLLM (batch, 52 languages)
     model_type: stt
@@ -375,6 +398,7 @@ models:
 # Memory Configuration
 # ===========================
 memory:
+  # Supported providers: chronicle, openmemory_mcp, graphiti
   provider: chronicle
   timeout_seconds: 1200
   extraction:
@@ -390,6 +414,11 @@ memory:
     client_name: chronicle
     user_id: default
     timeout: 30
+
+  # Graphiti provider settings:
+  # Graphiti uses the default LLM/embedding models plus FALKORDB_HOST/FALKORDB_PORT.
+  # Install the local fork manually for development:
+  #   cd backends/advanced && uv pip install -e ../../untracked/graphiti[falkordb]
 
   # Obsidian FalkorDB provider settings (legacy)
   obsidian:
@@ -582,3 +611,18 @@ cron_jobs:
     description: "Use LLM to surface potential transcript errors for user review"
     enabled: false
     schedule: "0 5 * * *"
+  auto_clean:
+    description: "Auto-archive near-silent conversations (deletes audio, keeps metadata)"
+    enabled: false
+    schedule: "0 3 * * *"
+
+# Data Cleaning / auto-clean "level" (thresholds for the auto_clean cron job).
+# Kept separate from cron_jobs.auto_clean so toggling the schedule in the UI
+# does not overwrite these values. Conservative by default: only essentially
+# dead-silent recordings are archived.
+data_cleaning:
+  auto_clean:
+    silence_threshold_dbfs: -50.0   # windows quieter than this count as silent
+    min_silent_fraction: 0.97       # archive only if >= 97% of windows are silent
+    min_duration: 30.0              # ignore clips shorter than this (seconds)
+    max_archive_per_run: 100        # safety cap on archives per sweep

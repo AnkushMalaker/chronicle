@@ -53,7 +53,6 @@ Prod Mode Teardown
 
     # Clean up any remaining volumes
     Run Process    rm    -rf    ${BACKEND_DIR}/data/test_mongo_data    shell=True
-    Run Process    rm    -rf    ${BACKEND_DIR}/data/test_qdrant_data    shell=True
     Run Process    rm    -rf    ${BACKEND_DIR}/data/test_audio_chunks    shell=True
 
     # Delete all HTTP sessions

@@ -4,11 +4,11 @@ import { useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft, Calendar, User, Trash2, RefreshCw, MoreVertical,
   RotateCcw, Zap, Play, Pause, Download,
-  Save, X, Pencil, Brain, Clock, Database, Layers, Star, BarChart3
+  Save, X, Pencil, Clock, Database, Layers, Star, BarChart3
 } from 'lucide-react'
 import { annotationsApi, speakerApi, systemApi, BACKEND_URL } from '../services/api'
 import {
-  useConversationDetail, useConversationMemories,
+  useConversationDetail,
   useDeleteConversation, useReprocessTranscript, useReprocessMemory, useReprocessSpeakers, useToggleStar
 } from '../hooks/useConversations'
 import ConversationVersionHeader from '../components/ConversationVersionHeader'
@@ -95,12 +95,6 @@ export default function ConversationDetail() {
       transcriptEndRef.current.scrollIntoView({ behavior: 'smooth' })
     }
   }, [segments.length, isLive])
-
-  const {
-    data: memoriesData,
-  } = useConversationMemories(id ?? null)
-
-  const memories = (memoriesData as any)?.memories ?? []
 
   const error = queryError?.message ?? ((!loading && !conversation) ? 'Conversation not found' : null)
 
@@ -365,7 +359,12 @@ export default function ConversationDetail() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `${conversation?.title || id}.wav`
+      // Derive the extension from what the server actually returned, not from
+      // the requested format — the body is ogg/opus for audio/ogg, RIFF wav
+      // for audio/wav. Naming opus bytes ".wav" produces files that won't play.
+      const contentType = resp.headers.get('Content-Type') || ''
+      const ext = contentType.includes('ogg') ? 'ogg' : 'wav'
+      a.download = `${conversation?.title || id}.${ext}`
       a.click()
       URL.revokeObjectURL(url)
     } catch (err: any) {
@@ -742,7 +741,6 @@ export default function ConversationDetail() {
         }}
         onVersionChange={() => {
           refetch()
-          queryClient.invalidateQueries({ queryKey: ['conversationMemories', id] })
         }}
       />
 
@@ -1066,31 +1064,6 @@ export default function ConversationDetail() {
                 </div>
               )}
             </dl>
-          </div>
-
-          {/* Extracted Memories Card */}
-          <div className="bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg p-4">
-            <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase mb-3 flex items-center gap-2">
-              <Brain className="w-4 h-4" />
-              Memories ({memories.length})
-            </h3>
-            {memories.length > 0 ? (
-              <div className="space-y-2">
-                {memories.map((mem: any) => (
-                  <div
-                    key={mem.id}
-                    onClick={() => navigate(`/memories/${mem.id}`)}
-                    className="p-2 bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-600 cursor-pointer hover:border-purple-300 dark:hover:border-purple-600 transition-colors"
-                  >
-                    <p className="text-xs text-gray-700 dark:text-gray-300 line-clamp-2">
-                      {mem.memory || mem.content}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-gray-500 dark:text-gray-400 italic">No memories extracted yet</p>
-            )}
           </div>
 
           {/* Version Info Card */}

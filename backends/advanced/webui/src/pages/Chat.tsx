@@ -39,7 +39,10 @@ export default function Chat() {
   const [extractionMessage, setExtractionMessage] = useState('')
   const [includeObsidian, setIncludeObsidian] = useState(false)
   const [memoryLimit, setMemoryLimit] = useState(5)
-  const [memoryMode, setMemoryMode] = useState<'always' | 'tool' | 'off'>('always')
+  // Default to 'tool' (Auto): the chat agent calls the memory search tool only when a
+  // question needs it. In vault mode that tool runs the agentic vault search, so we don't
+  // want to fire it on every message the way 'always' does.
+  const [memoryMode, setMemoryMode] = useState<'always' | 'tool' | 'off'>('tool')
 
   // Query for messages of current session
   const { data: queryMessages } = useChatMessages(currentSessionId)

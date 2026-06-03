@@ -211,14 +211,20 @@ def _parse_action_items(markdown: str) -> List[ActionItem]:
 def compute_hybrid_scores(
     vector_results: List[Dict],
     fulltext_results: List[Dict],
+    bfs_results: Optional[List[Dict]] = None,
     vector_weight: float = 0.7,
     text_weight: float = 0.3,
+    bfs_weight: float = 0.2,
     recency_half_life_days: float = 30.0,
     recency_floor: float = 0.5,
 ) -> List[Dict]:
-    """Merge vector and full-text results with recency bias.
+    """Merge vector + full-text + (optional) BFS results with recency bias.
 
     Each result dict must have: 'chunk_id', 'score', 'date' (ISO string or datetime).
+    For ``bfs_results`` the ``score`` is integer shared-entity-count; it is
+    normalized by the maximum in the BFS list so it lands in [0, 1] like the
+    other two sources. Chunks reachable only via BFS contribute via
+    ``bfs_weight``; chunks already present from vector/BM25 get a small bonus.
     Additional fields are preserved.
     """
     now = datetime.now(timezone.utc)
@@ -226,14 +232,39 @@ def compute_hybrid_scores(
 
     for r in vector_results:
         cid = r["chunk_id"]
-        merged[cid] = {**r, "vector_score": r["score"], "text_score": 0.0}
+        merged[cid] = {
+            **r,
+            "vector_score": r["score"],
+            "text_score": 0.0,
+            "bfs_score": 0.0,
+        }
 
     for r in fulltext_results:
         cid = r["chunk_id"]
         if cid in merged:
             merged[cid]["text_score"] = r["score"]
         else:
-            merged[cid] = {**r, "vector_score": 0.0, "text_score": r["score"]}
+            merged[cid] = {
+                **r,
+                "vector_score": 0.0,
+                "text_score": r["score"],
+                "bfs_score": 0.0,
+            }
+
+    if bfs_results:
+        max_shared = max((r["score"] for r in bfs_results), default=0) or 1
+        for r in bfs_results:
+            cid = r["chunk_id"]
+            normalized = r["score"] / max_shared
+            if cid in merged:
+                merged[cid]["bfs_score"] = normalized
+            else:
+                merged[cid] = {
+                    **r,
+                    "vector_score": 0.0,
+                    "text_score": 0.0,
+                    "bfs_score": normalized,
+                }
 
     results = []
     for entry in merged.values():
@@ -249,7 +280,9 @@ def compute_hybrid_scores(
         age_days = (now - d).total_seconds() / 86400.0
 
         relevance = (
-            vector_weight * entry["vector_score"] + text_weight * entry["text_score"]
+            vector_weight * entry["vector_score"]
+            + text_weight * entry["text_score"]
+            + bfs_weight * entry["bfs_score"]
         )
         recency = max(
             recency_floor, math.exp(-0.693 * age_days / recency_half_life_days)

@@ -7,6 +7,7 @@ and environment file handling. Used by wizard.py, init.py scripts, and plugin se
 
 import getpass
 import json
+import os
 import re
 import secrets
 import subprocess
@@ -377,8 +378,10 @@ def generate_tailscale_certs(certs_dir: str) -> bool:
     """
     Generate trusted TLS certificates via Tailscale.
 
-    Uses `sudo tailscale cert` to obtain certs signed by the Tailscale CA,
-    which are automatically trusted on devices in the same tailnet.
+    Uses `tailscale cert` to obtain certs signed by the Tailscale CA, which are
+    automatically trusted on devices in the same tailnet. Tries without sudo first
+    (works when the Tailscale operator is set to the current user via
+    `tailscale set --operator=$USER`); falls back to `sudo` otherwise.
 
     Args:
         certs_dir: Directory to write server.crt and server.key into.
@@ -396,71 +399,136 @@ def generate_tailscale_certs(certs_dir: str) -> bool:
     cert_file = certs_path / "server.crt"
     key_file = certs_path / "server.key"
 
+    cert_cmd = [
+        "tailscale",
+        "cert",
+        "--cert-file",
+        str(cert_file),
+        "--key-file",
+        str(key_file),
+        dns_name,
+    ]
+
     try:
-        result = subprocess.run(
-            [
-                "sudo",
-                "tailscale",
-                "cert",
-                "--cert-file",
-                str(cert_file),
-                "--key-file",
-                str(key_file),
-                dns_name,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        # Try without sudo first (operator configured). Fall back to non-interactive
+        # sudo (-n avoids hanging on a password prompt in unattended contexts).
+        result = subprocess.run(cert_cmd, capture_output=True, text=True, timeout=30)
+        used_sudo = False
+        if result.returncode != 0:
+            result = subprocess.run(
+                ["sudo", "-n", *cert_cmd], capture_output=True, text=True, timeout=30
+            )
+            used_sudo = True
         if result.returncode != 0:
             return False
 
-        # Fix ownership so Docker can read the files
-        import os
-
-        uid = os.getuid()
-        gid = os.getgid()
-        subprocess.run(
-            ["sudo", "chown", f"{uid}:{gid}", str(cert_file), str(key_file)],
-            capture_output=True,
-            timeout=10,
-        )
+        if used_sudo:
+            # sudo wrote the files as root; fix ownership so Docker (and our user) can read them
+            uid = os.getuid()
+            gid = os.getgid()
+            subprocess.run(
+                ["sudo", "-n", "chown", f"{uid}:{gid}", str(cert_file), str(key_file)],
+                capture_output=True,
+                timeout=10,
+            )
         return True
     except (subprocess.SubprocessError, FileNotFoundError, OSError):
         return False
 
 
-def generate_self_signed_certs(server_address: str, certs_dir: str) -> bool:
+def cert_needs_renewal(certs_dir: str, within_days: int = 21) -> bool:
     """
-    Generate self-signed TLS certificates using the repo's generate-ssl.sh script.
+    Check whether the TLS cert in certs_dir is missing or expiring soon.
+
+    Cheap, local-only check (no network): inspects the cert file's expiry via
+    `openssl x509 -checkend`, which exits 0 if the cert is valid beyond the window
+    and non-zero if it expires within it (or is already expired).
 
     Args:
-        server_address: IP address or domain name for the certificate SAN.
-        certs_dir: Directory to write server.crt and server.key into.
+        certs_dir: Directory containing server.crt.
+        within_days: Treat the cert as needing renewal if it expires within this many days.
 
     Returns:
-        True if certificates were generated successfully, False otherwise.
+        True if the cert is missing or expires within `within_days`, False otherwise.
     """
-    certs_path = Path(certs_dir)
-    certs_path.mkdir(parents=True, exist_ok=True)
-
-    # The generate-ssl.sh script is at certs/generate-ssl.sh relative to repo root
-    # and outputs into the current working directory
-    script = certs_path / "generate-ssl.sh"
-    if not script.exists():
-        return False
+    cert_file = Path(certs_dir) / "server.crt"
+    if not cert_file.exists():
+        return True
 
     try:
         result = subprocess.run(
-            [str(script), server_address],
-            cwd=str(certs_path),
+            [
+                "openssl",
+                "x509",
+                "-checkend",
+                str(within_days * 86400),
+                "-noout",
+                "-in",
+                str(cert_file),
+            ],
             capture_output=True,
-            text=True,
-            timeout=60,
+            timeout=10,
         )
-        return result.returncode == 0
+        return result.returncode != 0
     except (subprocess.SubprocessError, FileNotFoundError, OSError):
-        return False
+        # If expiry can't be determined, err toward renewing.
+        return True
+
+
+def ensure_tailscale_cert(certs_dir: str, within_days: int = 21) -> Optional[bool]:
+    """
+    Renew the Tailscale TLS cert only if it is missing or near expiry.
+
+    No-op in the common case: just checks the local cert file's expiry and returns
+    without contacting Tailscale unless renewal is actually due. This keeps the
+    expensive `tailscale cert` call (and Let's Encrypt issuance) to roughly once
+    per certificate lifetime regardless of how often it is invoked.
+
+    Args:
+        certs_dir: Directory containing/receiving server.crt and server.key.
+        within_days: Renew if the cert expires within this many days.
+
+    Returns:
+        None if no renewal was needed, True if renewed successfully,
+        False if renewal was needed but failed.
+    """
+    if not cert_needs_renewal(certs_dir, within_days):
+        return None
+    return generate_tailscale_certs(certs_dir)
+
+
+def tailscale_socket_path() -> Optional[str]:
+    """
+    Return the path to the local tailscaled Unix socket if present, else None.
+
+    Used to decide whether Caddy can manage the Tailscale TLS cert itself (socket
+    mounted into the container) or whether we must fall back to a host-issued cert
+    file (e.g. Docker Desktop on macOS, where the socket isn't reachable from the VM).
+    """
+    for path in (
+        "/var/run/tailscale/tailscaled.sock",
+        "/run/tailscale/tailscaled.sock",
+    ):
+        if Path(path).exists():
+            return path
+    return None
+
+
+def decide_cert_mode(server_address: str) -> str:
+    """
+    Decide how the HTTPS certificate is managed for the given server address.
+
+    Returns:
+        "static" — host issues the cert file and Caddy serves it. Only for a Tailscale
+            (*.ts.net) address when no tailscaled socket is available to mount into
+            Caddy (e.g. Docker Desktop on macOS). Renewed by the services.py startup hook.
+        "caddy"  — Caddy obtains and auto-renews the cert itself: *.ts.net via the
+            mounted tailscaled socket, a real domain via Let's Encrypt, and an IP or
+            localhost via Caddy's internal CA. No host cert file, no renewal cron.
+    """
+    if server_address.endswith(".ts.net") and not tailscale_socket_path():
+        return "static"
+    return "caddy"
 
 
 def detect_cuda_version(default: str = "cu126") -> str:

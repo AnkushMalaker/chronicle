@@ -138,7 +138,7 @@ backends/advanced-backend/
 - **Memory Trigger**: Memory processing in `src/advanced_omi_backend/controllers/memory_controller.py`
 
 ### **Data Storage**
-- **Memories**: `src/advanced_omi_backend/memory/memory_service.py` → Mem0 → Qdrant
+- **Memories**: `src/advanced_omi_backend/services/memory/providers/chronicle.py` → FalkorDB (ConvDoc/ConvChunk/ConvEntity) + Vault
 
 ### **Configuration**
 - **Loading**: `src/advanced_omi_backend/model_registry.py`

@@ -15,6 +15,8 @@ interface Conversation {
   deleted?: boolean
   deletion_reason?: string
   deleted_at?: string
+  audio_archived?: boolean
+  archive_reason?: string
   transcript?: string
   segments?: Array<{
     text: string
@@ -224,15 +226,22 @@ export default function Archive() {
                     <p className="text-xs text-red-700 dark:text-red-400 mt-1">
                       Reason: {conversation.deletion_reason === 'user_deleted'
                         ? 'User deleted'
+                        : conversation.deletion_reason === 'audio_archived'
+                        ? `Audio archived${conversation.archive_reason ? ` (${conversation.archive_reason.replace(/_/g, ' ')})` : ''}`
                         : conversation.deletion_reason === 'no_meaningful_speech'
                         ? 'No meaningful speech detected'
                         : conversation.deletion_reason === 'audio_file_not_ready'
                         ? 'Audio file not saved (possible Bluetooth disconnect)'
                         : conversation.deletion_reason || 'Unknown'}
                     </p>
+                    {conversation.audio_archived && (
+                      <p className="text-xs text-red-700 dark:text-red-400 mt-1">
+                        Audio bytes were permanently deleted to reclaim storage. Restoring brings back metadata only — the audio cannot be recovered.
+                      </p>
+                    )}
                     {conversation.deleted_at && (
                       <p className="text-xs text-red-600 dark:text-red-500 mt-1">
-                        Deleted at: {formatDate(conversation.deleted_at)}
+                        {conversation.audio_archived ? 'Archived at: ' : 'Deleted at: '}{formatDate(conversation.deleted_at)}
                       </p>
                     )}
                   </div>

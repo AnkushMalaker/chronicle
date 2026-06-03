@@ -8,7 +8,7 @@ Features:
 - Strict backup verification before cleanup proceeds
 - Conversation-filtered audio export (only conversations with transcripts)
 - Comprehensive backup manifest with checksums
-- MongoDB, Qdrant, FalkorDB, Redis cleanup
+- MongoDB, FalkorDB, Redis cleanup
 """
 
 import argparse
@@ -31,8 +31,6 @@ try:
     from beanie import init_beanie
     from falkordb import FalkorDB
     from motor.motor_asyncio import AsyncIOMotorClient
-    from qdrant_client import AsyncQdrantClient
-    from qdrant_client.models import Distance, VectorParams
     from rich.console import Console
     from rich.panel import Panel
     from rich.progress import (
@@ -52,7 +50,6 @@ try:
     from advanced_omi_backend.models.conversation import Conversation
     from advanced_omi_backend.models.user import User
     from advanced_omi_backend.models.waveform import WaveformData
-    from advanced_omi_backend.services.memory.config import build_memory_config_from_env
 except ImportError as e:
     print(f"Error: Missing required dependency: {e}")
     print("This script must be run inside the chronicle-backend container")
@@ -67,22 +64,6 @@ console = Console()
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def get_qdrant_collection_name() -> str:
-    """Get Qdrant collection name from memory service configuration."""
-    try:
-        memory_config = build_memory_config_from_env()
-        if (
-            hasattr(memory_config, "vector_store_config")
-            and memory_config.vector_store_config
-        ):
-            return memory_config.vector_store_config.get(
-                "collection_name", "chronicle_memories"
-            )
-    except Exception:
-        pass
-    return "chronicle_memories"
 
 
 def _file_sha256(path: Path) -> str:
@@ -117,7 +98,6 @@ class Stats:
         self.chat_sessions = 0
         self.chat_messages = 0
         self.annotations = 0
-        self.memories = 0
         self.falkordb_nodes = 0
         self.falkordb_relationships = 0
         self.falkordb_promises = 0
@@ -130,7 +110,6 @@ class Stats:
 async def gather_stats(
     mongo_db: Any,
     redis_conn: Any,
-    qdrant_client: Optional[AsyncQdrantClient],
     falkordb_graph: Any = None,
     langfuse_client: Any = None,
 ) -> Stats:
@@ -148,14 +127,6 @@ async def gather_stats(
     s.chat_messages = await mongo_db["chat_messages"].count_documents({})
     s.annotations = await Annotation.find_all().count()
     s.users = await User.find_all().count()
-
-    # Qdrant
-    if qdrant_client:
-        try:
-            info = await qdrant_client.get_collection(get_qdrant_collection_name())
-            s.memories = info.points_count
-        except Exception:
-            pass
 
     # FalkorDB
     if falkordb_graph:
@@ -241,7 +212,6 @@ def render_stats_table(stats: Stats, title: str = "Current State") -> Table:
     row("Chat Messages", str(stats.chat_messages), "dim")
     row("Annotations", str(stats.annotations), "green" if stats.annotations else "dim")
     table.add_section()
-    row("Memories (Qdrant)", str(stats.memories), "yellow" if stats.memories else "dim")
     row("FalkorDB Nodes", str(stats.falkordb_nodes), "dim")
     row("FalkorDB Relationships", str(stats.falkordb_relationships), "dim")
     row(
@@ -344,7 +314,6 @@ class BackupManager:
 
     async def run(
         self,
-        qdrant_client: Optional[AsyncQdrantClient],
         stats: Stats,
     ) -> BackupResult:
         """Run all backup exports, return a BackupResult for verification."""
@@ -369,11 +338,6 @@ class BackupManager:
 
             if self.export_audio:
                 steps.append(("audio_wav", self._export_audio_wav))
-
-            if qdrant_client:
-                steps.append(
-                    ("memories", lambda r: self._export_memories(qdrant_client, r))
-                )
 
             if self.falkordb_graph:
                 steps.append(("falkordb_graph", self._export_falkordb))
@@ -408,7 +372,6 @@ class BackupManager:
                 "conversations_with_transcript": stats.conversations_with_transcript,
                 "audio_chunks": stats.audio_chunks,
                 "annotations": stats.annotations,
-                "memories": stats.memories,
                 "langfuse_prompts": stats.langfuse_prompts,
                 "users": stats.users,
             },
@@ -613,45 +576,6 @@ class BackupManager:
 
         return True
 
-    async def _export_memories(
-        self, qdrant_client: AsyncQdrantClient, result: BackupResult
-    ) -> Path:
-        collection_name = get_qdrant_collection_name()
-        collections = await qdrant_client.get_collections()
-        exists = any(c.name == collection_name for c in collections.collections)
-
-        path = self.backup_path / "memories.json"
-        if not exists:
-            with open(path, "w") as f:
-                json.dump([], f)
-            result.record("memories", path, True)
-            return path
-
-        data = []
-        offset = None
-        while True:
-            points, next_offset = await qdrant_client.scroll(
-                collection_name=collection_name,
-                limit=100,
-                offset=offset,
-                with_payload=True,
-                with_vectors=True,
-            )
-            if not points:
-                break
-            for pt in points:
-                data.append(
-                    {"id": str(pt.id), "vector": pt.vector, "payload": pt.payload}
-                )
-            if next_offset is None:
-                break
-            offset = next_offset
-
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
-        result.record("memories", path, True)
-        return path
-
     def _export_falkordb(self, result: BackupResult) -> Path:
         path = self.backup_path / "falkordb_graph.json"
         try:
@@ -746,14 +670,12 @@ class CleanupManager:
         self,
         mongo_db: Any,
         redis_conn: Any,
-        qdrant_client: Optional[AsyncQdrantClient],
         include_wav: bool,
         delete_users: bool,
         falkordb_graph: Any = None,
     ):
         self.mongo_db = mongo_db
         self.redis_conn = redis_conn
-        self.qdrant_client = qdrant_client
         self.include_wav = include_wav
         self.delete_users = delete_users
         self.falkordb_graph = falkordb_graph
@@ -763,8 +685,6 @@ class CleanupManager:
         steps = [
             ("MongoDB collections", self._cleanup_mongodb),
         ]
-        if self.qdrant_client:
-            steps.append(("Qdrant memories", self._cleanup_qdrant))
         if self.falkordb_graph:
             steps.append(("FalkorDB graph", self._cleanup_falkordb))
         steps.append(("Redis queues", self._cleanup_redis))
@@ -804,18 +724,6 @@ class CleanupManager:
         if self.delete_users:
             await User.find_all().delete()
 
-    async def _cleanup_qdrant(self, stats: Stats):
-        collection_name = get_qdrant_collection_name()
-        collections = await self.qdrant_client.get_collections()
-        exists = any(c.name == collection_name for c in collections.collections)
-        if not exists:
-            return
-        await self.qdrant_client.delete_collection(collection_name)
-        await self.qdrant_client.create_collection(
-            collection_name=collection_name,
-            vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
-        )
-
     def _cleanup_falkordb(self, stats: Stats):
         try:
             self.falkordb_graph.query("MATCH (n) DETACH DELETE n")
@@ -854,7 +762,7 @@ class CleanupManager:
 
 
 async def connect_services():
-    """Initialize all service connections. Returns (mongo_db, redis_conn, qdrant_client, falkordb_graph, langfuse_client)."""
+    """Initialize all service connections. Returns (mongo_db, redis_conn, falkordb_graph, langfuse_client)."""
     # MongoDB
     mongodb_uri = os.getenv("MONGODB_URI", "mongodb://mongo:27017")
     mongodb_database = os.getenv("MONGODB_DATABASE", "chronicle")
@@ -874,15 +782,6 @@ async def connect_services():
     # Redis
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
     redis_conn = redis.from_url(redis_url)
-
-    # Qdrant
-    qdrant_client = None
-    try:
-        qdrant_host = os.getenv("QDRANT_BASE_URL", "qdrant")
-        qdrant_port = int(os.getenv("QDRANT_PORT", "6333"))
-        qdrant_client = AsyncQdrantClient(host=qdrant_host, port=qdrant_port)
-    except Exception:
-        pass
 
     # FalkorDB
     falkordb_graph = None
@@ -909,7 +808,7 @@ async def connect_services():
         except Exception:
             langfuse_client = None
 
-    return mongo_db, redis_conn, qdrant_client, falkordb_graph, langfuse_client
+    return mongo_db, redis_conn, falkordb_graph, langfuse_client
 
 
 # ---------------------------------------------------------------------------
@@ -960,7 +859,6 @@ def print_dry_run(stats: Stats, args):
         table.add_row("Chat Sessions", str(stats.chat_sessions))
         table.add_row("Chat Messages", str(stats.chat_messages))
         table.add_row("Annotations", str(stats.annotations))
-        table.add_row("Memories (Qdrant)", str(stats.memories))
         if stats.falkordb_nodes:
             table.add_row("FalkorDB Nodes", str(stats.falkordb_nodes))
             table.add_row("FalkorDB Relationships", str(stats.falkordb_relationships))
@@ -1014,7 +912,6 @@ def print_confirmation(stats: Stats, args) -> bool:
             f"  {stats.chat_sessions} chat sessions",
             f"  {stats.chat_messages} chat messages",
             f"  {stats.annotations} annotations",
-            f"  {stats.memories} memories",
         ]
         if stats.falkordb_nodes:
             items.append(
@@ -1102,14 +999,12 @@ Examples:
 
     # Connect
     with console.status("[bold cyan]Connecting to services...", spinner="dots"):
-        mongo_db, redis_conn, qdrant_client, falkordb_graph, langfuse_client = (
-            await connect_services()
-        )
+        mongo_db, redis_conn, falkordb_graph, langfuse_client = await connect_services()
 
     # Gather stats
     with console.status("[bold cyan]Gathering statistics...", spinner="dots"):
         stats = await gather_stats(
-            mongo_db, redis_conn, qdrant_client, falkordb_graph, langfuse_client
+            mongo_db, redis_conn, falkordb_graph, langfuse_client
         )
 
     console.print()
@@ -1138,7 +1033,7 @@ Examples:
             falkordb_graph,
             langfuse_client,
         )
-        result = await backup_mgr.run(qdrant_client, stats)
+        result = await backup_mgr.run(stats)
 
         console.print()
         console.print(result.render_table())
@@ -1184,7 +1079,6 @@ Examples:
     cleanup_mgr = CleanupManager(
         mongo_db,
         redis_conn,
-        qdrant_client,
         args.include_wav,
         args.delete_users,
         falkordb_graph,
@@ -1203,7 +1097,7 @@ Examples:
     console.print()
     with console.status("[bold cyan]Verifying cleanup...", spinner="dots"):
         final_stats = await gather_stats(
-            mongo_db, redis_conn, qdrant_client, falkordb_graph, langfuse_client
+            mongo_db, redis_conn, falkordb_graph, langfuse_client
         )
 
     console.print(render_stats_table(final_stats, "After Cleanup"))

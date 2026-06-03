@@ -813,7 +813,7 @@ async def dispatch_plugin_event(
     event: PluginEvent,
     user_id: str,
     data: dict,
-    metadata: dict = None,
+    metadata: Optional[dict] = None,
     description: str = "",
     require_router: bool = False,
 ) -> Optional[list]:

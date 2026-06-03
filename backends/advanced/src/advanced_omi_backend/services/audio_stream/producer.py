@@ -195,8 +195,8 @@ class AudioStreamProducer:
     async def update_session_job_ids(
         self,
         session_id: str,
-        speech_detection_job_id: str = None,
-        audio_persistence_job_id: str = None,
+        speech_detection_job_id: str | None = None,
+        audio_persistence_job_id: str | None = None,
     ):
         """
         Update job IDs in session metadata.
@@ -218,7 +218,9 @@ class AudioStreamProducer:
             await self.redis_client.hset(session_key, mapping=updates)
             logger.debug(f"📊 Updated job IDs for session {session_id}: {updates}")
 
-    async def finalize_session(self, session_id: str, completion_reason: str = None):
+    async def finalize_session(
+        self, session_id: str, completion_reason: str | None = None
+    ):
         """
         Mark session as finalizing, send end marker, and clean up buffer.
 

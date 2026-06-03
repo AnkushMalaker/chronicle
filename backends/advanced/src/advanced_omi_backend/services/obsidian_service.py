@@ -4,24 +4,24 @@ This module provides functionality to parse, chunk, embed, and ingest Obsidian m
 notes into a FalkorDB graph database. It extracts notes, chunks them for vector search,
 generates embeddings, and stores them with relationships (folders, tags, links) in FalkorDB.
 
-The service supports:
-- Parsing Obsidian markdown files with frontmatter
-- Character-based chunking with overlap
-- Embedding generation using configured models
-- Graph storage with Note, Chunk, Folder, Tag, and Link relationships
-- Vector similarity search via FalkorDB vector indexes
+Each user's Obsidian data lives in its own per-user FalkorDB graph
+(``chronicle_<user_id>``), shared with chronicle's MemoryService and
+KnowledgeGraphService. Note/Chunk/Folder/Tag labels are distinct from
+ConvDoc/ConvChunk/Entity, so the three services coexist without collision.
 """
 
 import hashlib
 import logging
 import os
 import re
-from typing import List, Literal, Optional, TypedDict
+import threading
+from typing import Dict, List, Literal, Optional, Tuple, TypedDict
 
 from advanced_omi_backend.services.graph_client import (
     GraphClient,
     GraphReadInterface,
     GraphWriteInterface,
+    graph_name_for_user,
 )
 from advanced_omi_backend.services.memory.config import (
     load_config_yml as load_root_config,
@@ -105,25 +105,53 @@ class ObsidianService:
         )
         self.max_chunk_words = int(chunking_config.get("max_chunk_words", 300))
 
-        self.graph_client = GraphClient(
-            host=falkordb_host, port=falkordb_port, graph_name="chronicle"
-        )
-        self.read_interface = GraphReadInterface(self.graph_client)
-        self.write_interface = GraphWriteInterface(self.graph_client)
+        self._falkordb_host = falkordb_host
+        self._falkordb_port = falkordb_port
 
-    def close(self):
-        """Close the FalkorDB connection and clean up resources."""
-        self.graph_client.close()
+        # Per-user graph cache (shared with chronicle + KG services).
+        self._io_cache: Dict[
+            str, Tuple[GraphClient, GraphReadInterface, GraphWriteInterface]
+        ] = {}
+        self._io_lock = threading.Lock()
 
-    def reset_driver(self):
-        """Reset the connection, forcing it to be recreated."""
-        self.graph_client.reset()
+    def _get_io(
+        self, user_id: str
+    ) -> Tuple[GraphClient, GraphReadInterface, GraphWriteInterface]:
+        """Return ``(client, read, write)`` for ``user_id``'s per-user graph."""
+        cached = self._io_cache.get(user_id)
+        if cached is not None:
+            return cached
 
-    def setup_database(self) -> None:
-        """Create database constraints and vector index for notes and chunks."""
-        # Reset driver to ensure we use current credentials
-        self.reset_driver()
-        with self.write_interface.session() as session:
+        with self._io_lock:
+            cached = self._io_cache.get(user_id)
+            if cached is not None:
+                return cached
+
+            client = GraphClient(
+                host=self._falkordb_host,
+                port=self._falkordb_port,
+                graph_name=graph_name_for_user(user_id),
+            )
+            read = GraphReadInterface(client)
+            write = GraphWriteInterface(client)
+            io = (client, read, write)
+            self._io_cache[user_id] = io
+            return io
+
+    def close(self) -> None:
+        """Close all cached per-user FalkorDB connections."""
+        with self._io_lock:
+            for client, _, _ in self._io_cache.values():
+                try:
+                    client.close()
+                except Exception:
+                    pass
+            self._io_cache.clear()
+
+    def setup_database(self, user_id: str) -> None:
+        """Create constraints + vector index for ``user_id``'s graph (idempotent)."""
+        _, _, write = self._get_io(user_id)
+        with write.session() as session:
             # FalkorDB doesn't support IF NOT EXISTS for constraints/indexes,
             # so wrap each in try/except for idempotency
             try:
@@ -271,15 +299,17 @@ class ObsidianService:
         return chunk_payloads
 
     def ingest_note_and_chunks(
-        self, note_data: NoteData, chunks: List[ChunkPayload]
+        self, note_data: NoteData, chunks: List[ChunkPayload], user_id: str
     ) -> None:
-        """Store note and chunks in FalkorDB with relationships to folders, tags, and links.
+        """Store note and chunks in ``user_id``'s graph with folder/tag/link edges.
 
         Args:
             note_data: Parsed note data to store.
             chunks: List of chunks with embeddings to store.
+            user_id: User whose per-user graph receives the note.
         """
-        with self.write_interface.session() as session:
+        _, _, write = self._get_io(user_id)
+        with write.session() as session:
             session.run(
                 """
                 MERGE (f:Folder {name: $folder})
@@ -323,14 +353,12 @@ class ObsidianService:
                     link=link,
                 )
 
-    async def ingest_vault(self, vault_path: str) -> dict:
-        """Ingest an entire Obsidian vault into FalkorDB.
-
-        Processes all markdown files in the vault, chunks them, generates embeddings,
-        and stores them in FalkorDB with relationships.
+    async def ingest_vault(self, vault_path: str, user_id: str) -> dict:
+        """Ingest an entire Obsidian vault into ``user_id``'s per-user graph.
 
         Args:
             vault_path: Path to the Obsidian vault directory.
+            user_id: User whose per-user graph receives the vault.
 
         Returns:
             Dictionary with status, processed count, and any errors.
@@ -341,7 +369,7 @@ class ObsidianService:
         if not os.path.exists(vault_path):
             raise FileNotFoundError(f"Vault path not found: {vault_path}")
 
-        self.setup_database()
+        self.setup_database(user_id)
 
         processed = 0
         errors = []
@@ -355,7 +383,9 @@ class ObsidianService:
                         chunk_payloads = await self.chunking_and_embedding(note_data)
 
                         if chunk_payloads:
-                            self.ingest_note_and_chunks(note_data, chunk_payloads)
+                            self.ingest_note_and_chunks(
+                                note_data, chunk_payloads, user_id
+                            )
                             processed += 1
                     except Exception as e:
                         logger.exception(f"Processing {file} failed")
@@ -363,15 +393,18 @@ class ObsidianService:
 
         return {"status": "success", "processed": processed, "errors": errors}
 
-    async def search_obsidian(self, query: str, limit: int = 5) -> ObsidianSearchResult:
-        """Search Obsidian vault for relevant context using vector search and graph traversal.
+    async def search_obsidian(
+        self, query: str, user_id: str, limit: int = 5
+    ) -> ObsidianSearchResult:
+        """Search ``user_id``'s Obsidian graph for relevant context.
 
         Args:
             query: User's search query.
+            user_id: User whose per-user graph to search.
             limit: Maximum number of chunks to retrieve.
 
         Returns:
-            Result payload containing the formatted contexts (if any) and structured error info.
+            Result payload containing the formatted contexts (if any).
         """
         try:
             clean_query = self._clean_text(query)
@@ -409,9 +442,10 @@ class ObsidianService:
         ORDER BY score DESC
         """
 
+        _, read, _ = self._get_io(user_id)
         context_entries = []
         try:
-            with self.read_interface.session() as session:
+            with read.session() as session:
                 results = session.run(cypher_query, vector=query_vector, limit=limit)
 
                 for record in results:

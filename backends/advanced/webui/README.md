@@ -57,7 +57,7 @@ A modern React-based web interface for the Chronicle AI-powered personal audio s
 4. **Start backend services:**
    ```bash
    cd ../
-   docker compose up chronicle-backend mongo qdrant
+   docker compose up chronicle-backend mongo falkordb redis
    ```
 
 ### Docker Development
@@ -70,7 +70,7 @@ docker compose --profile dev up
 ```
 
 This starts:
-- Backend services (chronicle-backend, mongo, qdrant)
+- Backend services (chronicle-backend, mongo, falkordb, redis)
 - React dev server with hot reload (http://localhost:5173)
 
 ## Production Deployment
@@ -79,7 +79,7 @@ This starts:
 
 ```bash
 cd backends/advanced
-docker compose up webui chronicle-backend mongo qdrant
+docker compose up webui chronicle-backend mongo falkordb redis
 ```
 
 The production build will be available at http://localhost:3000

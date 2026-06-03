@@ -6,7 +6,7 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import redis.asyncio as aioredis
@@ -31,6 +31,7 @@ from advanced_omi_backend.controllers.session_controller import (
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import JobPriority
+from advanced_omi_backend.models.waveform import WaveformData
 from advanced_omi_backend.plugins.events import ConversationCloseReason, PluginEvent
 from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.users import User
@@ -229,6 +230,8 @@ def _conversation_to_list_dict(conv: Conversation) -> dict:
         "deleted": conv.deleted,
         "deletion_reason": conv.deletion_reason,
         "deleted_at": conv.deleted_at.isoformat() if conv.deleted_at else None,
+        "audio_archived": conv.audio_archived,
+        "archive_reason": conv.archive_reason,
         "processing_status": conv.processing_status,
         "always_persist": conv.always_persist,
         "title": conv.title,
@@ -302,6 +305,8 @@ def _raw_doc_to_list_dict(doc: dict) -> dict:
         "deleted": doc.get("deleted", False),
         "deletion_reason": doc.get("deletion_reason"),
         "deleted_at": deleted_at.isoformat() if deleted_at else None,
+        "audio_archived": doc.get("audio_archived", False),
+        "archive_reason": doc.get("archive_reason"),
         "processing_status": doc.get("processing_status"),
         "always_persist": doc.get("always_persist", False),
         "title": doc.get("title"),
@@ -333,6 +338,8 @@ _LIST_PROJECTION = {
     "deleted": 1,
     "deletion_reason": 1,
     "deleted_at": 1,
+    "audio_archived": 1,
+    "archive_reason": 1,
     "processing_status": 1,
     "always_persist": 1,
     "title": 1,
@@ -562,7 +569,7 @@ async def _soft_delete_conversation(
     where a retry will complete the operation.
     """
     conversation_id = conversation.conversation_id
-    deleted_at = datetime.utcnow()
+    deleted_at = datetime.now(timezone.utc)
 
     # 1. Soft delete audio chunks FIRST (safe failure mode: orphaned-deleted chunks)
     result = await AudioChunkDocument.find(
@@ -694,6 +701,111 @@ async def delete_conversation(
             status_code=500,
             content={"error": f"Failed to delete conversation: {str(e)}"},
         )
+
+
+async def archive_conversation_audio_doc(
+    conversation: Conversation, reason: str = "manual_cleanup"
+) -> int:
+    """Archive a conversation document's audio (no permission check).
+
+    Hard-deletes the audio chunks and marks the conversation archived + soft-
+    deleted, keeping duration as the stub metadata. Returns the number of audio
+    chunks deleted. Idempotent: a re-run on an already-archived conversation
+    backfills the soft-delete flags and deletes 0 chunks.
+
+    This is the shared core used by both the user-facing endpoint (after a
+    permission check) and the system auto-clean sweep. Archiving is a
+    specialization of soft-delete: ``deleted=True`` hides it from the normal
+    list and surfaces it in the Archive tab; ``audio_archived``/``archive_reason``
+    record that the audio bytes were permanently purged. ``deletion_reason
+    ="audio_archived"`` is intentionally distinct from the no-speech/orphan
+    reasons so it isn't treated as a reprocessable orphan.
+    """
+    conversation_id = conversation.conversation_id
+    archived_at = datetime.now(timezone.utc)
+
+    if conversation.audio_archived:
+        # Idempotent backfill of soft-delete flags for items archived before
+        # archiving was unified with soft-delete.
+        if not conversation.deleted:
+            conversation.deleted = True
+            conversation.deletion_reason = "audio_archived"
+            conversation.deleted_at = conversation.audio_archived_at or archived_at
+            await conversation.save()
+        return 0
+
+    # 1. Hard delete audio chunks FIRST (no rollback for hard deletes; if the
+    #    metadata write fails afterwards a re-run completes — chunks are gone).
+    result = await AudioChunkDocument.find(
+        AudioChunkDocument.conversation_id == conversation_id
+    ).delete()
+    deleted_chunks = result.deleted_count
+
+    # 2. Mark the conversation as archived (+ soft-deleted), keeping duration.
+    conversation.audio_archived = True
+    conversation.audio_archived_at = archived_at
+    conversation.archive_reason = reason
+    conversation.audio_chunks_count = 0
+    conversation.audio_compression_ratio = None
+    conversation.deleted = True
+    conversation.deletion_reason = "audio_archived"
+    conversation.deleted_at = archived_at
+    await conversation.save()
+
+    # Drop any cached waveform — it points at audio that no longer exists.
+    try:
+        await WaveformData.find(
+            WaveformData.conversation_id == conversation_id
+        ).delete()
+    except Exception as e:
+        logger.warning(f"Failed to delete waveform for {conversation_id}: {e}")
+
+    logger.info(
+        f"Archived audio for conversation {conversation_id} "
+        f"(reason={reason}, deleted {deleted_chunks} chunks)"
+    )
+    return deleted_chunks
+
+
+async def archive_conversation_audio(
+    conversation_id: str, user: User, reason: str = "manual_cleanup"
+) -> JSONResponse:
+    """Archive a conversation's audio: permanently delete the audio bytes from
+    MongoDB while keeping the conversation document as a lightweight metadata
+    stub (date, duration, reason).
+
+    Used by the Data Cleaning feature to reclaim storage for near-silent or
+    bad-speaker recordings. Unlike soft delete, this is irreversible for the
+    audio — the transcript/segment metadata is retained.
+    """
+    conversation, error = await _get_conversation_or_error(conversation_id, user)
+    if error:
+        return error
+
+    already_archived = conversation.audio_archived
+    deleted_chunks = await archive_conversation_audio_doc(conversation, reason)
+
+    if already_archived:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "message": "Conversation audio already archived",
+                "conversation_id": conversation_id,
+                "already_archived": True,
+                "deleted_chunks": 0,
+            },
+        )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "message": f"Successfully archived audio for conversation '{conversation_id}'",
+            "conversation_id": conversation_id,
+            "archive_reason": reason,
+            "deleted_chunks": deleted_chunks,
+            "duration_seconds": conversation.audio_total_duration,
+        },
+    )
 
 
 async def restore_conversation(conversation_id: str, user: User) -> JSONResponse:
@@ -945,7 +1057,9 @@ async def toggle_star(conversation_id: str, user: User):
 
         # Toggle
         conversation.starred = not conversation.starred
-        conversation.starred_at = datetime.utcnow() if conversation.starred else None
+        conversation.starred_at = (
+            datetime.now(timezone.utc) if conversation.starred else None
+        )
         await conversation.save()
 
         logger.info(

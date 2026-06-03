@@ -450,7 +450,7 @@ Only return valid JSON, no additional text.""",
     # ------------------------------------------------------------------
     registry.register_default(
         "asr.hot_words",
-        template="vivi, chronicle, omi",
+        template="hermes, chronicle, omi",
         name="ASR Hot Words",
         description="Comma-separated hot words for speech recognition. "
         "For Deepgram: boosts keyword recognition via keyterm. "
@@ -664,7 +664,32 @@ duration_minutes: {{duration}}
 {2-3 sentence summary of what was discussed}
 
 ### Key Facts
-{Bulleted list of specific facts, decisions, numbers, dates mentioned}
+{Bulleted list. CRITICAL — preserve every concrete detail VERBATIM. For each fact in the transcript, capture all WH-details that appear:
+  - WHO: people, friends, colleagues, family, by name.
+  - WHAT: titles (books / plays / movies / songs / games / podcasts / playlists),
+          products, brands, dishes, model numbers, job titles, occupations.
+  - WHERE: stores, retailers (e.g. "Target", "Trader Joe's"), restaurants,
+           cities, parks, venues, addresses, websites.
+  - WHEN: full date and/or time. If the transcript prefix has one, use it verbatim.
+  - HOW MUCH / HOW MANY: prices, distances, durations, quantities, speeds,
+           personal-best times — keep them exact.
+
+Distinguish current vs. previous state explicitly when the user says so
+("previous job was X", "used to be Y", "no longer Z").
+
+Examples of BAD vs. GOOD facts:
+  BAD:  Attended a play at the local community theater.
+  GOOD: Attended The Glass Menagerie at the local community theater on 2023-05-26.
+  BAD:  Bought a new tennis racket recently.
+  GOOD: Bought a new tennis racket from the sports store downtown.
+  BAD:  Made a Spotify playlist.
+  GOOD: Created a Spotify playlist named "Summer Vibes".
+  BAD:  Previous job was in marketing.
+  GOOD: Previous occupation: marketing specialist at a small startup.
+  BAD:  Upgraded internet plan.
+  GOOD: New internet plan: 500 Mbps.
+  BAD:  Improved 5K time.
+  GOOD: Personal best in the charity 5K: 25:50 (previous PB was 27:12).}
 
 ### People
 {Bulleted list in format: - Name (role/relationship, context)}
@@ -679,7 +704,8 @@ Use [x] for items already completed in the conversation.
 Rules:
 - Every ### section MUST be present, even if empty (use "- None" for empty sections)
 - People section: ONLY named individuals, format MUST be "- Name (description)"
-- Key Facts: be specific — include dates, numbers, names
+- Key Facts: keep every WH-detail verbatim — never paraphrase a name, title,
+  store, date, or number into a generic word like "a play" / "a store" / "recently"
 - Action Items: use checkbox format [ ] or [x]
 - Do NOT add any sections beyond the four listed above
 """,
@@ -688,6 +714,36 @@ Rules:
         category="memory",
         variables=["conversation_id", "date", "speakers", "duration"],
         is_dynamic=True,
+    )
+
+    # ------------------------------------------------------------------
+    # memory.agent_system  (Chronicle memory agent — vault-editing system prompt)
+    # ------------------------------------------------------------------
+    # Canonical text lives with the agent so the two never drift; lazy import
+    # avoids any import-order coupling (the agent module is heavy).
+    from advanced_omi_backend.services.memory.agent.memory_agent import (
+        DEFAULT_AGENT_SYSTEM_PROMPT,
+        SEARCH_SYSTEM_PROMPT,
+    )
+
+    registry.register_default(
+        "memory.agent_system",
+        template=DEFAULT_AGENT_SYSTEM_PROMPT,
+        name="Memory Agent System Prompt",
+        description="Vault-aware system prompt for the tool-calling memory agent. "
+        "Supports a {{vault_summary}} slot for learned, per-user vault conventions.",
+        category="memory",
+        variables=["vault_summary"],
+    )
+
+    registry.register_default(
+        "memory.search_system",
+        template=SEARCH_SYSTEM_PROMPT,
+        name="Memory Search Agent System Prompt",
+        description="Vault-aware system prompt for the read-only retrieval agent "
+        "(grep/glob/read). Supports a {{vault_summary}} slot.",
+        category="memory",
+        variables=["vault_summary"],
     )
 
     # ------------------------------------------------------------------

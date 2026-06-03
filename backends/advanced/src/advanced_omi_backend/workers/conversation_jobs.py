@@ -10,7 +10,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from rq.exceptions import NoSuchJobError
@@ -132,7 +132,7 @@ async def handle_end_of_conversation(
             logger.warning(f"⚠️ Invalid end_reason '{end_reason}', using UNKNOWN")
             conversation.end_reason = Conversation.EndReason.UNKNOWN
 
-        conversation.completed_at = datetime.utcnow()
+        conversation.completed_at = datetime.now(timezone.utc)
         await conversation.save()
         logger.info(
             f"💾 Saved conversation {conversation_id[:12]} end_reason: {conversation.end_reason}"
@@ -1032,7 +1032,7 @@ async def _create_live_transcript_version(
         "segments": segments_as_dicts,
         "provider": provider,
         "model": provider,
-        "created_at": datetime.utcnow(),
+        "created_at": datetime.now(timezone.utc),
         "processing_time_seconds": None,
         "diarization_source": "provider" if segments_as_dicts else None,
         "metadata": {
@@ -1341,7 +1341,7 @@ async def open_conversation_job(
     user_id: str,
     client_id: str,
     speech_detected_at: float,
-    speech_job_id: str = None,
+    speech_job_id: Optional[str] = None,
     *,
     redis_client=None,
 ) -> Dict[str, Any]:
@@ -1811,7 +1811,7 @@ async def dispatch_conversation_complete_event_job(
             conversation.end_reason = Conversation.EndReason.UNKNOWN
 
         if conversation.completed_at is None:
-            conversation.completed_at = datetime.utcnow()
+            conversation.completed_at = datetime.now(timezone.utc)
 
         await conversation.save()
         logger.info(

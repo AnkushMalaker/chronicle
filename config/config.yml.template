@@ -6,6 +6,10 @@ defaults:
   # - stt-deepgram: Cloud-based (requires DEEPGRAM_API_KEY in .env)
   # - stt-parakeet-batch: Local ASR (requires Parakeet service running)
   tts: tts-http
+  # Live transcription path: "streaming_stt" (uses stt_stream) or "windowed_batch"
+  # (batch-transcribes fixed ~windowed_batch_seconds windows using stt; for setups
+  # with no streaming ASR). Defaults to streaming_stt.
+  live_segmentation: streaming_stt
 models:
 - name: emberfang-llm
   description: Emberfang One LLM

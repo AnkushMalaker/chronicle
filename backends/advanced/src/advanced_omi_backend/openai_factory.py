@@ -20,6 +20,24 @@ logger = logging.getLogger(__name__)
 _client_cache: dict[tuple[str, str, bool], openai.OpenAI | openai.AsyncOpenAI] = {}
 
 
+def is_reasoning_model(model: str | None) -> bool:
+    """Return True for OpenAI reasoning-class models (o1/o3/o4/gpt-5 family).
+
+    These models have stricter API surface than standard chat models — they
+    reject non-default `temperature` and require `max_completion_tokens`
+    instead of `max_tokens`. Callers should adapt API params accordingly.
+    """
+    if not model:
+        return False
+    m = model.lower()
+    return m.startswith(("o1", "o3", "o4")) or m.startswith("gpt-5")
+
+
+def model_supports_temperature(model: str | None) -> bool:
+    """Return False for models that reject non-default temperature."""
+    return not is_reasoning_model(model)
+
+
 def create_openai_client(api_key: str, base_url: str, is_async: bool = False):
     """Get or create a cached OpenAI client.
 

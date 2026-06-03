@@ -11,7 +11,7 @@ This module provides:
 import logging
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import redis
@@ -146,16 +146,16 @@ def get_job_stats() -> Dict[str, Any]:
         "failed_jobs": failed_jobs,
         "canceled_jobs": canceled_jobs,
         "deferred_jobs": deferred_jobs,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
 def get_jobs(
     limit: int = 20,
     offset: int = 0,
-    queue_name: str = None,
-    job_type: str = None,
-    client_id: str = None,
+    queue_name: Optional[str] = None,
+    job_type: Optional[str] = None,
+    client_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Get jobs from a specific queue or all queues with optional filtering.

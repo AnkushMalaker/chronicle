@@ -66,7 +66,7 @@ class HomeAssistantPlugin(BasePlugin):
         # Configuration
         self.ha_url = config.get("ha_url", "http://localhost:8123")
         self.ha_token = config.get("ha_token", "")
-        self.wake_word = config.get("wake_word", "vivi")
+        self.wake_word = config.get("wake_word", "hermes")
         self.timeout = int(config.get("timeout", 30))
         self.button_actions = config.get("button_actions", {})
 
@@ -146,7 +146,7 @@ class HomeAssistantPlugin(BasePlugin):
             Context data:
                 {
                     'command': 'turn off study lights',
-                    'original_transcript': 'vivi turn off study lights',
+                    'original_transcript': 'hermes turn off study lights',
                     'conversation_id': 'conv_123'
                 }
 
@@ -545,7 +545,7 @@ class HomeAssistantPlugin(BasePlugin):
         Use a lightweight LLM call to extract only the Home Assistant command
         from a transcript that may contain mixed conversation.
 
-        When the keyword (e.g. "vivi") is detected anywhere in a long transcript,
+        When the keyword (e.g. "hermes") is detected anywhere in a long transcript,
         the surrounding text often includes unrelated speech. This method asks the
         LLM to return just the smart-home command portion.
 

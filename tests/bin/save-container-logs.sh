@@ -18,7 +18,7 @@ echo "📝 Saving container logs to logs/$TIMESTAMP/"
 PROJECT_NAME="backend-test"
 
 # Service list (based on docker-compose-test.yml)
-SERVICES="chronicle-backend-test workers-test mongo-test redis-test qdrant-test speaker-service-test"
+SERVICES="chronicle-backend-test workers-test mongo-test redis-test speaker-service-test"
 
 # Save logs for each service
 for service in $SERVICES; do

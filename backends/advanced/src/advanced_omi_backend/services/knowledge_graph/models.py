@@ -5,7 +5,7 @@ service for storing and retrieving entities and relationships.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -55,8 +55,8 @@ class Entity(BaseModel):
     icon: Optional[str] = None  # Emoji for display
     embedding: Optional[List[float]] = None  # For semantic search
     metadata: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     # Type-specific fields
     location: Optional[Dict[str, float]] = None  # For Place: {lat, lon}
@@ -114,7 +114,7 @@ class Relationship(BaseModel):
     context: Optional[str] = None  # Additional context about the relationship
     timestamp: Optional[datetime] = None  # When was this relationship established
     metadata: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     # For start/end dates on temporal relationships
     start_date: Optional[datetime] = None

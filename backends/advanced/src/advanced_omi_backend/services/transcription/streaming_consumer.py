@@ -32,6 +32,17 @@ logger = logging.getLogger(__name__)
 
 MAX_STREAMING_START_ATTEMPTS = 2
 
+# Bail out of process_stream after this many seconds with no incoming chunks.
+# process_stream's normal exit is the end_marker sent by AudioStreamProducer.finalize_session.
+# That marker is missed when:
+#   - the device drops the TCP connection without a clean WebSocket close (no FastAPI
+#     disconnect handler fires, so finalize_session never runs)
+#   - the backend process crashes / is restarted before finalize_session runs
+# Without a heartbeat exit the task pins on the stream forever, polling XREADGROUP every
+# ~1s. Streams idle 65+ days have been observed in prod. Threshold is generous enough to
+# ride out brief network blips (producer emits chunks every 0.25s when healthy).
+STREAM_IDLE_TIMEOUT_SECONDS = 300
+
 
 def _is_connection_error(e: Exception) -> bool:
     """Check if exception indicates WebSocket connection death."""
@@ -566,7 +577,7 @@ class StreamingTranscriptionConsumer:
             )
 
     async def store_final_result(
-        self, session_id: str, result: Dict, chunk_id: str = None
+        self, session_id: str, result: Dict, chunk_id: Optional[str] = None
     ):
         """
         Store final transcription result to Redis Stream.
@@ -767,10 +778,22 @@ class StreamingTranscriptionConsumer:
                     )
 
                     if not messages:
-                        # No new messages - check if stream is still alive
                         if session_id not in self.active_sessions:
                             logger.info(
                                 f"Session {session_id} no longer active, ending stream processing"
+                            )
+                            stream_ended = True
+                            continue
+
+                        # Heartbeat-based zombie exit (see STREAM_IDLE_TIMEOUT_SECONDS).
+                        idle_for = (
+                            time.time()
+                            - self.active_sessions[session_id]["last_activity"]
+                        )
+                        if idle_for > STREAM_IDLE_TIMEOUT_SECONDS:
+                            logger.warning(
+                                f"Stream {stream_name} idle for {idle_for:.0f}s without "
+                                f"end_marker — treating as zombie and ending processing"
                             )
                             stream_ended = True
                         continue
@@ -804,6 +827,10 @@ class StreamingTranscriptionConsumer:
                                 logger.debug(
                                     f"Processing audio chunk {msg_id} ({len(audio_chunk)} bytes)"
                                 )
+                                if session_id in self.active_sessions:
+                                    self.active_sessions[session_id][
+                                        "last_activity"
+                                    ] = time.time()
                                 # Process audio chunk through streaming provider
                                 try:
                                     await self.process_audio_chunk(

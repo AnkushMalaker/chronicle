@@ -11,7 +11,10 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
 from advanced_omi_backend.model_registry import get_models_registry
-from advanced_omi_backend.openai_factory import create_openai_client
+from advanced_omi_backend.openai_factory import (
+    create_openai_client,
+    model_supports_temperature,
+)
 from advanced_omi_backend.services.memory.config import (
     load_config_yml as _load_root_config,
 )
@@ -92,11 +95,13 @@ class OpenAILLMClient(LLMClient):
             model_name = model or self.model
             temp = temperature if temperature is not None else self.temperature
 
-            response = self.client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temp,
-            )
+            params: dict[str, Any] = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            if model_supports_temperature(model_name):
+                params["temperature"] = temp
+            response = self.client.chat.completions.create(**params)
             return response.choices[0].message.content.strip()
         except Exception as e:
             self.logger.error(f"Error generating completion: {e}")
@@ -111,11 +116,14 @@ class OpenAILLMClient(LLMClient):
     ):
         """Chat completion with tool/function calling support. Returns raw response object."""
         model_name = model or self.model
-        params = {
+        params: dict[str, Any] = {
             "model": model_name,
             "messages": messages,
-            "temperature": temperature if temperature is not None else self.temperature,
         }
+        if model_supports_temperature(model_name):
+            params["temperature"] = (
+                temperature if temperature is not None else self.temperature
+            )
         if tools:
             params["tools"] = tools
         return self.client.chat.completions.create(**params)
@@ -253,6 +261,8 @@ async def async_generate(
                 api_params["temperature"] = temperature
             if model is not None:
                 api_params["model"] = model
+            if not model_supports_temperature(api_params.get("model")):
+                api_params.pop("temperature", None)
             api_params["messages"] = [{"role": "user", "content": prompt}]
             response = await client.chat.completions.create(**api_params)
             return response.choices[0].message.content.strip()

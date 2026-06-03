@@ -20,11 +20,23 @@ WORKDIR /app
 # Copy dependency files first (cache-friendly)
 COPY pyproject.toml uv.lock ./
 
-# Export locked deps to requirements.txt (handles extras, git sources, custom indexes)
-# Install to system Python (no venv) - container IS the isolation
+# Build a project .venv from the lockfile (includes git deps like Graphiti)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv export --frozen --no-dev --extra deepgram --extra galileo --no-emit-project -o requirements.txt && \
-    uv pip install --system -r requirements.txt
+    uv sync --frozen --no-dev --extra deepgram --extra galileo --extra benchmark --no-install-project
+
+
+# ============================================
+# notesmd-cli builder - vault note rename/move with backlink rewrite
+# ============================================
+# The memory agent uses `notesmd-cli move` to rename a person note and rewrite every
+# [[wikilink]] to it across the vault in one shot (verified non-destructive). Pinned to
+# the commit vendored in untracked/; vendor/ in the repo means the build is hermetic.
+FROM golang:1.25-bookworm AS notesmd-builder
+ARG NOTESMD_REF=cae9aa8
+RUN git clone https://github.com/Yakitrak/notesmd-cli /src \
+    && cd /src \
+    && git checkout ${NOTESMD_REF} \
+    && CGO_ENABLED=0 go build -trimpath -mod=vendor -o /out/notesmd-cli .
 
 
 # ============================================
@@ -36,15 +48,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsndfile1 \
     curl \
     ffmpeg \
+    ripgrep \
     && rm -rf /var/lib/apt/lists/*
+
+# notesmd-cli on PATH so the memory agent auto-detects it (shutil.which).
+COPY --from=notesmd-builder /out/notesmd-cli /usr/local/bin/notesmd-cli
 
 WORKDIR /app
 
-# Copy installed packages from builder
-COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
+# Copy locked virtual environment from builder
+COPY --from=builder /app/.venv /app/.venv
 
-# Source layout needs PYTHONPATH
+# Source layout + venv defaults for runtime shells and commands
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH="/app/.venv/bin:${PATH}"
 ENV PYTHONPATH=/app/src:/app
 
 # Copy application code
@@ -69,20 +86,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsndfile1 \
     curl \
     ffmpeg \
+    ripgrep \
     build-essential \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# notesmd-cli on PATH so the memory agent auto-detects it (shutil.which).
+COPY --from=notesmd-builder /out/notesmd-cli /usr/local/bin/notesmd-cli
+
 WORKDIR /app
 
-# For dev, install deps + test group using uv temporarily
+# For dev, create project .venv with test deps
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv export --frozen --extra deepgram --extra galileo --group test --no-emit-project -o requirements.txt && \
-    uv pip install --system -r requirements.txt && \
+    uv sync --frozen --extra deepgram --extra galileo --extra benchmark --group test --no-install-project && \
     rm /bin/uv /bin/uvx
 
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH="/app/.venv/bin:${PATH}"
 ENV PYTHONPATH=/app/src:/app
 
 # Copy application code

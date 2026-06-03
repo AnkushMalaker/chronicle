@@ -14,16 +14,39 @@ from .config import WorkerDefinition, WorkerType
 logger = logging.getLogger(__name__)
 
 
+def _get_live_segmentation() -> str:
+    """Read the live-segmentation mode from config.yml (defaults.live_segmentation).
+
+    "streaming_stt" (default): the streaming-stt worker produces live transcripts.
+    "windowed_batch": the windowed-batch worker produces transcripts from the batch
+        STT provider in fixed-duration windows (for setups with no streaming ASR).
+
+    Exactly one of the two transcript-producing workers runs, gated on this switch.
+    """
+    try:
+        from advanced_omi_backend.model_registry import get_models_registry
+
+        registry = get_models_registry()
+        if registry and registry.defaults:
+            return registry.defaults.get("live_segmentation", "streaming_stt")
+    except Exception as e:
+        logger.warning(f"Failed to read live_segmentation from config.yml: {e}")
+
+    return "streaming_stt"
+
+
 def has_streaming_stt_configured() -> bool:
     """
-    Check if streaming STT provider is configured in config.yml.
+    Check if the streaming STT worker should run.
 
     Returns:
-        True if defaults.stt_stream is configured, False otherwise
+        True if live_segmentation is "streaming_stt" and defaults.stt_stream is configured.
 
     Note: Batch STT is handled by RQ workers in transcription_jobs.py,
           no separate worker needed.
     """
+    if _get_live_segmentation() != "streaming_stt":
+        return False
     try:
         from advanced_omi_backend.model_registry import get_models_registry
 
@@ -33,6 +56,28 @@ def has_streaming_stt_configured() -> bool:
             return stt_stream_model is not None
     except Exception as e:
         logger.warning(f"Failed to read streaming STT config from config.yml: {e}")
+
+    return False
+
+
+def has_windowed_batch_configured() -> bool:
+    """
+    Check if the windowed-batch transcription worker should run.
+
+    Returns:
+        True if live_segmentation is "windowed_batch" and a batch STT provider
+        (defaults.stt) is configured.
+    """
+    if _get_live_segmentation() != "windowed_batch":
+        return False
+    try:
+        from advanced_omi_backend.model_registry import get_models_registry
+
+        registry = get_models_registry()
+        if registry and registry.defaults:
+            return registry.get_default("stt") is not None
+    except Exception as e:
+        logger.warning(f"Failed to read batch STT config from config.yml: {e}")
 
     return False
 
@@ -96,6 +141,24 @@ def build_worker_definitions() -> List[WorkerDefinition]:
             ],
             worker_type=WorkerType.STREAM_CONSUMER,
             enabled_check=has_streaming_stt_configured,
+            restart_on_failure=True,
+        )
+    )
+
+    # Windowed Batch Worker - Conditional (live_segmentation == "windowed_batch").
+    # Mutually exclusive with streaming-stt via the live_segmentation switch. Transcribes
+    # fixed-duration windows with the batch STT provider so continuous/static sources are
+    # transcribed incrementally instead of only on disconnect (no streaming ASR needed).
+    workers.append(
+        WorkerDefinition(
+            name="windowed-batch",
+            command=[
+                "python",
+                "-m",
+                "advanced_omi_backend.workers.windowed_batch_worker",
+            ],
+            worker_type=WorkerType.STREAM_CONSUMER,
+            enabled_check=has_windowed_batch_configured,
             restart_on_failure=True,
         )
     )
