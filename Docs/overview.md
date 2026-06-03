@@ -28,7 +28,7 @@ Audio/Images/Data  →  Ingestion  →  Processing  →  Memories
 2. **Transcription**: Deepgram (cloud) or Parakeet (local) converts speech to text
 3. **Speaker Recognition**: Optional identification of who said what (pyannote)
 4. **Memory Extraction**: LLM extracts facts, preferences, and context from transcripts
-5. **Storage**: Memories stored as vectors in Qdrant for semantic search
+5. **Storage**: Memories indexed in FalkorDB (graph + vector + BM25 hybrid search)
 
 ### Image Pipeline (In Development)
 
@@ -51,8 +51,9 @@ Audio/Images/Data  →  Ingestion  →  Processing  →  Memories
 │  └──────────────┘    └──────┬───────┘               │
 │                             │                        │
 │  ┌──────────────┐    ┌──────▼───────┐  ┌──────────┐ │
-│  │ Web UI       │    │   Workers    │  │ Qdrant   │ │
-│  │ (React)      │    │  (RQ/Redis)  │  │ (Vector) │ │
+│  │ Web UI       │    │   Workers    │  │ FalkorDB │ │
+│  │ (React)      │    │  (RQ/Redis)  │  │ (Graph + │ │
+│  │              │    │              │  │  Vector) │ │
 │  └──────────────┘    └──────────────┘  └──────────┘ │
 │                                                       │
 │  Transcription:  Deepgram (cloud) or Parakeet (local) │
@@ -72,6 +73,7 @@ Audio/Images/Data  →  Ingestion  →  Processing  →  Memories
 | **ASR Services** | `extras/asr-services/` | Local speech-to-text (Parakeet) |
 | **OpenMemory MCP** | `extras/openmemory-mcp/` | Cross-client memory compatibility |
 | **HAVPE Relay** | `extras/havpe-relay/` | ESP32 audio bridge |
+| **Vault Sync** | `extras/vault-sync/` | macOS menu bar app — syncs your conversation_docs vault to Obsidian via Syncthing |
 
 ### Pluggable Providers
 
@@ -79,7 +81,7 @@ Chronicle is designed around swappable providers:
 
 - **Transcription**: Deepgram API or local Parakeet ASR
 - **LLM**: OpenAI or local Ollama
-- **Memory Storage**: Chronicle native (Qdrant) or OpenMemory MCP
+- **Memory Storage**: Chronicle native (FalkorDB) or OpenMemory MCP
 - **Speaker Recognition**: pyannote-based service (optional)
 
 ## Repository Structure
@@ -95,7 +97,8 @@ chronicle/
 │   ├── speaker-recognition/ # Voice identification
 │   ├── asr-services/        # Local ASR (Parakeet)
 │   ├── openmemory-mcp/      # External memory server
-│   └── havpe-relay/         # ESP32 audio bridge
+│   ├── havpe-relay/         # ESP32 audio bridge
+│   └── vault-sync/          # macOS menu bar app: vault ⇄ Obsidian via Syncthing
 ├── config/                  # Central configuration
 ├── Docs/                    # Documentation
 ├── tests/                   # Integration tests (Robot Framework)
