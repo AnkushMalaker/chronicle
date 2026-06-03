@@ -12,12 +12,20 @@ import type { AudioDataEvent } from '@siteed/expo-audio-studio';
 import base64 from 'react-native-base64';
 
 
+interface StartRecordingOptions {
+  /** Specific input device to record from. Omit/undefined to use the system default mic. */
+  deviceId?: string;
+}
+
 interface UsePhoneAudioRecorder {
   isRecording: boolean;
   isInitializing: boolean;
   error: string | null;
   audioLevel: number;
-  startRecording: (onAudioData: (pcmBuffer: Uint8Array) => void) => Promise<void>;
+  startRecording: (
+    onAudioData: (pcmBuffer: Uint8Array) => void,
+    options?: StartRecordingOptions
+  ) => Promise<void>;
   stopRecording: () => Promise<void>;
 }
 
@@ -119,7 +127,10 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
   }, []);
 
   // Start recording from phone microphone - EXACT 2025 guide pattern
-  const startRecording = useCallback(async (onAudioData: (pcmBuffer: Uint8Array) => void): Promise<void> => {
+  const startRecording = useCallback(async (
+    onAudioData: (pcmBuffer: Uint8Array) => void,
+    options?: StartRecordingOptions
+  ): Promise<void> => {
     if (isRecording) {
       console.log('[PhoneAudioRecorder] Already recording, stopping first...');
       await stopRecording();
@@ -136,7 +147,10 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
         throw new Error('Microphone permission denied');
       }
 
-      console.log('[PhoneAudioRecorder] Starting audio recording...');
+      console.log(
+        '[PhoneAudioRecorder] Starting audio recording...',
+        options?.deviceId ? `deviceId=${options.deviceId}` : 'deviceId=default'
+      );
 
       // EXACT config from 2025 guide + processing for audio levels
       const config = {
@@ -146,6 +160,19 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
         encoding: "pcm_16bit" as const,
         enableProcessing: true,        // Enable audio analysis for live RMS
         intervalAnalysis: 500,         // Analysis every 500ms
+        // Route to the chosen input device (e.g. a Bluetooth headset mic). When the
+        // device drops mid-stream, fall back to the default mic instead of stopping.
+        ...(options?.deviceId ? { deviceId: options.deviceId } : {}),
+        deviceDisconnectionBehavior: 'fallback' as const,
+        // iOS requires PlayAndRecord + AllowBluetooth for the OS to route input to a
+        // Bluetooth (HFP/SCO) headset mic; without it iOS keeps the built-in mic.
+        ios: {
+          audioSession: {
+            category: 'PlayAndRecord' as const,
+            mode: 'Default' as const,
+            categoryOptions: ['AllowBluetooth', 'DefaultToSpeaker'] as ('AllowBluetooth' | 'DefaultToSpeaker')[],
+          },
+        },
         onAudioStream: async (event: AudioDataEvent) => {
           // EXACT payload handling from guide
           const payload = typeof event.data === "string"
