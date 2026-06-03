@@ -34,6 +34,10 @@ services:
       - CORS_ORIGINS=http://localhost:3010,http://localhost:8000,http://192.168.1.153:3010,http://192.168.1.153:8000,https://localhost:3010,https://localhost:8000,https://100.105.225.45,https://localhost
       - REDIS_URL=redis://redis:6379/0
       - MONGODB_URI=mongodb://mongo:27017
+      # Vault sync broker -> server Syncthing REST API (internal docker network)
+      - VAULT_SYNC_SYNCTHING_URL=http://vault-syncthing:8384
+      - VAULT_SYNC_API_KEY=${VAULT_SYNC_API_KEY:-}
+      - VAULT_SYNC_ADDRESS=${VAULT_SYNC_ADDRESS:-}
     depends_on:
       falkordb:
         condition: service_healthy
@@ -248,6 +252,32 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  # Vault sync - Syncthing instance that shares each user's Obsidian vault
+  # (data/conversation_docs/{user_id}) with their Mac so it can be opened in Obsidian.
+  # Configured exclusively by the backend's /api/vault-sync broker - not by hand.
+  # REST API stays on the internal docker network (reachable as vault-syncthing:8384);
+  # only the sync protocol port 22000 is published (reach it over Tailscale).
+  # Enable with: docker compose --profile vault-sync up -d
+  vault-syncthing:
+    image: syncthing/syncthing:latest
+    container_name: chronicle-vault-syncthing
+    hostname: chronicle-vault-syncthing
+    environment:
+      - STGUIADDRESS=0.0.0.0:8384          # REST API reachable from the backend container
+      - STGUIAPIKEY=${VAULT_SYNC_API_KEY}  # backend authenticates to Syncthing with this
+      - PUID=${VAULT_SYNC_PUID:-0}         # match conversation_docs file ownership
+      - PGID=${VAULT_SYNC_PGID:-0}
+    volumes:
+      - ./data/syncthing_config:/var/syncthing/config
+      - ./data/conversation_docs:/vaults   # backend exposes per-user folders under here
+    ports:
+      - "22000:22000/tcp"   # sync protocol (reachable via Tailscale)
+      - "22000:22000/udp"   # QUIC
+      - "21027:21027/udp"   # local network discovery
+    restart: unless-stopped
+    profiles:
+      - vault-sync
 
   tailscale:
     image: tailscale/tailscale:latest
