@@ -129,7 +129,6 @@ jobs:
         docker compose -f docker-compose-test.yml logs workers-test > logs/workers.log 2>&1 || true
         docker compose -f docker-compose-test.yml logs mongo-test > logs/mongo.log 2>&1 || true
         docker compose -f docker-compose-test.yml logs redis-test > logs/redis.log 2>&1 || true
-        docker compose -f docker-compose-test.yml logs qdrant-test > logs/qdrant.log 2>&1 || true
         docker compose -f docker-compose-test.yml logs speaker-service-test > logs/speaker.log 2>&1 || true
         echo "✓ Logs saved to backends/advanced/logs/"
         ls -lh logs/

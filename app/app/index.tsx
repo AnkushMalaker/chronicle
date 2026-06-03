@@ -16,6 +16,7 @@ import { useAudioStreamingOrchestrator } from '@/hooks/useAudioStreamingOrchestr
 import { useAudioListener } from '@/hooks/useAudioListener';
 import { useAudioStreamer } from '@/hooks/useAudioStreamer';
 import { usePhoneAudioRecorder } from '@/hooks/usePhoneAudioRecorder';
+import { usePhoneAudioDevices } from '@/hooks/usePhoneAudioDevices';
 import { useBatteryMonitor } from '@/hooks/useBatteryMonitor';
 import { saveLastConnectedDeviceId } from '@/utils/storage';
 
@@ -28,6 +29,7 @@ import AuthSection from '@/components/AuthSection';
 import BackendStatus from '@/components/BackendStatus';
 import ObsidianIngest from '@/components/ObsidianIngest';
 import PhoneAudioButton from '@/components/PhoneAudioButton';
+import PhoneAudioMicPicker from '@/components/PhoneAudioMicPicker';
 
 export default function App() {
   const { colors } = useTheme();
@@ -51,6 +53,7 @@ export default function App() {
     },
   });
   const phoneAudioRecorder = usePhoneAudioRecorder();
+  const phoneAudioDevices = usePhoneAudioDevices();
 
   const { isListeningAudio: isOmiAudioListenerActive, audioPacketsReceived, startAudioListener: originalStartAudioListener, stopAudioListener: originalStopAudioListener, isRetrying: isAudioListenerRetrying, retryAttempts: audioListenerRetryAttempts } = useAudioListener(omiConnection, () => !!deviceConnection.connectedDeviceId);
 
@@ -139,6 +142,7 @@ export default function App() {
     phoneAudioRecorder,
     originalStartAudioListener,
     originalStopAudioListener,
+    resolvePhoneInputDeviceId: phoneAudioDevices.resolveEffectiveDeviceId,
     settings,
   });
 
@@ -234,6 +238,18 @@ export default function App() {
             error={phoneAudioRecorder.error}
             onPress={orchestrator.handleTogglePhoneAudio}
           />
+
+          {!deviceConnection.connectedDeviceId && !deviceConnection.isConnecting && (
+            <PhoneAudioMicPicker
+              devices={phoneAudioDevices.devices}
+              selectedDeviceId={phoneAudioDevices.selectedDeviceId}
+              effectiveDevice={phoneAudioDevices.effectiveDevice}
+              loading={phoneAudioDevices.loading}
+              disabled={phoneAudioRecorder.isRecording || orchestrator.isPhoneAudioMode}
+              onSelect={phoneAudioDevices.setSelectedDeviceId}
+              onRefresh={phoneAudioDevices.refresh}
+            />
+          )}
 
           <BluetoothStatusBanner bluetoothState={bluetoothState} isPermissionsLoading={isPermissionsLoading} permissionGranted={permissionGranted} onRequestPermission={requestBluetoothPermission} />
           <ScanControls scanning={scanning} onScanPress={startScan} onStopScanPress={stopDeviceScanAction} canScan={canScan} />
