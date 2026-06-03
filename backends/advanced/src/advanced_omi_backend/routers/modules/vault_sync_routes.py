@@ -35,6 +35,10 @@ SYNCTHING_API_KEY = os.getenv("VAULT_SYNC_API_KEY", "")
 # Empty -> the Mac relies on Syncthing's own discovery/relays to find the server.
 SYNCTHING_ADDRESS = os.getenv("VAULT_SYNC_ADDRESS", "")
 
+# Obsidian's per-vault workspace/config dir is local state, not content worth
+# syncing. Ignore it and everything under it on every paired device.
+_VAULT_IGNORE_PATTERNS = [".obsidian", ".obsidian/**"]
+
 # conversation_docs is mounted at /vaults inside the Syncthing container.
 _SYNCTHING_VAULTS_DIR = "/vaults"
 # ...and at /app/data/conversation_docs inside the backend container (same host dir).
@@ -171,3 +175,10 @@ async def _ensure_folder(
 
     resp = await client.put(f"/rest/config/folders/{folder_id}", json=folder)
     resp.raise_for_status()
+
+    ignores = await client.post(
+        "/rest/db/ignores",
+        params={"folder": folder_id},
+        json={"ignore": _VAULT_IGNORE_PATTERNS},
+    )
+    ignores.raise_for_status()
