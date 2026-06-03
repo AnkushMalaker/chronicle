@@ -14,20 +14,45 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BACKEND_HOST = os.getenv("BACKEND_HOST", "localhost:8000")
-USE_HTTPS = os.getenv("USE_HTTPS", "false").lower() == "true"
+logger = logging.getLogger(__name__)
+
 VERIFY_SSL = os.getenv("VERIFY_SSL", "true").lower() == "true"
 
-ws_protocol = "wss" if USE_HTTPS else "ws"
-http_protocol = "https" if USE_HTTPS else "http"
 
-websocket_uri = f"{ws_protocol}://{BACKEND_HOST}/ws?codec=opus"
-backend_url = f"{http_protocol}://{BACKEND_HOST}"
+def _resolve_backend_url() -> str:
+    """Resolve the backend URL, logging how it was chosen (see discovery.py)."""
+    host = os.getenv("BACKEND_HOST")
+    if host:
+        scheme = (
+            "https" if os.getenv("USE_HTTPS", "false").lower() == "true" else "http"
+        )
+        url = f"{scheme}://{host}"
+        logger.info("Backend URL from BACKEND_HOST: %s", url)
+        return url
+
+    import sys
+    from pathlib import Path
+
+    _repo_root = str(Path(__file__).resolve().parent.parent.parent)
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
+    try:
+        from discovery import resolve_backend_url
+
+        return resolve_backend_url(None, logger=logger)
+    except ImportError:
+        logger.warning("discovery module unavailable; set BACKEND_HOST in .env")
+        return "http://localhost:8000"
+
+
+backend_url = _resolve_backend_url()
+USE_HTTPS = backend_url.startswith("https")
+_host_part = backend_url.split("://", 1)[-1]
+websocket_uri = f"{'wss' if USE_HTTPS else 'ws'}://{_host_part}/ws?codec=opus"
+logger.info("Wearable backend resolved: %s (ws: %s)", backend_url, websocket_uri)
 
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
-
-logger = logging.getLogger(__name__)
 
 # Module-level websocket reference for sending control messages (e.g., button events)
 _active_websocket = None

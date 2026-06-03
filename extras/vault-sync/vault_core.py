@@ -54,26 +54,16 @@ class VaultSyncConfig:
 
     @classmethod
     def from_env(cls) -> "VaultSyncConfig":
-        backend_url = os.getenv("BACKEND_URL")
-        if not backend_url:
-            try:
-                from discovery import CHRONICLE_BACKEND, discover_service
+        from discovery import resolve_backend_url
 
-                discovered = discover_service(CHRONICLE_BACKEND)
-                if discovered:
-                    backend_url = discovered
-                    logger.info(
-                        "Discovered Chronicle backend via minidisc: %s", discovered
-                    )
-            except ImportError:
-                pass
+        backend_url = resolve_backend_url(os.getenv("BACKEND_URL"), logger=logger)
 
         vault_dir = (
             _persisted_vault_dir() or os.getenv("LOCAL_VAULT_DIR") or "~/ChronicleVault"
         )
 
         return cls(
-            backend_url=backend_url or "http://localhost:8000",
+            backend_url=backend_url,
             auth_username=os.getenv("AUTH_USERNAME") or os.getenv("ADMIN_EMAIL", ""),
             auth_password=os.getenv("AUTH_PASSWORD") or os.getenv("ADMIN_PASSWORD", ""),
             local_vault_dir=os.path.expanduser(vault_dir),

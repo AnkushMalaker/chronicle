@@ -11,6 +11,7 @@ Resolution priority (used by resolve_service_url):
   3. Default value / disabled
 """
 
+import importlib.util
 import logging
 import os
 import stat
@@ -132,6 +133,53 @@ def resolve_service_url(
     if discovered:
         return discovered
 
+    return default
+
+
+def resolve_backend_url(
+    env_url: Optional[str],
+    *,
+    default: str = "http://localhost:8000",
+    logger: Optional[logging.Logger] = None,
+) -> str:
+    """Resolve the Chronicle backend URL, logging *how* the decision was made.
+
+    Order of preference: explicit ``env_url`` > minidisc discovery > ``default``.
+    Every path logs its outcome, and on fallback it explains *why* discovery did not
+    apply (minidisc missing, no tailscaled socket, or nothing advertised) so the
+    reason shows up in the app's logs instead of silently landing on localhost.
+    """
+    log = logger or logging.getLogger(__name__)
+
+    if env_url:
+        log.info("Backend URL set explicitly: %s", env_url)
+        return env_url
+
+    minidisc_installed = importlib.util.find_spec("minidisc") is not None
+    socket_present = is_tailscale_available()
+
+    if not minidisc_installed:
+        log.warning("Auto-discovery off: minidisc-python is not installed")
+    elif not socket_present:
+        log.warning(
+            "Auto-discovery off: tailscaled socket %s is absent "
+            "(normal with the macOS GUI Tailscale app)",
+            _TAILSCALE_SOCKET,
+        )
+    else:
+        discovered = discover_service(CHRONICLE_BACKEND)
+        if discovered:
+            log.info("Discovered backend via minidisc: %s", discovered)
+            return discovered
+        log.warning(
+            "Auto-discovery found no '%s' service on the tailnet", CHRONICLE_BACKEND
+        )
+
+    log.warning(
+        "Falling back to %s. Set BACKEND_URL in .env to your server, "
+        "e.g. https://<your-host>.ts.net",
+        default,
+    )
     return default
 
 
