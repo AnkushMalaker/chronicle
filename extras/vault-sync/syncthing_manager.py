@@ -63,6 +63,7 @@ class SyncthingManager:
         self.api_key = _api_key()
         self.base_url = f"http://127.0.0.1:{GUI_PORT}"
         self._proc: Optional[subprocess.Popen] = None
+        self._log = None
 
     # --- process lifecycle ---------------------------------------------------
 
@@ -71,6 +72,9 @@ class SyncthingManager:
             return
         SYNCTHING_HOME.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ, STGUIAPIKEY=self.api_key)
+        # Capture output so a failed launch (e.g. bad flag) surfaces in the error
+        # instead of hiding behind a generic "did not become ready" timeout.
+        self._log = open(APP_SUPPORT / "syncthing.log", "ab")
         self._proc = subprocess.Popen(
             [
                 self.binary,
@@ -79,11 +83,12 @@ class SyncthingManager:
                 str(SYNCTHING_HOME),
                 "--gui-address",
                 f"127.0.0.1:{GUI_PORT}",
+                "--gui-apikey",
+                self.api_key,
                 "--no-browser",
-                "--no-default-folder",
             ],
             env=env,
-            stdout=subprocess.DEVNULL,
+            stdout=self._log,
             stderr=subprocess.STDOUT,
         )
         self._wait_ready()
@@ -92,6 +97,11 @@ class SyncthingManager:
     def _wait_ready(self, timeout: float = 30.0) -> None:
         deadline = time.time() + timeout
         while time.time() < deadline:
+            if self._proc and self._proc.poll() is not None:
+                raise RuntimeError(
+                    f"Syncthing exited early (code {self._proc.returncode}). "
+                    f"See {APP_SUPPORT / 'syncthing.log'}"
+                )
             try:
                 with self._client() as c:
                     if c.get("/rest/system/ping").status_code == 200:
