@@ -27,6 +27,10 @@ APIKEY_FILE = APP_SUPPORT / "apikey"
 # Default off 8385 so we don't collide with a user's own Syncthing on 8384.
 GUI_PORT = int(os.getenv("VAULT_SYNC_GUI_PORT", "8385"))
 
+# Obsidian's per-vault workspace/config dir is local state, not content worth
+# syncing. Ignore it and everything under it on every paired device.
+VAULT_IGNORE_PATTERNS = [".obsidian", ".obsidian/**"]
+
 
 def _find_binary() -> str:
     """Locate the syncthing binary, preferring PATH then common Homebrew locations."""
@@ -184,6 +188,17 @@ class SyncthingManager:
                     folder.setdefault("devices", []).append({"deviceID": dev})
             resp = c.put(f"/rest/config/folders/{folder_id}", json=folder)
             resp.raise_for_status()
+            self._set_ignores(c, folder_id, VAULT_IGNORE_PATTERNS)
+
+    @staticmethod
+    def _set_ignores(c: httpx.Client, folder_id: str, patterns: list[str]) -> None:
+        """Write the folder's .stignore patterns via REST."""
+        resp = c.post(
+            "/rest/db/ignores",
+            params={"folder": folder_id},
+            json={"ignore": patterns},
+        )
+        resp.raise_for_status()
 
     def connection_count(self) -> int:
         """Number of currently connected remote devices (0 or 1 in normal use)."""
