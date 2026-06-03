@@ -121,6 +121,18 @@ PROVIDERS = {
         "service": "gemma4-asr",
         "capabilities": ["timestamps", "diarization"],
     },
+    "af-next": {
+        "name": "Audio Flamingo Next",
+        "description": "NVIDIA Audio Flamingo Next (timestamped diarization; NONCOMMERCIAL license)",
+        "models": {
+            "nvidia/audio-flamingo-next-hf": "AF-Next Instruct (default; recommended for ASR — used by NVIDIA's HF Space)",
+            "nvidia/audio-flamingo-next-think-hf": "AF-Next Think (emits <think> reasoning trace; biased toward scene description)",
+            "nvidia/audio-flamingo-next-captioner-hf": "AF-Next Captioner (verbose descriptions)",
+        },
+        "default_model": "nvidia/audio-flamingo-next-hf",
+        "service": "af-next-asr",
+        "capabilities": ["timestamps", "diarization"],
+    },
     "qwen3-asr": {
         "name": "Qwen3-ASR",
         "description": "Qwen3-ASR via vLLM (52 languages, streaming + batch)",
@@ -531,6 +543,7 @@ class ASRServicesSetup:
             "nemo-strixhalo": "stt-nemo",
             "qwen3-asr": "stt-qwen3-asr",
             "gemma4": "stt-gemma4",
+            "af-next": "stt-af-next",
         }
 
         # Providers that also have a streaming model
@@ -737,6 +750,7 @@ def main():
             "nemo-strixhalo",
             "qwen3-asr",
             "gemma4",
+            "af-next",
         ],
         help="ASR provider to use",
     )

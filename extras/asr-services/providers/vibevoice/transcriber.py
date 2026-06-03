@@ -105,8 +105,11 @@ class VibeVoiceTranscriber:
         self.max_new_tokens = int(os.getenv("MAX_NEW_TOKENS", "8192"))
         self.repetition_penalty = float(os.getenv("REPETITION_PENALTY", "1.1"))
 
-        # Quantization config: "4bit", "8bit", or "" (none)
+        # Quantization config: "4bit", "8bit", or none ("" / "none" / "off" -> full precision).
+        # Default is none: 4-bit NF4 causes repetition collapse on hard audio (see compose note).
         self.quantization = os.getenv("QUANTIZATION", "").lower().strip()
+        if self.quantization in ("none", "off", "false", "no"):
+            self.quantization = ""
 
         # Determine torch dtype
         torch_dtype_str = os.getenv("TORCH_DTYPE", "bfloat16")

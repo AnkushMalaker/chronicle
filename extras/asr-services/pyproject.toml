@@ -64,6 +64,7 @@ conflicts = [
     { group = "qwen3-asr" },
     { group = "qwen3-asr-full" },
     { group = "gemma4" },
+    { group = "af-next" },
     { group = "parakeet" },
   ],
   [
@@ -153,6 +154,20 @@ gemma4 = [
     "soundfile>=0.12",
 ]
 
+# NVIDIA Audio Flamingo Next (Think variant by default).
+# License: NVIDIA OneWay Noncommercial — research use only.
+# AF-Next's `audioflamingonext` model_type is not in upstream transformers yet,
+# so we install from the in-flight PR fork referenced by the model card.
+# Switch to a stable transformers version once the PR lands.
+af-next = [
+    "transformers @ git+https://github.com/lashahub/transformers.git@205f8c852db63e03c4d05a0e28ceee25f80806da",
+    "accelerate>=0.30.0",
+    "librosa>=0.10.0",
+    "torch>=2.3",
+    "torchaudio>=2.3",
+    "soundfile>=0.12",
+]
+
 qwen3-asr = [
     "httpx>=0.28.1",
     "websockets>=13.0",
@@ -191,4 +206,4 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["common", "providers", "providers.faster_whisper", "providers.transformers", "providers.nemo", "providers.vibevoice", "providers.qwen3_asr", "providers.gemma4"]
+packages = ["common", "providers", "providers.faster_whisper", "providers.transformers", "providers.nemo", "providers.vibevoice", "providers.qwen3_asr", "providers.gemma4", "providers.af_next"]

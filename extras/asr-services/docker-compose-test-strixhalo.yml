@@ -24,7 +24,6 @@ services:
       - HF_HOME=/models
       - ASR_MODEL=nvidia/parakeet-tdt-0.6b-v3
       - HSA_OVERRIDE_GFX_VERSION=11.5.1
-    restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
       interval: 30s

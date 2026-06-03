@@ -49,27 +49,18 @@ For non-interactive setup:
 ./init.sh --hf-token YOUR_TOKEN --compute-mode gpu --enable-https --server-ip 100.83.66.30
 ```
 
-### 4. Generate SSL Certificates (Required for Nginx)
+### 4. SSL Certificates (automatic)
 
-**⚠️ Important**: The nginx proxy requires SSL certificates to start. SSL certificates are optional through `wizard.sh`. If you haven't generated them during setup, you must create them manually:
+HTTPS is fronted by **Caddy**, which obtains and auto-renews the certificate itself — no
+manual generation step. `./wizard.sh` configures it based on your address:
 
-```bash
-cd extras/speaker-recognition
-# Generate certificates for localhost (default)
-bash ssl/generate-ssl.sh localhost
+- **`*.ts.net` (Tailscale)** → Caddy fetches the cert from the local `tailscaled` (the
+  wizard mounts the socket). Trusted across your tailnet, auto-renewed.
+- **Real domain** → Let's Encrypt, auto-renewed.
+- **IP / `localhost`** → Caddy's internal-CA self-signed cert (accept the browser warning).
 
-# Or generate for a specific IP/domain (e.g., Tailscale IP)
-bash ssl/generate-ssl.sh 100.83.66.30
-```
-
-This creates:
-- `ssl/server.crt` - SSL certificate
-- `ssl/server.key` - Private key
-
-**Note**: If SSL certificates are missing, nginx will fail to start with errors like:
-```
-cannot load certificate "/etc/nginx/ssl/server.crt": BIO_new_file() failed
-```
+See [../../Docs/ssl-certificates.md](../../Docs/ssl-certificates.md) for the full model
+(including the Docker-Desktop `static` fallback).
 
 ### 5. Start the system
 ```bash
@@ -414,15 +405,13 @@ The React UI is configured with HTTPS enabled by default (`REACT_UI_HTTPS=true`)
 
 ## 🚨 Troubleshooting
 
-**Nginx failing to start with SSL certificate errors?**
-- Error: `cannot load certificate "/etc/nginx/ssl/server.crt": BIO_new_file() failed`
-- **Solution**: Generate SSL certificates (see step 4 in Quick Start):
-  ```bash
-  cd extras/speaker-recognition
-  bash ssl/generate-ssl.sh localhost
-  ```
-- Verify certificates exist: `ls -la ssl/server.crt ssl/server.key`
-- Restart nginx: `docker compose --profile cpu restart nginx` (or `--profile gpu`)
+**Caddy/HTTPS not serving a valid certificate?**
+- HTTPS is handled by **Caddy** (auto-managed certs); there is no manual cert step.
+- For a Tailscale (`*.ts.net`) address, confirm the socket is mounted into Caddy:
+  `docker inspect speaker-recognition-caddy-1 --format '{{range .Mounts}}{{.Destination}} {{end}}'`
+  should list `/var/run/tailscale/tailscaled.sock`.
+- Confirm the served cert: `echo | openssl s_client -connect localhost:8444 -servername <your-name> 2>/dev/null | openssl x509 -noout -issuer -enddate`
+- See [../../Docs/ssl-certificates.md](../../Docs/ssl-certificates.md) for details.
 
 **Can't access the web UI?**
 - Check if services are running: `docker compose --profile cpu ps` (or `--profile gpu`)
