@@ -80,7 +80,6 @@ services:
       timeout: 5s
       retries: 10
       start_period: 60s
-    restart: unless-stopped
 
   webui-test:
     build:
@@ -170,7 +169,6 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
-    restart: unless-stopped
     profiles:
       - speaker  # Optional service - only start when explicitly enabled
 
@@ -185,7 +183,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-    restart: unless-stopped
 
   mock-llm:
     build:
@@ -198,7 +195,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-    restart: unless-stopped
 
   mock-asr:
     build:
@@ -215,14 +211,12 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-    restart: unless-stopped
 
   # --- Langfuse observability stack (test) ---
   # Without this, Langfuse SDK defaults to cloud.langfuse.com and each
   # get_prompt() call blocks ~12s on DNS timeout, adding ~39s to title/summary jobs.
   langfuse-postgres-test:
     image: docker.io/postgres:16
-    restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -237,7 +231,6 @@ services:
 
   clickhouse-test:
     image: docker.io/clickhouse/clickhouse-server:24.12
-    restart: unless-stopped
     environment:
       CLICKHOUSE_DB: default
       CLICKHOUSE_USER: clickhouse
@@ -254,7 +247,6 @@ services:
 
   minio-test:
     image: docker.io/minio/minio:RELEASE.2025-01-20T14-49-07Z
-    restart: unless-stopped
     entrypoint: sh
     command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
     environment:
@@ -271,7 +263,6 @@ services:
 
   langfuse-redis-test:
     image: docker.io/redis:7
-    restart: unless-stopped
     command: >
       --requirepass myredissecret
     healthcheck:
@@ -282,7 +273,6 @@ services:
 
   langfuse-worker-test:
     image: docker.io/langfuse/langfuse-worker:3
-    restart: unless-stopped
     depends_on:
       langfuse-postgres-test:
         condition: service_healthy
@@ -326,7 +316,6 @@ services:
 
   langfuse-web-test:
     image: docker.io/langfuse/langfuse:3
-    restart: unless-stopped
     depends_on:
       langfuse-postgres-test:
         condition: service_healthy
@@ -420,7 +409,6 @@ services:
         condition: service_started
       falkordb-test:
         condition: service_healthy
-    restart: unless-stopped
 
   # caddy:
   #   image: caddy:2-alpine

@@ -7,7 +7,7 @@ Extracted from legacy TranscriptionService to be reusable across V2 architecture
 import asyncio
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -535,6 +535,6 @@ async def mark_conversation_deleted(conversation_id: str, deletion_reason: str) 
     if conversation:
         conversation.deleted = True
         conversation.deletion_reason = deletion_reason
-        conversation.deleted_at = datetime.utcnow()
+        conversation.deleted_at = datetime.now(timezone.utc)
         await conversation.save()
         logger.info(f"✅ Marked conversation {conversation_id} as deleted")

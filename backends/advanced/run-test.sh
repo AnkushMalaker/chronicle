@@ -211,7 +211,7 @@ print_info "Using environment variables from .env file for test configuration"
 
 # Clean test environment
 print_info "Cleaning test environment..."
-rm -rf ./test_audio_chunks/ ./test_data/ ./test_debug_dir/ ./mongo_data_test/ ./qdrant_data_test/ ./test_falkordb/ 2>/dev/null || true
+rm -rf ./test_audio_chunks/ ./test_data/ ./test_debug_dir/ ./mongo_data_test/ ./test_falkordb/ 2>/dev/null || true
 
 # If cleanup fails due to permissions, try with docker
 if [ -d "./data/test_audio_chunks/" ] || [ -d "./data/test_data/" ] || [ -d "./data/test_debug_dir/" ]; then

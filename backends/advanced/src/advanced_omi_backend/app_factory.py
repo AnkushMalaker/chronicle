@@ -327,6 +327,9 @@ async def lifespan(app: FastAPI):
 
     async def _init_cron_scheduler():
         try:
+            from advanced_omi_backend.controllers.data_cleaning_controller import (
+                run_auto_clean_cron,
+            )
             from advanced_omi_backend.cron_scheduler import (
                 get_scheduler,
                 register_cron_job,
@@ -348,6 +351,7 @@ async def lifespan(app: FastAPI):
             register_cron_job("asr_jargon_extraction", run_asr_jargon_extraction_job)
             register_cron_job("prompt_optimization", run_prompt_optimization_job)
             register_cron_job("annotation_suggestions", surface_error_suggestions)
+            register_cron_job("auto_clean", run_auto_clean_cron)
 
             scheduler = get_scheduler()
             await scheduler.start()

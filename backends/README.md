@@ -11,7 +11,7 @@ Full-featured backend with comprehensive AI capabilities:
 - Speaker recognition and enrollment
 - Web UI for management and monitoring
 - RESTful API with WebSocket support
-- MongoDB and Qdrant integration
+- MongoDB and FalkorDB integration
 
 ### [Simple Backend](simple/)
 Lightweight backend for basic audio capture:

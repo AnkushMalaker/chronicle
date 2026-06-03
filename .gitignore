@@ -27,7 +27,6 @@ plugins/*/config.yml.backup
 example/*
 **/node_modules/*
 **/ollama-data/*
-**/qdrant_data/*
 **/model_cache/*
 .vscode/*
 **/audio_chunks/*
@@ -83,6 +82,10 @@ backends/advanced/ssl/*
 # Generated reverse proxy configs
 extras/speaker-recognition/nginx.conf
 extras/speaker-recognition/Caddyfile
+
+# Generated compose overrides (e.g. Tailscale socket mount for Caddy-managed certs)
+backends/advanced/docker-compose.override.yml
+extras/speaker-recognition/docker-compose.override.yml
 
 # Cache
 extras/speaker-recognition/cache/*

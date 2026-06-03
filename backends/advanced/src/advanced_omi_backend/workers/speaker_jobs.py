@@ -141,7 +141,7 @@ async def recognise_speakers_job(
     conversation_id: str,
     version_id: str,
     transcript_text: str = "",
-    words: list = None,
+    words: list | None = None,
     *,
     redis_client=None,
 ) -> Dict[str, Any]:

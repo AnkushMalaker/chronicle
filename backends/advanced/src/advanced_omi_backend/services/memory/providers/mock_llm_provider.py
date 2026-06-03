@@ -19,7 +19,7 @@ class MockLLMProvider(LLMProviderBase):
     Useful for testing API contracts and data flow without external APIs.
     """
 
-    def __init__(self, config: Dict[str, Any] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
         """Initialize the mock LLM provider.
 
         Args:

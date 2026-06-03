@@ -26,12 +26,13 @@ def count_markdown_files(vault_path: str) -> int:
 
 
 @async_job(redis=True, beanie=False)
-async def ingest_obsidian_vault_job(job_id: str, vault_path: str, redis_client=None) -> dict:  # type: ignore
+async def ingest_obsidian_vault_job(job_id: str, vault_path: str, user_id: str, redis_client=None) -> dict:  # type: ignore
     """
-    Long-running ingestion job enqueued on the default RQ queue.
+    Long-running ingestion job enqueued on the default RQ queue. Writes into
+    the per-user FalkorDB graph ``chronicle_<user_id>``.
     """
     job = get_current_job()
-    logger.info("Starting Obsidian ingestion job %s", job.id)
+    logger.info("Starting Obsidian ingestion job %s for user %s", job.id, user_id)
 
     # Initialize job meta
     job.meta["status"] = "started"
@@ -39,10 +40,11 @@ async def ingest_obsidian_vault_job(job_id: str, vault_path: str, redis_client=N
     job.meta["total_files"] = 0
     job.meta["errors"] = []
     job.meta["vault_path"] = vault_path
+    job.meta["user_id"] = user_id
     job.save_meta()
 
     try:
-        get_obsidian_service().setup_database()
+        get_obsidian_service().setup_database(user_id)
     except Exception as exc:
         logger.exception("Database setup failed for job %s: %s", job.id, exc)
         job.meta["status"] = "failed"
@@ -84,7 +86,7 @@ async def ingest_obsidian_vault_job(job_id: str, vault_path: str, redis_client=N
                 note_data = svc.parse_obsidian_note(root, filename, vault_path)
                 chunks = await svc.chunking_and_embedding(note_data)
                 if chunks:
-                    svc.ingest_note_and_chunks(note_data, chunks)
+                    svc.ingest_note_and_chunks(note_data, chunks, user_id)
 
                 processed += 1
                 job.meta["processed"] = processed

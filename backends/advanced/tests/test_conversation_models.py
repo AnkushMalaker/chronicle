@@ -83,6 +83,7 @@ class TestConversationModel:
         """Test that provider enums work correctly."""
         assert Conversation.MemoryProvider.CHRONICLE == "chronicle"
         assert Conversation.MemoryProvider.OPENMEMORY_MCP == "openmemory_mcp"
+        assert Conversation.MemoryProvider.GRAPHITI == "graphiti"
 
     def test_word_model(self):
         """Test Word model."""

@@ -3,7 +3,7 @@
 import logging
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional, overload
 
 import jwt
@@ -134,8 +134,8 @@ def generate_jwt_for_user(user_id: str, user_email: str) -> str:
         "email": user_email,
         "iss": "chronicle",  # Issuer
         "aud": "chronicle",  # Audience
-        "exp": datetime.utcnow() + timedelta(seconds=JWT_LIFETIME_SECONDS),
-        "iat": datetime.utcnow(),  # Issued at
+        "exp": datetime.now(timezone.utc) + timedelta(seconds=JWT_LIFETIME_SECONDS),
+        "iat": datetime.now(timezone.utc),  # Issued at
     }
 
     # Sign the token with the same secret key

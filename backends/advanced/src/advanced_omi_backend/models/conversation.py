@@ -6,12 +6,12 @@ transcript versions, and memory versions.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from beanie import Document, Indexed
-from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
+from pydantic import BaseModel, Field, computed_field, model_validator
 from pymongo import IndexModel
 
 
@@ -25,6 +25,7 @@ class Conversation(Document):
 
         CHRONICLE = "chronicle"
         OPENMEMORY_MCP = "openmemory_mcp"
+        GRAPHITI = "graphiti"
         FRIEND_LITE = "friend_lite"  # Legacy value
 
     class ConversationStatus(str, Enum):
@@ -123,6 +124,46 @@ class Conversation(Document):
             default_factory=dict, description="Additional provider-specific metadata"
         )
 
+    class SilenceAnalysis(BaseModel):
+        """Cached amplitude/silence analysis for a conversation's audio.
+
+        Stores threshold-independent base metrics (summary stats + a dBFS
+        histogram of audio windows) so the UI can derive the silent fraction
+        for any chosen threshold without re-decoding the audio.
+        """
+
+        duration_seconds: float = Field(
+            description="Analyzed audio duration in seconds"
+        )
+        mean_dbfs: float = Field(description="Mean window loudness in dBFS")
+        peak_dbfs: float = Field(description="Peak window loudness in dBFS")
+        window_ms: int = Field(
+            description="Window size used for analysis, milliseconds"
+        )
+        window_count: int = Field(description="Number of windows analyzed")
+        histogram_min_dbfs: float = Field(
+            description="Lower edge of the first histogram bin"
+        )
+        histogram_bin_width: float = Field(
+            description="Width of each histogram bin in dB"
+        )
+        histogram: List[int] = Field(
+            default_factory=list,
+            description="Window counts per dBFS bin (low→high), for deriving silent fraction at any threshold",
+        )
+        analyzed_at: datetime = Field(description="When this analysis was computed")
+
+        def silent_fraction(self, threshold_dbfs: float) -> float:
+            """Fraction of windows quieter than ``threshold_dbfs`` (0.0-1.0)."""
+            if self.window_count <= 0 or not self.histogram:
+                return 0.0
+            silent = 0
+            for i, count in enumerate(self.histogram):
+                bin_upper = self.histogram_min_dbfs + (i + 1) * self.histogram_bin_width
+                if bin_upper <= threshold_dbfs:
+                    silent += count
+            return silent / self.window_count
+
     class MemoryVersion(BaseModel):
         """Version of memory extraction with processing metadata."""
 
@@ -174,6 +215,24 @@ class Conversation(Document):
         description="Compression ratio (compressed_size / original_size), typically ~0.047 for Opus",
     )
 
+    # Cached amplitude/silence analysis (data-cleaning feature)
+    silence_analysis: Optional["Conversation.SilenceAnalysis"] = Field(
+        None, description="Cached amplitude/silence metrics computed from audio chunks"
+    )
+
+    # Audio archival (data-cleaning feature): audio bytes hard-deleted, metadata kept
+    audio_archived: bool = Field(
+        False,
+        description="Whether the audio bytes were permanently deleted while keeping this metadata stub",
+    )
+    audio_archived_at: Optional[datetime] = Field(
+        None, description="When the audio was archived (hard-deleted)"
+    )
+    archive_reason: Optional[str] = Field(
+        None,
+        description="Why audio was archived (near_silent, bad_speaker, manual_cleanup, etc.)",
+    )
+
     # Markers (e.g., button events) captured during the session
     markers: List[Dict[str, Any]] = Field(
         default_factory=list,
@@ -182,7 +241,8 @@ class Conversation(Document):
 
     # Creation metadata
     created_at: Indexed(datetime) = Field(
-        default_factory=datetime.utcnow, description="When the conversation was created"
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="When the conversation was created",
     )
 
     # Processing status tracking
@@ -386,7 +446,9 @@ class Conversation(Document):
         transcript: str,
         words: Optional[List["Conversation.Word"]] = None,
         segments: Optional[List["Conversation.SpeakerSegment"]] = None,
-        provider: str = None,  # Provider name from config.yml (deepgram, parakeet, etc.)
+        provider: Optional[
+            str
+        ] = None,  # Provider name from config.yml (deepgram, parakeet, etc.)
         model: Optional[str] = None,
         processing_time_seconds: Optional[float] = None,
         metadata: Optional[Dict[str, Any]] = None,

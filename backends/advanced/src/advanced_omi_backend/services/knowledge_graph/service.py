@@ -4,16 +4,28 @@ This module provides the main service for:
 - Extracting entities and relationships from conversations
 - Storing and retrieving entities from FalkorDB
 - Querying the knowledge graph
+
+Each user's data lives in its own per-user FalkorDB graph (the same
+``chronicle_<user_id>`` graph used by chronicle's MemoryService and
+ObsidianService — so chunk→entity BFS in chronicle resolves naturally
+within a single graph). The graph itself is the user-isolation boundary;
+queries do not filter by ``user_id``.
 """
 
 import logging
 import os
 import threading
+import time
 import uuid
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
-from ..graph_client import GraphClient, GraphReadInterface, GraphWriteInterface
+from ..graph_client import (
+    GraphClient,
+    GraphReadInterface,
+    GraphWriteInterface,
+    graph_name_for_user,
+)
 from . import queries
 from .entity_extractor import extract_entities_from_transcript, parse_natural_datetime
 from .kb import KnowledgeBaseManager
@@ -40,37 +52,49 @@ class KnowledgeGraphService:
         self,
         host: Optional[str] = None,
         port: Optional[int] = None,
-        graph_name: str = "chronicle",
     ):
         """Initialize the knowledge graph service.
 
         Args:
             host: FalkorDB host (defaults to FALKORDB_HOST env var)
             port: FalkorDB port (defaults to FALKORDB_PORT env var)
-            graph_name: FalkorDB graph name
         """
         self.host = host or os.getenv("FALKORDB_HOST", "falkordb")
         self.port = port or int(os.getenv("FALKORDB_PORT", "6379"))
-        self.graph_name = graph_name
 
-        self._client: Optional[GraphClient] = None
-        self._read: Optional[GraphReadInterface] = None
-        self._write: Optional[GraphWriteInterface] = None
-        self._initialized = False
+        # Per-user graph cache: user_id -> (client, read, write).
+        # Uses the same graph name as chronicle's MemoryService
+        # (``chronicle_<user_id>``) so chunk→entity BFS in chronicle resolves
+        # within a single graph.
+        self._io_cache: Dict[
+            str, Tuple[GraphClient, GraphReadInterface, GraphWriteInterface]
+        ] = {}
+        self._io_lock = threading.Lock()
         self._kb = KnowledgeBaseManager()
 
-    def _ensure_initialized(self) -> None:
-        """Ensure FalkorDB client is initialized."""
-        if not self._initialized:
-            self._client = GraphClient(
+    def _get_io(
+        self, user_id: str
+    ) -> Tuple[GraphClient, GraphReadInterface, GraphWriteInterface]:
+        """Return ``(client, read, write)`` for ``user_id``'s per-user graph."""
+        cached = self._io_cache.get(user_id)
+        if cached is not None:
+            return cached
+
+        with self._io_lock:
+            cached = self._io_cache.get(user_id)
+            if cached is not None:
+                return cached
+
+            client = GraphClient(
                 host=self.host,
                 port=self.port,
-                graph_name=self.graph_name,
+                graph_name=graph_name_for_user(user_id),
             )
-            self._read = GraphReadInterface(self._client)
-            self._write = GraphWriteInterface(self._client)
-            self._initialized = True
-            logger.info("Knowledge Graph Service initialized with FalkorDB connection")
+            read = GraphReadInterface(client)
+            write = GraphWriteInterface(client)
+            io = (client, read, write)
+            self._io_cache[user_id] = io
+            return io
 
     # =========================================================================
     # CONVERSATION PROCESSING
@@ -97,27 +121,58 @@ class KnowledgeGraphService:
         Returns:
             Dictionary with extraction and storage results
         """
-        self._ensure_initialized()
-
         if not transcript or not transcript.strip():
             logger.debug(f"Empty transcript for conversation {conversation_id}")
             return {"entities": 0, "relationships": 0}
 
-        try:
-            # Extract entities using LLM
-            extraction = await extract_entities_from_transcript(
-                transcript=transcript,
-                conversation_id=conversation_id,
-            )
+        t_start = time.perf_counter()
+        t0 = time.perf_counter()
+        extraction = await extract_entities_from_transcript(
+            transcript=transcript,
+            conversation_id=conversation_id,
+        )
+        t_ent_llm = time.perf_counter() - t0
 
+        result = await self.store_extraction(
+            extraction=extraction,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            conversation_name=conversation_name,
+        )
+        result["timings"] = {
+            "ent_llm": t_ent_llm,
+            "total": time.perf_counter() - t_start,
+        }
+        return result
+
+    async def store_extraction(
+        self,
+        extraction: ExtractionResult,
+        conversation_id: str,
+        user_id: str,
+        conversation_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Persist an already-extracted ExtractionResult for ``user_id``.
+
+        Split out from ``process_conversation`` so callers can run the
+        entity-extraction LLM in parallel with chronicle's add_memory
+        (doc-gen LLM + chunk write) and only enter this storage phase
+        once chunks are guaranteed to be in the per-user graph — that
+        ordering is required for ``_link_chunks_to_entities`` to
+        actually resolve to the chunk nodes.
+        """
+        t_start = time.perf_counter()
+        try:
             if not extraction.entities:
-                logger.debug(
-                    f"No entities extracted from conversation {conversation_id}"
+                logger.info(
+                    "store_extraction %s: 0 entities  total=%.2fs",
+                    conversation_id,
+                    time.perf_counter() - t_start,
                 )
                 return {"entities": 0, "relationships": 0}
 
             # Create conversation entity node
-            conv_entity_id = await self._create_conversation_entity(
+            await self._create_conversation_entity(
                 conversation_id=conversation_id,
                 user_id=user_id,
                 name=conversation_name or f"Conversation {conversation_id[:8]}",
@@ -145,19 +200,33 @@ class KnowledgeGraphService:
                 user_id=user_id,
             )
 
-            logger.info(
-                f"Processed conversation {conversation_id}: "
-                f"{len(entity_id_map)} entities, {rel_count} relationships"
+            # Link chunks to entities so chronicle's BFS expansion at search
+            # time can walk from a chunk hit through shared entities to other
+            # chunks. Conversation-coarse (every chunk → every entity in this
+            # conversation); the caller must guarantee chunks for this
+            # conversation_id are already in the per-user graph before this
+            # method runs (see chat_service for the parallel-LLM ordering).
+            self._link_chunks_to_entities(
+                entity_ids=list(entity_id_map.values()),
+                conversation_id=conversation_id,
+                user_id=user_id,
             )
 
+            t_total = time.perf_counter() - t_start
+            logger.info(
+                "store_extraction %s: entities=%d rels=%d  store=%.2fs",
+                conversation_id,
+                len(entity_id_map),
+                rel_count,
+                t_total,
+            )
             return {
                 "entities": len(entity_id_map),
                 "relationships": rel_count,
                 "entity_ids": list(entity_id_map.values()),
             }
-
         except Exception as e:
-            logger.error(f"Error processing conversation {conversation_id}: {e}")
+            logger.error(f"Error storing extraction for {conversation_id}: {e}")
             return {"entities": 0, "relationships": 0, "error": str(e)}
 
     async def _create_conversation_entity(
@@ -167,8 +236,9 @@ class KnowledgeGraphService:
         name: str,
     ) -> str:
         """Create or update a conversation entity node."""
+        _, _, write = self._get_io(user_id)
         entity_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
         params = {
             "id": entity_id,
@@ -181,7 +251,7 @@ class KnowledgeGraphService:
             "updated_at": now,
         }
 
-        self._write.run(queries.CREATE_CONVERSATION_ENTITY, **params)
+        write.run(queries.CREATE_CONVERSATION_ENTITY, **params)
         return entity_id
 
     async def _store_entities(
@@ -195,11 +265,12 @@ class KnowledgeGraphService:
         Returns:
             Mapping of entity name (lowercase) to entity ID
         """
+        _, _, write = self._get_io(user_id)
         entity_id_map: Dict[str, str] = {}
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
         for extracted in extraction.entities:
-            # Check if entity already exists for this user
+            # Check if entity already exists in this user's graph
             existing = self._find_entity_by_name(extracted.name, user_id)
             if existing:
                 entity_id_map[extracted.name.lower()] = existing["id"]
@@ -231,7 +302,7 @@ class KnowledgeGraphService:
                 "conversation_id": None,
             }
 
-            self._write.run(queries.CREATE_ENTITY_SIMPLE, **params)
+            write.run(queries.CREATE_ENTITY_SIMPLE, **params)
             entity_id_map[extracted.name.lower()] = entity_id
             extraction.stored_entity_ids.append(entity_id)
 
@@ -245,8 +316,9 @@ class KnowledgeGraphService:
         conversation_id: str,
     ) -> int:
         """Store extracted relationships in FalkorDB."""
+        _, _, write = self._get_io(user_id)
         count = 0
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
         for rel in extraction.relationships:
             # Handle "speaker" as a special case - could be linked to user profile
@@ -280,7 +352,7 @@ class KnowledgeGraphService:
                 "created_at": now,
             }
 
-            self._write.run(queries.CREATE_RELATIONSHIP, **params)
+            write.run(queries.CREATE_RELATIONSHIP, **params)
             extraction.stored_relationship_ids.append(rel_id)
             count += 1
 
@@ -293,7 +365,8 @@ class KnowledgeGraphService:
         user_id: str,
     ) -> None:
         """Link entities to their source conversation."""
-        now = datetime.utcnow().isoformat()
+        _, _, write = self._get_io(user_id)
+        now = datetime.now(timezone.utc).isoformat()
 
         for entity_id in entity_ids:
             params = {
@@ -304,15 +377,38 @@ class KnowledgeGraphService:
                 "timestamp": now,
                 "context": None,
             }
-            self._write.run(queries.LINK_ENTITY_TO_CONVERSATION, **params)
+            write.run(queries.LINK_ENTITY_TO_CONVERSATION, **params)
+
+    def _link_chunks_to_entities(
+        self,
+        entity_ids: List[str],
+        conversation_id: str,
+        user_id: str,
+    ) -> None:
+        """Link each ConvChunk in this conversation to each extracted Entity.
+
+        Non-fatal: KG augmentation is opportunistic, so any failure (e.g.
+        chunks not yet written by the chronicle provider) logs but does not
+        propagate. Mirrors the non-fatal handling in chat_service.
+        """
+        if not entity_ids:
+            return
+        try:
+            _, _, write = self._get_io(user_id)
+            write.run(
+                queries.LINK_CHUNKS_TO_ENTITIES,
+                entity_ids=entity_ids,
+                conversation_id=conversation_id,
+            )
+        except Exception as e:
+            logger.warning(
+                f"Chunk→Entity linking failed for conversation {conversation_id}: {e}"
+            )
 
     def _find_entity_by_name(self, name: str, user_id: str) -> Optional[Dict[str, Any]]:
-        """Find existing entity by name for a user."""
-        results = self._read.run(
-            queries.FIND_ENTITY_BY_NAME,
-            name=name,
-            user_id=user_id,
-        )
+        """Find existing entity by name in this user's graph."""
+        _, read, _ = self._get_io(user_id)
+        results = read.run(queries.FIND_ENTITY_BY_NAME, name=name)
         if results:
             return dict(results[0]["e"])
         return None
@@ -337,11 +433,10 @@ class KnowledgeGraphService:
         Returns:
             List of Entity objects
         """
-        self._ensure_initialized()
+        _, read, _ = self._get_io(user_id)
 
-        results = self._read.run(
+        results = read.run(
             queries.GET_ENTITIES_BY_USER,
-            user_id=user_id,
             type=entity_type,
             limit=limit,
         )
@@ -368,13 +463,9 @@ class KnowledgeGraphService:
         Returns:
             Entity object or None if not found
         """
-        self._ensure_initialized()
+        _, read, _ = self._get_io(user_id)
 
-        results = self._read.run(
-            queries.GET_ENTITY_BY_ID,
-            id=entity_id,
-            user_id=user_id,
-        )
+        results = read.run(queries.GET_ENTITY_BY_ID, id=entity_id)
 
         if not results:
             return None
@@ -397,13 +488,9 @@ class KnowledgeGraphService:
         Returns:
             List of Relationship objects
         """
-        self._ensure_initialized()
+        _, read, _ = self._get_io(user_id)
 
-        results = self._read.run(
-            queries.GET_ENTITY_RELATIONSHIPS,
-            entity_id=entity_id,
-            user_id=user_id,
-        )
+        results = read.run(queries.GET_ENTITY_RELATIONSHIPS, entity_id=entity_id)
 
         relationships = []
         if not results:
@@ -447,12 +534,11 @@ class KnowledgeGraphService:
         Returns:
             List of matching Entity objects
         """
-        self._ensure_initialized()
+        _, read, _ = self._get_io(user_id)
 
-        results = self._read.run(
+        results = read.run(
             queries.SEARCH_ENTITIES_BY_NAME,
             query=query,
-            user_id=user_id,
             limit=limit,
         )
 
@@ -468,9 +554,9 @@ class KnowledgeGraphService:
         self,
         entity_id: str,
         user_id: str,
-        name: str = None,
-        details: str = None,
-        icon: str = None,
+        name: Optional[str] = None,
+        details: Optional[str] = None,
+        icon: Optional[str] = None,
     ) -> Optional[Entity]:
         """Update an entity's fields (partial update via COALESCE).
 
@@ -484,17 +570,16 @@ class KnowledgeGraphService:
         Returns:
             Updated Entity object or None if not found
         """
-        self._ensure_initialized()
+        _, _, write = self._get_io(user_id)
 
-        results = self._write.run(
+        results = write.run(
             queries.UPDATE_ENTITY,
             id=entity_id,
-            user_id=user_id,
             name=name,
             details=details,
             icon=icon,
             metadata=None,
-            now=datetime.utcnow().isoformat(),
+            now=datetime.now(timezone.utc).isoformat(),
         )
 
         if not results:
@@ -517,16 +602,37 @@ class KnowledgeGraphService:
         Returns:
             True if deleted, False if not found
         """
-        self._ensure_initialized()
+        _, _, write = self._get_io(user_id)
 
-        results = self._write.run(
-            queries.DELETE_ENTITY,
-            id=entity_id,
-            user_id=user_id,
-        )
+        results = write.run(queries.DELETE_ENTITY, id=entity_id)
 
         deleted = results[0]["deleted_count"] if results else 0
         return deleted > 0
+
+    async def delete_all_user_entities(self, user_id: str) -> int:
+        """Delete every :Entity (and :Conversation, which carries :Entity) for a user.
+
+        DETACH DELETE removes incident :RELATED_TO and :MENTIONED_IN edges with
+        the nodes. Note: this is a partial wipe within the per-user graph
+        (Entity nodes only). For a full per-user wipe (including ConvDoc/
+        ConvChunk/ConvEntity from chronicle's MemoryService), use
+        ``MemoryService.delete_all_user_memories`` which drops the whole graph.
+
+        If the per-user graph does not yet exist (FalkorDB raises "Invalid
+        graph operation on empty key" on MATCH against an empty Redis key)
+        we treat it as a no-op and return 0.
+        """
+        _, _, write = self._get_io(user_id)
+        try:
+            results = write.run(queries.DELETE_USER_ENTITIES)
+        except Exception as exc:
+            logger.debug(
+                "delete_all_user_entities for %s skipped (likely empty graph): %s",
+                user_id,
+                exc,
+            )
+            return 0
+        return results[0]["deleted_count"] if results else 0
 
     # =========================================================================
     # CONVERSATION DOC BROWSING (ConvDoc / ConvEntity from chronicle memory)
@@ -548,21 +654,16 @@ class KnowledgeGraphService:
         Returns:
             List of conversation doc dicts with people arrays
         """
-        self._ensure_initialized()
+        _, read, _ = self._get_io(user_id)
 
         if person:
-            results = self._read.run(
+            results = read.run(
                 queries.GET_CONVERSATION_DOCS_BY_PERSON,
-                user_id=user_id,
                 person=person,
                 limit=limit,
             )
         else:
-            results = self._read.run(
-                queries.GET_CONVERSATION_DOCS,
-                user_id=user_id,
-                limit=limit,
-            )
+            results = read.run(queries.GET_CONVERSATION_DOCS, limit=limit)
 
         docs = []
         for row in results:
@@ -603,12 +704,9 @@ class KnowledgeGraphService:
         Returns:
             List of people dicts with name, description, mention_count
         """
-        self._ensure_initialized()
+        _, read, _ = self._get_io(user_id)
 
-        results = self._read.run(
-            queries.GET_PEOPLE,
-            user_id=user_id,
-        )
+        results = read.run(queries.GET_PEOPLE)
 
         people = []
         for row in results:
@@ -644,11 +742,10 @@ class KnowledgeGraphService:
         Returns:
             List of Entity objects ordered by time
         """
-        self._ensure_initialized()
+        _, read, _ = self._get_io(user_id)
 
-        results = self._read.run(
+        results = read.run(
             queries.GET_TIMELINE,
-            user_id=user_id,
             start=start.isoformat(),
             end=end.isoformat(),
             limit=limit,
@@ -755,19 +852,29 @@ class KnowledgeGraphService:
         return await self._kb.consolidate_basic_memory(user_id, memories)
 
     def shutdown(self) -> None:
-        """Shutdown the service and close connections."""
-        if self._client:
-            self._client.close()
-            self._client = None
-        self._initialized = False
+        """Shutdown the service and close all per-user connections."""
+        with self._io_lock:
+            for client, _, _ in self._io_cache.values():
+                try:
+                    client.close()
+                except Exception:
+                    pass
+            self._io_cache.clear()
         logger.info("Knowledge Graph Service shut down")
 
     async def test_connection(self) -> bool:
-        """Test FalkorDB connection."""
+        """Test FalkorDB connection via a probe graph (no per-user select)."""
         try:
-            self._ensure_initialized()
-            self._read.run("RETURN 1 as test")
-            return True
+            probe = GraphClient(
+                host=self.host, port=self.port, graph_name="_chronicle_probe"
+            )
+            try:
+                # Writable session: ``ro_query`` on an empty Redis key
+                # raises "Invalid graph operation on empty key".
+                probe.session().run("RETURN 1 AS test")
+                return True
+            finally:
+                probe.close()
         except Exception as e:
             logger.error(f"FalkorDB connection test failed: {e}")
             return False

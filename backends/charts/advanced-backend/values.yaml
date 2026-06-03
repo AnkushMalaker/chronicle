@@ -73,7 +73,6 @@ resources:
 env:
   # These are set by Skaffold setValueTemplates for Kubernetes-specific URLs
   # MONGODB_URI: set by Skaffold
-  # QDRANT_BASE_URL: set by Skaffold
   # REDIS_URL: set by Skaffold in templates
 
   # Override only specific values if needed

@@ -12,6 +12,7 @@ Architecture:
 - service_factory.py: Provider selection and instantiation
 - providers/chronicle.py: Chronicle native provider (LLM + FalkorDB hybrid search + vault)
 - providers/openmemory_mcp.py: OpenMemory MCP provider
+- providers/graphiti.py: Graphiti temporal graph provider
 - providers/llm_providers.py: LLM implementations (OpenAI, Ollama)
 - graph_utils.py: Utility functions for markdown parsing and hybrid scoring
 - vault_manager.py: Conversation document vault (.md file I/O)

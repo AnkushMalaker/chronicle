@@ -93,7 +93,7 @@ class KnowledgeBaseManager:
 
         Args:
             user_id: The user whose basic memory to consolidate.
-            memories: List of extracted fact strings from Qdrant.
+            memories: List of extracted fact strings.
 
         Returns:
             The updated MEMORY.md content.
@@ -117,14 +117,19 @@ class KnowledgeBaseManager:
             f"## Extracted Memories ({len(memories)} facts)\n\n{facts_block}"
         )
 
-        llm_client = get_llm_client()
-        raw_response = llm_client.client.chat.completions.create(
-            model=llm_client.model,
+        from advanced_omi_backend.model_registry import get_models_registry
+
+        registry = get_models_registry()
+        if not registry:
+            raise RuntimeError("Model registry not initialized")
+        op = registry.get_llm_operation("memory_update")
+        client = op.get_client(is_async=False)
+        raw_response = client.chat.completions.create(
+            **op.to_api_params(),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            temperature=0.3,
         )
         response = raw_response.choices[0].message.content
 

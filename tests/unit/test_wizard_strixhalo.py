@@ -36,7 +36,7 @@ def _install_rich_stubs():
 def _install_setup_utils_stub():
     setup_utils_mod = types.ModuleType("setup_utils")
     setup_utils_mod.detect_tailscale_info = lambda: (None, None)
-    setup_utils_mod.generate_self_signed_certs = lambda *_: True
+    setup_utils_mod.decide_cert_mode = lambda *_: "caddy"
     setup_utils_mod.generate_tailscale_certs = lambda *_: False
     setup_utils_mod.is_placeholder = lambda value, *placeholders: value in placeholders
     setup_utils_mod.mask_value = lambda value, *_: value

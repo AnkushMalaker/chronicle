@@ -6,7 +6,7 @@ and relationships from conversation transcripts.
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.model_registry import get_models_registry
@@ -276,7 +276,7 @@ def parse_natural_datetime(
     if not text:
         return None
 
-    reference = reference_date or datetime.utcnow()
+    reference = reference_date or datetime.now(timezone.utc)
     text_lower = text.lower().strip()
 
     # Simple patterns - can be extended with dateparser library later

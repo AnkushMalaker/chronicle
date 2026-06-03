@@ -85,9 +85,9 @@ chronicle/
 │       ┌────────────────────┴────────────────┐          │
 │       │                                     │          │
 │  ┌────▼─────┐  ┌───────────┐  ┌──────────▼──┐        │
-│  │ Deepgram │  │  OpenAI   │  │   Qdrant    │        │
-│  │   STT    │  │   LLM     │  │  (Vector    │        │
-│  │          │  │           │  │   Store)    │        │
+│  │ Deepgram │  │  OpenAI   │  │  FalkorDB   │        │
+│  │   STT    │  │   LLM     │  │  (Graph +   │        │
+│  │          │  │           │  │   Vector)   │        │
 │  └──────────┘  └───────────┘  └─────────────┘        │
 │                                                         │
 │  Optional Services:                                     │

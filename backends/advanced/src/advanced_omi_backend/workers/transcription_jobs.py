@@ -11,7 +11,7 @@ import logging
 import os
 import time
 import wave
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from beanie.operators import In
@@ -62,7 +62,7 @@ async def apply_speaker_recognition(
     words: list,
     segments: list,
     user_id: str,
-    conversation_id: str = None,
+    conversation_id: str | None = None,
 ) -> list:
     """
     Apply speaker recognition to segments using the speaker recognition service.
@@ -808,7 +808,7 @@ async def create_audio_only_conversation(
         summary="Processing audio with offline transcription...",
         processing_status="batch_transcription",
         always_persist=False,  # Mark as False since this is fallback
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     await conversation.insert()
 
@@ -823,8 +823,8 @@ async def transcription_fallback_check_job(
     session_id: str,
     user_id: str,
     client_id: str,
-    conversation_id: str = None,
-    timeout_seconds: int = None,
+    conversation_id: str | None = None,
+    timeout_seconds: int | None = None,
     *,
     redis_client=None,
 ) -> Dict[str, Any]:
@@ -1293,15 +1293,13 @@ async def stream_speech_detection_job(
         logger.info(f"💬 Meaningful speech detected!")
 
         # Add session event for speech detected
-        from datetime import datetime
-
         await redis_client.hset(
             session_key,
             "last_event",
-            f"speech_detected:{datetime.utcnow().isoformat()}",
+            f"speech_detected:{datetime.now(timezone.utc).isoformat()}",
         )
         await redis_client.hset(
-            session_key, "speech_detected_at", datetime.utcnow().isoformat()
+            session_key, "speech_detected_at", datetime.now(timezone.utc).isoformat()
         )
 
         # Step 2: If speaker filter enabled, check for enrolled speakers
@@ -1314,7 +1312,7 @@ async def stream_speech_detection_job(
             await redis_client.hset(
                 session_key,
                 "last_event",
-                f"speaker_check_starting:{datetime.utcnow().isoformat()}",
+                f"speaker_check_starting:{datetime.now(timezone.utc).isoformat()}",
             )
             await redis_client.hset(session_key, "speaker_check_status", "checking")
             from .speaker_jobs import check_enrolled_speakers_job
@@ -1362,7 +1360,7 @@ async def stream_speech_detection_job(
                     await redis_client.hset(
                         session_key,
                         "last_event",
-                        f"speaker_check_complete:{datetime.utcnow().isoformat()}",
+                        f"speaker_check_complete:{datetime.now(timezone.utc).isoformat()}",
                     )
                     await redis_client.hset(
                         session_key,
@@ -1383,7 +1381,7 @@ async def stream_speech_detection_job(
                     await redis_client.hset(
                         session_key,
                         "last_event",
-                        f"speaker_check_failed:{datetime.utcnow().isoformat()}",
+                        f"speaker_check_failed:{datetime.now(timezone.utc).isoformat()}",
                     )
                     await redis_client.hset(
                         session_key, "speaker_check_status", "failed"
@@ -1402,7 +1400,7 @@ async def stream_speech_detection_job(
                 await redis_client.hset(
                     session_key,
                     "last_event",
-                    f"speaker_check_timeout:{datetime.utcnow().isoformat()}",
+                    f"speaker_check_timeout:{datetime.now(timezone.utc).isoformat()}",
                 )
                 await redis_client.hset(session_key, "speaker_check_status", "timeout")
 
@@ -1421,8 +1419,6 @@ async def stream_speech_detection_job(
         open_job_key = f"open_conversation:session:{session_id}"
 
         # Enqueue conversation job with speech detection job ID
-        from datetime import datetime
-
         speech_job_id = current_job.id if current_job else None
 
         open_job = transcription_queue.enqueue(

@@ -23,7 +23,7 @@ Setup keywords with dev/prod modes:
 - **Dev Mode Setup** (default): Reuse containers, clear data only (~5s)
 - **Dev Mode Setup With Rebuild**: Rebuild containers in dev mode (~60s)
 - **Prod Mode Setup**: Complete teardown and rebuild for CI/CD (~90s)
-- **Clear Test Databases**: Clear MongoDB, Qdrant, Redis, and audio files
+- **Clear Test Databases**: Clear MongoDB, FalkorDB, Redis, and audio files
 - **Readiness Check**: Verify service availability
 - **Health Check**: Verify service health
 
@@ -105,7 +105,7 @@ robot tests/
 ```
 - **Default behavior** - no environment variable needed
 - Reuses existing containers if available
-- Only clears test data (MongoDB, Qdrant, Redis, audio files)
+- Only clears test data (MongoDB, FalkorDB, Redis, audio files)
 - Keeps containers running after tests
 - **Fastest** for rapid iteration (~5s, instant if containers up)
 - Best for: local development, rapid testing

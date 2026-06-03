@@ -955,7 +955,7 @@ async def get_memory_provider():
             current_provider = "chronicle"
 
         # Get available providers
-        available_providers = ["chronicle", "openmemory_mcp"]
+        available_providers = ["chronicle", "openmemory_mcp", "graphiti"]
 
         return {
             "current_provider": current_provider,
@@ -973,7 +973,7 @@ async def set_memory_provider(provider: str):
     try:
         # Validate provider
         provider = provider.lower().strip()
-        valid_providers = ["chronicle", "openmemory_mcp"]
+        valid_providers = ["chronicle", "openmemory_mcp", "graphiti"]
 
         if provider not in valid_providers:
             raise ValueError(
@@ -1308,7 +1308,7 @@ async def get_plugins_config_yaml() -> str:
   #   access_level: transcript
   #   trigger:
   #     type: wake_word
-  #     wake_word: vivi
+  #     wake_word: hermes
   #   ha_url: http://localhost:8123
   #   ha_token: YOUR_TOKEN_HERE
 """

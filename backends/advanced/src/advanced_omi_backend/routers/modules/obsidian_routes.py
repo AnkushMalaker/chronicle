@@ -43,7 +43,9 @@ async def ingest_obsidian_vault(
         )
 
     try:
-        result = await get_obsidian_service().ingest_vault(request.vault_path)
+        result = await get_obsidian_service().ingest_vault(
+            request.vault_path, current_user.user_id
+        )
         return {"message": "Ingestion complete", **result}
     except Exception as e:
         logger.error(f"Ingestion failed: {e}")
@@ -101,7 +103,8 @@ async def upload_obsidian_zip(
 
         total = count_markdown_files(str(extract_dir))
 
-        # Store pending job state in Redis
+        # Store pending job state in Redis. user_id is captured here so that
+        # /start uses the uploader's id (not whoever calls /start later).
         pending_state = {
             "status": "ready",
             "total": total,
@@ -109,6 +112,7 @@ async def upload_obsidian_zip(
             "errors": [],
             "vault_path": str(extract_dir),
             "job_id": job_id,
+            "user_id": current_user.user_id,
         }
         redis_conn.set(
             f"obsidian_pending:{job_id}", json.dumps(pending_state), ex=3600 * 24
@@ -144,12 +148,16 @@ async def start_ingestion(
         try:
             job_data = json.loads(pending_data)
             vault_path = job_data.get("vault_path")
+            # Fall back to the caller's id only if the upload predates the
+            # user_id capture in /upload_zip (older pending entries).
+            user_id = job_data.get("user_id") or current_user.user_id
 
             # Enqueue to RQ
             rq_job = default_queue.enqueue(
                 ingest_obsidian_vault_job,
                 job_id,  # arg1
                 vault_path,  # arg2
+                user_id,  # arg3
                 job_id=job_id,  # Set RQ job ID to match our ID
                 description=f"Obsidian ingestion for job {job_id}",
                 job_timeout=3600,  # 1 hour timeout

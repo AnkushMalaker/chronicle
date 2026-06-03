@@ -7,7 +7,6 @@ audio chunk pipeline: encoding, storage, retrieval, and reconstruction.
 Run with: pytest tests/test_audio_persistence_mongodb.py --mongodb-url=mongodb://localhost:27017
 """
 
-import asyncio
 import io
 import os
 import struct
@@ -15,6 +14,7 @@ import wave
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 from beanie import init_beanie
 from bson import Binary
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -45,15 +45,7 @@ def get_test_db_name():
     return os.getenv("TEST_DB_NAME", "test_audio_chunks_db")
 
 
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create event loop for async tests."""
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def mongodb_client():
     """Create MongoDB client for tests."""
     client = AsyncIOMotorClient(get_mongodb_url())
@@ -61,7 +53,7 @@ async def mongodb_client():
     client.close()
 
 
-@pytest.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def init_db(mongodb_client):
     """Initialize Beanie with test database."""
     db = mongodb_client[get_test_db_name()]
@@ -74,7 +66,7 @@ async def init_db(mongodb_client):
     await mongodb_client.drop_database(get_test_db_name())
 
 
-@pytest.fixture
+@pytest_asyncio.fixture(loop_scope="session")
 async def clean_db(init_db):
     """Clean database before each test."""
     # Drop all collections
@@ -111,7 +103,7 @@ def create_wav_file(pcm_data, output_path, sample_rate=16000):
 # Integration Tests
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="session")
 class TestOpusCodecIntegration:
     """Test Opus encoding/decoding with real data."""
 
@@ -151,7 +143,7 @@ class TestOpusCodecIntegration:
             assert len(frames) == len(pcm_data)
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="session")
 class TestMongoDBChunkStorage:
     """Test MongoDB chunk storage and retrieval."""
 
@@ -246,7 +238,7 @@ class TestMongoDBChunkStorage:
         assert chunks[2].chunk_index == 7
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="session")
 class TestWAVReconstruction:
     """Test complete WAV reconstruction from MongoDB chunks."""
 
@@ -318,7 +310,7 @@ class TestWAVReconstruction:
             await reconstruct_wav_from_conversation("nonexistent-conv")
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="session")
 class TestWAVConversion:
     """Test WAV file to MongoDB chunk conversion."""
 
@@ -385,7 +377,7 @@ class TestWAVConversion:
         assert len(chunks) == 3
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="session")
 class TestChunkWaiting:
     """Test waiting for MongoDB chunks to become available."""
 

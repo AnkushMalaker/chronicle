@@ -12,11 +12,10 @@ import contextlib
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import AsyncGenerator, Dict, List, Optional, Tuple
 from uuid import uuid4
 
-from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorCollection
 
 from advanced_omi_backend.database import get_database
@@ -28,6 +27,7 @@ from advanced_omi_backend.observability.otel_setup import (
     set_otel_session,
     set_trace_io,
 )
+from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 from advanced_omi_backend.services.knowledge_graph.kb import KnowledgeBaseManager
 from advanced_omi_backend.services.memory import get_memory_service
@@ -36,7 +36,7 @@ from advanced_omi_backend.services.obsidian_service import (
     ObsidianSearchError,
     get_obsidian_service,
 )
-from advanced_omi_backend.users import User
+from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
 
 logger = logging.getLogger(__name__)
 
@@ -81,16 +81,16 @@ class ChatMessage:
         user_id: str,
         role: str,  # 'user' or 'assistant'
         content: str,
-        timestamp: datetime = None,
-        memories_used: List[str] = None,
-        metadata: Dict = None,
+        timestamp: Optional[datetime] = None,
+        memories_used: Optional[List[str]] = None,
+        metadata: Optional[Dict] = None,
     ):
         self.message_id = message_id
         self.session_id = session_id
         self.user_id = user_id
         self.role = role
         self.content = content
-        self.timestamp = timestamp or datetime.utcnow()
+        self.timestamp = timestamp or datetime.now(timezone.utc)
         self.memories_used = memories_used or []
         self.metadata = metadata or {}
 
@@ -129,16 +129,16 @@ class ChatSession:
         self,
         session_id: str,
         user_id: str,
-        title: str = None,
-        created_at: datetime = None,
-        updated_at: datetime = None,
-        metadata: Dict = None,
+        title: Optional[str] = None,
+        created_at: Optional[datetime] = None,
+        updated_at: Optional[datetime] = None,
+        metadata: Optional[Dict] = None,
     ):
         self.session_id = session_id
         self.user_id = user_id
         self.title = title or "New Chat"
-        self.created_at = created_at or datetime.utcnow()
-        self.updated_at = updated_at or datetime.utcnow()
+        self.created_at = created_at or datetime.now(timezone.utc)
+        self.updated_at = updated_at or datetime.now(timezone.utc)
         self.metadata = metadata or {}
 
     def to_dict(self) -> Dict:
@@ -248,7 +248,9 @@ If no relevant memories are available, respond normally based on the conversatio
             logger.error(f"Failed to initialize chat service: {e}")
             raise
 
-    async def create_session(self, user_id: str, title: str = None) -> ChatSession:
+    async def create_session(
+        self, user_id: str, title: Optional[str] = None
+    ) -> ChatSession:
         """Create a new chat session."""
         if not self._initialized:
             await self.initialize()
@@ -426,7 +428,7 @@ If no relevant memories are available, respond normally based on the conversatio
             try:
                 obsidian_service = get_obsidian_service()
                 obsidian_result = await obsidian_service.search_obsidian(
-                    current_message
+                    current_message, user_id
                 )
                 obsidian_context = obsidian_result["results"]
                 if obsidian_context:
@@ -814,7 +816,7 @@ If no relevant memories are available, respond normally based on the conversatio
         try:
             result = await self.sessions_collection.update_one(
                 {"session_id": session_id, "user_id": user_id},
-                {"$set": {"title": title, "updated_at": datetime.utcnow()}},
+                {"$set": {"title": title, "updated_at": datetime.now(timezone.utc)}},
             )
             return result.modified_count > 0
         except Exception as e:
@@ -897,21 +899,50 @@ If no relevant memories are available, respond normally based on the conversatio
 
             # Get user email for memory service
             user_email = session.get("user_email", f"user_{user_id}")
+            source_id = f"chat_{session_id}"
 
-            # Extract memories using the memory service
             success, memory_ids = await self.memory_service.add_memory(
                 transcript=transcript,
                 client_id="chat_interface",
-                source_id=f"chat_{session_id}",
+                source_id=source_id,
                 user_id=user_id,
                 user_email=user_email,
-                allow_update=True,  # Allow deduplication and updates
+                allow_update=True,
             )
 
             if success:
                 logger.info(
                     f"✅ Extracted {len(memory_ids)} memories from chat session {session_id}"
                 )
+                memory_count = len(memory_ids or [])
+
+                # Plugin dispatch — non-fatal, mirrors memory_jobs.py:398-422
+                try:
+                    memory_provider = getattr(
+                        self.memory_service, "provider_identifier", "unknown"
+                    )
+                    await dispatch_plugin_event(
+                        event=PluginEvent.MEMORY_PROCESSED,
+                        user_id=user_id,
+                        data={
+                            "memories": memory_ids or [],
+                            "conversation": {
+                                "conversation_id": source_id,
+                                "client_id": "chat_interface",
+                                "user_id": user_id,
+                                "user_email": user_email,
+                            },
+                            "memory_count": memory_count,
+                            "conversation_id": source_id,
+                        },
+                        metadata={"memory_provider": memory_provider},
+                        description=f"chat={session_id[:12]}, memories={memory_count}",
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"⚠️ Error triggering memory-level plugins for chat {session_id}: {e}"
+                    )
+
                 return True, memory_ids, len(memory_ids)
             else:
                 logger.error(

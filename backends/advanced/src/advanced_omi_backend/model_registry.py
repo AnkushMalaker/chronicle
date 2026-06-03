@@ -166,14 +166,22 @@ class ResolvedLLMOperation(BaseModel):
     def to_api_params(self) -> Dict[str, Any]:
         """Returns kwargs for client.chat.completions.create().
 
-        Works for OpenAI, Ollama, Groq — all OpenAI-compatible.
+        Works for OpenAI, Ollama, Groq — all OpenAI-compatible. For
+        reasoning-class models (gpt-5*, o1/o3/o4), `temperature` is omitted
+        and `max_tokens` is renamed to `max_completion_tokens`, matching
+        OpenAI's stricter API surface for those models.
         """
-        params: Dict[str, Any] = {
-            "model": self.model_def.model_name,
-            "temperature": self.temperature,
-        }
+        from advanced_omi_backend.openai_factory import is_reasoning_model
+
+        model_name = self.model_def.model_name
+        reasoning = is_reasoning_model(model_name)
+
+        params: Dict[str, Any] = {"model": model_name}
+        if not reasoning:
+            params["temperature"] = self.temperature
         if self.max_tokens is not None:
-            params["max_tokens"] = self.max_tokens
+            key = "max_completion_tokens" if reasoning else "max_tokens"
+            params[key] = self.max_tokens
         if self.response_format is not None:
             params["response_format"] = self.response_format
         return params

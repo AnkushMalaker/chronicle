@@ -15,8 +15,8 @@ from rich.prompt import Confirm, Prompt
 
 # Import shared setup utilities
 from setup_utils import (
+    decide_cert_mode,
     detect_tailscale_info,
-    generate_self_signed_certs,
     generate_tailscale_certs,
     is_placeholder,
     mask_value,
@@ -40,6 +40,7 @@ def get_existing_stt_provider(config_yml: dict):
         "stt-smallest": "smallest",
         "stt-smallest-stream": "smallest",
         "stt-gemma4": "gemma4",
+        "stt-af-next": "af-next",
     }
     return mapping.get(stt)
 
@@ -220,7 +221,13 @@ def select_services(
 
     # Services that will be auto-added based on provider choices
     auto_added = set()
-    if transcription_provider in ("parakeet", "vibevoice", "qwen3-asr", "gemma4"):
+    if transcription_provider in (
+        "parakeet",
+        "vibevoice",
+        "qwen3-asr",
+        "gemma4",
+        "af-next",
+    ):
         auto_added.add("asr-services")
     if llm_provider == "llamacpp":
         auto_added.add("llm-services")
@@ -238,6 +245,7 @@ def select_services(
                     "parakeet": "Parakeet",
                     "qwen3-asr": "Qwen3-ASR",
                     "gemma4": "Gemma 4",
+                    "af-next": "Audio Flamingo Next",
                 }.get(transcription_provider, transcription_provider)
             console.print(
                 f"  ✅ {service_config['description']} ({label}) [dim](auto-selected)[/dim]"
@@ -328,6 +336,7 @@ def run_service_setup(
     llm_provider=None,
     memory_provider=None,
     hardware_profile=None,
+    live_segmentation="streaming_stt",
 ):
     """Execute individual service setup script"""
     if service_name == "advanced":
@@ -347,6 +356,10 @@ def run_service_setup(
         # Pass streaming provider (different from batch) for re-transcription setup
         if streaming_provider:
             cmd.extend(["--streaming-provider", streaming_provider])
+
+        # Pass live-segmentation mode (windowed_batch when no streaming ASR)
+        if live_segmentation:
+            cmd.extend(["--live-segmentation", live_segmentation])
 
         # Add HTTPS configuration
         if https_enabled and server_ip:
@@ -430,6 +443,7 @@ def run_service_setup(
                     "parakeet": "nemo-strixhalo",
                     "qwen3-asr": "qwen3-asr",
                     "gemma4": "gemma4",
+                    "af-next": "af-next",
                 }
             else:
                 wizard_to_asr_provider = {
@@ -437,6 +451,7 @@ def run_service_setup(
                     "parakeet": "nemo",
                     "qwen3-asr": "qwen3-asr",
                     "gemma4": "gemma4",
+                    "af-next": "af-next",
                 }
             asr_provider = wizard_to_asr_provider.get(transcription_provider)
             if asr_provider:
@@ -832,7 +847,8 @@ def select_transcription_provider(config_yml: dict = None):
         "qwen3-asr": "4",
         "smallest": "5",
         "gemma4": "6",
-        "none": "7",
+        "af-next": "7",
+        "none": "8",
     }
     choice_to_provider = {v: k for k, v in provider_to_choice.items()}
     default_choice = provider_to_choice.get(existing_provider, "1")
@@ -852,6 +868,7 @@ def select_transcription_provider(config_yml: dict = None):
             "qwen3-asr": "Qwen3-ASR",
             "smallest": "Smallest.ai Pulse",
             "gemma4": "Gemma 4",
+            "af-next": "Audio Flamingo Next",
         }
         console.print(
             f"[blue][INFO][/blue] Current: {provider_labels.get(existing_provider, existing_provider)}"
@@ -865,7 +882,8 @@ def select_transcription_provider(config_yml: dict = None):
         "4": "Qwen3-ASR (offline, streaming + batch, 52 languages, GPU)",
         "5": "Smallest.ai Pulse (cloud, streaming + batch)",
         "6": "Gemma 4 (offline, batch only, prompt-based diarization, GPU)",
-        "7": "None (skip transcription setup)",
+        "7": "Audio Flamingo Next (offline, batch, timestamped diarization, GPU; noncommercial license)",
+        "8": "None (skip transcription setup)",
     }
 
     for key, desc in choices.items():
@@ -972,6 +990,38 @@ def select_streaming_provider(batch_provider, config_yml: dict = None):
             )
         except EOFError:
             return None
+
+
+def select_live_segmentation(batch_provider):
+    """When there's no streaming ASR, offer windowed-batch live transcription.
+
+    Without a streaming ASR, a continuously-streaming source is only transcribed when
+    it disconnects (24h+ for always-on sources). Windowed batch transcribes fixed
+    ~30s windows so conversations are created incrementally as audio streams in.
+
+    Returns:
+        "windowed_batch" or "streaming_stt".
+    """
+    console.print(
+        "\n🪟 [bold cyan]Live transcription without streaming ASR[/bold cyan]"
+    )
+    console.print(
+        f"{batch_provider} is batch-only and you skipped streaming. Without live "
+        "transcription, a continuously-streaming source is only transcribed when it "
+        "disconnects."
+    )
+    try:
+        enable = Confirm.ask(
+            "Enable windowed batch transcription (transcribe ~every 30s as audio streams in)?",
+            default=True,
+        )
+    except EOFError:
+        return "streaming_stt"
+
+    if enable:
+        console.print("[green]✅[/green] Live segmentation: windowed_batch")
+        return "windowed_batch"
+    return "streaming_stt"
 
 
 def setup_langfuse_choice():
@@ -1219,19 +1269,24 @@ def select_memory_provider(config_yml: dict = None) -> str:
     That question is about running the extra service; this is about the backend provider.
 
     Returns:
-        "chronicle" or "openmemory_mcp"
+        "chronicle", "openmemory_mcp", or "graphiti"
     """
     config_yml = config_yml or {}
     existing_provider = config_yml.get("memory", {}).get("provider", "chronicle")
-    default_choice = "2" if existing_provider == "openmemory_mcp" else "1"
+    default_choice = {
+        "chronicle": "1",
+        "openmemory_mcp": "2",
+        "graphiti": "3",
+    }.get(existing_provider, "1")
 
     console.print("\n🧠 [bold cyan]Memory Storage Backend[/bold cyan]")
     console.print("Choose where your memories and conversation facts are stored:")
     console.print()
 
     choices = {
-        "1": "Chronicle Native (Qdrant vector database, self-hosted)",
+        "1": "Chronicle Native (FalkorDB graph + vault, self-hosted)",
         "2": "OpenMemory MCP (cross-client compatible, requires openmemory-mcp service)",
+        "3": "Graphiti (FalkorDB temporal knowledge graph, self-hosted)",
     }
 
     for key, desc in choices.items():
@@ -1243,12 +1298,14 @@ def select_memory_provider(config_yml: dict = None) -> str:
         try:
             choice = Prompt.ask("Enter choice", default=default_choice)
             if choice in choices:
-                return {"1": "chronicle", "2": "openmemory_mcp"}[choice]
+                return {"1": "chronicle", "2": "openmemory_mcp", "3": "graphiti"}[
+                    choice
+                ]
             console.print(
                 f"[red]Invalid choice. Please select from {list(choices.keys())}[/red]"
             )
         except EOFError:
-            return {"1": "chronicle", "2": "openmemory_mcp"}.get(
+            return {"1": "chronicle", "2": "openmemory_mcp", "3": "graphiti"}.get(
                 default_choice, "chronicle"
             )
 
@@ -1283,6 +1340,15 @@ def main():
     # Ask about streaming provider (if batch provider doesn't stream, or user wants a different one)
     streaming_provider = select_streaming_provider(transcription_provider, config_yml)
 
+    # No streaming ASR (batch-only provider + streaming skipped) → offer windowed batch
+    live_segmentation = "streaming_stt"
+    if (
+        transcription_provider not in ("none", None)
+        and transcription_provider not in STREAMING_CAPABLE
+        and streaming_provider is None
+    ):
+        live_segmentation = select_live_segmentation(transcription_provider)
+
     # LLM Provider selection (asked once here, passed to init.py — avoids double-ask)
     llm_provider = select_llm_provider(config_yml, transcription_provider)
 
@@ -1295,7 +1361,7 @@ def main():
     )
 
     # Auto-add asr-services if any local ASR was chosen (batch or streaming)
-    local_asr_providers = ("parakeet", "vibevoice", "qwen3-asr", "gemma4")
+    local_asr_providers = ("parakeet", "vibevoice", "qwen3-asr", "gemma4", "af-next")
     needs_asr = transcription_provider in local_asr_providers or (
         streaming_provider and streaming_provider in local_asr_providers
     )
@@ -1431,20 +1497,37 @@ def main():
 
             console.print(f"[green]✅[/green] HTTPS configured for: {server_ip}")
 
-            # Generate certificates centrally in certs/
-            console.print("\n[blue][INFO][/blue] Generating TLS certificates...")
-            if ts_dns and generate_tailscale_certs("certs"):
+            # Decide how the TLS cert is managed. The per-service init scripts derive
+            # the same mode (from server_ip + tailscaled socket) and render their
+            # Caddyfile/compose to match, so nothing needs to be threaded through here.
+            cert_mode = decide_cert_mode(server_ip)
+            if cert_mode == "static":
+                # *.ts.net with no mountable tailscaled socket (e.g. Docker Desktop on
+                # macOS): issue the cert on the host now. The services.py startup hook
+                # renews it on restart — no cron needed.
                 console.print(
-                    f"[green]✅[/green] Tailscale trusted certs generated in certs/ for {ts_dns}"
+                    "\n[blue][INFO][/blue] Generating host-issued TLS certificate..."
                 )
-            elif generate_self_signed_certs(server_ip, "certs"):
-                console.print(
-                    f"[green]✅[/green] Self-signed certs generated in certs/ for {server_ip}"
-                )
+                if generate_tailscale_certs("certs"):
+                    console.print(
+                        f"[green]✅[/green] Tailscale cert generated in certs/ for {server_ip}"
+                    )
+                else:
+                    console.print(
+                        "[yellow]⚠️  Certificate generation failed; it will be retried "
+                        "automatically on the next service start.[/yellow]"
+                    )
             else:
+                # Caddy obtains and auto-renews the cert itself: *.ts.net via the mounted
+                # tailscaled socket, a real domain via Let's Encrypt, IP/localhost via
+                # Caddy's internal CA. No host cert file, no renewal cron.
                 console.print(
-                    "[yellow]⚠️  Certificate generation failed. "
-                    "Generate manually: cd certs && ./generate-ssl.sh <address>[/yellow]"
+                    f"\n[green]✅[/green] Caddy will obtain and auto-renew the TLS "
+                    f"certificate for {server_ip} (no host cert file, no renewal cron)"
+                )
+                console.print(
+                    "[blue][INFO][/blue] Trusted automatically for *.ts.net and real "
+                    "domains; IP/localhost get a self-signed cert you accept in the browser."
                 )
 
     obsidian_enabled = False
@@ -1521,6 +1604,7 @@ def main():
             llm_provider=llm_provider,
             memory_provider=memory_provider,
             hardware_profile=hardware_profile,
+            live_segmentation=live_segmentation,
         ):
             success_count += 1
 

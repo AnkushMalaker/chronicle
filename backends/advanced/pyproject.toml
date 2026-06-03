@@ -8,8 +8,8 @@ dependencies = [
     "easy-audio-interfaces>=0.7.1", # we need to add local-audio for scripts/local-audio.py | If we don't need that, we can remove this, and then remove portaudio19-dev from Dockerfile
     "fastapi>=0.115.12",
     "fastmcp>=0.5.0", # MCP server for conversation access
-    "mem0ai", # Using main branch with PR #3250 AsyncMemory fix
     "falkordb==1.2.2",
+    "graphiti-core[falkordb] @ git+https://github.com/SimpleOpenSoftware/graphiti.git",
     "motor>=3.7.1",
     "ollama>=0.4.8",
     "friend-lite-sdk",
@@ -52,6 +52,10 @@ galileo = [
     "galileo>=1.0",
     "opentelemetry-exporter-otlp>=1.20",
 ]
+benchmark = [
+    "huggingface-hub>=0.23",  # loader.py downloads LongMemEval via hf_hub_download
+    "ijson>=3.2.0",           # streaming JSON parse for the large LongMemEval files
+]
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
@@ -62,9 +66,6 @@ where = ["src"]
 
 [tool.isort]
 profile = "black"
-
-[tool.uv.sources]
-mem0ai = { git = "https://github.com/AnkushMalaker/mem0.git", rev = "main" }
 
 [tool.poetry.dependencies]
 robotframework = "^6.1.1"

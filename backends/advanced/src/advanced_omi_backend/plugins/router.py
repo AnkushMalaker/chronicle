@@ -30,9 +30,9 @@ def normalize_text_for_wake_word(text: str) -> str:
     - Strip leading/trailing whitespace
 
     Example:
-        "Hey, Vivi!" -> "hey vivi"
-        "HEY  VIVI" -> "hey vivi"
-        "Hey-Vivi" -> "hey vivi"
+        "Hey, Hermes!" -> "hey hermes"
+        "HEY  HERMES" -> "hey hermes"
+        "Hey-Hermes" -> "hey hermes"
     """
     # Lowercase
     text = text.lower()
@@ -53,16 +53,16 @@ def extract_command_around_keyword(transcript: str, keyword: str) -> str:
     Handles punctuation and spacing around the keyword gracefully.
 
     Example:
-        transcript: "Turn off the lights, Vivi"
-        keyword: "vivi"
+        transcript: "Turn off the lights, Hermes"
+        keyword: "hermes"
         -> "Turn off the lights"
 
-        transcript: "Vivi, turn off the lights in the hall"
-        keyword: "vivi"
+        transcript: "Hermes, turn off the lights in the hall"
+        keyword: "hermes"
         -> "turn off the lights in the hall"
 
-        transcript: "Turn off the hall lights, Vivi, please"
-        keyword: "vivi"
+        transcript: "Turn off the hall lights, Hermes, please"
+        keyword: "hermes"
         -> "Turn off the hall lights, please"
 
     Args:
@@ -97,8 +97,8 @@ def extract_command_after_wake_word(transcript: str, wake_word: str) -> str:
     Handles punctuation and spacing variations by creating a flexible regex pattern.
 
     Example:
-        transcript: "Hey, Vivi, turn off lights"
-        wake_word: "hey vivi"
+        transcript: "Hey, Hermes, turn off lights"
+        wake_word: "hey hermes"
         -> extracts: "turn off lights"
 
     Args:
@@ -115,7 +115,7 @@ def extract_command_after_wake_word(transcript: str, wake_word: str) -> str:
         return transcript.strip()
 
     # Create regex pattern that allows punctuation/whitespace between parts
-    # Example: "hey" + "vivi" -> r"hey[\s,.\-!?]*vivi[\s,.\-!?]*"
+    # Example: "hey" + "hermes" -> r"hey[\s,.\-!?]*hermes[\s,.\-!?]*"
     # The pattern matches the wake word parts with optional punctuation/whitespace between and after
     pattern_parts = [re.escape(part) for part in wake_word_parts]
     # Allow optional punctuation/whitespace between parts

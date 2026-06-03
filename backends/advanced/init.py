@@ -23,9 +23,13 @@ from rich.text import Text
 # Add repo root to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from config_manager import ConfigManager
-from setup_utils import detect_tailscale_info, mask_value
+from setup_utils import decide_cert_mode, detect_tailscale_info, mask_value
 from setup_utils import prompt_password as util_prompt_password
-from setup_utils import prompt_with_existing_masked, read_env_value
+from setup_utils import (
+    prompt_with_existing_masked,
+    read_env_value,
+    tailscale_socket_path,
+)
 
 
 class ChronicleSetup:
@@ -251,8 +255,10 @@ class ChronicleSetup:
                 choice = "5"
             elif provider == "gemma4":
                 choice = "6"
-            elif provider == "none":
+            elif provider == "af-next":
                 choice = "7"
+            elif provider == "none":
+                choice = "8"
             else:
                 choice = "1"  # Default to Deepgram
         else:
@@ -286,6 +292,11 @@ class ChronicleSetup:
                 "Offline (Gemma 4 E4B-it - GPU required, prompt-based diarization)"
             )
 
+            af_next_desc = (
+                "Offline (Audio Flamingo Next - GPU required, timestamped diarization; "
+                "NONCOMMERCIAL license)"
+            )
+
             choices = {
                 "1": "Deepgram (recommended - high quality, cloud-based)",
                 "2": parakeet_desc,
@@ -293,7 +304,8 @@ class ChronicleSetup:
                 "4": qwen3_desc,
                 "5": smallest_desc,
                 "6": gemma4_desc,
-                "7": "None (skip transcription setup)",
+                "7": af_next_desc,
+                "8": "None (skip transcription setup)",
             }
 
             choice = self.prompt_choice(
@@ -468,6 +480,36 @@ class ChronicleSetup:
             )
 
         elif choice == "7":
+            self.console.print(
+                "[blue][INFO][/blue] Audio Flamingo Next selected "
+                "(timestamped diarization, prompt-driven)"
+            )
+            self.console.print(
+                "[yellow][WARNING][/yellow] AF-Next is licensed under the NVIDIA OneWay "
+                "Noncommercial License — research use only. Do not deploy in commercial "
+                "products."
+            )
+            existing_af_next_url = (
+                read_env_value(".env", "AF_NEXT_ASR_URL") or "host.docker.internal:8767"
+            )
+            af_next_url = self.prompt_value(
+                "Audio Flamingo Next ASR URL", existing_af_next_url
+            )
+
+            self.config["AF_NEXT_ASR_URL"] = af_next_url
+
+            self.config_manager.update_config_defaults({"stt": "stt-af-next"})
+
+            self.console.print(
+                "[green][SUCCESS][/green] Audio Flamingo Next configured in config.yml and .env"
+            )
+            self.console.print("[blue][INFO][/blue] Set defaults.stt: stt-af-next")
+            self.console.print(
+                "[yellow][WARNING][/yellow] Remember to start AF-Next: "
+                "cd ../../extras/asr-services && docker compose up af-next-asr -d"
+            )
+
+        elif choice == "8":
             self.console.print("[blue][INFO][/blue] Skipping transcription setup")
 
     def setup_streaming_provider(self):
@@ -567,6 +609,27 @@ class ChronicleSetup:
                 )
                 stream_host = qwen3_url.replace("http://", "").rstrip("/")
                 self.config["QWEN3_ASR_STREAM_URL"] = stream_host
+
+    def setup_live_segmentation(self):
+        """Configure the live transcription path (defaults.live_segmentation).
+
+        Writes "windowed_batch" when the wizard selected it (no streaming ASR), so the
+        windowed-batch worker transcribes fixed windows of streamed audio. Defaults to
+        "streaming_stt" otherwise.
+        """
+        mode = getattr(self.args, "live_segmentation", None)
+        if not mode:
+            return
+
+        self.config_manager.update_config_defaults({"live_segmentation": mode})
+        self.console.print(
+            f"[blue][INFO][/blue] Set defaults.live_segmentation: {mode}"
+        )
+        if mode == "windowed_batch":
+            self.console.print(
+                "[blue][INFO][/blue] Continuous audio will be transcribed in windows "
+                "(no streaming ASR required)"
+            )
 
     def setup_llm(self):
         """Configure LLM provider - updates config.yml and .env"""
@@ -835,7 +898,9 @@ class ChronicleSetup:
             self.console.print(
                 f"[green]✅[/green] Memory provider: {provider} (configured via wizard)"
             )
-            choice = {"chronicle": "1", "openmemory_mcp": "2"}.get(provider, "1")
+            choice = {"chronicle": "1", "openmemory_mcp": "2", "graphiti": "3"}.get(
+                provider, "1"
+            )
         else:
             # Standalone init.py run — read existing config as default
             existing_choice = "1"
@@ -845,12 +910,15 @@ class ChronicleSetup:
             )
             if existing_provider == "openmemory_mcp":
                 existing_choice = "2"
+            elif existing_provider == "graphiti":
+                existing_choice = "3"
 
             self.print_section("Memory Storage Configuration")
 
             choices = {
-                "1": "Chronicle Native (Qdrant + custom extraction)",
+                "1": "Chronicle Native (FalkorDB graph + vault)",
                 "2": "OpenMemory MCP (cross-client compatible, external server)",
+                "3": "Graphiti (FalkorDB temporal knowledge graph)",
             }
 
             choice = self.prompt_choice(
@@ -861,9 +929,6 @@ class ChronicleSetup:
             self.console.print(
                 "[blue][INFO][/blue] Chronicle Native memory provider selected"
             )
-
-            qdrant_url = self.prompt_value("Qdrant URL", "qdrant")
-            self.config["QDRANT_BASE_URL"] = qdrant_url
 
             # Update config.yml (also updates .env automatically)
             self.config_manager.update_memory_config({"provider": "chronicle"})
@@ -895,6 +960,12 @@ class ChronicleSetup:
             )
             self.console.print(
                 "[green][SUCCESS][/green] OpenMemory MCP configured in config.yml and .env"
+            )
+        elif choice == "3":
+            self.console.print("[blue][INFO][/blue] Graphiti memory provider selected")
+            self.config_manager.update_memory_config({"provider": "graphiti"})
+            self.console.print(
+                "[green][SUCCESS][/green] Graphiti memory provider configured in config.yml and .env"
             )
             self.console.print(
                 "[yellow][WARNING][/yellow] Remember to start OpenMemory: cd ../../extras/openmemory-mcp && docker compose up -d"
@@ -1219,17 +1290,19 @@ class ChronicleSetup:
         if enable_https:
             script_dir = Path(__file__).parent
 
-            # Check for centralized certs (generated by wizard.py)
-            certs_dir = script_dir / ".." / ".." / "certs"
-            cert_file = certs_dir / "server.crt"
-            if not cert_file.exists():
-                self.console.print(
-                    "[yellow][WARNING][/yellow] No certificates found in certs/ directory"
-                )
-                self.console.print(
-                    "[yellow][WARNING][/yellow] Run ./wizard.sh to generate certificates, "
-                    "or: cd certs && ./generate-ssl.sh <address>"
-                )
+            # Decide how the TLS cert is managed (same logic the wizard uses).
+            cert_mode = decide_cert_mode(server_ip)
+
+            if cert_mode == "static":
+                # Host-issued cert file (e.g. Docker Desktop on macOS, where Caddy can't
+                # reach the tailscaled socket). Warn if it's missing; the wizard normally
+                # generates it and the services.py startup hook keeps it fresh on restart.
+                cert_file = script_dir / ".." / ".." / "certs" / "server.crt"
+                if not cert_file.exists():
+                    self.console.print(
+                        "[yellow][WARNING][/yellow] No certificate found in certs/; "
+                        "run ./wizard.sh, or it will be generated on first start."
+                    )
 
             # Generate Caddyfile from template
             self.console.print(
@@ -1264,6 +1337,16 @@ class ChronicleSetup:
                             "TAILSCALE_IP", server_ip
                         )
 
+                        # Static mode serves a host-issued cert file; caddy mode lets
+                        # Caddy obtain/renew the cert itself (no tls directive).
+                        if cert_mode == "static":
+                            caddyfile_content = caddyfile_content.replace(
+                                f"localhost {server_ip} {{",
+                                f"localhost {server_ip} {{\n"
+                                "    tls /certs/server.crt /certs/server.key",
+                                1,
+                            )
+
                         with open(caddyfile_path, "w") as f:
                             f.write(caddyfile_content)
 
@@ -1272,6 +1355,13 @@ class ChronicleSetup:
                         )
                         self.config["HTTPS_ENABLED"] = "true"
                         self.config["SERVER_IP"] = server_ip
+                        self.config["HTTPS_CERT_MODE"] = cert_mode
+
+                        # Caddy-managed certs on a Tailscale address need the tailscaled
+                        # socket mounted in; write/remove the compose override to match.
+                        self._write_caddy_socket_override(
+                            script_dir, cert_mode, server_ip
+                        )
 
                         # Configure webui-dev for same-origin API calls through Caddy
                         self.config["VITE_BACKEND_URL"] = ""
@@ -1296,6 +1386,29 @@ class ChronicleSetup:
                 self.config["HTTPS_ENABLED"] = "false"
         else:
             self.config["HTTPS_ENABLED"] = "false"
+
+    def _write_caddy_socket_override(self, service_dir, cert_mode, server_address):
+        """Write or remove the compose override that mounts the tailscaled socket into
+        Caddy. Needed only for Caddy-managed certs on a *.ts.net address; removed
+        otherwise so a re-run can't leave a stale mount behind."""
+        override_path = service_dir / "docker-compose.override.yml"
+        socket = tailscale_socket_path()
+        if cert_mode == "caddy" and server_address.endswith(".ts.net") and socket:
+            override_path.write_text(
+                "# Generated by init.py for HTTPS_CERT_MODE=caddy on a Tailscale address.\n"
+                "# Mounts the host tailscaled socket so Caddy fetches and auto-renews the\n"
+                "# Tailscale TLS certificate itself (no host cert file, no renewal cron).\n"
+                "services:\n"
+                "  caddy:\n"
+                "    volumes:\n"
+                f"      - {socket}:/var/run/tailscale/tailscaled.sock\n"
+            )
+            self.console.print(
+                "[green][SUCCESS][/green] Caddy will auto-manage the Tailscale "
+                "certificate (tailscaled socket mounted)"
+            )
+        elif override_path.exists():
+            override_path.unlink()
 
     def generate_env_file(self):
         """Generate .env file from template and update with configuration.
@@ -1490,6 +1603,7 @@ class ChronicleSetup:
             self.setup_authentication()
             self.setup_transcription()
             self.setup_streaming_provider()
+            self.setup_live_segmentation()
             self.setup_llm()
             self.setup_memory()
             self.setup_optional_services()
@@ -1551,6 +1665,7 @@ def main():
             "qwen3-asr",
             "smallest",
             "gemma4",
+            "af-next",
             "none",
         ],
         help="Transcription provider (default: prompt user)",
@@ -1591,13 +1706,19 @@ def main():
         help="Streaming provider when different from batch (enables batch re-transcription)",
     )
     parser.add_argument(
+        "--live-segmentation",
+        choices=["streaming_stt", "windowed_batch"],
+        help="Live transcription path: streaming_stt (default) or windowed_batch "
+        "(batch-transcribe fixed windows when no streaming ASR)",
+    )
+    parser.add_argument(
         "--llm-provider",
         choices=["openai", "ollama", "llamacpp", "custom", "gemma4-unified", "none"],
         help="LLM provider for memory extraction (default: prompt user)",
     )
     parser.add_argument(
         "--memory-provider",
-        choices=["chronicle", "openmemory_mcp"],
+        choices=["chronicle", "openmemory_mcp", "graphiti"],
         help="Memory storage backend (default: prompt user)",
     )
     parser.add_argument(

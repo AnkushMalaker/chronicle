@@ -11,6 +11,7 @@ services:
       - .env
     volumes:
       - ./src:/app/src  # Mount source code for development
+      - ./benchmark:/app/benchmark  # LongMemEval benchmark harness (Phase A+)
       - ./data/audio_chunks:/app/audio_chunks
       - ./data/debug_dir:/app/debug_dir
       - ./data:/app/data
@@ -198,17 +199,6 @@ services:
       chronicle-backend:
         condition: service_healthy
     restart: unless-stopped
-
-  qdrant:
-    image: qdrant/qdrant:latest
-    ports:
-      - "6033:6033" # gRPC
-      - "6034:6034" # HTTP
-    volumes:
-      - ./data/qdrant_data:/qdrant/storage
-    restart: unless-stopped
-    profiles:
-      - qdrant  # Optional — Chronicle now uses FalkorDB for memory search
 
   mongo:
     image: mongo:8.0.14

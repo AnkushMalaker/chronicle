@@ -63,12 +63,6 @@ Clear Test Databases
     # Clear admin user's registered_clients dict to prevent client_id counter increments
     Run Process    docker exec ${MONGO_CONTAINER} mongosh test_db --eval "db.users.updateOne({'email':'${ADMIN_EMAIL}'}, {\\$set: {'registered_clients': {}}})"    shell=True
 
-    # Clear Qdrant collections
-    # Note: Fixture memories will be lost here unless we implement Qdrant metadata filtering
-    Run Process    curl    -s    -X    DELETE    http://localhost:6337/collections/memories    shell=True
-    Run Process    curl    -s    -X    DELETE    http://localhost:6337/collections/conversations    shell=True
-    Log To Console    Qdrant collections cleared
-
     # Clear audio files (except fixtures subfolder)
     Run Process    bash    -c    find ${BACKEND_DIR}/data/test_audio_chunks -maxdepth 1 -name "*.wav" -delete || true    shell=True
     # Don't delete plugin database - just clear its contents later via Clear Plugin Events keyword
@@ -95,10 +89,6 @@ Clear All Test Data
     Run Process    docker exec ${MONGO_CONTAINER} mongosh test_db --eval "db.conversations.deleteMany({})"    shell=True
     Run Process    docker exec ${MONGO_CONTAINER} mongosh test_db --eval "db.audio_chunks.deleteMany({})"    shell=True
     Log To Console    MongoDB completely cleared
-
-    # Clear Qdrant
-    Run Process    curl    -s    -X    DELETE    http://localhost:6337/collections/memories    shell=True
-    Run Process    curl    -s    -X    DELETE    http://localhost:6337/collections/conversations    shell=True
 
     # Clear all audio files
     Run Process    bash    -c    rm -rf ${BACKEND_DIR}/data/test_audio_chunks/* || true    shell=True

@@ -1,6 +1,7 @@
 # SSL Certificates & HTTPS
 
-Chronicle uses automatic HTTPS setup for secure microphone access and remote connections.
+Chronicle uses **Caddy** for automatic HTTPS — for both the advanced backend and the
+speaker-recognition service — so certificates are obtained and renewed automatically.
 
 ## Why HTTPS is Needed
 
@@ -10,64 +11,79 @@ Modern browsers require HTTPS for:
 - **Remote access** via Tailscale/VPN
 - **Production deployments**
 
-## SSL Implementation
+Note: the **native mobile app** does not require HTTPS — only browsers do.
 
-### Advanced Backend → Caddy
+## How certificates are managed
 
-The main backend uses **Caddy** for automatic HTTPS:
+Both services front their containers with Caddy:
 
-**Configuration**: `backends/advanced/Caddyfile`
-**Activation**: Caddy starts when using `--profile https` or when wizard enables HTTPS
-**Certificate**: Self-signed for local/Tailscale IPs, automatic Let's Encrypt for domains
+| Service | Config | HTTP → HTTPS ports |
+|---------|--------|--------------------|
+| Advanced Backend | `backends/advanced/Caddyfile` | `80` → `443` |
+| Speaker Recognition | `extras/speaker-recognition/Caddyfile` | `8081` → `8444` |
 
-**Ports**:
-- `443` - HTTPS (main access)
-- `80` - HTTP (redirects to HTTPS)
+The wizard records the chosen approach as `HTTPS_CERT_MODE` in each service's `.env`:
 
-**Access**: `https://localhost` or `https://your-tailscale-ip`
+### `caddy` mode (default)
 
-### Speaker Recognition → nginx
+Caddy obtains **and auto-renews** the certificate itself — no cert files on disk, no
+renewal cron. The Caddyfile has no `tls` directive; Caddy picks the right source from
+the site address:
 
-The speaker recognition service uses **nginx** for HTTPS:
+- **`*.ts.net` (Tailscale)** → fetched from the local `tailscaled` at TLS-handshake
+  time. The wizard mounts the host `tailscaled.sock` into the Caddy container via a
+  generated `docker-compose.override.yml`. Trusted on all devices in your tailnet.
+- **Real domain** → Let's Encrypt via ACME (requires ports 80/443 reachable). Trusted
+  everywhere.
+- **IP address / `localhost`** → Caddy's internal CA (self-signed). Browsers show a
+  warning you can accept; the native app connects fine.
 
-**Configuration**: `extras/speaker-recognition/nginx.conf`
-**Certificate**: Self-signed via `ssl/generate-ssl.sh`
+Renewal is automatic (~30 days before expiry), so a Caddy-managed deployment never hits
+an expired cert.
 
-**Ports**:
-- `8444` - HTTPS
-- `8081` - HTTP (redirects to HTTPS)
+### `static` mode (Docker Desktop + Tailscale fallback)
 
-**Access**: `https://localhost:8444`
+On Docker Desktop (macOS/Windows) the `tailscaled` socket isn't reachable from the
+Docker VM, so Caddy can't fetch a `*.ts.net` cert. There the wizard issues the cert on
+the host (`tailscale cert` → `certs/server.crt`/`server.key`, mounted into Caddy) and the
+Caddyfile includes a `tls /certs/...` directive. `services.py` renews it on every
+`./start.sh` / `./restart.sh` if it's within 21 days of expiry — no cron needed, since
+those boxes restart frequently.
 
 ## Setup via Wizard
 
-When you run `./wizard.sh`, the setup wizard:
+When you run `./wizard.sh`, the wizard:
 1. Asks if you want to enable HTTPS
-2. Prompts for your Tailscale IP or domain
-3. Generates SSL certificates automatically
-4. Configures Caddy/nginx as needed
+2. Prompts for your Tailscale name, domain, or IP
+3. Picks `caddy` or `static` mode automatically (based on the address and whether the
+   `tailscaled` socket is available)
+4. Generates the Caddyfile (and, for Caddy-managed Tailscale, the socket-mount override)
 5. Updates CORS settings for HTTPS origins
 
-**No manual setup required** - the wizard handles everything.
+**No manual certificate generation required.**
 
 ## Browser Certificate Warnings
 
-Since we use self-signed certificates for local/Tailscale IPs, browsers will show security warnings:
+For `*.ts.net` and real domains the certificate is publicly trusted — no warning. For an
+IP or `localhost` address Caddy serves a self-signed internal-CA cert, so browsers warn:
 
 1. Click "Advanced"
-2. Click "Proceed to localhost (unsafe)" or similar
+2. Click "Proceed … (unsafe)"
 3. Microphone access will now work
-
-For production with real domains, Caddy automatically obtains valid Let's Encrypt certificates.
 
 ## Troubleshooting
 
 **HTTPS not working**:
-- Check Caddy/nginx containers are running: `docker compose ps`
-- Verify certificates exist: `ls backends/advanced/ssl/` or `ls extras/speaker-recognition/ssl/`
+- Check the Caddy containers are running: `docker compose ps` (look for `caddy`)
+- Confirm the served cert: `echo | openssl s_client -connect localhost:443 -servername <your-name> 2>/dev/null | openssl x509 -noout -issuer -enddate`
+- For Caddy-managed Tailscale, confirm the socket is mounted: `docker inspect <caddy-container> --format '{{range .Mounts}}{{.Destination}} {{end}}'` should list `/var/run/tailscale/tailscaled.sock`
 - Check you're using `https://` not `http://`
+
+**Tailscale cert won't issue** (`500 ... failed to create DNS record`):
+- Ensure **MagicDNS** and **HTTPS Certificates** are enabled at https://login.tailscale.com/admin/dns
+- These 500s are usually transient on Tailscale's side; retry after a short wait
 
 **Microphone not accessible**:
 - Ensure you're accessing via HTTPS (not HTTP)
-- Accept browser certificate warning
-- Verify you're not using `localhost` from remote device (use Tailscale IP instead)
+- Accept the browser certificate warning (IP/localhost only)
+- From a remote device use the Tailscale name/IP, not `localhost`

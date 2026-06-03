@@ -117,7 +117,7 @@ The Chronicle web dashboard provides a comprehensive interface for managing conv
 - **Queue Statistics**: Processing queue metrics, backlogs, and throughput
 - **Service Health**: Real-time health checks for all dependencies:
   - MongoDB connectivity and response times
-  - Qdrant vector database status and performance
+  - FalkorDB graph and memory search status
   - Ollama/OpenAI API availability and model status
   - ASR service connectivity and transcription status
 - **Recovery Metrics**: Automatic recovery attempts and success rates
@@ -238,7 +238,7 @@ ADMIN_PASSWORD=your-admin-password
 
 #### API Errors
 - Check backend logs for detailed error information
-- Verify all required services are running (MongoDB, Qdrant, etc.)
+- Verify all required services are running (MongoDB, FalkorDB, etc.)
 - Test API endpoints directly with curl for debugging
 
 ### Debug Steps

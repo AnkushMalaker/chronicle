@@ -213,7 +213,6 @@ uv run ruff check src/
 | Workers | `advanced-backend-test-workers-test-1` | `docker logs <name>` |
 | MongoDB | `advanced-backend-test-mongo-test-1` | `docker logs <name>` |
 | Redis | `advanced-backend-test-redis-test-1` | `docker logs <name>` |
-| Qdrant | `advanced-backend-test-qdrant-test-1` | `docker logs <name>` |
 
 ## Tips for Faster Debugging
 

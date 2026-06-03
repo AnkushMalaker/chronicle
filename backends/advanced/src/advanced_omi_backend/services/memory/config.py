@@ -3,8 +3,7 @@
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional
 
 import yaml
 
@@ -12,6 +11,8 @@ from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.utils.config_utils import resolve_value
 
 memory_logger = logging.getLogger("memory_service")
+
+__all__ = ["resolve_value"]
 
 
 class LLMProvider(Enum):
@@ -28,6 +29,8 @@ class MemoryProvider(Enum):
 
     CHRONICLE = "chronicle"  # Default — FalkorDB hybrid search + vault
     OPENMEMORY_MCP = "openmemory_mcp"  # OpenMemory MCP backend
+    GRAPHITI = "graphiti"  # Graphiti temporal graph backend
+    ROLLING_SUMMARY = "rolling_summary"  # Mongo-only rolling summary + user profile
 
 
 @dataclass
@@ -143,7 +146,9 @@ def build_memory_config_from_env() -> MemoryConfig:
                 timeout_seconds=int(mem_settings.get("timeout_seconds", 1200)),
             )
 
-        # For Chronicle provider, use registry-driven configuration
+        # Chronicle and Graphiti both use registry-driven OpenAI-compatible
+        # LLM + embedding configuration. Chronicle consumes it directly;
+        # Graphiti receives it through its own client adapters.
         llm_config = None
         llm_provider_enum = LLMProvider.OPENAI  # OpenAI-compatible API family
         if not reg:
@@ -178,7 +183,8 @@ def build_memory_config_from_env() -> MemoryConfig:
         timeout_seconds = int(mem_settings.get("timeout_seconds", 1200))
 
         memory_logger.info(
-            f"🔧 Memory config: Provider=Chronicle (FalkorDB), LLM={llm_def.model_provider}, Extraction={extraction_enabled}"
+            f"🔧 Memory config: Provider={memory_provider_enum.value}, "
+            f"LLM={llm_def.model_provider}, Extraction={extraction_enabled}"
         )
 
         return MemoryConfig(

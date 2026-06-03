@@ -20,7 +20,7 @@ Chronicle includes an **interactive setup wizard** for easy configuration. The w
 - Authentication setup (admin account, JWT secrets)
 - Transcription provider configuration (Deepgram or offline ASR)
 - LLM provider setup (OpenAI or Ollama)
-- Memory provider selection (Chronicle Native with Qdrant or OpenMemory MCP)
+- Memory provider selection (Chronicle Native with FalkorDB or OpenMemory MCP)
 - Network configuration and HTTPS setup
 - Optional services (speaker recognition, Parakeet ASR)
 
@@ -129,7 +129,7 @@ make logs SERVICE=<name>  # View specific service logs
 #### Test Environment
 
 Test services use isolated ports and database:
-- **Ports:** Backend (8001), MongoDB (27018), Redis (6380), Qdrant (6337/6338)
+- **Ports:** Backend (8001), MongoDB (27018), Redis (6380), FalkorDB (6380 internal)
 - **Database:** `test_db` (separate from production)
 - **Credentials:** `test-admin@example.com` / `test-admin-password-123`
 
@@ -176,7 +176,7 @@ docker compose up --build
 - **Memory System**: Pluggable providers (Chronicle native or OpenMemory MCP)
 - **Authentication**: Email-based login with MongoDB ObjectId user system
 - **Client Management**: Auto-generated client IDs as `{user_id_suffix}-{device_name}`, centralized ClientManager
-- **Data Storage**: MongoDB (`audio_chunks` collection for conversations), vector storage (Qdrant or OpenMemory)
+- **Data Storage**: MongoDB (`audio_chunks` collection for conversations), graph+vector storage (FalkorDB for Chronicle native, Qdrant for OpenMemory MCP)
 - **Web Interface**: React-based web dashboard with authentication and real-time monitoring
 
 ### Service Dependencies
@@ -184,7 +184,7 @@ docker compose up --build
 Required:
   - MongoDB: User data and conversations
   - Redis: Job queues (RQ workers) and session state
-  - Qdrant: Vector storage for memory search
+  - FalkorDB: Graph + vector storage for memory search and knowledge graph
   - FastAPI Backend: Core audio processing
   - LLM Service: Memory extraction and action items (OpenAI or Ollama)
 
@@ -207,7 +207,7 @@ Optional:
 5. **Dual Storage System**: Audio sessions always stored in `audio_chunks`, conversations created in `conversations` collection only with speech
 6. **Versioned Processing**: Transcript and memory versions tracked with active version pointers
 7. **Memory Processing**: Pluggable providers (Chronicle native with individual facts or OpenMemory MCP delegation)
-8. **Memory Storage**: Direct Qdrant (Chronicle) or OpenMemory server (MCP provider)
+8. **Memory Storage**: FalkorDB (Chronicle native: ConvDoc/ConvChunk/ConvEntity with hybrid vector+BM25 search) or OpenMemory server (MCP provider)
 9. **Audio Optimization**: Speech segment extraction removes silence automatically
 10. **Task Tracking**: BackgroundTaskManager ensures proper cleanup of all async operations
 
@@ -261,7 +261,8 @@ MEMORY_PROVIDER=chronicle  # or openmemory_mcp
 # Database
 MONGODB_URI=mongodb://mongo:27017
 # Database name: chronicle
-QDRANT_BASE_URL=qdrant
+FALKORDB_HOST=falkordb
+FALKORDB_PORT=6379
 
 # Network Configuration
 HOST_IP=localhost
@@ -284,8 +285,9 @@ LLM_PROVIDER=openai
 OPENAI_API_KEY=your-openai-key-here
 OPENAI_MODEL=gpt-4o-mini
 
-# Vector Storage
-QDRANT_BASE_URL=qdrant
+# Graph + vector storage
+FALKORDB_HOST=falkordb
+FALKORDB_PORT=6379
 ```
 
 #### OpenMemory MCP Provider
@@ -515,7 +517,7 @@ tailscale ip -4
 **Service Examples:**
 - GPU machine: LLM inference, ASR, speaker recognition
 - Backend machine: FastAPI, WebUI, databases
-- Database machine: MongoDB, Qdrant (optional separation)
+- Database machine: MongoDB, FalkorDB (optional separation)
 
 ## Development Notes
 

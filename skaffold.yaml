@@ -100,13 +100,6 @@ profiles:
               persistence.storageClass: "openebs-hostpath"
               service.nameOverride: "mongodb"
 
-          - name: qdrant
-            chartPath: backends/charts/qdrant
-            namespace: "{{.INFRASTRUCTURE_NAMESPACE}}"
-            setValueTemplates:
-              persistence.size: "10Gi"
-              persistence.storageClass: "openebs-hostpath"
-
           - name: redis
             remoteChart: oci://registry-1.docker.io/bitnamicharts/redis
             version: "22.0.7"
@@ -150,7 +143,6 @@ profiles:
               image.tag: "{{.IMAGE_TAG_advanced_backend}}"
               # Override specific Kubernetes-specific values (not in env file)
               env.MONGODB_URI: "mongodb://mongodb.{{.INFRASTRUCTURE_NAMESPACE}}.svc.cluster.local:27017/chronicle"
-              env.QDRANT_BASE_URL: "qdrant.{{.INFRASTRUCTURE_NAMESPACE}}.svc.cluster.local"
               env.REDIS_URL: "redis://redis-master.{{.INFRASTRUCTURE_NAMESPACE}}.svc.cluster.local:6379/0"
               persistence.storageClass: "openebs-hostpath"
               persistence.size: "10Gi"
@@ -195,7 +187,7 @@ profiles:
 
     deploy:
       docker:
-        images: [chronicle-backend-test, webui-test, mongo-test, qdrant-test, redis-test]
+        images: [chronicle-backend-test, webui-test, mongo-test, redis-test]
 
 
 
