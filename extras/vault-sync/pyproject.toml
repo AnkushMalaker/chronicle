@@ -1,0 +1,13 @@
+[project]
+name = "chronicle-vault-sync"
+version = "0.1.0"
+description = "macOS menu bar app that syncs your Chronicle Obsidian vault via Syncthing."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.27.0",
+    "python-dotenv>=1.0.0",
+    "rumps>=0.4.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+    "minidisc-python>=0.1.0",
+]
