@@ -1,0 +1,23 @@
+# Trained model artifacts (large binaries; produced by training/, vendored at deploy)
+models/*.onnx
+models/*.pt
+
+# Locally-built nanowakeword wheel (staged by build_nanowakeword.sh)
+vendor/
+
+# Captured data-collection clips (false-positive / primed-positive WAVs + meta).
+# User audio + regenerable training inputs — never commit.
+data/
+
+# Training scratch — datasets, generated audio/features, venvs, logs.
+# Everything here is downloadable (fetch_datasets.sh) or regenerable (configs).
+training/.venv-train/
+training/.venv/
+training/data/
+training/data_smoke/
+training/trained_models/
+training/NwwResourcesModel/
+training/SonicWeave-v2/
+training/*.npy
+training/*.zip
+training/*.log
