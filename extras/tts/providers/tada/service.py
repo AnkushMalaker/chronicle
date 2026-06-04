@@ -11,7 +11,6 @@ import os
 from typing import Optional
 
 import uvicorn
-
 from common.base_service import BaseTTSService, create_tts_app
 from providers.tada.synthesizer import TadaSynthesizer
 

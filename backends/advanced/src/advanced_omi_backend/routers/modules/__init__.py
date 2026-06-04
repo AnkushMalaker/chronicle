@@ -36,6 +36,7 @@ from .sse_routes import router as sse_router
 from .system_routes import router as system_router
 from .user_routes import router as user_router
 from .vault_sync_routes import router as vault_sync_router
+from .wakeword_routes import router as wakeword_router
 from .websocket_routes import router as websocket_router
 
 __all__ = [
@@ -56,5 +57,6 @@ __all__ = [
     "system_router",
     "user_router",
     "vault_sync_router",
+    "wakeword_router",
     "websocket_router",
 ]

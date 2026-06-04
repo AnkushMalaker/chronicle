@@ -44,7 +44,12 @@ PROVIDERS = {
         },
         "default_model": "fishaudio/s2-pro",
         "service": "fish-tts",
-        "capabilities": ["voice_cloning", "multilingual", "emotion_control", "streaming"],
+        "capabilities": [
+            "voice_cloning",
+            "multilingual",
+            "emotion_control",
+            "streaming",
+        ],
     },
     "kittentts": {
         "name": "KittenTTS",
@@ -125,7 +130,9 @@ def setup_model(provider_key: str) -> str:
     console.print("\n[bold]Available models:[/bold]")
     model_keys = list(models.keys())
     for i, (model_id, description) in enumerate(models.items(), 1):
-        default_marker = " [green](default)[/green]" if model_id == provider["default_model"] else ""
+        default_marker = (
+            " [green](default)[/green]" if model_id == provider["default_model"] else ""
+        )
         console.print(f"  {i}. {model_id} - {description}{default_marker}")
 
     console.print(f"  {len(model_keys) + 1}. Custom model (enter HuggingFace repo)")
@@ -169,7 +176,9 @@ def setup_cuda() -> str:
 def _backup_env() -> None:
     """Back up an existing .env before overwriting."""
     if ENV_FILE.exists():
-        backup = ENV_FILE.with_suffix(f".env.backup.{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        backup = ENV_FILE.with_suffix(
+            f".env.backup.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
         shutil.copy2(ENV_FILE, backup)
         console.print(f"[dim]Backed up existing .env to {backup.name}[/dim]")
 
@@ -273,7 +282,9 @@ def main():
             default=False,
         )
         ENV_FILE.touch()
-        set_key(str(ENV_FILE), "TTS_COMPILE", str(compile_tts).lower(), quote_mode="never")
+        set_key(
+            str(ENV_FILE), "TTS_COMPILE", str(compile_tts).lower(), quote_mode="never"
+        )
         set_key(str(ENV_FILE), "TTS_HALF", "true", quote_mode="never")
 
     port = Prompt.ask("TTS service port", default="8770")

@@ -127,7 +127,13 @@ class FishSpeechSynthesizer:
 
         # Pass through generation parameters
         if gen_kwargs:
-            for key in ("temperature", "top_p", "repetition_penalty", "seed", "max_new_tokens"):
+            for key in (
+                "temperature",
+                "top_p",
+                "repetition_penalty",
+                "seed",
+                "max_new_tokens",
+            ):
                 if key in gen_kwargs:
                     payload[key] = gen_kwargs[key]
 

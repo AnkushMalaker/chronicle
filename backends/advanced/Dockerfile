@@ -29,11 +29,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # notesmd-cli builder - vault note rename/move with backlink rewrite
 # ============================================
 # The memory agent uses `notesmd-cli move` to rename a person note and rewrite every
-# [[wikilink]] to it across the vault in one shot (verified non-destructive). Pinned to
-# the commit vendored in untracked/; vendor/ in the repo means the build is hermetic.
+# [[wikilink]] to it across the vault in one shot (verified non-destructive), and the
+# fork adds `create --template` (seed a note from a Templates/ note + {{date}}/{{title}}).
+# Pinned to the commit vendored in untracked/; vendor/ in the repo means the build is hermetic.
 FROM golang:1.25-bookworm AS notesmd-builder
-ARG NOTESMD_REF=cae9aa8
-RUN git clone https://github.com/Yakitrak/notesmd-cli /src \
+ARG NOTESMD_REPO=https://github.com/AnkushMalaker/notesmd-cli
+ARG NOTESMD_REF=2566ac2
+RUN git clone ${NOTESMD_REPO} /src \
     && cd /src \
     && git checkout ${NOTESMD_REF} \
     && CGO_ENABLED=0 go build -trimpath -mod=vendor -o /out/notesmd-cli .

@@ -13,7 +13,7 @@ import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .vault_scaffold import SCAFFOLD_NOTE_NAMES
+from .vault_scaffold import is_scaffold_note
 
 logger = logging.getLogger("memory_service.vault")
 
@@ -101,8 +101,8 @@ class ConvDocVaultManager:
         """List all note paths for a user, relative to the user root.
 
         Recursive so it covers the agent's ``Conversations/``/``People/``/``Topics/``
-        subfolders as well as the flat layout. Scaffold hub notes (``People.md`` etc.)
-        are excluded — they are views, not captured content.
+        subfolders as well as the flat layout. Scaffolding (root hub notes and everything
+        under ``Templates/``) is excluded — those are views/templates, not captured content.
         """
         user_dir = self.user_root(user_id)
         if not user_dir.exists():
@@ -110,7 +110,7 @@ class ConvDocVaultManager:
         return sorted(
             p.relative_to(user_dir).as_posix()
             for p in user_dir.rglob("*.md")
-            if p.name not in SCAFFOLD_NOTE_NAMES
+            if not is_scaffold_note(p, user_dir)
         )
 
     def delete_all_docs(self, user_id: str) -> int:

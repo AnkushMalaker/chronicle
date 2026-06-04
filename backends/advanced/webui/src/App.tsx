@@ -23,6 +23,7 @@ const Plugins = lazy(() => import('./pages/Plugins'))
 const Finetuning = lazy(() => import('./pages/Finetuning'))
 const Network = lazy(() => import('./pages/Network'))
 const DataCleaning = lazy(() => import('./pages/DataCleaning'))
+const WakeWordLab = lazy(() => import('./pages/WakeWordLab'))
 
 
 function PageSkeleton() {
@@ -157,6 +158,13 @@ function App() {
                   <PageErrorBoundary>
                     <Suspense fallback={<PageSkeleton />}>
                       <DataCleaning />
+                    </Suspense>
+                  </PageErrorBoundary>
+                } />
+                <Route path="wakeword-lab" element={
+                  <PageErrorBoundary>
+                    <Suspense fallback={<PageSkeleton />}>
+                      <WakeWordLab />
                     </Suspense>
                   </PageErrorBoundary>
                 } />

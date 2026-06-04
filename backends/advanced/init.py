@@ -289,7 +289,7 @@ class ChronicleSetup:
             smallest_desc = "Smallest.ai Pulse (cloud-based, fast, requires API key)"
 
             gemma4_desc = (
-                "Offline (Gemma 4 E4B-it - GPU required, prompt-based diarization)"
+                "Offline (Gemma 4 E2B-it - GPU required, prompt-based diarization)"
             )
 
             af_next_desc = (
@@ -460,7 +460,7 @@ class ChronicleSetup:
 
         elif choice == "6":
             self.console.print(
-                "[blue][INFO][/blue] Gemma 4 E4B-it selected (prompt-based diarization)"
+                "[blue][INFO][/blue] Gemma 4 E2B-it selected (prompt-based diarization, batch + streaming)"
             )
             existing_gemma4_url = (
                 read_env_value(".env", "GEMMA4_ASR_URL") or "host.docker.internal:8767"
@@ -469,12 +469,19 @@ class ChronicleSetup:
 
             self.config["GEMMA4_ASR_URL"] = gemma4_url
 
-            self.config_manager.update_config_defaults({"stt": "stt-gemma4"})
+            # The same gemma4-asr service serves both batch (/transcribe) and
+            # streaming (/stream), so enable both defaults at once.
+            self.config_manager.update_config_defaults(
+                {"stt": "stt-gemma4", "stt_stream": "stt-gemma4-stream"}
+            )
 
             self.console.print(
                 "[green][SUCCESS][/green] Gemma 4 configured in config.yml and .env"
             )
             self.console.print("[blue][INFO][/blue] Set defaults.stt: stt-gemma4")
+            self.console.print(
+                "[blue][INFO][/blue] Set defaults.stt_stream: stt-gemma4-stream"
+            )
             self.console.print(
                 "[yellow][WARNING][/yellow] Remember to start Gemma 4 ASR: cd ../../extras/asr-services && docker compose up gemma4-asr -d"
             )
@@ -534,6 +541,7 @@ class ChronicleSetup:
             "deepgram": "stt-deepgram-stream",
             "smallest": "stt-smallest-stream",
             "qwen3-asr": "stt-qwen3-asr",
+            "gemma4": "stt-gemma4-stream",
         }
 
         stream_stt = provider_to_stt_stream.get(streaming_provider)
@@ -609,6 +617,16 @@ class ChronicleSetup:
                 )
                 stream_host = qwen3_url.replace("http://", "").rstrip("/")
                 self.config["QWEN3_ASR_STREAM_URL"] = stream_host
+        elif streaming_provider == "gemma4":
+            # Streaming shares the gemma4-asr service (the /stream WS endpoint).
+            existing_url = read_env_value(".env", "GEMMA4_ASR_URL")
+            if not existing_url:
+                gemma4_url = self.prompt_value(
+                    "Gemma 4 ASR URL", "host.docker.internal:8767"
+                )
+                self.config["GEMMA4_ASR_URL"] = gemma4_url.replace(
+                    "http://", ""
+                ).rstrip("/")
 
     def setup_live_segmentation(self):
         """Configure the live transcription path (defaults.live_segmentation).
@@ -1699,6 +1717,11 @@ def main():
     parser.add_argument(
         "--langfuse-host",
         help="LangFuse host URL (default: http://langfuse-web:3000 for local)",
+    )
+    parser.add_argument(
+        "--langfuse-public-url",
+        help="Browser-accessible LangFuse URL for dashboard deep-links "
+        "(e.g. http://my-host:3002). Stored in config.yml as observability.langfuse.public_url",
     )
     parser.add_argument(
         "--streaming-provider",

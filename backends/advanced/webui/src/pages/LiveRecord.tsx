@@ -4,6 +4,7 @@ import SimplifiedControls from '../components/audio/SimplifiedControls'
 import StatusDisplay from '../components/audio/StatusDisplay'
 import AudioVisualizer from '../components/audio/AudioVisualizer'
 import SimpleDebugPanel from '../components/audio/SimpleDebugPanel'
+import WakeFeedback from '../components/audio/WakeFeedback'
 
 export default function LiveRecord() {
   const recording = useRecording()
@@ -160,6 +161,9 @@ export default function LiveRecord() {
         isRecording={recording.isRecording}
         analyser={recording.analyser}
       />
+
+      {/* Wake-word feedback - pulses on arm/end-of-turn + shows recognized command */}
+      <WakeFeedback />
 
       {/* Instructions */}
       <div className="mt-8 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4">

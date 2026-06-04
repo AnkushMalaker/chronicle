@@ -1,12 +1,17 @@
+import { useEffect, useState } from 'react'
 import { Zap } from 'lucide-react'
+import { wakewordApi } from '../../services/api'
+
+type ConditionType = 'always' | 'wake_word' | 'keyword_anywhere' | 'acoustic_wake_word'
 
 interface OrchestrationConfig {
   enabled: boolean
   events: string[]
   condition: {
-    type: 'always' | 'wake_word' | 'keyword_anywhere'
+    type: ConditionType
     wake_words?: string[]
     keywords?: string[]
+    threshold?: number
   }
 }
 
@@ -22,15 +27,40 @@ const AVAILABLE_EVENTS: { value: string; label: string; note?: string }[] = [
   { value: 'transcript.streaming', label: 'Transcript Streaming' },
   { value: 'memory.processed', label: 'Memory Processed' },
   { value: 'transcript.batch', label: 'Transcript Batch', note: 'file upload' },
+  { value: 'wake_word.detected', label: 'Acoustic Wake Word', note: 'wakeword-service' },
   { value: 'button.single_press', label: 'Button Single Press', note: 'from OMI' },
   { value: 'button.double_press', label: 'Button Double Press', note: 'from OMI' },
 ]
+
+const DEFAULT_ACOUSTIC_THRESHOLD = 0.9
 
 export default function OrchestrationSection({
   config,
   onChange,
   disabled = false
 }: OrchestrationSectionProps) {
+  // Wake-word models the service actually has on disk (for the acoustic picker).
+  const [models, setModels] = useState<string[]>([])
+  const [modelsError, setModelsError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    wakewordApi
+      .getModels()
+      .then((res) => {
+        if (!cancelled) {
+          setModels(res.data.available || [])
+          setModelsError(null)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setModelsError('Wake-word service unreachable — start it to pick a wake word.')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const handleEnabledChange = (enabled: boolean) => {
     onChange({ ...config, enabled })
   }
@@ -42,38 +72,68 @@ export default function OrchestrationSection({
     onChange({ ...config, events })
   }
 
-  const handleConditionTypeChange = (type: 'always' | 'wake_word' | 'keyword_anywhere') => {
+  const handleConditionTypeChange = (type: ConditionType) => {
     onChange({
       ...config,
       condition: {
         type,
-        wake_words: type === 'wake_word' ? config.condition.wake_words || [] : undefined,
-        keywords: type === 'keyword_anywhere' ? config.condition.keywords || [] : undefined
+        wake_words:
+          type === 'wake_word' || type === 'acoustic_wake_word'
+            ? config.condition.wake_words || []
+            : undefined,
+        keywords: type === 'keyword_anywhere' ? config.condition.keywords || [] : undefined,
+        threshold:
+          type === 'acoustic_wake_word'
+            ? config.condition.threshold ?? DEFAULT_ACOUSTIC_THRESHOLD
+            : undefined,
       }
     })
   }
 
   const handleWakeWordsChange = (value: string) => {
     const wake_words = value.split(',').map((w) => w.trim()).filter(Boolean)
-    onChange({
-      ...config,
-      condition: {
-        ...config.condition,
-        wake_words
-      }
-    })
+    onChange({ ...config, condition: { ...config.condition, wake_words } })
   }
 
   const handleKeywordsChange = (value: string) => {
     const keywords = value.split(',').map((w) => w.trim()).filter(Boolean)
+    onChange({ ...config, condition: { ...config.condition, keywords } })
+  }
+
+  const handleThresholdChange = (value: string) => {
+    const threshold = parseFloat(value)
     onChange({
       ...config,
-      condition: {
-        ...config.condition,
-        keywords
-      }
+      condition: { ...config.condition, threshold: isNaN(threshold) ? undefined : threshold }
     })
   }
+
+  const handleAcousticWakeToggle = (model: string) => {
+    const current = config.condition.wake_words || []
+    const wake_words = current.includes(model)
+      ? current.filter((w) => w !== model)
+      : [...current, model]
+    onChange({ ...config, condition: { ...config.condition, wake_words } })
+  }
+
+  const conditionOptions: { value: ConditionType; label: string; desc: string }[] = [
+    { value: 'always', label: 'Always', desc: 'Execute on every matching event, no filtering' },
+    {
+      value: 'wake_word',
+      label: 'Wake Word (start of sentence)',
+      desc: 'Triggers when the transcript starts with the wake word'
+    },
+    {
+      value: 'keyword_anywhere',
+      label: 'Keyword Anywhere',
+      desc: 'Triggers when keyword appears anywhere in the transcript'
+    },
+    {
+      value: 'acoustic_wake_word',
+      label: 'Acoustic Wake Word',
+      desc: 'Triggers only on the acoustic wake word from the wakeword-service (not text)'
+    },
+  ]
 
   return (
     <div className="space-y-4">
@@ -170,95 +230,36 @@ export default function OrchestrationSection({
           When should this plugin execute?
         </p>
         <div className="space-y-2">
-          <label
-            className={`
-              flex items-center space-x-3 p-3 border rounded-lg cursor-pointer transition-colors
-              ${
-                config.condition.type === 'always'
-                  ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
-                  : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'
-              }
-              ${disabled ? 'opacity-50 cursor-not-allowed' : ''}
-            `}
-          >
-            <input
-              type="radio"
-              name="condition"
-              value="always"
-              checked={config.condition.type === 'always'}
-              onChange={() => !disabled && handleConditionTypeChange('always')}
-              disabled={disabled}
-              className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
-            />
-            <div>
-              <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                Always
-              </span>
-              <p className="text-xs text-gray-500 dark:text-gray-400">
-                Execute on every matching event, no filtering
-              </p>
-            </div>
-          </label>
-
-          <label
-            className={`
-              flex items-center space-x-3 p-3 border rounded-lg cursor-pointer transition-colors
-              ${
-                config.condition.type === 'wake_word'
-                  ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
-                  : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'
-              }
-              ${disabled ? 'opacity-50 cursor-not-allowed' : ''}
-            `}
-          >
-            <input
-              type="radio"
-              name="condition"
-              value="wake_word"
-              checked={config.condition.type === 'wake_word'}
-              onChange={() => !disabled && handleConditionTypeChange('wake_word')}
-              disabled={disabled}
-              className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
-            />
-            <div className="flex-1">
-              <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                Wake Word (start of sentence)
-              </span>
-              <p className="text-xs text-gray-500 dark:text-gray-400">
-                Triggers when the transcript starts with the wake word
-              </p>
-            </div>
-          </label>
-
-          <label
-            className={`
-              flex items-center space-x-3 p-3 border rounded-lg cursor-pointer transition-colors
-              ${
-                config.condition.type === 'keyword_anywhere'
-                  ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
-                  : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'
-              }
-              ${disabled ? 'opacity-50 cursor-not-allowed' : ''}
-            `}
-          >
-            <input
-              type="radio"
-              name="condition"
-              value="keyword_anywhere"
-              checked={config.condition.type === 'keyword_anywhere'}
-              onChange={() => !disabled && handleConditionTypeChange('keyword_anywhere')}
-              disabled={disabled}
-              className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
-            />
-            <div className="flex-1">
-              <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                Keyword Anywhere
-              </span>
-              <p className="text-xs text-gray-500 dark:text-gray-400">
-                Triggers when keyword appears anywhere in the transcript
-              </p>
-            </div>
-          </label>
+          {conditionOptions.map((opt) => (
+            <label
+              key={opt.value}
+              className={`
+                flex items-center space-x-3 p-3 border rounded-lg cursor-pointer transition-colors
+                ${
+                  config.condition.type === opt.value
+                    ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
+                    : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'
+                }
+                ${disabled ? 'opacity-50 cursor-not-allowed' : ''}
+              `}
+            >
+              <input
+                type="radio"
+                name="condition"
+                value={opt.value}
+                checked={config.condition.type === opt.value}
+                onChange={() => !disabled && handleConditionTypeChange(opt.value)}
+                disabled={disabled}
+                className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
+              />
+              <div className="flex-1">
+                <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                  {opt.label}
+                </span>
+                <p className="text-xs text-gray-500 dark:text-gray-400">{opt.desc}</p>
+              </div>
+            </label>
+          ))}
         </div>
       </div>
 
@@ -309,6 +310,70 @@ export default function OrchestrationSection({
           <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
             Comma-separated list of keywords. Triggers when any keyword appears anywhere in the transcript (case-insensitive).
           </p>
+        </div>
+      )}
+
+      {/* Acoustic Wake Word config (conditional) */}
+      {config.condition.type === 'acoustic_wake_word' && (
+        <div className="pl-7 space-y-4">
+          {/* Wake-word model picker — limited to models the service has */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              Wake Word
+            </label>
+            {modelsError ? (
+              <p className="text-xs text-amber-600 dark:text-amber-400">{modelsError}</p>
+            ) : models.length === 0 ? (
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                No wake-word models found in the service.
+              </p>
+            ) : (
+              <div className="space-y-1.5">
+                {models.map((model) => (
+                  <label
+                    key={model}
+                    className={`flex items-center space-x-2 text-sm ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={config.condition.wake_words?.includes(model) || false}
+                      onChange={() => !disabled && handleAcousticWakeToggle(model)}
+                      disabled={disabled}
+                      className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                    />
+                    <span className="text-gray-900 dark:text-gray-100">{model}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              Only wake words the wakeword-service has trained models for can be selected.
+            </p>
+          </div>
+
+          {/* Detection threshold */}
+          <div>
+            <label
+              htmlFor="acoustic-threshold"
+              className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
+            >
+              Detection threshold
+            </label>
+            <input
+              type="number"
+              id="acoustic-threshold"
+              min={0}
+              max={1}
+              step={0.01}
+              value={config.condition.threshold ?? DEFAULT_ACOUSTIC_THRESHOLD}
+              onChange={(e) => !disabled && handleThresholdChange(e.target.value)}
+              disabled={disabled}
+              className="w-32 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+            />
+            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              Minimum acoustic confidence (0–1) required to fire. Higher = fewer false triggers.
+            </p>
+          </div>
         </div>
       )}
     </div>

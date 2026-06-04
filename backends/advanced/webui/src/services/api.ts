@@ -104,6 +104,8 @@ export const authApi = {
     return jwtResponse
   },
   getMe: () => api.get('/users/me'),
+  updateMe: (data: { display_name?: string; assistant_name?: string }) =>
+    api.patch('/users/me', data),
 }
 
 export const conversationsApi = {
@@ -289,6 +291,7 @@ export const systemApi = {
     per_segment_speaker_id?: boolean;
     streaming_fallback_timeout_seconds?: number;
     always_batch_retranscribe?: boolean;
+    live_segmentation?: 'streaming_stt' | 'windowed_batch' | 'off';
   }) => api.post('/api/misc-settings', settings),
 
   // Plugin Configuration Management (YAML-based)
@@ -308,7 +311,7 @@ export const systemApi = {
     orchestration?: {
       enabled: boolean
       events: string[]
-      condition: { type: string; wake_words?: string[]; keywords?: string[] }
+      condition: { type: string; wake_words?: string[]; keywords?: string[]; threshold?: number }
     }
     settings?: Record<string, any>
     env_vars?: Record<string, string>
@@ -317,7 +320,7 @@ export const systemApi = {
     orchestration?: {
       enabled: boolean
       events: string[]
-      condition: { type: string; wake_words?: string[]; keywords?: string[] }
+      condition: { type: string; wake_words?: string[]; keywords?: string[]; threshold?: number }
     }
     settings?: Record<string, any>
     env_vars?: Record<string, string>
@@ -634,4 +637,53 @@ export const knowledgeGraphApi = {
 
   // Health check
   getHealth: () => api.get('/api/knowledge-graph/health'),
+}
+
+// Wake-word data-collection (the "Hermes" training flywheel). Proxied through
+// the backend to the standalone wakeword-service.
+export interface WakeStream {
+  client_id: string
+  priming: boolean
+  armed: boolean
+}
+
+export interface WakeSample {
+  id: string
+  bucket: string
+  client_id: string
+  session_id: string
+  score: number
+  reason: string
+  kind: string
+  source: string
+  sample_rate: number
+  created_at_ms: number
+  duration_secs: number
+  label?: string
+  false_negative?: boolean
+}
+
+export const wakewordApi = {
+  // Wake-word models the service has on disk (for the acoustic-condition picker).
+  getModels: () =>
+    api.get<{ available: string[]; active: string }>('/api/wakeword/models'),
+  getStreams: () => api.get<{ streams: WakeStream[] }>('/api/wakeword/streams'),
+  // No client_id -> backend primes the caller's active recorder stream.
+  prime: (client_id?: string) =>
+    api.post('/api/wakeword/prime', client_id ? { client_id } : {}),
+  getSamples: (bucket: 'pending' | 'positive' | 'negative') =>
+    api.get<{ bucket: string; samples: WakeSample[] }>('/api/wakeword/samples', {
+      params: { bucket },
+    }),
+  getStats: () =>
+    api.get<{ pending: number; positive: number; negative: number; false_negatives: number }>(
+      '/api/wakeword/samples/stats'
+    ),
+  getAudioBlob: (id: string) =>
+    api.get(`/api/wakeword/samples/${encodeURIComponent(id)}/audio`, {
+      responseType: 'blob',
+    }),
+  label: (id: string, label: 'wake' | 'not_wake') =>
+    api.post(`/api/wakeword/samples/${encodeURIComponent(id)}/label`, { label }),
+  remove: (id: string) => api.delete(`/api/wakeword/samples/${encodeURIComponent(id)}`),
 }

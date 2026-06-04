@@ -39,6 +39,10 @@ services:
       - VAULT_SYNC_SYNCTHING_URL=http://vault-syncthing:8384
       - VAULT_SYNC_API_KEY=${VAULT_SYNC_API_KEY:-}
       - VAULT_SYNC_ADDRESS=${VAULT_SYNC_ADDRESS:-}
+      # Wake-word data-collection proxy -> standalone wakeword-service (chronicle-network)
+      - WAKEWORD_SERVICE_URL=${WAKEWORD_SERVICE_URL:-http://chronicle-wakeword-service:8770}
+      # TTS service (kitten/etc) for spoken replies on the device
+      - CHRONICLE_TTS_URL=${CHRONICLE_TTS_URL:-http://host.docker.internal:8770}
     depends_on:
       falkordb:
         condition: service_healthy
@@ -97,6 +101,8 @@ services:
       - MIN_RQ_WORKERS=${MIN_RQ_WORKERS:-6}
       - WORKER_STARTUP_GRACE_PERIOD=${WORKER_STARTUP_GRACE_PERIOD:-30}
       - WORKER_SHUTDOWN_TIMEOUT=${WORKER_SHUTDOWN_TIMEOUT:-30}
+      # TTS service (kitten/etc) for spoken replies on the device — dispatcher runs here
+      - CHRONICLE_TTS_URL=${CHRONICLE_TTS_URL:-http://host.docker.internal:8770}
     extra_hosts:
       - "host.docker.internal:host-gateway"  # Access host services
     depends_on:

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
-import { Settings as SettingsIcon, CheckCircle, AlertCircle, RefreshCw, Volume2, Sliders, Brain, Mic, Users, Cpu, Play, Loader2, X, Check } from 'lucide-react'
-import { systemApi, speakerApi } from '../services/api'
+import { Settings as SettingsIcon, CheckCircle, AlertCircle, RefreshCw, Volume2, Sliders, Brain, Mic, Users, Cpu, Play, Loader2, X, Check, UserCircle } from 'lucide-react'
+import { systemApi, speakerApi, authApi } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
 import { useDiarizationSettings, useLLMOperations, useMemoryProvider, useMiscSettings } from '../hooks/useSystem'
 
@@ -46,9 +46,16 @@ export default function Settings() {
     per_segment_speaker_id: false,
     streaming_fallback_timeout_seconds: 120,
     always_batch_retranscribe: false,
+    live_segmentation: 'streaming_stt' as 'streaming_stt' | 'windowed_batch' | 'off',
   })
   const [miscLoading, setMiscLoading] = useState(false)
   const [miscMessage, setMiscMessage] = useState('')
+
+  // Identity settings (how the user/assistant are labeled when extracting chat memories)
+  const [displayName, setDisplayName] = useState('')
+  const [assistantName, setAssistantName] = useState('')
+  const [identityLoading, setIdentityLoading] = useState(false)
+  const [identityMessage, setIdentityMessage] = useState('')
 
   // Sync query data into local editable state
   useEffect(() => {
@@ -66,6 +73,35 @@ export default function Settings() {
   useEffect(() => {
     if (miscSettingsData) setMiscSettings(miscSettingsData)
   }, [miscSettingsData])
+
+  // Load current identity from the user's profile
+  useEffect(() => {
+    authApi.getMe()
+      .then((res) => {
+        setDisplayName(res.data.display_name || '')
+        setAssistantName(res.data.assistant_name || '')
+      })
+      .catch(() => {
+        // Non-fatal: leave fields blank if profile can't be loaded
+      })
+  }, [])
+
+  const saveIdentity = async () => {
+    try {
+      setIdentityLoading(true)
+      setIdentityMessage('')
+      await authApi.updateMe({
+        display_name: displayName.trim(),
+        assistant_name: assistantName.trim(),
+      })
+      setIdentityMessage('Identity saved successfully')
+      setTimeout(() => setIdentityMessage(''), 3000)
+    } catch (err: any) {
+      setIdentityMessage('Error: ' + (err.response?.data?.detail || err.message))
+    } finally {
+      setIdentityLoading(false)
+    }
+  }
 
   const saveMiscSettings = async () => {
     try {
@@ -150,6 +186,60 @@ export default function Settings() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Identity */}
+        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center">
+            <UserCircle className="h-5 w-5 mr-2 text-blue-600" />
+            Identity
+          </h3>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
+            Names used to label who is speaking when extracting memories from chat.
+            Leave blank to fall back to the generic "User" and "Assistant".
+          </p>
+          <div className="space-y-3">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                Your name
+              </label>
+              <input
+                type="text"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                placeholder="e.g. Ankush"
+                className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                Assistant name
+              </label>
+              <input
+                type="text"
+                value={assistantName}
+                onChange={(e) => setAssistantName(e.target.value)}
+                placeholder="e.g. Chronicle"
+                className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+            </div>
+            <button
+              onClick={saveIdentity}
+              disabled={identityLoading}
+              className="w-full px-3 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {identityLoading ? 'Saving...' : 'Save Identity'}
+            </button>
+            {identityMessage && (
+              <div className={`p-2 rounded-md text-xs ${
+                identityMessage.includes('Error')
+                  ? 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300'
+                  : 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300'
+              }`}>
+                {identityMessage}
+              </div>
+            )}
+          </div>
+        </div>
+
         {/* Memory Provider */}
         <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
           <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center">
@@ -498,6 +588,33 @@ export default function Settings() {
                   className="sr-only peer"
                 />
                 <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
+              </label>
+            </div>
+
+            {/* Pseudo-streaming via batch Toggle */}
+            <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-md">
+              <div className="flex-1">
+                <div className="font-medium text-gray-900 dark:text-gray-100">
+                  Pseudo-streaming via batch
+                </div>
+                <div className="text-sm text-gray-600 dark:text-gray-400">
+                  {miscSettings.live_segmentation === 'streaming_stt'
+                    ? 'A real streaming STT provider is configured (stt_stream), so live transcripts come from it directly. This batch-window preview does not apply.'
+                    : 'Show a live transcript preview during recording by batch-transcribing fixed audio windows -- for batch ASR (e.g. VibeVoice) that has no true streaming. When off, no live transcript is shown; the full transcript is produced by batch transcription when the conversation ends. Changing this restarts the workers.'}
+                </div>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer ml-4">
+                <input
+                  type="checkbox"
+                  disabled={miscSettings.live_segmentation === 'streaming_stt'}
+                  checked={miscSettings.live_segmentation === 'windowed_batch'}
+                  onChange={(e) => setMiscSettings(prev => ({
+                    ...prev,
+                    live_segmentation: e.target.checked ? 'windowed_batch' : 'off'
+                  }))}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600 peer-disabled:opacity-40 peer-disabled:cursor-not-allowed"></div>
               </label>
             </div>
 

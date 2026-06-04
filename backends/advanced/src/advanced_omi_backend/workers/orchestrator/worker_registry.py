@@ -82,6 +82,44 @@ def has_windowed_batch_configured() -> bool:
     return False
 
 
+def has_wakeword_dispatch_enabled() -> bool:
+    """
+    Check if the wake-word dispatch worker should run.
+
+    The dispatcher bridges the standalone wakeword-service's ``wakeword:detections``
+    Redis stream to the plugin router (``wake_word.detected`` event). It must run
+    independently of the live-transcription mode — otherwise switching to
+    ``windowed_batch`` (no streaming-stt worker) silently kills the acoustic
+    wake-word → plugin path.
+
+    Returns:
+        True if any enabled plugin subscribes to the ``wake_word.detected`` event.
+    """
+    try:
+        import yaml
+
+        from advanced_omi_backend.config_loader import get_plugins_yml_path
+
+        plugins_yml = get_plugins_yml_path()
+        if not plugins_yml.exists():
+            return False
+        with open(plugins_yml, "r") as f:
+            plugins_config = yaml.safe_load(f) or {}
+        for _plugin_id, orchestration in (plugins_config.get("plugins") or {}).items():
+            if not isinstance(orchestration, dict):
+                continue
+            if not orchestration.get("enabled", False):
+                continue
+            if "wake_word.detected" in (orchestration.get("events") or []):
+                return True
+    except Exception as e:
+        logger.warning(
+            f"Failed to read wake-word dispatch config from plugins.yml: {e}"
+        )
+
+    return False
+
+
 def build_worker_definitions() -> List[WorkerDefinition]:
     """
     Build the complete list of worker definitions.
@@ -159,6 +197,24 @@ def build_worker_definitions() -> List[WorkerDefinition]:
             ],
             worker_type=WorkerType.STREAM_CONSUMER,
             enabled_check=has_windowed_batch_configured,
+            restart_on_failure=True,
+        )
+    )
+
+    # Wake-word Dispatch Worker - Conditional (any enabled plugin subscribes to
+    # wake_word.detected). Runs independently of the live-transcription mode so the
+    # acoustic wake-word → plugin path keeps working under windowed_batch (where the
+    # streaming-stt worker, which used to host the dispatcher, does not run).
+    workers.append(
+        WorkerDefinition(
+            name="wakeword-dispatch",
+            command=[
+                "python",
+                "-m",
+                "advanced_omi_backend.workers.wakeword_dispatch_worker",
+            ],
+            worker_type=WorkerType.STREAM_CONSUMER,
+            enabled_check=has_wakeword_dispatch_enabled,
             restart_on_failure=True,
         )
     )

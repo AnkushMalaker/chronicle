@@ -363,11 +363,32 @@ class PluginRouter:
         if condition_type == "always":
             return self._PASS
 
-        # Button and starred events bypass transcript-based conditions (no transcript to match)
+        # Acoustic wake word: the standalone wakeword-service is the ONLY source of
+        # WAKE_WORD_DETECTED. Fire ONLY on that event, gated by the configured score
+        # threshold, and never on transcript/button events — so a plugin can be
+        # gated EXCLUSIVELY on the acoustic wake word. The command text arrives
+        # pre-resolved in data["command"] (set by the wake-word dispatcher).
+        if condition_type == "acoustic_wake_word":
+            if event == PluginEvent.WAKE_WORD_DETECTED:
+                threshold = float(plugin.condition.get("threshold", 0.0) or 0.0)
+                raw_score = data.get("score")
+                score = float(raw_score) if raw_score is not None else 1.0
+                if score >= threshold:
+                    return self._PASS
+                logger.debug(
+                    f"Acoustic wake below threshold ({score:.3f} < {threshold:.3f}); skipping"
+                )
+            return self._SKIP
+
+        # Button, starred, and acoustic wake-word events bypass transcript-based
+        # conditions (wake_word/keyword_anywhere) — they have no transcript to
+        # match against. The acoustic detector already arms on the wake word, and
+        # the command text arrives pre-resolved in data["command"].
         if event and event in (
             PluginEvent.BUTTON_SINGLE_PRESS,
             PluginEvent.BUTTON_DOUBLE_PRESS,
             PluginEvent.CONVERSATION_STARRED,
+            PluginEvent.WAKE_WORD_DETECTED,
         ):
             return self._PASS
 
@@ -449,6 +470,8 @@ class PluginRouter:
             return await plugin.on_memory_processed(context)
         elif event == PluginEvent.CONVERSATION_STARRED:
             return await plugin.on_conversation_starred(context)
+        elif event == PluginEvent.WAKE_WORD_DETECTED:
+            return await plugin.on_wake_word_detected(context)
         elif event in (
             PluginEvent.BUTTON_SINGLE_PRESS,
             PluginEvent.BUTTON_DOUBLE_PRESS,

@@ -18,7 +18,9 @@ import time
 import requests
 from huggingface_hub import snapshot_download
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
+)
 logger = logging.getLogger("fish-tts-startup")
 
 # Fish-speech internal API
@@ -61,11 +63,19 @@ def start_fish_server(checkpoint_path: str, codec_path: str) -> subprocess.Popen
     use_compile = os.getenv("TTS_COMPILE", "false").lower() == "true"
 
     cmd = [
-        "uv", "run", "python", "-m", "tools.api_server",
-        "--listen", f"{_FISH_LISTEN_HOST}:{_FISH_API_PORT}",
-        "--llama-checkpoint-path", checkpoint_path,
-        "--decoder-checkpoint-path", codec_path,
-        "--decoder-config-name", decoder_config,
+        "uv",
+        "run",
+        "python",
+        "-m",
+        "tools.api_server",
+        "--listen",
+        f"{_FISH_LISTEN_HOST}:{_FISH_API_PORT}",
+        "--llama-checkpoint-path",
+        checkpoint_path,
+        "--decoder-checkpoint-path",
+        codec_path,
+        "--decoder-config-name",
+        decoder_config,
     ]
     if use_half:
         cmd.append("--half")
@@ -112,7 +122,6 @@ def start_wrapper() -> None:
     sys.path.insert(0, chronicle_dir)
 
     import uvicorn
-
     from common.base_service import create_tts_app
     from providers.fish_speech.service import FishSpeechService
 

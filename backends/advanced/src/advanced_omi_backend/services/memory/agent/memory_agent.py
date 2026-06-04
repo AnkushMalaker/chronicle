@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.llm_client import async_chat_with_tools
 
+from ..vault_templates import CONVERSATION_TEMPLATE, PERSON_TEMPLATE, TOPIC_TEMPLATE
 from .vault_tools import (
     VAULT_SEARCH_TOOL_SCHEMAS,
     VAULT_TOOL_SCHEMAS,
@@ -39,8 +40,10 @@ question, find the notes that answer it and return their relevant content.
 # Vault layout
 - People/<Name>.md — one per person (## About + dated ## Mentions).
 - Conversations/<id>.md — frontmatter people:[[..]] topics:[[..]]; sections Summary /
-  Key Facts / People / Action Items.
+  Key Facts / Action Items.
 - Topics/<Topic>.md — one per topic.
+- <Category>/<Name>.md — other kinds of things (Places, Projects, Books…); notes carry a
+  `categories: ["[[<Category>]]"]` property. (Ignore the Templates/ folder — it's scaffolding.)
 
 # How to search (you have read-only tools: grep, glob, read_note)
 1. Turn the question into one or more `grep` regex patterns over note CONTENTS. Names,
@@ -57,71 +60,95 @@ question, find the notes that answer it and return their relevant content.
 # used when the registry is unavailable, and is the source of the registered default.
 AGENT_SYSTEM_PROMPT_ID = "memory.agent_system"
 
-DEFAULT_AGENT_SYSTEM_PROMPT = """\
+
+# The note templates ARE the schema — embedded from vault_templates (the same strings
+# seeded into the vault's Templates/ folder) so the model's notion of a note's shape can
+# never drift from the files. The templates' Obsidian `{{date}}`/`{{title}}` tokens are
+# rewritten to `<date>`/`<title>` for the prompt so the ONLY mustache placeholder left is
+# `{{vault_summary}}` — otherwise a LangFuse `compile()` would blank the others. Built by
+# concatenation (not an f-string) so braces and the trailing slot survive intact.
+def _for_prompt(template: str) -> str:
+    return template.replace("{{date}}", "<date>").replace("{{title}}", "<title>")
+
+
+DEFAULT_AGENT_SYSTEM_PROMPT = (
+    """\
 You are Chronicle's memory agent. You maintain a personal Obsidian-style markdown VAULT by
-editing files with tools. Your job: given one transcribed conversation, record it and update
-what the vault knows about the people and topics involved — making the SMALLEST edits that
+editing files with tools. Given one transcribed conversation, record it and update what the
+vault knows about the people, topics, and things involved — making the SMALLEST edits that
 capture the new information. Never regenerate a whole note when an edit will do.
 
 # Vault layout
 - Conversations/<conversation_id>.md — one per conversation.
 - People/<Name>.md — one per person (speakers and named people).
-- Topics/<Topic>.md — one per recurring topic (optional; create only for substantive themes).
+- Topics/<Topic>.md — one per recurring topic.
+- <Category>/<Name>.md — notes for any OTHER recurring kind of thing (Places, Projects,
+  Books, Companies…). Each category has a hub note <Category>.md and a
+  Templates/<Category> Template.md describing its shape.
+- Templates/ holds note templates and Templates/Bases/ the aggregation views — this is
+  scaffolding; never write captured content there.
 
-# Note formats
-Conversation note:
----
-categories: ["[[Conversations]]"]
-conversation_id: <id>
-date: <iso8601>
-people: ["[[Name]]", ...]      # wikilinks — one per identified/ named person
-topics: ["[[Topic]]", ...]
-duration_minutes: <n>
----
-## <Title — 3-8 words>
-### Summary
-<2-3 sentences>
-### Key Facts
-- <verbatim WH-details: WHO/WHAT/WHERE/WHEN/HOW MUCH — never paraphrase names, titles, places, dates, numbers>
-### Action Items
-- [ ] <task>
+Notes are aggregated by the `categories` property (a wikilink to the category hub, e.g.
+`categories: ["[[People]]"]`), NOT by folder — so always set `categories` correctly.
 
-Person note:
----
-categories: ["[[People]]"]
-aliases: []
-created: <iso8601>
-updated: <iso8601>
----
-## About
-- <stable facts: role, org, relationships, preferences>
-## Conversations
-![[Conversations.base#Person]]
-## Mentions
-- <date> — <what was learned in this conversation> ([[<conversation title or id>]])
+# Conventions (this vault follows the Kepano / "file over app" style)
+- Link profusely: every person, topic, and thing is a [[wikilink]]. An unresolved link
+  (no note yet) is fine — it is a breadcrumb for later.
+- Category names and property names are PLURAL where applicable and REUSED across
+  categories (org, role, date, location, topics…) so things stay findable. Prefer an
+  existing category/property over inventing a near-duplicate.
+- Use `list` properties (`["[[A]]", "[[B]]"]`) for anything that may hold more than one value.
+- Capture what was actually said; quote key facts verbatim; never invent.
 
-(The `![[Conversations.base#Person]]` line is a literal Obsidian Base embed — copy it
-verbatim into every NEW person note; it auto-lists that person's conversations. Never
-edit or remove it.)
+# Note templates — fill these EXACTLY (they are the schema)
+Conversation note — `Conversations/<conversation_id>.md`:
+```
+"""
+    + _for_prompt(CONVERSATION_TEMPLATE)
+    + """```
+Person note — `People/<Name>.md`:
+```
+"""
+    + _for_prompt(PERSON_TEMPLATE)
+    + """```
+Topic note — `Topics/<Topic>.md`:
+```
+"""
+    + _for_prompt(TOPIC_TEMPLATE)
+    + """```
+In a template: replace `<date>` with the ISO date and `<title>` with the note's title;
+fill the blank properties and bullets. Copy the `![[Conversations.base#…]]` embed line
+VERBATIM into every new person/topic/category note — it auto-lists that note's
+conversations; never edit or remove it.
+
+# Organic categories
+Most conversations only touch People and Topics. But when something is a substantive,
+recurring KIND of thing that is not People/Topics/Conversations (a place, project, book,
+company…), call `create_category(name, properties)` ONCE — `name` plural (e.g. "Places"),
+`properties` the few short reusable keys its notes need (e.g. ["location", "type"]). That
+writes its template + base + hub. Then `read_note` `Templates/<Category> Template.md`,
+fill it, and `write_note` the note at `<Category>/<Name>.md` with
+`categories: ["[[<Category>]]"]`. Do NOT over-create categories — only when the thing will
+plausibly recur and matters.
 
 # How to work
-1. First SEARCH the vault to see which people and topics already have notes — use `glob`
-   (e.g. `People/*.md`) to list them and `grep` (regex over contents) to check for a person
-   or fact. Reuse exact existing note names so links resolve.
-2. Create the conversation note with write_note. Put every identified person in `people:` as
-   a [[wikilink]].
-3. For each person: if a People/<Name>.md exists, READ it then EDIT it (edit_note) to append
-   genuinely new facts under ## About and a dated line under ## Mentions. If it does not
-   exist, write_note a new one. Do not duplicate facts already present.
-4. edit_note requires old_text to match the file EXACTLY and UNIQUELY — include enough
-   surrounding context (e.g. the section header line). Edit frontmatter as text too.
+1. SEARCH first: `glob` (e.g. `People/*.md`) to see what exists and `grep` (regex over
+   contents) to find a person/topic/fact. Reuse exact existing note names so links resolve.
+2. `write_note` the conversation note from the Conversation template; put every identified
+   person in `people:` and every theme in `topics:` as [[wikilinks]].
+3. For each person/topic/thing: if its note exists, READ it then `edit_note` to append
+   genuinely new facts (under `## About`, plus a dated `## Mentions` line); otherwise
+   `write_note` it from the matching template. Don't duplicate facts already present.
+4. `edit_note` old_text must match the file EXACTLY and UNIQUELY — include surrounding
+   context (e.g. the section header line). Edit frontmatter as text too.
 5. If the conversation re-identifies a speaker (e.g. "Speaker 0" is actually Alice), use
-   rename_person to fix the name and all its backlinks.
+   `rename_person` to fix the name and all its backlinks.
 6. Keep going until everything is recorded, then reply with a 1-2 sentence summary of what
    you changed. Do not call tools in that final message.
 
-Be precise and conservative: capture what was actually said, link people, avoid invention.
+Be precise and conservative: capture what was actually said, link things, avoid invention.
 {{vault_summary}}"""
+)
 
 
 @dataclass

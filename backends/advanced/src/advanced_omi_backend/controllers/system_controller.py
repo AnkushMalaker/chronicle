@@ -558,7 +558,13 @@ async def save_misc_settings_controller(settings: dict):
             "streaming_fallback_timeout_seconds",
             "max_conversation_duration_seconds",
         }
-        valid_keys = boolean_keys | integer_keys
+        # Live-transcription mode selector (top-level defaults.live_segmentation).
+        # "windowed_batch" = pseudo-streaming via batch preview; "off" disables the
+        # live preview; "streaming_stt" uses a real streaming ASR provider.
+        enum_keys = {
+            "live_segmentation": {"streaming_stt", "windowed_batch", "off"},
+        }
+        valid_keys = boolean_keys | integer_keys | set(enum_keys)
 
         # Filter to only valid keys
         filtered_settings = {}
@@ -572,6 +578,13 @@ async def save_misc_settings_controller(settings: dict):
                     raise HTTPException(
                         status_code=400,
                         detail=f"Invalid value for {key}: must be boolean",
+                    )
+            elif key in enum_keys:
+                if value not in enum_keys[key]:
+                    allowed = ", ".join(sorted(enum_keys[key]))
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid value for {key}: must be one of {allowed}",
                     )
             elif key == "streaming_fallback_timeout_seconds":
                 if not isinstance(value, int) or value < 60 or value > 7200:

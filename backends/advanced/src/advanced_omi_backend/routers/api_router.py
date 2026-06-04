@@ -27,6 +27,7 @@ from .modules import (
     system_router,
     user_router,
     vault_sync_router,
+    wakeword_router,
 )
 from .modules.health_routes import router as health_router
 
@@ -53,6 +54,7 @@ router.include_router(sse_router)
 router.include_router(system_router)
 router.include_router(queue_router)
 router.include_router(vault_sync_router)
+router.include_router(wakeword_router)
 router.include_router(
     health_router
 )  # Also include under /api for frontend compatibility
