@@ -113,6 +113,10 @@ async def main():
         await redis_client.aclose()
         sys.exit(1)
 
+    # The wake-word dispatcher runs as its own worker (wakeword_dispatch_worker),
+    # decoupled from the live-transcription mode so the acoustic wake-word path keeps
+    # working under windowed_batch too.
+
     # Setup signal handlers for graceful shutdown
     def signal_handler(signum, frame):
         logger.info(f"Received signal {signum}, shutting down...")
@@ -129,7 +133,8 @@ async def main():
         )
         logger.info("💾 Publishing final results to transcription:results:{session_id}")
 
-        # This blocks until consumer is stopped
+        # The streaming consumer is the only task here; the wake-word dispatcher
+        # runs as its own worker (wakeword_dispatch_worker).
         await consumer.start_consuming()
 
     except KeyboardInterrupt:

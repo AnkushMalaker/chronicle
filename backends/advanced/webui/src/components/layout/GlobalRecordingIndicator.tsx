@@ -1,11 +1,13 @@
 import { useNavigate, useLocation } from 'react-router-dom'
 import { Radio, Square, Zap, Archive } from 'lucide-react'
 import { useRecording } from '../../contexts/RecordingContext'
+import { useWakeFeedback } from '../../hooks/useWakeFeedback'
 
 export default function GlobalRecordingIndicator() {
   const navigate = useNavigate()
   const location = useLocation()
   const { isRecording, recordingDuration, mode, stopRecording, formatDuration } = useRecording()
+  const { phase } = useWakeFeedback()
 
   // Don't show if not recording
   if (!isRecording) return null
@@ -13,21 +15,52 @@ export default function GlobalRecordingIndicator() {
   // Don't show on the Live Record page (it has its own UI)
   if (location.pathname === '/live-record') return null
 
+  // While the wake word is active (armed -> end-of-turn) the whole indicator
+  // turns amber — the same color as the "wake word detected" message — then
+  // snaps back to red at end of turn. This is visible from any page.
+  const listening = phase === 'listening'
+
+  // Color tokens swap as one set so the pill, dot, text and buttons stay coherent.
+  const c = listening
+    ? {
+        wrap: 'bg-amber-50 dark:bg-amber-900/30 border-amber-300 dark:border-amber-700',
+        ping: 'bg-amber-400',
+        dot: 'bg-amber-500',
+        time: 'text-amber-700 dark:text-amber-300',
+        mode: 'text-amber-600 dark:text-amber-400',
+        navHover: 'hover:bg-amber-100 dark:hover:bg-amber-800/50 text-amber-600 dark:text-amber-400',
+        stop: 'bg-amber-600 hover:bg-amber-700',
+      }
+    : {
+        wrap: 'bg-red-50 dark:bg-red-900/30 border-red-200 dark:border-red-800',
+        ping: 'bg-red-400',
+        dot: 'bg-red-500',
+        time: 'text-red-700 dark:text-red-300',
+        mode: 'text-red-600 dark:text-red-400',
+        navHover: 'hover:bg-red-100 dark:hover:bg-red-800/50 text-red-600 dark:text-red-400',
+        stop: 'bg-red-600 hover:bg-red-700',
+      }
+
   return (
-    <div className="flex items-center gap-3 px-3 py-1.5 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg">
-      {/* Pulsing red dot */}
-      <div className="relative flex items-center">
-        <span className="absolute inline-flex h-3 w-3 rounded-full bg-red-400 opacity-75 animate-ping" />
-        <span className="relative inline-flex h-3 w-3 rounded-full bg-red-500" />
+    <div className={`flex items-center gap-3 px-3 py-1.5 border rounded-lg transition-colors duration-300 ${c.wrap}`}>
+      {/* Pulsing dot — amber while listening, red otherwise */}
+      <div className="relative flex items-center" title={listening ? 'Wake word detected — listening…' : 'Recording'}>
+        <span className={`absolute inline-flex h-3 w-3 rounded-full opacity-75 animate-ping ${c.ping}`} />
+        <span className={`relative inline-flex h-3 w-3 rounded-full ${c.dot}`} />
       </div>
 
       {/* Recording info */}
       <div className="flex items-center gap-2 text-sm">
-        <span className="font-medium text-red-700 dark:text-red-300">
+        <span className={`font-medium ${c.time}`}>
           {formatDuration(recordingDuration)}
         </span>
-        <span className="text-red-600 dark:text-red-400 flex items-center gap-1">
-          {mode === 'streaming' ? (
+        <span className={`flex items-center gap-1 ${c.mode}`}>
+          {listening ? (
+            <>
+              <Radio className="h-3 w-3" />
+              <span>Listening</span>
+            </>
+          ) : mode === 'streaming' ? (
             <>
               <Zap className="h-3 w-3" />
               <span>Streaming</span>
@@ -46,7 +79,7 @@ export default function GlobalRecordingIndicator() {
         {/* Navigate to Live Record */}
         <button
           onClick={() => navigate('/live-record')}
-          className="p-1.5 rounded hover:bg-red-100 dark:hover:bg-red-800/50 transition-colors text-red-600 dark:text-red-400"
+          className={`p-1.5 rounded transition-colors ${c.navHover}`}
           title="Go to Live Record"
         >
           <Radio className="h-4 w-4" />
@@ -55,7 +88,7 @@ export default function GlobalRecordingIndicator() {
         {/* Stop button */}
         <button
           onClick={stopRecording}
-          className="p-1.5 rounded bg-red-600 hover:bg-red-700 transition-colors text-white"
+          className={`p-1.5 rounded transition-colors text-white ${c.stop}`}
           title="Stop Recording"
         >
           <Square className="h-4 w-4" />

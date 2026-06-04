@@ -244,6 +244,15 @@ def get_misc_settings() -> dict:
         OmegaConf.to_container(speaker_cfg, resolve=True) if speaker_cfg else {}
     )
 
+    # Live-transcription mode lives in the top-level `defaults` block, not under
+    # `backend`. "windowed_batch" is the pseudo-streaming-via-batch preview;
+    # "off" disables the live preview entirely (final transcript still produced
+    # by batch transcription when the conversation ends).
+    cfg = load_config()
+    defaults_settings = (
+        OmegaConf.to_container(cfg.get("defaults", {}), resolve=True) if cfg else {}
+    ) or {}
+
     return {
         "always_persist_enabled": audio_settings.get("always_persist_enabled", False),
         "use_provider_segments": transcription_settings.get(
@@ -258,6 +267,9 @@ def get_misc_settings() -> dict:
         ),
         "always_batch_retranscribe": transcription_settings.get(
             "always_batch_retranscribe", False
+        ),
+        "live_segmentation": defaults_settings.get(
+            "live_segmentation", "streaming_stt"
         ),
     }
 
@@ -312,6 +324,15 @@ def save_misc_settings(settings: dict) -> bool:
             "always_batch_retranscribe": settings["always_batch_retranscribe"]
         }
         if not save_config_section("backend.transcription", batch_settings):
+            success = False
+
+    # Save live_segmentation if provided (top-level `defaults` block). Note: this
+    # selects which live worker the orchestrator runs, so it only takes effect
+    # after the workers container is restarted.
+    if "live_segmentation" in settings:
+        if not save_config_section(
+            "defaults", {"live_segmentation": settings["live_segmentation"]}
+        ):
             success = False
 
     return success

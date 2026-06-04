@@ -27,7 +27,7 @@ from ..base import MemoryEntry, MemoryServiceBase
 from ..config import MemoryConfig
 from ..graph_utils import Section, compute_hybrid_scores, parse_conversation_doc
 from ..vault_manager import ConvDocVaultManager
-from ..vault_scaffold import SCAFFOLD_NOTE_NAMES, seed_vault_scaffold
+from ..vault_scaffold import is_scaffold_note, seed_vault_scaffold
 from .llm_providers import OpenAIProvider
 
 memory_logger = logging.getLogger("memory_service")
@@ -1169,7 +1169,7 @@ class MemoryService(MemoryServiceBase):
         if not root.exists():
             return []
         paths = sorted(
-            (p for p in root.rglob("*.md") if p.name not in SCAFFOLD_NOTE_NAMES),
+            (p for p in root.rglob("*.md") if not is_scaffold_note(p, root)),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )

@@ -34,8 +34,8 @@ _EMOJI_PATTERN = re.compile(
     "\U00002B00-\U00002BFF"  # misc symbols and arrows (stars, etc.)
     "\U0000FE00-\U0000FE0F"  # variation selectors
     "\U0001F1E6-\U0001F1FF"  # regional indicators (flags)
-    "\U0000200D"             # zero-width joiner (compound emoji)
-    "\U000020E3"             # combining enclosing keycap
+    "\U0000200D"  # zero-width joiner (compound emoji)
+    "\U000020E3"  # combining enclosing keycap
     "]+",
     flags=re.UNICODE,
 )
@@ -48,9 +48,7 @@ def strip_emoji(text: str) -> str:
     """
     cleaned = _EMOJI_PATTERN.sub("", text)
     # Drop any remaining standalone symbol/pictographic codepoints not caught above.
-    cleaned = "".join(
-        ch for ch in cleaned if unicodedata.category(ch) != "So"
-    )
+    cleaned = "".join(ch for ch in cleaned if unicodedata.category(ch) != "So")
     # Collapse the gaps the removals leave (e.g. "great 👍 job" -> "great job").
     return re.sub(r"\s{2,}", " ", cleaned).strip()
 
@@ -73,9 +71,13 @@ class KittenSynthesizer:
         voice: Optional[str] = None,
         speed: Optional[float] = None,
     ):
-        self.model_id = model_id or os.getenv("TTS_MODEL", "KittenML/kitten-tts-mini-0.8")
+        self.model_id = model_id or os.getenv(
+            "TTS_MODEL", "KittenML/kitten-tts-mini-0.8"
+        )
         self.voice = voice or os.getenv("TTS_VOICE", "Jasper")
-        self.speed = float(speed if speed is not None else os.getenv("TTS_SPEED", "1.0"))
+        self.speed = float(
+            speed if speed is not None else os.getenv("TTS_SPEED", "1.0")
+        )
         self.model = None
         self._is_loaded = False
         self._lock = asyncio.Lock()
@@ -145,7 +147,9 @@ class KittenSynthesizer:
         if clean_text != text:
             logger.info("Stripped emoji from text before KittenTTS synthesis")
         if not clean_text:
-            raise ValueError("Text is empty after stripping emoji; nothing to synthesize")
+            raise ValueError(
+                "Text is empty after stripping emoji; nothing to synthesize"
+            )
         audio = self.model.generate(clean_text, voice=voice, speed=speed)
         return self._to_wav_bytes(audio)
 

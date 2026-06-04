@@ -4,7 +4,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft, Calendar, User, Trash2, RefreshCw, MoreVertical,
   RotateCcw, Zap, Play, Pause, Download,
-  Save, X, Pencil, Clock, Database, Layers, Star, BarChart3
+  Save, X, Pencil, Clock, Database, Layers, Star, BarChart3, Hash
 } from 'lucide-react'
 import { annotationsApi, speakerApi, systemApi, BACKEND_URL } from '../services/api'
 import {
@@ -1017,6 +1017,14 @@ export default function ConversationDetail() {
               Metadata
             </h3>
             <dl className="space-y-3 text-sm">
+              <div className="flex justify-between items-start gap-2">
+                <dt className="text-gray-600 dark:text-gray-400 flex items-center gap-1.5 shrink-0">
+                  <Hash className="w-3.5 h-3.5" /> ID
+                </dt>
+                <dd className="text-gray-900 dark:text-gray-100 text-right font-mono text-xs break-all">
+                  {conversation.conversation_id}
+                </dd>
+              </div>
               <div className="flex justify-between items-start">
                 <dt className="text-gray-600 dark:text-gray-400 flex items-center gap-1.5">
                   <Calendar className="w-3.5 h-3.5" /> Date

@@ -44,6 +44,10 @@ class PluginEvent(str, Enum):
         "conversation.starred",
         "Fires when a conversation is starred or unstarred",
     )
+    WAKE_WORD_DETECTED = (
+        "wake_word.detected",
+        "Acoustic wake word detected by the standalone wakeword-service",
+    )
 
     # Button events (from OMI device)
     BUTTON_SINGLE_PRESS = ("button.single_press", "OMI device button single press")

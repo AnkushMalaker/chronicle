@@ -905,8 +905,15 @@ class StreamingTranscriptionConsumer:
         the same stream. We only delete when both have 0 pending messages to avoid
         breaking the other consumer. If any group still has pending messages or not all
         expected groups are registered, the 60s TTL fallback handles cleanup.
+
+        The standalone wakeword-service adds a third group (wakeword_detection) when
+        deployed. It's treated as OPTIONAL: if that group is registered on the stream
+        we wait for its pending to drain too (so we don't delete out from under its
+        pending entries), but if the service isn't running the group never exists and
+        deletion proceeds on the two core groups as before.
         """
         _EXPECTED_GROUPS = {"streaming-transcription", "audio_persistence"}
+        _OPTIONAL_GROUPS = {"wakeword_detection"}
 
         if not await self.redis_client.exists(stream_name):
             return
@@ -939,11 +946,15 @@ class StreamingTranscriptionConsumer:
 
         if not _EXPECTED_GROUPS.issubset(registered_names):
             logger.debug(
-                f"Stream {stream_name}: not all consumer groups registered yet "
-                f"(found: {registered_names}), skipping delete"
+                f"Stream {stream_name}: not all core consumer groups registered yet "
+                f"(found: {registered_names}, optional present: "
+                f"{registered_names & _OPTIONAL_GROUPS}), skipping delete"
             )
             return
 
+        # total_pending sums ALL registered groups, including the optional
+        # wakeword_detection group when present — so its pending entries also
+        # block deletion without needing to be in the required-subset gate above.
         if total_pending > 0:
             logger.debug(
                 f"Stream {stream_name} still has {total_pending} pending messages "

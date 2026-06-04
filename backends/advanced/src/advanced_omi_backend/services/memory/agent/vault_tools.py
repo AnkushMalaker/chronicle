@@ -25,6 +25,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
 
+from ..vault_scaffold import write_category
 from .edit_engine import Edit, EditError, apply_edits
 
 logger = logging.getLogger("memory_service.agent.tools")
@@ -181,6 +182,26 @@ class VaultTools:
         self.touched.add(_safe_relpath(path))
         return f"{'Overwrote' if existed else 'Wrote'} {path} ({len(content)} chars)."
 
+    def create_category(self, name: str, properties: List[str] | None = None) -> str:
+        """Mint a new organic category: its template, base, and hub note (idempotent).
+
+        ``name`` should be the plural category name (e.g. ``"Places"``); ``properties`` the
+        short, reusable frontmatter keys its notes carry (e.g. ``["location", "type"]``).
+        """
+        created = write_category(self.root, name, properties or [])
+        for rel in created:
+            self.touched.add(rel)
+        if created:
+            return (
+                f"Created category '{name}' ({', '.join(created)}). Now file notes under "
+                f'{name}/<Title>.md with categories: ["[[{name}]]"], using '
+                f"Templates/{name} Template.md as the shape."
+            )
+        return (
+            f"Category '{name}' already exists. File notes under {name}/<Title>.md and read "
+            f"Templates/{name} Template.md for its schema."
+        )
+
     def rename_person(self, old_name: str, new_name: str) -> str:
         old_rel, new_rel = f"People/{old_name}.md", f"People/{new_name}.md"
         old_fp, new_fp = self._abs(old_rel), self._abs(new_rel)
@@ -264,6 +285,8 @@ class VaultTools:
             )
         if name == "rename_person":
             return self.rename_person(args["old_name"], args["new_name"])
+        if name == "create_category":
+            return self.create_category(args["name"], args.get("properties"))
         raise VaultToolError(f"Unknown tool: {name}")
 
 
@@ -405,6 +428,35 @@ _RENAME_TOOL = {
     },
 }
 
+_CREATE_CATEGORY_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "create_category",
+        "description": (
+            "Mint a NEW organic category — its template, aggregation base, and hub note — "
+            "for a substantive, recurring KIND of thing that isn't People/Topics/"
+            "Conversations (e.g. Places, Projects, Books, Companies). Idempotent. Use "
+            "sparingly: only when the thing will plausibly recur and matters; prefer an "
+            "existing category. After this, file notes under '<name>/<Title>.md'.\n"
+            "- `name`: the PLURAL category name, e.g. 'Places'.\n"
+            "- `properties`: a few short, reusable frontmatter keys its notes carry, e.g. "
+            "['location', 'type']. Reuse names already used by other categories where you can."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Plural category name."},
+                "properties": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Short reusable frontmatter keys for the category's notes.",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+}
+
 # Full write-agent toolset.
 VAULT_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     _GREP_TOOL,
@@ -413,6 +465,7 @@ VAULT_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     _EDIT_TOOL,
     _WRITE_TOOL,
     _RENAME_TOOL,
+    _CREATE_CATEGORY_TOOL,
 ]
 
 # Read-only subset for search.

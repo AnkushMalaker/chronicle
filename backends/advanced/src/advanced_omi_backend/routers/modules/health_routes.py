@@ -155,6 +155,7 @@ async def health_check():
 
     speaker_service_url = os.getenv("SPEAKER_SERVICE_URL")
     openmemory_mcp_url = os.getenv("OPENMEMORY_MCP_URL")
+    wakeword_service_url = os.getenv("WAKEWORD_SERVICE_URL")
 
     # Check MongoDB (critical service)
     try:
@@ -447,6 +448,49 @@ async def health_check():
                 "healthy": False,
                 "url": openmemory_mcp_url,
                 "provider": "openmemory_mcp",
+                "critical": False,
+            }
+            overall_healthy = False
+
+    # Check Wake-word service (non-critical - optional feature). Only probed when
+    # WAKEWORD_SERVICE_URL is configured, mirroring the speaker_recognition gate.
+    if wakeword_service_url:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{wakeword_service_url}/health",
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as response:
+                    if response.status == 200:
+                        body = await response.json()
+                        health_status["services"]["wakeword"] = {
+                            "status": "✅ Connected",
+                            "healthy": True,
+                            "url": wakeword_service_url,
+                            "model_loaded": body.get("model_loaded"),
+                            "critical": False,
+                        }
+                    else:
+                        health_status["services"]["wakeword"] = {
+                            "status": f"⚠️ Unhealthy: HTTP {response.status}",
+                            "healthy": False,
+                            "url": wakeword_service_url,
+                            "critical": False,
+                        }
+                        overall_healthy = False
+        except asyncio.TimeoutError:
+            health_status["services"]["wakeword"] = {
+                "status": "⚠️ Connection Timeout (5s)",
+                "healthy": False,
+                "url": wakeword_service_url,
+                "critical": False,
+            }
+            overall_healthy = False
+        except Exception as e:
+            health_status["services"]["wakeword"] = {
+                "status": f"⚠️ Connection Failed: {str(e)}",
+                "healthy": False,
+                "url": wakeword_service_url,
                 "critical": False,
             }
             overall_healthy = False

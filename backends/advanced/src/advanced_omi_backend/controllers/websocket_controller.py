@@ -187,8 +187,22 @@ async def subscribe_to_device_downlink(websocket: WebSocket, client_id: str) -> 
 
                 try:
                     await websocket.send_json(payload)
+                    data = payload.get("data")
+                    # Summarize so large fields (e.g. base64 TTS audio) don't flood logs.
+                    summary = (
+                        {
+                            k: (
+                                f"<{len(v)} chars>"
+                                if isinstance(v, str) and len(v) > 80
+                                else v
+                            )
+                            for k, v in data.items()
+                        }
+                        if isinstance(data, dict)
+                        else data
+                    )
                     logger.info(
-                        f"📤 Forwarded '{msg_type}' to device {client_id}: {payload.get('data')}"
+                        f"📤 Forwarded '{msg_type}' to device {client_id}: {summary}"
                     )
                 except Exception as send_error:
                     logger.warning(

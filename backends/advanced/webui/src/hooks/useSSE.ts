@@ -2,6 +2,7 @@ import { useEffect, useRef, useCallback, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '../contexts/AuthContext'
 import { BACKEND_URL } from '../services/api'
+import { emitWakeEvent } from './useWakeFeedback'
 
 export type SSEStatus = 'connecting' | 'connected' | 'reconnecting' | 'error'
 
@@ -43,19 +44,49 @@ export function useSSE(): SSEStatus {
       case 'transcript.live': {
         const d = data as { conversation_id?: string; segments?: unknown[]; transcript?: string }
         if (d.conversation_id) {
+          const patch = {
+            segments: d.segments ?? [],
+            transcript: d.transcript ?? '',
+            segment_count: d.segments?.length ?? 0,
+          }
+          // Patch the conversation detail cache (['conversation', id])
           queryClient.setQueryData(
             ['conversation', d.conversation_id],
-            (old: Record<string, unknown> | undefined) => {
-              if (!old) return old
-              return {
-                ...old,
-                segments: d.segments ?? [],
-                transcript: d.transcript ?? '',
-                segment_count: d.segments?.length ?? 0,
-              }
+            (old: Record<string, unknown> | undefined) => (old ? { ...old, ...patch } : old)
+          )
+          // Patch the matching row in every cached conversations list (['conversations', opts])
+          queryClient.setQueriesData(
+            { queryKey: ['conversations'] },
+            (old: { conversations?: Array<Record<string, unknown>> } | undefined) => {
+              if (!old?.conversations) return old
+              let changed = false
+              const conversations = old.conversations.map((c) => {
+                if (c.conversation_id !== d.conversation_id) return c
+                changed = true
+                return { ...c, ...patch }
+              })
+              return changed ? { ...old, conversations } : old
             }
           )
         }
+        break
+      }
+
+      case 'wake.armed': {
+        const d = data as { score?: number }
+        emitWakeEvent({ type: 'armed', score: d.score })
+        break
+      }
+
+      case 'wake.end_of_turn': {
+        const d = data as { reason?: string; duration?: number }
+        emitWakeEvent({ type: 'end_of_turn', reason: d.reason, duration: d.duration })
+        break
+      }
+
+      case 'wake.command': {
+        const d = data as { command?: string; reply?: string }
+        emitWakeEvent({ type: 'command', command: d.command, reply: d.reply })
         break
       }
 

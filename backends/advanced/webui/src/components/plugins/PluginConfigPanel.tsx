@@ -22,9 +22,10 @@ interface PluginConfig {
     enabled: boolean
     events: string[]
     condition: {
-      type: 'always' | 'wake_word' | 'keyword_anywhere'
+      type: 'always' | 'wake_word' | 'keyword_anywhere' | 'acoustic_wake_word'
       wake_words?: string[]
       keywords?: string[]
+      threshold?: number
     }
   }
   settings: Record<string, any>

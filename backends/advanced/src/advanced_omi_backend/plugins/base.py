@@ -192,6 +192,27 @@ class BasePlugin(ABC):
         """
         pass
 
+    async def on_wake_word_detected(
+        self, context: PluginContext
+    ) -> Optional[PluginResult]:
+        """
+        Called when the standalone wakeword-service detects the acoustic wake word
+        and captures the command turn.
+
+        Context data contains:
+            - command: str - The captured command text (resolved from existing
+              transcription; may be empty if transcription lagged)
+            - client_id: str - Client identifier
+            - session_id: str - Audio session id
+            - conversation_id: str or None - Current conversation id (if any)
+            - score: float - Acoustic detection score
+            - reason: str - End-of-turn reason ("smart_turn" | "max_duration")
+
+        Returns:
+            PluginResult with success status, optional message, and should_continue flag
+        """
+        pass
+
     async def on_plugin_action(self, context: PluginContext) -> Optional[PluginResult]:
         """
         Called when another plugin dispatches an action to this plugin via PluginServices.call_plugin().

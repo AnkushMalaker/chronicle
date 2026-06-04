@@ -21,6 +21,7 @@ from motor.motor_asyncio import AsyncIOMotorCollection
 from advanced_omi_backend.database import get_database
 from advanced_omi_backend.llm_client import async_chat_with_tools, get_llm_client
 from advanced_omi_backend.model_registry import get_models_registry
+from advanced_omi_backend.models.user import get_user_by_id
 from advanced_omi_backend.observability.otel_setup import (
     get_tracer,
     is_otel_enabled,
@@ -889,10 +890,18 @@ If no relevant memories are available, respond normally based on the conversatio
                 )
                 return True, [], 0
 
+            # Resolve speaker labels from the user's profile so extracted memories
+            # are attributed to the actual person instead of a generic "User".
+            user = await get_user_by_id(user_id)
+            user_label = user.display_name if user and user.display_name else "User"
+            assistant_label = (
+                user.assistant_name if user and user.assistant_name else "Assistant"
+            )
+
             # Format messages as a transcript
             transcript_parts = []
             for message in messages:
-                role = "User" if message.role == "user" else "Assistant"
+                role = user_label if message.role == "user" else assistant_label
                 transcript_parts.append(f"{role}: {message.content}")
 
             transcript = "\n".join(transcript_parts)
