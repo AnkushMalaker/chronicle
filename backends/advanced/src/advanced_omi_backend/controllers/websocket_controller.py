@@ -145,6 +145,88 @@ async def subscribe_to_interim_results(websocket: WebSocket, session_id: str) ->
             )
 
 
+async def subscribe_to_device_downlink(websocket: WebSocket, client_id: str) -> None:
+    """Forward backend→device control messages from Redis Pub/Sub to the device WebSocket.
+
+    Any backend component (wake-word service, plugins) can push a message to a
+    specific device by publishing to ``device:downlink:{client_id}``. Each message
+    is a Wyoming-style control frame (e.g. ``{"type": "play-tone", "data": {...}}``)
+    which the HAVPE relay's ``handle_backend_messages`` dispatches to the device.
+
+    Runs as a background task for the lifetime of the WebSocket connection.
+    """
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    channel = f"device:downlink:{client_id}"
+    redis_client = None
+    pubsub = None
+
+    try:
+        redis_client = await redis.from_url(redis_url, decode_responses=True)
+        pubsub = redis_client.pubsub()
+        await pubsub.subscribe(channel)
+        logger.info(f"🔊 Subscribed to device downlink channel: {channel}")
+
+        while True:
+            try:
+                message = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=1.0
+                )
+                if not message or message["type"] != "message":
+                    continue
+
+                try:
+                    payload = json.loads(message["data"])
+                except json.JSONDecodeError as e:
+                    logger.error(f"Invalid device downlink message on {channel}: {e}")
+                    continue
+
+                msg_type = payload.get("type")
+                if not msg_type:
+                    logger.warning(f"Device downlink message missing 'type': {payload}")
+                    continue
+
+                try:
+                    await websocket.send_json(payload)
+                    logger.info(
+                        f"📤 Forwarded '{msg_type}' to device {client_id}: {payload.get('data')}"
+                    )
+                except Exception as send_error:
+                    logger.warning(
+                        f"Failed to send downlink to device {client_id}: {send_error}"
+                    )
+                    break
+
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                logger.info(f"Device downlink subscriber cancelled for {client_id}")
+                break
+            except Exception as e:
+                logger.error(
+                    f"Error in device downlink subscriber for {client_id}: {e}",
+                    exc_info=True,
+                )
+                break
+
+    except Exception as e:
+        logger.error(
+            f"Failed to initialize device downlink subscriber for {client_id}: {e}",
+            exc_info=True,
+        )
+    finally:
+        if pubsub is not None:
+            try:
+                await pubsub.unsubscribe(channel)
+                await pubsub.close()
+            except Exception as cleanup_error:
+                logger.error(f"Error cleaning up downlink subscriber: {cleanup_error}")
+        if redis_client is not None:
+            try:
+                await redis_client.aclose()
+            except Exception:
+                pass
+
+
 async def parse_wyoming_protocol(ws: WebSocket) -> tuple[dict, Optional[bytes]]:
     """Parse Wyoming protocol: JSON header line followed by optional binary payload.
 
@@ -1357,6 +1439,7 @@ async def _websocket_session(ws, token, device_name, connection_type):
 
     client_id = None
     interim_holder = [None]  # mutable so inner loop can update
+    downlink_task = None
 
     try:
         client_id, client_state, user = await _setup_websocket_connection(
@@ -1373,6 +1456,9 @@ async def _websocket_session(ws, token, device_name, connection_type):
 
         audio_stream_producer = get_audio_stream_producer()
 
+        # Forward backend→device control messages (tones, TTS) for this device.
+        downlink_task = asyncio.create_task(subscribe_to_device_downlink(ws, client_id))
+
         yield (client_id, client_state, user, audio_stream_producer, interim_holder)
 
     except WebSocketDisconnect:
@@ -1385,6 +1471,16 @@ async def _websocket_session(ws, token, device_name, connection_type):
             exc_info=True,
         )
     finally:
+        if downlink_task and not downlink_task.done():
+            downlink_task.cancel()
+            try:
+                await downlink_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as task_error:
+                application_logger.error(
+                    f"Error cancelling downlink task for {client_id}: {task_error}"
+                )
         await _cleanup_websocket_connection(
             client_id, pending_client_id, interim_holder[0]
         )

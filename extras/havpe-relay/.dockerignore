@@ -2,6 +2,8 @@
 !main.py
 !relay_core.py
 !device_controller.py
+!tone_server.py
+!tones
 !pyproject.toml
 !uv.lock
 !.env

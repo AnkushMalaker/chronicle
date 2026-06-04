@@ -16,6 +16,7 @@ import httpx
 import websockets
 from device_controller import DeviceController
 from dotenv import load_dotenv
+from tone_server import tone_url
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -162,6 +163,15 @@ async def handle_backend_messages(ws, device: DeviceController) -> None:
             announcement = data.get("announcement", True)
             logger.info("Backend→device: play-audio %s", url)
             await device.play_audio(url, announcement=announcement)
+
+        elif msg_type == "play-tone":
+            tone = data.get("tone", "")
+            url = tone_url(tone)
+            if url:
+                logger.info("Backend→device: play-tone %s → %s", tone, url)
+                await device.play_audio(url, announcement=True)
+            else:
+                logger.warning("Backend→device: play-tone unknown tone '%s'", tone)
 
         elif msg_type == "led-control":
             r = float(data.get("r", 0))
