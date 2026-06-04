@@ -1,8 +1,17 @@
 """
-Gemma 4 E4B-it Transcriber.
+Gemma 4 E2B-it Transcriber.
 
-Uses Google's Gemma 4 multimodal model for speech-to-text with
-prompt-based speaker diarization. Max audio input: 30 seconds per chunk.
+Uses Google's Gemma 4 multimodal model for speech-to-text with prompt-based
+speaker diarization. Default target is the E2B-it model (2.3B effective / ~5.1B
+with embeddings, ~10GB in bf16) — small enough to run full precision on a 24GB
+GPU, so the default ``GEMMA4_QUANT`` is bf16 (4bit/8bit remain available for
+smaller GPUs; the audio/vision towers are kept out of any quantization).
+
+Decoding is accelerated with Multi-Token Prediction (MTP): a small text-only
+``-assistant`` drafter proposes tokens that the target verifies (``GEMMA4_MTP``).
+Verified output is drawn from the target's own distribution, so MTP does not
+change quality. Every Gemma 4 size ships a matching ``*-it-assistant`` drafter
+(``gemma-4-E2B-it-assistant`` is 78M params).
 """
 
 import logging
@@ -14,29 +23,47 @@ import wave
 import torch
 from common.batching import split_audio_file, stitch_transcription_results
 from common.response_models import Segment, Speaker, TranscriptionResult
-from transformers import AutoModelForMultimodalLM, AutoProcessor
+from transformers import (
+    AutoModelForCausalLM,
+    AutoModelForMultimodalLM,
+    AutoProcessor,
+    BitsAndBytesConfig,
+)
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "google/gemma-4-E4B-it"
+DEFAULT_MODEL = "google/gemma-4-E2B-it"
 MAX_CHUNK_SECONDS = 30
 BATCH_THRESHOLD_SECONDS = 30
 BATCH_OVERLAP_SECONDS = 5
+
+# 4-bit/8-bit must never touch the audio/vision towers: their Gemma4ClippableLinear
+# calls torch.finfo(weight.dtype), which breaks on uint8 quantized weights. The
+# "model." prefix is required — should_convert_module matches start-anchored.
+QUANT_SKIP_MODULES = [
+    "model.audio_tower",
+    "model.vision_tower",
+    "model.embed_audio",
+    "model.embed_vision",
+    "lm_head",
+]
 
 # Google's recommended sampling configuration for Gemma 4 (all use cases).
 GEMMA4_TEMPERATURE = 1.0
 GEMMA4_TOP_P = 0.95
 GEMMA4_TOP_K = 64
 
+# Google's recommended ASR prompt for Gemma 4 (kept deliberately minimal). The
+# elaborate "identify speakers / Speaker N:" framing was dropped: the diarized
+# labels were discarded downstream anyway (_parse_diarized_text strips them and
+# returns one speaker=None segment), and the instruction soup — plus the old
+# "respond with [NO SPEECH]" escape hatch — pushed Gemma 4 into its reasoning
+# channel and made it refuse / mis-fire [NO SPEECH] on real speech.
 DEFAULT_TRANSCRIPTION_PROMPT = (
-    "Transcribe the following speech segment in its original language and identify different speakers. "
-    "Follow these specific instructions for formatting the answer:\n"
-    "* Label each speaker as Speaker 1, Speaker 2, etc.\n"
-    "* Format each turn as 'Speaker N: <text>' on its own line.\n"
-    "* Start a new line when the speaker changes.\n"
-    "* When transcribing numbers, write the digits, i.e. write 1.7 and not "
-    "one point seven, and write 3 instead of three.\n"
-    "* If the audio is silence or contains no speech, respond with exactly: [NO SPEECH]"
+    "Transcribe the following speech segment in its original language into text. "
+    "Only output the transcription text itself, with no commentary or explanation. "
+    "When transcribing numbers, write the digits, i.e. write 1.7 and not "
+    "one point seven, and write 3 instead of three."
 )
 
 # Regex to parse "Speaker N: text" lines
@@ -96,7 +123,7 @@ def _parse_diarized_text(
 
 
 class Gemma4Transcriber:
-    """Transcriber using Google Gemma 4 E4B-it multimodal model."""
+    """Transcriber using Google Gemma 4 E2B-it multimodal model."""
 
     def __init__(self, model_id: str | None = None):
         self.model_id = model_id or os.getenv("ASR_MODEL", DEFAULT_MODEL)
@@ -115,12 +142,24 @@ class Gemma4Transcriber:
             os.getenv("BATCH_OVERLAP_SECONDS", str(BATCH_OVERLAP_SECONDS))
         )
         self.prompt = os.getenv("TRANSCRIPTION_PROMPT", DEFAULT_TRANSCRIPTION_PROMPT)
+        # Quantization: bf16 (default — E2B is ~10GB, fits a 24GB GPU full
+        # precision), 8bit, or 4bit (for smaller GPUs).
+        self.quant = os.getenv("GEMMA4_QUANT", "bf16").lower()
+        # MTP: text-only -assistant drafter for speculative decoding (~1.6x on ASR).
+        self.mtp_enabled = os.getenv("GEMMA4_MTP", "1") == "1"
+        self.assistant_model_id = (
+            os.getenv("GEMMA4_ASSISTANT_MODEL") or f"{self.model_id}-assistant"
+        )
         self.processor = None
         self.model = None
+        self.assistant_model = None
 
     def load_model(self) -> None:
-        """Load model and processor."""
-        logger.info(f"Loading Gemma 4 model: {self.model_id}")
+        """Load model, processor, and (optionally) the MTP assistant drafter."""
+        logger.info(
+            f"Loading Gemma 4 model: {self.model_id} "
+            f"(quant={self.quant}, mtp={self.mtp_enabled})"
+        )
 
         dtype_map = {
             "bfloat16": torch.bfloat16,
@@ -129,13 +168,48 @@ class Gemma4Transcriber:
         }
         dtype = dtype_map.get(self.torch_dtype, torch.bfloat16)
 
+        load_kwargs: dict = {"dtype": dtype, "device_map": "auto"}
+        if self.quant == "4bit":
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=dtype,
+                llm_int8_skip_modules=QUANT_SKIP_MODULES,
+            )
+        elif self.quant == "8bit":
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_8bit=True,
+                llm_int8_skip_modules=QUANT_SKIP_MODULES,
+            )
+        elif self.quant != "bf16":
+            raise ValueError(
+                f"Invalid GEMMA4_QUANT={self.quant!r}; expected 4bit, 8bit, or bf16"
+            )
+
         self.processor = AutoProcessor.from_pretrained(self.model_id)
         self.model = AutoModelForMultimodalLM.from_pretrained(
-            self.model_id,
-            dtype=dtype,
-            device_map="auto",
+            self.model_id, **load_kwargs
         )
+        self.model.eval()
+
+        if self.mtp_enabled:
+            logger.info(f"Loading MTP assistant drafter: {self.assistant_model_id}")
+            # The drafter is small (~0.8GB) and text-only; load it in bf16 even when
+            # the target is quantized (validated combination).
+            self.assistant_model = AutoModelForCausalLM.from_pretrained(
+                self.assistant_model_id, dtype=dtype, device_map="auto"
+            )
+            self.assistant_model.eval()
+
         logger.info(f"Model loaded on {self.device}")
+
+    def _generate(self, inputs: dict, **gen_kwargs):
+        """Run model.generate, injecting the MTP assistant when enabled."""
+        if self.assistant_model is not None:
+            gen_kwargs["assistant_model"] = self.assistant_model
+        with torch.inference_mode():
+            return self.model.generate(**inputs, **gen_kwargs)
 
     def _decode_response(self, outputs, input_len: int) -> str:
         """Decode generated tokens and strip any thinking/channel blocks.
@@ -204,8 +278,7 @@ class Gemma4Transcriber:
 
         input_len = inputs["input_ids"].shape[-1]
 
-        with torch.inference_mode():
-            outputs = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens)
+        outputs = self._generate(inputs, max_new_tokens=self.max_new_tokens)
 
         raw_text = self._decode_response(outputs, input_len)
         logger.info(f"Raw output ({duration:.1f}s): {raw_text[:200]}")
@@ -334,8 +407,7 @@ class Gemma4Transcriber:
         else:
             gen_kwargs["do_sample"] = False
 
-        with torch.inference_mode():
-            outputs = self.model.generate(**inputs, **gen_kwargs)
+        outputs = self._generate(inputs, **gen_kwargs)
 
         completion_tokens = outputs.shape[-1] - input_len
         text = self._decode_response(outputs, input_len)
@@ -394,12 +466,7 @@ class Gemma4Transcriber:
 
         # Greedy decoding here is deliberate: the judge emits a structured JSON
         # verdict and we want it deterministic across runs.
-        with torch.inference_mode():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=1024,
-                do_sample=False,
-            )
+        outputs = self._generate(inputs, max_new_tokens=1024, do_sample=False)
 
         raw_text = self._decode_response(outputs, input_len)
         logger.info(f"Judge raw output: {raw_text[:300]}")

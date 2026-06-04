@@ -1,9 +1,11 @@
 # syntax=docker/dockerfile:1
 #
-# Gemma 4 E4B-it ASR Provider Dockerfile
+# Gemma 4 E2B-it ASR Provider Dockerfile
 #
 # Google Gemma 4 multimodal model for speech-to-text with prompt-based diarization.
-# ~17GB VRAM at BF16, fits on a single 4090.
+# Default target is the E2B-it model (~5.1B params, ~10GB bf16 incl. the 78M MTP
+# assistant drafter) so it runs full precision on a single 24GB GPU. Set
+# GEMMA4_QUANT=4bit/8bit for smaller GPUs.
 
 ARG PYTORCH_CUDA_VERSION=cu126
 
@@ -36,10 +38,12 @@ COPY providers/gemma4/ ./providers/gemma4/
 
 # Default environment
 ENV HF_HOME="/models"
-ENV ASR_MODEL="google/gemma-4-E4B-it"
+ENV ASR_MODEL="google/gemma-4-E2B-it"
 ENV DEVICE="cuda"
 ENV TORCH_DTYPE="bfloat16"
 ENV MAX_NEW_TOKENS="512"
+ENV GEMMA4_QUANT="bf16"
+ENV GEMMA4_MTP="1"
 
 EXPOSE 8765
 

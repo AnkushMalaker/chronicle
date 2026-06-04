@@ -71,6 +71,7 @@ Audio/Images/Data  →  Ingestion  →  Processing  →  Memories
 | **Mobile App** | `app/` | React Native app for OMI device pairing |
 | **Speaker Recognition** | `extras/speaker-recognition/` | Voice identification service |
 | **ASR Services** | `extras/asr-services/` | Local speech-to-text (Parakeet) |
+| **TTS Services** | `extras/tts/` | Text-to-speech (TADA, Fish Speech, KittenTTS) |
 | **OpenMemory MCP** | `extras/openmemory-mcp/` | Cross-client memory compatibility |
 | **HAVPE Relay** | `extras/havpe-relay/` | ESP32 audio bridge |
 | **Vault Sync** | `extras/vault-sync/` | macOS menu bar app — syncs your conversation_docs vault to Obsidian via Syncthing |
@@ -83,6 +84,7 @@ Chronicle is designed around swappable providers:
 - **LLM**: OpenAI or local Ollama
 - **Memory Storage**: Chronicle native (FalkorDB) or OpenMemory MCP
 - **Speaker Recognition**: pyannote-based service (optional)
+- **Text-to-Speech**: TADA, Fish Speech (GPU), or KittenTTS (CPU) — optional
 
 ## Repository Structure
 
@@ -96,6 +98,7 @@ chronicle/
 ├── extras/
 │   ├── speaker-recognition/ # Voice identification
 │   ├── asr-services/        # Local ASR (Parakeet)
+│   ├── tts/                 # Text-to-speech (TADA, Fish Speech, KittenTTS)
 │   ├── openmemory-mcp/      # External memory server
 │   ├── havpe-relay/         # ESP32 audio bridge
 │   └── vault-sync/          # macOS menu bar app: vault ⇄ Obsidian via Syncthing

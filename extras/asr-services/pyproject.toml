@@ -144,7 +144,9 @@ vibevoice = [
 ]
 
 gemma4 = [
-    "transformers>=5.5.0,<6.0.0",
+    # 5.10+ ships Gemma4AssistantForCausalLM (MTP drafter) and fixes the 5.5.0
+    # audio-conditioned use_cache logits bug that speculative decoding depends on.
+    "transformers>=5.10.0,<6.0.0",
     "accelerate>=0.30.0",
     "librosa>=0.10.0",
     "torch>=2.3",
@@ -152,6 +154,10 @@ gemma4 = [
     "torchvision>=0.18",
     "pillow>=10.0.0",
     "soundfile>=0.12",
+    # 4-bit/8-bit quantization for running Gemma 4 on smaller GPUs.
+    "bitsandbytes>=0.46.1",
+    # WebSocket backend for the /stream streaming endpoint (uvicorn needs a ws impl).
+    "websockets>=13.0",
 ]
 
 # NVIDIA Audio Flamingo Next (Think variant by default).

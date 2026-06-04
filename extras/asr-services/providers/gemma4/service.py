@@ -1,27 +1,53 @@
 """
 Gemma 4 ASR Service.
 
-FastAPI service for Google Gemma 4 E4B-it multimodal transcription,
+FastAPI service for Google Gemma 4 E2B-it multimodal transcription,
 with an OpenAI-compatible chat completions endpoint for unified STT+LLM mode.
 """
 
 import argparse
 import asyncio
+import json
 import logging
 import os
+import tempfile
 import time
 import uuid
+import wave
 from typing import Optional
 
 import uvicorn
 from common.base_service import BaseASRService, create_asr_app
 from common.response_models import TranscriptionResult
-from fastapi import File, Form, HTTPException, UploadFile
+from fastapi import (
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from providers.gemma4.transcriber import Gemma4Transcriber
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+# Streaming audio is 16-bit LE mono PCM at 16 kHz (Chronicle streaming contract).
+STREAM_SAMPLE_RATE = 16000
+STREAM_BYTES_PER_SEC = STREAM_SAMPLE_RATE * 2
+
+
+def _pcm_to_temp_wav(pcm: bytes) -> str:
+    """Write raw PCM bytes to a temporary 16 kHz mono WAV file, return its path."""
+    fd, path = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(STREAM_SAMPLE_RATE)
+        wf.writeframes(pcm)
+    return path
 
 
 # --- OpenAI-compatible request/response models ---
@@ -33,7 +59,7 @@ class ChatMessage(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    model: str = "gemma-4-E4B-it"
+    model: str = "gemma-4-E2B-it"
     messages: list[dict]
     # Google's recommended sampling configuration for Gemma 4.
     temperature: float = 1.0
@@ -46,7 +72,7 @@ class ChatCompletionRequest(BaseModel):
 
 
 class Gemma4Service(BaseASRService):
-    """ASR service using Google Gemma 4 E4B-it multimodal model."""
+    """ASR service using Google Gemma 4 E2B-it multimodal model."""
 
     def __init__(self, model_id: Optional[str] = None):
         super().__init__(model_id)
@@ -97,7 +123,7 @@ def main():
     if args.model:
         os.environ["ASR_MODEL"] = args.model
 
-    model_id = os.getenv("ASR_MODEL", "google/gemma-4-E4B-it")
+    model_id = os.getenv("ASR_MODEL", "google/gemma-4-E2B-it")
     service = Gemma4Service(model_id)
     app = create_asr_app(service)
 
@@ -212,6 +238,114 @@ def main():
                 }
             ],
         }
+
+    # --- Streaming-ish WebSocket endpoint (Chronicle stt_stream contract) ---
+    #
+    # Gemma 4 is a batch ASR model with no incremental decoding and (critically)
+    # no word timestamps, so true local-agreement commit (which needs word-level
+    # audio offsets to trim the buffer) is not possible. Instead we mirror the
+    # qwen3 bridge: re-decode a bounded rolling window every interval to emit
+    # interim previews, and run one full (batched) transcription on stream end
+    # for the accurate final. The bounded window caps the per-decode cost on
+    # long sessions. Reuses the already-loaded model (single process, no bridge).
+    stream_interval = float(os.getenv("GEMMA4_STREAM_INTERVAL_SECONDS", "4"))
+    stream_window = float(os.getenv("GEMMA4_STREAM_WINDOW_SECONDS", "30"))
+
+    def _transcribe_pcm(pcm: bytes) -> TranscriptionResult:
+        path = _pcm_to_temp_wav(pcm)
+        try:
+            return service.transcriber.transcribe(path)
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    @app.websocket("/stream")
+    async def stream(ws: WebSocket):
+        """Streaming transcription: binary PCM in, interim/final JSON out."""
+        await ws.accept()
+        if not service.is_ready or service.transcriber is None:
+            await ws.close(code=1011, reason="Service not ready")
+            return
+
+        loop = asyncio.get_event_loop()
+        audio = bytearray()
+        prev_interim = ""
+        last_decoded_bytes = 0
+        running = True
+        try:
+            while running:
+                try:
+                    message = await asyncio.wait_for(ws.receive(), timeout=60.0)
+                except asyncio.TimeoutError:
+                    continue
+
+                if message.get("type") == "websocket.disconnect":
+                    break
+
+                if message.get("bytes"):
+                    audio.extend(message["bytes"])
+                    pending = (len(audio) - last_decoded_bytes) / STREAM_BYTES_PER_SEC
+                    if pending >= stream_interval:
+                        last_decoded_bytes = len(audio)
+                        window = bytes(
+                            audio[-int(stream_window * STREAM_BYTES_PER_SEC) :]
+                        )
+                        try:
+                            result = await loop.run_in_executor(
+                                None, _transcribe_pcm, window
+                            )
+                        except Exception as e:
+                            logger.warning(f"gemma4 stream interim failed: {e}")
+                            continue
+                        text = (result.text or "").strip()
+                        if text and text != prev_interim:
+                            prev_interim = text
+                            await ws.send_json(
+                                {
+                                    "type": "interim",
+                                    "text": text,
+                                    "words": [],
+                                    "segments": [],
+                                }
+                            )
+                elif message.get("text"):
+                    try:
+                        msg = json.loads(message["text"])
+                    except json.JSONDecodeError:
+                        continue
+                    if msg.get("type") in ("CloseStream", "stop", "finalize"):
+                        running = False
+
+            # Accurate final: full-buffer transcription (batches internally >30s).
+            if audio:
+                result = await loop.run_in_executor(None, _transcribe_pcm, bytes(audio))
+                segments = [
+                    {
+                        "start": s.start,
+                        "end": s.end,
+                        "text": s.text,
+                        "speaker": s.speaker,
+                    }
+                    for s in (result.segments or [])
+                ]
+                await ws.send_json(
+                    {
+                        "type": "final",
+                        "text": (result.text or "").strip(),
+                        "words": [],
+                        "segments": segments,
+                    }
+                )
+            else:
+                await ws.send_json(
+                    {"type": "final", "text": "", "words": [], "segments": []}
+                )
+        except WebSocketDisconnect:
+            logger.info("gemma4 stream: client disconnected")
+        except Exception as e:
+            logger.error(f"gemma4 stream error: {e}", exc_info=True)
 
     uvicorn.run(app, host=args.host, port=args.port)
 
