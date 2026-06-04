@@ -66,9 +66,13 @@ class ClientWakeState:
     turn_analyzer: Optional[LocalSmartTurnAnalyzerV3] = None
     vad_model: Optional[SileroOnnxModel] = None
     # Leftover PCM samples not yet aligned to a 512-sample VAD frame.
-    vad_remainder: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int16))
+    vad_remainder: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int16)
+    )
     # Leftover PCM not yet aligned to a 1280-sample wake-interpreter frame.
-    wake_remainder: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int16))
+    wake_remainder: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int16)
+    )
     # Raw int16 PCM of the armed command turn (arm -> EOT), for batch ASR.
     capture_chunks: list = field(default_factory=list)
     # Semantic end-of-turn (Smart Turn) tracking within an armed capture: have we
@@ -261,7 +265,9 @@ class HermesDetector:
         buf = np.concatenate(list(state.preroll))
         return buf[-n_samples:] if buf.size > n_samples else buf
 
-    def _run_wake(self, state: ClientWakeState, client_id: str, audio: np.ndarray) -> None:
+    def _run_wake(
+        self, state: ClientWakeState, client_id: str, audio: np.ndarray
+    ) -> None:
         # Reframe to exactly 1280-sample frames (carry a remainder across calls);
         # the interpreter scores 0.0 on any other frame size.
         buf = (
@@ -284,7 +290,10 @@ class HermesDetector:
                 logger.info(f"score {score:.3f} '{client_id}'")
             state.consec = state.consec + 1 if score > self.threshold else 0
             now = time.monotonic()
-            if state.consec >= self.patience and (now - state.last_detection_time) > self.debounce_secs:
+            if (
+                state.consec >= self.patience
+                and (now - state.last_detection_time) > self.debounce_secs
+            ):
                 state.armed = True
                 state.arm_time = now
                 state.arm_score = score
@@ -292,7 +301,9 @@ class HermesDetector:
                 state.consec = 0
                 # Snapshot the wake-trigger window for false-positive review (the
                 # audio that *caused* this arm, distinct from the command turn).
-                state.trigger_audio = self._preroll_tail(state, PREROLL_SAMPLES).tobytes()
+                state.trigger_audio = self._preroll_tail(
+                    state, PREROLL_SAMPLES
+                ).tobytes()
                 # Reset interpreter + wake remainder so capture/next wake start clean.
                 self._interpreter.reset()
                 state.wake_remainder = np.empty(0, dtype=np.int16)
@@ -309,7 +320,9 @@ class HermesDetector:
         """
         if state.priming:
             if state.prime_speech_started:
-                return self._finish_prime(state, client_id, session_id, "primed_stream_end")
+                return self._finish_prime(
+                    state, client_id, session_id, "primed_stream_end"
+                )
             self._reset_prime(state)
             return None
         if state.armed:
@@ -337,7 +350,9 @@ class HermesDetector:
         for i in range(0, n_full, VAD_FRAME_SAMPLES):
             frame = buf[i : i + VAD_FRAME_SAMPLES]
             conf = float(
-                np.asarray(vad(frame.astype(np.float32) / 32768.0, SAMPLE_RATE)).flatten()[0]
+                np.asarray(
+                    vad(frame.astype(np.float32) / 32768.0, SAMPLE_RATE)
+                ).flatten()[0]
             )
             is_speech = conf >= self.vad_threshold
 
@@ -367,7 +382,9 @@ class HermesDetector:
                         )
                     # INCOMPLETE: the model expects more speech — keep listening and
                     # re-query after another stretch of continued silence.
-                    state.eot_next_check = state.eot_silence_frames + self.eot_recheck_frames
+                    state.eot_next_check = (
+                        state.eot_silence_frames + self.eot_recheck_frames
+                    )
 
         # Hard cap on capture duration.
         if (time.monotonic() - state.arm_time) > self.max_arm_secs:
@@ -450,7 +467,9 @@ class HermesDetector:
         for i in range(0, n_full, VAD_FRAME_SAMPLES):
             frame = buf[i : i + VAD_FRAME_SAMPLES]
             conf = float(
-                np.asarray(vad(frame.astype(np.float32) / 32768.0, SAMPLE_RATE)).flatten()[0]
+                np.asarray(
+                    vad(frame.astype(np.float32) / 32768.0, SAMPLE_RATE)
+                ).flatten()[0]
             )
             is_speech = conf >= self.vad_threshold
 
@@ -458,7 +477,9 @@ class HermesDetector:
                 if is_speech:
                     # Seed with a short lead-in so the onset isn't clipped.
                     state.prime_speech_started = True
-                    state.prime_chunks = [self._preroll_tail(state, PRIME_LEADIN_SAMPLES)]
+                    state.prime_chunks = [
+                        self._preroll_tail(state, PRIME_LEADIN_SAMPLES)
+                    ]
                     state.prime_chunks.append(frame)
                     state.prime_silence_run = 0
                 continue
@@ -474,7 +495,9 @@ class HermesDetector:
         if state.prime_speech_started:
             captured = sum(c.size for c in state.prime_chunks)
             if captured >= self.prime_max_samples:
-                return self._finish_prime(state, client_id, session_id, "primed_max_duration")
+                return self._finish_prime(
+                    state, client_id, session_id, "primed_max_duration"
+                )
         elif time.monotonic() > state.prime_deadline:
             # Heard no speech in the priming window — cancel quietly.
             logger.info(f"🎯 prime for '{client_id}' timed out (no speech)")
@@ -485,7 +508,9 @@ class HermesDetector:
         self, state: ClientWakeState, client_id: str, session_id: str, reason: str
     ) -> WakeEvent:
         captured = (
-            np.concatenate(state.prime_chunks) if state.prime_chunks else np.empty(0, dtype=np.int16)
+            np.concatenate(state.prime_chunks)
+            if state.prime_chunks
+            else np.empty(0, dtype=np.int16)
         )
         score = self._score_buffer(captured)
         is_fn = score < self.threshold

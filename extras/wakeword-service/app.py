@@ -66,9 +66,11 @@ def _validate_models() -> None:
     with the list of what's actually available rather than half-starting.
     """
     models_dir = os.path.dirname(MODEL_PATH) or "."
-    available = sorted(
-        f for f in os.listdir(models_dir) if f.endswith(".onnx")
-    ) if os.path.isdir(models_dir) else []
+    available = (
+        sorted(f for f in os.listdir(models_dir) if f.endswith(".onnx"))
+        if os.path.isdir(models_dir)
+        else []
+    )
     # Smart Turn / Silero default to the pipecat bundle when their env is unset.
     required = {"wake-word model": MODEL_PATH}
     if SMART_TURN_MODEL_PATH:
@@ -108,7 +110,9 @@ async def lifespan(app: FastAPI):
     )
     store = SampleStore(DATA_DIR)
     app.state.store = store
-    consumer = WakeWordConsumer(detector=detector, redis_url=REDIS_URL, sample_store=store)
+    consumer = WakeWordConsumer(
+        detector=detector, redis_url=REDIS_URL, sample_store=store
+    )
     app.state.consumer = consumer
     consumer_task = asyncio.create_task(consumer.start())
     app.state.consumer_task = consumer_task
