@@ -162,6 +162,12 @@ docker compose up --build
 # HAVPE Relay (ESP32 bridge)
 cd extras/havpe-relay
 docker compose up --build
+
+# TTS Services (text-to-speech, run ONE provider at a time on port 8770)
+cd extras/tts
+docker compose up tada-tts -d --build        # HumeAI TADA (GPU, voice cloning)
+docker compose up fish-tts -d --build        # Fish Speech (GPU, 50+ langs, emotion tags)
+docker compose up kittentts-tts -d --build   # KittenTTS (~25MB CPU ONNX, no GPU)
 ```
 
 ## Architecture Overview
@@ -459,6 +465,50 @@ The relay will automatically:
 - Generate client ID as `objectid_suffix-havpe`
 - Forward ESP32 audio to the backend with proper authentication
 - Handle token refresh and reconnection
+
+## TTS Services
+
+Provider-based text-to-speech (`extras/tts/`), built on the same provider pattern as `extras/asr-services/`. Run **one provider at a time**, all serving on port `8770` (configurable via `TTS_PORT`).
+
+### Providers
+
+| Provider | Service | Hardware | Highlights |
+|----------|---------|----------|-----------|
+| **TADA** (HumeAI) | `tada-tts` | GPU | Zero-shot voice cloning, 1:1 token alignment (no hallucinations), MIT. `tada-1b` (English) / `tada-3b-ml` (9 langs). Needs `HF_TOKEN` (Llama 3.2 base is gated). |
+| **Fish Speech** (Fish Audio) | `fish-tts` | GPU | Dual-AR, 50+ langs, inline emotion/prosody tags (`[laugh]`, `[whispers]`), streaming. `s2-pro` (default) / `openaudio-s1-mini` / `fish-speech-1.5`. Optional `torch.compile`. |
+| **KittenTTS** (KittenML) | `kittentts-tts` | CPU | Ultra-light (~25MB) ONNX, no GPU/API key, preset voices, English only. Uses dedicated `KITTEN_TTS_*` env vars. |
+
+### Setup & Run
+
+```bash
+cd extras/tts
+
+# Configure (selects provider, model, CUDA version)
+uv run --with-requirements ../../setup-requirements.txt python init.py
+
+# Start ONE provider
+docker compose up tada-tts -d --build       # or fish-tts / kittentts-tts
+
+# Test
+curl http://localhost:8770/health
+curl -X POST http://localhost:8770/synthesize -F "text=Hello world." -o output.wav
+```
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Service health (`healthy` / `initializing`) |
+| `/info` | GET | Model id, provider, capabilities, supported languages |
+| `/synthesize` | POST | Generate speech (multipart form) |
+
+**POST /synthesize** — `text` (required); optional `reference_audio` (WAV) + `reference_text` for voice cloning; optional generation params (`temperature`, `top_p`, `repetition_penalty`, `seed`, `max_new_tokens`). Returns WAV bytes with `X-Sample-Rate`, `X-Provider`, `X-Model` headers.
+
+**Notes:**
+- Not registered in `services.py` — manage with `docker compose` directly (like the HAVPE relay).
+- GPU providers require CUDA 12.6+ (`PYTORCH_CUDA_VERSION=cu126`/`cu128`); `cu121` is unsupported (torch>=2.7).
+- Add a provider by creating `extras/tts/providers/{name}/` with `service.py`, `synthesizer.py`, and `Dockerfile` (subclass `BaseTTSService`).
+- An optional `edge-agent` sidecar (`--profile edge`) advertises the service on the Tailnet.
 
 ## Distributed Deployment
 

@@ -1,0 +1,40 @@
+# Hermes Agent Plugin Configuration
+#
+# Routes "hermes ..." voice commands to an external Hermes agent that exposes an
+# OpenAI-compatible HTTP API (POST /v1/chat/completions).
+#
+# Plugin orchestration (enabled, events, trigger keyword) lives in
+# config/plugins.yml. The API key (if your server requires one) is stored in
+# plugins/hermes/.env as HERMES_API_KEY.
+
+# Hermes server base URL: scheme://host:port. Use your RPi's Tailscale MagicDNS
+# name or its LAN IP. A trailing "/v1" is optional (added automatically).
+# Examples:
+#   http://hermes-rpi.your-tailnet.ts.net:8642
+#   http://192.168.1.50:8642
+api_url: "http://192.168.0.108:8642"
+
+# Model name advertised by your Hermes server.
+model: "hermes"
+
+# Request timeout in seconds. Agent calls that use tools can take a while.
+timeout: 120
+
+# Optional extra system prompt. Hermes already has its own core system prompt /
+# identity; anything set here is layered ON TOP of it (additive, not a
+# replacement). Leave empty to use Hermes's own prompt unchanged. Use it only to
+# inject Chronicle-specific context, e.g. "You're being spoken to through a
+# wearable; keep replies short and suitable for text-to-speech."
+system_prompt: ""
+
+# Optional bearer token for the Hermes server. Stored as a secret in .env.
+api_key: ${HERMES_API_KEY}
+
+# Optional: also push Hermes's reply to Discord via the webhook "notify" route
+# (deliver_only — no extra LLM cost). Leave webhook_url empty to disable the push.
+# Use the full notify route URL (note: plural "/webhooks/").
+# Example: http://192.168.0.108:8644/webhooks/notify
+webhook_url: "http://192.168.0.108:8644/webhooks/notify"
+
+# HMAC secret for the webhook (X-Hub-Signature-256). Stored as a secret in .env.
+webhook_secret: ${HERMES_WEBHOOK_SECRET}

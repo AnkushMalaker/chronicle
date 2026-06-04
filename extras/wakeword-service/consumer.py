@@ -38,7 +38,9 @@ STREAM_IDLE_TIMEOUT_SECONDS = 300
 class WakeWordConsumer:
     """Discovers audio streams and runs acoustic wake detection on each."""
 
-    def __init__(self, detector: HermesDetector, redis_url: str, sample_store: SampleStore):
+    def __init__(
+        self, detector: HermesDetector, redis_url: str, sample_store: SampleStore
+    ):
         """Initialize the consumer.
 
         Args:
@@ -86,7 +88,9 @@ class WakeWordConsumer:
         """Connect to Redis and run the discovery + processing loop."""
         self.redis_client = redis.from_url(self.redis_url)
         self.running = True
-        logger.info(f"WakeWordConsumer started (group={GROUP_NAME}, redis={self.redis_url})")
+        logger.info(
+            f"WakeWordConsumer started (group={GROUP_NAME}, redis={self.redis_url})"
+        )
         try:
             while self.running:
                 await self._discover_and_spawn()
@@ -144,13 +148,19 @@ class WakeWordConsumer:
         try:
             while self.running:
                 messages = await self.redis_client.xreadgroup(
-                    GROUP_NAME, self.consumer_name, {stream_name: ">"}, count=10, block=1000
+                    GROUP_NAME,
+                    self.consumer_name,
+                    {stream_name: ">"},
+                    count=10,
+                    block=1000,
                 )
 
                 if not messages:
                     if time.time() - last_activity > STREAM_IDLE_TIMEOUT_SECONDS:
                         await self._flush(state, client_id, session_id)
-                        logger.info(f"Stream '{stream_name}' idle — ending wake processing")
+                        logger.info(
+                            f"Stream '{stream_name}' idle — ending wake processing"
+                        )
                         return
                     continue
 
@@ -163,7 +173,9 @@ class WakeWordConsumer:
                         )
                         try:
                             if fields.get(b"end_marker") or fields.get("end_marker"):
-                                await self.redis_client.xack(stream_name, GROUP_NAME, msg_id)
+                                await self.redis_client.xack(
+                                    stream_name, GROUP_NAME, msg_id
+                                )
                                 await self._flush(state, client_id, session_id)
                                 logger.info(f"End marker on '{stream_name}' — ending")
                                 return
@@ -182,7 +194,9 @@ class WakeWordConsumer:
                                 if event is not None:
                                     await self._handle_event(event)
                         finally:
-                            await self.redis_client.xack(stream_name, GROUP_NAME, msg_id)
+                            await self.redis_client.xack(
+                                stream_name, GROUP_NAME, msg_id
+                            )
         finally:
             self._states.pop(client_id, None)
 
@@ -224,7 +238,9 @@ class WakeWordConsumer:
                 bucket, pcm, SAMPLE_RATE, int(time.time() * 1000), meta
             )
             logger.info(f"💾 saved {bucket} sample {rec['id']} ({len(pcm)}B)")
-        except Exception as e:  # noqa: BLE001 - data collection must never break dispatch
+        except (
+            Exception
+        ) as e:  # noqa: BLE001 - data collection must never break dispatch
             logger.error(f"Failed to save {bucket} sample: {e}", exc_info=True)
 
     async def _publish_detection(self, event: WakeEvent) -> None:
@@ -270,7 +286,9 @@ class WakeWordConsumer:
             f"({len(event.audio)}B audio, reason={event.reason})"
         )
 
-    async def _on_armed(self, state: ClientWakeState, client_id: str, session_id: str) -> None:
+    async def _on_armed(
+        self, state: ClientWakeState, client_id: str, session_id: str
+    ) -> None:
         """Push a UI pulse the instant the wake word arms (before capture/ASR)."""
         user_id = await self._lookup_user_id(session_id)
         await self._publish_sse(
@@ -286,7 +304,9 @@ class WakeWordConsumer:
         await self._publish_downlink(client_id, "play-tone", {"tone": "armed"})
         logger.info(f"🔔 wake.armed SSE for '{client_id}'")
 
-    async def _publish_downlink(self, client_id: str, msg_type: str, data: dict) -> None:
+    async def _publish_downlink(
+        self, client_id: str, msg_type: str, data: dict
+    ) -> None:
         """Push a control message to the device via ``device:downlink:{client_id}``.
 
         The backend's WebSocket handler subscribes to this channel and forwards the
@@ -298,7 +318,9 @@ class WakeWordConsumer:
         try:
             message = json.dumps({"type": msg_type, "data": data})
             await self.redis_client.publish(f"device:downlink:{client_id}", message)
-        except Exception as e:  # noqa: BLE001 - downlink is best-effort, never break dispatch
+        except (
+            Exception
+        ) as e:  # noqa: BLE001 - downlink is best-effort, never break dispatch
             logger.debug(f"Failed to publish downlink {msg_type}: {e}")
 
     async def _publish_sse(self, user_id: str, event_type: str, data: dict) -> None:
@@ -314,7 +336,9 @@ class WakeWordConsumer:
                 {"event": event_type, "data": data, "timestamp": time.time()}
             )
             await self.redis_client.publish(f"sse:{user_id}", message)
-        except Exception as e:  # noqa: BLE001 - SSE is best-effort, never break dispatch
+        except (
+            Exception
+        ) as e:  # noqa: BLE001 - SSE is best-effort, never break dispatch
             logger.debug(f"Failed to publish SSE {event_type}: {e}")
 
     async def _lookup_user_id(self, session_id: str) -> str:

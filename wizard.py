@@ -53,6 +53,7 @@ def get_existing_stream_provider(config_yml: dict):
         "stt-smallest-stream": "smallest",
         "stt-qwen3-asr": "qwen3-asr",
         "stt-qwen3-asr-stream": "qwen3-asr",
+        "stt-gemma4-stream": "gemma4",
     }
     return mapping.get(stt_stream)
 
@@ -127,6 +128,18 @@ SERVICES = {
             ],
             "description": "Local LLM via llama.cpp (chat + embeddings)",
         },
+        "wakeword-service": {
+            "path": "extras/wakeword-service",
+            "cmd": [
+                "uv",
+                "run",
+                "--with-requirements",
+                "../../setup-requirements.txt",
+                "python",
+                "init.py",
+            ],
+            "description": "Hermes acoustic wake-word detection",
+        },
     },
 }
 
@@ -185,6 +198,7 @@ def check_service_exists(service_name, service_config):
         "asr-services",
         "langfuse",
         "llm-services",
+        "wakeword-service",
     ]:
         script_path = service_path / "init.py"
         if not script_path.exists():
@@ -332,6 +346,7 @@ def run_service_setup(
     langfuse_public_key=None,
     langfuse_secret_key=None,
     langfuse_host=None,
+    langfuse_public_url=None,
     streaming_provider=None,
     llm_provider=None,
     memory_provider=None,
@@ -385,6 +400,8 @@ def run_service_setup(
             cmd.extend(["--langfuse-secret-key", langfuse_secret_key])
             if langfuse_host:
                 cmd.extend(["--langfuse-host", langfuse_host])
+            if langfuse_public_url:
+                cmd.extend(["--langfuse-public-url", langfuse_public_url])
 
     else:
         service = SERVICES["extras"][service_name]
@@ -829,14 +846,21 @@ def setup_hf_token_if_needed(selected_services):
 
 
 # Providers that support real-time streaming
-STREAMING_CAPABLE = {"deepgram", "smallest", "qwen3-asr"}
+STREAMING_CAPABLE = {"deepgram", "smallest", "qwen3-asr", "gemma4"}
 
 # STT providers that can also serve as LLM (unified multimodal models)
 UNIFIED_CAPABLE_STT = {"gemma4"}
 
 
-def select_transcription_provider(config_yml: dict = None):
-    """Ask user which transcription provider they want (batch/primary)."""
+def select_transcription_provider(
+    config_yml: dict = None, default_provider: str = None
+):
+    """Ask user which transcription (batch/high-quality) provider they want.
+
+    ``default_provider`` (the streaming provider chosen first) pre-selects the
+    matching batch option when that provider can also do batch — the user can still
+    pick a different provider for higher-quality batch transcription.
+    """
     config_yml = config_yml or {}
     existing_provider = get_existing_stt_provider(config_yml)
 
@@ -851,16 +875,21 @@ def select_transcription_provider(config_yml: dict = None):
         "none": "8",
     }
     choice_to_provider = {v: k for k, v in provider_to_choice.items()}
-    default_choice = provider_to_choice.get(existing_provider, "1")
+
+    # Prefer the streaming provider (it can also do batch), else existing config.
+    preferred = default_provider if default_provider in provider_to_choice else None
+    default_choice = provider_to_choice.get(preferred or existing_provider, "1")
 
     console.print("\n🎤 [bold cyan]Transcription Provider[/bold cyan]")
     console.print(
-        "Choose your speech-to-text provider (used for [bold]batch[/bold]/high-quality transcription):"
+        "Choose your speech-to-text provider for [bold]batch[/bold]/high-quality transcription:"
     )
-    console.print(
-        "[dim]If it also supports streaming, it will be used for real-time too by default.[/dim]"
-    )
-    if existing_provider:
+    if preferred:
+        console.print(
+            f"[dim]Defaulting to {preferred} (your streaming choice — it does batch too). "
+            f"Pick another for a different/higher-quality batch engine.[/dim]"
+        )
+    elif existing_provider:
         provider_labels = {
             "deepgram": "Deepgram",
             "parakeet": "Parakeet ASR",
@@ -881,13 +910,13 @@ def select_transcription_provider(config_yml: dict = None):
         "3": "VibeVoice ASR (offline, batch only, built-in diarization, GPU)",
         "4": "Qwen3-ASR (offline, streaming + batch, 52 languages, GPU)",
         "5": "Smallest.ai Pulse (cloud, streaming + batch)",
-        "6": "Gemma 4 (offline, batch only, prompt-based diarization, GPU)",
+        "6": "Gemma 4 (offline, streaming + batch, prompt-based diarization, MTP, GPU)",
         "7": "Audio Flamingo Next (offline, batch, timestamped diarization, GPU; noncommercial license)",
         "8": "None (skip transcription setup)",
     }
 
     for key, desc in choices.items():
-        marker = " [dim](current)[/dim]" if key == default_choice else ""
+        marker = " [dim](default)[/dim]" if key == default_choice else ""
         console.print(f"  {key}) {desc}{marker}")
     console.print()
 
@@ -904,71 +933,53 @@ def select_transcription_provider(config_yml: dict = None):
             return choice_to_provider.get(default_choice, "deepgram")
 
 
-def select_streaming_provider(batch_provider, config_yml: dict = None):
-    """Ask if user wants a different provider for real-time streaming.
+def select_streaming_provider(config_yml: dict = None):
+    """Ask which real-time streaming provider to use (or skip).
 
-    If the batch provider supports streaming, offer to use the same (saves a step).
-    If it's batch-only, the user must pick a streaming provider or skip.
+    Asked BEFORE the batch provider so a streaming-capable choice can default the
+    batch selection — the common case is one provider doing both, but the user can
+    still pick a different (e.g. higher-quality) batch engine next.
 
     Returns:
-        Streaming provider name if different from batch, or None (same / skipped).
+        Streaming provider name, or None if streaming is skipped.
     """
     config_yml = config_yml or {}
-    if batch_provider in ("none", None):
-        return None
-
     existing_stream = get_existing_stream_provider(config_yml)
 
-    if batch_provider in STREAMING_CAPABLE:
-        # Batch provider can already stream — just confirm
-        # Default to "use different" if a different streaming provider was previously configured
-        has_different_stream = bool(
-            existing_stream and existing_stream != batch_provider
-        )
-        console.print(f"\n🔊 [bold cyan]Streaming[/bold cyan]")
-        console.print(f"{batch_provider} supports both batch and streaming.")
-        try:
-            use_different = Confirm.ask(
-                "Use a different provider for real-time streaming?",
-                default=has_different_stream,
-            )
-        except EOFError:
-            return None
-        if not use_different:
-            return None
-    else:
-        # Batch-only provider — need to pick a streaming provider
-        console.print(f"\n🔊 [bold cyan]Streaming[/bold cyan]")
-        console.print(
-            f"{batch_provider} is batch-only. Pick a streaming provider for real-time transcription:"
-        )
+    console.print("\n🔊 [bold cyan]Real-time Streaming Transcription[/bold cyan]")
+    console.print(
+        "Choose a provider for [bold]real-time[/bold] (live) transcription. "
+        "You'll pick the batch/high-quality provider next."
+    )
+    console.print(
+        "[dim]A provider that also does batch will be offered as the batch default too.[/dim]"
+    )
+    console.print()
 
-    # Show streaming-capable providers (excluding the batch provider)
-    streaming_choices = {}
-    provider_map = {}
-    idx = 1
-
-    for name, desc in [
+    options = [
         ("deepgram", "Deepgram (cloud, streaming)"),
         ("smallest", "Smallest.ai Pulse (cloud, streaming)"),
-        ("qwen3-asr", "Qwen3-ASR (offline, streaming)"),
-    ]:
-        if name != batch_provider:
-            streaming_choices[str(idx)] = desc
-            provider_map[str(idx)] = name
-            idx += 1
-
-    skip_key = str(idx)
+        ("qwen3-asr", "Qwen3-ASR (offline, streaming, GPU)"),
+        (
+            "gemma4",
+            "Gemma 4 (offline, streaming-ish, prompt-based diarization, MTP, GPU)",
+        ),
+    ]
+    streaming_choices = {}
+    provider_map = {}
+    for idx, (name, desc) in enumerate(options, start=1):
+        streaming_choices[str(idx)] = desc
+        provider_map[str(idx)] = name
+    skip_key = str(len(options) + 1)
     streaming_choices[skip_key] = "Skip (no real-time streaming)"
     provider_map[skip_key] = None
 
-    # Pre-select the default based on existing config
-    default_stream_choice = "1"
-    if existing_stream and existing_stream != batch_provider:
-        for k, v in provider_map.items():
-            if v == existing_stream:
-                default_stream_choice = k
-                break
+    # Default to the previously-configured streaming provider, else skip.
+    default_stream_choice = skip_key
+    for k, v in provider_map.items():
+        if v and v == existing_stream:
+            default_stream_choice = k
+            break
 
     for key, desc in streaming_choices.items():
         marker = " [dim](current)[/dim]" if key == default_stream_choice else ""
@@ -981,15 +992,15 @@ def select_streaming_provider(batch_provider, config_yml: dict = None):
             if choice in streaming_choices:
                 result = provider_map[choice]
                 if result:
-                    console.print(
-                        f"[green]✅[/green] Streaming: {result}, Batch: {batch_provider}"
-                    )
+                    console.print(f"[green]✅[/green] Streaming: {result}")
+                else:
+                    console.print("[blue][INFO][/blue] No real-time streaming")
                 return result
             console.print(
                 f"[red]Invalid choice. Please select from {list(streaming_choices.keys())}[/red]"
             )
         except EOFError:
-            return None
+            return provider_map.get(default_stream_choice)
 
 
 def select_live_segmentation(batch_provider):
@@ -1022,6 +1033,28 @@ def select_live_segmentation(batch_provider):
         console.print("[green]✅[/green] Live segmentation: windowed_batch")
         return "windowed_batch"
     return "streaming_stt"
+
+
+def derive_langfuse_public_url(langfuse_mode, langfuse_external, server_ip):
+    """Derive the browser-accessible LangFuse URL used for dashboard deep-links.
+
+    This becomes ``observability.langfuse.public_url`` in config.yml, which the
+    backend serves to the web UI for Langfuse trace/session links.
+
+    - external mode: the host the user entered is already browser-accessible.
+    - local mode: the bundled instance is exposed on plain HTTP port 3002
+      (see extras/langfuse/docker-compose.yml). Use the Tailscale name/IP chosen
+      for HTTPS when available, otherwise fall back to detected Tailscale info,
+      otherwise localhost.
+    """
+    if langfuse_mode == "external":
+        return langfuse_external.get("host")
+
+    host = server_ip
+    if not host:
+        ts_dns, ts_ip = detect_tailscale_info()
+        host = ts_dns or ts_ip or "localhost"
+    return f"http://{host}:3002"
 
 
 def setup_langfuse_choice():
@@ -1334,11 +1367,29 @@ def main():
     # Read existing config.yml once — used as defaults for ALL wizard questions below
     config_yml = config_mgr.get_full_config()
 
-    # Ask about transcription provider FIRST (determines which services are needed)
-    transcription_provider = select_transcription_provider(config_yml)
+    # Ask about the real-time STREAMING provider FIRST.
+    streaming_provider = select_streaming_provider(config_yml)
 
-    # Ask about streaming provider (if batch provider doesn't stream, or user wants a different one)
-    streaming_provider = select_streaming_provider(transcription_provider, config_yml)
+    # Then the batch/high-quality provider, defaulting to the streaming provider
+    # when it can also do batch (one provider for both is the simple common case,
+    # but the user can still choose a different/higher-quality batch engine).
+    transcription_provider = select_transcription_provider(
+        config_yml, default_provider=streaming_provider
+    )
+
+    # If batch and streaming are the same provider there is no separate streaming
+    # engine to wire — setup_transcription sets both defaults.stt and stt_stream.
+    # Only pass streaming_provider to init.py when it actually differs from batch.
+    if streaming_provider == transcription_provider:
+        streaming_provider = None
+        console.print(
+            f"[green]✅[/green] Using {transcription_provider} for both batch and streaming"
+        )
+    elif streaming_provider:
+        console.print(
+            f"[blue][INFO][/blue] Batch: {transcription_provider}, "
+            f"streaming: {streaming_provider} (batch-retranscribe enabled)"
+        )
 
     # No streaming ASR (batch-only provider + streaming skipped) → offer windowed batch
     live_segmentation = "streaming_stt"
@@ -1571,6 +1622,12 @@ def main():
         "host"
     )  # None for local (backend defaults to langfuse-web)
 
+    # Browser-accessible URL for Langfuse dashboard deep-links (stored in config.yml).
+    # Derived from server_ip/Tailscale so links don't hardcode localhost.
+    langfuse_public_url = derive_langfuse_public_url(
+        langfuse_mode, langfuse_external, server_ip
+    )
+
     # Determine setup order: langfuse first (to get API keys), then backend (with langfuse keys), then others
     setup_order = []
     if "langfuse" in selected_services:
@@ -1600,6 +1657,7 @@ def main():
             langfuse_public_key=langfuse_public_key,
             langfuse_secret_key=langfuse_secret_key,
             langfuse_host=langfuse_host,
+            langfuse_public_url=langfuse_public_url,
             streaming_provider=streaming_provider,
             llm_provider=llm_provider,
             memory_provider=memory_provider,
@@ -1691,14 +1749,8 @@ def main():
         console.print(
             "[bold cyan]Prompt Management:[/bold cyan] Once services are running, edit AI prompts at:"
         )
-        if https_enabled and server_ip:
-            console.print(
-                f"   [link=https://{server_ip}:3443/project/chronicle/prompts]https://{server_ip}:3443/project/chronicle/prompts[/link]"
-            )
-        else:
-            console.print(
-                "   [link=http://localhost:3002/project/chronicle/prompts]http://localhost:3002/project/chronicle/prompts[/link]"
-            )
+        prompts_url = f"{langfuse_public_url.rstrip('/')}/project/chronicle/prompts"
+        console.print(f"   [link={prompts_url}]{prompts_url}[/link]")
     elif langfuse_mode == "external" and langfuse_host:
         console.print("")
         console.print(

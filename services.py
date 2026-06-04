@@ -93,6 +93,15 @@ SERVICES = {
             ("embeddings", "EMBED_PORT", "8082", "/health"),
         ],
     },
+    "wakeword-service": {
+        "path": "extras/wakeword-service",
+        "compose_file": "docker-compose.yml",
+        "description": "Hermes Acoustic Wake-Word Detection",
+        "ports": ["8770"],
+        "health_endpoints": [
+            ("wakeword", "WAKEWORD_PORT", "8770", "/health"),
+        ],
+    },
 }
 
 
@@ -102,6 +111,7 @@ _DISCOVERY_NAMES = {
     "asr-services": "chronicle-asr",
     "openmemory-mcp": "chronicle-openmemory",
     "llm-services": "chronicle-llm",
+    "wakeword-service": "chronicle-wakeword-service",
 }
 
 
