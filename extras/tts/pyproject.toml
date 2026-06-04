@@ -1,0 +1,79 @@
+[project]
+name = "tts-services"
+version = "0.1.0"
+description = "Provider-based TTS services for Chronicle"
+requires-python = ">=3.10"
+
+dependencies = [
+  "pydantic>=2.0.0",
+  "numpy>=1.26",
+  "soundfile>=0.12",
+  "fastapi>=0.115.12",
+  "uvicorn>=0.34.2",
+  "python-multipart>=0.0.6",
+]
+
+[project.optional-dependencies]
+# CUDA versions for PyTorch (hume-tada requires torch>=2.7)
+cu126 = [
+  "torch>=2.7",
+  "torchaudio>=2.7",
+]
+
+cu128 = [
+  "torch>=2.7",
+  "torchaudio>=2.7",
+]
+
+[tool.uv]
+compile-bytecode = true
+conflicts = [
+  [
+    { extra = "cu126" },
+    { extra = "cu128" },
+  ],
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu126", extra = "cu126" },
+    { index = "pytorch-cu128", extra = "cu128" },
+]
+torchaudio = [
+    { index = "pytorch-cu126", extra = "cu126" },
+    { index = "pytorch-cu128", extra = "cu128" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[dependency-groups]
+# Provider-specific dependency groups
+tada = [
+    "hume-tada>=0.1.0",
+    # descript-audio-codec is a runtime dep of hume-tada but missing from its PyPI metadata
+    "descript-audio-codec>=1.0.0",
+    # Pin transformers <5 to match hume-tada's requirement (5.x breaks Encoder loading)
+    "transformers>=4.57.1,<5",
+]
+
+# Development dependencies
+dev = [
+    "black>=25.1.0",
+    "requests>=2.31.0",
+    "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["common", "providers", "providers.tada", "providers.fish_speech"]

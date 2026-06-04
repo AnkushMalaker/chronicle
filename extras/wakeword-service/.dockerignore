@@ -1,0 +1,11 @@
+*
+!app.py
+!consumer.py
+!detector.py
+!samples.py
+!pyproject.toml
+!README.md
+!models/
+!models/**
+!vendor/
+!vendor/**

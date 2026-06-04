@@ -66,11 +66,11 @@ models:
     model_output: json
 
   - name: gemma4-llm
-    description: Gemma 4 E4B-it (unified model, reuses ASR service)
+    description: Gemma 4 E2B-it (unified model, reuses ASR service)
     model_type: llm
     model_provider: gemma4
     api_family: openai
-    model_name: gemma-4-E4B-it
+    model_name: gemma-4-E2B-it
     model_url: http://${oc.env:GEMMA4_ASR_URL,host.docker.internal:8767}/v1
     api_key: no-key
     model_params:
@@ -167,7 +167,7 @@ models:
             segments: segments
 
   - name: stt-gemma4
-    description: Google Gemma 4 E4B-it (batch, prompt-based diarization)
+    description: Google Gemma 4 E2B-it (batch, prompt-based diarization, MTP)
     model_type: stt
     model_provider: gemma4
     api_family: http
@@ -351,6 +351,29 @@ models:
     api_family: websocket
     model_url: ws://${oc.env:QWEN3_ASR_STREAM_URL,host.docker.internal:8769}
     api_key: ''
+    operations:
+      query: {}
+      end:
+        message:
+          type: CloseStream
+      expect:
+        interim_type: interim
+        final_type: final
+        extract:
+          text: text
+          words: words
+          segments: segments
+
+  - name: stt-gemma4-stream
+    description: Google Gemma 4 E2B-it (streaming-ish, bounded rolling window + MTP)
+    model_type: stt_stream
+    model_provider: gemma4
+    api_family: websocket
+    # Same gemma4-asr service as the batch entry; the /stream path is the WS endpoint.
+    model_url: ws://${oc.env:GEMMA4_ASR_URL,host.docker.internal:8767}/stream
+    api_key: ''
+    capabilities:
+      - diarization
     operations:
       query: {}
       end:

@@ -356,6 +356,27 @@ models:
       final_type: final
       extract:
         text: text
+- name: stt-gemma4-stream
+  description: Google Gemma 4 E2B-it (streaming-ish, bounded rolling window + MTP)
+  model_type: stt_stream
+  model_provider: gemma4
+  api_family: websocket
+  model_url: ws://${oc.env:GEMMA4_ASR_URL,host.docker.internal:8767}/stream
+  api_key: ''
+  capabilities:
+    - diarization
+  operations:
+    query: {}
+    end:
+      message:
+        type: CloseStream
+    expect:
+      interim_type: interim
+      final_type: final
+      extract:
+        text: text
+        words: words
+        segments: segments
 - name: stt-smallest-stream
   description: Smallest.ai Pulse streaming transcription over WebSocket
   model_type: stt_stream

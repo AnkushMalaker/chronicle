@@ -8,6 +8,7 @@ Tone assets live in ``tones/`` and are the Home Assistant Voice PE sounds
 (CC-BY 4.0, see tones/LICENSE.md).
 """
 
+import itertools
 import logging
 import os
 import socket
@@ -19,6 +20,13 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 TONES_DIR = Path(__file__).resolve().parent / "tones"
+
+# Dynamic (TTS) audio is written into TONES_DIR with a "_dyn_" prefix and served
+# by the same HTTP server. Unique names avoid device-side caching; old ones are
+# pruned so the dir doesn't grow without bound.
+_DYN_PREFIX = "_dyn_"
+_DYN_KEEP = 3
+_dyn_seq = itertools.count(1)
 
 # Logical tone name (sent by the backend) -> filename in tones/
 TONE_FILES: dict[str, str] = {
@@ -79,3 +87,26 @@ def tone_url(tone: str, port: int = _DEFAULT_PORT) -> str | None:
         logger.warning("Tone file missing: %s", TONES_DIR / filename)
         return None
     return f"{ensure_tone_server(port)}/{filename}"
+
+
+def _prune_dynamic() -> None:
+    """Keep only the newest _DYN_KEEP dynamic audio files."""
+    files = sorted(TONES_DIR.glob(f"{_DYN_PREFIX}*"), key=lambda p: p.stat().st_mtime)
+    for old in files[:-_DYN_KEEP]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
+def serve_audio_bytes(data: bytes, ext: str = "wav", port: int = _DEFAULT_PORT) -> str:
+    """Write audio bytes to a uniquely-named local file and return its served URL.
+
+    Used for backend-generated audio (e.g. TTS) that the device must fetch on the
+    LAN because it cannot reach the backend directly.
+    """
+    base = ensure_tone_server(port)
+    name = f"{_DYN_PREFIX}{next(_dyn_seq)}.{ext}"
+    (TONES_DIR / name).write_bytes(data)
+    _prune_dynamic()
+    return f"{base}/{name}"

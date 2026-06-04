@@ -6,6 +6,7 @@ relay (main.py) and the macOS menu bar relay (menu_relay.py).
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -16,7 +17,11 @@ import httpx
 import websockets
 from device_controller import DeviceController
 from dotenv import load_dotenv
-from tone_server import tone_url
+from tone_server import serve_audio_bytes, tone_url
+
+# Max backend→relay WS frame. Bumped above the websockets 1 MiB default so larger
+# inline TTS audio payloads (play-audio audio_b64) are not rejected.
+_WS_MAX_SIZE = 16 * 1024 * 1024
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -159,10 +164,29 @@ async def handle_backend_messages(ws, device: DeviceController) -> None:
         data = msg.get("data", {})
 
         if msg_type == "play-audio":
-            url = data.get("url", "")
             announcement = data.get("announcement", True)
-            logger.info("Backend→device: play-audio %s", url)
-            await device.play_audio(url, announcement=announcement)
+            url = data.get("url", "")
+            audio_b64 = data.get("audio_b64", "")
+            if audio_b64:
+                # Backend-generated audio (e.g. TTS): the device can't reach the
+                # backend, so serve the bytes locally on the LAN.
+                try:
+                    audio = base64.b64decode(audio_b64)
+                    url = serve_audio_bytes(audio, ext=data.get("format", "wav"))
+                    logger.info(
+                        "Backend→device: play-audio (%d bytes) → %s", len(audio), url
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Backend→device: failed to stage play-audio bytes: %s", e
+                    )
+                    url = ""
+            else:
+                logger.info("Backend→device: play-audio %s", url)
+            if url:
+                await device.play_audio(url, announcement=announcement)
+            else:
+                logger.warning("Backend→device: play-audio with no url/audio_b64")
 
         elif msg_type == "play-tone":
             tone = data.get("tone", "")
@@ -262,7 +286,7 @@ async def run_device_session(
     tasks: list[asyncio.Task] = []
 
     try:
-        async with websockets.connect(backend_uri) as ws:
+        async with websockets.connect(backend_uri, max_size=_WS_MAX_SIZE) as ws:
             logger.info("Backend WS connected, starting bidirectional bridge")
 
             esphome_ip = config.esphome_device_ip or device_ip

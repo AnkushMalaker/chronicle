@@ -1,0 +1,48 @@
+services:
+  wakeword-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${CHRONICLE_REGISTRY:-}chronicle-wakeword:${CHRONICLE_TAG:-latest}
+    container_name: chronicle-wakeword-service
+    ports:
+      # Host 8771 (8770 is taken by the kittentts service); container stays 8770.
+      - "${WAKEWORD_PORT:-8771}:8770"
+    environment:
+      # Shares the backend's Redis (same chronicle-network).
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - WAKEWORD_MODEL_PATH=/app/models/hey_hermes.onnx
+      - SMART_TURN_MODEL_PATH=/app/models/smart-turn-v3.2-cpu.onnx
+      - SILERO_VAD_MODEL_PATH=/app/models/silero_vad.onnx
+      - WAKEWORD_THRESHOLD=${WAKEWORD_THRESHOLD:-0.9}
+      - WAKEWORD_PATIENCE=${WAKEWORD_PATIENCE:-2}
+      - WAKEWORD_SCORE_LOG=${WAKEWORD_SCORE_LOG:-0}
+      - WAKEWORD_DEBOUNCE_SECS=${WAKEWORD_DEBOUNCE_SECS:-3.0}
+      - WAKEWORD_VAD_THRESHOLD=${WAKEWORD_VAD_THRESHOLD:-0.5}
+      - WAKEWORD_STOP_SECS=${WAKEWORD_STOP_SECS:-2.0}
+      - WAKEWORD_MAX_ARM_SECS=${WAKEWORD_MAX_ARM_SECS:-15.0}
+      - WAKEWORD_DATA_DIR=/app/data/samples
+      - WAKEWORD_PRIME_TIMEOUT_SECS=${WAKEWORD_PRIME_TIMEOUT_SECS:-12.0}
+      - WAKEWORD_PRIME_TRAIL_SILENCE_SECS=${WAKEWORD_PRIME_TRAIL_SILENCE_SECS:-0.6}
+      - WAKEWORD_PRIME_MAX_SECS=${WAKEWORD_PRIME_MAX_SECS:-4.0}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    # Mount models read-write during dev so a freshly trained hermes.onnx can be
+    # dropped in without rebuilding the image. Remove for an immutable image.
+    # ./data holds captured wake-word clips (the training flywheel) — persisted
+    # on the host so labeled positives/negatives survive rebuilds and feed
+    # training/ingest_samples.py directly.
+    volumes:
+      - ./models:/app/models
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8770/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+networks:
+  default:
+    name: chronicle-network
+    external: true
