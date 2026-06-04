@@ -139,7 +139,7 @@ services:
     restart: unless-stopped
 
   # ============================================================================
-  # Gemma 4 Provider (Google Gemma 4 E4B-it with prompt-based diarization)
+  # Gemma 4 Provider (Google Gemma 4 E2B-it with prompt-based diarization)
   # ============================================================================
   gemma4-asr:
     build:
@@ -169,12 +169,24 @@ services:
       # falling back to the local cache. Default 0 so first-run can still download.
       - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}
       - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-0}
-      - ASR_MODEL=${GEMMA4_MODEL:-google/gemma-4-E4B-it}
+      - ASR_MODEL=${GEMMA4_MODEL:-google/gemma-4-E2B-it}
       - DEVICE=${DEVICE:-cuda}
-      # Gemma4 ~7B-class: stay on bf16 unless explicitly overridden via GEMMA4_TORCH_DTYPE.
+      # Gemma4 bf16 compute dtype (quantization is set by GEMMA4_QUANT below).
       # Don't inherit the global TORCH_DTYPE — that fp16-overflows on Gemma4 the same
       # way it did on AF-Next (see asr_provider_landscape memory).
       - TORCH_DTYPE=${GEMMA4_TORCH_DTYPE:-bfloat16}
+      # E2B is ~10GB in bf16, so default to full precision on a 24GB GPU.
+      # bf16 (default) | 8bit | 4bit (for smaller GPUs).
+      - GEMMA4_QUANT=${GEMMA4_QUANT:-bf16}
+      # Multi-Token Prediction: a small text-only "-assistant" drafter speculatively
+      # decodes (~1.6x on ASR, no quality change). Set 0 to disable; override the
+      # drafter repo with GEMMA4_ASSISTANT_MODEL (default: "${ASR_MODEL}-assistant").
+      - GEMMA4_MTP=${GEMMA4_MTP:-1}
+      - GEMMA4_ASSISTANT_MODEL=${GEMMA4_ASSISTANT_MODEL:-}
+      # Streaming (/stream WS): re-decode the last WINDOW seconds every INTERVAL
+      # seconds for interim previews; one full transcription on stream end.
+      - GEMMA4_STREAM_INTERVAL_SECONDS=${GEMMA4_STREAM_INTERVAL_SECONDS:-4}
+      - GEMMA4_STREAM_WINDOW_SECONDS=${GEMMA4_STREAM_WINDOW_SECONDS:-30}
       - MAX_NEW_TOKENS=${GEMMA4_MAX_NEW_TOKENS:-512}
       - BATCH_THRESHOLD_SECONDS=${GEMMA4_BATCH_THRESHOLD_SECONDS:-30}
       - BATCH_DURATION_SECONDS=${GEMMA4_BATCH_DURATION_SECONDS:-30}

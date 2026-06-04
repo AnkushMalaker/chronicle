@@ -113,11 +113,13 @@ PROVIDERS = {
     },
     "gemma4": {
         "name": "Gemma 4",
-        "description": "Google Gemma 4 E4B-it multimodal (prompt-based diarization, 30s chunks)",
+        "description": "Google Gemma 4 E2B multimodal (prompt-based diarization, MTP-accelerated)",
         "models": {
+            "google/gemma-4-E2B-it": "Gemma 4 E2B-it (~10GB VRAM at BF16 + MTP, fits 24GB)",
             "google/gemma-4-E4B-it": "Gemma 4 E4B-it (8B, ~17GB VRAM at BF16)",
+            "google/gemma-4-12B-it": "Gemma 4 12B-it (~9GB VRAM at 4-bit + MTP, fits 24GB)",
         },
-        "default_model": "google/gemma-4-E4B-it",
+        "default_model": "google/gemma-4-E2B-it",
         "service": "gemma4-asr",
         "capabilities": ["timestamps", "diarization"],
     },
