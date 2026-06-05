@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Dict
 
 import redis.asyncio as redis
@@ -35,6 +36,28 @@ logger = logging.getLogger(__name__)
 STREAM_PATTERN = "audio:stream:*"
 GROUP_NAME = "wakeword_detection"
 DETECTIONS_STREAM = "wakeword:detections"
+
+# Notification tones (HA Voice PE sounds, CC-BY 4.0 — see tones/LICENSE.md),
+# served to devices as inline ``play-audio`` bytes. The HAVPE relay also accepts
+# ``play-tone`` (its own bundled, low-latency path), but the phone app only
+# understands ``play-audio``; sending the bytes works for both device types.
+_TONES_DIR = Path(__file__).resolve().parent / "tones"
+_TONE_FILES = {"armed": "armed.wav", "done": "done.wav"}  # logical name -> file
+
+
+def _load_tones() -> Dict[str, str]:
+    """Load each tone as a base64 ``play-audio`` payload once at import."""
+    loaded: Dict[str, str] = {}
+    for name, filename in _TONE_FILES.items():
+        path = _TONES_DIR / filename
+        try:
+            loaded[name] = base64.b64encode(path.read_bytes()).decode("ascii")
+        except OSError as e:  # noqa: BLE001 - a missing tone must not break detection
+            logger.warning("Tone '%s' unavailable (%s): %s", name, path, e)
+    return loaded
+
+
+_TONE_B64 = _load_tones()
 
 # Stop processing a stream after this long with no new chunks (zombie guard).
 STREAM_IDLE_TIMEOUT_SECONDS = 300
@@ -356,7 +379,7 @@ class WakeWordConsumer:
             },
         )
         # Play the "processing" tone on the device the moment the turn ends.
-        await self._publish_downlink(event.client_id, "play-tone", {"tone": "done"})
+        await self._send_tone(event.client_id, "done")
         payload = {
             "client_id": event.client_id,
             "session_id": event.session_id,
@@ -394,8 +417,24 @@ class WakeWordConsumer:
             },
         )
         # Play the "listening" tone on the device the instant the wake word arms.
-        await self._publish_downlink(client_id, "play-tone", {"tone": "armed"})
+        await self._send_tone(client_id, "armed")
         logger.info(f"🔔 wake.armed SSE for '{client_id}'")
+
+    async def _send_tone(self, client_id: str, tone: str) -> None:
+        """Play a notification tone on the device via inline ``play-audio`` bytes.
+
+        Sent as ``play-audio`` (not ``play-tone``) so both the phone app and the
+        HAVPE relay play it — the phone has no ``play-tone`` handler. Best-effort:
+        a missing tone asset just means no sound.
+        """
+        audio_b64 = _TONE_B64.get(tone)
+        if not audio_b64:
+            return
+        await self._publish_downlink(
+            client_id,
+            "play-audio",
+            {"audio_b64": audio_b64, "format": "wav", "announcement": True},
+        )
 
     async def _publish_downlink(
         self, client_id: str, msg_type: str, data: dict

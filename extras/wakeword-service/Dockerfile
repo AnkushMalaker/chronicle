@@ -42,6 +42,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # Service code + vendored ONNX models (hermes.onnx, smart-turn, silero, feature).
 COPY app.py consumer.py detector.py samples.py ./
 COPY models ./models
+COPY tones ./tones
 
 # Pre-place the nanowakeword feature ONNX (melspec + embedding) into the package
 # location the NanoInterpreter expects, so no network fetch happens at runtime.

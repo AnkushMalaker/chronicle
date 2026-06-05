@@ -9,3 +9,5 @@
 !models/**
 !vendor/
 !vendor/**
+!tones/
+!tones/**
