@@ -20,10 +20,15 @@ import time
 from typing import Dict
 
 import redis.asyncio as redis
+from detector import (
+    RECEPTIVE_FIELD_SECONDS,
+    SAMPLE_RATE,
+    ClientWakeState,
+    HermesDetector,
+    WakeEvent,
+)
 from redis import exceptions as redis_exceptions
-
-from detector import SAMPLE_RATE, ClientWakeState, HermesDetector, WakeEvent
-from samples import PENDING, POSITIVE, SampleStore
+from samples import PENDING, SampleStore
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +38,15 @@ DETECTIONS_STREAM = "wakeword:detections"
 
 # Stop processing a stream after this long with no new chunks (zombie guard).
 STREAM_IDLE_TIMEOUT_SECONDS = 300
+
+# Dev: persist the interpreter buffer state at arm (embeddings + ~10 s raw audio)
+# alongside each captured clip, so a false positive is exactly reproducible
+# offline. On by default; set WAKEWORD_SAVE_BUFFER_STATE=0 to disable.
+SAVE_BUFFER_STATE = os.getenv("WAKEWORD_SAVE_BUFFER_STATE", "1").lower() not in (
+    "0",
+    "false",
+    "no",
+)
 
 
 class WakeWordConsumer:
@@ -84,6 +98,19 @@ class WakeWordConsumer:
         self.detector.start_priming(state, client_id)
         return True
 
+    def unprime(self, client_id: str) -> bool:
+        """Manually end an in-progress prime capture (UI 'stop'). False if unknown.
+
+        The per-stream task finalizes and saves on its next frame, so the captured
+        attempt always lands in the review queue rather than being dropped.
+        """
+        state = self._states.get(client_id)
+        task = self._stream_tasks.get(client_id)
+        if state is None or task is None or task.done():
+            return False
+        self.detector.stop_priming(state)
+        return True
+
     async def start(self) -> None:
         """Connect to Redis and run the discovery + processing loop."""
         self.redis_client = redis.from_url(self.redis_url)
@@ -104,8 +131,17 @@ class WakeWordConsumer:
 
     async def _discover_and_spawn(self) -> None:
         streams = await self._discover_streams()
+        live_clients: set[str] = set()
         for stream_name in streams:
             client_id = stream_name.replace("audio:stream:", "")
+            # A device that drops without a clean end-marker leaves its
+            # audio:stream key behind (session stuck "active"). Without this
+            # check we'd re-spawn a task for that dead key every time the
+            # previous one idled out, so it perpetually shows as an "active
+            # stream". Only process streams that got a chunk recently.
+            if not await self._stream_is_live(stream_name):
+                continue
+            live_clients.add(client_id)
             task = self._stream_tasks.get(client_id)
             if task is None or task.done():
                 if task is not None and task.done():
@@ -116,6 +152,37 @@ class WakeWordConsumer:
                 self._stream_tasks[client_id] = asyncio.create_task(
                     self._process_stream(stream_name, client_id)
                 )
+        # Reap tasks whose stream is gone or has gone stale, so they stop being
+        # reported as active streams (and free their per-client detector state).
+        for client_id, task in list(self._stream_tasks.items()):
+            if task.done():
+                self._stream_tasks.pop(client_id, None)
+            elif client_id not in live_clients:
+                logger.info(f"Reaping wake stream task for stale '{client_id}'")
+                task.cancel()
+                self._stream_tasks.pop(client_id, None)
+
+    async def _stream_is_live(self, stream_name: str) -> bool:
+        """True if the stream received a chunk within the idle window.
+
+        Redis stream entry ids are wall-clock-ms based (server-assigned on XADD),
+        so the last entry's id tells us how long ago audio last arrived — the
+        signal that distinguishes a live stream from an abandoned one whose key
+        Redis still holds.
+        """
+        try:
+            entries = await self.redis_client.xrevrange(stream_name, count=1)
+        except redis_exceptions.ResponseError:
+            return False
+        if not entries:
+            return False
+        last_id = entries[0][0]
+        last_id = last_id.decode() if isinstance(last_id, bytes) else last_id
+        try:
+            ts_ms = int(last_id.split("-")[0])
+        except (ValueError, IndexError):
+            return False
+        return (time.time() * 1000 - ts_ms) < STREAM_IDLE_TIMEOUT_SECONDS * 1000
 
     async def _discover_streams(self) -> list[str]:
         streams: list[str] = []
@@ -210,8 +277,10 @@ class WakeWordConsumer:
         """Route a captured event: persist training data and (for real arms)
         dispatch the command to the Hermes plugin via Redis."""
         if event.kind == "primed_positive":
-            # Known-good wake utterance from the "prime + say it" flow -> positive set.
-            self._save_sample(POSITIVE, event, event.audio)
+            # "Prime + say it" capture -> review queue (pending), same as a real
+            # arm, so the user confirms wake / not-wake before it rolls into
+            # training. Rescued false-negatives become positives once labeled.
+            self._save_sample(PENDING, event, event.audio)
             return
         # Real acoustic arm: snapshot the trigger window for false-positive review,
         # then forward the command turn to Hermes exactly as before.
@@ -229,15 +298,38 @@ class WakeWordConsumer:
             "reason": event.reason,
             "kind": event.kind,
             "source": "prime" if event.kind == "primed_positive" else "arm",
+            # The model's receptive field is ~1.96 s, and the arm fires at the END
+            # of the pre-roll, so the activation is the LAST ~1.96 s of this clip.
+            "activation_window_secs": RECEPTIVE_FIELD_SECONDS,
+            "activation_at": "end",
         }
         if event.kind == "primed_positive":
+            # Left UNLABELED so it surfaces in the pending review queue; the score
+            # still flags whether the live model under-scored this utterance.
             meta["false_negative"] = event.is_false_negative
-            meta["label"] = "wake"
+        else:
+            # Real arm: record whether the captured turn held speech. A near-silent
+            # arm (has_speech=False) is a false positive whose command ASR the
+            # backend skipped — flagged here so it's visible in the review store.
+            meta["has_speech"] = event.has_speech
+        # Dev: attach the interpreter buffer state captured at arm so the FP is
+        # exactly reproducible offline (command arms only carry it).
+        features = event.buffer_features if SAVE_BUFFER_STATE else None
+        context_pcm = event.buffer_context if SAVE_BUFFER_STATE else None
         try:
             rec = self.sample_store.save(
-                bucket, pcm, SAMPLE_RATE, int(time.time() * 1000), meta
+                bucket,
+                pcm,
+                SAMPLE_RATE,
+                int(time.time() * 1000),
+                meta,
+                features=features,
+                context_pcm=context_pcm,
             )
-            logger.info(f"💾 saved {bucket} sample {rec['id']} ({len(pcm)}B)")
+            logger.info(
+                f"💾 saved {bucket} sample {rec['id']} ({len(pcm)}B"
+                f"{', +buffer-state' if rec.get('has_buffer_state') else ''})"
+            )
         except (
             Exception
         ) as e:  # noqa: BLE001 - data collection must never break dispatch
@@ -273,6 +365,7 @@ class WakeWordConsumer:
             "reason": event.reason,
             "sample_rate": SAMPLE_RATE,
             "audio_b64": base64.b64encode(event.audio).decode("ascii"),
+            "has_speech": event.has_speech,
             "detected_at": time.time(),
         }
         await self.redis_client.xadd(

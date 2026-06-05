@@ -671,6 +671,9 @@ export const wakewordApi = {
   // No client_id -> backend primes the caller's active recorder stream.
   prime: (client_id?: string) =>
     api.post('/api/wakeword/prime', client_id ? { client_id } : {}),
+  // Manually end an in-progress prime; the captured attempt is saved to pending.
+  unprime: (client_id?: string) =>
+    api.post('/api/wakeword/unprime', client_id ? { client_id } : {}),
   getSamples: (bucket: 'pending' | 'positive' | 'negative') =>
     api.get<{ bucket: string; samples: WakeSample[] }>('/api/wakeword/samples', {
       params: { bucket },

@@ -126,6 +126,43 @@ async def prime(req: PrimeRequest, current_user: User = Depends(current_active_u
     return resp.json()
 
 
+@router.post("/unprime")
+async def unprime(req: PrimeRequest, current_user: User = Depends(current_active_user)):
+    """Manually end an in-progress prime capture (the Lab 'stop' button).
+
+    Mirrors :func:`prime`'s stream resolution/ownership so the button can call it
+    with the same (optional) ``client_id``.
+    """
+    async with _client() as client:
+        try:
+            client_id = req.client_id
+            if client_id is None:
+                streams_resp = await client.get("/streams")
+                streams_resp.raise_for_status()
+                owned = [
+                    s.get("client_id", "")
+                    for s in streams_resp.json().get("streams", [])
+                    if _owns(current_user, s.get("client_id", ""))
+                ]
+                if not owned:
+                    raise HTTPException(
+                        status_code=404, detail="No active stream to stop."
+                    )
+                client_id = next((c for c in owned if "recorder" in c), owned[0])
+            elif not _owns(current_user, client_id):
+                raise HTTPException(status_code=403, detail="Not your stream")
+
+            resp = await client.post("/unprime", json={"client_id": client_id})
+            if resp.status_code == 404:
+                raise HTTPException(status_code=404, detail=resp.json().get("detail"))
+            resp.raise_for_status()
+        except httpx.HTTPError as e:
+            raise HTTPException(
+                status_code=503, detail=f"Wake-word service unreachable: {e}"
+            )
+    return resp.json()
+
+
 @router.get("/samples")
 async def list_samples(
     bucket: str = Query("pending"),

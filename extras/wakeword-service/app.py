@@ -16,12 +16,11 @@ import os
 from contextlib import asynccontextmanager
 
 import uvicorn
+from consumer import DETECTIONS_STREAM, GROUP_NAME, WakeWordConsumer
+from detector import HermesDetector
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel
-
-from consumer import DETECTIONS_STREAM, GROUP_NAME, WakeWordConsumer
-from detector import HermesDetector
 from samples import BUCKETS, SampleStore
 
 logging.basicConfig(
@@ -47,13 +46,22 @@ STOP_SECS = float(os.getenv("WAKEWORD_STOP_SECS", "6.0"))
 EOT_MIN_SILENCE_SECS = float(os.getenv("WAKEWORD_EOT_MIN_SILENCE_SECS", "0.2"))
 EOT_RECHECK_SECS = float(os.getenv("WAKEWORD_EOT_RECHECK_SECS", "0.3"))
 MAX_ARM_SECS = float(os.getenv("WAKEWORD_MAX_ARM_SECS", "15.0"))
+# Minimum spoken (VAD) speech a captured command must contain to be sent for
+# batch ASR. Below this the capture is a near-silent false arm; the backend skips
+# transcription so self-diarizing ASR can't hallucinate a phantom command.
+MIN_COMMAND_SPEECH_SECS = float(os.getenv("WAKEWORD_MIN_COMMAND_SPEECH_SECS", "0.3"))
 SERVICE_PORT = int(os.getenv("WAKEWORD_SERVICE_PORT", "8770"))
 # Root for the data-collection clip store (mounted volume in docker-compose).
 DATA_DIR = os.getenv("WAKEWORD_DATA_DIR", "/app/data/samples")
-# "Prime + say it" capture tuning (data collection).
-PRIME_TIMEOUT_SECS = float(os.getenv("WAKEWORD_PRIME_TIMEOUT_SECS", "12.0"))
+# "Prime + say it" capture tuning (data collection). Hard upper bound of 10 s
+# on the whole priming session; the utterance itself caps at PRIME_MAX_SECS and
+# normally ends a beat after a trailing-silence gap (so capture lands in ~5 s).
+PRIME_TIMEOUT_SECS = float(os.getenv("WAKEWORD_PRIME_TIMEOUT_SECS", "10.0"))
 PRIME_TRAIL_SILENCE_SECS = float(os.getenv("WAKEWORD_PRIME_TRAIL_SILENCE_SECS", "0.6"))
 PRIME_MAX_SECS = float(os.getenv("WAKEWORD_PRIME_MAX_SECS", "4.0"))
+# VAD gate while priming — dropped well below the live VAD threshold so the
+# known-incoming utterance is auto-caught even when spoken softly.
+PRIME_VAD_THRESHOLD = float(os.getenv("WAKEWORD_PRIME_VAD_THRESHOLD", "0.3"))
 # Optional explicit ONNX paths (vendored into models/). Empty -> pipecat bundle.
 SMART_TURN_MODEL_PATH = os.getenv("SMART_TURN_MODEL_PATH", "") or None
 SILERO_VAD_MODEL_PATH = os.getenv("SILERO_VAD_MODEL_PATH", "") or None
@@ -107,6 +115,8 @@ async def lifespan(app: FastAPI):
         prime_timeout_secs=PRIME_TIMEOUT_SECS,
         prime_trail_silence_secs=PRIME_TRAIL_SILENCE_SECS,
         prime_max_secs=PRIME_MAX_SECS,
+        prime_vad_threshold=PRIME_VAD_THRESHOLD,
+        min_command_speech_secs=MIN_COMMAND_SPEECH_SECS,
     )
     store = SampleStore(DATA_DIR)
     app.state.store = store
@@ -227,6 +237,22 @@ async def prime(req: PrimeRequest):
             detail=f"No active stream '{req.client_id}' to prime",
         )
     return {"client_id": req.client_id, "primed": True}
+
+
+@app.post("/unprime")
+async def unprime(req: PrimeRequest):
+    """Manually end an in-progress prime capture (the UI 'stop' button).
+
+    Finalizes whatever was heard so far and saves it for review — the capture is
+    never silently dropped.
+    """
+    consumer: WakeWordConsumer = app.state.consumer
+    if not consumer.unprime(req.client_id):
+        raise HTTPException(
+            status_code=404,
+            detail=f"No priming stream '{req.client_id}' to stop",
+        )
+    return {"client_id": req.client_id, "unprimed": True}
 
 
 @app.get("/samples")

@@ -95,6 +95,7 @@
           }
         }
       ],
+      "expo-audio",
       [
         "expo-build-properties",
         {

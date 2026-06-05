@@ -4,6 +4,7 @@ import { PermissionsAndroid, Platform } from 'react-native';
 import notifee, { AndroidImportance } from '@notifee/react-native';
 import NetInfo from '@react-native-community/netinfo';
 import { getAuthEmail, getAuthPassword, getWebSocketUrl, saveJwtToken } from '../utils/storage';
+import { playDownlinkAudio } from '../utils/audioPlayback';
 
 interface UseAudioStreamerOptions {
   /** Called when a new JWT token is obtained via auto-re-login */
@@ -352,6 +353,14 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
               console.warn(`[AudioStreamer] Auth error from server: ${msg.error} — ${msg.message}`);
               authFailedRef.current = true;
               setStateSafe(setError, msg.message || 'Session expired. Re-authenticating...');
+              return;
+            }
+            // Backend→device downlink: play synthesized audio (e.g. TTS reply)
+            // out of the phone speaker, just like the HAVPE relay does on-device.
+            if (msg.type === 'play-audio' && msg.data) {
+              playDownlinkAudio(msg.data).catch((e) =>
+                console.warn('[AudioStreamer] Failed to play downlink audio:', e)
+              );
               return;
             }
           } catch {

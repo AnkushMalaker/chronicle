@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Mic, Radio, Trash2, Check, X, RefreshCw, Target, AlertTriangle } from 'lucide-react'
+import { Mic, Radio, Trash2, Check, X, RefreshCw, Target, AlertTriangle, Square } from 'lucide-react'
 import { wakewordApi, WakeStream, WakeSample } from '../services/api'
 
 type Bucket = 'pending' | 'positive' | 'negative'
@@ -18,6 +18,11 @@ export default function WakeWordLab() {
   const [error, setError] = useState<string | null>(null)
   const [primedMsg, setPrimedMsg] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  // Latest selected bucket + whether any stream was priming on the previous poll,
+  // read inside the polling callback without re-creating the interval.
+  const bucketRef = useRef<Bucket>(bucket)
+  const wasPrimingRef = useRef(false)
+  useEffect(() => { bucketRef.current = bucket }, [bucket])
 
   const refreshSamples = useCallback(async (b: Bucket) => {
     try {
@@ -34,10 +39,18 @@ export default function WakeWordLab() {
       setStreams(s.data.streams)
       setStats(st.data)
       setError(null)
+      // A prime session that just ended has dropped its clip into pending review —
+      // pull the current bucket so the capture shows up without a manual refresh.
+      const anyPriming = s.data.streams.some((x) => x.priming)
+      if (wasPrimingRef.current && !anyPriming) {
+        refreshSamples(bucketRef.current)
+        setPrimedMsg(null)
+      }
+      wasPrimingRef.current = anyPriming
     } catch (e: any) {
       setError(e?.response?.data?.detail || 'Wake-word service unreachable')
     }
-  }, [])
+  }, [refreshSamples])
 
   const refreshAll = useCallback(async () => {
     setLoading(true)
@@ -56,11 +69,25 @@ export default function WakeWordLab() {
   const prime = async (clientId?: string) => {
     try {
       const { data } = await wakewordApi.prime(clientId)
-      setPrimedMsg(`Primed ${data.client_id} — say "hey hermes" now…`)
-      setTimeout(() => setPrimedMsg(null), 12000)
+      // The capture lands in pending review — show that tab so it's visible.
+      setBucket('pending')
+      setPrimedMsg(`Primed ${data.client_id} — say "hey hermes" now (auto-stops in 10s)…`)
+      setTimeout(() => setPrimedMsg(null), 10000)
       refreshMeta()
     } catch (e: any) {
       setError(e?.response?.data?.detail || 'Could not prime stream')
+    }
+  }
+
+  const stopPrime = async (clientId: string) => {
+    try {
+      await wakewordApi.unprime(clientId)
+      setPrimedMsg(null)
+      // The finalize+save happens on the next audio frame (~0.25s); give it a beat
+      // then pull streams + the pending list so the clip appears.
+      setTimeout(() => Promise.all([refreshMeta(), refreshSamples('pending')]), 500)
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || 'Could not stop priming')
     }
   }
 
@@ -144,13 +171,21 @@ export default function WakeWordLab() {
                     </span>
                   )}
                 </span>
-                <button
-                  onClick={() => prime(s.client_id)}
-                  disabled={s.priming}
-                  className="flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-                >
-                  <Target className="h-3.5 w-3.5" /> I'll say it now
-                </button>
+                {s.priming ? (
+                  <button
+                    onClick={() => stopPrime(s.client_id)}
+                    className="flex items-center gap-1.5 rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700"
+                  >
+                    <Square className="h-3.5 w-3.5" /> Stop &amp; save
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => prime(s.client_id)}
+                    className="flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
+                  >
+                    <Target className="h-3.5 w-3.5" /> I'll say it now
+                  </button>
+                )}
               </li>
             ))}
           </ul>
