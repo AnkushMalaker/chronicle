@@ -16,6 +16,7 @@
     "@siteed/expo-audio-studio": "^2.18.6",
     "deprecated-react-native-prop-types": "^5.0.0",
     "expo": "~55.0.15",
+    "expo-audio": "~55.0.14",
     "expo-build-properties": "~55.0.13",
     "expo-camera": "~55.0.15",
     "expo-constants": "~55.0.14",
@@ -38,8 +39,7 @@
     "react-native-safe-area-context": "~5.6.2",
     "react-native-screens": "~4.23.0",
     "setimmediate": "^1.0.5",
-    "webidl-conversions": "^7.0.0",
-    "expo-audio": "~0.4.9"
+    "webidl-conversions": "^7.0.0"
   },
   "devDependencies": {
     "@babel/core": "^7.20.0",
