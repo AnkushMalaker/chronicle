@@ -2,7 +2,7 @@
   "expo": {
     "name": "chronicle",
     "slug": "friend-lite-app",
-    "version": "1.0.3",
+    "version": "1.0.6",
     "scheme": "chronicle",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -64,6 +64,7 @@
           "enableBackgroundAudio": true,
           "enableDeviceDetection": true,
           "iosBackgroundModes": {
+            "useAudio": true,
             "useProcessing": true
           },
           "iosConfig": {
