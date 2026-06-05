@@ -42,10 +42,17 @@ VAD_FRAME_SAMPLES = 512  # Silero requires exactly 512 samples @ 16 kHz
 # directly yields a flat 0.0 score — the live frames MUST be reframed to 1280.
 WAKE_FRAME_SAMPLES = 1280
 
+# The wake model scores a 16-embedding-frame window = 80 ms stride × 15 + 760 ms
+# embedding window = 1.96 s of audio (its receptive field). A captured clip must
+# cover at least this to reproduce a detection; cold-streaming reproduction is
+# also alignment-sensitive, so we keep a margin.
+RECEPTIVE_FIELD_SECONDS = 1.96
 # Rolling pre-roll kept per client so that on an arm we can snapshot the audio
 # that *caused* it (the wake-word window) for false-positive review — separate
-# from the command turn that follows.
-PREROLL_SECONDS = 1.5
+# from the command turn that follows. Sized to 3 s (> the 1.96 s receptive field
+# + lead-in) so the snapshot reproduces the detection standalone; the model
+# activation itself is the LAST ~1.96 s of the clip (the arm fires at its end).
+PREROLL_SECONDS = 3.0
 PREROLL_SAMPLES = int(PREROLL_SECONDS * SAMPLE_RATE)
 # Lead-in pulled from the pre-roll when a primed positive capture starts, so the
 # very start of the utterance isn't clipped at speech onset.
@@ -65,6 +72,11 @@ class ClientWakeState:
     # Smart Turn analyzer is per-client (it holds an audio buffer + thread).
     turn_analyzer: Optional[LocalSmartTurnAnalyzerV3] = None
     vad_model: Optional[SileroOnnxModel] = None
+    # Per-client wake interpreter. NanoInterpreter holds a STREAMING feature
+    # buffer (raw audio -> mel -> 96-d embeddings) that spans ~2 s of context, so
+    # it must not be shared across clients/streams — a shared one interleaves
+    # unrelated audio and produces spurious scores.
+    interpreter: Optional["NanoInterpreter"] = None
     # Leftover PCM samples not yet aligned to a 512-sample VAD frame.
     vad_remainder: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.int16)
@@ -75,6 +87,10 @@ class ClientWakeState:
     )
     # Raw int16 PCM of the armed command turn (arm -> EOT), for batch ASR.
     capture_chunks: list = field(default_factory=list)
+    # Count of VAD speech frames seen during this armed capture. Used to gate the
+    # backend's batch ASR: near-silent captures (a false arm with nothing spoken)
+    # make self-diarizing ASR hallucinate, so we flag them and skip transcription.
+    capture_speech_frames: int = 0
     # Semantic end-of-turn (Smart Turn) tracking within an armed capture: have we
     # heard speech yet, how many consecutive silent VAD frames since, and the
     # silence-frame count at which to next query the Smart Turn model.
@@ -86,9 +102,17 @@ class ClientWakeState:
     preroll_len: int = 0
     # Snapshot of the trigger window taken at arm time (for false-positive review).
     trigger_audio: bytes = b""
+    # Dev capture: interpreter buffer state snapshotted at arm. The model's ~2 s
+    # receptive field exceeds the 1.5 s trigger_audio window, so a cold replay of
+    # trigger_audio alone often won't reproduce the live score. These make an arm
+    # exactly reproducible offline: trigger_features = the (N, 96) embedding buffer
+    # the wake model scored on; trigger_context = the full ~10 s raw-audio buffer.
+    trigger_features: Optional[np.ndarray] = None
+    trigger_context: bytes = b""
     # --- "prime + say it" positive-capture mode (data collection) ---
     priming: bool = False
-    prime_deadline: float = 0.0  # monotonic; cancel if no speech heard by then
+    prime_start: float = 0.0  # monotonic; whole-session hard-cap reference
+    prime_stop_requested: bool = False  # manual "end now" from the UI
     prime_speech_started: bool = False
     prime_chunks: list = field(default_factory=list)
     prime_silence_run: int = 0  # consecutive silent VAD frames after speech began
@@ -116,10 +140,19 @@ class WakeEvent:
     score: float
     reason: str  # "smart_turn" | "max_duration" | "stream_end" | "primed" | ...
     kind: str = "command"  # "command" | "primed_positive"
+    # Whether VAD heard enough speech in the captured turn to be worth batch-ASR.
+    # False for near-silent false arms — the backend skips transcription so the
+    # ASR can't hallucinate a phantom command. (command kind only.)
+    has_speech: bool = True
     # Wake-trigger window captured at arm (command kind only), for FP review.
     trigger_audio: bytes = b""
     # primed_positive only: did the live model under-score this true positive?
     is_false_negative: bool = False
+    # Dev capture (command kind): interpreter buffer state at arm, so the arm is
+    # reproducible offline. buffer_features = (N, 96) embeddings the wake model
+    # scored on; buffer_context = full ~10 s raw-audio buffer (int16 PCM bytes).
+    buffer_features: Optional[np.ndarray] = None
+    buffer_context: bytes = b""
 
 
 class HermesDetector:
@@ -138,9 +171,11 @@ class HermesDetector:
         silero_vad_model_path: Optional[str] = None,
         eot_min_silence_secs: float = 0.2,
         eot_recheck_secs: float = 0.3,
-        prime_timeout_secs: float = 12.0,
+        prime_timeout_secs: float = 10.0,
         prime_trail_silence_secs: float = 0.6,
         prime_max_secs: float = 4.0,
+        prime_vad_threshold: float = 0.3,
+        min_command_speech_secs: float = 0.3,
     ):
         """Initialize the detector.
 
@@ -187,12 +222,28 @@ class HermesDetector:
             1, int(prime_trail_silence_secs * SAMPLE_RATE / VAD_FRAME_SAMPLES)
         )
         self.prime_max_samples = int(prime_max_secs * SAMPLE_RATE)
+        # While priming we drop the VAD gate well below the live threshold so the
+        # primed utterance is auto-caught even if spoken softly — the whole point
+        # of "I'll say it now" is that we already know speech is coming.
+        self.prime_vad_threshold = prime_vad_threshold
+        # Minimum cumulative VAD speech (in frames) a captured command must contain
+        # to be sent for batch ASR. Below this the turn is treated as a near-silent
+        # false arm and the backend skips transcription (avoids ASR hallucination).
+        self.min_command_speech_frames = max(
+            1, int(min_command_speech_secs * SAMPLE_RATE / VAD_FRAME_SAMPLES)
+        )
         self.smart_turn_model_path = smart_turn_model_path
 
+        # Interpreters are per-client (built in new_client_state) — the streaming
+        # feature buffer is stateful and must not be shared across streams. Load a
+        # throwaway probe here only to validate the model and read the wake key.
         logger.info(f"Loading wake-word model: {model_path} (threshold={threshold})")
-        self._interpreter = NanoInterpreter.load_model(model_path)
-        self._wake_key = next(iter(self._interpreter.models.keys()))
-        logger.info(f"Wake-word model loaded (key='{self._wake_key}')")
+        probe = NanoInterpreter.load_model(model_path)
+        self._wake_key = next(iter(probe.models.keys()))
+        del probe
+        logger.info(
+            f"Wake-word model loaded (key='{self._wake_key}', per-client interpreters)"
+        )
 
         # Resolve the Silero VAD ONNX path once (explicit override or bundled).
         if silero_vad_model_path:
@@ -212,6 +263,7 @@ class HermesDetector:
         )
         analyzer.set_sample_rate(SAMPLE_RATE)
         return ClientWakeState(
+            interpreter=NanoInterpreter.load_model(self.model_path),
             turn_analyzer=analyzer,
             vad_model=SileroOnnxModel(self._vad_model_path, force_onnx_cpu=True),
         )
@@ -265,6 +317,23 @@ class HermesDetector:
         buf = np.concatenate(list(state.preroll))
         return buf[-n_samples:] if buf.size > n_samples else buf
 
+    @staticmethod
+    def _prime_leadin(state: ClientWakeState, onset_offset: int) -> np.ndarray:
+        """Lead-in (PRIME_LEADIN_SAMPLES) ending exactly at the prime onset.
+
+        The pre-roll ends at "now" (the end of the current buffer); the onset
+        sits ``onset_offset`` samples before that end. We take the lead-in from
+        *before* the onset rather than the most-recent 0.3 s — pulling the tail
+        would duplicate the slice we immediately re-append as capture frames,
+        which produced a "he-hey hermes" echo at the clip's start.
+        """
+        if not state.preroll:
+            return np.empty(0, dtype=np.int16)
+        buf = np.concatenate(list(state.preroll))
+        end = buf.size - onset_offset  # index of the onset within the pre-roll
+        start = max(0, end - PRIME_LEADIN_SAMPLES)
+        return buf[start:end]
+
     def _run_wake(
         self, state: ClientWakeState, client_id: str, audio: np.ndarray
     ) -> None:
@@ -283,7 +352,7 @@ class HermesDetector:
         # + .detected path never fires here, so we gate on the raw score, which is
         # what evaluate_hermes.py validated.) This is the main FP suppressor.
         for i in range(0, n_full, WAKE_FRAME_SAMPLES):
-            score = self._interpreter.predict(buf[i : i + WAKE_FRAME_SAMPLES]).get(
+            score = state.interpreter.predict(buf[i : i + WAKE_FRAME_SAMPLES]).get(
                 self._wake_key, 0.0
             )
             if self.score_log_floor and score > self.score_log_floor:
@@ -304,8 +373,15 @@ class HermesDetector:
                 state.trigger_audio = self._preroll_tail(
                     state, PREROLL_SAMPLES
                 ).tobytes()
+                # Dev: snapshot the interpreter's streaming buffer state that
+                # produced this arm BEFORE the reset clears it — makes the arm
+                # exactly reproducible offline (the model's ~2 s receptive field
+                # exceeds the 1.5 s trigger_audio window).
+                state.trigger_features, state.trigger_context = self._snapshot_buffers(
+                    state.interpreter
+                )
                 # Reset interpreter + wake remainder so capture/next wake start clean.
-                self._interpreter.reset()
+                state.interpreter.reset()
                 state.wake_remainder = np.empty(0, dtype=np.int16)
                 logger.info(f"🔔 ARMED '{client_id}' (score={score:.4f})")
                 return
@@ -367,6 +443,7 @@ class HermesDetector:
                 # Speech (re)started: reset the endpoint tracking; the next query
                 # happens once a fresh ``eot_min_silence_frames`` gap accrues.
                 state.eot_speech_seen = True
+                state.capture_speech_frames += 1
                 state.eot_silence_frames = 0
                 state.eot_next_check = self.eot_min_silence_frames
             elif state.eot_speech_seen:
@@ -401,6 +478,12 @@ class HermesDetector:
             if state.capture_chunks
             else b""
         )
+        # Silence gate: a captured turn with little/no VAD speech is a false arm
+        # (nothing actually spoken after the wake word). Flag it so the backend
+        # skips batch ASR — self-diarizing ASR hallucinates phantom commands on
+        # near-silent audio.
+        speech_secs = state.capture_speech_frames * VAD_FRAME_SAMPLES / SAMPLE_RATE
+        has_speech = state.capture_speech_frames >= self.min_command_speech_frames
         event = WakeEvent(
             client_id=client_id,
             session_id=session_id,
@@ -410,20 +493,27 @@ class HermesDetector:
             score=state.arm_score,
             reason=reason,
             kind="command",
+            has_speech=has_speech,
             trigger_audio=state.trigger_audio,
+            buffer_features=state.trigger_features,
+            buffer_context=state.trigger_context,
         )
         logger.info(
             f"🛑 CAPTURED '{client_id}' reason={reason} "
-            f"dur={eot_time - state.arm_time:.2f}s audio={len(captured)}B"
+            f"dur={eot_time - state.arm_time:.2f}s audio={len(captured)}B "
+            f"speech={speech_secs:.2f}s has_speech={has_speech}"
         )
         # Reset state for the next wake word.
         state.armed = False
         state.arm_time = 0.0
         state.arm_score = 0.0
         state.trigger_audio = b""
+        state.trigger_features = None
+        state.trigger_context = b""
         state.vad_remainder = np.empty(0, dtype=np.int16)
         state.wake_remainder = np.empty(0, dtype=np.int16)
         state.capture_chunks = []
+        state.capture_speech_frames = 0
         state.eot_speech_seen = False
         state.eot_silence_frames = 0
         state.eot_next_check = 0
@@ -443,7 +533,8 @@ class HermesDetector:
         model's score; the score is computed afterwards to flag false negatives.
         """
         state.priming = True
-        state.prime_deadline = time.monotonic() + self.prime_timeout_secs
+        state.prime_start = time.monotonic()
+        state.prime_stop_requested = False
         state.prime_speech_started = False
         state.prime_chunks = []
         state.prime_silence_run = 0
@@ -452,9 +543,24 @@ class HermesDetector:
             state.turn_analyzer.clear()
         logger.info(f"🎯 PRIMED positive capture for '{client_id}' — awaiting speech")
 
+    def stop_priming(self, state: ClientWakeState) -> None:
+        """Request a manual end of an in-progress prime (the UI 'stop' button).
+
+        The stream task finalizes on its next frame, saving whatever was heard so
+        far (or a short pre-roll fallback) so the attempt always lands in review.
+        """
+        if state.priming:
+            state.prime_stop_requested = True
+
     def _run_prime(
         self, state: ClientWakeState, client_id: str, session_id: str, audio: np.ndarray
     ) -> Optional[WakeEvent]:
+        # Manual "end now" from the UI: finalize immediately with whatever we have.
+        if state.prime_stop_requested:
+            return self._finish_prime(
+                state, client_id, session_id, "primed_manual_stop"
+            )
+
         vad = state.vad_model
         buf = (
             np.concatenate([state.vad_remainder, audio])
@@ -471,16 +577,21 @@ class HermesDetector:
                     vad(frame.astype(np.float32) / 32768.0, SAMPLE_RATE)
                 ).flatten()[0]
             )
-            is_speech = conf >= self.vad_threshold
+            # Lowered gate (prime_vad_threshold) — we know speech is coming, so
+            # auto-catch it even when spoken softly.
+            is_speech = conf >= self.prime_vad_threshold
 
             if not state.prime_speech_started:
                 if is_speech:
-                    # Seed with a short lead-in so the onset isn't clipped.
+                    # Seed with a short lead-in so the onset isn't clipped. The
+                    # lead-in is taken from BEFORE the onset (onset sits buf.size-i
+                    # samples before the pre-roll's end) so we don't re-include the
+                    # slice we're about to append as frames (the "he-hey" echo).
                     state.prime_speech_started = True
                     state.prime_chunks = [
-                        self._preroll_tail(state, PRIME_LEADIN_SAMPLES)
+                        self._prime_leadin(state, buf.size - i),
+                        frame,
                     ]
-                    state.prime_chunks.append(frame)
                     state.prime_silence_run = 0
                 continue
 
@@ -498,21 +609,30 @@ class HermesDetector:
                 return self._finish_prime(
                     state, client_id, session_id, "primed_max_duration"
                 )
-        elif time.monotonic() > state.prime_deadline:
-            # Heard no speech in the priming window — cancel quietly.
-            logger.info(f"🎯 prime for '{client_id}' timed out (no speech)")
-            self._reset_prime(state)
+
+        # Whole-session hard cap: stop within prime_timeout_secs no matter what and
+        # ALWAYS finalize (never a silent drop) so the attempt lands in review —
+        # captured speech if we heard any, else a short pre-roll fallback.
+        if time.monotonic() - state.prime_start > self.prime_timeout_secs:
+            reason = (
+                "primed_timeout" if state.prime_speech_started else "primed_no_speech"
+            )
+            return self._finish_prime(state, client_id, session_id, reason)
         return None
 
     def _finish_prime(
         self, state: ClientWakeState, client_id: str, session_id: str, reason: str
     ) -> WakeEvent:
-        captured = (
-            np.concatenate(state.prime_chunks)
-            if state.prime_chunks
-            else np.empty(0, dtype=np.int16)
+        if state.prime_chunks:
+            captured = np.concatenate(state.prime_chunks)
+        else:
+            # Manual stop / timeout with no VAD-gated speech: fall back to the
+            # recent pre-roll so the attempt still surfaces for review instead of
+            # vanishing (the user explicitly asked for it to always show up).
+            captured = self._preroll_tail(state, PREROLL_SAMPLES)
+        score = (
+            self._score_buffer(state.interpreter, captured) if captured.size else 0.0
         )
-        score = self._score_buffer(captured)
         is_fn = score < self.threshold
         event = WakeEvent(
             client_id=client_id,
@@ -533,24 +653,40 @@ class HermesDetector:
         self._reset_prime(state)
         return event
 
-    def _score_buffer(self, audio: np.ndarray) -> float:
-        """Max wake score over a buffer (reset interpreter before/after so the
-        live streaming state isn't polluted)."""
-        self._interpreter.reset()
+    def _score_buffer(self, interp, audio: np.ndarray) -> float:
+        """Max wake score over a buffer using this client's interpreter (reset
+        before/after so the live streaming state isn't polluted)."""
+        interp.reset()
         best = 0.0
         n_full = (audio.size // WAKE_FRAME_SAMPLES) * WAKE_FRAME_SAMPLES
         for i in range(0, n_full, WAKE_FRAME_SAMPLES):
-            s = self._interpreter.predict(audio[i : i + WAKE_FRAME_SAMPLES]).get(
+            s = interp.predict(audio[i : i + WAKE_FRAME_SAMPLES]).get(
                 self._wake_key, 0.0
             )
             best = max(best, s)
-        self._interpreter.reset()
+        interp.reset()
         return float(best)
+
+    @staticmethod
+    def _snapshot_buffers(interp) -> tuple:
+        """Copy the interpreter's streaming buffers at arm time so the arm is
+        reproducible offline. Returns (feature_buffer copy as (N, 96) float32,
+        raw-audio buffer as int16 PCM bytes). Never raises — capture must not
+        break detection."""
+        try:
+            pre = interp.preprocessor
+            feats = np.asarray(pre.feature_buffer, dtype=np.float32).copy()
+            raw = np.asarray(pre.raw_data_buffer, dtype=np.int16).tobytes()
+            return feats, raw
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"buffer-state snapshot failed: {e}")
+            return None, b""
 
     @staticmethod
     def _reset_prime(state: ClientWakeState) -> None:
         state.priming = False
-        state.prime_deadline = 0.0
+        state.prime_start = 0.0
+        state.prime_stop_requested = False
         state.prime_speech_started = False
         state.prime_chunks = []
         state.prime_silence_run = 0

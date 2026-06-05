@@ -138,11 +138,30 @@ class WakeWordDispatcher:
         # streaming transcript). Empty command -> the Hermes plugin reports it.
         audio_b64 = payload.get("audio_b64", "")
         sample_rate = int(payload.get("sample_rate", 16000))
+        # Silence gate: the wakeword service flags captures that contained no real
+        # speech (a false arm with nothing said). Skip batch ASR on those — self-
+        # diarizing ASR (e.g. VibeVoice) hallucinates phantom commands on near-
+        # silent audio, which would then be acted on as a real command.
+        has_speech = bool(payload.get("has_speech", True))
         command = ""
-        if audio_b64:
-            command = await self._transcribe(base64.b64decode(audio_b64), sample_rate)
-        else:
+        # Why the command is (or isn't) populated, so downstream consumers can tell
+        # an intentional silence-gate skip apart from an ASR miss or missing audio:
+        #   "transcribed"  -> batch ASR ran (command may still be empty if it heard
+        #                     nothing meaningful)
+        #   "skipped_silence" -> near-silent false arm; ASR deliberately not run
+        #   "no_audio"     -> capture carried no audio at all
+        if not audio_b64:
+            asr_status = "no_audio"
             logger.warning(f"wake-word detection for '{session_id}' carried no audio")
+        elif not has_speech:
+            asr_status = "skipped_silence"
+            logger.info(
+                f"wake-word detection for '{session_id}' was near-silent; "
+                f"skipping batch ASR (silence gate)"
+            )
+        else:
+            asr_status = "transcribed"
+            command = await self._transcribe(base64.b64decode(audio_b64), sample_rate)
 
         conversation_id = await self._current_conversation_id(session_id)
 
@@ -153,12 +172,13 @@ class WakeWordDispatcher:
             "conversation_id": conversation_id,
             "score": payload.get("score"),
             "reason": payload.get("reason"),
+            "asr_status": asr_status,
             "transcript": command,  # alias for plugins that read transcript
         }
 
         logger.info(
             f"🔔 Dispatching wake_word.detected (user={user_id}, "
-            f"session={session_id}, command='{command[:50]}')"
+            f"session={session_id}, asr_status={asr_status}, command='{command[:50]}')"
         )
         results = await self.plugin_router.dispatch_event(
             event=PluginEvent.WAKE_WORD_DETECTED,
@@ -178,6 +198,7 @@ class WakeWordDispatcher:
                 "reply": reply,
                 "conversation_id": conversation_id,
                 "client_id": client_id,
+                "asr_status": asr_status,
             },
         )
 

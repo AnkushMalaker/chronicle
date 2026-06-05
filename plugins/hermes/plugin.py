@@ -20,6 +20,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 import httpx
+
 from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
 
 logger = logging.getLogger(__name__)
@@ -309,6 +310,14 @@ class HermesPlugin(BasePlugin):
         transcription — placed in ``context.data["command"]``. This shares the
         exact agent-call path as the text keyword trigger.
         """
+        # The wakeword-service silence-gates near-silent captures: it didn't run
+        # batch ASR because the turn held no real speech (a false arm). Don't bug
+        # the agent or speak a misleading "couldn't make out the command" — just
+        # drop it quietly. The skip is still visible via asr_status in the SSE/log.
+        asr_status = context.data.get("asr_status")
+        if asr_status == "skipped_silence":
+            logger.info("Hermes wake word armed but capture was silent; ignoring")
+            return PluginResult(success=False, message="", should_continue=True)
         return await self._dispatch_command(
             command=context.data.get("command"),
             conversation_id=context.data.get("conversation_id"),
