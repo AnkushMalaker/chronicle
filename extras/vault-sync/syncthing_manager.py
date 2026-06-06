@@ -168,9 +168,20 @@ class SyncthingManager:
         server_device_id: str,
         self_device_id: str,
     ) -> None:
-        """Upsert the vault folder mapped to the local path, shared with the server."""
+        """Upsert the vault folder mapped to the local path, shared with the server.
+
+        Any *other* folder already bound to the same local path is detached first.
+        Syncthing refuses to run two folders that share a directory, so a leftover
+        folder from a previous pairing would silently wedge sync. This happens when
+        the backend re-creates the admin user with a new id (e.g. after a data
+        reset): ``folder_id`` is ``vault-{user_id}``, so a new user id means a new
+        folder pointed at the same local vault dir. Detaching the stale one lets the
+        current vault take over the path cleanly.
+        """
         Path(path).mkdir(parents=True, exist_ok=True)
+        target = os.path.realpath(path)
         with self._client() as c:
+            self._detach_folders_at_path(c, target, keep_id=folder_id)
             existing = c.get(f"/rest/config/folders/{folder_id}")
             if existing.status_code == 200:
                 folder = existing.json()
@@ -189,6 +200,19 @@ class SyncthingManager:
             resp = c.put(f"/rest/config/folders/{folder_id}", json=folder)
             resp.raise_for_status()
             self._set_ignores(c, folder_id, VAULT_IGNORE_PATTERNS)
+
+    @staticmethod
+    def _detach_folders_at_path(c: httpx.Client, target: str, keep_id: str) -> None:
+        """Remove any folder bound to ``target`` whose id differs from ``keep_id``."""
+        resp = c.get("/rest/config/folders")
+        resp.raise_for_status()
+        for folder in resp.json():
+            fid = folder.get("id")
+            if not fid or fid == keep_id:
+                continue
+            if os.path.realpath(folder.get("path", "")) == target:
+                logger.info("Detaching stale folder %s bound to %s", fid, target)
+                c.delete(f"/rest/config/folders/{fid}").raise_for_status()
 
     @staticmethod
     def _set_ignores(c: httpx.Client, folder_id: str, patterns: list[str]) -> None:
@@ -212,18 +236,34 @@ class SyncthingManager:
         except httpx.HTTPError:
             return 0
 
-    def folder_completion(self, folder_id: str) -> Optional[float]:
-        """Return sync completion percentage for the folder, or None if unknown."""
+    def folder_status(self, folder_id: str) -> dict:
+        """Return ``{"completion", "state", "error"}`` for the folder.
+
+        ``completion`` is the percent of bytes in sync (None if unknown). An empty
+        folder only reads as 100% when Syncthing also reports it idle with no error:
+        a wedged folder (overlapping path, missing marker, scan failure) surfaces its
+        error instead of a misleading 100%, which previously made a broken sync show
+        as "In sync".
+        """
+        unknown = {"completion": None, "state": None, "error": None}
         try:
             with self._client() as c:
                 resp = c.get("/rest/db/status", params={"folder": folder_id})
                 if resp.status_code != 200:
-                    return None
+                    return unknown
                 data = resp.json()
+                state = data.get("state")
+                error = data.get("error") or None
+                if not error and data.get("errors"):
+                    error = f"{data['errors']} item error(s)"
                 total = data.get("globalBytes", 0)
                 need = data.get("needBytes", 0)
                 if total <= 0:
-                    return 100.0
-                return max(0.0, min(100.0, (1 - need / total) * 100.0))
+                    completion = (
+                        100.0 if state in ("idle", None) and not error else None
+                    )
+                else:
+                    completion = max(0.0, min(100.0, (1 - need / total) * 100.0))
+                return {"completion": completion, "state": state, "error": error}
         except httpx.HTTPError:
-            return None
+            return unknown

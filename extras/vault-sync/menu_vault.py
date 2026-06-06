@@ -114,6 +114,7 @@ class SharedState:
     error: Optional[str] = None
     connected: bool = False
     completion: Optional[float] = None
+    folder_error: Optional[str] = None  # folder-level error from Syncthing
     folder_id: Optional[str] = None
     vault_dir: str = ""
 
@@ -124,6 +125,7 @@ class SharedState:
                 "error": self.error,
                 "connected": self.connected,
                 "completion": self.completion,
+                "folder_error": self.folder_error,
                 "folder_id": self.folder_id,
                 "vault_dir": self.vault_dir,
             }
@@ -214,10 +216,15 @@ class VaultSyncManager:
             return
         connected = self.syncthing.connection_count() > 0
         completion = None
+        folder_error = None
         snap = self.state.snapshot()
         if snap["folder_id"]:
-            completion = self.syncthing.folder_completion(snap["folder_id"])
-        self.state.update(connected=connected, completion=completion)
+            fstatus = self.syncthing.folder_status(snap["folder_id"])
+            completion = fstatus["completion"]
+            folder_error = fstatus["error"]
+        self.state.update(
+            connected=connected, completion=completion, folder_error=folder_error
+        )
 
     def shutdown(self) -> None:
         self.syncthing.stop()
@@ -265,8 +272,12 @@ class VaultSyncApp(rumps.App):
             self.conn_item.title = (
                 "Server: connected" if connected else "Server: connecting…"
             )
+            folder_error = snap["folder_error"]
             comp = snap["completion"]
-            if comp is not None and comp >= 99.9:
+            if folder_error:
+                self.title = "◈!"  # ◈!
+                self.status_item.title = f"Status: Folder error — {folder_error}"
+            elif comp is not None and comp >= 99.9 and connected:
                 self.title = "◈✓"  # ◈✓
                 self.status_item.title = "Status: In sync"
             else:
