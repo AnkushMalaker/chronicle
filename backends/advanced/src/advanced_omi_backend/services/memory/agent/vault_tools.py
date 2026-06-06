@@ -59,8 +59,41 @@ class VaultTools:
 
     # --- path helpers -------------------------------------------------------
 
+    def _resolve_ci(self, rel: str) -> str:
+        """Map a vault-relative path onto an existing file matching case-insensitively.
+
+        The backend filesystem is case-sensitive, but macOS/Windows clients are not.
+        Writing ``People/Hermes.md`` when ``People/hermes.md`` already exists would
+        create a case-variant sibling here that collides irrecoverably once Syncthing
+        pushes both to a case-insensitive client. Resolving each path component
+        against what is already on disk makes the agent reuse the existing note
+        instead, so two notes never differ only by case.
+        """
+        current = self.root
+        resolved: List[str] = []
+        parts = Path(rel).parts
+        for i, part in enumerate(parts):
+            if (current / part).exists():
+                current = current / part
+                resolved.append(part)
+                continue
+            match = None
+            if current.is_dir():
+                lowered = part.lower()
+                match = next(
+                    (e.name for e in current.iterdir() if e.name.lower() == lowered),
+                    None,
+                )
+            if match:
+                current = current / match
+                resolved.append(match)
+            else:
+                resolved.extend(parts[i:])  # no match: keep requested casing onward
+                break
+        return str(Path(*resolved)) if resolved else rel
+
     def _abs(self, path: str) -> Path:
-        return self.root / _safe_relpath(path)
+        return self.root / self._resolve_ci(_safe_relpath(path))
 
     def _all_md(self) -> List[Path]:
         return list(self.root.rglob("*.md"))
@@ -166,21 +199,22 @@ class VaultTools:
         except EditError as e:
             raise VaultToolError(str(e))
         fp.write_text(new_content, encoding="utf-8")
-        self.touched.add(_safe_relpath(path))
+        self.touched.add(self._resolve_ci(_safe_relpath(path)))
         return f"Edited {path} ({len(edits)} replacement(s))."
 
     def write_note(self, path: str, content: str, overwrite: bool = False) -> str:
-        fp = self._abs(path)
+        rel = self._resolve_ci(_safe_relpath(path))
+        fp = self.root / rel
         if fp.exists() and not overwrite:
             raise VaultToolError(
-                f"Note '{path}' already exists. Use edit_note to modify it, or pass "
+                f"Note '{rel}' already exists. Use edit_note to modify it, or pass "
                 f"overwrite=true only if you intend to replace it entirely."
             )
         existed = fp.exists()
         fp.parent.mkdir(parents=True, exist_ok=True)
         fp.write_text(content, encoding="utf-8")
-        self.touched.add(_safe_relpath(path))
-        return f"{'Overwrote' if existed else 'Wrote'} {path} ({len(content)} chars)."
+        self.touched.add(rel)
+        return f"{'Overwrote' if existed else 'Wrote'} {rel} ({len(content)} chars)."
 
     def create_category(self, name: str, properties: List[str] | None = None) -> str:
         """Mint a new organic category: its template, base, and hub note (idempotent).
