@@ -148,6 +148,7 @@ class VaultSyncManager:
         self.syncthing = SyncthingManager()
         self.state.update(vault_dir=self.config.local_vault_dir)
         self._lock = threading.Lock()
+        self._logged_errors: set[str] = set()
 
     def pair_async(self) -> None:
         """Run the (blocking) pair flow on a background thread."""
@@ -222,6 +223,18 @@ class VaultSyncManager:
             fstatus = self.syncthing.folder_status(snap["folder_id"])
             completion = fstatus["completion"]
             folder_error = fstatus["error"]
+
+        # Pull Syncthing's own detailed errors into the log buffer so "View Logs"
+        # shows the real cause (e.g. a case collision), not just a count. Log each
+        # message once; re-log if it clears and recurs.
+        detailed = self.syncthing.collect_errors()
+        for msg in detailed:
+            if msg not in self._logged_errors:
+                logger.error("Syncthing: %s", msg)
+        self._logged_errors = set(detailed)
+        if detailed:
+            folder_error = detailed[0] if len(detailed) == 1 else f"{detailed[0]} (+{len(detailed) - 1} more)"
+
         self.state.update(
             connected=connected, completion=completion, folder_error=folder_error
         )
@@ -276,7 +289,13 @@ class VaultSyncApp(rumps.App):
             comp = snap["completion"]
             if folder_error:
                 self.title = "◈!"  # ◈!
-                self.status_item.title = f"Status: Folder error — {folder_error}"
+                # Truncate for the menu; the full error is in the log buffer (View Logs).
+                short = (
+                    folder_error
+                    if len(folder_error) <= 80
+                    else folder_error[:79] + "…"
+                )
+                self.status_item.title = f"Status: Folder error — {short}"
             elif comp is not None and comp >= 99.9 and connected:
                 self.title = "◈✓"  # ◈✓
                 self.status_item.title = "Status: In sync"

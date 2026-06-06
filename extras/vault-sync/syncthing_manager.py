@@ -267,3 +267,34 @@ class SyncthingManager:
                 return {"completion": completion, "state": state, "error": error}
         except httpx.HTTPError:
             return unknown
+
+    def collect_errors(self) -> List[str]:
+        """Return detailed Syncthing-side errors (system + per-folder pull failures).
+
+        ``folder_status`` only reports a count ("N item error(s)"); the actual
+        messages — case collisions, permission denials, failed pulls — live in
+        ``/rest/folder/errors`` and ``/rest/system/error``. The menu polls this so
+        the real cause reaches "View Logs" instead of staying buried in Syncthing.
+        """
+        messages: List[str] = []
+        try:
+            with self._client() as c:
+                sys_resp = c.get("/rest/system/error")
+                if sys_resp.status_code == 200:
+                    for e in sys_resp.json().get("errors") or []:
+                        messages.append(f"system: {e.get('message', e)}")
+
+                folders = c.get("/rest/config/folders")
+                if folders.status_code != 200:
+                    return messages
+                for f in folders.json():
+                    fid = f["id"]
+                    label = f.get("label") or fid
+                    resp = c.get("/rest/folder/errors", params={"folder": fid})
+                    if resp.status_code != 200:
+                        continue
+                    for e in resp.json().get("errors") or []:
+                        messages.append(f"{label}: {e.get('path')}: {e.get('error')}")
+        except httpx.HTTPError as e:
+            logger.debug("Could not fetch Syncthing errors: %s", e)
+        return messages
