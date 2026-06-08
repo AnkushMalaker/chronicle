@@ -1,11 +1,12 @@
-"""Local HTTP server for serving short notification tones to the HAVPE device.
+"""Local HTTP server for serving backend-generated audio to the HAVPE device.
 
-The ESP32 media_player plays audio by fetching an HTTP URL, so the tones bundled
-with the relay are served from a tiny on-LAN HTTP server. This keeps tone latency
-local instead of round-tripping a URL through the (possibly remote) backend.
+The ESP32 media_player plays audio by fetching an HTTP URL, but the device is
+LAN-only and can't reach the (possibly remote) backend. So audio pushed from the
+backend — wake-word tones and TTS replies, both arriving as ``play-audio`` bytes —
+is written to a local staging dir and served from this tiny on-LAN HTTP server.
 
-Tone assets live in ``tones/`` and are the Home Assistant Voice PE sounds
-(CC-BY 4.0, see tones/LICENSE.md).
+The relay no longer bundles any tone assets of its own: the wake-word service is
+the single source of tone audio and sends it inline as ``play-audio``.
 """
 
 import itertools
@@ -19,20 +20,16 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-TONES_DIR = Path(__file__).resolve().parent / "tones"
+# Runtime staging dir for backend-pushed audio (created on first use). Not bundled
+# in the image or tracked in git — every file here is regenerable.
+STAGING_DIR = Path(__file__).resolve().parent / "audio_cache"
 
-# Dynamic (TTS) audio is written into TONES_DIR with a "_dyn_" prefix and served
-# by the same HTTP server. Unique names avoid device-side caching; old ones are
-# pruned so the dir doesn't grow without bound.
+# Backend audio is written into STAGING_DIR with a "_dyn_" prefix and served by the
+# HTTP server. Unique names avoid device-side caching; old ones are pruned so the
+# dir doesn't grow without bound.
 _DYN_PREFIX = "_dyn_"
 _DYN_KEEP = 3
 _dyn_seq = itertools.count(1)
-
-# Logical tone name (sent by the backend) -> filename in tones/
-TONE_FILES: dict[str, str] = {
-    "armed": "armed.flac",  # wake word triggered ("listening")
-    "done": "done.wav",  # end of turn ("processing")
-}
 
 _DEFAULT_PORT = int(os.getenv("TONE_HTTP_PORT", "8990"))
 
@@ -67,31 +64,20 @@ def ensure_tone_server(port: int = _DEFAULT_PORT) -> str:
     with _lock:
         if _server is not None and _base_url is not None:
             return _base_url
-        handler = partial(_QuietHandler, directory=str(TONES_DIR))
+        STAGING_DIR.mkdir(parents=True, exist_ok=True)
+        handler = partial(_QuietHandler, directory=str(STAGING_DIR))
         _server = HTTPServer(("0.0.0.0", port), handler)
         threading.Thread(
             target=_server.serve_forever, daemon=True, name="tone-http"
         ).start()
         _base_url = f"http://{get_local_ip()}:{port}"
-        logger.info("Tone server started at %s (serving %s)", _base_url, TONES_DIR)
+        logger.info("Audio server started at %s (serving %s)", _base_url, STAGING_DIR)
         return _base_url
-
-
-def tone_url(tone: str, port: int = _DEFAULT_PORT) -> str | None:
-    """Resolve a logical tone name to a locally-served URL, or None if unknown."""
-    filename = TONE_FILES.get(tone)
-    if not filename:
-        logger.warning("Unknown tone '%s' (known: %s)", tone, list(TONE_FILES))
-        return None
-    if not (TONES_DIR / filename).exists():
-        logger.warning("Tone file missing: %s", TONES_DIR / filename)
-        return None
-    return f"{ensure_tone_server(port)}/{filename}"
 
 
 def _prune_dynamic() -> None:
     """Keep only the newest _DYN_KEEP dynamic audio files."""
-    files = sorted(TONES_DIR.glob(f"{_DYN_PREFIX}*"), key=lambda p: p.stat().st_mtime)
+    files = sorted(STAGING_DIR.glob(f"{_DYN_PREFIX}*"), key=lambda p: p.stat().st_mtime)
     for old in files[:-_DYN_KEEP]:
         try:
             old.unlink()
@@ -107,6 +93,6 @@ def serve_audio_bytes(data: bytes, ext: str = "wav", port: int = _DEFAULT_PORT) 
     """
     base = ensure_tone_server(port)
     name = f"{_DYN_PREFIX}{next(_dyn_seq)}.{ext}"
-    (TONES_DIR / name).write_bytes(data)
+    (STAGING_DIR / name).write_bytes(data)
     _prune_dynamic()
     return f"{base}/{name}"
