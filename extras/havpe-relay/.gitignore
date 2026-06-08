@@ -10,3 +10,6 @@ audio_chunks/
 # Python
 __pycache__/
 *.pyc
+
+# Runtime staging dir for backend-pushed audio (tone_server.py)
+audio_cache/

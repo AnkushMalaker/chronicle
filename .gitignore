@@ -1,5 +1,8 @@
 **/__pycache__
 *.wav
+# Wake-word notification tones are bundled assets, not user audio — keep them tracked
+# so they're baked into the wakeword-service image (and served to all clients).
+!extras/wakeword-service/tones/*.wav
 **/*.env
 !**/.env.template
 **/memory_config.yaml

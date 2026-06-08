@@ -17,7 +17,7 @@ import httpx
 import websockets
 from device_controller import DeviceController
 from dotenv import load_dotenv
-from tone_server import serve_audio_bytes, tone_url
+from tone_server import serve_audio_bytes
 
 # Max backend→relay WS frame. Bumped above the websockets 1 MiB default so larger
 # inline TTS audio payloads (play-audio audio_b64) are not rejected.
@@ -187,15 +187,6 @@ async def handle_backend_messages(ws, device: DeviceController) -> None:
                 await device.play_audio(url, announcement=announcement)
             else:
                 logger.warning("Backend→device: play-audio with no url/audio_b64")
-
-        elif msg_type == "play-tone":
-            tone = data.get("tone", "")
-            url = tone_url(tone)
-            if url:
-                logger.info("Backend→device: play-tone %s → %s", tone, url)
-                await device.play_audio(url, announcement=True)
-            else:
-                logger.warning("Backend→device: play-tone unknown tone '%s'", tone)
 
         elif msg_type == "led-control":
             r = float(data.get("r", 0))
