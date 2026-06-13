@@ -18,11 +18,9 @@ interface Conversation {
   created_at?: string
   client_id: string
   segment_count?: number  // From list endpoint
-  memory_count?: number  // From list endpoint
   audio_chunks_count?: number  // Number of MongoDB audio chunks
   audio_total_duration?: number  // Total duration in seconds
   duration_seconds?: number
-  has_memory?: boolean
   transcript?: string  // From detail endpoint
   segments?: Array<{
     text: string
@@ -33,11 +31,8 @@ interface Conversation {
     confidence?: number
   }>  // From detail endpoint (loaded on expand)
   active_transcript_version?: string
-  active_memory_version?: string
   transcript_version_count?: number
-  memory_version_count?: number
   active_transcript_version_number?: number
-  active_memory_version_number?: number
   deleted?: boolean
   deletion_reason?: string
   deleted_at?: string
@@ -128,9 +123,17 @@ export default function Conversations() {
   const [playingSegment, setPlayingSegment] = useState<string | null>(null) // Format: "audioUuid-segmentIndex"
   const [audioCurrentTime, setAudioCurrentTime] = useState<{ [conversationId: string]: number }>({})
   const audioRefs = useRef<{ [key: string]: HTMLAudioElement }>({})
+  // Exactly one audio element may play (and drive the waveform cursor) at a time.
+  // `activeAudioRef` is the single source of truth for "who owns playback" — checked by
+  // identity in every timeupdate/ended/async-start so stale elements can never move the
+  // cursor or keep playing. `playSeqRef` supersedes in-flight loads when a newer play starts.
+  const activeAudioRef = useRef<HTMLAudioElement | null>(null)
+  const playSeqRef = useRef(0)
   const [activeAudioKey, setActiveAudioKey] = useState<string | null>(null) // "{conversationId}_{windowStart}"
-  const [activeChunk, setActiveChunk] = useState<{ conversationId: string; start: number; end: number } | null>(null)
   const [isAudioPaused, setIsAudioPaused] = useState(false)
+  // Transcript segment markers on the waveform: playing/last-played band + hover preview band
+  const [segmentMarker, setSegmentMarker] = useState<{ conversationId: string; start: number; end: number; playing: boolean } | null>(null)
+  const [hoverMarker, setHoverMarker] = useState<{ conversationId: string; start: number; end: number } | null>(null)
 
   // Reprocessing state
   const [openDropdown, setOpenDropdown] = useState<string | null>(null)
@@ -205,28 +208,42 @@ export default function Conversations() {
   // Ref to hold the latest handleSeek so event listeners can call it without stale closure
   const handleSeekRef = useRef<(conversationId: string, time: number, totalDuration?: number) => void>(() => {})
 
+  // Stop whatever is currently playing. The ref always points at the truly-active element
+  // (never stale React state), so this reliably silences the previous source before a new
+  // one starts — preventing two elements from playing and fighting over the cursor.
+  const stopActiveAudio = useCallback(() => {
+    if (activeAudioRef.current) {
+      activeAudioRef.current.pause()
+      activeAudioRef.current = null
+    }
+  }, [])
+
   const handleSeek = useCallback((conversationId: string, time: number, totalDuration?: number) => {
     const windowStart = Math.floor(time / CHUNK_WINDOW) * CHUNK_WINDOW
-    const windowEnd = windowStart + CHUNK_WINDOW
     const cacheKey = `${conversationId}_${windowStart}`
+
+    // This call supersedes any earlier in-flight load; stop current audio immediately.
+    const seq = ++playSeqRef.current
+    stopActiveAudio()
+    if (playingSegment) {
+      setPlayingSegment(null)
+      setSegmentMarker(prev => (prev ? { ...prev, playing: false } : prev))
+    }
 
     // If time exceeds total duration, stop playback
     if (totalDuration !== undefined && time >= totalDuration) {
       setActiveAudioKey(null)
-      setActiveChunk(null)
       setIsAudioPaused(false)
       return
     }
 
-    // Pause any currently playing audio
-    if (activeAudioKey && audioRefs.current[activeAudioKey]) {
-      audioRefs.current[activeAudioKey].pause()
-    }
-
-    // Helper to play an audio element at the right offset
+    // Helper to play an audio element at the right offset. Claims ownership via activeAudioRef.
     const playAt = (audio: HTMLAudioElement, absoluteTime: number) => {
+      if (playSeqRef.current !== seq) return // superseded by a newer click
       const localTime = absoluteTime - windowStart
+      activeAudioRef.current = audio
       const startPlaying = () => {
+        if (activeAudioRef.current !== audio) return // no longer the active element
         audio.currentTime = Math.max(0, localTime)
         audio.play().catch(err => console.warn('Playback failed:', err))
       }
@@ -238,7 +255,6 @@ export default function Conversations() {
       }
 
       setActiveAudioKey(cacheKey)
-      setActiveChunk({ conversationId, start: windowStart, end: windowEnd })
       setIsAudioPaused(false)
     }
 
@@ -258,11 +274,13 @@ export default function Conversations() {
         return r.blob()
       })
       .then(blob => {
+        if (playSeqRef.current !== seq) return // a newer click won while we were loading
         const blobUrl = URL.createObjectURL(blob)
         const audio = new Audio(blobUrl)
 
-        // Track playback position
+        // Track playback position — only the active element may move the cursor
         audio.addEventListener('timeupdate', () => {
+          if (activeAudioRef.current !== audio) return
           setAudioCurrentTime(prev => ({
             ...prev,
             [conversationId]: windowStart + audio.currentTime,
@@ -271,6 +289,7 @@ export default function Conversations() {
 
         // Auto-load next window on end for seamless playback
         audio.addEventListener('ended', () => {
+          if (activeAudioRef.current !== audio) return
           const nextStart = windowStart + CHUNK_WINDOW
           handleSeekRef.current(conversationId, nextStart, totalDuration)
         })
@@ -280,7 +299,7 @@ export default function Conversations() {
         playAt(audio, time)
       })
       .catch(err => console.warn('Failed to load audio chunk:', err))
-  }, [activeAudioKey])
+  }, [playingSegment, stopActiveAudio])
 
   // Keep ref in sync
   handleSeekRef.current = handleSeek
@@ -292,6 +311,8 @@ export default function Conversations() {
       const audio = audioRefs.current[activeAudioKey]
       if (audio) {
         if (audio.paused) {
+          // Resume — reclaim cursor ownership for this element
+          activeAudioRef.current = audio
           audio.play().catch(err => console.warn('Resume failed:', err))
           setIsAudioPaused(false)
         } else {
@@ -913,21 +934,18 @@ export default function Conversations() {
 
     // If this segment is already playing, pause it
     if (playingSegment === segmentId) {
-      const audio = audioRefs.current[segmentId];
-      if (audio) {
-        audio.pause();
-      }
+      stopActiveAudio();
       setPlayingSegment(null);
+      // Keep the band as a faint anchor so the segment stays locatable on the waveform
+      setSegmentMarker(prev => (prev ? { ...prev, playing: false } : prev));
       return;
     }
 
-    // Stop any currently playing segment
-    if (playingSegment) {
-      const currentAudio = audioRefs.current[playingSegment];
-      if (currentAudio) {
-        currentAudio.pause();
-      }
-    }
+    // This call supersedes any earlier in-flight load; stop current audio immediately.
+    const seq = ++playSeqRef.current;
+    stopActiveAudio();
+    setActiveAudioKey(null);
+    setIsAudioPaused(false);
 
     // Get or create audio element for this specific segment
     let audio = audioRefs.current[segmentId];
@@ -946,15 +964,37 @@ export default function Conversations() {
         console.error('Audio src:', audio.src);
       });
 
+      // Sync the waveform playhead: segment clips start at 0, so map back to absolute time.
+      // Only the active element may move the cursor.
+      audio.addEventListener('timeupdate', () => {
+        if (activeAudioRef.current !== audio) return;
+        setAudioCurrentTime(prev => ({
+          ...prev,
+          [conversationId]: segment.start + audio.currentTime,
+        }));
+      });
+
       // Add event listener to handle when audio ends naturally
       audio.addEventListener('ended', () => {
+        if (activeAudioRef.current !== audio) return;
         setPlayingSegment(null);
+        setSegmentMarker(prev => (prev ? { ...prev, playing: false } : prev));
       });
     }
 
+    if (playSeqRef.current !== seq) return; // superseded before we could start
+    activeAudioRef.current = audio;
+
     // Play the segment (no need to seek since audio is already trimmed to exact range)
     audio.play().then(() => {
+      // Ownership may have moved elsewhere while play() was pending
+      if (activeAudioRef.current !== audio) {
+        audio.pause();
+        return;
+      }
       setPlayingSegment(segmentId);
+      setSegmentMarker({ conversationId, start: segment.start, end: segment.end, playing: true });
+      setAudioCurrentTime(prev => ({ ...prev, [conversationId]: segment.start + audio.currentTime }));
     }).catch(err => {
       console.error('Error playing audio segment:', err);
       setPlayingSegment(null);
@@ -968,6 +1008,7 @@ export default function Conversations() {
       Object.values(audioRefs.current).forEach(audio => {
         audio.pause();
       });
+      activeAudioRef.current = null;
     };
   }, [])
 
@@ -1153,11 +1194,8 @@ export default function Conversations() {
                 conversationId={conversation.conversation_id}
                   versionInfo={{
                     transcript_count: conversation.transcript_version_count || 0,
-                    memory_count: conversation.memory_version_count || 0,
                     active_transcript_version: conversation.active_transcript_version,
-                    active_memory_version: conversation.active_memory_version,
-                    active_transcript_version_number: conversation.active_transcript_version_number,
-                    active_memory_version_number: conversation.active_memory_version_number
+                    active_transcript_version_number: conversation.active_transcript_version_number
                   }}
                   onVersionChange={async () => {
                     // Update only this specific conversation without reloading all conversations
@@ -1280,12 +1318,6 @@ export default function Conversations() {
                         </div>
                       ) : null
                     })()}
-                    {(conversation.memory_count ?? 0) > 0 && (
-                      <div className="flex items-center space-x-1 text-sm text-purple-600 dark:text-purple-400">
-                        <Brain className="h-4 w-4" />
-                        <span>{conversation.memory_count}</span>
-                      </div>
-                    )}
                     <button
                       onClick={(e) => {
                         e.stopPropagation()
@@ -1489,8 +1521,15 @@ export default function Conversations() {
                           currentTime={audioCurrentTime[conversation.conversation_id]}
                           onSeek={(time) => handleSeek(conversation.conversation_id!, time, conversation.audio_total_duration)}
                           height={80}
-                          chunkStart={activeChunk?.conversationId === conversation.conversation_id ? activeChunk.start : undefined}
-                          chunkEnd={activeChunk?.conversationId === conversation.conversation_id ? activeChunk.end : undefined}
+                          segments={conversation.segments}
+                          segmentMarkers={[
+                            ...(segmentMarker?.conversationId === conversation.conversation_id
+                              ? [{ start: segmentMarker.start, end: segmentMarker.end, kind: segmentMarker.playing ? ('playing' as const) : ('anchor' as const) }]
+                              : []),
+                            ...(hoverMarker?.conversationId === conversation.conversation_id
+                              ? [{ start: hoverMarker.start, end: hoverMarker.end, kind: 'hover' as const }]
+                              : []),
+                          ]}
                         />
                       )}
                     </>
@@ -1704,11 +1743,15 @@ export default function Conversations() {
                             renderedSegments.push(
                               <div key={index} className="group/seg relative">
                                 {!isPreview && <button onClick={(e) => openInsertForm(index === 0 ? -1 : index - 1, e)} className={insertBtnClass('top')}>+</button>}
-                                <div className={`text-sm italic border-l-2 pl-3 py-0.5 px-2 rounded-r flex items-center gap-2 ${
-                                  segType === 'event'
-                                    ? 'text-gray-500 dark:text-gray-400 bg-yellow-50 dark:bg-yellow-900/20 border-yellow-400'
-                                    : 'text-gray-500 dark:text-gray-400 bg-green-50 dark:bg-green-900/20 border-green-400'
-                                }`}>
+                                <div
+                                  className={`text-sm italic border-l-2 pl-3 py-0.5 px-2 rounded-r flex items-center gap-2 ${
+                                    segType === 'event'
+                                      ? 'text-gray-500 dark:text-gray-400 bg-yellow-50 dark:bg-yellow-900/20 border-yellow-400'
+                                      : 'text-gray-500 dark:text-gray-400 bg-green-50 dark:bg-green-900/20 border-green-400'
+                                  }`}
+                                  onMouseEnter={segType === 'event' && hasAudio ? () => setHoverMarker({ conversationId: conversation.conversation_id!, start: segment.start, end: segment.end }) : undefined}
+                                  onMouseLeave={segType === 'event' && hasAudio ? () => setHoverMarker(null) : undefined}
+                                >
                                   {segType === 'event' && hasAudio && !isPreview && (
                                     <button
                                       onClick={() => handleSegmentPlayPause(conversation.conversation_id, index, segment)}
@@ -1742,6 +1785,8 @@ export default function Conversations() {
                               className={`text-sm leading-relaxed flex items-start space-x-2 py-1 px-2 rounded transition-colors ${
                                 isPlaying ? 'bg-blue-50 dark:bg-blue-900/20' : isEditing ? 'bg-yellow-50 dark:bg-yellow-900/20' : 'hover:bg-gray-50 dark:hover:bg-gray-700'
                               }`}
+                              onMouseEnter={hasAudio ? () => setHoverMarker({ conversationId: conversation.conversation_id!, start: segment.start, end: segment.end }) : undefined}
+                              onMouseLeave={hasAudio ? () => setHoverMarker(null) : undefined}
                             >
                               {/* Play/Pause Button */}
                               {hasAudio && !isEditing && (
@@ -1947,9 +1992,7 @@ export default function Conversations() {
                   <div className="text-xs text-gray-600 dark:text-gray-400 space-y-1">
                     <div>Conversation ID: {conversation.conversation_id || 'N/A'}</div>
                     <div>Transcript Version Count: {conversation.transcript_version_count || 0}</div>
-                    <div>Memory Version Count: {conversation.memory_version_count || 0}</div>
                     <div>Segment Count: {conversation.segment_count || 0}</div>
-                    <div>Memory Count: {conversation.memory_count || 0}</div>
                     <div>Client ID: {conversation.client_id}</div>
                   </div>
 

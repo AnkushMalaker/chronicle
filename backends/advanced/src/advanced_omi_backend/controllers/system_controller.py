@@ -16,7 +16,9 @@ from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
+import httpx
 from dotenv import set_key as dotenv_set_key
 from fastapi import HTTPException
 from ruamel.yaml import YAML
@@ -121,10 +123,8 @@ async def get_network_discovery(app):
             {
                 "client_id": client_id,
                 "device_name": device_name,
-                "user_email": getattr(state, "user_email", None),
-                "connected": getattr(state, "connected", False),
-                "has_active_conversation": getattr(state, "current_audio_uuid", None)
-                is not None,
+                "user_email": state.user_email,
+                "connected": state.connected,
             }
         )
     result["connected_devices"] = connected_devices
@@ -134,6 +134,24 @@ async def get_network_discovery(app):
 
 _yaml = YAML()
 _yaml.preserve_quotes = True
+
+
+def _is_self_hosted_model(model) -> bool:
+    """Whether a model entry points at a self-hosted service (no API key needed).
+
+    Cloud providers (Deepgram, OpenAI, smallest.ai, ...) live on public domains;
+    self-hosted services are reached via localhost, docker hostnames, private/
+    tailnet IPs, or tailnet DNS names.
+    """
+    host = urlparse(str(getattr(model, "model_url", "") or "")).hostname or ""
+    if not host:
+        return False
+    if host in ("localhost", "host.docker.internal"):
+        return True
+    if re.match(r"^(127\.|10\.|172\.|192\.168\.|100\.)", host):
+        return True
+    # Tailnet DNS names, or bare docker-compose service names (no dots)
+    return host.endswith(".ts.net") or "." not in host
 
 
 async def get_config_diagnostics():
@@ -239,6 +257,13 @@ async def get_config_diagnostics():
                             "message": f"Configured: {stt.name} ({stt.model_provider}) - API key present",
                         }
                     )
+                elif _is_self_hosted_model(stt):
+                    diagnostics["info"].append(
+                        {
+                            "component": "STT (Batch)",
+                            "message": f"Configured: {stt.name} ({stt.model_provider}) - local service, no API key required",
+                        }
+                    )
                 else:
                     diagnostics["warnings"].append(
                         {
@@ -268,6 +293,13 @@ async def get_config_diagnostics():
                             "message": f"Configured: {stt_stream.name} ({stt_stream.model_provider}) - API key present",
                         }
                     )
+                elif _is_self_hosted_model(stt_stream):
+                    diagnostics["info"].append(
+                        {
+                            "component": "STT (Streaming)",
+                            "message": f"Configured: {stt_stream.name} ({stt_stream.model_provider}) - local service, no API key required",
+                        }
+                    )
                 else:
                     diagnostics["warnings"].append(
                         {
@@ -294,6 +326,13 @@ async def get_config_diagnostics():
                         {
                             "component": "LLM",
                             "message": f"Configured: {llm.name} ({llm.model_provider}) - API key present",
+                        }
+                    )
+                elif _is_self_hosted_model(llm):
+                    diagnostics["info"].append(
+                        {
+                            "component": "LLM",
+                            "message": f"Configured: {llm.name} ({llm.model_provider}) - local service, no API key required",
                         }
                     )
                 else:
@@ -487,10 +526,10 @@ async def save_diarization_settings_controller(settings: dict):
                         detail=f"Invalid value for {key}: must be integer 1-20",
                     )
             elif key == "diarization_source":
-                if not isinstance(value, str) or value not in ["pyannote", "deepgram"]:
+                if not isinstance(value, str) or value not in ["pyannote", "provider"]:
                     raise HTTPException(
                         status_code=400,
-                        detail=f"Invalid value for {key}: must be 'pyannote' or 'deepgram'",
+                        detail=f"Invalid value for {key}: must be 'pyannote' or 'provider'",
                     )
             else:
                 if not isinstance(value, (int, float)) or value < 0:
@@ -550,7 +589,6 @@ async def save_misc_settings_controller(settings: dict):
         # Validate settings
         boolean_keys = {
             "always_persist_enabled",
-            "use_provider_segments",
             "per_segment_speaker_id",
             "always_batch_retranscribe",
         }
@@ -2130,3 +2168,128 @@ async def delete_plugin(plugin_id: str, remove_files: bool = False) -> dict:
         "removed_from_yml": removed_from_yml,
         "files_removed": files_removed,
     }
+
+
+# ── External Service Management (host service-manager agent proxy) ──────────
+# The service manager agent (edge/service_manager.py) runs natively on the
+# host and wraps services.py — the backend just proxies admin requests to it.
+
+_SERVICE_MANAGER_TIMEOUT = 30.0
+
+
+def _service_manager_config() -> tuple[str, str]:
+    url = (os.getenv("SERVICE_MANAGER_URL") or "").rstrip("/")
+    token = os.getenv("SERVICE_MANAGER_TOKEN") or ""
+    return url, token
+
+
+async def _service_manager_request(
+    method: str, path: str, json_body: dict | None = None
+):
+    """Proxy a request to the service manager agent. Raises HTTPException on failure."""
+    url, token = _service_manager_config()
+    if not url or not token:
+        raise HTTPException(
+            status_code=503,
+            detail="Service manager not configured (SERVICE_MANAGER_URL / SERVICE_MANAGER_TOKEN)",
+        )
+    try:
+        async with httpx.AsyncClient(timeout=_SERVICE_MANAGER_TIMEOUT) as client:
+            resp = await client.request(
+                method,
+                f"{url}{path}",
+                json=json_body,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=502, detail=f"Service manager unreachable at {url}: {e}"
+        )
+    if resp.status_code >= 400:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except ValueError:
+            detail = resp.text
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+    return resp.json()
+
+
+async def get_external_services():
+    """List host-managed services with health and provider info.
+
+    Returns available=False (instead of an error) when the agent is not
+    configured or unreachable, so the WebUI can hide/disable the section.
+    """
+    url, token = _service_manager_config()
+    if not url or not token:
+        return {"available": False, "reason": "not_configured"}
+    try:
+        data = await _service_manager_request("GET", "/services")
+    except HTTPException as e:
+        if e.status_code in (502, 503):
+            return {"available": False, "reason": "unreachable", "detail": e.detail}
+        raise
+    return {"available": True, **data}
+
+
+async def external_service_action(name: str, action: str, body: dict):
+    """Start/stop/restart a host-managed service via the agent."""
+    return await _service_manager_request("POST", f"/services/{name}/{action}", body)
+
+
+# ASR_PROVIDER key (extras/asr-services/.env, drives which container runs) →
+# STT model name in the model registry (drives which model entry the pipeline
+# calls). A provider switch must update BOTH, or transcription keeps using the
+# old model entry while a different container serves the port.
+_ASR_PROVIDER_TO_STT_MODEL = {
+    "vibevoice": "stt-vibevoice",
+    "vibevoice-strixhalo": "stt-vibevoice",
+    "faster-whisper": "stt-faster-whisper",
+    "transformers": "stt-transformers",
+    "nemo": "stt-nemo",
+    "nemo-strixhalo": "stt-nemo",
+    "parakeet": "stt-parakeet-batch",
+    "qwen3-asr": "stt-qwen3-asr",
+    "gemma4": "stt-gemma4",
+    "nemotron": "stt-nemotron-batch",
+}
+
+
+async def set_external_service_provider(name: str, body: dict):
+    """Switch the active provider (ASR/TTS) for a host-managed service.
+
+    For ASR this also repoints defaults.stt in config.yml at the matching
+    model registry entry and hot-reloads the registry (+ signals workers),
+    so the pipeline actually uses the newly started provider.
+    """
+    result = await _service_manager_request("POST", f"/services/{name}/provider", body)
+
+    if name == "asr-services":
+        stt_model = _ASR_PROVIDER_TO_STT_MODEL.get(body.get("provider", ""))
+        if stt_model:
+            from advanced_omi_backend.services.plugin_service import (
+                signal_worker_restart,
+            )
+
+            save_config_section("defaults", {"stt": stt_model})
+            load_models_config(force_reload=True)
+            signal_worker_restart()
+            logger.info(
+                "ASR provider switched to %s — defaults.stt set to %s, "
+                "registry reloaded, workers signaled",
+                body.get("provider"),
+                stt_model,
+            )
+            result["stt_model"] = stt_model
+        else:
+            logger.warning(
+                "No STT model mapping for ASR provider %r — defaults.stt unchanged",
+                body.get("provider"),
+            )
+
+    return result
+
+
+async def get_external_service_operation(operation_id: str):
+    """Poll a long-running service operation on the agent."""
+    return await _service_manager_request("GET", f"/operations/{operation_id}")

@@ -195,6 +195,7 @@ def write_env(
 
     # Write values
     ENV_FILE.touch()
+    set_key(str(ENV_FILE), "TTS_PROVIDER", provider_key, quote_mode="never")
     set_key(str(ENV_FILE), "TTS_MODEL", model_id, quote_mode="never")
     set_key(str(ENV_FILE), "TTS_PORT", port, quote_mode="never")
     set_key(str(ENV_FILE), "PYTORCH_CUDA_VERSION", cuda_version, quote_mode="never")
@@ -215,6 +216,7 @@ def write_env_kittentts(
     # KittenTTS uses its own env vars so the heavy Fish/TADA settings don't bleed
     # into this CPU service (matches docker-compose.yml).
     ENV_FILE.touch()
+    set_key(str(ENV_FILE), "TTS_PROVIDER", "kittentts", quote_mode="never")
     set_key(str(ENV_FILE), "KITTEN_TTS_MODEL", model_id, quote_mode="never")
     set_key(str(ENV_FILE), "KITTEN_TTS_VOICE", voice, quote_mode="never")
     set_key(str(ENV_FILE), "KITTEN_TTS_SPEED", speed, quote_mode="never")

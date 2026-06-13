@@ -15,7 +15,6 @@ from urllib.parse import urlencode
 import httpx
 import websockets
 
-from advanced_omi_backend.config_loader import get_backend_config
 from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 
@@ -203,6 +202,7 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
         diarize: bool = False,
         context_info: Optional[str] = None,
         progress_callback=None,
+        priority: bool = False,
         **kwargs,
     ) -> dict:
         # Special handling for mock provider (no HTTP server needed)
@@ -302,6 +302,11 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
                         form_data = {}
                         if hot_words_str and hot_words_str.strip():
                             form_data["context_info"] = hot_words_str.strip()
+                        # Route latency-sensitive requests (e.g. wake-word command
+                        # clips) to the service's dedicated priority GPU lane so they
+                        # don't queue behind a long batch.
+                        if priority:
+                            form_data["priority"] = "1"
 
                         # Use streaming to handle NDJSON progress responses
                         async with client.stream(
@@ -381,21 +386,12 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
             segments = _dotted_get(data, extract.get("segments")) or []
             segments = _normalize_provider_segments(segments)
 
-            # Check config to decide whether to keep or discard provider segments
-            transcription_config = get_backend_config("transcription")
-            use_provider_segments = transcription_config.get(
-                "use_provider_segments", False
+            # Provider segments are always stored; the diarization_source setting
+            # decides downstream whether the speaker pipeline trusts them or
+            # re-diarizes with pyannote.
+            logger.debug(
+                f"Transcription: Extracted {len(words)} words, {len(segments)} provider segments"
             )
-
-            if not use_provider_segments:
-                segments = []
-                logger.debug(
-                    f"Transcription: Extracted {len(words)} words, ignoring provider segments (use_provider_segments=false)"
-                )
-            else:
-                logger.debug(
-                    f"Transcription: Extracted {len(words)} words, keeping {len(segments)} provider segments (use_provider_segments=true)"
-                )
 
         return {"text": text, "words": words, "segments": segments}
 
@@ -511,7 +507,9 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
         url = f"{base_url}?{query_str}" if query_str else base_url
 
         # Debug: Log the URL
-        logger.info(f"🔗 Connecting to Deepgram WebSocket: {url}")
+        logger.info(
+            f"🔗 Connecting to streaming STT WebSocket [{self.model.model_provider}]: {url}"
+        )
 
         # Connect to WebSocket with Authorization header
         headers = {}

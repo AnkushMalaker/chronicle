@@ -28,6 +28,7 @@ from simple_speaker_recognition.api.core.utils import (
     safe_format_confidence,
     validate_confidence,
 )
+from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
 from simple_speaker_recognition.core.models import SpeakerStatus
 from simple_speaker_recognition.core.unified_speaker_db import UnifiedSpeakerDB
 
@@ -409,7 +410,8 @@ async def websocket_streaming_with_scd(
         default=None, description="User ID for speaker identification"
     ),
     confidence_threshold: float = Query(
-        default=0.15, description="Speaker identification confidence threshold"
+        default=DEFAULT_SIMILARITY_THRESHOLD,
+        description="Speaker identification confidence threshold",
     ),
     utterance_end_ms: int = Query(
         default=1000,
@@ -745,7 +747,7 @@ async def deepgram_proxy_websocket(
         default=None, description="User ID for speaker identification (enhancement)"
     ),
     confidence_threshold: float = Query(
-        default=0.15,
+        default=DEFAULT_SIMILARITY_THRESHOLD,
         description="Speaker identification confidence threshold (enhancement)",
     ),
     db: UnifiedSpeakerDB = Depends(get_db),
@@ -783,14 +785,16 @@ async def deepgram_proxy_websocket(
     # Extract our enhancement parameters
     enhancement_params = {
         "user_id": all_params.pop("user_id", None),
-        "confidence_threshold": all_params.pop("confidence_threshold", "0.15"),
+        "confidence_threshold": all_params.pop(
+            "confidence_threshold", str(DEFAULT_SIMILARITY_THRESHOLD)
+        ),
     }
 
     # Convert confidence threshold to float
     try:
         confidence_threshold = float(enhancement_params["confidence_threshold"])
     except (ValueError, TypeError):
-        confidence_threshold = 0.15
+        confidence_threshold = DEFAULT_SIMILARITY_THRESHOLD
 
     # Parse user_id
     if enhancement_params["user_id"]:

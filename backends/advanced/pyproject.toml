@@ -38,6 +38,7 @@ dependencies = [
     "croniter>=1.3.0",
     "rich>=13.0.0",
     "minidisc-python>=0.1.0",
+    "ten-vad @ git+https://github.com/TEN-framework/ten-vad.git@22a3bcd4509d0faaa8eef4881e8af5f39c178950",
 ]
 
 [project.optional-dependencies]

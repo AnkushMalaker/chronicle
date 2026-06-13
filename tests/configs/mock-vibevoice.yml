@@ -97,9 +97,9 @@ memory:
 backend:
   audio:
     always_persist_enabled: true
-  transcription:
-    # Use segments from provider (VibeVoice provides pre-diarized segments)
-    use_provider_segments: true
+  diarization:
+    # Trust provider segments (VibeVoice provides pre-diarized segments)
+    diarization_source: provider
 
 # Speaker recognition should skip diarization step for VibeVoice
 # but can still run speaker identification if enrolled speakers exist

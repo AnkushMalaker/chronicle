@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import Field
 from pydantic_settings import BaseSettings
 from simple_speaker_recognition.api.core.utils import get_data_directory
+from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
 from simple_speaker_recognition.core.audio_backend import AudioBackend
 from simple_speaker_recognition.core.unified_speaker_db import UnifiedSpeakerDB
 from simple_speaker_recognition.database import init_db
@@ -66,7 +67,7 @@ class Settings(BaseSettings):
     """Service configuration settings."""
 
     similarity_threshold: float = Field(
-        default=0.45,
+        default=DEFAULT_SIMILARITY_THRESHOLD,
         description="Cosine similarity threshold for speaker identification",
     )
     data_dir: Path = Field(

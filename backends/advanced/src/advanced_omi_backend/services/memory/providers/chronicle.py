@@ -21,8 +21,9 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Iterable, List, Optional, Tuple
 
+from ..audit import record_vault_change
 from ..base import MemoryEntry, MemoryServiceBase
 from ..config import MemoryConfig
 from ..graph_utils import Section, compute_hybrid_scores, parse_conversation_doc
@@ -394,8 +395,18 @@ class MemoryService(MemoryServiceBase):
 
             # 3. Write to vault (ground truth)
             t0 = time.perf_counter()
+            prev_doc = self.vault.read_doc(user_id, source_id)
             file_path = self.vault.write_doc(user_id, source_id, doc_md)
             t_vault = time.perf_counter() - t0
+            await record_vault_change(
+                user_id=user_id,
+                conversation_id=source_id,
+                operation="update" if prev_doc else "create",
+                note_path=f"{Path(source_id).name}.md",
+                before=prev_doc or None,
+                after=doc_md,
+                agent_mode=False,
+            )
 
             # 4. Embed sections
             t0 = time.perf_counter()
@@ -478,9 +489,23 @@ class MemoryService(MemoryServiceBase):
 
         t0 = time.perf_counter()
         user_root = self.vault.user_root(user_id)
+        # Concurrent memory jobs for the same user may run on different RQ workers;
+        # each individual vault mutation is serialised inside VaultTools via the
+        # per-user vault_note_lock (lock-write-unlock, never across LLM calls).
         seed_vault_scaffold(user_root)  # idempotent: .base + hub notes
+        existing_before = self._vault_note_set(user_root)
         agent = MemoryAgent(user_root)
         result = await agent.run(transcript, source_id)
+        if result.truncated and not result.touched:
+            memory_logger.error(
+                "❌ add_memory(agent) %s: aborted on truncated LLM response after "
+                "%d rounds (%d tool calls) — nothing recorded (%.2fs)",
+                source_id,
+                result.rounds,
+                result.tool_calls,
+                time.perf_counter() - t0,
+            )
+            return False, []
         memory_logger.info(
             "✅ add_memory(agent) %s: touched=%d rounds=%d tools=%d errors=%d (%.2fs) — %s",
             source_id,
@@ -490,6 +515,9 @@ class MemoryService(MemoryServiceBase):
             len(result.errors),
             time.perf_counter() - t0,
             result.summary[:160],
+        )
+        await self._record_agent_touches(
+            user_id, source_id, user_root, result.touched, existing_before
         )
         return True, result.touched
 
@@ -515,19 +543,32 @@ class MemoryService(MemoryServiceBase):
             return True, []
 
         user_root = self.vault.user_root(user_id)
+        guidance = self._speaker_rename_guidance(transcript_diff)
+
+        t0 = time.perf_counter()
+        # Per-user serialisation happens per-mutation inside VaultTools (see
+        # _add_memory_agent).
         seed_vault_scaffold(user_root)
+        existing_before = self._vault_note_set(user_root)
 
         # Remove the old conversation note (agent writes Conversations/<id>.md and
-        # write_note refuses to clobber). Person/topic notes are intentionally preserved.
+        # write_note refuses to clobber). Person/topic notes are preserved.
         conv_note = user_root / "Conversations" / f"{Path(source_id).name}.md"
         if conv_note.exists():
             conv_note.unlink()
 
-        guidance = self._speaker_rename_guidance(transcript_diff)
-
-        t0 = time.perf_counter()
         agent = MemoryAgent(user_root)
         result = await agent.run(transcript, source_id, guidance=guidance)
+        if result.truncated and not result.touched:
+            memory_logger.error(
+                "❌ reprocess_memory(agent) %s: aborted on truncated LLM response after "
+                "%d rounds (%d tool calls) — nothing recorded (%.2fs)",
+                source_id,
+                result.rounds,
+                result.tool_calls,
+                time.perf_counter() - t0,
+            )
+            return False, []
         memory_logger.info(
             "✅ reprocess_memory(agent) %s: touched=%d rounds=%d tools=%d errors=%d (%.2fs) — %s",
             source_id,
@@ -538,7 +579,49 @@ class MemoryService(MemoryServiceBase):
             time.perf_counter() - t0,
             result.summary[:160],
         )
+        await self._record_agent_touches(
+            user_id, source_id, user_root, result.touched, existing_before
+        )
         return True, result.touched
+
+    def _vault_note_set(self, user_root: Path) -> set:
+        """Vault-relative paths of all notes currently on disk (for create/update audit)."""
+        if not user_root.exists():
+            return set()
+        return {p.relative_to(user_root).as_posix() for p in user_root.rglob("*.md")}
+
+    async def _record_agent_touches(
+        self,
+        user_id: str,
+        source_id: str,
+        user_root: Path,
+        touched: Iterable[str],
+        existing_before: set,
+    ) -> None:
+        """Record one audit-ledger entry per note the memory agent changed."""
+        for rel in sorted(touched):
+            try:
+                after: Optional[str] = (user_root / rel).read_text(encoding="utf-8")
+            except Exception:  # noqa: BLE001 — note may have been renamed away
+                after = None
+            is_new = rel not in existing_before
+            await record_vault_change(
+                user_id=user_id,
+                conversation_id=source_id,
+                operation="create" if is_new else "update",
+                note_path=rel,
+                after=after,
+                agent_mode=True,
+                summary=(
+                    None
+                    if is_new
+                    else (
+                        f"updated ({len(after.splitlines())} lines)"
+                        if after is not None
+                        else "updated"
+                    )
+                ),
+            )
 
     @staticmethod
     def _speaker_rename_guidance(transcript_diff: Optional[list]) -> str:
@@ -1258,6 +1341,14 @@ class MemoryService(MemoryServiceBase):
             )
             return None
 
+        if self._agent_mode:
+            # Agent-mode memory ids are vault-relative note paths (see add_memory).
+            root = self.vault.user_root(user_id)
+            fp = root / memory_id
+            if not fp.is_file():
+                return None
+            return self._vault_entry_from_path(user_id, fp, root)
+
         try:
             _, read, _ = self._get_io(user_id)
             data = await asyncio.to_thread(
@@ -1375,7 +1466,15 @@ class MemoryService(MemoryServiceBase):
             await self.initialize()
 
         if self._agent_mode:
-            return self.vault.delete_all_docs(user_id)  # vault is the only store
+            count = self.vault.delete_all_docs(user_id)  # vault is the only store
+            await record_vault_change(
+                user_id=user_id,
+                operation="delete_all",
+                agent_mode=True,
+                summary=f"deleted {count} notes",
+                count=count,
+            )
+            return count
 
         try:
             # Drop the entire per-user graph in one shot (O(1) on the server).
@@ -1422,6 +1521,13 @@ class MemoryService(MemoryServiceBase):
 
             # Delete vault files
             vault_count = self.vault.delete_all_docs(user_id)
+            await record_vault_change(
+                user_id=user_id,
+                operation="delete_all",
+                agent_mode=False,
+                summary=f"deleted {vault_count} notes",
+                count=vault_count,
+            )
 
             memory_logger.info(
                 f"🗑️ Dropped per-user graph ({graph_count} memory nodes) and "

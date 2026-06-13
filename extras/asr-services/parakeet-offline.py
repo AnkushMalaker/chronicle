@@ -38,6 +38,7 @@ from fastapi import (
     FastAPI,
     File,
     HTTPException,
+    Response,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -488,10 +489,18 @@ async def startup_event():
 
 
 @app.get("/health")
-async def health_check():
-    """Health check endpoint."""
+async def health_check(response: Response):
+    """Health check endpoint.
+
+    Reports the actual readiness of the model, not a constant "healthy".
+    Returns 503 until the transcriber and its model are loaded, so a probe
+    can't see green while the service can't actually transcribe.
+    """
+    ready = transcriber is not None and getattr(transcriber, "model", None) is not None
+    if not ready:
+        response.status_code = 503
     return {
-        "status": "healthy",
+        "status": "healthy" if ready else "initializing",
         "model": transcriber._model_name if transcriber else "not_loaded",
     }
 

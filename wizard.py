@@ -6,7 +6,6 @@ Handles service selection and delegation only - no configuration duplication
 
 import shutil
 import subprocess
-from datetime import datetime
 from pathlib import Path
 
 from config_manager import ConfigManager
@@ -140,6 +139,18 @@ SERVICES = {
             ],
             "description": "Hermes acoustic wake-word detection",
         },
+        "tts": {
+            "path": "extras/tts",
+            "cmd": [
+                "uv",
+                "run",
+                "--with-requirements",
+                "../../setup-requirements.txt",
+                "python",
+                "init.py",
+            ],
+            "description": "Text-to-speech (TADA / Fish Speech / KittenTTS)",
+        },
     },
 }
 
@@ -199,6 +210,7 @@ def check_service_exists(service_name, service_config):
         "langfuse",
         "llm-services",
         "wakeword-service",
+        "tts",
     ]:
         script_path = service_path / "init.py"
         if not script_path.exists():
@@ -310,27 +322,27 @@ def select_services(
     return selected
 
 
-def cleanup_unselected_services(selected_services):
-    """Backup and remove .env files from services that weren't selected"""
+def persist_enabled_services(selected_services):
+    """Write the enabled-services map to config.yml — the source of truth for the
+    lifecycle (services.py ``--all``).
 
-    all_services = list(SERVICES["backend"].keys()) + list(SERVICES["extras"].keys())
+    Replaces the old approach of renaming an unselected service's ``.env`` away to
+    signal "disabled". Enabled/disabled is now declared explicitly in
+    config/config.yml ``services:``, decoupled from whether a ``.env`` exists, so a
+    stale or half-written ``.env`` never counts as "configured". Secrets in ``.env``
+    are left untouched.
+    """
+    # Lifecycle service names = services.py registry keys. The wizard calls the
+    # backend "advanced"; the lifecycle calls it "backend".
+    lifecycle_names = ["backend"] + list(SERVICES["extras"].keys())
+    wizard_to_lifecycle = {"advanced": "backend"}
+    selected_lifecycle = {wizard_to_lifecycle.get(s, s) for s in selected_services}
 
-    for service_name in all_services:
-        if service_name not in selected_services:
-            if service_name == "advanced":
-                service_path = Path(SERVICES["backend"][service_name]["path"])
-            else:
-                service_path = Path(SERVICES["extras"][service_name]["path"])
+    enabled = {name: (name in selected_lifecycle) for name in lifecycle_names}
+    ConfigManager().set_enabled_services(enabled)
 
-            env_file = service_path / ".env"
-            if env_file.exists():
-                # Create backup with timestamp
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                backup_file = service_path / f".env.backup.{timestamp}.unselected"
-                env_file.rename(backup_file)
-                console.print(
-                    f"🧹 [dim]Backed up {service_name} configuration to {backup_file.name} (service not selected)[/dim]"
-                )
+    on = ", ".join(name for name, is_on in enabled.items() if is_on)
+    console.print(f"🧩 [dim]Enabled services written to config.yml: {on}[/dim]")
 
 
 def run_service_setup(
@@ -1609,8 +1621,8 @@ def main():
     # Pure Delegation - Run Each Service Setup
     console.print(f"\n📋 [bold]Setting up {len(selected_services)} services...[/bold]")
 
-    # Clean up .env files from unselected services (creates backups)
-    cleanup_unselected_services(selected_services)
+    # Record which services are enabled (config.yml is the lifecycle source of truth)
+    persist_enabled_services(selected_services)
 
     success_count = 0
     failed_services = []

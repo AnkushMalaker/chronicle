@@ -16,11 +16,11 @@ from typing import Any, Dict, Optional
 from rq.exceptions import NoSuchJobError
 from rq.job import Job
 
+from advanced_omi_backend.config import get_live_segmentation
 from advanced_omi_backend.controllers.queue_controller import (
     redis_conn,
     start_post_conversation_jobs,
 )
-from advanced_omi_backend.controllers.session_controller import mark_session_complete
 from advanced_omi_backend.models.job import async_job
 from advanced_omi_backend.observability.otel_setup import (
     set_otel_session,
@@ -29,6 +29,10 @@ from advanced_omi_backend.observability.otel_setup import (
     traced_job,
 )
 from advanced_omi_backend.plugins.events import PluginEvent
+from advanced_omi_backend.services.audio_stream.session_store import (
+    SessionStatus,
+    SessionStore,
+)
 from advanced_omi_backend.services.plugin_service import (
     dispatch_plugin_event,
     get_plugin_router,
@@ -84,6 +88,7 @@ async def handle_end_of_conversation(
     Returns:
         Dict with conversation_id, conversation_count, final_result_count, runtime_seconds, timeout_triggered, end_reason
     """
+    store = SessionStore(redis_client)
     # Clean up Redis streams to prevent memory leaks
     try:
         # NOTE: Do NOT delete audio:stream:{client_id} here!
@@ -96,17 +101,11 @@ async def handle_end_of_conversation(
         await redis_client.delete(results_stream_key)
         logger.info(f"🧹 Deleted results stream: {results_stream_key}")
 
-        # Set TTL on session key (expire after 1 hour)
-        session_key = f"audio:session:{session_id}"
-        await redis_client.expire(session_key, 3600)
-        logger.info(f"⏰ Set TTL on session key: {session_key}")
+        # NOTE: session-hash TTL is handled below, gated on whether the session is
+        # ending vs. continuing. Setting it here (unconditionally) would let the hash
+        # expire mid-session for a still-active connection → zombie session.
     except Exception as cleanup_error:
         logger.warning(f"⚠️ Error during stream cleanup: {cleanup_error}")
-
-    # Clean up Redis tracking keys so speech detection job knows conversation is complete
-    open_job_key = f"open_conversation:session:{session_id}"
-    await redis_client.delete(open_job_key)
-    logger.info(f"🧹 Cleaned up tracking key {open_job_key}")
 
     # Delete the conversation:current signal so audio persistence knows conversation ended.
     # May already be deleted by open_conversation_job for close_requested/timeout cases
@@ -143,47 +142,36 @@ async def handle_end_of_conversation(
         )
 
     # Increment conversation count for this session
-    conversation_count_key = f"session:conversation_count:{session_id}"
-    conversation_count = await redis_client.incr(conversation_count_key)
-    await redis_client.expire(conversation_count_key, 3600)  # 1 hour TTL
+    conversation_count = await store.increment_conversation_count(session_id)
     logger.info(f"📊 Conversation count for session {session_id}: {conversation_count}")
 
     # Check if session is still active (user still recording) and restart listening jobs
-    session_key = f"audio:session:{session_id}"
     # Fetch status, websocket_connected, and completion_reason in one Redis call
-    status_raw, ws_connected_raw, cr_raw = await redis_client.hmget(
-        session_key, "status", "websocket_connected", "completion_reason"
+    status, ws_connected, completion_reason = await store.get_status_ws_reason(
+        session_id
     )
 
-    if status_raw:
-        status_str = (
-            status_raw.decode() if isinstance(status_raw, bytes) else status_raw
-        )
-        ws_connected = (
-            ws_connected_raw.decode()
-            if isinstance(ws_connected_raw, bytes)
-            else (ws_connected_raw or "false")
-        ) == "true"
-        completion_reason = (
-            cr_raw.decode() if isinstance(cr_raw, bytes) else (cr_raw or "")
-        )
-
+    if status is not None:
         # Determine if we should restart speech detection
         # Only restart when session is explicitly active.
         # status=finalizing means the session is ending (audio-stop or disconnect),
         # so re-enqueueing speech detection for the same session is always wrong.
         should_restart = False
-        if status_str == "active":
+        if status == SessionStatus.ACTIVE:
             should_restart = True
         else:
             logger.info(
-                f"Session {session_id[:12]}: status={status_str}, "
+                f"Session {session_id[:12]}: status={status.value}, "
                 f"ws_connected={ws_connected}, completion_reason={completion_reason} "
                 f"— not restarting speech detection."
             )
 
         if should_restart:
-            # Session still active - enqueue new speech detection for next conversation
+            # Session still active - enqueue new speech detection for next conversation.
+            # Clear any TTL: the hash must live as long as the connection does, otherwise
+            # a quiet gap > TTL expires it mid-session → next close reads status=None →
+            # speech detection never restarts (deaf connection). See Docs/system-oddities.md #4.
+            await store.persist_session(session_id)
             logger.info(
                 f"🔄 Enqueueing new speech detection (conversation #{conversation_count + 1})"
             )
@@ -227,9 +215,12 @@ async def handle_end_of_conversation(
 
             logger.info(f"✅ Enqueued speech detection job {speech_job.id}")
         else:
+            # Session ending (finalizing/finished): set a backstop TTL so the hash
+            # self-cleans if the disconnect path didn't already remove it.
+            await store.expire_session(session_id, 3600)
             logger.info(
-                f"Session {session_id} status={status_str}, ws_connected={ws_connected}, "
-                f"not restarting (user stopped recording)"
+                f"Session {session_id} status={status.value}, ws_connected={ws_connected}, "
+                f"not restarting (user stopped recording) — set 1h cleanup TTL"
             )
     else:
         logger.info(f"Session {session_id} not found, not restarting (session ended)")
@@ -555,20 +546,13 @@ async def _initialize_conversation(
         )
 
     # Attach markers from Redis session (e.g., button events captured during streaming)
-    session_key = f"audio:session:{session_id}"
-    markers_json = await redis_client.hget(session_key, "markers")
-    if markers_json:
-        try:
-            markers_data = (
-                markers_json if isinstance(markers_json, str) else markers_json.decode()
-            )
-            conversation.markers = json.loads(markers_data)
-            await conversation.save()
-            logger.info(
-                f"📌 Attached {len(conversation.markers)} markers to conversation {conversation_id}"
-            )
-        except Exception as marker_err:
-            logger.warning(f"⚠️ Failed to parse markers from Redis: {marker_err}")
+    markers = await SessionStore(redis_client).get_markers(session_id)
+    if markers:
+        conversation.markers = markers
+        await conversation.save()
+        logger.info(
+            f"📌 Attached {len(conversation.markers)} markers to conversation {conversation_id}"
+        )
 
     # Link job metadata to conversation (cascading updates)
     current_job.meta["conversation_id"] = conversation_id
@@ -635,7 +619,7 @@ async def _monitor_conversation_loop(
     """
     from advanced_omi_backend.utils.job_utils import check_job_alive
 
-    session_key = f"audio:session:{state.session_id}"
+    store = SessionStore(redis_client)
     max_runtime = 86400  # 24h safety ceiling
 
     # Inactivity timeout configuration
@@ -644,6 +628,20 @@ async def _monitor_conversation_loop(
     )
     inactivity_timeout_minutes = inactivity_timeout_seconds / 60
     last_inactivity_log_time = time.time()
+
+    # Audio-stream idle watchdog (wall-clock). The producer bumps last_chunk_at on
+    # every audio chunk, so it advances continuously while the device streams — even
+    # during silence — and freezes the instant the device disconnects. The
+    # audio-timestamp-based inactivity check below cannot grow without new results,
+    # so on a sudden disconnect it would hang until the 24h ceiling. This watchdog
+    # is the reliable "device stopped streaming" signal, independent of WebSocket
+    # cleanup running. It only applies when live transcription is enabled — in
+    # "off"/batch mode no streaming worker fills the aggregator and chunks may stop
+    # without the conversation being stuck (the batch path closes it).
+    expects_live_results = get_live_segmentation() != "off"
+    stream_idle_timeout_seconds = float(os.getenv("STREAM_IDLE_TIMEOUT_SECONDS", "30"))
+    health_check_interval = 5.0  # wall-clock cadence for status + chunk-idle polling
+    last_health_check_time = time.time()
 
     # Test mode: wait for audio queue to drain before timing out
     wait_for_queue_drain = (
@@ -712,9 +710,7 @@ async def _monitor_conversation_loop(
                         break
 
                     elif sig_type == "close_requested":
-                        await redis_client.hdel(
-                            session_key, "conversation_close_requested"
-                        )
+                        await store.take_close_request(state.session_id)
                         state.close_requested_reason = sig_reason
                         logger.info(f"🔒 Conversation close requested: {sig_reason}")
                         state.timeout_triggered = True
@@ -723,19 +719,13 @@ async def _monitor_conversation_loop(
                     elif sig_type == "session_complete":
                         # Check for spurious "finished" from status endpoint race
                         if sig_reason == "all_jobs_complete":
-                            ws_raw = await redis_client.hget(
-                                session_key, "websocket_connected"
-                            )
-                            ws_connected = (
-                                ws_raw.decode() if ws_raw else "false"
-                            ) == "true"
-                            if ws_connected:
+                            if await store.is_websocket_connected(state.session_id):
                                 logger.warning(
                                     f"⚠️ Ignoring spurious 'finished' for session {state.session_id[:12]}: "
                                     f"websocket_connected=true, reason=all_jobs_complete. "
                                     f"Resetting status to 'active'."
                                 )
-                                await redis_client.hset(session_key, "status", "active")
+                                await store.set_status_active(state.session_id)
                                 # Continue monitoring
                             else:
                                 break
@@ -920,49 +910,62 @@ async def _monitor_conversation_loop(
                 logger.warning(f"⏱️ Max runtime reached for {state.conversation_id}")
                 break
 
-            # Fallback signal check (in case pub/sub message was missed)
-            if not done:
-                status_raw = await redis_client.hget(session_key, "status")
-                status_str = status_raw.decode() if status_raw else None
-                if status_str in ["finalizing", "finished"]:
-                    reason_raw = await redis_client.hget(
-                        session_key, "completion_reason"
-                    )
-                    reason_str = reason_raw.decode() if reason_raw else "unknown"
-                    ws_raw = await redis_client.hget(session_key, "websocket_connected")
-                    ws_connected = (ws_raw.decode() if ws_raw else "false") == "true"
+            # Periodic health check (status + audio-stream liveness). Runs on a
+            # wall-clock cadence regardless of whether results/signals fired this
+            # iteration — so a missed pub/sub finalize signal or a silently
+            # disconnected device is still detected, not just when the loop happens
+            # to time out idle.
+            if current_time - last_health_check_time >= health_check_interval:
+                last_health_check_time = current_time
 
+                status, ws_connected, reason_str = await store.get_status_ws_reason(
+                    state.session_id
+                )
+                reason_str = reason_str or "unknown"
+                if status in (SessionStatus.FINALIZING, SessionStatus.FINISHED):
                     if (
-                        status_str == "finished"
+                        status == SessionStatus.FINISHED
                         and ws_connected
                         and reason_str == "all_jobs_complete"
                     ):
-                        await redis_client.hset(session_key, "status", "active")
+                        await store.set_status_active(state.session_id)
                     else:
                         logger.info(
-                            f"🔍 Fallback signal check: session {state.session_id[:12]} "
-                            f"status={status_str}, reason={reason_str}"
+                            f"🔍 Health check: session {state.session_id[:12]} "
+                            f"status={status.value}, reason={reason_str}"
                         )
                         if reason_str == "websocket_disconnect":
                             state.timeout_triggered = False
                         break
 
-                # Also check for missed close_requested
-                close_raw = await redis_client.hget(
-                    session_key, "conversation_close_requested"
-                )
-                if close_raw:
-                    await redis_client.hdel(session_key, "conversation_close_requested")
-                    state.close_requested_reason = (
-                        close_raw.decode()
-                        if isinstance(close_raw, bytes)
-                        else close_raw
-                    )
+                # Catch a missed close_requested signal
+                close_reason = await store.take_close_request(state.session_id)
+                if close_reason:
+                    state.close_requested_reason = close_reason
                     logger.info(
-                        f"🔍 Fallback: conversation close requested: {state.close_requested_reason}"
+                        f"🔍 Health check: conversation close requested: {state.close_requested_reason}"
                     )
                     state.timeout_triggered = True
                     break
+
+                # Audio-stream idle watchdog: no audio chunks for too long means the
+                # device stopped streaming (sudden disconnect) even though status may
+                # still read ACTIVE (WebSocket cleanup not yet run). Skipped in
+                # "off"/batch mode, where no streaming worker produces chunks here.
+                if expects_live_results:
+                    last_chunk_at = await store.get_last_chunk_at(state.session_id)
+                    if (
+                        last_chunk_at
+                        and current_time - last_chunk_at > stream_idle_timeout_seconds
+                    ):
+                        logger.warning(
+                            f"🔌 No audio chunks for {current_time - last_chunk_at:.0f}s "
+                            f"(threshold {stream_idle_timeout_seconds:.0f}s) — device "
+                            f"stopped streaming, closing conversation "
+                            f"{state.conversation_id[:12]}"
+                        )
+                        state.timeout_triggered = True
+                        break
 
             # Inactivity log and check
             if current_time - last_inactivity_log_time >= 10:
@@ -1163,8 +1166,7 @@ async def _save_streaming_transcript(
         for w in words_data
     ]
 
-    # Use provider-supplied segments if available (from streaming diarization),
-    # otherwise leave empty for speaker recognition service to fill later.
+    # Use provider-supplied segments if available (from streaming diarization).
     segments_data = final_transcript.get("segments", [])
     if segments_data:
         segments = [
@@ -1187,14 +1189,34 @@ async def _save_streaming_transcript(
             )
             for s in segments_data
         ]
+        provider_diarized = True
     else:
-        segments = []
+        # Non-diarizing streaming provider returned no segments. Build a single
+        # fallback segment from the transcript text/words so the transcript is always
+        # renderable in the UI (the frontend only shows the segment list). This mirrors
+        # the batch path's fallback. If speaker recognition is enabled, the
+        # post-conversation speaker job replaces this with diarized segments.
+        provider_diarized = False
+        if transcript_text:
+            start_time_audio = words_data[0].get("start", 0.0) if words_data else 0.0
+            end_time_audio = words_data[-1].get("end", 0.0) if words_data else 0.0
+            segments = [
+                Conversation.SpeakerSegment(
+                    speaker="Speaker 0",
+                    start=start_time_audio,
+                    end=end_time_audio,
+                    text=transcript_text,
+                    words=words,
+                )
+            ]
+        else:
+            segments = []
 
     # Determine provider from streaming results
     provider = final_transcript.get("provider", "deepgram")
 
-    # Determine diarization source if provider supplied segments
-    diarization_source = "provider" if segments else None
+    # Diarization source reflects real provider diarization, not the fallback segment
+    diarization_source = "provider" if provider_diarized else None
 
     # Add streaming transcript with words at version level
     version = conversation.add_transcript_version(
@@ -1209,7 +1231,7 @@ async def _save_streaming_transcript(
             "source": "streaming",
             "chunk_count": final_transcript.get("chunk_count", 0),
             "word_count": len(words),
-            "provider_capabilities": {"diarization": bool(segments)},
+            "provider_capabilities": {"diarization": provider_diarized},
         },
         set_as_active=True,
     )
@@ -1228,11 +1250,12 @@ async def _save_streaming_transcript(
 
     # Save conversation with streaming transcript
     await conversation.save()
-    segment_info = (
-        f"{len(segments)} provider segments (diarization_source={diarization_source})"
-        if segments
-        else "0 segments (pending speaker recognition)"
-    )
+    if provider_diarized:
+        segment_info = f"{len(segments)} provider segments (diarization_source={diarization_source})"
+    elif segments:
+        segment_info = f"{len(segments)} fallback segment (pending speaker recognition)"
+    else:
+        segment_info = "0 segments (empty transcript)"
     logger.info(
         f"✅ Saved streaming transcript: {len(transcript_text)} chars, "
         f"{segment_info}, {len(words)} words "
@@ -1419,9 +1442,9 @@ async def open_conversation_job(
     )
 
     # Phase 3: Determine end reason
-    session_key = f"audio:session:{session_id}"
-    completion_reason = await redis_client.hget(session_key, "completion_reason")
-    completion_reason_str = completion_reason.decode() if completion_reason else None
+    completion_reason_str = await SessionStore(redis_client).get_completion_reason(
+        session_id
+    )
 
     if completion_reason_str:
         state.end_reason = completion_reason_str

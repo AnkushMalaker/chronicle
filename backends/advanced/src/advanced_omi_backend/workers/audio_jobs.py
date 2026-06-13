@@ -5,7 +5,6 @@ This module contains jobs related to audio file processing and cropping.
 """
 
 import asyncio
-import json
 import logging
 import os
 import time
@@ -19,6 +18,10 @@ from advanced_omi_backend.models.job import (
     JobPriority,
     _ensure_beanie_initialized,
     async_job,
+)
+from advanced_omi_backend.services.audio_stream.session_store import (
+    SessionStatus,
+    SessionStore,
 )
 
 logger = logging.getLogger(__name__)
@@ -79,6 +82,12 @@ async def audio_streaming_persistence_job(
             logger.warning(f"Failed to create audio consumer group: {e}")
         logger.debug(f"Audio consumer group already exists for {audio_stream_name}")
 
+    # Conversation this job should persist chunks under at startup. Seeded below for
+    # always_persist sessions so the very first flush (e.g. a short session that is
+    # already finalizing on the first loop iteration) writes to MongoDB instead of
+    # no-opping because current_conversation_id is still None.
+    initial_conversation_id = None
+
     # If always_persist enabled, create placeholder conversation if it doesn't exist
     if always_persist:
         conversation_key = f"conversation:current:{session_id}"
@@ -120,7 +129,6 @@ async def audio_streaming_persistence_job(
                 title="Audio Recording (Processing...)",
                 summary="Transcription in progress...",
                 transcript_versions=[],
-                memory_versions=[],
                 processing_status="pending_transcription",
                 always_persist=True,
             )
@@ -132,14 +140,16 @@ async def audio_streaming_persistence_job(
             # by the guard above (checks MongoDB on next startup).
             await redis_client.set(conversation_key, conversation.conversation_id)
 
+            initial_conversation_id = conversation.conversation_id
             logger.info(
                 f"✅ Created placeholder conversation {conversation.conversation_id} "
                 f"and set Redis key {conversation_key}"
             )
         else:
+            initial_conversation_id = existing_conversation_id.decode()
             logger.info(
                 f"📋 always_persist=True - placeholder conversation already exists: "
-                f"{existing_conversation_id.decode()}"
+                f"{initial_conversation_id}"
             )
     else:
         logger.info(
@@ -147,7 +157,7 @@ async def audio_streaming_persistence_job(
         )
 
     # Job control
-    session_key = f"audio:session:{session_id}"
+    store = SessionStore(redis_client)
     max_runtime = 86340  # 24 hours - 60 seconds (graceful exit before RQ timeout)
     start_time = time.time()
 
@@ -158,9 +168,11 @@ async def audio_streaming_persistence_job(
     from advanced_omi_backend.models.conversation import Conversation
     from advanced_omi_backend.utils.audio_chunk_utils import encode_pcm_to_opus
 
-    # Conversation rotation state
-    current_conversation_id = None
-    conversation_start_time = None
+    # Conversation rotation state. Seed from the placeholder created above so the
+    # first flush persists to MongoDB and the first-iteration rotation check is a
+    # no-op (instead of discarding the initial buffer as a spurious rotation).
+    current_conversation_id = initial_conversation_id
+    conversation_start_time = time.time() if initial_conversation_id else None
     conversation_count = 0
 
     # PCM buffer for current 10-second chunk
@@ -169,24 +181,10 @@ async def audio_streaming_persistence_job(
     chunk_start_time = 0.0  # Start time of current buffered chunk
 
     # Read actual sample rate from the session's audio_format stored in Redis
-    # Same pattern as streaming_consumer.py:634-644
-    SAMPLE_RATE = 16000
-    SAMPLE_WIDTH = 2  # 16-bit
-    CHANNELS = 1  # Mono
-    try:
-        audio_format_raw = await redis_client.hget(session_key, "audio_format")
-        if audio_format_raw:
-            audio_format = json.loads(audio_format_raw)
-            SAMPLE_RATE = int(audio_format.get("rate", 16000))
-            SAMPLE_WIDTH = int(audio_format.get("width", 2))
-            CHANNELS = int(audio_format.get("channels", 1))
-            logger.info(
-                f"🎵 Audio format from Redis: {SAMPLE_RATE}Hz, {SAMPLE_WIDTH*8}-bit, {CHANNELS}ch"
-            )
-    except Exception as e:
-        logger.warning(
-            f"Failed to read audio_format from Redis for {session_id}, using defaults: {e}"
-        )
+    SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH = await store.get_audio_format(session_id)
+    logger.info(
+        f"🎵 Audio format from Redis: {SAMPLE_RATE}Hz, {SAMPLE_WIDTH*8}-bit, {CHANNELS}ch"
+    )
 
     CHUNK_DURATION_SECONDS = 10.0
     BYTES_PER_SECOND = SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS
@@ -315,14 +313,11 @@ async def audio_streaming_persistence_job(
             break
 
         # Idle detection: no new chunks + websocket gone = zombie
-        last_chunk_at_raw = await redis_client.hget(session_key, "last_chunk_at")
-        if last_chunk_at_raw:
-            idle_seconds = time.time() - float(last_chunk_at_raw.decode())
+        last_chunk_at = await store.get_last_chunk_at(session_id)
+        if last_chunk_at is not None:
+            idle_seconds = time.time() - last_chunk_at
             if idle_seconds > 300:  # 5 minutes no new data
-                ws_connected = await redis_client.hget(
-                    session_key, "websocket_connected"
-                )
-                if not ws_connected or ws_connected.decode() != "true":
+                if not await store.is_websocket_connected(session_id):
                     logger.warning(
                         f"⚠️ Idle {idle_seconds:.0f}s + WS disconnected — exiting audio persistence"
                     )
@@ -339,8 +334,10 @@ async def audio_streaming_persistence_job(
             break
 
         # Check if session is finalizing
-        session_status = await redis_client.hget(session_key, "status")
-        if session_status and session_status.decode() in ["finalizing", "finished"]:
+        if await store.get_status(session_id) in (
+            SessionStatus.FINALIZING,
+            SessionStatus.FINISHED,
+        ):
             logger.info(f"🛑 Session finalizing detected, flushing final chunks...")
             await asyncio.sleep(0.5)  # Brief wait for in-flight chunks
 
@@ -462,7 +459,6 @@ async def audio_streaming_persistence_job(
                     title="Audio Recording (Processing...)",
                     summary="Transcription in progress...",
                     transcript_versions=[],
-                    memory_versions=[],
                     processing_status="pending_transcription",
                     always_persist=True,
                 )

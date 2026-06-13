@@ -16,6 +16,7 @@ from simple_speaker_recognition.api.core.utils import (
     secure_temp_file,
     validate_confidence,
 )
+from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
 from simple_speaker_recognition.core.models import (
     DiarizeAndIdentifyRequest,
     IdentifyResponse,
@@ -63,7 +64,7 @@ class AnalyzeSegmentsRequest(BaseModel):
     segments: List[AnnotationSegment]
     method: str = "umap"
     cluster_method: str = "dbscan"
-    similarity_threshold: float = 0.8
+    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD
 
 
 class CombinedAnalysisRequest(BaseModel):
@@ -73,7 +74,7 @@ class CombinedAnalysisRequest(BaseModel):
     expected_speakers: int = 2
     method: str = "umap"
     cluster_method: str = "dbscan"
-    similarity_threshold: float = 0.8
+    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD
 
 
 @router.post("/diarize-and-identify")
@@ -385,7 +386,7 @@ async def diarize_identify_match(
         default=0.5, description="Minimum segment duration in seconds"
     ),
     similarity_threshold: float = Form(
-        default=0.45, description="Speaker similarity threshold"
+        default=DEFAULT_SIMILARITY_THRESHOLD, description="Speaker similarity threshold"
     ),
     min_speakers: Optional[int] = Form(
         default=None, description="Minimum number of speakers to detect"
@@ -882,7 +883,9 @@ async def analyze_annotation_segments(
     segments: str = Form(..., description="JSON string of segments to analyze"),
     method: str = Form(default="umap", description="Dimensionality reduction method"),
     cluster_method: str = Form(default="dbscan", description="Clustering method"),
-    similarity_threshold: float = Form(default=0.8, description="Similarity threshold"),
+    similarity_threshold: float = Form(
+        default=DEFAULT_SIMILARITY_THRESHOLD, description="Similarity threshold"
+    ),
     db: UnifiedSpeakerDB = Depends(get_db),
 ):
     """
@@ -1029,7 +1032,9 @@ async def analyze_segments_with_enrolled_speakers(
     ),
     method: str = Form(default="umap", description="Dimensionality reduction method"),
     cluster_method: str = Form(default="dbscan", description="Clustering method"),
-    similarity_threshold: float = Form(default=0.8, description="Similarity threshold"),
+    similarity_threshold: float = Form(
+        default=DEFAULT_SIMILARITY_THRESHOLD, description="Similarity threshold"
+    ),
     db: UnifiedSpeakerDB = Depends(get_db),
 ):
     """

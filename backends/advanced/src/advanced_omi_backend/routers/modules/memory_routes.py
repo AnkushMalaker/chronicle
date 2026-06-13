@@ -38,6 +38,23 @@ async def get_memories(
     return await memory_controller.get_memories(current_user, limit, user_id)
 
 
+@router.get("/audit")
+async def get_memory_audit(
+    current_user: User = Depends(current_active_user),
+    limit: int = Query(default=100, ge=1, le=1000),
+    conversation_id: Optional[str] = Query(
+        default=None, description="Filter to a single conversation"
+    ),
+    user_id: Optional[str] = Query(
+        default=None, description="User ID filter (admin only)"
+    ),
+):
+    """Memory vault change ledger (audit history). Newest first."""
+    return await memory_controller.get_memory_audit(
+        current_user, limit, user_id, conversation_id
+    )
+
+
 @router.get("/with-transcripts")
 async def get_memories_with_transcripts(
     current_user: User = Depends(current_active_user),

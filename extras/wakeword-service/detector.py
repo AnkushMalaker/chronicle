@@ -1,8 +1,9 @@
-"""Acoustic Hermes wake-word detector + end-of-turn capture.
+"""Acoustic wake-word detector + end-of-turn capture (multi-wake-word).
 
-Wraps three ONNX models, all run standalone (no pipecat pipeline runtime):
+Wraps, per client, N independent wake models plus a shared end-of-turn stack:
 
-- ``hermes.onnx`` via nanowakeword ``NanoInterpreter`` — acoustic wake word.
+- one ``NanoInterpreter`` per wake word (e.g. ``hey_hermes`` + ``hermes``),
+  scored in parallel on every frame — acoustic wake words.
 - Silero VAD (``SileroOnnxModel``) — gates speech for end-of-turn.
 - Smart Turn v3 (``LocalSmartTurnAnalyzerV3``) — semantic end-of-turn decision.
 
@@ -10,13 +11,24 @@ Per-client arming state lives in :class:`ClientWakeState`, keyed by client_id
 in the consumer. Audio frames arrive as int16 PCM at 16 kHz.
 
 Flow per client:
-  1. Feed every frame to the wake interpreter. score > threshold -> ARM.
+  1. Feed every frame to EACH wake interpreter. The first word to satisfy its
+     patience/threshold (in config-priority order) ARMS — a single arm per
+     debounce window across all words (a phrase like "hey hermes" that trips
+     several models dispatches once). Co-firing words are recorded as
+     ``also_fired`` metadata, never a second capture.
   2. While armed, run Silero VAD per 512-sample sub-frame and buffer it into the
      Smart Turn analyzer. At each speech->silence pause, query the Smart Turn
      MODEL (analyze_end_of_turn) for the semantic end-of-turn decision; on
      COMPLETE the turn is captured -> emit. The analyzer's own stop_secs silence
      timer is kept only as a LONG backstop if the model never fires.
   3. A max-arm-duration guard ends capture even if EOT never fires.
+
+Because the wake words can overlap acoustically (``hermes`` is a substring of
+``hey hermes``), clean per-word POSITIVE data comes from the "prime + say it"
+enrollment flow, where the user declares which word they are recording. Live
+arms are attributed to the single arming word (the shorter word may occasionally
+win a frame early for an overlapping phrase — that only affects which review
+queue the trigger clip lands in, which a human reviews, not dispatch).
 """
 
 import logging
@@ -32,6 +44,7 @@ from pipecat.audio.turn.base_turn_analyzer import EndOfTurnState
 from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroOnnxModel
+from verifier import WakeVerifier
 
 logger = logging.getLogger(__name__)
 
@@ -64,24 +77,32 @@ class ClientWakeState:
     """Per-client wake-word + capture state (in-memory, v1)."""
 
     armed: bool = False
+    # Which wake word armed the current capture (None when not armed).
+    armed_wakeword: Optional[str] = None
+    # Other wake words that also scored over threshold at the arm instant.
+    also_fired: list = field(default_factory=list)
     arm_time: float = 0.0
     arm_score: float = 0.0
+    # Single shared arm gate: one arm per debounce window across all DISPATCH words.
     last_detection_time: float = 0.0
-    # Consecutive 1280-frames whose raw wake score exceeds threshold (patience).
-    consec: int = 0
+    # Separate debounce for collect-only (shadow) firings, so they neither spam
+    # the review queue nor touch the real-arm debounce of dispatch words.
+    last_collect_time: float = 0.0
+    # Per-wake-word consecutive-frame-over-threshold counters (patience).
+    consec: dict = field(default_factory=dict)
     # Smart Turn analyzer is per-client (it holds an audio buffer + thread).
     turn_analyzer: Optional[LocalSmartTurnAnalyzerV3] = None
     vad_model: Optional[SileroOnnxModel] = None
-    # Per-client wake interpreter. NanoInterpreter holds a STREAMING feature
-    # buffer (raw audio -> mel -> 96-d embeddings) that spans ~2 s of context, so
-    # it must not be shared across clients/streams — a shared one interleaves
-    # unrelated audio and produces spurious scores.
-    interpreter: Optional["NanoInterpreter"] = None
+    # One wake interpreter PER wake word. Each NanoInterpreter holds a STREAMING
+    # feature buffer (raw audio -> mel -> 96-d embeddings) spanning ~2 s of
+    # context, so they are per-client and never shared across streams.
+    interpreters: dict = field(default_factory=dict)
     # Leftover PCM samples not yet aligned to a 512-sample VAD frame.
     vad_remainder: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.int16)
     )
-    # Leftover PCM not yet aligned to a 1280-sample wake-interpreter frame.
+    # Leftover PCM not yet aligned to a 1280-sample wake-interpreter frame
+    # (shared across wake words — the reframing is identical for all).
     wake_remainder: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.int16)
     )
@@ -102,15 +123,17 @@ class ClientWakeState:
     preroll_len: int = 0
     # Snapshot of the trigger window taken at arm time (for false-positive review).
     trigger_audio: bytes = b""
-    # Dev capture: interpreter buffer state snapshotted at arm. The model's ~2 s
-    # receptive field exceeds the 1.5 s trigger_audio window, so a cold replay of
-    # trigger_audio alone often won't reproduce the live score. These make an arm
-    # exactly reproducible offline: trigger_features = the (N, 96) embedding buffer
-    # the wake model scored on; trigger_context = the full ~10 s raw-audio buffer.
+    # Dev capture: interpreter buffer state snapshotted at arm (of the arming
+    # word's interpreter). The model's ~2 s receptive field exceeds the 3 s
+    # trigger_audio window's usable part, so these make an arm exactly
+    # reproducible offline: trigger_features = the (N, 96) embedding buffer the
+    # wake model scored on; trigger_context = the full ~10 s raw-audio buffer.
     trigger_features: Optional[np.ndarray] = None
     trigger_context: bytes = b""
     # --- "prime + say it" positive-capture mode (data collection) ---
     priming: bool = False
+    # Which wake word the user declared they are enrolling for this prime.
+    prime_wakeword: Optional[str] = None
     prime_start: float = 0.0  # monotonic; whole-session hard-cap reference
     prime_stop_requested: bool = False  # manual "end now" from the UI
     prime_speech_started: bool = False
@@ -123,16 +146,21 @@ class WakeEvent:
     """Emitted when a turn is captured.
 
     Two kinds:
-      - ``command``: a real acoustic arm + captured command turn (the live Hermes
+      - ``command``: a real acoustic arm + captured command turn (the live wake
         path). ``audio`` is the command; ``trigger_audio`` is the wake-word window
         snapshotted at arm, saved for false-positive review.
       - ``primed_positive``: a "prime + say it" data-collection capture. ``audio``
         is the spoken wake-word utterance; ``score`` is the model's max score over
         it and ``is_false_negative`` is True when that fell below threshold.
+
+    ``wakeword`` is the word this event belongs to (the arming word for commands,
+    the declared word for primes). ``also_fired`` lists other words over threshold
+    at arm (command kind only) — recorded for visibility, never cross-written.
     """
 
     client_id: str
     session_id: str
+    wakeword: str
     # Raw int16 PCM @16k of the captured turn (command, or primed wake utterance).
     audio: bytes
     arm_time: float
@@ -140,6 +168,11 @@ class WakeEvent:
     score: float
     reason: str  # "smart_turn" | "max_duration" | "stream_end" | "primed" | ...
     kind: str = "command"  # "command" | "primed_positive"
+    also_fired: list = field(default_factory=list)
+    # Collect-only (shadow) firing: the model fired but the word is in collect-only
+    # mode — snapshot the trigger window for FP review, but do NOT dispatch to the
+    # plugin, play a tone, or capture a command turn. (command kind only.)
+    collect_only: bool = False
     # Whether VAD heard enough speech in the captured turn to be worth batch-ASR.
     # False for near-silent false arms — the backend skips transcription so the
     # ASR can't hallucinate a phantom command. (command kind only.)
@@ -156,11 +189,11 @@ class WakeEvent:
 
 
 class HermesDetector:
-    """Loads the wake model + builds per-client capture state."""
+    """Loads N wake models + builds per-client capture state."""
 
     def __init__(
         self,
-        model_path: str,
+        models: dict[str, str],
         threshold: float = 0.9,
         patience: int = 5,
         debounce_secs: float = 3.0,
@@ -176,16 +209,34 @@ class HermesDetector:
         prime_max_secs: float = 4.0,
         prime_vad_threshold: float = 0.3,
         min_command_speech_secs: float = 0.3,
+        verifiers: Optional[dict[str, str]] = None,
+        verifier_threshold: Optional[float] = None,
+        thresholds: Optional[dict[str, float]] = None,
+        patiences: Optional[dict[str, int]] = None,
+        collect_only: Optional[list[str]] = None,
     ):
         """Initialize the detector.
 
         Args:
-            model_path: Path to the trained ``hermes.onnx`` wake-word model.
-            threshold: Acoustic detection threshold (favor precision).
-            patience: Require this many CONSECUTIVE frames over threshold before
-                firing — the main false-positive suppressor (raw per-frame
-                thresholding alone over-triggers on real ambient noise).
-            debounce_secs: Suppress repeat arming within this window.
+            models: Ordered ``{wakeword: onnx_path}``. Insertion order is the
+                arming PRIORITY when several words fire on the same frame (put the
+                more specific / lower-FP word first).
+            threshold: Default acoustic detection threshold (per-word override via
+                ``thresholds``). Favor precision.
+            verifiers: Optional ``{wakeword: verifier_npz_path}`` second-stage
+                verifiers (``.npz`` from ``training/train_verifier.py``). When set
+                for a word, each of its arms is confirmed by the verifier before it
+                dispatches; arms it judges false are dropped. Missing word -> no
+                verifier (stage-1 only) for that word.
+            verifier_threshold: Optional override of every verifier's trained
+                operating-point threshold.
+            patience: Default consecutive-frames-over-threshold required before
+                firing — the main false-positive suppressor (per-word override via
+                ``patiences``).
+            thresholds: Optional per-word threshold overrides.
+            patiences: Optional per-word patience overrides.
+            debounce_secs: Suppress repeat arming within this window (shared
+                across all wake words — one arm per window).
             vad_threshold: Silero speech-probability threshold.
             stop_secs: LONG backstop — silence (s) that forces end-of-turn if the
                 Smart Turn model never fires. End-of-turn is normally decided by
@@ -200,9 +251,20 @@ class HermesDetector:
             silero_vad_model_path: Optional override for the Silero VAD ONNX. If
                 None, the pipecat-bundled copy is resolved automatically.
         """
-        self.model_path = model_path
+        if not models:
+            raise ValueError("HermesDetector needs at least one wake model")
+        self.models = dict(models)
+        self.wakewords = list(self.models.keys())  # config order = priority
+        # Words in "collect-only" (shadow) mode fire to gather false-positive
+        # review data but never dispatch a command / play a tone / block a real
+        # wake word — used to farm FPs live for a not-yet-trusted word.
+        self.collect_only = set(collect_only or [])
         self.threshold = threshold
         self.patience = patience
+        self.thresholds = {
+            w: (thresholds or {}).get(w, threshold) for w in self.wakewords
+        }
+        self.patiences = {w: (patiences or {}).get(w, patience) for w in self.wakewords}
         self.debounce_secs = debounce_secs
         # Diagnostic: log any frame scoring above this floor (0 = off).
         self.score_log_floor = float(os.getenv("WAKEWORD_SCORE_LOG", "0") or 0)
@@ -236,14 +298,46 @@ class HermesDetector:
 
         # Interpreters are per-client (built in new_client_state) — the streaming
         # feature buffer is stateful and must not be shared across streams. Load a
-        # throwaway probe here only to validate the model and read the wake key.
-        logger.info(f"Loading wake-word model: {model_path} (threshold={threshold})")
-        probe = NanoInterpreter.load_model(model_path)
-        self._wake_key = next(iter(probe.models.keys()))
-        del probe
+        # throwaway probe per word here only to validate it and read its key.
+        self._wake_keys: dict[str, str] = {}
+        self._wake_in_names: dict[str, str] = {}
+        for wakeword, path in self.models.items():
+            logger.info(
+                f"Loading wake model '{wakeword}': {path} "
+                f"(threshold={self.thresholds[wakeword]}, "
+                f"patience={self.patiences[wakeword]})"
+            )
+            probe = NanoInterpreter.load_model(path)
+            key = next(iter(probe.models.keys()))
+            self._wake_keys[wakeword] = key
+            # Cache the wake ONNX input name so the verifier can score raw feature
+            # windows directly (it picks the peak window the model armed on).
+            self._wake_in_names[wakeword] = probe.models[key].get_inputs()[0].name
+            del probe
         logger.info(
-            f"Wake-word model loaded (key='{self._wake_key}', per-client interpreters)"
+            f"Loaded {len(self.wakewords)} wake model(s): {', '.join(self.wakewords)} "
+            f"(per-client interpreters)"
         )
+
+        # Optional second-stage verifiers (FP suppression), one per word. Loaded
+        # once, shared read-only across clients (pure-numpy scoring, no state).
+        self.verifiers: dict[str, WakeVerifier] = {}
+        for wakeword, vpath in (verifiers or {}).items():
+            if wakeword not in self.models:
+                logger.warning(f"verifier for unknown word '{wakeword}' — ignored")
+                continue
+            if vpath and os.path.exists(vpath):
+                self.verifiers[wakeword] = WakeVerifier(
+                    vpath, threshold=verifier_threshold
+                )
+                logger.info(f"verifier enabled for '{wakeword}' ({vpath})")
+            elif vpath:
+                logger.warning(
+                    f"verifier_path '{vpath}' for '{wakeword}' not found — "
+                    f"stage-1 only for that word"
+                )
+        if not self.verifiers:
+            logger.info("No verifiers configured — running stage-1 (wake models) only")
 
         # Resolve the Silero VAD ONNX path once (explicit override or bundled).
         if silero_vad_model_path:
@@ -256,14 +350,17 @@ class HermesDetector:
             )
 
     def new_client_state(self) -> ClientWakeState:
-        """Build fresh per-client state with its own VAD + Smart Turn instances."""
+        """Build fresh per-client state: one interpreter per wake word + VAD + ST."""
         analyzer = LocalSmartTurnAnalyzerV3(
             smart_turn_model_path=self.smart_turn_model_path,
             params=SmartTurnParams(stop_secs=self.stop_secs),
         )
         analyzer.set_sample_rate(SAMPLE_RATE)
         return ClientWakeState(
-            interpreter=NanoInterpreter.load_model(self.model_path),
+            interpreters={
+                w: NanoInterpreter.load_model(p) for w, p in self.models.items()
+            },
+            consec={w: 0 for w in self.wakewords},
             turn_analyzer=analyzer,
             vad_model=SileroOnnxModel(self._vad_model_path, force_onnx_cpu=True),
         )
@@ -295,8 +392,9 @@ class HermesDetector:
             return self._run_prime(state, client_id, session_id, audio)
 
         if not state.armed:
-            self._run_wake(state, client_id, audio)
-            return None
+            # _run_wake arms dispatch words (event comes later from capture) and
+            # returns a shadow event immediately for collect-only words.
+            return self._run_wake(state, client_id, session_id, audio)
 
         # Armed: drive VAD + Smart Turn to capture the command turn.
         return await self._run_capture(state, client_id, session_id, audio)
@@ -335,10 +433,10 @@ class HermesDetector:
         return buf[start:end]
 
     def _run_wake(
-        self, state: ClientWakeState, client_id: str, audio: np.ndarray
-    ) -> None:
+        self, state: ClientWakeState, client_id: str, session_id: str, audio: np.ndarray
+    ) -> Optional[WakeEvent]:
         # Reframe to exactly 1280-sample frames (carry a remainder across calls);
-        # the interpreter scores 0.0 on any other frame size.
+        # the interpreters score 0.0 on any other frame size.
         buf = (
             np.concatenate([state.wake_remainder, audio])
             if state.wake_remainder.size
@@ -347,44 +445,136 @@ class HermesDetector:
         n_full = (buf.size // WAKE_FRAME_SAMPLES) * WAKE_FRAME_SAMPLES
         state.wake_remainder = buf[n_full:].copy()
 
-        # Manual patience: require `self.patience` CONSECUTIVE 1280-frames over
-        # threshold before arming. (The interpreter's own patience/threshold-dict
-        # + .detected path never fires here, so we gate on the raw score, which is
-        # what evaluate_hermes.py validated.) This is the main FP suppressor.
         for i in range(0, n_full, WAKE_FRAME_SAMPLES):
-            score = state.interpreter.predict(buf[i : i + WAKE_FRAME_SAMPLES]).get(
-                self._wake_key, 0.0
-            )
-            if self.score_log_floor and score > self.score_log_floor:
-                logger.info(f"score {score:.3f} '{client_id}'")
-            state.consec = state.consec + 1 if score > self.threshold else 0
+            frame = buf[i : i + WAKE_FRAME_SAMPLES]
             now = time.monotonic()
-            if (
-                state.consec >= self.patience
-                and (now - state.last_detection_time) > self.debounce_secs
-            ):
-                state.armed = True
-                state.arm_time = now
-                state.arm_score = score
-                state.last_detection_time = now
-                state.consec = 0
-                # Snapshot the wake-trigger window for false-positive review (the
-                # audio that *caused* this arm, distinct from the command turn).
-                state.trigger_audio = self._preroll_tail(
-                    state, PREROLL_SAMPLES
-                ).tobytes()
-                # Dev: snapshot the interpreter's streaming buffer state that
-                # produced this arm BEFORE the reset clears it — makes the arm
-                # exactly reproducible offline (the model's ~2 s receptive field
-                # exceeds the 1.5 s trigger_audio window).
-                state.trigger_features, state.trigger_context = self._snapshot_buffers(
-                    state.interpreter
+
+            # Score EVERY wake word on this frame; update each patience counter.
+            scores: dict[str, float] = {}
+            for w in self.wakewords:
+                s = state.interpreters[w].predict(frame).get(self._wake_keys[w], 0.0)
+                scores[w] = s
+                if self.score_log_floor and s > self.score_log_floor:
+                    logger.info(f"score[{w}] {s:.3f} '{client_id}'")
+                state.consec[w] = state.consec[w] + 1 if s > self.thresholds[w] else 0
+
+            # Words ready to fire this frame, split by mode.
+            ready = [w for w in self.wakewords if state.consec[w] >= self.patiences[w]]
+            collect_ready = [w for w in ready if w in self.collect_only]
+            dispatch_ready = [w for w in ready if w not in self.collect_only]
+
+            # 1) Collect-only (shadow) firing: snapshot the trigger window for FP
+            # review, but DON'T enter the shared armed/capture state (so it never
+            # blocks a real dispatch word), don't dispatch, and don't run the
+            # verifier (we want to farm what the RAW model fires on). Independent
+            # debounce; only the firing word's interpreter resets (keeps dispatch
+            # words warm).
+            if collect_ready and (now - state.last_collect_time) > self.debounce_secs:
+                cand = collect_ready[0]
+                tf, tc = self._snapshot_buffers(state.interpreters[cand])
+                also = [
+                    w
+                    for w in self.wakewords
+                    if w != cand and scores[w] > self.thresholds[w]
+                ]
+                state.last_collect_time = now
+                state.consec[cand] = 0
+                state.interpreters[cand].reset()
+                trig = self._preroll_tail(state, PREROLL_SAMPLES).tobytes()
+                logger.info(
+                    f"👁 SHADOW '{client_id}' word={cand} "
+                    f"score={scores[cand]:.4f} (collect-only)"
                 )
-                # Reset interpreter + wake remainder so capture/next wake start clean.
-                state.interpreter.reset()
-                state.wake_remainder = np.empty(0, dtype=np.int16)
-                logger.info(f"🔔 ARMED '{client_id}' (score={score:.4f})")
-                return
+                return WakeEvent(
+                    client_id=client_id,
+                    session_id=session_id,
+                    wakeword=cand,
+                    audio=b"",
+                    arm_time=now,
+                    eot_time=now,
+                    score=scores[cand],
+                    reason="shadow_arm",
+                    kind="command",
+                    collect_only=True,
+                    also_fired=also,
+                    has_speech=False,
+                    trigger_audio=trig,
+                    buffer_features=tf,
+                    buffer_context=tc,
+                )
+
+            # 2) Real dispatch arming: one arm per debounce window across all
+            # dispatch words, highest-priority ready word that passes its verifier.
+            if (
+                not dispatch_ready
+                or (now - state.last_detection_time) <= self.debounce_secs
+            ):
+                continue
+
+            arm_word = None
+            trigger_features, trigger_context = None, b""
+            for cand in dispatch_ready:
+                # Snapshot the interpreter's streaming buffer that produced this
+                # candidate arm BEFORE any reset clears it — needed both by the
+                # verifier and for false-positive review.
+                tf, tc = self._snapshot_buffers(state.interpreters[cand])
+                verifier = self.verifiers.get(cand)
+                if verifier is not None and tf is not None:
+                    passed, vprob = verifier.verify(
+                        tf,
+                        state.interpreters[cand].models[self._wake_keys[cand]],
+                        self._wake_in_names[cand],
+                    )
+                    if not passed:
+                        # Reject: clear THIS word's patience but keep streaming (no
+                        # interpreter reset, no debounce) so a real wake right after
+                        # is not delayed; let a lower-priority ready word still arm.
+                        state.consec[cand] = 0
+                        logger.info(
+                            f"🚫 verifier REJECTED '{cand}' arm '{client_id}' "
+                            f"(wake={scores[cand]:.4f} verify={vprob:.3f} "
+                            f"< {verifier.threshold:.2f})"
+                        )
+                        continue
+                    logger.info(
+                        f"✅ verifier confirmed '{cand}' '{client_id}' "
+                        f"(verify={vprob:.3f})"
+                    )
+                arm_word = cand
+                trigger_features, trigger_context = tf, tc
+                break
+
+            if arm_word is None:
+                continue
+
+            # Other words also over threshold at this instant (visibility only).
+            also_fired = [
+                w
+                for w in self.wakewords
+                if w != arm_word and scores[w] > self.thresholds[w]
+            ]
+            state.armed = True
+            state.armed_wakeword = arm_word
+            state.also_fired = also_fired
+            state.arm_time = now
+            state.arm_score = scores[arm_word]
+            state.last_detection_time = now
+            for w in self.wakewords:
+                state.consec[w] = 0
+            # Snapshot the wake-trigger window for false-positive review (the
+            # audio that *caused* this arm, distinct from the command turn).
+            state.trigger_audio = self._preroll_tail(state, PREROLL_SAMPLES).tobytes()
+            state.trigger_features = trigger_features
+            state.trigger_context = trigger_context
+            # Reset all interpreters + wake remainder so capture/next wake start clean.
+            for w in self.wakewords:
+                state.interpreters[w].reset()
+            state.wake_remainder = np.empty(0, dtype=np.int16)
+            logger.info(
+                f"🔔 ARMED '{client_id}' word={arm_word} score={scores[arm_word]:.4f}"
+                f"{f' also_fired={also_fired}' if also_fired else ''}"
+            )
+            return
 
     def flush(
         self, state: ClientWakeState, client_id: str, session_id: str
@@ -487,24 +677,28 @@ class HermesDetector:
         event = WakeEvent(
             client_id=client_id,
             session_id=session_id,
+            wakeword=state.armed_wakeword or self.wakewords[0],
             audio=captured,
             arm_time=state.arm_time,
             eot_time=eot_time,
             score=state.arm_score,
             reason=reason,
             kind="command",
+            also_fired=list(state.also_fired),
             has_speech=has_speech,
             trigger_audio=state.trigger_audio,
             buffer_features=state.trigger_features,
             buffer_context=state.trigger_context,
         )
         logger.info(
-            f"🛑 CAPTURED '{client_id}' reason={reason} "
+            f"🛑 CAPTURED '{client_id}' word={event.wakeword} reason={reason} "
             f"dur={eot_time - state.arm_time:.2f}s audio={len(captured)}B "
             f"speech={speech_secs:.2f}s has_speech={has_speech}"
         )
         # Reset state for the next wake word.
         state.armed = False
+        state.armed_wakeword = None
+        state.also_fired = []
         state.arm_time = 0.0
         state.arm_score = 0.0
         state.trigger_audio = b""
@@ -525,14 +719,21 @@ class HermesDetector:
     # "Prime + say it" positive capture (false-negative / hard-positive collection)
     # ------------------------------------------------------------------ #
 
-    def start_priming(self, state: ClientWakeState, client_id: str) -> None:
-        """Arm a one-shot positive capture: the next utterance is a known wake word.
+    def start_priming(
+        self, state: ClientWakeState, client_id: str, wakeword: str
+    ) -> None:
+        """Arm a one-shot positive capture: the next utterance is ``wakeword``.
 
         Used by the data-collection UI ("I'll say the wake word now"). The next
-        VAD-detected utterance is captured as a labeled positive regardless of the
-        model's score; the score is computed afterwards to flag false negatives.
+        VAD-detected utterance is captured as a labeled positive for ``wakeword``
+        regardless of the model's score; the score (against that word's model) is
+        computed afterwards to flag false negatives. Because the user declares the
+        word, this enrollment path is unambiguous even when wake words overlap.
         """
+        if wakeword not in self.models:
+            raise ValueError(f"unknown wake word '{wakeword}' (have {self.wakewords})")
         state.priming = True
+        state.prime_wakeword = wakeword
         state.prime_start = time.monotonic()
         state.prime_stop_requested = False
         state.prime_speech_started = False
@@ -541,7 +742,10 @@ class HermesDetector:
         state.vad_remainder = np.empty(0, dtype=np.int16)
         if state.turn_analyzer is not None:
             state.turn_analyzer.clear()
-        logger.info(f"🎯 PRIMED positive capture for '{client_id}' — awaiting speech")
+        logger.info(
+            f"🎯 PRIMED positive capture for '{client_id}' word={wakeword} "
+            f"— awaiting speech"
+        )
 
     def stop_priming(self, state: ClientWakeState) -> None:
         """Request a manual end of an in-progress prime (the UI 'stop' button).
@@ -623,6 +827,7 @@ class HermesDetector:
     def _finish_prime(
         self, state: ClientWakeState, client_id: str, session_id: str, reason: str
     ) -> WakeEvent:
+        wakeword = state.prime_wakeword or self.wakewords[0]
         if state.prime_chunks:
             captured = np.concatenate(state.prime_chunks)
         else:
@@ -630,13 +835,13 @@ class HermesDetector:
             # recent pre-roll so the attempt still surfaces for review instead of
             # vanishing (the user explicitly asked for it to always show up).
             captured = self._preroll_tail(state, PREROLL_SAMPLES)
-        score = (
-            self._score_buffer(state.interpreter, captured) if captured.size else 0.0
-        )
-        is_fn = score < self.threshold
+        interp = state.interpreters[wakeword]
+        score = self._score_buffer(interp, wakeword, captured) if captured.size else 0.0
+        is_fn = score < self.thresholds[wakeword]
         event = WakeEvent(
             client_id=client_id,
             session_id=session_id,
+            wakeword=wakeword,
             audio=captured.tobytes(),
             arm_time=0.0,
             eot_time=time.monotonic(),
@@ -646,23 +851,22 @@ class HermesDetector:
             is_false_negative=is_fn,
         )
         logger.info(
-            f"🎯 PRIMED POSITIVE '{client_id}' score={score:.4f} "
+            f"🎯 PRIMED POSITIVE '{client_id}' word={wakeword} score={score:.4f} "
             f"{'(FALSE NEGATIVE)' if is_fn else '(would-have-fired)'} "
             f"dur={captured.size / SAMPLE_RATE:.2f}s reason={reason}"
         )
         self._reset_prime(state)
         return event
 
-    def _score_buffer(self, interp, audio: np.ndarray) -> float:
-        """Max wake score over a buffer using this client's interpreter (reset
+    def _score_buffer(self, interp, wakeword: str, audio: np.ndarray) -> float:
+        """Max wake score over a buffer using this word's interpreter (reset
         before/after so the live streaming state isn't polluted)."""
+        key = self._wake_keys[wakeword]
         interp.reset()
         best = 0.0
         n_full = (audio.size // WAKE_FRAME_SAMPLES) * WAKE_FRAME_SAMPLES
         for i in range(0, n_full, WAKE_FRAME_SAMPLES):
-            s = interp.predict(audio[i : i + WAKE_FRAME_SAMPLES]).get(
-                self._wake_key, 0.0
-            )
+            s = interp.predict(audio[i : i + WAKE_FRAME_SAMPLES]).get(key, 0.0)
             best = max(best, s)
         interp.reset()
         return float(best)
@@ -685,6 +889,7 @@ class HermesDetector:
     @staticmethod
     def _reset_prime(state: ClientWakeState) -> None:
         state.priming = False
+        state.prime_wakeword = None
         state.prime_start = 0.0
         state.prime_stop_requested = False
         state.prime_speech_started = False

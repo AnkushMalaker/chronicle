@@ -48,6 +48,7 @@ dependencies = [
     { name = "ruamel-yaml" },
     { name = "soundfile" },
     { name = "spacy" },
+    { name = "ten-vad" },
     { name = "uvicorn" },
     { name = "websockets" },
     { name = "wyoming" },
@@ -127,6 +128,7 @@ requires-dist = [
     { name = "ruamel-yaml", specifier = ">=0.18.0" },
     { name = "soundfile", specifier = ">=0.12.1" },
     { name = "spacy", specifier = ">=3.8.2" },
+    { name = "ten-vad", git = "https://github.com/TEN-framework/ten-vad.git?rev=22a3bcd4509d0faaa8eef4881e8af5f39c178950" },
     { name = "uvicorn", specifier = ">=0.34.2" },
     { name = "websockets", specifier = ">=12.0" },
     { name = "wyoming", specifier = ">=1.6.1" },
@@ -4090,6 +4092,11 @@ sdist = { url = "https://files.pythonhosted.org/packages/ba/b8/73a0e6a6e079a9d9c
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d9/52/1064f510b141bd54025f9b55105e26d1fa970b9be67ad766380a3c9b74b0/starlette-0.50.0-py3-none-any.whl", hash = "sha256:9e5391843ec9b6e472eed1365a78c8098cfceb7a74bfd4d6b1c0c0095efb3bca", size = 74033, upload_time = "2025-11-01T15:25:25.461Z" },
 ]
+
+[[package]]
+name = "ten-vad"
+version = "1.0.6.8"
+source = { git = "https://github.com/TEN-framework/ten-vad.git?rev=22a3bcd4509d0faaa8eef4881e8af5f39c178950#22a3bcd4509d0faaa8eef4881e8af5f39c178950" }
 
 [[package]]
 name = "tenacity"

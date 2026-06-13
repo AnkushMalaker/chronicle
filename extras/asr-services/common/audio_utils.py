@@ -68,6 +68,56 @@ def numpy_to_audio_bytes(audio_array: np.ndarray, sample_width: int = 2) -> byte
         raise ValueError(f"Unsupported sample width: {sample_width}")
 
 
+def measure_voiced_duration_ms(
+    audio_array: np.ndarray,
+    sample_rate: int = STANDARD_SAMPLE_RATE,
+    energy_floor: float = 0.01,
+    frame_ms: int = 30,
+) -> float:
+    """Cumulative duration (ms) of frames whose RMS exceeds ``energy_floor``.
+
+    A frame-energy VAD: the audio is chopped into ``frame_ms`` frames and a frame
+    counts as "voiced" when its RMS is above ``energy_floor`` (on a [-1, 1] signal).
+    Robust to single clicks/pops (one loud frame contributes only ``frame_ms``),
+    unlike peak amplitude or whole-window mean RMS.
+
+    Args:
+        audio_array: Mono samples normalised to [-1.0, 1.0] (as ``load_audio_file`` returns).
+        sample_rate: Sample rate of ``audio_array``.
+        energy_floor: Per-frame RMS above which a frame is considered speech.
+        frame_ms: Frame length in milliseconds.
+
+    Returns:
+        Total voiced duration in milliseconds.
+    """
+    frame_len = max(1, int(sample_rate * frame_ms / 1000))
+    if len(audio_array) < frame_len:
+        return 0.0
+    n_frames = len(audio_array) // frame_len
+    frames = audio_array[: n_frames * frame_len].reshape(n_frames, frame_len)
+    frame_rms = np.sqrt(np.mean(frames.astype(np.float32) ** 2, axis=1) + 1e-12)
+    return float(np.count_nonzero(frame_rms > energy_floor) * frame_ms)
+
+
+def is_silent(
+    audio_array: np.ndarray,
+    sample_rate: int = STANDARD_SAMPLE_RATE,
+    energy_floor: float = 0.01,
+    min_voiced_ms: float = 200.0,
+    frame_ms: int = 30,
+) -> bool:
+    """True when the clip carries less than ``min_voiced_ms`` of voiced audio.
+
+    Used to gate prompt-conditioned ASR models (VibeVoice/Gemma) which hallucinate
+    their context prompt back as "transcription" on near-silent windows. See
+    :func:`measure_voiced_duration_ms` for the energy-VAD details.
+    """
+    voiced_ms = measure_voiced_duration_ms(
+        audio_array, sample_rate, energy_floor=energy_floor, frame_ms=frame_ms
+    )
+    return voiced_ms < min_voiced_ms
+
+
 def resample_audio(
     audio_array: np.ndarray, original_rate: int, target_rate: int = STANDARD_SAMPLE_RATE
 ) -> np.ndarray:

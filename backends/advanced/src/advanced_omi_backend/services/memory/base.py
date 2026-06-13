@@ -226,6 +226,24 @@ class MemoryServiceBase(ABC):
         """
         return []
 
+    async def delete_memories_by_source(self, user_id: str, source_id: str) -> int:
+        """Delete all memories extracted from a specific source (conversation).
+
+        Used when a source conversation is replaced (split/merge) so its facts
+        don't survive as duplicates once the derived conversations re-extract.
+        Default implementation lists via ``get_memories_by_source`` and deletes
+        each; providers without source tracking are a no-op.
+
+        Returns:
+            Number of memories deleted.
+        """
+        memories = await self.get_memories_by_source(user_id, source_id, limit=1000)
+        deleted = 0
+        for memory in memories:
+            if await self.delete_memory(memory.id, user_id=user_id):
+                deleted += 1
+        return deleted
+
     async def reprocess_memory(
         self,
         transcript: str,

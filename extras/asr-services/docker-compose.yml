@@ -52,6 +52,54 @@ services:
     restart: unless-stopped
 
   # ============================================================================
+  # Nemotron 3.5 Streaming Provider (NeMo cache-aware FastConformer-RNNT)
+  # Reuses the nemo provider image; exposes /transcribe (offline) and /stream
+  # (true cache-aware low-latency streaming, ~100ms). Runs on its own port so it
+  # can serve stt_stream alongside a different batch stt provider on 8767.
+  # ============================================================================
+  nemotron-stream-asr:
+    build:
+      context: .
+      dockerfile: providers/nemo/Dockerfile
+      args:
+        PYTORCH_CUDA_VERSION: ${PYTORCH_CUDA_VERSION:-cu126}
+        # Nemotron 3.5's prompt-conditioned RNNT class only exists on NeMo main,
+        # overlaid on the stable nemo deps (see providers/nemo/Dockerfile).
+        NEMO_GIT_REF: ${NEMO_GIT_REF:-b7e09985039ada42f40c5f796ef22c711c283c90}
+    image: ${CHRONICLE_REGISTRY:-}chronicle-asr-nemotron:${CHRONICLE_TAG:-latest}
+    ports:
+      - "${NEMOTRON_STREAM_PORT:-8772}:8765"
+    volumes:
+      - ./model_cache:/models
+      - ./debug:/app/debug
+      - ./results:/app/results
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - HF_HOME=/models
+      - ASR_MODEL=${NEMOTRON_MODEL:-nvidia/nemotron-3.5-asr-streaming-0.6b}
+      - DEVICE=${DEVICE:-cuda}
+      # Cache-aware streaming attention context "[left,right]" (80ms .. 1.12s
+      # look-ahead). [56,3] = 320ms is the balanced default; [56,0] snappiest,
+      # [56,13] most accurate.
+      - NEMO_ATT_CONTEXT_SIZE=${NEMO_ATT_CONTEXT_SIZE:-[56,3]}
+      # Language prompt key from the model's prompt_dictionary. "auto" is the
+      # language-agnostic prompt (best for code-switched / Hinglish audio);
+      # force one with e.g. en-US, hi-IN, es-ES, zh-CN.
+      - NEMO_TARGET_LANG=${NEMO_TARGET_LANG:-auto}
+      - NEMO_STREAM_INTERVAL_SECONDS=${NEMO_STREAM_INTERVAL_SECONDS:-1.0}
+      - NEMO_FALLBACK_WINDOW_SECONDS=${NEMO_FALLBACK_WINDOW_SECONDS:-30}
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    restart: unless-stopped
+
+  # ============================================================================
   # Faster-Whisper Provider (4-6x faster Whisper inference)
   # ============================================================================
   faster-whisper-asr:

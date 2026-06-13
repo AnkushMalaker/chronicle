@@ -4,6 +4,7 @@ Abstract base class for ASR services.
 Provides a common interface and FastAPI app setup for all ASR providers.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -18,6 +19,18 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 
 logger = logging.getLogger(__name__)
+
+# Sentinel returned by _safe_next() when a sync generator is exhausted, so we can
+# step it from the event loop via run_in_executor without StopIteration crossing
+# the async boundary.
+_GEN_DONE = object()
+
+
+def _safe_next(generator):
+    try:
+        return next(generator)
+    except StopIteration:
+        return _GEN_DONE
 
 
 class BaseASRService(ABC):
@@ -128,6 +141,34 @@ class BaseASRService(ABC):
         """Return True if service is ready to handle requests."""
         return self._is_ready
 
+    def max_concurrency(self) -> int:
+        """Max concurrent transcriptions this service runs on the GPU at once.
+
+        Default 1: a single-GPU model serializes inference, so concurrent requests
+        must queue rather than dogpile the GPU (which causes VRAM OOM / wedge).
+        Configurable via the ASR_MAX_CONCURRENCY env var, or override in a provider
+        to derive the limit from available VRAM (memory-aware concurrency).
+        """
+        try:
+            return max(1, int(os.getenv("ASR_MAX_CONCURRENCY", "1")))
+        except ValueError:
+            return 1
+
+    def priority_concurrency(self) -> int:
+        """Concurrent slots reserved for the PRIORITY lane (min 1).
+
+        The priority lane is a separate GPU semaphore from the normal lane, so a
+        latency-sensitive request (e.g. a wake-word command clip) always has a
+        free slot and runs concurrently with a long batch instead of queueing
+        behind it. On a single GPU this means up to (normal + priority) inferences
+        interleave — keep this at 1 and priority clips short to bound VRAM use.
+        Configurable via ASR_PRIORITY_CONCURRENCY.
+        """
+        try:
+            return max(1, int(os.getenv("ASR_PRIORITY_CONCURRENCY", "1")))
+        except ValueError:
+            return 1
+
 
 def _get_audio_duration(file_path: str) -> Optional[float]:
     """Return audio duration in seconds, or None if unreadable."""
@@ -154,13 +195,30 @@ def create_asr_app(service: BaseASRService) -> FastAPI:
         description=f"ASR service using {service.provider_name} provider",
     )
 
+    # GPU concurrency gates: limit how many transcriptions run at once so a burst of
+    # requests queues at the GPU instead of dogpiling it (which OOMs/wedges a single-GPU
+    # service). Two independent lanes — "normal" and "priority" — each with its own
+    # semaphore (≥1), so a latency-sensitive request gets a dedicated slot and runs
+    # concurrently with a long batch instead of queueing behind it. Created on startup
+    # so they bind to the running event loop. Shared by the streaming and single paths.
+    gate = {}
+
     @app.on_event("startup")
     async def startup_event():
         """Initialize the transcriber on startup."""
         logger.info(f"Starting {service.provider_name} ASR service...")
         await service.warmup()
+        normal_limit = service.max_concurrency()
+        priority_limit = service.priority_concurrency()
+        gate["normal"] = asyncio.Semaphore(normal_limit)
+        gate["priority"] = asyncio.Semaphore(priority_limit)
+        # Mark ready only after the gates exist, so the /transcribe handler never
+        # races ahead of them being set.
         service._is_ready = True
-        logger.info(f"{service.provider_name} ASR service ready")
+        logger.info(
+            f"{service.provider_name} ASR service ready "
+            f"(normal concurrency: {normal_limit}, priority: {priority_limit})"
+        )
 
     @app.get("/health", response_model=HealthResponse)
     async def health_check():
@@ -186,6 +244,7 @@ def create_asr_app(service: BaseASRService) -> FastAPI:
         file: UploadFile = File(...),
         context_info: Optional[str] = Form(None),
         prompt: Optional[str] = Form(None),
+        priority: bool = Form(False),
     ):
         """
         Transcribe uploaded audio file.
@@ -198,8 +257,12 @@ def create_asr_app(service: BaseASRService) -> FastAPI:
         if not service.is_ready:
             raise HTTPException(status_code=503, detail="Service not ready")
 
+        # Pick the GPU lane: priority requests use a dedicated semaphore so they
+        # never queue behind a long batch holding the normal lane.
+        sem = gate["priority"] if priority else gate["normal"]
+
         request_start = time.time()
-        logger.info(f"Transcription request started")
+        logger.info(f"Transcription request started (priority={priority})")
 
         tmp_filename = None
         streaming_response = False
@@ -232,35 +295,47 @@ def create_asr_app(service: BaseASRService) -> FastAPI:
                 )
                 streaming_response = True
 
-                def _ndjson_generator():
-                    """Wrap sync generator as NDJSON lines, clean up temp file when done."""
-                    try:
-                        for event in service.transcribe_with_progress(
+                async def _ndjson_generator():
+                    """Stream NDJSON progress/result, holding the GPU gate for the
+                    whole inference and stepping the provider's sync generator in a
+                    thread so the event loop stays responsive."""
+                    loop = asyncio.get_event_loop()
+                    async with sem:
+                        sync_gen = service.transcribe_with_progress(
                             tmp_filename,
                             context_info=context_info,
                             prompt=prompt,
-                        ):
-                            yield json.dumps(event) + "\n"
-                    finally:
+                        )
                         try:
-                            os.unlink(tmp_filename)
-                        except Exception as e:
-                            logger.warning(
-                                f"Failed to delete temp file {tmp_filename}: {e}"
-                            )
+                            while True:
+                                event = await loop.run_in_executor(
+                                    None, _safe_next, sync_gen
+                                )
+                                if event is _GEN_DONE:
+                                    break
+                                yield json.dumps(event) + "\n"
+                        finally:
+                            try:
+                                os.unlink(tmp_filename)
+                            except Exception as e:
+                                logger.warning(
+                                    f"Failed to delete temp file {tmp_filename}: {e}"
+                                )
 
                 return StreamingResponse(
                     _ndjson_generator(),
                     media_type="application/x-ndjson",
                 )
 
-            # Normal path: single JSON response
+            # Normal path: single JSON response. Hold the GPU gate across the call so
+            # short-audio requests serialize with streaming ones on the single GPU.
             transcribe_start = time.time()
-            result = await service.transcribe(
-                tmp_filename,
-                context_info=context_info,
-                prompt=prompt,
-            )
+            async with sem:
+                result = await service.transcribe(
+                    tmp_filename,
+                    context_info=context_info,
+                    prompt=prompt,
+                )
             transcribe_time = time.time() - transcribe_start
             logger.info(f"Transcription completed in {transcribe_time:.3f}s")
 

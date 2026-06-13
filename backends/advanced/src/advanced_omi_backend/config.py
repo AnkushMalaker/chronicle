@@ -212,6 +212,25 @@ def get_streaming_fallback_timeout() -> int:
     return int(timeout)
 
 
+def get_live_segmentation() -> str:
+    """
+    Get the live-transcription mode (top-level ``defaults.live_segmentation``).
+
+    - ``"streaming_stt"`` (default): a real streaming ASR produces live transcripts.
+    - ``"windowed_batch"``: pseudo-streaming via fixed-duration batch windows.
+    - ``"off"``: no live transcription; the final transcript is produced by batch
+      transcription only when the session ends.
+
+    Returns:
+        One of "streaming_stt", "windowed_batch", "off".
+    """
+    cfg = load_config()
+    defaults_settings = (
+        OmegaConf.to_container(cfg.get("defaults", {}), resolve=True) if cfg else {}
+    ) or {}
+    return defaults_settings.get("live_segmentation", "streaming_stt")
+
+
 # ============================================================================
 # Miscellaneous Settings (OmegaConf-based)
 # ============================================================================
@@ -222,7 +241,7 @@ def get_misc_settings() -> dict:
     Get miscellaneous configuration settings using OmegaConf.
 
     Returns:
-        Dict with always_persist_enabled and use_provider_segments
+        Dict with miscellaneous settings (persistence, timeouts, segmentation mode)
     """
     # Get audio settings for always_persist_enabled
     audio_cfg = get_backend_config("audio")
@@ -230,7 +249,7 @@ def get_misc_settings() -> dict:
         OmegaConf.to_container(audio_cfg, resolve=True) if audio_cfg else {}
     )
 
-    # Get transcription settings for use_provider_segments
+    # Get transcription settings for timeouts and batch re-transcription
     transcription_cfg = get_backend_config("transcription")
     transcription_settings = (
         OmegaConf.to_container(transcription_cfg, resolve=True)
@@ -255,9 +274,6 @@ def get_misc_settings() -> dict:
 
     return {
         "always_persist_enabled": audio_settings.get("always_persist_enabled", False),
-        "use_provider_segments": transcription_settings.get(
-            "use_provider_segments", False
-        ),
         "per_segment_speaker_id": speaker_settings.get("per_segment_speaker_id", False),
         "streaming_fallback_timeout_seconds": int(
             transcription_settings.get(
@@ -279,7 +295,7 @@ def save_misc_settings(settings: dict) -> bool:
     Save miscellaneous settings to config.yml using OmegaConf.
 
     Args:
-        settings: Dict with always_persist_enabled and/or use_provider_segments
+        settings: Dict with miscellaneous settings to save
 
     Returns:
         True if saved successfully, False otherwise
@@ -290,14 +306,6 @@ def save_misc_settings(settings: dict) -> bool:
     if "always_persist_enabled" in settings:
         audio_settings = {"always_persist_enabled": settings["always_persist_enabled"]}
         if not save_config_section("backend.audio", audio_settings):
-            success = False
-
-    # Save transcription settings if use_provider_segments is provided
-    if "use_provider_segments" in settings:
-        transcription_settings = {
-            "use_provider_segments": settings["use_provider_segments"]
-        }
-        if not save_config_section("backend.transcription", transcription_settings):
             success = False
 
     # Save speaker recognition settings if per_segment_speaker_id is provided

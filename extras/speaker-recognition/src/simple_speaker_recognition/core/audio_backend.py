@@ -284,8 +284,11 @@ class AudioBackend:
                     f"Segment [{start:.6f}s, {end:.6f}s] clamped to [{start_clamped:.6f}s, {end_clamped:.6f}s] for file duration {file_duration:.6f}s"
                 )
 
+            # mode="pad" zero-pads short reads at file end — duration metadata can
+            # over-report by a few ms vs decodable samples, and strict mode raises
+            # on the final diarization chunk in that case.
             seg = Segment(start_clamped, end_clamped)
-            wav, _ = self.loader.crop(str(path), seg)
+            wav, _ = self.loader.crop(str(path), seg, mode="pad")
         else:
             wav, _ = self.loader(str(path))
         return wav.unsqueeze(0)  # (1, 1, T)

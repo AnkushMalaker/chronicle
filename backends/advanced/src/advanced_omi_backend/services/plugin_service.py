@@ -22,6 +22,7 @@ from advanced_omi_backend.config_loader import get_plugins_yml_path
 from advanced_omi_backend.plugins import BasePlugin, PluginRouter
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.plugins.services import PluginServices
+from advanced_omi_backend.redis_factory import create_sync_redis
 
 logger = logging.getLogger(__name__)
 
@@ -749,8 +750,7 @@ def _build_plugin_router() -> Optional[PluginRouter]:
             logger.info("No plugins.yml found, plugins disabled")
 
         # Attach PluginServices for cross-plugin and system interaction
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        services = PluginServices(router=router, redis_url=redis_url)
+        services = PluginServices(router=router)
         router.set_services(services)
 
         return router
@@ -986,10 +986,7 @@ def signal_worker_restart() -> None:
     plugin router's lifecycle (e.g. during or after a failed reload).
     """
     try:
-        import redis
-
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        client = redis.from_url(redis_url, decode_responses=True)
+        client = create_sync_redis(decode_responses=True)
         try:
             timestamp = time.strftime("%Y-%m-%dT%H:%M:%S")
             client.set(WORKER_RESTART_KEY, timestamp)

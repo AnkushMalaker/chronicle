@@ -41,6 +41,18 @@ class FishSpeechService(BaseTTSService):
     def provider_name(self) -> str:
         return "fish-speech"
 
+    async def health_probe(self) -> bool:
+        """Re-probe the fish-speech inference subprocess on every /health.
+
+        startup.py runs the real inference server as a separate process; if it
+        crashes after boot the wrapper stays up. Re-checking its /v1/health here
+        means our /health reports the real state instead of a stale warmup flag.
+        """
+        if not self._is_ready or self.synthesizer is None:
+            return False
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.synthesizer.backend_alive)
+
     async def warmup(self) -> None:
         """Initialize the HTTP client and detect sample rate.
 

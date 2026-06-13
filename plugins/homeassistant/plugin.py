@@ -13,12 +13,15 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.llm_client import get_llm_client
+from advanced_omi_backend.openai_factory import model_supports_temperature
 from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 
 from .command_parser import COMMAND_PARSER_SYSTEM_PROMPT, ParsedCommand
 from .entity_cache import EntityCache
+from .intent_router import router_client
+from .intent_router.cascade import ConvResult, run_ha_cascade
 from .mcp_client import HAMCPClient, MCPError
 
 logger = logging.getLogger(__name__)
@@ -114,7 +117,106 @@ class HomeAssistantPlugin(BasePlugin):
         except Exception as e:
             raise MCPError(f"Failed to connect to Home Assistant API: {e}")
 
+        # Warm the HA Assist pipeline so the first real command isn't slow.
+        # (The intent-router microservice warms its own model on startup.)
+        try:
+            await self.mcp_client.process_conversation("status")
+            logger.info("HA Assist warmed")
+        except Exception as e:
+            logger.warning(f"Warm-up skipped: {e}")
+
         logger.info("Home Assistant plugin initialized successfully")
+
+    async def on_wake_word_detected(
+        self, context: PluginContext
+    ) -> Optional[PluginResult]:
+        """First handler in the wake-word chain of responsibility.
+
+        Decides "is this command for me (Home Assistant)?":
+          - intent router says 'other'        -> decline (return None) -> next plugin
+          - router says 'home' and HA acts    -> handle, stop the chain
+          - router says 'home' but HA can't   -> decline (return None) -> next plugin
+
+        Returning None passes the command down the priority-ordered plugin chain
+        (the Hermes agent is the catch-all, last). This plugin has NO knowledge of
+        Hermes - the ordering/hierarchy lives in config/plugins.yml (priority).
+        """
+        if context.data.get("asr_status") == "skipped_silence":
+            logger.info("Wake word armed but capture was silent; ignoring")
+            return PluginResult(success=False, message="", should_continue=False)
+
+        command = (
+            context.data.get("command") or context.data.get("transcript") or ""
+        ).strip()
+        if not command or not self.mcp_client:
+            return None  # nothing we can do -> let the next handler try
+
+        route = await router_client.classify(command)
+        if route.route != "home":
+            logger.info(
+                "Router: %r -> %s (P=%.2f); declining",
+                command,
+                route.route,
+                route.p_home,
+            )
+            return None  # not a home command -> pass to next handler (e.g. Hermes)
+
+        async def conversation_fn(text: str) -> ConvResult:
+            d = await self.mcp_client.process_conversation(text)
+            return ConvResult(
+                response_type=d["response_type"],
+                code=d["code"],
+                speech=d["speech"],
+                success_count=d["success_count"],
+            )
+
+        async def llm_complete_fn(system: str, user: str) -> str:
+            llm = get_llm_client()
+
+            def _call():
+                # Don't set max_tokens (reasoning models reject it) and only set
+                # temperature when the model supports it — mirrors LLMClient.generate.
+                params = {
+                    "model": llm.model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                }
+                if model_supports_temperature(llm.model):
+                    params["temperature"] = 0.0
+                resp = llm.client.chat.completions.create(**params)
+                return resp.choices[0].message.content or ""
+
+            return await asyncio.to_thread(_call)
+
+        res = await run_ha_cascade(
+            command,
+            conversation_fn=conversation_fn,
+            llm_complete_fn=llm_complete_fn,
+        )
+        logger.info(
+            "HA cascade: %r -> %s (%.0fms) :: %s",
+            command,
+            res.final_tier,
+            res.total_ms,
+            res.message,
+        )
+        if not res.success:
+            return None  # HA couldn't act -> pass down the chain
+
+        return PluginResult(
+            success=True,
+            message=res.message,
+            data={
+                "final_tier": res.final_tier,
+                "p_home": route.p_home,
+                "traces": [
+                    (t.tier, round(t.latency_ms, 1), t.detail) for t in res.traces
+                ],
+            },
+            should_continue=False,  # handled -> stop the chain
+        )
 
     async def on_transcript(self, context: PluginContext) -> Optional[PluginResult]:
         """

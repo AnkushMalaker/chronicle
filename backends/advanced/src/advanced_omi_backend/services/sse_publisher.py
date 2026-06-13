@@ -11,14 +11,13 @@ The SSE endpoint subscribes to the user's channel and streams events to the brow
 
 import json
 import logging
-import os
 import time
 
 import redis
 
-logger = logging.getLogger(__name__)
+from advanced_omi_backend.redis_factory import create_sync_redis
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+logger = logging.getLogger(__name__)
 
 # Lazy-initialized sync Redis client (for RQ workers)
 _sync_redis: redis.Redis | None = None
@@ -28,7 +27,7 @@ def _get_sync_redis() -> redis.Redis:
     """Get or create the sync Redis client."""
     global _sync_redis
     if _sync_redis is None:
-        _sync_redis = redis.from_url(REDIS_URL, decode_responses=True)
+        _sync_redis = create_sync_redis(decode_responses=True)
     return _sync_redis
 
 

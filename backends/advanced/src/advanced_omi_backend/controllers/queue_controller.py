@@ -14,19 +14,18 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-import redis
 from rq import Queue, Worker
 from rq.job import Job, JobStatus
 from rq.registry import DeferredJobRegistry, ScheduledJobRegistry
 
 from advanced_omi_backend.config_loader import get_service_config
+from advanced_omi_backend.redis_factory import create_sync_redis
 from advanced_omi_backend.services.sse_publisher import publish_sse_event
 
 logger = logging.getLogger(__name__)
 
-# Redis connection configuration
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-redis_conn = redis.from_url(REDIS_URL)
+# Shared sync Redis connection for RQ (decode_responses=False, as RQ requires).
+redis_conn = create_sync_redis()
 
 
 def get_job_status_from_rq(job: Job) -> str:
@@ -409,6 +408,20 @@ def start_streaming_jobs(
     misc_settings = get_misc_settings()
     always_persist = misc_settings.get("always_persist_enabled", False)
 
+    # In "off" live-segmentation mode there is no live transcript to gate on, so batch
+    # transcription is the ONLY path to a transcript — and batch reads audio from
+    # MongoDB. always_persist=False would mean nothing is persisted (no speech signal
+    # to trigger it), so the audio would only ever exist in the soon-trimmed Redis
+    # stream and never get transcribed. Force persistence so off mode always has audio
+    # for batch; no-speech sessions are still hidden via post-batch soft-delete.
+    live_segmentation = misc_settings.get("live_segmentation", "streaming_stt")
+    if live_segmentation == "off" and not always_persist:
+        logger.info(
+            "🔒 live_segmentation=off → forcing always_persist=True so batch "
+            "transcription has persisted audio to read"
+        )
+        always_persist = True
+
     # Enqueue speech detection job
     speech_job = transcription_queue.enqueue(
         stream_speech_detection_job,
@@ -493,6 +506,7 @@ def start_post_conversation_jobs(
     depends_on_job=None,
     client_id: Optional[str] = None,
     end_reason: str = "file_upload",
+    skip_speaker_recognition: bool = False,
 ) -> Dict[str, str]:
     """
     Start post-conversation processing jobs after conversation is created.
@@ -513,6 +527,8 @@ def start_post_conversation_jobs(
         depends_on_job: Optional job dependency for first job (e.g., transcription for file uploads)
         client_id: Client ID for UI tracking
         end_reason: Reason conversation ended (e.g., 'file_upload', 'websocket_disconnect', 'user_stopped')
+        skip_speaker_recognition: Skip the speaker step even when enabled — used
+            by split/merge, whose transcripts already carry speaker labels
 
     Returns:
         Dict with job IDs for speaker_recognition, memory, title_summary, event_dispatch
@@ -542,6 +558,12 @@ def start_post_conversation_jobs(
         depends_on_job  # Start with upstream dependency (transcription if file upload)
     )
     speaker_job = None
+
+    if speaker_enabled and skip_speaker_recognition:
+        logger.info(
+            f"⏭️  Speaker recognition skipped by caller for conversation {conversation_id[:8]}"
+        )
+        speaker_enabled = False
 
     if speaker_enabled:
         speaker_job_id = f"speaker_{conversation_id[:12]}"

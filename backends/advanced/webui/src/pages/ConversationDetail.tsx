@@ -1,10 +1,10 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft, Calendar, User, Trash2, RefreshCw, MoreVertical,
-  RotateCcw, Zap, Play, Pause, Download,
-  Save, X, Pencil, Clock, Database, Layers, Star, BarChart3, Hash
+  RotateCcw, Zap, Play, Pause, Download, Scissors,
+  Save, X, Pencil, Clock, Database, Layers, Star, BarChart3, Hash, Check
 } from 'lucide-react'
 import { annotationsApi, speakerApi, systemApi, BACKEND_URL } from '../services/api'
 import {
@@ -12,8 +12,10 @@ import {
   useDeleteConversation, useReprocessTranscript, useReprocessMemory, useReprocessSpeakers, useToggleStar
 } from '../hooks/useConversations'
 import ConversationVersionHeader from '../components/ConversationVersionHeader'
+import MemoryAuditCard from '../components/MemoryAuditCard'
 import { WaveformDisplay } from '../components/audio/WaveformDisplay'
 import SpeakerNameDropdown from '../components/SpeakerNameDropdown'
+import SplitConversationModal from '../components/dataAudit/SplitConversationModal'
 import { getStorageKey } from '../utils/storage'
 
 // Detect browser opus/ogg playback support once at module load
@@ -55,19 +57,14 @@ interface Conversation {
   created_at?: string
   client_id: string
   segment_count?: number
-  memory_count?: number
   audio_chunks_count?: number
   audio_total_duration?: number
   duration_seconds?: number
-  has_memory?: boolean
   transcript?: string
   segments?: Segment[]
   active_transcript_version?: string
-  active_memory_version?: string
   transcript_version_count?: number
-  memory_version_count?: number
   active_transcript_version_number?: number
-  active_memory_version_number?: number
   starred?: boolean
   starred_at?: string
 }
@@ -75,7 +72,13 @@ interface Conversation {
 export default function ConversationDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const location = useLocation()
   const queryClient = useQueryClient()
+
+  // Pages that link here pass their own path in location.state.from so "Back"
+  // returns to where the user actually came from (e.g. Data Audit).
+  const backTo: string = location.state?.from || '/conversations'
+  const backLabel = backTo === '/data-audit' ? 'Back to Data Audit' : 'Back to Conversations'
 
   const {
     data: conversationData,
@@ -100,6 +103,9 @@ export default function ConversationDetail() {
 
   // Dropdown menu state
   const [openDropdown, setOpenDropdown] = useState(false)
+
+  // Split modal state
+  const [showSplitModal, setShowSplitModal] = useState(false)
 
   // Langfuse observability link
   const [langfuseSessionUrl, setLangfuseSessionUrl] = useState<string | null>(null)
@@ -133,9 +139,18 @@ export default function ConversationDetail() {
   const [playingSegment, setPlayingSegment] = useState<string | null>(null)
   const [audioCurrentTime, setAudioCurrentTime] = useState<number>(0)
   const audioRefs = useRef<{ [key: string]: HTMLAudioElement }>({})
+  // Exactly one audio element may play (and drive the waveform cursor) at a time.
+  // `activeAudioRef` is the single source of truth for "who owns playback" — checked by
+  // identity in every timeupdate/ended/async-start so stale elements can never move the
+  // cursor or keep playing. `playSeqRef` supersedes in-flight loads when a newer play starts.
+  const activeAudioRef = useRef<HTMLAudioElement | null>(null)
+  const playSeqRef = useRef(0)
   const [activeAudioKey, setActiveAudioKey] = useState<string | null>(null)
   const [isAudioPaused, setIsAudioPaused] = useState(false)
   const handleSeekRef = useRef<(time: number, totalDuration?: number) => void>(() => {})
+  // Transcript segment markers on the waveform: playing/last-played band + hover preview band
+  const [segmentMarker, setSegmentMarker] = useState<{ start: number; end: number; playing: boolean } | null>(null)
+  const [hoverMarker, setHoverMarker] = useState<{ start: number; end: number } | null>(null)
 
   // Detailed summary expand
   const [showDetailedSummary, setShowDetailedSummary] = useState(false)
@@ -177,6 +192,71 @@ export default function ConversationDetail() {
       .then(res => setTranscriptAnnotations(res.data))
       .catch(() => {})
   }, [id, conversation])
+
+  // Pending annotation apply/clear state
+  const [applyingAnnotations, setApplyingAnnotations] = useState(false)
+  const [clearingAnnotations, setClearingAnnotations] = useState(false)
+
+  const pendingDiarAnnotations = useMemo(
+    () => diarizationAnnotations.filter(a => !a.processed),
+    [diarizationAnnotations]
+  )
+  const pendingTextAnnotations = useMemo(
+    () => transcriptAnnotations.filter(a => !a.processed),
+    [transcriptAnnotations]
+  )
+  const totalPendingAnnotations = pendingDiarAnnotations.length + pendingTextAnnotations.length
+
+  const reloadAnnotations = useCallback(async () => {
+    if (!id) return
+    const [diar, text] = await Promise.all([
+      annotationsApi.getDiarizationAnnotations(id),
+      annotationsApi.getTranscriptAnnotations(id),
+    ])
+    setDiarizationAnnotations(diar.data)
+    setTranscriptAnnotations(text.data)
+  }, [id])
+
+  const handleApplyAnnotations = async () => {
+    if (!id) return
+    try {
+      setApplyingAnnotations(true)
+      await annotationsApi.applyAllAnnotations(id)
+      await refetch()
+      await reloadAnnotations()
+    } catch (err: any) {
+      setActionError(`Error applying annotations: ${err.message || 'Unknown error'}`)
+    } finally {
+      setApplyingAnnotations(false)
+    }
+  }
+
+  const handleClearAnnotations = async () => {
+    if (!id) return
+    if (!confirm(`Discard ${totalPendingAnnotations} pending correction(s)?`)) return
+    try {
+      setClearingAnnotations(true)
+      await Promise.all(
+        [...pendingDiarAnnotations, ...pendingTextAnnotations].map(a =>
+          annotationsApi.deleteAnnotation(a.id)
+        )
+      )
+      await reloadAnnotations()
+    } catch (err: any) {
+      setActionError(`Error clearing annotations: ${err.message || 'Unknown error'}`)
+    } finally {
+      setClearingAnnotations(false)
+    }
+  }
+
+  const handleDeleteAnnotation = async (annotationId: string) => {
+    try {
+      await annotationsApi.deleteAnnotation(annotationId)
+      await reloadAnnotations()
+    } catch {
+      setActionError('Failed to revert annotation')
+    }
+  }
 
   // Compute merged speaker list including annotation names
   const allSpeakers = useMemo(() => {
@@ -221,11 +301,29 @@ export default function ConversationDetail() {
     return `${mins}:${secs.toString().padStart(2, '0')}`
   }
 
+  // Stop whatever is currently playing. The ref always points at the truly-active element
+  // (never stale React state), so this reliably silences the previous source before a new
+  // one starts — preventing two elements from playing and fighting over the cursor.
+  const stopActiveAudio = useCallback(() => {
+    if (activeAudioRef.current) {
+      activeAudioRef.current.pause()
+      activeAudioRef.current = null
+    }
+  }, [])
+
   // Chunk-based seek handler: loads a 10s audio window on demand via waveform click
   const handleSeek = useCallback((time: number, totalDuration?: number) => {
     if (!id) return
     const windowStart = Math.floor(time / CHUNK_WINDOW) * CHUNK_WINDOW
     const cacheKey = `${id}_${windowStart}`
+
+    // This call supersedes any earlier in-flight load; stop current audio immediately.
+    const seq = ++playSeqRef.current
+    stopActiveAudio()
+    if (playingSegment) {
+      setPlayingSegment(null)
+      setSegmentMarker(prev => (prev ? { ...prev, playing: false } : prev))
+    }
 
     // If time exceeds total duration, stop playback
     const dur = totalDuration ?? conversation?.audio_total_duration
@@ -235,15 +333,13 @@ export default function ConversationDetail() {
       return
     }
 
-    // Pause any currently playing audio
-    if (activeAudioKey && audioRefs.current[activeAudioKey]) {
-      audioRefs.current[activeAudioKey].pause()
-    }
-
-    // Helper to play an audio element at the right offset
+    // Helper to play an audio element at the right offset. Claims ownership via activeAudioRef.
     const playAt = (audio: HTMLAudioElement, absoluteTime: number) => {
+      if (playSeqRef.current !== seq) return // superseded by a newer click
       const localTime = absoluteTime - windowStart
+      activeAudioRef.current = audio
       const startPlaying = () => {
+        if (activeAudioRef.current !== audio) return // no longer the active element
         audio.currentTime = Math.max(0, localTime)
         audio.play().catch(err => console.warn('Playback failed:', err))
       }
@@ -272,16 +368,19 @@ export default function ConversationDetail() {
         return r.blob()
       })
       .then(blob => {
+        if (playSeqRef.current !== seq) return // a newer click won while we were loading
         const blobUrl = URL.createObjectURL(blob)
         const audio = new Audio(blobUrl)
 
-        // Track playback position
+        // Track playback position — only the active element may move the cursor
         audio.addEventListener('timeupdate', () => {
+          if (activeAudioRef.current !== audio) return
           setAudioCurrentTime(windowStart + audio.currentTime)
         })
 
         // Auto-load next window on end for seamless playback
         audio.addEventListener('ended', () => {
+          if (activeAudioRef.current !== audio) return
           const nextStart = windowStart + CHUNK_WINDOW
           handleSeekRef.current(nextStart, dur)
         })
@@ -291,7 +390,7 @@ export default function ConversationDetail() {
         playAt(audio, time)
       })
       .catch(err => console.warn('Failed to load audio chunk:', err))
-  }, [id, activeAudioKey, conversation?.audio_total_duration])
+  }, [id, playingSegment, conversation?.audio_total_duration, stopActiveAudio])
 
   // Keep ref in sync
   handleSeekRef.current = handleSeek
@@ -303,6 +402,8 @@ export default function ConversationDetail() {
       const audio = audioRefs.current[activeAudioKey]
       if (audio) {
         if (audio.paused) {
+          // Resume — reclaim cursor ownership for this element
+          activeAudioRef.current = audio
           audio.play().catch(err => console.warn('Resume failed:', err))
           setIsAudioPaused(false)
         } else {
@@ -322,16 +423,18 @@ export default function ConversationDetail() {
     const segmentId = `${id}-${segmentIndex}`
 
     if (playingSegment === segmentId) {
-      const audio = audioRefs.current[segmentId]
-      if (audio) audio.pause()
+      stopActiveAudio()
       setPlayingSegment(null)
+      // Keep the band as a faint anchor so the segment stays locatable on the waveform
+      setSegmentMarker(prev => (prev ? { ...prev, playing: false } : prev))
       return
     }
 
-    if (playingSegment) {
-      const currentAudio = audioRefs.current[playingSegment]
-      if (currentAudio) currentAudio.pause()
-    }
+    // This call supersedes any earlier in-flight load; stop current audio immediately.
+    const seq = ++playSeqRef.current
+    stopActiveAudio()
+    setActiveAudioKey(null)
+    setIsAudioPaused(false)
 
     let audio = audioRefs.current[segmentId]
     if (!audio || audio.error) {
@@ -339,10 +442,32 @@ export default function ConversationDetail() {
       const audioUrl = `${BACKEND_URL}/api/audio/chunks/${id}?start_time=${segment.start}&end_time=${segment.end}&format=${AUDIO_FORMAT}&token=${token}`
       audio = new Audio(audioUrl)
       audioRefs.current[segmentId] = audio
-      audio.addEventListener('ended', () => setPlayingSegment(null))
+      // Sync the waveform playhead: segment clips start at 0, so map back to absolute time.
+      // Only the active element may move the cursor.
+      audio.addEventListener('timeupdate', () => {
+        if (activeAudioRef.current !== audio) return
+        setAudioCurrentTime(segment.start + audio.currentTime)
+      })
+      audio.addEventListener('ended', () => {
+        if (activeAudioRef.current !== audio) return
+        setPlayingSegment(null)
+        setSegmentMarker(prev => (prev ? { ...prev, playing: false } : prev))
+      })
     }
 
-    audio.play().then(() => setPlayingSegment(segmentId)).catch(() => setPlayingSegment(null))
+    if (playSeqRef.current !== seq) return // superseded before we could start
+    activeAudioRef.current = audio
+
+    audio.play().then(() => {
+      // Ownership may have moved elsewhere while play() was pending
+      if (activeAudioRef.current !== audio) {
+        audio.pause()
+        return
+      }
+      setPlayingSegment(segmentId)
+      setSegmentMarker({ start: segment.start, end: segment.end, playing: true })
+      setAudioCurrentTime(segment.start + audio.currentTime)
+    }).catch(() => setPlayingSegment(null))
   }
 
   // Action handlers
@@ -378,7 +503,7 @@ export default function ConversationDetail() {
     if (!confirmed) return
     try {
       await deleteConversationMutation.mutateAsync(id)
-      navigate('/conversations')
+      navigate(backTo)
     } catch (err: any) {
       setActionError(`Failed to delete: ${err.message || 'Unknown error'}`)
     }
@@ -573,6 +698,7 @@ export default function ConversationDetail() {
   useEffect(() => {
     return () => {
       Object.values(audioRefs.current).forEach(audio => audio.pause())
+      activeAudioRef.current = null
     }
   }, [])
 
@@ -594,11 +720,11 @@ export default function ConversationDetail() {
     return (
       <div className="max-w-4xl mx-auto p-6">
         <button
-          onClick={() => navigate('/conversations')}
+          onClick={() => navigate(backTo)}
           className="flex items-center gap-2 text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100 mb-6"
         >
           <ArrowLeft className="w-5 h-5" />
-          Back to Conversations
+          {backLabel}
         </button>
         <div className="flex items-center justify-center py-12">
           <RefreshCw className="w-6 h-6 animate-spin text-blue-600" />
@@ -612,11 +738,11 @@ export default function ConversationDetail() {
     return (
       <div className="max-w-4xl mx-auto p-6">
         <button
-          onClick={() => navigate('/conversations')}
+          onClick={() => navigate(backTo)}
           className="flex items-center gap-2 text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100 mb-6"
         >
           <ArrowLeft className="w-5 h-5" />
-          Back to Conversations
+          {backLabel}
         </button>
         <div className="border border-red-200 dark:border-red-800 rounded-lg p-8 text-center bg-red-50 dark:bg-red-900/20">
           <p className="text-red-600 dark:text-red-400">{error || 'Conversation not found'}</p>
@@ -630,11 +756,11 @@ export default function ConversationDetail() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <button
-          onClick={() => navigate('/conversations')}
+          onClick={() => navigate(backTo)}
           className="flex items-center gap-2 text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100 transition-colors"
         >
           <ArrowLeft className="w-5 h-5" />
-          Back to Conversations
+          {backLabel}
         </button>
 
         <div className="flex items-center space-x-1">
@@ -696,13 +822,26 @@ export default function ConversationDetail() {
                 <span>Reprocess Speakers</span>
               </button>
               {conversation.audio_chunks_count && conversation.audio_chunks_count > 0 && (
-                <button
-                  onClick={handleDownloadAudio}
-                  className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2"
-                >
-                  <Download className="h-4 w-4" />
-                  <span>Download Audio</span>
-                </button>
+                <>
+                  <button
+                    onClick={handleDownloadAudio}
+                    className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2"
+                  >
+                    <Download className="h-4 w-4" />
+                    <span>Download Audio</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setOpenDropdown(false)
+                      setShowSplitModal(true)
+                    }}
+                    className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2"
+                    title="Split this conversation at long silence gaps"
+                  >
+                    <Scissors className="h-4 w-4" />
+                    <span>Split Conversation…</span>
+                  </button>
+                </>
               )}
               <div className="border-t border-gray-200 dark:border-gray-600 my-1"></div>
               <button
@@ -733,11 +872,8 @@ export default function ConversationDetail() {
         conversationId={conversation.conversation_id}
         versionInfo={{
           transcript_count: conversation.transcript_version_count || 0,
-          memory_count: conversation.memory_version_count || 0,
           active_transcript_version: conversation.active_transcript_version,
-          active_memory_version: conversation.active_memory_version,
           active_transcript_version_number: conversation.active_transcript_version_number,
-          active_memory_version_number: conversation.active_memory_version_number,
         }}
         onVersionChange={() => {
           refetch()
@@ -832,6 +968,13 @@ export default function ConversationDetail() {
                   currentTime={audioCurrentTime}
                   onSeek={handleSeek}
                   height={80}
+                  segments={segments}
+                  segmentMarkers={[
+                    ...(segmentMarker
+                      ? [{ start: segmentMarker.start, end: segmentMarker.end, kind: segmentMarker.playing ? ('playing' as const) : ('anchor' as const) }]
+                      : []),
+                    ...(hoverMarker ? [{ start: hoverMarker.start, end: hoverMarker.end, kind: 'hover' as const }] : []),
+                  ]}
                 />
               )}
 
@@ -871,6 +1014,43 @@ export default function ConversationDetail() {
               )}
             </h2>
 
+            {totalPendingAnnotations > 0 && (
+              <div className="flex items-center justify-between gap-3 mb-4 px-3 py-2 bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 rounded-lg">
+                <span className="text-sm text-orange-700 dark:text-orange-300">
+                  {totalPendingAnnotations} pending correction{totalPendingAnnotations === 1 ? '' : 's'}
+                  {' '}({pendingDiarAnnotations.length} speaker, {pendingTextAnnotations.length} text) — not yet applied to the transcript
+                </span>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <button
+                    onClick={handleApplyAnnotations}
+                    disabled={applyingAnnotations || clearingAnnotations}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-white bg-blue-600 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Create a new transcript version with these corrections and reprocess memory"
+                  >
+                    {applyingAnnotations ? (
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Check className="h-3.5 w-3.5" />
+                    )}
+                    Apply
+                  </button>
+                  <button
+                    onClick={handleClearAnnotations}
+                    disabled={applyingAnnotations || clearingAnnotations}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Discard all pending corrections"
+                  >
+                    {clearingAnnotations ? (
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="h-3.5 w-3.5" />
+                    )}
+                    Clear
+                  </button>
+                </div>
+              </div>
+            )}
+
             {segments.length > 0 ? (
               <div className="space-y-1">
                 {segments.map((segment, idx) => {
@@ -879,7 +1059,7 @@ export default function ConversationDetail() {
                   const isEvent = segment.segment_type === 'event'
                   const isNote = segment.segment_type === 'note'
                   const isEditing = editingSegment === idx
-                  const hasDiarAnnotation = diarizationAnnotations.some(a => a.segment_index === idx && !a.processed)
+                  const diarAnnotation = diarizationAnnotations.find(a => a.segment_index === idx && !a.processed)
                   const hasTextAnnotation = transcriptAnnotations.some(a => a.segment_index === idx && !a.processed)
 
                   if (isEvent || isNote) {
@@ -891,6 +1071,8 @@ export default function ConversationDetail() {
                             ? 'bg-yellow-50 dark:bg-yellow-900/20 border-l-2 border-yellow-400'
                             : 'bg-green-50 dark:bg-green-900/20 border-l-2 border-green-400'
                         }`}
+                        onMouseEnter={isEvent ? () => setHoverMarker({ start: segment.start, end: segment.end }) : undefined}
+                        onMouseLeave={isEvent ? () => setHoverMarker(null) : undefined}
                       >
                         {isEvent && (
                           <button
@@ -921,6 +1103,8 @@ export default function ConversationDetail() {
                       className={`group flex items-start gap-2 py-1 rounded hover:bg-gray-50 dark:hover:bg-gray-700/50 ${
                         hasTextAnnotation ? 'bg-yellow-50 dark:bg-yellow-900/10' : ''
                       }`}
+                      onMouseEnter={() => setHoverMarker({ start: segment.start, end: segment.end })}
+                      onMouseLeave={() => setHoverMarker(null)}
                     >
                       {/* Play button */}
                       <button
@@ -935,15 +1119,24 @@ export default function ConversationDetail() {
                         )}
                       </button>
 
-                      {/* Speaker name */}
-                      <div className="flex-shrink-0 w-28">
+                      {/* Speaker name — pending annotations show the corrected name */}
+                      <div className="flex-shrink-0 w-28 inline-flex items-start gap-1">
+                        {diarAnnotation && (
+                          <button
+                            onClick={() => handleDeleteAnnotation(diarAnnotation.id)}
+                            className="flex-shrink-0 mt-1 text-gray-400 hover:text-red-500 transition-colors"
+                            title={`Revert to "${diarAnnotation.original_speaker}"`}
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        )}
                         <SpeakerNameDropdown
-                          currentSpeaker={speaker}
+                          currentSpeaker={diarAnnotation ? diarAnnotation.corrected_speaker : speaker}
                           enrolledSpeakers={allSpeakers}
-                          onSpeakerChange={(newSpeaker) => handleSpeakerChange(idx, speaker, newSpeaker, segment.start)}
+                          onSpeakerChange={(newSpeaker) => handleSpeakerChange(idx, diarAnnotation ? diarAnnotation.original_speaker : speaker, newSpeaker, segment.start)}
                           segmentIndex={idx}
                           conversationId={conversation.conversation_id}
-                          annotated={hasDiarAnnotation}
+                          annotated={!!diarAnnotation}
                           speakerColor={speakerColor}
                           recentSpeakers={recentSpeakers}
                         />
@@ -1075,33 +1268,39 @@ export default function ConversationDetail() {
           </div>
 
           {/* Version Info Card */}
-          {((conversation.transcript_version_count || 0) > 0 || (conversation.memory_version_count || 0) > 0) && (
+          {(conversation.transcript_version_count || 0) > 0 && (
             <div className="bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
               <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase mb-3">
                 Versions
               </h3>
               <dl className="space-y-3 text-sm">
-                {(conversation.transcript_version_count || 0) > 0 && (
-                  <div className="flex justify-between items-start">
-                    <dt className="text-gray-600 dark:text-gray-400">Transcript</dt>
-                    <dd className="text-gray-900 dark:text-gray-100">
-                      v{conversation.active_transcript_version_number || 1} of {conversation.transcript_version_count}
-                    </dd>
-                  </div>
-                )}
-                {(conversation.memory_version_count || 0) > 0 && (
-                  <div className="flex justify-between items-start">
-                    <dt className="text-gray-600 dark:text-gray-400">Memory</dt>
-                    <dd className="text-gray-900 dark:text-gray-100">
-                      v{conversation.active_memory_version_number || 1} of {conversation.memory_version_count}
-                    </dd>
-                  </div>
-                )}
+                <div className="flex justify-between items-start">
+                  <dt className="text-gray-600 dark:text-gray-400">Transcript</dt>
+                  <dd className="text-gray-900 dark:text-gray-100">
+                    v{conversation.active_transcript_version_number || 1} of {conversation.transcript_version_count}
+                  </dd>
+                </div>
               </dl>
             </div>
           )}
+
+          {/* Memory change history (audit ledger) */}
+          <MemoryAuditCard conversationId={conversation.conversation_id} />
         </div>
       </div>
+
+      {/* Split modal — on success the conversation is soft-deleted, so leave */}
+      {showSplitModal && (
+        <SplitConversationModal
+          conversation={{
+            conversation_id: conversation.conversation_id,
+            title: conversation.title || null,
+            duration_seconds: conversation.audio_total_duration || conversation.duration_seconds || 0,
+          }}
+          onClose={() => setShowSplitModal(false)}
+          onDone={() => navigate(backTo)}
+        />
+      )}
     </div>
   )
 }

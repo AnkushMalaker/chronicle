@@ -18,6 +18,8 @@ try:
 except ImportError:
     UMAP_AVAILABLE = False
 
+from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
+
 log = logging.getLogger(__name__)
 
 
@@ -162,7 +164,9 @@ def cluster_speakers(
 
 
 def find_similar_speakers(
-    embeddings: np.ndarray, speaker_names: List[str], threshold: float = 0.8
+    embeddings: np.ndarray,
+    speaker_names: List[str],
+    threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
 ) -> List[Dict[str, Any]]:
     """Find pairs of similar speakers based on embedding similarity.
 
@@ -271,7 +275,7 @@ def create_speaker_analysis(
     embeddings_dict: Dict[str, np.ndarray],
     method: str = "umap",
     cluster_method: str = "dbscan",
-    similarity_threshold: float = 0.8,
+    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
     speaker_names: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Create comprehensive analysis of speaker embeddings.

@@ -10,6 +10,7 @@ import time
 from typing import Any, Dict
 
 from advanced_omi_backend.auth import generate_jwt_for_user
+from advanced_omi_backend.config import get_diarization_settings, get_misc_settings
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import async_job
 from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggregator
@@ -214,8 +215,16 @@ async def recognise_speakers_job(
 
     # Check if provider already did diarization (set by transcription job)
     diarization_source = transcript_version.diarization_source
+    provider_diarized = provider_has_diarization or diarization_source == "provider"
 
-    if provider_has_diarization or diarization_source == "provider":
+    # Diarization policy from settings:
+    # - "provider": trust provider diarization when available, fall back to pyannote
+    # - "pyannote": always re-diarize with pyannote (when word timestamps allow it)
+    diarization_settings = get_diarization_settings()
+    preferred_source = diarization_settings.get("diarization_source", "provider")
+    use_provider_diarization = provider_diarized and preferred_source == "provider"
+
+    if use_provider_diarization:
         # Provider already did diarization (e.g., VibeVoice, Deepgram batch)
         # Skip pyannote diarization, go straight to speaker identification
         logger.info(
@@ -284,9 +293,9 @@ async def recognise_speakers_job(
 
     # Check if we can run pyannote diarization
     # Pyannote requires word timestamps to align speaker segments with text
-    can_run_pyannote = bool(actual_words) and not provider_has_diarization
+    can_run_pyannote = bool(actual_words) and not use_provider_diarization
 
-    if not actual_words and not provider_has_diarization:
+    if not actual_words and not provider_diarized:
         if not transcript_version.segments:
             # No words, no provider diarization, no existing segments - nothing we can do
             logger.warning(
@@ -307,27 +316,14 @@ async def recognise_speakers_job(
             f"Running speaker identification on existing segments."
         )
 
-    # Determine speaker identification mode:
-    # 1. Config toggle (per_segment_speaker_id) enables per-segment globally
-    # 2. Manual reprocess trigger also enables per-segment for that run
-    from advanced_omi_backend.config import get_misc_settings
-
+    # Per-segment identification mode comes solely from settings
     misc_config = get_misc_settings()
-    per_segment_config = misc_config.get("per_segment_speaker_id", False)
-
-    trigger = transcript_version.metadata.get("trigger", "")
-    is_reprocess = trigger == "manual_reprocess"
-
-    use_per_segment = per_segment_config or is_reprocess
+    use_per_segment = misc_config.get("per_segment_speaker_id", False)
     if use_per_segment:
-        reason = []
-        if per_segment_config:
-            reason.append("config toggle enabled")
-        if is_reprocess:
-            reason.append("manual reprocess")
-        logger.info(f"🎤 Per-segment identification mode active ({', '.join(reason)})")
+        logger.info("🎤 Per-segment identification mode active (config toggle enabled)")
 
     try:
+        ran_pyannote_diarization = False
         if transcript_version.segments and not can_run_pyannote:
             # Have existing segments and can't/shouldn't run pyannote - do identification only
             # Covers: provider already diarized, no word timestamps but segments exist, etc.
@@ -354,6 +350,7 @@ async def recognise_speakers_job(
             )
         else:
             # Standard path: full diarization + identification via speaker service
+            ran_pyannote_diarization = True
             transcript_data = {"text": actual_transcript_text, "words": actual_words}
 
             # Generate backend token for speaker service to fetch audio
@@ -601,11 +598,8 @@ async def recognise_speakers_job(
             sr_metadata["partial_errors"] = speaker_result["partial_errors"]
         transcript_version.metadata["speaker_recognition"] = sr_metadata
 
-        # Set diarization source if pyannote ran (provider didn't do diarization)
-        if (
-            not provider_has_diarization
-            and transcript_version.diarization_source != "provider"
-        ):
+        # Record which engine produced the speaker segments on this version
+        if ran_pyannote_diarization:
             transcript_version.diarization_source = "pyannote"
 
         await conversation.save()

@@ -37,10 +37,10 @@ STREAM_PATTERN = "audio:stream:*"
 GROUP_NAME = "wakeword_detection"
 DETECTIONS_STREAM = "wakeword:detections"
 
-# Notification tones (HA Voice PE sounds, CC-BY 4.0 — see tones/LICENSE.md),
-# served to devices as inline ``play-audio`` bytes. The HAVPE relay also accepts
-# ``play-tone`` (its own bundled, low-latency path), but the phone app only
-# understands ``play-audio``; sending the bytes works for both device types.
+# Notification tones (HA Voice PE sounds, CC-BY 4.0 — see tones/LICENSE.md).
+# This service is the single source of tone audio: tones are sent to every client
+# (HAVPE relay, phone app, web UI) as inline ``play-audio`` bytes, which they all
+# decode and play. No client bundles its own copy.
 _TONES_DIR = Path(__file__).resolve().parent / "tones"
 _TONE_FILES = {"armed": "armed.wav", "done": "done.wav"}  # logical name -> file
 
@@ -107,18 +107,25 @@ class WakeWordConsumer:
                 {
                     "client_id": client_id,
                     "priming": bool(state and state.priming),
+                    "prime_wakeword": (
+                        state.prime_wakeword if state and state.priming else None
+                    ),
                     "armed": bool(state and state.armed),
                 }
             )
         return out
 
-    def prime(self, client_id: str) -> bool:
-        """Arm a one-shot positive capture on an active stream. False if unknown."""
+    def prime(self, client_id: str, wakeword: str) -> bool:
+        """Arm a one-shot positive capture of ``wakeword`` on an active stream.
+
+        Returns False if the stream is unknown. Raises ValueError if ``wakeword``
+        is not a configured wake word.
+        """
         state = self._states.get(client_id)
         task = self._stream_tasks.get(client_id)
         if state is None or task is None or task.done():
             return False
-        self.detector.start_priming(state, client_id)
+        self.detector.start_priming(state, client_id, wakeword)
         return True
 
     def unprime(self, client_id: str) -> bool:
@@ -143,8 +150,27 @@ class WakeWordConsumer:
         )
         try:
             while self.running:
-                await self._discover_and_spawn()
-                await asyncio.sleep(2.0)
+                # A transient Redis failure (e.g. Redis restarting during a stack
+                # restart) must NOT permanently kill the discovery loop — otherwise
+                # the HTTP server stays up reporting "healthy" while no audio is ever
+                # consumed again. Catch, log, back off, and retry; the redis.asyncio
+                # connection pool reconnects on the next command.
+                try:
+                    await self._discover_and_spawn()
+                    await asyncio.sleep(2.0)
+                except asyncio.CancelledError:
+                    raise
+                except redis_exceptions.RedisError as e:
+                    logger.warning(
+                        f"Redis error in discovery loop (retrying in 2s): {e}"
+                    )
+                    await asyncio.sleep(2.0)
+                except Exception as e:  # noqa: BLE001 - loop must never die silently
+                    logger.error(
+                        f"Unexpected error in discovery loop (retrying in 2s): {e}",
+                        exc_info=True,
+                    )
+                    await asyncio.sleep(2.0)
         finally:
             await self._shutdown()
 
@@ -308,10 +334,16 @@ class WakeWordConsumer:
         # Real acoustic arm: snapshot the trigger window for false-positive review,
         # then forward the command turn to Hermes exactly as before.
         self._save_sample(PENDING, event, event.trigger_audio)
+        # Collect-only (shadow) firing: the word is farming FP review data only —
+        # the trigger is saved above, but we do NOT dispatch a command to the plugin
+        # (no tone was played and no command turn was captured either).
+        if getattr(event, "collect_only", False):
+            return
         await self._publish_detection(event)
 
     def _save_sample(self, bucket: str, event: WakeEvent, pcm: bytes) -> None:
-        """Persist a captured clip into the on-disk training store."""
+        """Persist a captured clip into the on-disk training store, scoped to the
+        event's wake word."""
         if not pcm:
             return
         meta = {
@@ -320,7 +352,13 @@ class WakeWordConsumer:
             "score": round(event.score, 4),
             "reason": event.reason,
             "kind": event.kind,
-            "source": "prime" if event.kind == "primed_positive" else "arm",
+            "also_fired": list(event.also_fired),
+            "collect_only": getattr(event, "collect_only", False),
+            "source": (
+                "prime"
+                if event.kind == "primed_positive"
+                else ("shadow" if getattr(event, "collect_only", False) else "arm")
+            ),
             # The model's receptive field is ~1.96 s, and the arm fires at the END
             # of the pre-roll, so the activation is the LAST ~1.96 s of this clip.
             "activation_window_secs": RECEPTIVE_FIELD_SECONDS,
@@ -341,6 +379,7 @@ class WakeWordConsumer:
         context_pcm = event.buffer_context if SAVE_BUFFER_STATE else None
         try:
             rec = self.sample_store.save(
+                event.wakeword,
                 bucket,
                 pcm,
                 SAMPLE_RATE,
@@ -384,6 +423,8 @@ class WakeWordConsumer:
             "client_id": event.client_id,
             "session_id": event.session_id,
             "user_id": user_id,
+            "wakeword": event.wakeword,
+            "also_fired": list(event.also_fired),
             "score": round(event.score, 4),
             "reason": event.reason,
             "sample_rate": SAMPLE_RATE,
@@ -423,9 +464,9 @@ class WakeWordConsumer:
     async def _send_tone(self, client_id: str, tone: str) -> None:
         """Play a notification tone on the device via inline ``play-audio`` bytes.
 
-        Sent as ``play-audio`` (not ``play-tone``) so both the phone app and the
-        HAVPE relay play it — the phone has no ``play-tone`` handler. Best-effort:
-        a missing tone asset just means no sound.
+        ``play-audio`` carries the tone bytes inline, so every client type (HAVPE
+        relay, phone app, web UI) can play it the same way — no client needs its own
+        bundled copy. Best-effort: a missing tone asset just means no sound.
         """
         audio_b64 = _TONE_B64.get(tone)
         if not audio_b64:

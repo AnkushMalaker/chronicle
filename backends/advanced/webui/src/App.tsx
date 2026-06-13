@@ -22,7 +22,7 @@ const LiveRecord = lazy(() => import('./pages/LiveRecord'))
 const Plugins = lazy(() => import('./pages/Plugins'))
 const Finetuning = lazy(() => import('./pages/Finetuning'))
 const Network = lazy(() => import('./pages/Network'))
-const DataCleaning = lazy(() => import('./pages/DataCleaning'))
+const DataAudit = lazy(() => import('./pages/DataAudit'))
 const WakeWordLab = lazy(() => import('./pages/WakeWordLab'))
 
 
@@ -154,10 +154,10 @@ function App() {
                     </Suspense>
                   </PageErrorBoundary>
                 } />
-                <Route path="data-cleaning" element={
+                <Route path="data-audit" element={
                   <PageErrorBoundary>
                     <Suspense fallback={<PageSkeleton />}>
-                      <DataCleaning />
+                      <DataAudit />
                     </Suspense>
                   </PageErrorBoundary>
                 } />

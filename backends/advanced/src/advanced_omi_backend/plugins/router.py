@@ -7,13 +7,12 @@ Routes pipeline events to appropriate plugins based on access level and triggers
 import asyncio
 import json
 import logging
-import os
 import re
 import string
 import time
 from typing import Any, Dict, List, NamedTuple, Optional
 
-import redis
+from advanced_omi_backend.redis_factory import create_sync_redis
 
 from .base import BasePlugin, PluginContext, PluginResult
 from .events import PluginEvent
@@ -182,9 +181,8 @@ class PluginRouter:
         self._services = None
 
         # Sync Redis for event logging (works from both FastAPI and RQ workers)
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
         try:
-            self._event_redis = redis.from_url(redis_url, decode_responses=True)
+            self._event_redis = create_sync_redis(decode_responses=True)
         except Exception:
             logger.warning("Could not connect to Redis for event logging")
             self._event_redis = None
@@ -251,8 +249,12 @@ class PluginRouter:
         results = []
         executed = []  # Track per-plugin outcomes for event log
 
-        # Get plugins subscribed to this event
-        plugin_ids = self._plugins_by_event.get(event, [])
+        # Get plugins subscribed to this event, ordered by priority (lower first)
+        # so they form a deterministic chain of responsibility.
+        plugin_ids = sorted(
+            self._plugins_by_event.get(event, []),
+            key=lambda pid: getattr(self.plugins[pid], "priority", 100),
+        )
 
         if not plugin_ids:
             logger.info(f"🔌 ROUTER: No plugins subscribed to event '{event}'")
@@ -303,6 +305,10 @@ class PluginRouter:
                             "plugin_id": plugin_id,
                             "success": result.success,
                             "message": result.message,
+                            # Carry the plugin's structured output (reply, command,
+                            # skip reason, etc.) into the event log so the Events
+                            # page can show *why* a plugin succeeded/failed.
+                            "data": result.data,
                         }
                     )
 

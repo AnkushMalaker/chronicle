@@ -11,13 +11,11 @@ Triggers plugins on final results only.
 
 import asyncio
 import logging
-import os
 import signal
 import sys
 
-import redis.asyncio as redis
-
 from advanced_omi_backend.client_manager import initialize_redis_for_client_manager
+from advanced_omi_backend.redis_factory import REDIS_URL, create_async_redis
 from advanced_omi_backend.services.plugin_service import init_plugin_router
 from advanced_omi_backend.services.transcription.streaming_consumer import (
     StreamingTranscriptionConsumer,
@@ -38,17 +36,13 @@ async def main():
         "📋 Provider configuration loaded from config.yml (defaults.stt_stream)"
     )
 
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-
     # Create Redis client
     try:
-        redis_client = await redis.from_url(
-            redis_url, encoding="utf-8", decode_responses=False
-        )
-        logger.info(f"✅ Connected to Redis: {redis_url}")
+        redis_client = create_async_redis(decode_responses=False)
+        logger.info(f"✅ Connected to Redis: {REDIS_URL}")
 
         # Initialize ClientManager Redis for cross-container client→user mapping
-        initialize_redis_for_client_manager(redis_url)
+        initialize_redis_for_client_manager()
 
     except Exception as e:
         logger.error(f"Failed to connect to Redis: {e}", exc_info=True)
@@ -135,7 +129,8 @@ async def main():
 
         # The streaming consumer is the only task here; the wake-word dispatcher
         # runs as its own worker (wakeword_dispatch_worker).
-        await consumer.start_consuming()
+        # heartbeat_name lets the workers healthcheck detect a wedged loop.
+        await consumer.start_consuming(heartbeat_name="streaming-stt")
 
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received, shutting down...")

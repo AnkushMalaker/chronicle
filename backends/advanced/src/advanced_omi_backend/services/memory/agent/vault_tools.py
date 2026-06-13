@@ -17,14 +17,16 @@ Frontmatter is edited as text via ``edit_note`` — never through notesmd-cli's
 ``frontmatter --edit``, which corrupts wikilinks and list/number values.
 """
 
+import contextlib
 import json
 import logging
 import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterator, List
 
+from ..vault_lock import VaultLockTimeout, vault_note_lock
 from ..vault_scaffold import write_category
 from .edit_engine import Edit, EditError, apply_edits
 
@@ -38,13 +40,30 @@ class VaultToolError(Exception):
 
 
 def _safe_relpath(path: str) -> str:
-    """Reject absolute paths and traversal; normalise to a vault-relative .md path."""
+    """Reject absolute paths, traversal, and slash-in-title nesting; normalise to a
+    vault-relative ``<Folder>/<Title>.md`` (or top-level hub ``<Title>.md``) path.
+
+    Whitespace around components is stripped — a title like ``"TailScale "`` would
+    otherwise mint a trailing-space file/folder name that breaks Windows and Syncthing.
+    """
     p = path.strip().lstrip("/")
     if ".." in Path(p).parts:
         raise VaultToolError(f"Invalid path '{path}': must stay inside the vault.")
     if not p.endswith(".md"):
         p += ".md"
-    return p
+    parts = list(Path(p).parts)
+    if len(parts) > 2:
+        raise VaultToolError(
+            f"Invalid path '{path}': notes live at <Folder>/<Title>.md, one folder "
+            f"deep. A '/' in a note title would create nested folders — rephrase the "
+            f"title without '/' (e.g. 'Tailscale VPN WireGuard', not "
+            f"'TailScale / VPN / WireGuard')."
+        )
+    dirs = [d.strip() for d in parts[:-1]]
+    stem = parts[-1][: -len(".md")].strip()
+    if not stem or any(not d for d in dirs):
+        raise VaultToolError(f"Invalid path '{path}': empty folder or note title.")
+    return str(Path(*dirs, stem + ".md"))
 
 
 class VaultTools:
@@ -56,6 +75,24 @@ class VaultTools:
         self._rg = shutil.which("rg")
         self._notesmd = os.getenv("NOTESMD_CLI_BIN") or shutil.which("notesmd-cli")
         self.touched: set = set()  # vault-relative paths created/edited this run
+
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        """Serialise ONE mutation against concurrent writers of this user's vault.
+
+        The vault root's directory name is the user id (``conversation_docs/<user_id>``).
+        Every mutating tool runs its full resolve-check-write sequence inside this lock
+        so exists/case-collision checks cannot race a concurrent agent's write.
+        """
+        try:
+            with vault_note_lock(self.root.name):
+                yield
+        except VaultLockTimeout:
+            raise VaultToolError(
+                "The vault is briefly locked by another writer. Retry this exact "
+                "operation; if editing, read_note the file again first — it may have "
+                "changed."
+            )
 
     # --- path helpers -------------------------------------------------------
 
@@ -187,33 +224,35 @@ class VaultTools:
         return fp.read_text(encoding="utf-8")
 
     def edit_note(self, path: str, edits: List[Dict[str, str]]) -> str:
-        fp = self._abs(path)
-        if not fp.exists():
-            raise VaultToolError(
-                f"Could not edit '{path}': file not found. Use write_note to create it."
-            )
-        content = fp.read_text(encoding="utf-8")
         parsed = [Edit(e["old_text"], e["new_text"]) for e in edits]
-        try:
-            new_content = apply_edits(content, parsed, path)
-        except EditError as e:
-            raise VaultToolError(str(e))
-        fp.write_text(new_content, encoding="utf-8")
-        self.touched.add(self._resolve_ci(_safe_relpath(path)))
+        with self._locked():
+            fp = self._abs(path)
+            if not fp.exists():
+                raise VaultToolError(
+                    f"Could not edit '{path}': file not found. Use write_note to create it."
+                )
+            content = fp.read_text(encoding="utf-8")
+            try:
+                new_content = apply_edits(content, parsed, path)
+            except EditError as e:
+                raise VaultToolError(str(e))
+            fp.write_text(new_content, encoding="utf-8")
+            self.touched.add(self._resolve_ci(_safe_relpath(path)))
         return f"Edited {path} ({len(edits)} replacement(s))."
 
     def write_note(self, path: str, content: str, overwrite: bool = False) -> str:
-        rel = self._resolve_ci(_safe_relpath(path))
-        fp = self.root / rel
-        if fp.exists() and not overwrite:
-            raise VaultToolError(
-                f"Note '{rel}' already exists. Use edit_note to modify it, or pass "
-                f"overwrite=true only if you intend to replace it entirely."
-            )
-        existed = fp.exists()
-        fp.parent.mkdir(parents=True, exist_ok=True)
-        fp.write_text(content, encoding="utf-8")
-        self.touched.add(rel)
+        with self._locked():
+            rel = self._resolve_ci(_safe_relpath(path))
+            fp = self.root / rel
+            if fp.exists() and not overwrite:
+                raise VaultToolError(
+                    f"Note '{rel}' already exists. Use edit_note to modify it, or pass "
+                    f"overwrite=true only if you intend to replace it entirely."
+                )
+            existed = fp.exists()
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            fp.write_text(content, encoding="utf-8")
+            self.touched.add(rel)
         return f"{'Overwrote' if existed else 'Wrote'} {rel} ({len(content)} chars)."
 
     def create_category(self, name: str, properties: List[str] | None = None) -> str:
@@ -222,7 +261,8 @@ class VaultTools:
         ``name`` should be the plural category name (e.g. ``"Places"``); ``properties`` the
         short, reusable frontmatter keys its notes carry (e.g. ``["location", "type"]``).
         """
-        created = write_category(self.root, name, properties or [])
+        with self._locked():
+            created = write_category(self.root, name, properties or [])
         for rel in created:
             self.touched.add(rel)
         if created:
@@ -238,28 +278,31 @@ class VaultTools:
 
     def rename_person(self, old_name: str, new_name: str) -> str:
         old_rel, new_rel = f"People/{old_name}.md", f"People/{new_name}.md"
-        old_fp, new_fp = self._abs(old_rel), self._abs(new_rel)
-        if not old_fp.exists():
-            raise VaultToolError(f"Person note 'People/{old_name}.md' does not exist.")
-        if new_fp.exists():
-            # Merge case — a plain move would clobber the target. Rewrite backlinks in
-            # Python, leave the bodies for the agent to consolidate via edit_note.
+        with self._locked():
+            old_fp, new_fp = self._abs(old_rel), self._abs(new_rel)
+            if not old_fp.exists():
+                raise VaultToolError(
+                    f"Person note 'People/{old_name}.md' does not exist."
+                )
+            if new_fp.exists():
+                # Merge case — a plain move would clobber the target. Rewrite backlinks in
+                # Python, leave the bodies for the agent to consolidate via edit_note.
+                n = self._rewrite_backlinks_python(old_name, new_name)
+                old_fp.unlink()
+                return (
+                    f"'{new_name}' already existed — merged: rewrote {n} backlink(s) and "
+                    f"deleted People/{old_name}.md. Review People/{new_name}.md and use "
+                    f"edit_note to consolidate any duplicated facts."
+                )
+            self.touched.add(new_rel)
+            if self._notesmd:
+                try:
+                    self._move_cli(old_rel, new_rel)
+                    return f"Renamed People/{old_name} -> People/{new_name} (backlinks rewritten)."
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("notesmd-cli move failed (%s); using python", e)
             n = self._rewrite_backlinks_python(old_name, new_name)
-            old_fp.unlink()
-            return (
-                f"'{new_name}' already existed — merged: rewrote {n} backlink(s) and "
-                f"deleted People/{old_name}.md. Review People/{new_name}.md and use "
-                f"edit_note to consolidate any duplicated facts."
-            )
-        self.touched.add(new_rel)
-        if self._notesmd:
-            try:
-                self._move_cli(old_rel, new_rel)
-                return f"Renamed People/{old_name} -> People/{new_name} (backlinks rewritten)."
-            except Exception as e:  # noqa: BLE001
-                logger.warning("notesmd-cli move failed (%s); using python", e)
-        n = self._rewrite_backlinks_python(old_name, new_name)
-        old_fp.rename(new_fp)
+            old_fp.rename(new_fp)
         return f"Renamed People/{old_name} -> People/{new_name} ({n} backlink(s) rewritten)."
 
     def _move_cli(self, old_rel: str, new_rel: str) -> None:

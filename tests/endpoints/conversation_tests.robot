@@ -97,9 +97,10 @@ Reprocess Memory Test
 
     ${conversation_id}=    Set Variable    ${test_conversation}[conversation_id]
 
-    # Get initial memory version count
-    ${initial_memory_count}=    Set Variable    ${test_conversation}[memory_version_count]
-    Log    Initial memory version count: ${initial_memory_count}
+    # Get initial memory audit ledger size
+    ${initial_audit}=    Get Conversation Memory Audit    ${conversation_id}
+    ${initial_count}=    Get Length    ${initial_audit}
+    Log    Initial memory audit entries: ${initial_count}
 
     # Trigger memory reprocessing
     ${response}=    Reprocess Memory    ${conversation_id}
@@ -113,15 +114,12 @@ Reprocess Memory Test
     ${job_id}=    Set Variable    ${response}[job_id]
     Wait For Job Status    ${job_id}    finished    timeout=60s    interval=5s
 
-    # Verify new memory version was created
-    ${updated_conversation}=    Get Conversation By ID    ${conversation_id}
-    ${new_memory_count}=    Set Variable    ${updated_conversation}[memory_version_count]
-    Log    New memory version count: ${new_memory_count}
+    # Verify the reprocess recorded a new vault change in the audit ledger
+    ${updated_audit}=    Get Conversation Memory Audit    ${conversation_id}
+    ${new_count}=    Get Length    ${updated_audit}
+    Log    New memory audit entries: ${new_count}
 
-    Should Be True    ${new_memory_count} > ${initial_memory_count}    Expected memory version count to increase
-
-    ${memory_versions}=    Get conversation memory versions    ${conversation_id}
-    Length Should Be    ${memory_versions}    ${new_memory_count}
+    Should Be True    ${new_count} > ${initial_count}    Expected memory audit ledger to grow after reprocessing
 
 
 Close Conversation Test
@@ -183,13 +181,6 @@ Transcript Version activate Test
     ${response}=       Activate Transcript Version      ${conversation_id}    ${target_version}
     Should Be Equal As Strings    ${response}[active_transcript_version]   ${target_version}
 
-
-        # ${active_memory}=     Get memory versions
-        # ...    ${test}[active_memory_version]
-        # IF    '${active_memory}' != '${None}' and '${active_memory}' != 'null'
-        #     ${response}=       Activate Memory Version       ${conversation_id}    ${active_memory}
-        #     Should Be Equal As Integers    ${response.status_code}    200
-        # END
 
 Get conversation permission Test
     [Documentation]    Test that users can only access their own conversations

@@ -6,15 +6,12 @@ jargon cached in Redis by the ``asr_jargon_extraction`` cron job.
 """
 
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import Optional
 
-import redis.asyncio as aioredis
+from advanced_omi_backend.redis_factory import create_async_redis
 
 logger = logging.getLogger(__name__)
-
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 
 @dataclass
@@ -80,11 +77,11 @@ async def gather_transcription_context(
     user_jargon = ""
     if user_id:
         try:
-            redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+            redis_client = create_async_redis(decode_responses=True)
             try:
                 user_jargon = await redis_client.get(f"asr:jargon:{user_id}") or ""
             finally:
-                await redis_client.close()
+                await redis_client.aclose()
         except Exception:
             pass  # Redis unavailable → skip dynamic jargon
 

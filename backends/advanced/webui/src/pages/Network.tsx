@@ -138,12 +138,24 @@ export default function Network() {
 
       {/* Tailscale Status */}
       <div className={`rounded-lg p-4 border mb-6 ${
-        data?.tailscale_available
-          ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800'
-          : 'bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800'
+        loading && !data
+          ? 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800'
+          : data?.tailscale_available
+            ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800'
+            : 'bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800'
       }`}>
         <div className="flex items-center space-x-3">
-          {data?.tailscale_available ? (
+          {loading && !data ? (
+            <>
+              <RefreshCw className="h-5 w-5 text-blue-600 dark:text-blue-400 animate-spin" />
+              <div>
+                <span className="font-medium text-blue-800 dark:text-blue-200">Scanning Network…</span>
+                <p className="text-sm text-blue-600 dark:text-blue-400">
+                  Checking for Tailscale and discovering services on your Tailnet.
+                </p>
+              </div>
+            </>
+          ) : data?.tailscale_available ? (
             <>
               <Wifi className="h-5 w-5 text-green-600 dark:text-green-400" />
               <div>

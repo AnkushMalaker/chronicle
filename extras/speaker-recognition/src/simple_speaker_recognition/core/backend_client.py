@@ -90,7 +90,10 @@ class BackendClient:
             httpx.HTTPStatusError: If request fails
         """
         url = f"{self.base_url}/api/conversations/{conversation_id}/audio-segments"
-        params = {"start": start}
+        # Request WAV explicitly — the endpoint defaults to ogg/opus, whose
+        # pre-skip (312 samples @ 48kHz) makes header duration exceed decodable
+        # samples and trips pyannote's strict sample-count check on the last chunk.
+        params = {"start": start, "format": "wav"}
         if duration is not None:
             params["duration"] = duration
         headers = {"Authorization": f"Bearer {token}"}

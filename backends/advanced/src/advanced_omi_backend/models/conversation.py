@@ -1,8 +1,8 @@
 """
 Conversation models for Chronicle backend.
 
-This module contains Beanie Document and Pydantic models for conversations,
-transcript versions, and memory versions.
+This module contains Beanie Document and Pydantic models for conversations
+and transcript versions.
 """
 
 import uuid
@@ -19,14 +19,6 @@ class Conversation(Document):
     """Complete conversation model with versioned processing."""
 
     # Nested Enums - Note: TranscriptProvider accepts any string value for flexibility
-
-    class MemoryProvider(str, Enum):
-        """Supported memory providers."""
-
-        CHRONICLE = "chronicle"
-        OPENMEMORY_MCP = "openmemory_mcp"
-        GRAPHITI = "graphiti"
-        FRIEND_LITE = "friend_lite"  # Legacy value
 
     class ConversationStatus(str, Enum):
         """Conversation processing status."""
@@ -50,6 +42,8 @@ class Conversation(Document):
             "close_requested"  # External close signal (API, plugin, button)
         )
         ERROR = "error"  # Processing error forced conversation end
+        SPLIT = "split"  # Created by splitting a longer conversation
+        MERGE = "merge"  # Created by merging adjacent conversations
         UNKNOWN = "unknown"  # Unknown or legacy reason
 
     # Nested Models
@@ -124,67 +118,60 @@ class Conversation(Document):
             default_factory=dict, description="Additional provider-specific metadata"
         )
 
-    class SilenceAnalysis(BaseModel):
-        """Cached amplitude/silence analysis for a conversation's audio.
+    class VadAnalysis(BaseModel):
+        """Cached VAD summary for a conversation's audio (data-audit feature).
 
-        Stores threshold-independent base metrics (summary stats + a dBFS
-        histogram of audio windows) so the UI can derive the silent fraction
-        for any chosen threshold without re-decoding the audio.
+        Frame-level speech probabilities live on the audio chunk documents
+        (``AudioChunkDocument.vad_scores``); this stores a threshold-independent
+        histogram of those probabilities so the UI can derive the speech
+        fraction for any chosen threshold without touching the chunks.
         """
 
-        duration_seconds: float = Field(
-            description="Analyzed audio duration in seconds"
+        provider: str = Field(description="VAD provider that produced the scores")
+        frame_hop_ms: float = Field(
+            description="Milliseconds of audio per VAD frame/score"
         )
-        mean_dbfs: float = Field(description="Mean window loudness in dBFS")
-        peak_dbfs: float = Field(description="Peak window loudness in dBFS")
-        window_ms: int = Field(
-            description="Window size used for analysis, milliseconds"
-        )
-        window_count: int = Field(description="Number of windows analyzed")
-        histogram_min_dbfs: float = Field(
-            description="Lower edge of the first histogram bin"
-        )
+        frame_count: int = Field(description="Number of frames scored")
         histogram_bin_width: float = Field(
-            description="Width of each histogram bin in dB"
+            description="Width of each probability histogram bin (bins span [0, 1])"
         )
         histogram: List[int] = Field(
             default_factory=list,
-            description="Window counts per dBFS bin (low→high), for deriving silent fraction at any threshold",
+            description="Frame counts per speech-probability bin (low→high)",
+        )
+        chunk_duration_seconds: float = Field(
+            description="Nominal audio chunk duration used during analysis"
+        )
+        speech_regions: Optional[List[List[float]]] = Field(
+            None,
+            description="Merged [start, end] speech intervals in seconds, for speech-skip playback",
         )
         analyzed_at: datetime = Field(description="When this analysis was computed")
 
-        def silent_fraction(self, threshold_dbfs: float) -> float:
-            """Fraction of windows quieter than ``threshold_dbfs`` (0.0-1.0)."""
-            if self.window_count <= 0 or not self.histogram:
+        def speech_fraction(self, threshold: float = 0.5) -> float:
+            """Fraction of frames with speech probability >= ``threshold`` (0.0-1.0)."""
+            if self.frame_count <= 0 or not self.histogram:
                 return 0.0
-            silent = 0
+            speech = 0
             for i, count in enumerate(self.histogram):
-                bin_upper = self.histogram_min_dbfs + (i + 1) * self.histogram_bin_width
-                if bin_upper <= threshold_dbfs:
-                    silent += count
-            return silent / self.window_count
+                bin_lower = i * self.histogram_bin_width
+                if bin_lower >= threshold:
+                    speech += count
+            return speech / self.frame_count
 
-    class MemoryVersion(BaseModel):
-        """Version of memory extraction with processing metadata."""
+    class DerivedFrom(BaseModel):
+        """Lineage record for conversations produced by split/merge operations."""
 
-        version_id: str = Field(description="Unique version identifier")
-        memory_count: int = Field(description="Number of memories extracted")
-        transcript_version_id: str = Field(
-            description="Which transcript version was used"
+        operation: str = Field(description="'split' or 'merge'")
+        source_conversation_ids: List[str] = Field(
+            description="Conversations this one was derived from"
         )
-        provider: "Conversation.MemoryProvider" = Field(
-            description="Memory provider used"
+        time_range: Optional[List[float]] = Field(
+            None,
+            description="For split children: [start, end] seconds in the parent timeline",
         )
-        model: Optional[str] = Field(
-            None, description="Model used (e.g., gpt-4o-mini, llama3)"
-        )
-        created_at: datetime = Field(description="When this version was created")
-        processing_time_seconds: Optional[float] = Field(
-            None, description="Time taken to process"
-        )
-        metadata: Dict[str, Any] = Field(
-            default_factory=dict, description="Additional provider-specific metadata"
-        )
+        performed_at: datetime = Field(description="When the operation ran")
+        performed_by: str = Field(description="User who performed the operation")
 
     # Core identifiers
     conversation_id: Indexed(str, unique=True) = Field(
@@ -215,12 +202,22 @@ class Conversation(Document):
         description="Compression ratio (compressed_size / original_size), typically ~0.047 for Opus",
     )
 
-    # Cached amplitude/silence analysis (data-cleaning feature)
-    silence_analysis: Optional["Conversation.SilenceAnalysis"] = Field(
-        None, description="Cached amplitude/silence metrics computed from audio chunks"
+    # Cached VAD speech analysis (data-audit feature)
+    vad_analysis: Optional["Conversation.VadAnalysis"] = Field(
+        None,
+        description="Cached VAD speech-probability summary computed from audio chunks",
     )
 
-    # Audio archival (data-cleaning feature): audio bytes hard-deleted, metadata kept
+    # Split/merge lineage (data-audit feature)
+    derived_from: Optional["Conversation.DerivedFrom"] = Field(
+        None, description="Set on conversations created by a split/merge operation"
+    )
+    derived_into: List[str] = Field(
+        default_factory=list,
+        description="Conversation IDs this conversation was split/merged into (set on soft-deleted sources)",
+    )
+
+    # Audio archival (data-audit feature): audio bytes hard-deleted, metadata kept
     audio_archived: bool = Field(
         False,
         description="Whether the audio bytes were permanently deleted while keeping this metadata stub",
@@ -298,20 +295,16 @@ class Conversation(Document):
     transcript_versions: List["Conversation.TranscriptVersion"] = Field(
         default_factory=list, description="All transcript processing attempts"
     )
-    memory_versions: List["Conversation.MemoryVersion"] = Field(
-        default_factory=list, description="All memory extraction attempts"
-    )
 
-    # Active version pointers
+    # Active version pointer
     active_transcript_version: Optional[str] = Field(
         None, description="Version ID of currently active transcript"
     )
-    active_memory_version: Optional[str] = Field(
-        None, description="Version ID of currently active memory extraction"
-    )
 
-    # Legacy fields removed - use transcript_versions[active_transcript_version] and memory_versions[active_memory_version]
-    # Frontend should access: conversation.active_transcript.segments, conversation.active_transcript.transcript
+    # Legacy fields removed - use transcript_versions[active_transcript_version].
+    # Frontend should access: conversation.active_transcript.segments, conversation.active_transcript.transcript.
+    # Memory is no longer versioned (the vault is the system of record); changes are
+    # recorded in the memory_audit ledger (see models/memory_audit.py).
 
     @model_validator(mode="before")
     @classmethod
@@ -363,18 +356,6 @@ class Conversation(Document):
                 return version
         return None
 
-    @computed_field
-    @property
-    def active_memory(self) -> Optional["Conversation.MemoryVersion"]:
-        """Get the currently active memory version."""
-        if not self.active_memory_version:
-            return None
-
-        for version in self.memory_versions:
-            if version.version_id == self.active_memory_version:
-                return version
-        return None
-
     # Convenience properties that return data from active transcript version
     @computed_field
     @property
@@ -396,27 +377,9 @@ class Conversation(Document):
 
     @computed_field
     @property
-    def memory_count(self) -> int:
-        """Get memory count from active memory version."""
-        return self.active_memory.memory_count if self.active_memory else 0
-
-    @computed_field
-    @property
-    def has_memory(self) -> bool:
-        """Check if conversation has any memory versions."""
-        return len(self.memory_versions) > 0
-
-    @computed_field
-    @property
     def transcript_version_count(self) -> int:
         """Get count of transcript versions."""
         return len(self.transcript_versions)
-
-    @computed_field
-    @property
-    def memory_version_count(self) -> int:
-        """Get count of memory versions."""
-        return len(self.memory_versions)
 
     @computed_field
     @property
@@ -426,17 +389,6 @@ class Conversation(Document):
             return None
         for i, version in enumerate(self.transcript_versions):
             if version.version_id == self.active_transcript_version:
-                return i + 1
-        return None
-
-    @computed_field
-    @property
-    def active_memory_version_number(self) -> Optional[int]:
-        """Get 1-based version number of the active memory version."""
-        if not self.active_memory_version:
-            return None
-        for i, version in enumerate(self.memory_versions):
-            if version.version_id == self.active_memory_version:
                 return i + 1
         return None
 
@@ -474,49 +426,11 @@ class Conversation(Document):
 
         return new_version
 
-    def add_memory_version(
-        self,
-        version_id: str,
-        memory_count: int,
-        transcript_version_id: str,
-        provider: "Conversation.MemoryProvider",
-        model: Optional[str] = None,
-        processing_time_seconds: Optional[float] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        set_as_active: bool = True,
-    ) -> "Conversation.MemoryVersion":
-        """Add a new memory version and optionally set it as active."""
-        new_version = Conversation.MemoryVersion(
-            version_id=version_id,
-            memory_count=memory_count,
-            transcript_version_id=transcript_version_id,
-            provider=provider,
-            model=model,
-            created_at=datetime.now(),
-            processing_time_seconds=processing_time_seconds,
-            metadata=metadata or {},
-        )
-
-        self.memory_versions.append(new_version)
-
-        if set_as_active:
-            self.active_memory_version = version_id
-
-        return new_version
-
     def set_active_transcript_version(self, version_id: str) -> bool:
         """Set a specific transcript version as active."""
         for version in self.transcript_versions:
             if version.version_id == version_id:
                 self.active_transcript_version = version_id
-                return True
-        return False
-
-    def set_active_memory_version(self, version_id: str) -> bool:
-        """Set a specific memory version as active."""
-        for version in self.memory_versions:
-            if version.version_id == version_id:
-                self.active_memory_version = version_id
                 return True
         return False
 
@@ -590,8 +504,6 @@ def create_conversation(
         "summary": summary,
         "transcript_versions": [],
         "active_transcript_version": None,
-        "memory_versions": [],
-        "active_memory_version": None,
         "external_source_id": external_source_id,
         "external_source_type": external_source_type,
     }

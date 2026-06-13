@@ -54,9 +54,13 @@ localhost TAILSCALE_IP {
         reverse_proxy chronicle-backend:8000
     }
 
-    # Everything else - proxy to webui
+    # Everything else -> dev webui (Vite, hot reload). The HMR websocket is
+    # proxied transparently (Caddy auto-upgrades); VITE_HMR_PORT=443 makes the
+    # browser connect HMR over wss through Caddy. This is the default so HTTPS +
+    # hot reload work together with no prod build/rebuild. (The wizard already
+    # configures webui-dev for same-origin + HMR when HTTPS is enabled.)
     handle {
-        reverse_proxy webui:80
+        reverse_proxy webui-dev:5173
     }
 }
 

@@ -23,6 +23,7 @@ from simple_speaker_recognition.api.core.utils import (
     safe_format_confidence,
     validate_confidence,
 )
+from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
 from simple_speaker_recognition.core.models import DiarizationConfig, SpeakerStatus
 from simple_speaker_recognition.core.unified_speaker_db import UnifiedSpeakerDB
 from simple_speaker_recognition.utils.audio_processing import get_audio_info
@@ -281,7 +282,7 @@ async def enhance_deepgram_response_with_speaker_id(
     audio_data: bytes,
     deepgram_response: Dict[str, Any],
     user_id: Optional[int],
-    confidence_threshold: float = 0.15,
+    confidence_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
 ) -> Dict[str, Any]:
     """Extract speaker segments and identify speakers from Deepgram response."""
     enhanced_response = deepgram_response.copy()
@@ -582,7 +583,8 @@ async def deepgram_compatible_transcription(
         default=None, description="User ID for speaker identification"
     ),
     speaker_confidence_threshold: float = Query(
-        default=0.15, description="Minimum confidence for speaker identification"
+        default=DEFAULT_SIMILARITY_THRESHOLD,
+        description="Minimum confidence for speaker identification",
     ),
     # Authentication
     authorization: Optional[str] = Header(

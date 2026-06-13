@@ -7,256 +7,46 @@ This module manages Redis-based audio streaming sessions, including:
 - Session lifecycle tracking
 """
 
-import json
 import logging
 import time
-from typing import Dict, List, Literal, Optional
 
 from fastapi.responses import JSONResponse
+
+from advanced_omi_backend.services.audio_stream.session_store import (
+    SessionStatus,
+    SessionStore,
+    SessionView,
+)
 
 logger = logging.getLogger(__name__)
 
 
-async def mark_session_complete(
-    redis_client,
-    session_id: str,
-    reason: Literal[
-        "websocket_disconnect",
-        "user_stopped",
-        "inactivity_timeout",
-        "max_duration",
-        "all_jobs_complete",
-    ],
-) -> None:
-    """
-    Single source of truth for marking sessions as complete.
-
-    This function ensures that both 'status' and 'completion_reason' are ALWAYS
-    set together atomically, preventing race conditions where workers check status
-    before completion_reason is set.
-
-    Args:
-        redis_client: Redis async client
-        session_id: Session UUID
-        reason: Why the session is completing (enforced by type system)
-
-    Usage:
-        # WebSocket disconnect
-        await mark_session_complete(redis, session_id, "websocket_disconnect")
-
-        # User manually stopped
-        await mark_session_complete(redis, session_id, "user_stopped")
-
-        # Inactivity timeout
-        await mark_session_complete(redis, session_id, "inactivity_timeout")
-
-        # Max duration reached
-        await mark_session_complete(redis, session_id, "max_duration")
-
-        # All jobs finished
-        await mark_session_complete(redis, session_id, "all_jobs_complete")
-    """
-    session_key = f"audio:session:{session_id}"
-    mark_time = time.time()
-    mapping = {
-        "status": "finished",
-        "completed_at": str(mark_time),
-        "completion_reason": reason,
+def _session_info_dict(view: SessionView, conversation_count: int) -> dict:
+    """Shape a SessionView into the session-info response dict used by the API."""
+    now = time.time()
+    return {
+        "session_id": view.session_id,
+        "user_id": view.user_id,
+        "client_id": view.client_id,
+        "provider": view.provider,
+        "mode": view.mode,
+        "status": view.status.value if view.status else "",
+        "websocket_connected": view.websocket_connected,
+        "completion_reason": view.completion_reason,
+        "chunks_published": view.chunks_published,
+        "started_at": view.started_at,
+        "last_chunk_at": view.last_chunk_at,
+        "age_seconds": now - view.started_at,
+        "idle_seconds": now - view.last_chunk_at,
+        "conversation_count": conversation_count,
+        # Speech detection events
+        "last_event": view.last_event,
+        "speech_detected_at": view.speech_detected_at,
+        "speaker_check_status": (
+            view.speaker_check_status.value if view.speaker_check_status else ""
+        ),
+        "identified_speakers": ",".join(view.identified_speakers),
     }
-    if reason == "websocket_disconnect":
-        mapping["websocket_connected"] = "false"
-    await redis_client.hset(
-        session_key,
-        mapping=mapping,
-    )
-
-    # Notify monitoring loop via pub/sub
-    signal = json.dumps({"type": "session_complete", "reason": reason})
-    await redis_client.publish(f"session:signal:{session_id}", signal)
-
-    logger.info(
-        f"✅ Session {session_id[:12]} marked finished: {reason} [TIME: {mark_time:.3f}]"
-    )
-
-
-async def request_conversation_close(
-    redis_client,
-    session_id: str,
-    reason: str = "user_requested",
-) -> bool:
-    """
-    Request closing the current conversation without killing the session.
-
-    Unlike mark_session_complete() which finalizes the entire session,
-    this signals open_conversation_job to close just the current conversation
-    and trigger post-processing. The session stays active for new conversations.
-
-    Sets 'conversation_close_requested' field on the session hash.
-    The open_conversation_job checks this field every poll iteration.
-
-    Args:
-        redis_client: Redis async client
-        session_id: Session UUID
-        reason: Why the conversation is being closed
-
-    Returns:
-        True if the close request was set, False if session not found
-    """
-    session_key = f"audio:session:{session_id}"
-    if not await redis_client.exists(session_key):
-        return False
-    await redis_client.hset(session_key, "conversation_close_requested", reason)
-
-    # Notify monitoring loop via pub/sub
-    signal = json.dumps({"type": "close_requested", "reason": reason})
-    await redis_client.publish(f"session:signal:{session_id}", signal)
-
-    logger.info(
-        f"🔒 Conversation close requested for session {session_id[:12]}: {reason}"
-    )
-    return True
-
-
-async def get_session_info(redis_client, session_id: str) -> Optional[Dict]:
-    """
-    Get detailed information about a specific session.
-
-    Args:
-        redis_client: Redis async client
-        session_id: Session UUID
-
-    Returns:
-        Dict with session information or None if not found
-    """
-    try:
-        session_key = f"audio:session:{session_id}"
-        session_data = await redis_client.hgetall(session_key)
-
-        if not session_data:
-            return None
-
-        # Get conversation count for this session
-        conversation_count_key = f"session:conversation_count:{session_id}"
-        conversation_count_bytes = await redis_client.get(conversation_count_key)
-        conversation_count = (
-            int(conversation_count_bytes.decode()) if conversation_count_bytes else 0
-        )
-
-        started_at = float(session_data.get(b"started_at", b"0"))
-        last_chunk_at = float(session_data.get(b"last_chunk_at", b"0"))
-
-        return {
-            "session_id": session_id,
-            "user_id": session_data.get(b"user_id", b"").decode(),
-            "client_id": session_data.get(b"client_id", b"").decode(),
-            "provider": session_data.get(b"provider", b"").decode(),
-            "mode": session_data.get(b"mode", b"").decode(),
-            "status": session_data.get(b"status", b"").decode(),
-            "websocket_connected": session_data.get(
-                b"websocket_connected", b"false"
-            ).decode()
-            == "true",
-            "completion_reason": session_data.get(b"completion_reason", b"").decode(),
-            "chunks_published": int(session_data.get(b"chunks_published", b"0")),
-            "started_at": started_at,
-            "last_chunk_at": last_chunk_at,
-            "age_seconds": time.time() - started_at,
-            "idle_seconds": time.time() - last_chunk_at,
-            "conversation_count": conversation_count,
-            # Speech detection events
-            "last_event": session_data.get(b"last_event", b"").decode(),
-            "speech_detected_at": session_data.get(b"speech_detected_at", b"").decode(),
-            "speaker_check_status": session_data.get(
-                b"speaker_check_status", b""
-            ).decode(),
-            "identified_speakers": session_data.get(
-                b"identified_speakers", b""
-            ).decode(),
-        }
-
-    except Exception as e:
-        logger.error(f"Error getting session info for {session_id}: {e}")
-        return None
-
-
-async def get_all_sessions(redis_client, limit: int = 100) -> List[Dict]:
-    """
-    Get information about all active sessions.
-
-    Args:
-        redis_client: Redis async client
-        limit: Maximum number of sessions to return
-
-    Returns:
-        List of session info dictionaries
-    """
-    try:
-        # Get all session keys
-        session_keys = []
-        cursor = b"0"
-        while cursor and len(session_keys) < limit:
-            cursor, keys = await redis_client.scan(
-                cursor, match="audio:session:*", count=limit
-            )
-            session_keys.extend(keys[: limit - len(session_keys)])
-
-        # Get info for each session
-        sessions = []
-        for key in session_keys:
-            session_id = key.decode().replace("audio:session:", "")
-            session_info = await get_session_info(redis_client, session_id)
-            if session_info:
-                sessions.append(session_info)
-
-        return sessions
-
-    except Exception as e:
-        logger.error(f"Error getting all sessions: {e}")
-        return []
-
-
-async def get_session_conversation_count(redis_client, session_id: str) -> int:
-    """
-    Get the conversation count for a specific session.
-
-    Args:
-        redis_client: Redis async client
-        session_id: Session UUID
-
-    Returns:
-        Number of conversations created in this session
-    """
-    try:
-        conversation_count_key = f"session:conversation_count:{session_id}"
-        conversation_count_bytes = await redis_client.get(conversation_count_key)
-        return int(conversation_count_bytes.decode()) if conversation_count_bytes else 0
-    except Exception as e:
-        logger.error(f"Error getting conversation count for session {session_id}: {e}")
-        return 0
-
-
-async def increment_session_conversation_count(redis_client, session_id: str) -> int:
-    """
-    Increment and return the conversation count for a session.
-
-    Args:
-        redis_client: Redis async client
-        session_id: Session UUID
-
-    Returns:
-        New conversation count
-    """
-    try:
-        conversation_count_key = f"session:conversation_count:{session_id}"
-        count = await redis_client.incr(conversation_count_key)
-        await redis_client.expire(conversation_count_key, 3600)  # 1 hour TTL
-        logger.info(f"📊 Conversation count for session {session_id}: {count}")
-        return count
-    except Exception as e:
-        logger.error(
-            f"Error incrementing conversation count for session {session_id}: {e}"
-        )
-        return 0
 
 
 async def get_streaming_status(request):
@@ -279,23 +69,17 @@ async def get_streaming_status(request):
             )
 
         # Get all sessions (both active and completed)
-        session_keys = await redis_client.keys("audio:session:*")
+        store = SessionStore(redis_client)
         active_sessions = []
         completed_sessions_from_redis = []
 
-        for key in session_keys:
-            session_id = key.decode().split(":")[-1]
-
-            # Use session_controller to get complete session info including conversation_count
-            session_obj = await get_session_info(redis_client, session_id)
-            if not session_obj:
-                continue
-
-            status = session_obj.get("status", "")
+        async for view in store.iter_views():
+            conversation_count = await store.get_conversation_count(view.session_id)
+            session_obj = _session_info_dict(view, conversation_count)
 
             # Separate active and completed sessions
             # Check if all jobs are complete (including failed jobs)
-            all_jobs_done = all_jobs_complete_for_client(session_obj.get("client_id"))
+            all_jobs_done = all_jobs_complete_for_client(view.client_id)
 
             # Session is completed ONLY when:
             # 1. Status was already set to "finished" by an authoritative source
@@ -306,40 +90,13 @@ async def get_streaming_status(request):
             # (after open_conversation_job finishes, before speech detection restarts),
             # all jobs are briefly terminal. Writing "finished" during this gap kills
             # the session permanently.
-            if status == "finished" and all_jobs_done:
-                # Get additional session data for completed sessions
-                session_key = f"audio:session:{session_id}"
-                session_data = await redis_client.hgetall(session_key)
-
+            if view.status == SessionStatus.FINISHED and all_jobs_done:
                 completed_sessions_from_redis.append(
                     {
-                        "session_id": session_id,
-                        "client_id": session_obj.get("client_id", ""),
-                        "conversation_id": (
-                            session_data.get(b"conversation_id", b"").decode()
-                            if session_data and b"conversation_id" in session_data
-                            else None
-                        ),
-                        "has_conversation": bool(
-                            session_data and session_data.get(b"conversation_id", b"")
-                        ),
-                        "action": (
-                            session_data.get(b"action", b"finished").decode()
-                            if session_data and b"action" in session_data
-                            else "finished"
-                        ),
-                        "reason": (
-                            session_data.get(b"reason", b"").decode()
-                            if session_data and b"reason" in session_data
-                            else ""
-                        ),
-                        "completed_at": session_obj.get("last_chunk_at", 0),
-                        "audio_file": (
-                            session_data.get(b"audio_file", b"").decode()
-                            if session_data and b"audio_file" in session_data
-                            else ""
-                        ),
-                        "conversation_count": session_obj.get("conversation_count", 0),
+                        "session_id": view.session_id,
+                        "client_id": view.client_id,
+                        "completed_at": view.completed_at or view.last_chunk_at,
+                        "conversation_count": conversation_count,
                     }
                 )
             else:
@@ -619,38 +376,30 @@ async def cleanup_old_sessions(request, max_age_seconds: int = 3600):
                 content={"error": "Redis client for audio streaming not initialized"},
             )
 
-        # Get all session keys
-        session_keys = await redis_client.keys("audio:session:*")
+        # Clean up old session hashes
+        store = SessionStore(redis_client)
         cleaned_sessions = 0
         old_sessions = []
 
         current_time = time.time()
 
-        for key in session_keys:
-            session_data = await redis_client.hgetall(key)
-            if not session_data:
-                continue
-
-            session_id = key.decode().split(":")[-1]
-            started_at = float(session_data.get(b"started_at", b"0"))
-            status = session_data.get(b"status", b"").decode()
-
-            age_seconds = current_time - started_at
+        async for view in store.iter_views():
+            age_seconds = current_time - view.started_at
 
             # Clean up sessions older than max_age or stuck in "finalizing"
             should_clean = age_seconds > max_age_seconds or (
-                status == "finalizing" and age_seconds > 300
+                view.status == SessionStatus.FINALIZING and age_seconds > 300
             )  # Finalizing for more than 5 minutes
 
             if should_clean:
                 old_sessions.append(
                     {
-                        "session_id": session_id,
+                        "session_id": view.session_id,
                         "age_seconds": age_seconds,
-                        "status": status,
+                        "status": view.status.value if view.status else "",
                     }
                 )
-                await redis_client.delete(key)
+                await store.delete(view.session_id)
                 cleaned_sessions += 1
 
         # Also clean up old audio streams (per-client streams that are inactive)

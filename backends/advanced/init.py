@@ -908,6 +908,95 @@ class ChronicleSetup:
                 "[yellow][WARNING][/yellow] Embeddings require Ollama running with nomic-embed-text model"
             )
 
+    def setup_fast_llm(self):
+        """Optionally configure a separate fast LLM for quick, latency-sensitive
+        tasks (wake-word follow-ups). Default: reuse the main LLM."""
+        self.print_section("Fast LLM (optional)")
+        self.console.print(
+            "[blue][INFO][/blue] A 'fast LLM' handles quick tasks like wake-word "
+            "follow-up commands (e.g. saying 'warmer' after an action runs)."
+        )
+        self.console.print(
+            "By default this reuses your main LLM. You can point it at a faster/cheaper "
+            "model instead (e.g. an 'instant' hosted model or a small local one)."
+        )
+        self.console.print()
+
+        full_config = self.config_manager.get_full_config()
+        existing_fast = full_config.get("defaults", {}).get("fast_llm", "")
+
+        choices = {
+            "1": "Reuse my main LLM (recommended)",
+            "2": "Use a separate fast LLM (OpenAI-compatible endpoint)",
+        }
+        choice = self.prompt_choice(
+            "Fast LLM for quick tasks?", choices, "2" if existing_fast else "1"
+        )
+
+        if choice == "1":
+            # Empty default -> followup_resolution falls back to defaults.llm.
+            self.config_manager.update_config_defaults({"fast_llm": ""})
+            self.console.print(
+                "[blue][INFO][/blue] Fast LLM = main LLM (defaults.fast_llm cleared)"
+            )
+            return
+
+        existing_model = next(
+            (m for m in full_config.get("models", []) if m.get("name") == "fast-llm"),
+            {},
+        )
+
+        base_url = self.prompt_value(
+            "Fast LLM API Base URL",
+            existing_model.get("model_url", "https://api.openai.com/v1"),
+        )
+        if not base_url:
+            self.console.print(
+                "[yellow][WARNING][/yellow] No base URL - keeping main LLM for fast tasks"
+            )
+            self.config_manager.update_config_defaults({"fast_llm": ""})
+            return
+
+        api_key = self.prompt_with_existing_masked(
+            prompt_text="Fast LLM API Key (leave empty if not required)",
+            env_key="FAST_LLM_API_KEY",
+            placeholders=["your_fast_llm_api_key_here"],
+            is_password=True,
+            default="",
+        )
+        if api_key:
+            self.config["FAST_LLM_API_KEY"] = api_key
+
+        model_name = self.prompt_value(
+            "Fast LLM model name (e.g., gpt-5.5, gpt-4o-mini, llama-3.1-8b-instant)",
+            existing_model.get("model_name", "gpt-5.5"),
+        )
+        if not model_name:
+            self.console.print(
+                "[yellow][WARNING][/yellow] No model name - keeping main LLM for fast tasks"
+            )
+            self.config_manager.update_config_defaults({"fast_llm": ""})
+            return
+
+        fast_model = {
+            "name": "fast-llm",
+            "description": "Fast LLM for quick tasks (wake-word follow-ups)",
+            "model_type": "llm",
+            "model_provider": "openai",
+            "api_family": "openai",
+            "model_name": model_name,
+            "model_url": base_url,
+            "api_key": "${oc.env:FAST_LLM_API_KEY,''}",
+            "model_params": {"temperature": 0.1, "max_tokens": 200},
+            "model_output": "json",
+        }
+        self.config_manager.add_or_update_model(fast_model)
+        self.config_manager.update_config_defaults({"fast_llm": "fast-llm"})
+        self.console.print(
+            "[green][SUCCESS][/green] Separate fast LLM configured "
+            "(defaults.fast_llm: fast-llm)"
+        )
+
     def setup_memory(self):
         """Configure memory provider - updates config.yml"""
         # Check if memory provider was provided via command line (from wizard.py)
@@ -1623,6 +1712,7 @@ class ChronicleSetup:
             self.setup_streaming_provider()
             self.setup_live_segmentation()
             self.setup_llm()
+            self.setup_fast_llm()
             self.setup_memory()
             self.setup_optional_services()
             self.setup_falkordb()

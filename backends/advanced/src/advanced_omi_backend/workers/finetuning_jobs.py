@@ -10,20 +10,17 @@ Jobs:
 import io
 import json
 import logging
-import os
 import time
 from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
-import redis.asyncio as aioredis
 
 from advanced_omi_backend.llm_client import async_generate
 from advanced_omi_backend.prompt_registry import get_prompt_registry
+from advanced_omi_backend.redis_factory import create_async_redis
 
 logger = logging.getLogger(__name__)
-
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # TTL for cached jargon: 2 hours (job runs every 30 min, so always refreshed)
 JARGON_CACHE_TTL = 7200
@@ -269,7 +266,7 @@ async def run_asr_finetuning_job() -> dict:
     pending_annotations = []  # annotations to mark after success
 
     # Optionally load cached jargon for customized_context
-    redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+    redis_client = create_async_redis(decode_responses=True)
 
     try:
         for conv_id, conv_annotations in by_conversation.items():
@@ -408,7 +405,7 @@ async def run_asr_jargon_extraction_job() -> dict:
     skipped = 0
     errors = 0
 
-    redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+    redis_client = create_async_redis(decode_responses=True)
     try:
         for user in users:
             user_id = str(user.id)

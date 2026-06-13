@@ -141,9 +141,13 @@ plausibly recur and matters.
    `write_note` it from the matching template. Don't duplicate facts already present.
 4. `edit_note` old_text must match the file EXACTLY and UNIQUELY — include surrounding
    context (e.g. the section header line). Edit frontmatter as text too.
-5. If the conversation re-identifies a speaker (e.g. "Speaker 0" is actually Alice), use
+5. Other conversations may be recorded into this vault CONCURRENTLY, so a note can change
+   between your read and your edit. If an edit fails to match, read_note the file again
+   and re-apply only the smallest new edit against its current content — never re-write
+   or re-paste a whole section, and never re-add content that is already present.
+6. If the conversation re-identifies a speaker (e.g. "Speaker 0" is actually Alice), use
    `rename_person` to fix the name and all its backlinks.
-6. Keep going until everything is recorded, then reply with a 1-2 sentence summary of what
+7. Keep going until everything is recorded, then reply with a 1-2 sentence summary of what
    you changed. Do not call tools in that final message.
 
 Be precise and conservative: capture what was actually said, link things, avoid invention.
@@ -159,6 +163,9 @@ class MemoryAgentResult:
     summary: str
     tool_calls: int = 0
     errors: List[str] = field(default_factory=list)
+    truncated: bool = (
+        False  # loop ended on a truncated/empty LLM response, not a deliberate finish
+    )
 
 
 async def _get_prompt(prompt_id: str, default: str, vault_summary: str = "") -> str:
@@ -181,10 +188,12 @@ async def _get_prompt(prompt_id: str, default: str, vault_summary: str = "") -> 
 class MemoryAgent:
     """Runs the tool loop that turns a transcript into vault edits."""
 
-    def __init__(self, vault_root: Path, operation: str = "chat"):
-        # `operation` selects the model/params from model_registry. "chat" is used (not
-        # "memory_extraction") because the latter may force response_format=json, which
-        # conflicts with tool calling.
+    def __init__(self, vault_root: Path, operation: str = "memory_agent"):
+        # `operation` selects the model/params from model_registry. A dedicated
+        # "memory_agent" operation is used (not "memory_extraction", which may force
+        # response_format=json and conflict with tool calling): reasoning models spend
+        # completion tokens on reasoning before emitting any tool call, so this
+        # operation carries a larger max_tokens budget and a low reasoning_effort.
         self.tools = VaultTools(vault_root)
         self.operation = operation
 
@@ -219,6 +228,7 @@ class MemoryAgent:
 
         tool_calls = 0
         errors: List[str] = []
+        truncation_retried = False
 
         for round_idx in range(MAX_TOOL_ROUNDS):
             response = await async_chat_with_tools(
@@ -229,6 +239,39 @@ class MemoryAgent:
 
             if not msg.tool_calls:
                 summary = (msg.content or "").strip()
+                if not summary or choice.finish_reason == "length":
+                    # Reasoning models can burn the whole completion budget on
+                    # reasoning and return an empty/truncated message with no tool
+                    # calls (finish_reason="length") — that is NOT a deliberate
+                    # completion. Retry the round once, then abort as truncated.
+                    if not truncation_retried:
+                        truncation_retried = True
+                        logger.warning(
+                            "memory agent got truncated/empty response for conv=%s "
+                            "(finish_reason=%s) — retrying round %d",
+                            conversation_id,
+                            choice.finish_reason,
+                            round_idx + 1,
+                        )
+                        continue
+                    logger.error(
+                        "memory agent aborted on truncated/empty response for conv=%s "
+                        "(finish_reason=%s, rounds=%d, tools=%d, touched=%d)",
+                        conversation_id,
+                        choice.finish_reason,
+                        round_idx + 1,
+                        tool_calls,
+                        len(self.tools.touched),
+                    )
+                    return MemoryAgentResult(
+                        conversation_id=conversation_id,
+                        rounds=round_idx + 1,
+                        touched=sorted(self.tools.touched),
+                        summary=summary,
+                        tool_calls=tool_calls,
+                        errors=errors,
+                        truncated=True,
+                    )
                 logger.info(
                     "memory agent done: conv=%s rounds=%d tools=%d touched=%d",
                     conversation_id,
@@ -294,7 +337,7 @@ async def search_vault(
     query: str,
     vault_root: Path,
     *,
-    operation: str = "chat",
+    operation: str = "memory_agent",
     max_rounds: int = MAX_SEARCH_ROUNDS,
     vault_summary: str = "",
 ) -> VaultSearchResult:
