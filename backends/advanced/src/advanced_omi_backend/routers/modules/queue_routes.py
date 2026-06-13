@@ -6,7 +6,6 @@ Provides basic endpoints for viewing job status and statistics.
 import logging
 from typing import List, Optional
 
-import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from rq.job import Job
@@ -19,6 +18,7 @@ from advanced_omi_backend.controllers.queue_controller import (
     get_jobs,
     redis_conn,
 )
+from advanced_omi_backend.redis_factory import create_async_redis
 from advanced_omi_backend.users import User
 
 logger = logging.getLogger(__name__)
@@ -94,6 +94,12 @@ async def get_job_status(
             raise HTTPException(status_code=500, detail=str(e))
 
         response = {"job_id": job.id, "status": status}
+
+        # Surface in-flight progress published by batch jobs (job.meta
+        # "batch_progress" convention) so pollers can show done/total.
+        batch_progress = (job.meta or {}).get("batch_progress")
+        if batch_progress:
+            response["batch_progress"] = batch_progress
 
         # Include error information for failed jobs
         if status == "failed" and job.exc_info:
@@ -847,9 +853,7 @@ async def flush_all_jobs(
         deleted_keys = 0
 
         # Get async Redis connection for scanning
-        from advanced_omi_backend.controllers.queue_controller import REDIS_URL
-
-        async_redis = await aioredis.from_url(REDIS_URL)
+        async_redis = create_async_redis()
 
         try:
             # Delete audio streams
@@ -910,70 +914,32 @@ async def get_redis_sessions(
 ):
     """Get Redis session tracking information."""
     try:
-        import redis.asyncio as aioredis
+        from advanced_omi_backend.services.audio_stream.session_store import (
+            SessionStore,
+        )
 
-        from advanced_omi_backend.controllers.queue_controller import REDIS_URL
-
-        redis_client = aioredis.from_url(REDIS_URL)
+        redis_client = create_async_redis()
         try:
-            # Get session keys
-            session_keys = []
-            cursor = b"0"
-            while cursor and len(session_keys) < limit:
-                cursor, keys = await redis_client.scan(
-                    cursor, match="audio:session:*", count=limit
-                )
-                session_keys.extend(keys[: limit - len(session_keys)])
-
-            # Get session info
+            store = SessionStore(redis_client)
             sessions = []
-            for key in session_keys:
-                try:
-                    session_data = await redis_client.hgetall(key)
-                    if session_data:
-                        session_id = key.decode().replace("audio:session:", "")
-
-                        # Get conversation count for this session
-                        conversation_count_key = (
-                            f"session:conversation_count:{session_id}"
-                        )
-                        conversation_count_bytes = await redis_client.get(
-                            conversation_count_key
-                        )
-                        conversation_count = (
-                            int(conversation_count_bytes.decode())
-                            if conversation_count_bytes
-                            else 0
-                        )
-
-                        sessions.append(
-                            {
-                                "session_id": session_id,
-                                "user_id": session_data.get(b"user_id", b"").decode(),
-                                "client_id": session_data.get(
-                                    b"client_id", b""
-                                ).decode(),
-                                "stream_name": session_data.get(
-                                    b"stream_name", b""
-                                ).decode(),
-                                "provider": session_data.get(b"provider", b"").decode(),
-                                "mode": session_data.get(b"mode", b"").decode(),
-                                "status": session_data.get(b"status", b"").decode(),
-                                "started_at": session_data.get(
-                                    b"started_at", b""
-                                ).decode(),
-                                "chunks_published": int(
-                                    session_data.get(b"chunks_published", b"0").decode()
-                                    or 0
-                                ),
-                                "last_chunk_at": session_data.get(
-                                    b"last_chunk_at", b""
-                                ).decode(),
-                                "conversation_count": conversation_count,
-                            }
-                        )
-                except Exception as e:
-                    logger.error(f"Error getting session info for {key}: {e}")
+            async for view in store.iter_views(limit=limit):
+                sessions.append(
+                    {
+                        "session_id": view.session_id,
+                        "user_id": view.user_id,
+                        "client_id": view.client_id,
+                        "stream_name": view.stream_name,
+                        "provider": view.provider,
+                        "mode": view.mode,
+                        "status": view.status.value if view.status else "",
+                        "started_at": str(view.started_at),
+                        "chunks_published": view.chunks_published,
+                        "last_chunk_at": str(view.last_chunk_at),
+                        "conversation_count": await store.get_conversation_count(
+                            view.session_id
+                        ),
+                    }
+                )
 
             return {"total_sessions": len(sessions), "sessions": sessions}
         finally:
@@ -998,39 +964,22 @@ async def clear_old_sessions(
     try:
         import time
 
-        import redis.asyncio as aioredis
+        from advanced_omi_backend.services.audio_stream.session_store import (
+            SessionStore,
+        )
 
-        from advanced_omi_backend.controllers.queue_controller import REDIS_URL
-
-        redis_client = aioredis.from_url(REDIS_URL)
+        redis_client = create_async_redis()
         try:
-            current_time = time.time()
-            cutoff_time = current_time - older_than_seconds
+            cutoff_time = time.time() - older_than_seconds
 
-            # Get all session keys
-            session_keys = []
-            cursor = b"0"
-            while cursor:
-                cursor, keys = await redis_client.scan(
-                    cursor, match="audio:session:*", count=100
-                )
-                session_keys.extend(keys)
-
-            # Check each session and delete if old
+            # Delete sessions whose last chunk predates the cutoff
+            store = SessionStore(redis_client)
             deleted_count = 0
-            for key in session_keys:
-                try:
-                    session_data = await redis_client.hgetall(key)
-                    if session_data:
-                        last_chunk_at = session_data.get(b"last_chunk_at", b"").decode()
-                        if last_chunk_at:
-                            last_chunk_time = float(last_chunk_at)
-                            if last_chunk_time < cutoff_time:
-                                await redis_client.delete(key)
-                                deleted_count += 1
-                                logger.info(f"Deleted old session: {key.decode()}")
-                except Exception as e:
-                    logger.error(f"Error processing session {key}: {e}")
+            async for view in store.iter_views():
+                if view.last_chunk_at and view.last_chunk_at < cutoff_time:
+                    await store.delete(view.session_id)
+                    deleted_count += 1
+                    logger.info(f"Deleted old session: {view.session_id}")
 
             return {
                 "deleted_count": deleted_count,

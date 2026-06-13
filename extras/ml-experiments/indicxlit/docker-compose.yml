@@ -1,0 +1,16 @@
+services:
+  indicxlit:
+    # Reuse the prebuilt ~10GB indicxlit:latest if present; build only if it's missing
+    # (docker compose up without --build uses the existing image).
+    image: indicxlit:latest
+    build: .
+    container_name: chronicle-indicxlit
+    ports:
+      - "5111:5000"   # external 5111 -> container 5000 (matches INDICXLIT_URL)
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s

@@ -2,6 +2,8 @@ import { createContext, useContext, useState, useRef, useCallback, useEffect, us
 import { BACKEND_URL } from '../services/api'
 import { getStorageKey } from '../utils/storage'
 import { useAuth } from './AuthContext'
+import { playDownlinkAudio } from '../utils/audioPlayback'
+import { setActiveWakeClientId } from '../hooks/useWakeFeedback'
 
 const log = import.meta.env.DEV ? console.log.bind(console) : () => {}
 
@@ -25,6 +27,7 @@ export interface RecordingContextType {
   recordingDuration: number
   error: string | null
   mode: RecordingMode
+  liveTranscript: string
 
   // Actions
   startRecording: () => Promise<void>
@@ -58,6 +61,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   const [recordingDuration, setRecordingDuration] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [mode, setMode] = useState<RecordingMode>('streaming')
+  const [liveTranscript, setLiveTranscript] = useState('')
   const [analyserState, setAnalyserState] = useState<AnalyserNode | null>(null)
   const [audioSource, setAudioSource] = useState<AudioSource>('mic')
 
@@ -127,6 +131,9 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   // Cleanup function
   const cleanup = useCallback(() => {
     log('Cleaning up audio recording resources')
+
+    // No longer streaming as any client — stop reacting to wake-word SSE feedback.
+    setActiveWakeClientId(null)
 
     // Stop audio processing
     audioProcessingStartedRef.current = false
@@ -354,9 +361,27 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
             setIsRecording(false)
           }
 
+          // The backend confirms the connection with the resolved client_id. Record it
+          // so wake-word SSE feedback can be scoped to this device (see useSSE).
+          else if (message.type === 'ready') {
+            if (message.client_id) setActiveWakeClientId(message.client_id)
+          }
+
+          // Backend→device downlink: wake-word tones and Hermes TTS replies, forwarded
+          // down this device's own WebSocket. Play them out the browser's speaker.
+          else if (message.type === 'play-audio') {
+            playDownlinkAudio(message.data)
+          }
+
           // Handle other message types (interim_transcript, etc.)
           else if (message.type === 'interim_transcript') {
             log('Received interim transcript:', message.data)
+            // Streaming providers send a cumulative transcript that grows over
+            // time, so replace (not append) with the latest text.
+            const text = message.data?.text
+            if (typeof text === 'string' && text.length > 0) {
+              setLiveTranscript(text)
+            }
           }
 
         } catch (e) {
@@ -533,6 +558,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
 
     try {
       setError(null)
+      setLiveTranscript('')
 
       // Step 1: Get microphone access (skip for tab-only)
       let micStream: MediaStream | null = null
@@ -656,6 +682,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     recordingDuration,
     error,
     mode,
+    liveTranscript,
     startRecording,
     stopRecording,
     setMode,
@@ -669,7 +696,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     formatDuration,
     canAccessMicrophone
   }), [
-    currentStep, isRecording, recordingDuration, error, mode,
+    currentStep, isRecording, recordingDuration, error, mode, liveTranscript,
     startRecording, stopRecording, setMode,
     audioSource, setAudioSource,
     availableDevices, selectedDeviceId, setSelectedDeviceId,

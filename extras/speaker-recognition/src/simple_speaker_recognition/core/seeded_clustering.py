@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 from pyannote.core import Annotation, Segment
+from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
 from sklearn.cluster import AgglomerativeClustering as SklearnAgglo
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -20,7 +21,7 @@ class SeededAgglomerativeClustering:
 
     def __init__(
         self,
-        similarity_threshold: float = 0.15,
+        similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
         min_cluster_size: int = 3,
         fallback_threshold: float = 0.7,
         confidence_weight: float = 0.8,

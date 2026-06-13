@@ -5,6 +5,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useSystemData, useRestartWorkers, useRestartBackend } from '../hooks/useSystem'
 import { systemApi } from '../services/api'
+import ExternalServices from '../components/ExternalServices'
 
 function getBackendHttpUrl(): string {
   const { protocol, hostname, port } = window.location
@@ -193,9 +194,11 @@ export default function System() {
       'mongodb': 'MONGODB',
       'redis': 'REDIS & RQ WORKERS',
       'llm': 'LLM',
+      'fast_llm': 'LLM (FAST)',
       'mem0': 'MEM0',
       'memory_service': 'MEMORY SERVICE',
-      'speech_to_text': 'SPEECH TO TEXT',
+      'speech_to_text': 'SPEECH TO TEXT (BATCH)',
+      'speech_to_text_streaming': 'SPEECH TO TEXT (STREAMING)',
       'speaker_recognition': 'SPEAKER RECOGNITION',
       'openmemory_mcp': 'OPENMEMORY MCP'
     }
@@ -562,6 +565,11 @@ export default function System() {
         </div>
       )}
 
+      {/* External Services (host service-manager agent) */}
+      <div className="mb-6">
+        <ExternalServices isAdmin={isAdmin} />
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Services Status */}
         {healthData?.services && (
@@ -593,6 +601,11 @@ export default function System() {
                     {(status as any).provider && (
                       <span className="text-xs text-blue-600 dark:text-blue-400">
                         ({(status as any).provider})
+                      </span>
+                    )}
+                    {(status as any).model && (
+                      <span className="text-xs text-gray-500 dark:text-gray-500 block">
+                        {(status as any).model}
                       </span>
                     )}
                     {service === 'redis' && (status as any).worker_count !== undefined && (

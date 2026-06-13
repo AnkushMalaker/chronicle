@@ -189,6 +189,27 @@ class ConfigManager:
             logger.error(f"Failed to update .env file: {e}")
             raise
 
+    def get_enabled_services(self) -> Dict[str, bool]:
+        """Return the enabled-services map from config.yml (``services:`` section).
+
+        This is the single source of truth for which services the lifecycle
+        (services.py ``--all``) starts/stops — independent of whether a service's
+        ``.env`` happens to exist.
+        """
+        config = self._load_config_yml()
+        return dict(config.get("services", {}) or {})
+
+    def set_enabled_services(self, services: Dict[str, bool]) -> None:
+        """Write the enabled-services map to config.yml (``services:`` section).
+
+        Args:
+            services: Mapping of lifecycle service name → enabled bool. Replaces the
+                whole ``services:`` section so it always reflects the latest wizard run.
+        """
+        config = self._load_config_yml()
+        config["services"] = {name: bool(on) for name, on in services.items()}
+        self._save_config_yml(config)
+
     def get_memory_provider(self) -> str:
         """
         Get current memory provider from config.yml.

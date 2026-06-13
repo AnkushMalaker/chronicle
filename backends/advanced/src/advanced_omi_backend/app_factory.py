@@ -12,7 +12,6 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import redis.asyncio as redis
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
@@ -27,6 +26,7 @@ from advanced_omi_backend.auth import (
 )
 from advanced_omi_backend.client_manager import get_client_manager
 from advanced_omi_backend.middleware.app_middleware import setup_middleware
+from advanced_omi_backend.redis_factory import create_async_redis
 from advanced_omi_backend.routers.api_router import router as api_router
 from advanced_omi_backend.routers.modules.health_routes import router as health_router
 from advanced_omi_backend.routers.modules.websocket_routes import (
@@ -139,6 +139,7 @@ async def lifespan(app: FastAPI):
         from advanced_omi_backend.models.annotation import Annotation
         from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
         from advanced_omi_backend.models.conversation import Conversation
+        from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
         from advanced_omi_backend.models.user import User
         from advanced_omi_backend.models.waveform import WaveformData
 
@@ -150,6 +151,7 @@ async def lifespan(app: FastAPI):
                 AudioChunkDocument,
                 WaveformData,
                 Annotation,
+                MemoryAuditEntry,
             ],
         )
         application_logger.info("Beanie initialized for all document models")
@@ -253,9 +255,7 @@ async def lifespan(app: FastAPI):
 
     async def _init_redis_audio_producer():
         try:
-            app.state.redis_audio_stream = await redis.from_url(
-                config.redis_url, encoding="utf-8", decode_responses=False
-            )
+            app.state.redis_audio_stream = create_async_redis(decode_responses=False)
             from advanced_omi_backend.services.audio_stream import AudioStreamProducer
 
             app.state.audio_stream_producer = AudioStreamProducer(
@@ -269,7 +269,7 @@ async def lifespan(app: FastAPI):
                 initialize_redis_for_client_manager,
             )
 
-            initialize_redis_for_client_manager(config.redis_url)
+            initialize_redis_for_client_manager()
         except Exception as e:
             application_logger.error(
                 f"Failed to initialize Redis client for audio streaming: {e}",
@@ -327,7 +327,7 @@ async def lifespan(app: FastAPI):
 
     async def _init_cron_scheduler():
         try:
-            from advanced_omi_backend.controllers.data_cleaning_controller import (
+            from advanced_omi_backend.controllers.data_audit_controller import (
                 run_auto_clean_cron,
             )
             from advanced_omi_backend.cron_scheduler import (
@@ -410,6 +410,19 @@ async def lifespan(app: FastAPI):
         f"Phase 4 (OpenMemory/Cron/Plugins) completed in {time.monotonic() - phase_start:.2f}s"
     )
 
+    # Inbound vault edits (human edits in Obsidian, delivered by Syncthing) are
+    # recorded into the memory audit ledger by a background listener. No-ops when
+    # vault sync isn't configured.
+    try:
+        from advanced_omi_backend.services.memory.syncthing_audit import (
+            start_syncthing_audit_listener,
+        )
+
+        app.state.syncthing_audit_task = start_syncthing_audit_listener()
+    except Exception as e:
+        application_logger.warning(f"Syncthing memory-audit listener not started: {e}")
+        app.state.syncthing_audit_task = None
+
     total_startup = time.monotonic() - startup_start
     application_logger.info(
         f"Application ready in {total_startup:.2f}s - using application-level processing architecture."
@@ -433,6 +446,15 @@ async def lifespan(app: FastAPI):
                 await cleanup_client_state(client_id)
             except Exception as e:
                 application_logger.error(f"Error cleaning up client {client_id}: {e}")
+
+        # Stop the Syncthing memory-audit listener
+        try:
+            audit_task = getattr(app.state, "syncthing_audit_task", None)
+            if audit_task is not None:
+                audit_task.cancel()
+                application_logger.info("Syncthing memory-audit listener stopped")
+        except Exception as e:
+            application_logger.error(f"Error stopping memory-audit listener: {e}")
 
         # Shutdown BackgroundTaskManager
         try:

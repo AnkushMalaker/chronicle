@@ -61,6 +61,20 @@ class FishSpeechSynthesizer:
         self._is_loaded = True
         logger.info(f"Fish Speech ready (sample_rate={self._sample_rate})")
 
+    def backend_alive(self) -> bool:
+        """Quick liveness probe of the fish-speech inference server.
+
+        Used by the service /health so a crashed/OOMed backend subprocess flips
+        health to unhealthy instead of being masked behind the one-time warmup.
+        """
+        try:
+            resp = requests.get(
+                f"http://{_FISH_API_HOST}:{_FISH_API_PORT}/v1/health", timeout=3
+            )
+            return resp.status_code == 200
+        except requests.RequestException:
+            return False
+
     def _detect_sample_rate(self) -> int:
         """Detect sample rate from a short synthesis."""
         resp = requests.post(

@@ -17,7 +17,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from advanced_omi_backend.client_manager import get_client_manager
 from advanced_omi_backend.controllers.queue_controller import redis_conn
-from advanced_omi_backend.llm_client import async_health_check
+from advanced_omi_backend.llm_client import async_health_check, async_health_check_fast
 from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.services.transcription import get_transcription_provider
@@ -267,6 +267,29 @@ async def health_check():
         }
         overall_healthy = False
 
+    # Check separate fast LLM, only when one is configured (defaults.fast_llm set
+    # and distinct from defaults.llm). Reuses the main LLM otherwise.
+    try:
+        fast_health = await asyncio.wait_for(async_health_check_fast(), timeout=8.0)
+        if fast_health is not None:
+            is_healthy = fast_health.get("healthy", False)
+            health_status["services"]["fast_llm"] = {
+                "status": fast_health.get("status", "❌ Unknown"),
+                "healthy": is_healthy,
+                "base_url": fast_health.get("base_url", ""),
+                "model": fast_health.get("default_model", ""),
+                "critical": False,
+            }
+            if not is_healthy:
+                overall_healthy = False
+    except Exception as e:  # noqa: BLE001 - fast LLM is optional/non-critical
+        health_status["services"]["fast_llm"] = {
+            "status": f"⚠️ Connection Failed: {str(e)} - Service may not be running",
+            "healthy": False,
+            "critical": False,
+        }
+        overall_healthy = False
+
     # Check memory service (provider-dependent)
     if memory_provider in ("chronicle", "graphiti"):
         provider_label = "Graphiti" if memory_provider == "graphiti" else "Chronicle"
@@ -323,48 +346,69 @@ async def health_check():
         }
         overall_healthy = False
 
-    # Check Speech to Text service based on configured provider
-    if transcription_provider:
-        provider_name = transcription_provider.name
-        provider_type = transcription_provider.mode
-
+    # Check Speech to Text services — both batch (stored transcripts) and
+    # streaming (live, real-time). Each is reported separately so the status
+    # page shows what's configured for each mode, or flags it as unconfigured.
+    async def _check_stt(provider, label):
+        if provider is None:
+            return {
+                "status": "⚠️ Not configured",
+                "healthy": False,
+                "type": label,
+                "provider": "None",
+                "configured": False,
+                "critical": False,
+            }
         try:
-            stt_health = await asyncio.wait_for(
-                transcription_provider.health_check(), timeout=8.0
-            )
-            health_status["services"]["speech_to_text"] = {
-                "status": stt_health.get("status", "❌ Unknown"),
-                "healthy": stt_health.get("healthy", False),
-                "type": provider_type.title(),
-                "provider": provider_name,
+            h = await asyncio.wait_for(provider.health_check(), timeout=8.0)
+            return {
+                "status": h.get("status", "❌ Unknown"),
+                "healthy": h.get("healthy", False),
+                "type": label,
+                "provider": provider.name,
+                "configured": True,
                 "critical": False,
             }
         except asyncio.TimeoutError:
-            health_status["services"]["speech_to_text"] = {
+            return {
                 "status": "⚠️ Connection Timeout (8s)",
                 "healthy": False,
-                "type": provider_type.title(),
-                "provider": provider_name,
+                "type": label,
+                "provider": provider.name,
+                "configured": True,
                 "critical": False,
             }
         except Exception as e:
-            health_status["services"]["speech_to_text"] = {
+            return {
                 "status": f"⚠️ Provider Error: {str(e)}",
                 "healthy": False,
-                "type": provider_type.title(),
-                "provider": provider_name,
+                "type": label,
+                "provider": provider.name,
+                "configured": True,
                 "critical": False,
             }
-    else:
-        # No transcription service configured
-        health_status["services"]["speech_to_text"] = {
-            "status": "❌ No transcription service configured",
-            "healthy": False,
-            "type": "None",
-            "provider": "None",
-            "critical": False,
-        }
+
+    batch_provider = get_transcription_provider(mode="batch")
+    streaming_provider = get_transcription_provider(mode="streaming")
+
+    health_status["services"]["speech_to_text"] = await _check_stt(
+        batch_provider, "Batch"
+    )
+    health_status["services"]["speech_to_text_streaming"] = await _check_stt(
+        streaming_provider, "Streaming"
+    )
+
+    # Batch STT is required for stored transcripts; missing → degraded overall.
+    # Streaming is optional (live preview only), so it stays a non-fatal warning.
+    if batch_provider is None:
+        health_status["services"]["speech_to_text"][
+            "status"
+        ] = "❌ No batch STT configured (set defaults.stt)"
         overall_healthy = False
+    if streaming_provider is None:
+        health_status["services"]["speech_to_text_streaming"][
+            "status"
+        ] = "⚠️ No streaming STT configured (set defaults.stt_stream)"
 
     # Check Speaker Recognition service (non-critical - optional feature)
     if speaker_service_url:

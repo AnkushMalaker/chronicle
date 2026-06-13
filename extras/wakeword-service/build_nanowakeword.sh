@@ -1,15 +1,21 @@
 #!/bin/bash
-# Stage a nanowakeword wheel from the local source into vendor/ for the Docker
-# build. PyPI tops out at 2.1.3; the model was trained/exported with the local
-# 2.1.4 checkout, so we install that exact source (interpreter core only — no
-# torch/train deps at runtime). Run this BEFORE `docker compose build`.
+# Stage a nanowakeword wheel into vendor/ for the Docker build. Source of truth
+# is the FORK https://github.com/AnkushMalaker/nanowakeword (carries the
+# determinism fixes: deduped optimizer params, NWW_SEED/NWW_DETERMINISTIC).
+# PyPI tops out at 2.1.3 and upstream 2.1.4 lacks the fixes.
+# Run this BEFORE `docker compose build`.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../../untracked/nanowakeword"
 VENDOR="$HERE/vendor"
+FORK_URL="https://github.com/AnkushMalaker/nanowakeword"
 
-[ -d "$SRC" ] || { echo "nanowakeword source not found at $SRC"; exit 1; }
+if [ ! -d "$SRC" ]; then
+  echo "Cloning fork into $SRC ..."
+  git clone "$FORK_URL" "$SRC"
+fi
+echo "Building from: $(git -C "$SRC" log -1 --oneline) ($(git -C "$SRC" remote get-url origin))"
 
 mkdir -p "$VENDOR"
 rm -f "$VENDOR"/nanowakeword-*.whl

@@ -14,12 +14,11 @@ import json
 import logging
 from typing import Optional
 
-import redis.asyncio as aioredis
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 
 from advanced_omi_backend.auth import get_user_from_token_param
-from advanced_omi_backend.services.sse_publisher import REDIS_URL
+from advanced_omi_backend.redis_factory import create_async_redis
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +29,7 @@ HEARTBEAT_INTERVAL = 30  # seconds
 
 async def _sse_generator(user_id: str):
     """Async generator that subscribes to a user's SSE channel and yields events."""
-    r = aioredis.from_url(REDIS_URL, decode_responses=True)
+    r = create_async_redis(decode_responses=True)
     pubsub = r.pubsub()
     channel = f"sse:{user_id}"
 

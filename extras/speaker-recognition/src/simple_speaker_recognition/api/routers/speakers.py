@@ -11,6 +11,7 @@ import numpy as np
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from simple_speaker_recognition.api.core.utils import extract_user_id_from_speaker_id
+from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
 from simple_speaker_recognition.core.unified_speaker_db import UnifiedSpeakerDB
 from simple_speaker_recognition.database import get_db_session
 from simple_speaker_recognition.database.models import Speaker
@@ -88,7 +89,8 @@ async def get_speakers_analysis(
         default="dbscan", description="Clustering method: dbscan, kmeans"
     ),
     similarity_threshold: float = Query(
-        default=0.8, description="Threshold for finding similar speakers"
+        default=DEFAULT_SIMILARITY_THRESHOLD,
+        description="Threshold for finding similar speakers",
     ),
     db: UnifiedSpeakerDB = Depends(get_db),
 ):

@@ -180,7 +180,6 @@ models:
         method: POST
         path: /transcribe
         content_type: multipart/form-data
-        use_provider_segments: true
         response:
           type: json
           extract:
@@ -203,7 +202,6 @@ models:
         method: POST
         path: /transcribe
         content_type: multipart/form-data
-        use_provider_segments: true
         timeout: 3600
         response:
           type: json
@@ -269,7 +267,9 @@ models:
           Authorization: Bearer ${oc.env:SMALLEST_API_KEY,''}
         query:
           model: pulse
-          language: en
+          # hi natively covers Hindi-English code-switching; en hallucinates massive
+          # insertions on Hindi speech (158% corpus WER vs 12.9% with hi on CoSHE-100)
+          language: hi
           word_timestamps: 'true'
         response:
           type: json
@@ -400,7 +400,8 @@ models:
     operations:
       auth_prefix: Bearer
       query:
-        language: en
+        # hi natively covers Hindi-English code-switching (see stt-smallest note)
+        language: hi
         encoding: linear16
         sample_rate: 16000
         word_timestamps: 'true'
@@ -487,6 +488,14 @@ asr_services:
     batch_threshold_seconds: 300    # Audio longer than this triggers batching
     batch_duration_seconds: 240     # Non-overlapping window size
     batch_overlap_seconds: 30       # Overlap between windows
+    # Silence gate — VibeVoice echoes the context_info prompt back as a phantom
+    # transcript on near-silent windows. Windows with < silence_min_voiced_ms of
+    # voiced audio (frame RMS > silence_energy_floor on a [-1,1] signal) skip the
+    # model and emit nothing. Validated: echo windows have 0-60ms voiced, real
+    # speech 510ms+. Set silence_gate_enabled: false to disable.
+    silence_gate_enabled: true
+    silence_energy_floor: 0.01      # Per-frame RMS floor for a "voiced" frame
+    silence_min_voiced_ms: 200      # Min voiced audio for a window to be transcribed
 
 # ===========================
 # Chat Configuration
@@ -516,10 +525,20 @@ llm_operations:
     temperature: 0.1
     max_tokens: 2000
     response_format: json
+  # Vault memory agent (tool-calling loop that writes notes). Reasoning models
+  # spend completion tokens on reasoning before emitting any tool call or text,
+  # so the budget must cover reasoning + a full note body — too small a cap
+  # returns an empty message (finish_reason=length) and no vault writes.
+  memory_agent:
+    reasoning_effort: low
+    max_tokens: 8000
   title_summary:
     temperature: 0.3
   detailed_summary:
     temperature: 0.3
+    # Reasoning models spend completion tokens on reasoning before any output;
+    # long transcripts overflow small model-level caps and return empty content.
+    max_tokens: 8000
   entity_extraction:
     temperature: 0.1
     max_tokens: 2000
@@ -530,6 +549,12 @@ llm_operations:
     temperature: 0.3
     max_tokens: 4000
   plugin_assistant: {}
+  # Privacy screen for annotation exports: flag segments too personal to
+  # share with an outside annotator. JSON output (list of flagged indices).
+  sensitivity_screening:
+    temperature: 0.0
+    max_tokens: 2000
+    response_format: json
 
 # ===========================
 # Backend Configuration
@@ -560,10 +585,6 @@ backend:
     provider: deepgram  # or parakeet
     api_key: ${oc.env:DEEPGRAM_API_KEY,''}
     base_url: https://api.deepgram.com
-    # Fallback to provider segments when speaker service unavailable
-    # When true: Use segments from transcription provider (e.g., mock provider in tests)
-    # When false: Expect speaker service to create segments via diarization (default production behavior)
-    use_provider_segments: false
     # Transcription job timeout in seconds (how long to wait for batch transcription)
     job_timeout_seconds: 900
     # When enabled, automatically re-transcribe every streaming conversation with the batch provider
@@ -571,8 +592,11 @@ backend:
     always_batch_retranscribe: false
 
   # Diarization settings
+  # diarization_source: "provider" trusts diarized segments from the transcription
+  # provider when available (falls back to pyannote otherwise);
+  # "pyannote" always re-diarizes via the speaker service
   diarization:
-    diarization_source: pyannote
+    diarization_source: provider
     similarity_threshold: 0.15
     min_duration: 0.5
     collar: 2.0
@@ -635,17 +659,37 @@ cron_jobs:
     enabled: false
     schedule: "0 5 * * *"
   auto_clean:
-    description: "Auto-archive near-silent conversations (deletes audio, keeps metadata)"
+    description: "Auto-archive speech-free conversations (deletes audio, keeps metadata)"
     enabled: false
     schedule: "0 3 * * *"
 
-# Data Cleaning / auto-clean "level" (thresholds for the auto_clean cron job).
+# Data Audit / auto-clean "level" (thresholds for the auto_clean cron job).
 # Kept separate from cron_jobs.auto_clean so toggling the schedule in the UI
 # does not overwrite these values. Conservative by default: only essentially
-# dead-silent recordings are archived.
-data_cleaning:
+# speech-free recordings are archived.
+data_audit:
+  vad_provider: ten_vad             # swappable VAD backend for audio analysis
   auto_clean:
-    silence_threshold_dbfs: -50.0   # windows quieter than this count as silent
-    min_silent_fraction: 0.97       # archive only if >= 97% of windows are silent
+    speech_prob_threshold: 0.5      # VAD frame prob at/above this counts as speech
+    max_speech_fraction: 0.03       # archive only if <= 3% of frames are speech
     min_duration: 30.0              # ignore clips shorter than this (seconds)
     max_archive_per_run: 100        # safety cap on archives per sweep
+  export:
+    # Privacy screen for annotation exports. The policy is user-editable per
+    # export in the UI; this is the default prefill. It targets personally
+    # sensitive content (comfort, not a strict PII definition) — names and
+    # identifiers are intentionally kept so annotators can label speakers.
+    sensitivity:
+      policy: |
+        Flag segments I would not be comfortable sharing with an outside
+        annotator because they are personally sensitive. In particular:
+        - my family, household, or living situation
+        - health (physical or mental), medical or therapy details
+        - personal finances, income, debts, or specific expenses
+        - romantic relationships or sex life
+        - religious or political beliefs stated as personal conviction
+        - confidential business deals: named counterparties, terms, or
+          unreleased plans
+        Do NOT flag general technical discussion, abstract product/business
+        strategy, publicly-known facts, or people's names used only for
+        context (annotators need names for speaker labels).

@@ -17,7 +17,7 @@ ASR Services uses a **provider-based architecture** where inference engines are 
 | `faster-whisper` | CTranslate2 | Fast Whisper inference (4-6x faster) | Whisper Large V3, distil-whisper |
 | `transformers` | HuggingFace | General ASR models | Hindi Whisper, fine-tuned Whisper |
 | `vibevoice` | VibeVoice | Speaker diarization | microsoft/VibeVoice-ASR |
-| `nemo` | NVIDIA NeMo | NeMo models, long audio | Parakeet, Canary |
+| `nemo` | NVIDIA NeMo | NeMo models, long audio, cache-aware streaming | Parakeet, Canary, Nemotron 3.5 |
 
 ## Quick Start
 
@@ -88,6 +88,25 @@ docker compose up -d vibevoice-asr
 |-------|-------------|----------|
 | `nvidia/parakeet-tdt-0.6b-v3` | Production-ready | Enhanced chunking, timestamps |
 | `nvidia/canary-1b` | Multilingual | 1B parameters |
+| `nvidia/nemotron-3.5-asr-streaming-0.6b` | Cache-aware streaming | Real-time `/stream` WS (~100ms), 40 langs, offline `/transcribe` |
+
+#### Nemotron 3.5 Streaming
+
+The `nemo` provider also serves a low-latency `/stream` WebSocket endpoint (the
+Chronicle `stt_stream` contract) using NeMo cache-aware streaming
+(`CacheAwareStreamingAudioBuffer` + `conformer_stream_step`). Interim previews
+and the final result both come from the streaming decode — no full-file
+re-transcription. Latency is set by `NEMO_ATT_CONTEXT_SIZE` (`[56,0]` 80ms ..
+`[56,13]` 1.12s, `[56,3]` 320ms balanced default).
+
+```bash
+cp configs/nemotron-streaming.env .env
+docker compose up --build -d nemotron-stream-asr   # serves :8771 by default
+```
+
+The dedicated `nemotron-stream-asr` compose service reuses the nemo image and
+runs on its own port (`NEMOTRON_STREAM_PORT`, default 8771) so it can be the
+`stt_stream` provider alongside a different batch `stt` provider on 8767.
 
 ## API Endpoints
 

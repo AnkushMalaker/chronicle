@@ -135,6 +135,9 @@ class LLMOperationConfig(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     response_format: Optional[str] = None  # "json" → {"type": "json_object"}
+    reasoning_effort: Optional[str] = (
+        None  # "minimal"|"low"|... — reasoning models only
+    )
 
 
 class ResolvedLLMOperation(BaseModel):
@@ -150,6 +153,7 @@ class ResolvedLLMOperation(BaseModel):
     temperature: float
     max_tokens: Optional[int] = None
     response_format: Optional[Dict[str, Any]] = None  # {"type": "json_object"} or None
+    reasoning_effort: Optional[str] = None  # forwarded only for reasoning-class models
 
     @property
     def model_name(self) -> str:
@@ -184,6 +188,8 @@ class ResolvedLLMOperation(BaseModel):
             params[key] = self.max_tokens
         if self.response_format is not None:
             params["response_format"] = self.response_format
+        if reasoning and self.reasoning_effort:
+            params["reasoning_effort"] = self.reasoning_effort
         return params
 
     def get_client(self, is_async: bool = False):
@@ -287,17 +293,23 @@ class AppModels(BaseModel):
         """
         return sorted(set(m.model_type for m in self.models.values()))
 
-    def get_llm_operation(self, name: str) -> ResolvedLLMOperation:
+    def get_llm_operation(
+        self, name: str, *, default_model_type: str = "llm"
+    ) -> ResolvedLLMOperation:
         """Resolve a named LLM operation to a self-contained config.
 
         Resolution:
           1. Look up llm_operations[name] (empty LLMOperationConfig if missing)
-          2. Resolve model_def: op.model → get_by_name, else defaults.llm
+          2. Resolve model_def: op.model → get_by_name, else defaults[default_model_type]
+             (falling back to defaults.llm — so e.g. an unset fast_llm reuses the
+             main LLM)
           3. Merge parameters: operation > model_def.model_params > safe fallback
           4. Return ResolvedLLMOperation ready for use
 
         Args:
             name: Operation name (e.g. "memory_extraction", "chat")
+            default_model_type: defaults key to use when the operation pins no model
+                (e.g. "fast_llm"); falls back to "llm" when that default is unset.
 
         Returns:
             ResolvedLLMOperation with model_def, temperature, max_tokens, response_format
@@ -316,7 +328,9 @@ class AppModels(BaseModel):
                     f"which is not defined in the models list"
                 )
         else:
-            model_def = self.get_default("llm")
+            model_def = self.get_default(default_model_type)
+            if not model_def and default_model_type != "llm":
+                model_def = self.get_default("llm")
             if not model_def:
                 raise RuntimeError(
                     f"No model specified for operation '{name}' and no default LLM defined"
@@ -335,6 +349,11 @@ class AppModels(BaseModel):
             if op_config.max_tokens is not None
             else model_params.get("max_tokens")
         )
+        reasoning_effort = (
+            op_config.reasoning_effort
+            if op_config.reasoning_effort is not None
+            else model_params.get("reasoning_effort")
+        )
 
         # Convert "json" shorthand to OpenAI format
         response_format = None
@@ -346,6 +365,7 @@ class AppModels(BaseModel):
             temperature=float(temperature),
             max_tokens=int(max_tokens) if max_tokens is not None else None,
             response_format=response_format,
+            reasoning_effort=reasoning_effort,
         )
 
 

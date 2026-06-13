@@ -51,6 +51,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ffmpeg \
     ripgrep \
+    libc++1 \
     && rm -rf /var/lib/apt/lists/*
 
 # notesmd-cli on PATH so the memory agent auto-detects it (shutil.which).
@@ -89,6 +90,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ffmpeg \
     ripgrep \
+    libc++1 \
     build-essential \
     git \
     && rm -rf /var/lib/apt/lists/*

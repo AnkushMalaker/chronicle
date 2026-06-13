@@ -87,6 +87,59 @@ export function useLLMOperations() {
   })
 }
 
+export interface ExternalServiceProvider {
+  env_key: string
+  current: string
+  streaming_current?: string
+  available: { key: string; label: string }[]
+}
+
+export interface ExternalService {
+  name: string
+  description: string
+  ports: string[]
+  enabled: boolean
+  health: 'healthy' | 'partial' | 'unhealthy' | 'stopped' | 'starting'
+  health_detail: string
+  provider: ExternalServiceProvider | null
+}
+
+export interface ServiceOperation {
+  id: string
+  service: string
+  action: string
+  status: 'running' | 'done' | 'failed'
+  ok: boolean | null
+  log: string
+}
+
+export interface ExternalServicesData {
+  available: boolean
+  reason?: string
+  detail?: string
+  services?: ExternalService[]
+  operation?: ServiceOperation | null
+}
+
+export function useExternalServices(isAdmin: boolean, pollWhileBusy: boolean) {
+  return useQuery<ExternalServicesData>({
+    queryKey: ['system', 'externalServices'],
+    queryFn: async () => {
+      const response = await systemApi.getExternalServices()
+      return response.data
+    },
+    enabled: isAdmin,
+    staleTime: 30_000,
+    // Poll while an operation runs or a service is still booting (model loading),
+    // so health flips to healthy without a manual refresh.
+    refetchInterval: query => {
+      if (pollWhileBusy) return 3_000
+      const services = query.state.data?.services
+      return services?.some(s => s.health === 'starting') ? 5_000 : false
+    },
+  })
+}
+
 export function useRestartWorkers() {
   const queryClient = useQueryClient()
   return useMutation({

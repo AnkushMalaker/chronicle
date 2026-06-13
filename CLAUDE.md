@@ -627,6 +627,7 @@ For detailed technical documentation, see:
 - **[@backends/advanced/Docs/auth.md](backends/advanced/Docs/auth.md)**: Authentication architecture
 - **[backends/advanced/Docs/architecture.md](backends/advanced/Docs/architecture.md)**: Backend architecture details
 - **[backends/advanced/Docs/memories.md](backends/advanced/Docs/memories.md)**: Memory system documentation
+- **[backends/advanced/Docs/data-audit.md](backends/advanced/Docs/data-audit.md)**: Data Audit (VAD analysis, split/merge, audio preview)
 - **[backends/advanced/Docs/plugin-development-guide.md](backends/advanced/Docs/plugin-development-guide.md)**: Plugin development guide
 
 ## Robot Framework Testing

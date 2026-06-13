@@ -276,15 +276,17 @@ async def concatenate_chunks_to_pcm(
     return pcm_data
 
 
-async def get_opus_for_time_range(
+async def get_trimmed_opus_for_time_range(
     conversation_id: str, start_time: float, end_time: float
 ) -> bytes:
     """
-    Get raw ogg/opus audio for a time range by concatenating stored chunks.
+    Get exact-trimmed ogg/opus audio for a time range.
 
-    No decoding — returns the original compressed data directly.
-    Time boundaries are chunk-aligned (may include slightly more audio than
-    requested at the start/end).
+    Decodes the stored chunks overlapping the range, clips the PCM to the
+    exact boundaries, and re-encodes as a single ogg/opus stream. Raw chunk
+    concatenation is not usable here: it is chunk-aligned (~10s granularity)
+    and produces a chained ogg stream, which browsers stop playing after the
+    first link.
 
     Args:
         conversation_id: Conversation ID
@@ -292,32 +294,33 @@ async def get_opus_for_time_range(
         end_time: End time in seconds
 
     Returns:
-        Concatenated ogg/opus bytes
+        Ogg/opus bytes covering exactly start_time..end_time
 
     Raises:
-        ValueError: If no chunks found
+        ValueError: If the conversation or range has no audio
     """
-    chunks = (
-        await AudioChunkDocument.find(
-            AudioChunkDocument.conversation_id == conversation_id,
-            AudioChunkDocument.start_time < end_time,
-            AudioChunkDocument.end_time > start_time,
-        )
-        .sort(+AudioChunkDocument.chunk_index)
-        .to_list()
+    start_timer = time.time()
+
+    clipped_pcm, sample_rate, channels = await get_clipped_pcm_for_time_range(
+        conversation_id, start_time, end_time
     )
 
-    if not chunks:
+    if not clipped_pcm:
         raise ValueError(
             f"No audio chunks found for {conversation_id} "
             f"in range {start_time:.1f}s-{end_time:.1f}s"
         )
 
-    opus_data = b"".join(bytes(chunk.audio_data) for chunk in chunks)
+    opus_data = await encode_pcm_to_opus(
+        pcm_data=clipped_pcm,
+        sample_rate=sample_rate,
+        channels=channels,
+    )
 
-    logger.debug(
-        f"Serving {len(chunks)} raw opus chunks for {conversation_id[:8]}... "
-        f"({len(opus_data)} bytes, {start_time:.1f}s-{end_time:.1f}s)"
+    logger.info(
+        f"Trimmed opus for {conversation_id[:8]}...: "
+        f"{start_time:.1f}s - {end_time:.1f}s "
+        f"({len(opus_data)} bytes, {time.time() - start_timer:.2f}s)"
     )
 
     return opus_data
@@ -538,15 +541,15 @@ async def reconstruct_audio_segments(
         start_time += segment_duration
 
 
-async def reconstruct_audio_segment(
+async def get_clipped_pcm_for_time_range(
     conversation_id: str, start_time: float, end_time: float
-) -> bytes:
+) -> tuple[bytes, int, int]:
     """
-    Reconstruct audio for a specific time range from MongoDB chunks.
+    Decode conversation audio and clip it to an exact time range.
 
-    This function returns a single audio segment for the specified time range,
-    enabling on-demand access to conversation audio without loading the entire
-    file into memory. Used by the audio segment API endpoint.
+    Fetches the MongoDB chunks overlapping the range, batch-decodes them in
+    a single ffmpeg call, and clips the PCM to the exact requested
+    boundaries (chunk boundaries are ~10s, so decoding alone is not enough).
 
     Args:
         conversation_id: Conversation ID
@@ -554,20 +557,12 @@ async def reconstruct_audio_segment(
         end_time: End time in seconds
 
     Returns:
-        WAV audio bytes (16kHz mono or original format)
+        Tuple of (pcm_data, sample_rate, channels). pcm_data is empty when
+        no chunks overlap the range.
 
     Raises:
-        ValueError: If conversation not found or has no audio
-        Exception: If audio reconstruction fails
-
-    Example:
-        >>> # Get first 60 seconds of audio
-        >>> wav_bytes = await reconstruct_audio_segment(conv_id, 0.0, 60.0)
-        >>> # Save to file
-        >>> with open("segment.wav", "wb") as f:
-        ...     f.write(wav_bytes)
+        ValueError: If conversation not found, has no audio, or range is invalid
     """
-    start_timer = time.time()
     from advanced_omi_backend.models.conversation import Conversation
 
     # Validate start_time
@@ -625,12 +620,7 @@ async def reconstruct_audio_segment(
             f"No chunks found for time range {start_time:.1f}s - {end_time:.1f}s "
             f"in conversation {conversation_id[:8]}..."
         )
-        # Return silence for empty range
-        return await build_wav_from_pcm(
-            pcm_data=b"",
-            sample_rate=sample_rate,
-            channels=channels,
-        )
+        return b"", sample_rate, channels
 
     # Batch decode all chunks in a single ffmpeg call (concatenated ogg stream)
     pcm_data = await concatenate_chunks_to_pcm(chunks)
@@ -646,7 +636,43 @@ async def reconstruct_audio_segment(
     clip_end_byte = int((end_time - chunk_range_start) * bytes_per_second)
     clip_end_byte = min(len(pcm_data), (clip_end_byte // 2) * 2)
 
-    clipped_pcm = pcm_data[clip_start_byte:clip_end_byte]
+    return pcm_data[clip_start_byte:clip_end_byte], sample_rate, channels
+
+
+async def reconstruct_audio_segment(
+    conversation_id: str, start_time: float, end_time: float
+) -> bytes:
+    """
+    Reconstruct audio for a specific time range from MongoDB chunks.
+
+    This function returns a single audio segment for the specified time range,
+    enabling on-demand access to conversation audio without loading the entire
+    file into memory. Used by the audio segment API endpoint.
+
+    Args:
+        conversation_id: Conversation ID
+        start_time: Start time in seconds
+        end_time: End time in seconds
+
+    Returns:
+        WAV audio bytes (16kHz mono or original format)
+
+    Raises:
+        ValueError: If conversation not found or has no audio
+        Exception: If audio reconstruction fails
+
+    Example:
+        >>> # Get first 60 seconds of audio
+        >>> wav_bytes = await reconstruct_audio_segment(conv_id, 0.0, 60.0)
+        >>> # Save to file
+        >>> with open("segment.wav", "wb") as f:
+        ...     f.write(wav_bytes)
+    """
+    start_timer = time.time()
+
+    clipped_pcm, sample_rate, channels = await get_clipped_pcm_for_time_range(
+        conversation_id, start_time, end_time
+    )
 
     wav_bytes = await build_wav_from_pcm(
         pcm_data=clipped_pcm,
@@ -659,7 +685,7 @@ async def reconstruct_audio_segment(
     logger.info(
         f"Reconstructed audio segment for {conversation_id[:8]}...: "
         f"{start_time:.1f}s - {end_time:.1f}s "
-        f"({len(chunks)} chunks, {len(wav_bytes)} bytes WAV, "
+        f"({len(wav_bytes)} bytes WAV, "
         f"processing time: {processing_time:.2f}s)"
     )
 

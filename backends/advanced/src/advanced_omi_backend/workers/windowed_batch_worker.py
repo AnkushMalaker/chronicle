@@ -11,13 +11,11 @@ incrementally instead of only on disconnect.
 
 import asyncio
 import logging
-import os
 import signal
 import sys
 
-import redis.asyncio as redis
-
 from advanced_omi_backend.config_loader import get_backend_config
+from advanced_omi_backend.redis_factory import REDIS_URL, create_async_redis
 from advanced_omi_backend.services.audio_stream.windowed_batch_consumer import (
     WindowedBatchConsumer,
 )
@@ -33,13 +31,9 @@ async def main():
     """Main worker entry point."""
     logger.info("🚀 Starting windowed batch transcription worker")
 
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-
     try:
-        redis_client = await redis.from_url(
-            redis_url, encoding="utf-8", decode_responses=False
-        )
-        logger.info(f"✅ Connected to Redis: {redis_url}")
+        redis_client = create_async_redis(decode_responses=False)
+        logger.info(f"✅ Connected to Redis: {REDIS_URL}")
     except Exception as e:
         logger.error(f"Failed to connect to Redis: {e}", exc_info=True)
         sys.exit(1)
@@ -74,8 +68,9 @@ async def main():
         logger.info("📡 Listening for audio streams on audio:stream:* pattern")
         logger.info("💾 Publishing results to transcription:results:{session_id}")
 
-        # This blocks until the consumer is stopped
-        await consumer.start_consuming()
+        # This blocks until the consumer is stopped.
+        # heartbeat_name lets the workers healthcheck detect a wedged loop.
+        await consumer.start_consuming(heartbeat_name="windowed-batch")
 
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received, shutting down...")

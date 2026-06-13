@@ -106,6 +106,46 @@ class HAMCPClient:
             logger.error(f"Unexpected error calling MCP endpoint: {e}")
             raise MCPError(f"Unexpected error: {e}")
 
+    async def process_conversation(
+        self, text: str, language: str = "en"
+    ) -> Dict[str, Any]:
+        """Send text to Home Assistant Assist (/api/conversation/process).
+
+        HA runs its local intent NLU, executes any matched intent, and returns a
+        natural-language reply. Returns a parsed dict:
+            {response_type, code, speech, success_count}
+        - response_type: action_done | query_answer | error
+        - code: e.g. 'no_intent_match' / 'no_valid_targets' on a miss, else None
+        - success_count: number of entities actually controlled (0 for info
+          intents like the time, which lets callers reject those false matches)
+        """
+        url = f"{self.base_url}/api/conversation/process"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+        }
+        try:
+            resp = await self.client.post(
+                url, json={"text": text, "language": language}, headers=headers
+            )
+            resp.raise_for_status()
+            d = resp.json().get("response", {})
+            data = d.get("data", {}) or {}
+            return {
+                "response_type": d.get("response_type", "error"),
+                "code": data.get("code"),
+                "speech": d.get("speech", {}).get("plain", {}).get("speech", ""),
+                "success_count": len(data.get("success", []) or []),
+            }
+        except Exception as e:
+            logger.error(f"HA conversation/process failed: {e}")
+            return {
+                "response_type": "error",
+                "code": "request_failed",
+                "speech": "",
+                "success_count": 0,
+            }
+
     async def list_tools(self) -> List[Dict[str, Any]]:
         """
         Get list of available MCP tools from Home Assistant.

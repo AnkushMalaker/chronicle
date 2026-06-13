@@ -4,6 +4,7 @@ from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
+from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
 
 
 class UserRequest(BaseModel):
@@ -248,7 +249,8 @@ class DeepgramTranscriptionRequest(BaseModel):
         default=None, description="User ID for speaker identification"
     )
     speaker_confidence_threshold: Optional[float] = Field(
-        default=0.15, description="Minimum confidence for speaker identification"
+        default=DEFAULT_SIMILARITY_THRESHOLD,
+        description="Minimum confidence for speaker identification",
     )
 
 

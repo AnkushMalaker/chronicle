@@ -162,6 +162,31 @@ export default function LiveRecord() {
         analyser={recording.analyser}
       />
 
+      {/* Live streaming transcript - real-time text from the streaming STT provider */}
+      {(recording.isRecording || recording.liveTranscript) && (
+        <div className="mt-4 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="relative flex h-2.5 w-2.5">
+              {recording.isRecording && (
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+              )}
+              <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${recording.isRecording ? 'bg-green-500' : 'bg-gray-400'}`}></span>
+            </span>
+            <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300">
+              Live Transcript
+            </h3>
+            <span className="text-xs text-gray-400">(streaming)</span>
+          </div>
+          <p className="text-gray-900 dark:text-gray-100 whitespace-pre-wrap min-h-[1.5rem]">
+            {recording.liveTranscript || (
+              <span className="text-gray-400 italic">
+                {recording.isRecording ? 'Listening…' : ''}
+              </span>
+            )}
+          </p>
+        </div>
+      )}
+
       {/* Wake-word feedback - pulses on arm/end-of-turn + shows recognized command */}
       <WakeFeedback />
 

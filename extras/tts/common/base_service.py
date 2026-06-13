@@ -82,6 +82,16 @@ class BaseTTSService(ABC):
     def is_ready(self) -> bool:
         return self._is_ready
 
+    async def health_probe(self) -> bool:
+        """Liveness of the thing that actually does the work.
+
+        Default: the model was warmed up in-process, so readiness is enough.
+        Providers backed by a SEPARATE process (e.g. Fish Speech runs its
+        inference server as a subprocess) must override this to re-check that
+        backend, so /health can't report green after the backend dies.
+        """
+        return self._is_ready
+
 
 def create_tts_app(service: BaseTTSService) -> FastAPI:
     """
@@ -107,9 +117,18 @@ def create_tts_app(service: BaseTTSService) -> FastAPI:
         logger.info(f"{service.provider_name} TTS service ready")
 
     @app.get("/health", response_model=HealthResponse)
-    async def health_check():
+    async def health_check(response: Response):
+        # Probe the real backend (subprocess/model), not just the startup flag,
+        # so a backend that dies after boot flips health instead of staying green.
+        try:
+            alive = await service.health_probe()
+        except Exception as e:  # noqa: BLE001 - a probe error means "not healthy"
+            logger.warning(f"health_probe raised: {e}")
+            alive = False
+        if not alive:
+            response.status_code = 503
         return HealthResponse(
-            status="healthy" if service.is_ready else "initializing",
+            status="healthy" if alive else "initializing",
             model=service.get_model_id(),
             provider=service.provider_name,
         )

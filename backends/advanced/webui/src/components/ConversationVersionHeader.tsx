@@ -7,11 +7,8 @@ interface ConversationVersionHeaderProps {
   conversationId: string;
   versionInfo?: {
     transcript_count: number;
-    memory_count: number;
     active_transcript_version?: string;
-    active_memory_version?: string;
     active_transcript_version_number?: number;
-    active_memory_version_number?: number;
   };
   onVersionChange?: () => void;
 }
@@ -40,12 +37,12 @@ export default function ConversationVersionHeader({ conversationId, versionInfo,
   if (!versionInfo) return null;
 
   // Only show if there are multiple versions or reprocessing capability
-  if (versionInfo.transcript_count <= 1 && versionInfo.memory_count <= 1) {
+  if (versionInfo.transcript_count <= 1) {
     return (
       <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-3 mb-4">
         <div className="flex items-center justify-between">
           <div className="text-sm text-gray-600">
-            {versionInfo.transcript_count} transcript version, {versionInfo.memory_count} memory version
+            {versionInfo.transcript_count} transcript version
           </div>
           <button
             type="button"
@@ -76,8 +73,7 @@ export default function ConversationVersionHeader({ conversationId, versionInfo,
       <div className="flex items-center justify-between">
         <div className="flex items-center space-x-4">
           <div className="text-sm text-gray-700">
-            <span className="font-medium">{versionInfo.transcript_count}</span> transcript versions,
-            <span className="font-medium ml-1">{versionInfo.memory_count}</span> memory versions
+            <span className="font-medium">{versionInfo.transcript_count}</span> transcript versions
             {error && <div className="text-red-600 text-xs mt-1">{error}</div>}
           </div>
 

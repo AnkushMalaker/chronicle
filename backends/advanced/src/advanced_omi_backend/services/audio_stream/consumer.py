@@ -12,6 +12,8 @@ from abc import ABC, abstractmethod
 import redis.asyncio as redis
 from redis import exceptions as redis_exceptions
 
+from advanced_omi_backend.heartbeat import beat
+
 logger = logging.getLogger(__name__)
 
 
@@ -241,8 +243,14 @@ class BaseAudioStreamConsumer(ABC):
         """
         pass
 
-    async def start_consuming(self):
-        """Discover and consume from multiple streams using Redis consumer groups."""
+    async def start_consuming(self, heartbeat_name: str | None = None):
+        """Discover and consume from multiple streams using Redis consumer groups.
+
+        Args:
+            heartbeat_name: If set, beat ``worker:heartbeat:{name}`` once per loop
+                iteration so the workers healthcheck can tell this consumer's main
+                loop is still turning (not wedged-but-alive).
+        """
         self.running = True
         logger.info(
             f"➡️ Starting dynamic stream consumer: {self.consumer_name} (group: {self.group_name})"
@@ -252,6 +260,8 @@ class BaseAudioStreamConsumer(ABC):
         discovery_interval = 10  # Discover new streams every 10 seconds
 
         while self.running:
+            if heartbeat_name:
+                await beat(self.redis_client, heartbeat_name)
             try:
                 current_time = time.time()
 

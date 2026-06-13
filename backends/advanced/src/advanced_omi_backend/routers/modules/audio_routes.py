@@ -25,7 +25,7 @@ from advanced_omi_backend.utils.audio_chunk_utils import (
     build_wav_from_pcm,
     concatenate_chunks_to_pcm,
     get_opus_for_conversation,
-    get_opus_for_time_range,
+    get_trimmed_opus_for_time_range,
     reconstruct_wav_from_conversation,
     retrieve_audio_chunks,
 )
@@ -350,8 +350,8 @@ async def get_audio_chunk_range(
     """
     Serve audio for a time range.
 
-    With format=opus (default), serves raw ogg/opus chunks directly — zero
-    server-side decoding. Time boundaries are chunk-aligned (~10s granularity).
+    With format=opus (default), serves a single ogg/opus stream trimmed to
+    the exact time range (decoded, clipped, and re-encoded server-side).
     With format=wav, decodes to exact time-clipped WAV.
 
     Example:
@@ -394,7 +394,7 @@ async def get_audio_chunk_range(
 
     if format == "opus":
         try:
-            opus_data = await get_opus_for_time_range(
+            opus_data = await get_trimmed_opus_for_time_range(
                 conversation_id, start_time, end_time
             )
         except ValueError as e:

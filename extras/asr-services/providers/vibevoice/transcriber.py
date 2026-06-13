@@ -31,12 +31,19 @@ from pathlib import Path
 from typing import Optional
 
 import torch
-from common.audio_utils import STANDARD_SAMPLE_RATE, load_audio_file
+from common.audio_utils import STANDARD_SAMPLE_RATE, is_silent, load_audio_file
 from common.batching import split_audio_file, stitch_transcription_results
 from common.response_models import Segment, Speaker, TranscriptionResult
 from omegaconf import OmegaConf
 
 logger = logging.getLogger(__name__)
+
+
+def _as_bool(env_val: Optional[str], default: bool) -> bool:
+    """Parse an env override into a bool, falling back to ``default`` when unset."""
+    if env_val is None or env_val == "":
+        return bool(default)
+    return env_val.strip().lower() not in ("0", "false", "no", "off")
 
 
 def load_vibevoice_config() -> dict:
@@ -133,6 +140,24 @@ class VibeVoiceTranscriber:
         self.batch_overlap = float(
             os.getenv("BATCH_OVERLAP_SECONDS")
             or config.get("batch_overlap_seconds", 30)
+        )
+
+        # Silence gate: VibeVoice (a prompt-conditioned LLM-backbone ASR) hallucinates
+        # the context_info prompt back as "transcription" on near-silent windows. Skip
+        # the model on windows carrying < silence_min_voiced_ms of voiced audio and emit
+        # nothing instead. Thresholds validated against real captures (echo windows have
+        # 0-60ms voiced at floor 0.01; real speech windows have 510ms+).
+        self.silence_gate_enabled = _as_bool(
+            os.getenv("SILENCE_GATE_ENABLED"),
+            config.get("silence_gate_enabled", True),
+        )
+        self.silence_energy_floor = float(
+            os.getenv("SILENCE_ENERGY_FLOOR")
+            or config.get("silence_energy_floor", 0.01)
+        )
+        self.silence_min_voiced_ms = float(
+            os.getenv("SILENCE_MIN_VOICED_MS")
+            or config.get("silence_min_voiced_ms", 200)
         )
 
         # LoRA adapter path (auto-loaded after base model if set)
@@ -325,6 +350,32 @@ class VibeVoiceTranscriber:
         logger.info(f"Transcribing: {audio_file_path}")
         if context_info:
             logger.info(f"With context: {context_info[:120]}")
+
+        # Silence gate: skip the model on near-silent windows. A prompt-conditioned ASR
+        # echoes context_info back as a phantom transcript on silence, so output nothing.
+        if self.silence_gate_enabled:
+            audio_array, sr = load_audio_file(
+                audio_file_path, target_rate=STANDARD_SAMPLE_RATE
+            )
+            duration = len(audio_array) / sr
+            if is_silent(
+                audio_array,
+                sr,
+                energy_floor=self.silence_energy_floor,
+                min_voiced_ms=self.silence_min_voiced_ms,
+            ):
+                logger.info(
+                    f"Silence gate: {audio_file_path} has < {self.silence_min_voiced_ms:.0f}ms "
+                    f"voiced audio (floor={self.silence_energy_floor}); skipping ASR, emitting silence"
+                )
+                return TranscriptionResult(
+                    text="",
+                    words=[],
+                    segments=[],
+                    speakers=None,
+                    language=None,
+                    duration=duration,
+                )
 
         # Build inputs via the native transformers API
         request_kwargs = {"audio": audio_file_path}

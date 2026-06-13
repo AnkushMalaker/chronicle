@@ -8,7 +8,8 @@ Features:
 - Strict backup verification before cleanup proceeds
 - Conversation-filtered audio export (only conversations with transcripts)
 - Comprehensive backup manifest with checksums
-- MongoDB, FalkorDB, Redis cleanup
+- Per-user vault backup (conversation_docs + memory_md tarred into vault.tar.gz)
+- MongoDB, FalkorDB, Redis, and vault cleanup (Syncthing markers preserved)
 """
 
 import argparse
@@ -17,8 +18,11 @@ import hashlib
 import json
 import logging
 import os
+import re
+import shutil
 import struct
 import sys
+import tarfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -82,6 +86,41 @@ def _human_size(nbytes: int) -> str:
     return f"{nbytes:.1f} TB"
 
 
+# Per-user markdown vaults on disk. Dirs are named by the user's 24-hex
+# Mongo ObjectId; anything else (bench-*, agenttest, ...) is test data
+# that backup/cleanup must not touch.
+DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
+VAULT_BASE_DIRS = ("conversation_docs", "memory_md")
+_USER_ID_RE = re.compile(r"^[0-9a-f]{24}$")
+# Syncthing folder markers — deleting these breaks the sync pairing
+_SYNCTHING_MARKERS = (".stfolder", ".stignore")
+
+
+def _iter_user_vaults():
+    """Yield per-user vault directories under conversation_docs/ and memory_md/."""
+    for base_name in VAULT_BASE_DIRS:
+        base = DATA_DIR / base_name
+        if not base.is_dir():
+            continue
+        for d in sorted(base.iterdir()):
+            if d.is_dir() and _USER_ID_RE.fullmatch(d.name):
+                yield d
+
+
+def _count_vault_files() -> int:
+    """Count vault content files, excluding Syncthing markers."""
+    count = 0
+    for vault in _iter_user_vaults():
+        for f in vault.rglob("*"):
+            if not f.is_file():
+                continue
+            rel_top = f.relative_to(vault).parts[0]
+            if rel_top in _SYNCTHING_MARKERS:
+                continue
+            count += 1
+    return count
+
+
 # ---------------------------------------------------------------------------
 # Stats
 # ---------------------------------------------------------------------------
@@ -103,6 +142,7 @@ class Stats:
         self.falkordb_promises = 0
         self.redis_jobs = 0
         self.legacy_wav = 0
+        self.vault_files = 0
         self.users = 0
         self.langfuse_prompts = 0
 
@@ -173,6 +213,9 @@ async def gather_stats(
     if wav_dir.exists():
         s.legacy_wav = len(list(wav_dir.glob("*.wav")))
 
+    # Vault (per-user markdown)
+    s.vault_files = _count_vault_files()
+
     return s
 
 
@@ -222,6 +265,7 @@ def render_stats_table(stats: Stats, title: str = "Current State") -> Table:
     table.add_section()
     row("Redis Jobs", str(stats.redis_jobs), "dim")
     row("Legacy WAV Files", str(stats.legacy_wav), "dim")
+    row("Vault Files", str(stats.vault_files), "green" if stats.vault_files else "dim")
     table.add_section()
     row("Users", str(stats.users), "cyan")
 
@@ -248,8 +292,14 @@ class BackupResult:
             "sha256": "",
         }
         if ok and path and path.exists():
-            entry["size"] = path.stat().st_size
-            entry["sha256"] = _file_sha256(path)
+            if path.is_dir():
+                # Directory export (e.g. audio WAVs): total size, no checksum
+                entry["size"] = sum(
+                    f.stat().st_size for f in path.rglob("*") if f.is_file()
+                )
+            else:
+                entry["size"] = path.stat().st_size
+                entry["sha256"] = _file_sha256(path)
         self.exports[name] = entry
 
     @property
@@ -258,8 +308,8 @@ class BackupResult:
 
     @property
     def critical_ok(self) -> bool:
-        """conversations, audio_metadata, and annotations are critical."""
-        critical = ("conversations", "audio_metadata", "annotations")
+        """conversations, audio_metadata, annotations, and vault are critical."""
+        critical = ("conversations", "audio_metadata", "annotations", "vault")
         return all(
             self.exports.get(n, {}).get("ok", False)
             for n in critical
@@ -303,9 +353,11 @@ class BackupManager:
         mongo_db: Any,
         falkordb_graph: Any = None,
         langfuse_client: Any = None,
+        skip_existing_audio: bool = False,
     ):
         self.backup_dir = Path(backup_dir)
         self.export_audio = export_audio
+        self.skip_existing_audio = skip_existing_audio
         self.mongo_db = mongo_db
         self.falkordb_graph = falkordb_graph
         self.langfuse_client = langfuse_client
@@ -334,6 +386,7 @@ class BackupManager:
                 ("chat_sessions", self._export_chat_sessions),
                 ("chat_messages", self._export_chat_messages),
                 ("annotations", self._export_annotations),
+                ("vault", self._export_vault),
             ]
 
             if self.export_audio:
@@ -372,6 +425,7 @@ class BackupManager:
                 "conversations_with_transcript": stats.conversations_with_transcript,
                 "audio_chunks": stats.audio_chunks,
                 "annotations": stats.annotations,
+                "vault_files": stats.vault_files,
                 "langfuse_prompts": stats.langfuse_prompts,
                 "users": stats.users,
             },
@@ -481,6 +535,27 @@ class BackupManager:
         result.record("annotations", path, True)
         return path
 
+    def _export_vault(self, result: BackupResult) -> Path:
+        """Tar per-user markdown vaults (conversation_docs + memory_md)."""
+        path = self.backup_path / "vault.tar.gz"
+        with tarfile.open(path, "w:gz") as tar:
+            for vault in _iter_user_vaults():
+                tar.add(vault, arcname=str(vault.relative_to(DATA_DIR)))
+        result.record("vault", path, True)
+        return path
+
+    def _find_previously_exported_audio(self) -> set[str]:
+        """Conversation IDs whose audio already exists in a prior backup dir."""
+        existing: set[str] = set()
+        for conv_dir in self.backup_dir.glob("backup_*/audio/*"):
+            if (
+                conv_dir.is_dir()
+                and conv_dir.parent.parent != self.backup_path
+                and any(conv_dir.glob("*.wav"))
+            ):
+                existing.add(conv_dir.name)
+        return existing
+
     async def _export_audio_wav(self, result: BackupResult) -> Optional[Path]:
         """Export audio WAV files for conversations that have transcripts."""
         # Only export audio for conversations with actual transcripts
@@ -492,12 +567,20 @@ class BackupManager:
             result.record("audio_wav", None, True)
             return None
 
+        skip_ids: set[str] = set()
+        if self.skip_existing_audio:
+            skip_ids = self._find_previously_exported_audio()
+
         audio_dir = self.backup_path / "audio"
         audio_dir.mkdir(parents=True, exist_ok=True)
         exported = 0
+        skipped = 0
         failed = 0
 
         for conv in conversations:
+            if conv.conversation_id in skip_ids:
+                skipped += 1
+                continue
             try:
                 ok = await self._export_conversation_audio(
                     conv.conversation_id, audio_dir
@@ -508,37 +591,60 @@ class BackupManager:
                 logger.warning(f"Audio export failed for {conv.conversation_id}: {e}")
                 failed += 1
 
-        ok = exported > 0 or (len(conversations) == 0)
-        error = f"{failed} failed" if failed else ""
-        result.record("audio_wav", audio_dir, ok, error)
+        ok = exported > 0 or skipped > 0 or (len(conversations) == 0)
+        notes = []
+        if skipped:
+            notes.append(f"{skipped} skipped (in prior backups)")
+        if failed:
+            notes.append(f"{failed} failed")
+        result.record("audio_wav", audio_dir, ok, ", ".join(notes))
         return audio_dir
 
     async def _export_conversation_audio(
         self, conversation_id: str, audio_dir: Path
     ) -> bool:
-        """Decode Opus chunks to WAV for a single conversation. Returns True if audio was exported."""
+        """Decode Opus chunks to 1-minute WAV files for a single conversation.
+
+        Streams chunk-by-chunk so memory stays bounded (one opus chunk plus at
+        most one minute of PCM), even for multi-hour conversations.
+        Returns True if audio was exported.
+        """
+        import wave
+
         from advanced_omi_backend.utils.audio_chunk_utils import decode_opus_to_pcm
 
-        chunks = (
-            await AudioChunkDocument.find(
-                AudioChunkDocument.conversation_id == conversation_id
-            )
-            .sort("+chunk_index")
-            .to_list()
-        )
+        cursor = AudioChunkDocument.find(
+            AudioChunkDocument.conversation_id == conversation_id
+        ).sort("+chunk_index")
 
-        if not chunks:
-            return False
-
-        conv_dir = audio_dir / conversation_id
-        conv_dir.mkdir(parents=True, exist_ok=True)
-
-        sample_rate = chunks[0].sample_rate
-        channels = chunks[0].channels
-
-        # Decode all chunks using FFmpeg (same path as UI playback)
+        final_dir = audio_dir / conversation_id
+        # Write into a temp dir and rename on completion, so an interrupted
+        # export never leaves a partial dir that --skip-existing-audio would skip
+        conv_dir = audio_dir / f"{conversation_id}.partial"
+        sample_rate = None
+        channels = None
+        bytes_per_minute = 0
         pcm_buffer = bytearray()
-        for chunk in chunks:
+        chunk_num = 1
+
+        def _write_segment(segment_pcm: bytes):
+            nonlocal chunk_num
+            wav_path = conv_dir / f"chunk_{chunk_num:03d}.wav"
+            with wave.open(str(wav_path), "wb") as wf:
+                wf.setnchannels(channels)
+                wf.setsampwidth(2)
+                wf.setframerate(sample_rate)
+                wf.writeframes(segment_pcm)
+            chunk_num += 1
+
+        async for chunk in cursor:
+            if sample_rate is None:
+                sample_rate = chunk.sample_rate
+                channels = chunk.channels
+                bytes_per_minute = (
+                    sample_rate * channels * 2 * 60
+                )  # 16-bit = 2 bytes per sample
+                conv_dir.mkdir(parents=True, exist_ok=True)
             try:
                 pcm_data = await decode_opus_to_pcm(
                     opus_data=bytes(chunk.audio_data),
@@ -552,29 +658,19 @@ class BackupManager:
                 )
                 continue
 
-        if not pcm_buffer:
-            return False
+            while len(pcm_buffer) >= bytes_per_minute:
+                _write_segment(bytes(pcm_buffer[:bytes_per_minute]))
+                del pcm_buffer[:bytes_per_minute]
 
-        # Split into 1-minute WAV files
-        import wave
+        if pcm_buffer:
+            _write_segment(bytes(pcm_buffer))
 
-        bytes_per_minute = (
-            sample_rate * channels * 2 * 60
-        )  # 16-bit = 2 bytes per sample
-        all_pcm = bytes(pcm_buffer)
-        chunk_num = 1
-
-        for start in range(0, len(all_pcm), bytes_per_minute):
-            wav_path = conv_dir / f"chunk_{chunk_num:03d}.wav"
-            segment_pcm = all_pcm[start : start + bytes_per_minute]
-            with wave.open(str(wav_path), "wb") as wf:
-                wf.setnchannels(channels)
-                wf.setsampwidth(2)
-                wf.setframerate(sample_rate)
-                wf.writeframes(segment_pcm)
-            chunk_num += 1
-
-        return True
+        if chunk_num > 1:
+            conv_dir.rename(final_dir)
+            return True
+        if conv_dir.exists():
+            conv_dir.rmdir()
+        return False
 
     def _export_falkordb(self, result: BackupResult) -> Path:
         path = self.backup_path / "falkordb_graph.json"
@@ -688,6 +784,7 @@ class CleanupManager:
         if self.falkordb_graph:
             steps.append(("FalkorDB graph", self._cleanup_falkordb))
         steps.append(("Redis queues", self._cleanup_redis))
+        steps.append(("Vault markdown", self._cleanup_vault))
         if self.include_wav:
             steps.append(("Legacy WAV files", self._cleanup_legacy_wav))
 
@@ -747,6 +844,21 @@ class CleanupManager:
                         registry.remove(job_id)
             except Exception as e:
                 logger.warning(f"Redis queue {qname} cleanup failed: {e}")
+
+    def _cleanup_vault(self, stats: Stats):
+        """Clear per-user vault contents, preserving Syncthing markers.
+
+        Keeping .stfolder/.stignore keeps the Syncthing pairing intact;
+        the deletions propagate to paired remote vaults (e.g. Obsidian).
+        """
+        for vault in _iter_user_vaults():
+            for entry in vault.iterdir():
+                if entry.name in _SYNCTHING_MARKERS:
+                    continue
+                if entry.is_dir():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
 
     def _cleanup_legacy_wav(self, stats: Stats):
         wav_dir = Path("/app/data/audio_chunks")
@@ -863,6 +975,7 @@ def print_dry_run(stats: Stats, args):
             table.add_row("FalkorDB Nodes", str(stats.falkordb_nodes))
             table.add_row("FalkorDB Relationships", str(stats.falkordb_relationships))
         table.add_row("Redis Jobs", str(stats.redis_jobs))
+        table.add_row("Vault Files", str(stats.vault_files))
         if args.include_wav:
             table.add_row("Legacy WAV Files", str(stats.legacy_wav))
         if args.delete_users:
@@ -918,6 +1031,9 @@ def print_confirmation(stats: Stats, args) -> bool:
                 f"  {stats.falkordb_nodes} FalkorDB nodes + {stats.falkordb_relationships} relationships"
             )
         items.append(f"  {stats.redis_jobs} Redis jobs")
+        items.append(
+            f"  {stats.vault_files} vault files (deletions sync to paired Obsidian vaults)"
+        )
         if args.include_wav:
             items.append(f"  {stats.legacy_wav} legacy WAV files")
         if args.delete_users:
@@ -967,6 +1083,11 @@ Examples:
         "--export-audio",
         action="store_true",
         help="Include audio WAV export in backup (conversations with transcripts only)",
+    )
+    parser.add_argument(
+        "--skip-existing-audio",
+        action="store_true",
+        help="Skip audio export for conversations already present in prior backups",
     )
     parser.add_argument(
         "--include-wav", action="store_true", help="Include legacy WAV file cleanup"
@@ -1032,6 +1153,7 @@ Examples:
             mongo_db,
             falkordb_graph,
             langfuse_client,
+            skip_existing_audio=args.skip_existing_audio,
         )
         result = await backup_mgr.run(stats)
 

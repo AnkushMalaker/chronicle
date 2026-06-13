@@ -7,7 +7,6 @@ ensuring that application-level logs from job functions are visible.
 """
 
 import logging
-import os
 import sys
 
 # Configure logging BEFORE importing any application modules
@@ -30,11 +29,9 @@ def main():
     except Exception:
         pass  # Optional — don't block workers
 
-    from redis import Redis
     from rq import Worker
 
-    # Get Redis URL from environment
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    from advanced_omi_backend.redis_factory import REDIS_URL, create_sync_redis
 
     # Get queue names from command line arguments
     queue_names = (
@@ -42,10 +39,10 @@ def main():
     )
 
     logger.info(f"🚀 Starting RQ worker for queues: {', '.join(queue_names)}")
-    logger.info(f"📡 Redis URL: {redis_url}")
+    logger.info(f"📡 Redis URL: {REDIS_URL}")
 
     # Create Redis connection
-    redis_conn = Redis.from_url(redis_url)
+    redis_conn = create_sync_redis()
 
     # Create and start worker
     worker = Worker(queue_names, connection=redis_conn, log_job_description=True)

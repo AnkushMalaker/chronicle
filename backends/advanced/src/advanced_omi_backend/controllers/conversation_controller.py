@@ -3,13 +3,11 @@ Conversation controller for handling conversation-related business logic.
 """
 
 import logging
-import os
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-import redis.asyncio as aioredis
 from fastapi.responses import JSONResponse
 from pymongo.errors import OperationFailure
 
@@ -25,14 +23,13 @@ from advanced_omi_backend.controllers.queue_controller import (
     start_post_conversation_jobs,
     transcription_queue,
 )
-from advanced_omi_backend.controllers.session_controller import (
-    request_conversation_close,
-)
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import JobPriority
 from advanced_omi_backend.models.waveform import WaveformData
 from advanced_omi_backend.plugins.events import ConversationCloseReason, PluginEvent
+from advanced_omi_backend.redis_factory import create_async_redis
+from advanced_omi_backend.services.audio_stream.session_store import SessionStore
 from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.users import User
 from advanced_omi_backend.workers.conversation_jobs import generate_title_summary_job
@@ -92,7 +89,7 @@ async def close_current_conversation(client_id: str, user: User):
             status_code=404,
         )
 
-    session_id = getattr(client_state, "stream_session_id", None)
+    session_id = client_state.stream_session_id
     if not session_id:
         return JSONResponse(
             content={"error": "No active session"},
@@ -100,11 +97,10 @@ async def close_current_conversation(client_id: str, user: User):
         )
 
     # Signal the conversation job to close and trigger post-processing
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-    r = aioredis.from_url(redis_url)
+    r = create_async_redis()
     try:
-        success = await request_conversation_close(
-            r, session_id, reason=ConversationCloseReason.USER_REQUESTED.value
+        success = await SessionStore(r).request_close(
+            session_id, ConversationCloseReason.USER_REQUESTED.value
         )
     finally:
         await r.aclose()
@@ -168,14 +164,9 @@ async def get_conversation(conversation_id: str, user: User):
             "transcript": conversation.transcript,
             "segments": [s.model_dump() for s in conversation.segments],
             "segment_count": conversation.segment_count,
-            "memory_count": conversation.memory_count,
-            "has_memory": conversation.has_memory,
             "active_transcript_version": conversation.active_transcript_version,
-            "active_memory_version": conversation.active_memory_version,
             "transcript_version_count": conversation.transcript_version_count,
-            "memory_version_count": conversation.memory_version_count,
             "active_transcript_version_number": conversation.active_transcript_version_number,
-            "active_memory_version_number": conversation.active_memory_version_number,
             "starred": conversation.starred,
             "starred_at": (
                 conversation.starred_at.isoformat() if conversation.starred_at else None
@@ -238,14 +229,9 @@ def _conversation_to_list_dict(conv: Conversation) -> dict:
         "summary": conv.summary,
         "detailed_summary": conv.detailed_summary,
         "active_transcript_version": conv.active_transcript_version,
-        "active_memory_version": conv.active_memory_version,
         "segment_count": conv.segment_count,
-        "has_memory": conv.has_memory,
-        "memory_count": conv.memory_count,
         "transcript_version_count": conv.transcript_version_count,
-        "memory_version_count": conv.memory_version_count,
         "active_transcript_version_number": conv.active_transcript_version_number,
-        "active_memory_version_number": conv.active_memory_version_number,
         "starred": conv.starred,
         "starred_at": conv.starred_at.isoformat() if conv.starred_at else None,
     }
@@ -258,7 +244,6 @@ def _raw_doc_to_list_dict(doc: dict) -> dict:
     version arrays without loading full transcript/word data.
     """
     active_tv = doc.get("active_transcript_version")
-    active_mv = doc.get("active_memory_version")
 
     # Compute segment_count from projected transcript_versions
     segment_count = 0
@@ -268,25 +253,11 @@ def _raw_doc_to_list_dict(doc: dict) -> dict:
             segment_count = len(tv.get("segments", []))
             break
 
-    # Compute memory_count from projected memory_versions
-    memory_count = 0
-    memory_versions = doc.get("memory_versions") or []
-    for mv in memory_versions:
-        if mv.get("version_id") == active_mv:
-            memory_count = mv.get("memory_count", 0)
-            break
-
-    # Compute active version numbers (1-based)
+    # Compute active version number (1-based)
     active_transcript_version_number = None
     for i, tv in enumerate(transcript_versions):
         if tv.get("version_id") == active_tv:
             active_transcript_version_number = i + 1
-            break
-
-    active_memory_version_number = None
-    for i, mv in enumerate(memory_versions):
-        if mv.get("version_id") == active_mv:
-            active_memory_version_number = i + 1
             break
 
     created_at = doc.get("created_at")
@@ -313,14 +284,9 @@ def _raw_doc_to_list_dict(doc: dict) -> dict:
         "summary": doc.get("summary"),
         "detailed_summary": doc.get("detailed_summary"),
         "active_transcript_version": active_tv,
-        "active_memory_version": active_mv,
         "segment_count": segment_count,
-        "has_memory": len(memory_versions) > 0,
-        "memory_count": memory_count,
         "transcript_version_count": len(transcript_versions),
-        "memory_version_count": len(memory_versions),
         "active_transcript_version_number": active_transcript_version_number,
-        "active_memory_version_number": active_memory_version_number,
         "starred": doc.get("starred", False),
         "starred_at": starred_at.isoformat() if starred_at else None,
     }
@@ -348,12 +314,9 @@ _LIST_PROJECTION = {
     "starred": 1,
     "starred_at": 1,
     "active_transcript_version": 1,
-    "active_memory_version": 1,
     # Lightweight version metadata (exclude transcript, words, segment text)
     "transcript_versions.version_id": 1,
     "transcript_versions.segments": 1,
-    "memory_versions.version_id": 1,
-    "memory_versions.memory_count": 1,
 }
 
 
@@ -774,7 +737,7 @@ async def archive_conversation_audio(
     MongoDB while keeping the conversation document as a lightweight metadata
     stub (date, duration, reason).
 
-    Used by the Data Cleaning feature to reclaim storage for near-silent or
+    Used by the Data Audit feature to reclaim storage for speech-free or
     bad-speaker recordings. Unlike soft delete, this is irreversible for the
     audio — the transcript/segment metadata is retained.
     """
@@ -1464,44 +1427,12 @@ async def activate_transcript_version(
         )
 
 
-async def activate_memory_version(conversation_id: str, version_id: str, user: User):
-    """Activate a specific memory version. Users can only modify their own conversations."""
-    try:
-        conversation_model, error = await _get_conversation_or_error(
-            conversation_id, user
-        )
-        if error:
-            return error
-
-        # Activate the memory version using Beanie model method
-        success = conversation_model.set_active_memory_version(version_id)
-        if not success:
-            return JSONResponse(
-                status_code=400, content={"error": "Failed to activate memory version"}
-            )
-
-        await conversation_model.save()
-
-        logger.info(
-            f"Activated memory version {version_id} for conversation {conversation_id} by user {user.user_id}"
-        )
-
-        return JSONResponse(
-            content={
-                "message": f"Memory version {version_id} activated successfully",
-                "active_memory_version": version_id,
-            }
-        )
-
-    except Exception as e:
-        logger.error(f"Error activating memory version: {e}")
-        return JSONResponse(
-            status_code=500, content={"error": "Error activating memory version"}
-        )
-
-
 async def get_conversation_version_history(conversation_id: str, user: User):
-    """Get version history for a conversation. Users can only access their own conversations."""
+    """Get transcript version history for a conversation. Users can only access their own conversations.
+
+    Memory is no longer versioned (the vault is the system of record); see the
+    memory audit ledger (``get_conversation_memory_audit``) for memory change history.
+    """
     try:
         conversation_model, error = await _get_conversation_or_error(
             conversation_id, user
@@ -1518,19 +1449,10 @@ async def get_conversation_version_history(conversation_id: str, user: User):
                 version_dict["created_at"] = version_dict["created_at"].isoformat()
             transcript_versions.append(version_dict)
 
-        memory_versions = []
-        for v in conversation_model.memory_versions:
-            version_dict = v.model_dump()
-            if version_dict.get("created_at"):
-                version_dict["created_at"] = version_dict["created_at"].isoformat()
-            memory_versions.append(version_dict)
-
         history = {
             "conversation_id": conversation_id,
             "active_transcript_version": conversation_model.active_transcript_version,
-            "active_memory_version": conversation_model.active_memory_version,
             "transcript_versions": transcript_versions,
-            "memory_versions": memory_versions,
         }
 
         return JSONResponse(content=history)
@@ -1540,3 +1462,63 @@ async def get_conversation_version_history(conversation_id: str, user: User):
         return JSONResponse(
             status_code=500, content={"error": "Error fetching version history"}
         )
+
+
+async def get_conversation_memory_audit(
+    conversation_id: str, user: User, limit: int = 100
+):
+    """Get the memory vault change history (audit ledger) for a conversation.
+
+    Replaces the old per-conversation "memory versions": memory is a vault that is
+    overwritten in place, so instead we return the recorded changes (which notes
+    were created/updated/deleted, when, and what triggered each).
+    """
+    try:
+        _, error = await _get_conversation_or_error(conversation_id, user)
+        if error:
+            return error
+
+        from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
+
+        entries = (
+            await MemoryAuditEntry.find(
+                MemoryAuditEntry.conversation_id == conversation_id
+            )
+            .sort(-MemoryAuditEntry.created_at)
+            .limit(limit)
+            .to_list()
+        )
+
+        return JSONResponse(
+            content={
+                "conversation_id": conversation_id,
+                "count": len(entries),
+                "entries": [_memory_audit_to_dict(e) for e in entries],
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Error fetching memory audit for {conversation_id}: {e}")
+        return JSONResponse(
+            status_code=500, content={"error": "Error fetching memory audit"}
+        )
+
+
+def _memory_audit_to_dict(entry) -> dict:
+    """Serialize a MemoryAuditEntry for API responses."""
+    return {
+        "id": str(entry.id),
+        "user_id": entry.user_id,
+        "conversation_id": entry.conversation_id,
+        "operation": entry.operation,
+        "note_path": entry.note_path,
+        "trigger": entry.trigger,
+        "provider": entry.provider,
+        "agent_mode": entry.agent_mode,
+        "before_hash": entry.before_hash,
+        "after_hash": entry.after_hash,
+        "after_bytes": entry.after_bytes,
+        "summary": entry.summary,
+        "extra": entry.extra,
+        "created_at": entry.created_at.isoformat() if entry.created_at else None,
+    }

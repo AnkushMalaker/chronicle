@@ -24,6 +24,45 @@ def _resolve_target_user(user: User, user_id: Optional[str] = None) -> str:
     return user.user_id
 
 
+async def get_memory_audit(
+    user: User,
+    limit: int,
+    user_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+):
+    """Return the memory vault change ledger for a user (newest first).
+
+    Records which notes were created/updated/deleted, when, and what triggered
+    each change (memory extraction, speaker reprocess, or an inbound Obsidian edit).
+    """
+    try:
+        from advanced_omi_backend.controllers.conversation_controller import (
+            _memory_audit_to_dict,
+        )
+        from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
+
+        target_user_id = _resolve_target_user(user, user_id)
+
+        query = MemoryAuditEntry.find(MemoryAuditEntry.user_id == target_user_id)
+        if conversation_id:
+            query = query.find(MemoryAuditEntry.conversation_id == conversation_id)
+
+        entries = await query.sort(-MemoryAuditEntry.created_at).limit(limit).to_list()
+
+        return {
+            "user_id": target_user_id,
+            "count": len(entries),
+            "entries": [_memory_audit_to_dict(e) for e in entries],
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching memory audit: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"message": f"Error fetching memory audit: {str(e)}"},
+        )
+
+
 async def get_memories(user: User, limit: int, user_id: Optional[str] = None):
     """Get memories. Users see only their own memories, admins can see all or filter by user."""
     try:

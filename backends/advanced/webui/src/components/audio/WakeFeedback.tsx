@@ -28,6 +28,16 @@ export default function WakeFeedback() {
                 Wake word detected — listening…
               </span>
             </>
+          ) : phase === 'followup' ? (
+            <>
+              <span className="relative flex h-2.5 w-2.5">
+                <span className="absolute inline-flex h-2.5 w-2.5 rounded-full bg-sky-400 opacity-75 animate-ping" />
+                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-sky-500" />
+              </span>
+              <span className="text-sm font-medium text-sky-600 dark:text-sky-400">
+                Listening for follow-up… (no wake word needed)
+              </span>
+            </>
           ) : (
             <>
               <span className="relative flex h-2.5 w-2.5">

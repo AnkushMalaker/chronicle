@@ -15,7 +15,7 @@ from rich.console import Console
 from rich.table import Table
 
 # Import service definitions from services.py
-from services import SERVICES, check_service_configured
+from services import SERVICES, check_service_enabled
 
 console = Console()
 
@@ -151,7 +151,7 @@ def check_http_health(url: str, timeout: int = 5) -> Dict[str, Any]:
 def get_service_health(service_name: str) -> Dict[str, Any]:
     """Get comprehensive health status for a service"""
     # Check if configured
-    if not check_service_configured(service_name):
+    if not check_service_enabled(service_name):
         return {
             "configured": False,
             "container_status": "not_configured",

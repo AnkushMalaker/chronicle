@@ -317,7 +317,20 @@ class HermesPlugin(BasePlugin):
         asr_status = context.data.get("asr_status")
         if asr_status == "skipped_silence":
             logger.info("Hermes wake word armed but capture was silent; ignoring")
-            return PluginResult(success=False, message="", should_continue=True)
+            # message stays empty so nothing is spoken/surfaced as a reply; the
+            # detail lives in `data` so the Events page can explain the no-op
+            # instead of showing a bare "Error".
+            return PluginResult(
+                success=False,
+                message="",
+                data={
+                    "skipped": True,
+                    "skip_reason": "silent_capture",
+                    "detail": "Wake word armed but the capture held no speech; "
+                    "batch ASR was skipped (silence gate).",
+                },
+                should_continue=True,
+            )
         return await self._dispatch_command(
             command=context.data.get("command"),
             conversation_id=context.data.get("conversation_id"),

@@ -58,33 +58,6 @@ class TestConversationModel:
         assert version.processing_time_seconds == 12.5
         assert version.metadata["confidence"] == 0.9
 
-    def test_memory_version_model(self):
-        """Test MemoryVersion model."""
-        version = Conversation.MemoryVersion(
-            version_id="mem-v1",
-            memory_count=5,
-            transcript_version_id="trans-v1",
-            provider=Conversation.MemoryProvider.CHRONICLE,
-            model="gpt-4o-mini",
-            created_at=datetime.now(),
-            processing_time_seconds=45.2,
-            metadata={"extraction_quality": "high"},
-        )
-
-        assert version.version_id == "mem-v1"
-        assert version.memory_count == 5
-        assert version.transcript_version_id == "trans-v1"
-        assert version.provider == Conversation.MemoryProvider.CHRONICLE
-        assert version.model == "gpt-4o-mini"
-        assert version.processing_time_seconds == 45.2
-        assert version.metadata["extraction_quality"] == "high"
-
-    def test_provider_enums(self):
-        """Test that provider enums work correctly."""
-        assert Conversation.MemoryProvider.CHRONICLE == "chronicle"
-        assert Conversation.MemoryProvider.OPENMEMORY_MCP == "openmemory_mcp"
-        assert Conversation.MemoryProvider.GRAPHITI == "graphiti"
-
     def test_word_model(self):
         """Test Word model."""
         word = Conversation.Word(word="hello", start=0.0, end=0.5, confidence=0.98)

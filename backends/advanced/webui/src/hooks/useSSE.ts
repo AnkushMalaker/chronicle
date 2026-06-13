@@ -2,7 +2,7 @@ import { useEffect, useRef, useCallback, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '../contexts/AuthContext'
 import { BACKEND_URL } from '../services/api'
-import { emitWakeEvent } from './useWakeFeedback'
+import { emitWakeEvent, getActiveWakeClientId } from './useWakeFeedback'
 
 export type SSEStatus = 'connecting' | 'connected' | 'reconnecting' | 'error'
 
@@ -72,21 +72,34 @@ export function useSSE(): SSEStatus {
         break
       }
 
-      case 'wake.armed': {
-        const d = data as { score?: number }
-        emitWakeEvent({ type: 'armed', score: d.score })
-        break
-      }
+      // Wake events are delivered over the per-user SSE bus but carry the originating
+      // client_id. Only react to wake activity for the device THIS browser is streaming
+      // as — a wake on the user's HAVPE or phone must not light up the web UI.
+      case 'wake.armed':
+      case 'wake.end_of_turn':
+      case 'wake.command':
+      case 'wake.followup': {
+        const d = data as {
+          client_id?: string
+          score?: number
+          reason?: string
+          duration?: number
+          command?: string
+          reply?: string
+          window_secs?: number
+        }
+        const myClientId = getActiveWakeClientId()
+        if (!myClientId || d.client_id !== myClientId) break
 
-      case 'wake.end_of_turn': {
-        const d = data as { reason?: string; duration?: number }
-        emitWakeEvent({ type: 'end_of_turn', reason: d.reason, duration: d.duration })
-        break
-      }
-
-      case 'wake.command': {
-        const d = data as { command?: string; reply?: string }
-        emitWakeEvent({ type: 'command', command: d.command, reply: d.reply })
+        if (eventType === 'wake.armed') {
+          emitWakeEvent({ type: 'armed', score: d.score })
+        } else if (eventType === 'wake.end_of_turn') {
+          emitWakeEvent({ type: 'end_of_turn', reason: d.reason, duration: d.duration })
+        } else if (eventType === 'wake.command') {
+          emitWakeEvent({ type: 'command', command: d.command, reply: d.reply })
+        } else {
+          emitWakeEvent({ type: 'followup', window_secs: d.window_secs })
+        }
         break
       }
 

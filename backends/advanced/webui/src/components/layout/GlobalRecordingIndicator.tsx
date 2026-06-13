@@ -19,6 +19,9 @@ export default function GlobalRecordingIndicator() {
   // turns amber — the same color as the "wake word detected" message — then
   // snaps back to red at end of turn. This is visible from any page.
   const listening = phase === 'listening'
+  // While a follow-up window is open the next utterance is taken as a follow-up
+  // (no wake word) — show it in sky blue, distinct from amber (armed) and red.
+  const followup = phase === 'followup'
 
   // Color tokens swap as one set so the pill, dot, text and buttons stay coherent.
   const c = listening
@@ -30,6 +33,16 @@ export default function GlobalRecordingIndicator() {
         mode: 'text-amber-600 dark:text-amber-400',
         navHover: 'hover:bg-amber-100 dark:hover:bg-amber-800/50 text-amber-600 dark:text-amber-400',
         stop: 'bg-amber-600 hover:bg-amber-700',
+      }
+    : followup
+    ? {
+        wrap: 'bg-sky-50 dark:bg-sky-900/30 border-sky-300 dark:border-sky-700',
+        ping: 'bg-sky-400',
+        dot: 'bg-sky-500',
+        time: 'text-sky-700 dark:text-sky-300',
+        mode: 'text-sky-600 dark:text-sky-400',
+        navHover: 'hover:bg-sky-100 dark:hover:bg-sky-800/50 text-sky-600 dark:text-sky-400',
+        stop: 'bg-sky-600 hover:bg-sky-700',
       }
     : {
         wrap: 'bg-red-50 dark:bg-red-900/30 border-red-200 dark:border-red-800',
@@ -44,7 +57,7 @@ export default function GlobalRecordingIndicator() {
   return (
     <div className={`flex items-center gap-3 px-3 py-1.5 border rounded-lg transition-colors duration-300 ${c.wrap}`}>
       {/* Pulsing dot — amber while listening, red otherwise */}
-      <div className="relative flex items-center" title={listening ? 'Wake word detected — listening…' : 'Recording'}>
+      <div className="relative flex items-center" title={listening ? 'Wake word detected — listening…' : followup ? 'Listening for follow-up… (no wake word needed)' : 'Recording'}>
         <span className={`absolute inline-flex h-3 w-3 rounded-full opacity-75 animate-ping ${c.ping}`} />
         <span className={`relative inline-flex h-3 w-3 rounded-full ${c.dot}`} />
       </div>
@@ -59,6 +72,11 @@ export default function GlobalRecordingIndicator() {
             <>
               <Radio className="h-3 w-3" />
               <span>Listening</span>
+            </>
+          ) : followup ? (
+            <>
+              <Radio className="h-3 w-3" />
+              <span>Follow-up</span>
             </>
           ) : mode === 'streaming' ? (
             <>

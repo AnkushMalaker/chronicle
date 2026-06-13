@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Dict, Optional
 
 import redis.asyncio as redis
 
+from advanced_omi_backend.redis_factory import create_async_redis
+
 if TYPE_CHECKING:
     from advanced_omi_backend.client import ClientState
     from advanced_omi_backend.users import User
@@ -99,7 +101,7 @@ class ClientManager:
         return len(self._active_clients)
 
     def create_client(
-        self, client_id: str, chunk_dir, user_id: str, user_email: Optional[str] = None
+        self, client_id: str, user_id: str, user_email: Optional[str] = None
     ) -> "ClientState":
         """
         Atomically create and register a new client.
@@ -109,7 +111,6 @@ class ClientManager:
 
         Args:
             client_id: Unique client identifier
-            chunk_dir: Directory for audio chunks
             user_id: User ID who owns this client
             user_email: Optional user email
 
@@ -126,7 +127,7 @@ class ClientManager:
         from advanced_omi_backend.client import ClientState
 
         # Create client state
-        client_state = ClientState(client_id, chunk_dir, user_id, user_email)
+        client_state = ClientState(client_id, user_id, user_email)
 
         # Atomically add to internal storage and register mapping
         self._active_clients[client_id] = client_state
@@ -220,17 +221,10 @@ class ClientManager:
         """
         client_info = []
         for client_id, client_state in self._active_clients.items():
-            current_audio_uuid = client_state.current_audio_uuid
             client_data = {
                 "client_id": client_id,
-                "connected": getattr(client_state, "connected", True),
-                "current_audio_uuid": current_audio_uuid,
-                "last_transcript_time": client_state.last_transcript_time,
-                "conversation_start_time": client_state.conversation_start_time,
-                "has_active_conversation": current_audio_uuid is not None,
-                "conversation_transcripts_count": len(
-                    getattr(client_state, "conversation_transcripts", [])
-                ),
+                "connected": client_state.connected,
+                "user_email": client_state.user_email,
             }
             client_info.append(client_data)
 
@@ -440,16 +434,11 @@ def get_user_clients_active(user_id: str) -> list[str]:
     return user_clients
 
 
-def initialize_redis_for_client_manager(redis_url: str):
-    """
-    Initialize Redis client for cross-container client→user mapping.
-
-    Args:
-        redis_url: Redis connection URL
-    """
+def initialize_redis_for_client_manager():
+    """Initialize the shared Redis client for cross-container client→user mapping."""
     global _redis_client
-    _redis_client = redis.from_url(redis_url, decode_responses=True)
-    logger.info(f"✅ ClientManager Redis initialized: {redis_url}")
+    _redis_client = create_async_redis(decode_responses=True)
+    logger.info("✅ ClientManager Redis initialized")
 
 
 async def get_client_owner_async(client_id: str) -> Optional[str]:

@@ -8,7 +8,7 @@ Plugins use this interface (via context.services) to interact with the core syst
 import logging
 from typing import TYPE_CHECKING, Optional
 
-import redis.asyncio as aioredis
+from advanced_omi_backend.redis_factory import create_async_redis
 
 from .base import PluginContext, PluginResult
 from .events import ConversationCloseReason, PluginEvent
@@ -22,9 +22,9 @@ logger = logging.getLogger(__name__)
 class PluginServices:
     """Typed interface for plugin-to-system and plugin-to-plugin communication."""
 
-    def __init__(self, router: "PluginRouter", redis_url: str):
+    def __init__(self, router: "PluginRouter"):
         self._router = router
-        self._async_redis = aioredis.from_url(redis_url, decode_responses=True)
+        self._async_redis = create_async_redis(decode_responses=True)
 
     async def cleanup(self):
         """Close the shared async Redis connection pool."""
@@ -66,12 +66,12 @@ class PluginServices:
             )
             return False
 
-        from advanced_omi_backend.controllers.session_controller import (
-            request_conversation_close,
+        from advanced_omi_backend.services.audio_stream.session_store import (
+            SessionStore,
         )
 
-        return await request_conversation_close(
-            self._async_redis, session_id, reason=reason.value
+        return await SessionStore(self._async_redis).request_close(
+            session_id, reason.value
         )
 
     async def star_conversation(self, session_id: str) -> bool:

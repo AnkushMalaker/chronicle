@@ -1,5 +1,9 @@
 defaults:
   llm: openai-llm
+  # Optional separate fast LLM for quick, latency-sensitive tasks (wake-word
+  # follow-ups). Empty -> reuse defaults.llm. Configure via the wizard (writes a
+  # 'fast-llm' model entry keyed off FAST_LLM_API_KEY) or set the model name here.
+  fast_llm: ''
   embedding: openai-embed
   stt: stt-deepgram
   # Transcription provider selection:
@@ -288,7 +292,9 @@ models:
         Authorization: Bearer ${oc.env:SMALLEST_API_KEY,''}
       query:
         model: pulse
-        language: en
+        # hi natively covers Hindi-English code-switching; en hallucinates massive
+        # insertions on Hindi speech (158% corpus WER vs 12.9% with hi on CoSHE-100)
+        language: hi
         word_timestamps: 'true'
       response:
         type: json
@@ -390,7 +396,8 @@ models:
   operations:
     auth_prefix: Bearer
     query:
-      language: en
+      # hi natively covers Hindi-English code-switching (see stt-smallest note)
+      language: hi
       encoding: linear16
       sample_rate: 16000
       word_timestamps: 'true'

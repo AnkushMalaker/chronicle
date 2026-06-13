@@ -7,6 +7,11 @@ This module provides common utilities for long-running RQ jobs.
 import logging
 from typing import Optional
 
+from advanced_omi_backend.services.audio_stream.session_store import (
+    SessionStatus,
+    SessionStore,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,12 +71,8 @@ async def check_job_alive(
         if not job_exists:
             # Check if this is a natural exit (session ended) vs true zombie
             if session_id:
-                session_key = f"audio:session:{session_id}"
-                session_status = await redis_client.hget(session_key, "status")
-                if session_status and session_status.decode() in [
-                    "finalizing",
-                    "finished",
-                ]:
+                status = await SessionStore(redis_client).get_status(session_id)
+                if status in (SessionStatus.FINALIZING, SessionStatus.FINISHED):
                     # Session ended naturally - not a zombie, just natural cleanup
                     logger.debug(
                         f"📋 Job {current_job.id} ending naturally (session closed)"

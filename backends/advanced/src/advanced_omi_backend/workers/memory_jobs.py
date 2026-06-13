@@ -14,7 +14,6 @@ Supports two processing pathways:
 
 import logging
 import time
-import uuid
 from typing import Any, Dict, List
 
 from advanced_omi_backend.controllers.queue_controller import (
@@ -29,24 +28,13 @@ from advanced_omi_backend.observability.otel_setup import (
     traced_job,
 )
 from advanced_omi_backend.plugins.events import PluginEvent
+from advanced_omi_backend.services.memory.audit import memory_trigger
 from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
 from advanced_omi_backend.services.sse_publisher import publish_sse_event
 
 logger = logging.getLogger(__name__)
 
 MIN_CONVERSATION_LENGTH = 10
-
-
-def _conversation_memory_provider(conversation_model, memory_provider: str):
-    """Map provider identifier strings to persisted conversation enum values."""
-    provider_map = {
-        "chronicle": conversation_model.MemoryProvider.CHRONICLE,
-        "openmemory_mcp": conversation_model.MemoryProvider.OPENMEMORY_MCP,
-        "graphiti": conversation_model.MemoryProvider.GRAPHITI,
-    }
-    return provider_map.get(
-        memory_provider, conversation_model.MemoryProvider.CHRONICLE
-    )
 
 
 def compute_speaker_diff(
@@ -256,31 +244,34 @@ async def process_memory_job(
         else None
     )
 
-    # Process memory — choose pathway based on trigger
+    # Process memory — choose pathway based on trigger. The trigger label is
+    # recorded on any vault changes the provider makes (memory_audit ledger).
     memory_service = get_memory_service()
+    audit_trigger = trigger or "memory_extraction"
 
-    if trigger == "reprocess_after_speaker":
-        # === Speaker reprocess pathway ===
-        # Compute diff between old and new transcript versions
-        memory_result = await _process_speaker_reprocess(
-            memory_service=memory_service,
-            conversation_model=conversation_model,
-            full_conversation=full_conversation,
-            client_id=client_id,
-            conversation_id=conversation_id,
-            user_id=user_id,
-            user_email=user_email,
-        )
-    else:
-        # === Normal extraction pathway ===
-        memory_result = await memory_service.add_memory(
-            full_conversation,
-            client_id,
-            conversation_id,
-            user_id,
-            user_email,
-            allow_update=True,
-        )
+    with memory_trigger(audit_trigger):
+        if trigger == "reprocess_after_speaker":
+            # === Speaker reprocess pathway ===
+            # Compute diff between old and new transcript versions
+            memory_result = await _process_speaker_reprocess(
+                memory_service=memory_service,
+                conversation_model=conversation_model,
+                full_conversation=full_conversation,
+                client_id=client_id,
+                conversation_id=conversation_id,
+                user_id=user_id,
+                user_email=user_email,
+            )
+        else:
+            # === Normal extraction pathway ===
+            memory_result = await memory_service.add_memory(
+                full_conversation,
+                client_id,
+                conversation_id,
+                user_id,
+                user_email,
+                allow_update=True,
+            )
 
     if memory_result:
         success, created_memory_ids = memory_result
@@ -291,35 +282,9 @@ async def process_memory_job(
             # Determine memory provider from memory service
             memory_provider = memory_service.provider_identifier
 
-            # Only create memory version if new memories were created
+            # Vault changes are recorded in the memory_audit ledger by the provider
+            # itself (see services/memory/audit.py); the job just surfaces the result.
             if created_memory_ids:
-                # Add memory version to conversation
-                conversation_model = await Conversation.find_one(
-                    Conversation.conversation_id == conversation_id
-                )
-                if conversation_model:
-                    # Get active transcript version for reference
-                    transcript_version_id = (
-                        conversation_model.active_transcript_version or "unknown"
-                    )
-
-                    # Create version ID for this memory extraction
-                    version_id = str(uuid.uuid4())
-
-                    # Add memory version with metadata
-                    conversation_model.add_memory_version(
-                        version_id=version_id,
-                        memory_count=len(created_memory_ids),
-                        transcript_version_id=transcript_version_id,
-                        provider=_conversation_memory_provider(
-                            conversation_model, memory_provider
-                        ),
-                        processing_time_seconds=processing_time,
-                        metadata={"memory_ids": created_memory_ids},
-                        set_as_active=True,
-                    )
-                    await conversation_model.save()
-
                 publish_sse_event(
                     user_id,
                     "memory.processed",

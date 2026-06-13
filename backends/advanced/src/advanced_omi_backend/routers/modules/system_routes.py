@@ -629,6 +629,66 @@ async def cleanup_old_sessions(
     return await session_controller.cleanup_old_sessions(request, max_age_seconds)
 
 
+# External Service Management Endpoints (proxied to host service-manager agent)
+
+
+class ServiceActionRequest(BaseModel):
+    """Options for start/stop/restart of a host-managed service."""
+
+    build: bool = False
+    recreate: bool = False
+    force: bool = False
+
+
+class ServiceProviderRequest(BaseModel):
+    """Switch the active provider (e.g. ASR model service) for a service."""
+
+    provider: str
+    build: bool = False
+
+
+@router.get("/admin/services")
+async def list_external_services(current_user: User = Depends(current_superuser)):
+    """List host-managed services (ASR, TTS, speaker recognition, ...). Admin only.
+
+    Returns available=False when no service manager agent is configured/reachable.
+    """
+    return await system_controller.get_external_services()
+
+
+@router.get("/admin/services/operations/{operation_id}")
+async def get_external_service_operation(
+    operation_id: str, current_user: User = Depends(current_superuser)
+):
+    """Poll a long-running service start/stop/build operation. Admin only."""
+    return await system_controller.get_external_service_operation(operation_id)
+
+
+@router.post("/admin/services/{name}/provider")
+async def set_external_service_provider(
+    name: str,
+    body: ServiceProviderRequest,
+    current_user: User = Depends(current_superuser),
+):
+    """Switch the active provider for a service (e.g. ASR model). Admin only."""
+    return await system_controller.set_external_service_provider(name, body.dict())
+
+
+@router.post("/admin/services/{name}/{action}")
+async def external_service_action(
+    name: str,
+    action: str,
+    body: ServiceActionRequest | None = None,
+    current_user: User = Depends(current_superuser),
+):
+    """Start/stop/restart a host-managed service via the agent. Admin only."""
+    if action not in ("start", "stop", "restart"):
+        raise HTTPException(status_code=404, detail=f"Unknown action: {action}")
+    return await system_controller.external_service_action(
+        name, action, (body or ServiceActionRequest()).dict()
+    )
+
+
 # Memory Provider Configuration Endpoints
 
 

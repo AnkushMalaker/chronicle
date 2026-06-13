@@ -21,6 +21,7 @@ import tempfile
 import wave
 
 import torch
+from common.audio_utils import STANDARD_SAMPLE_RATE, is_silent, load_audio_file
 from common.batching import split_audio_file, stitch_transcription_results
 from common.response_models import Segment, Speaker, TranscriptionResult
 from transformers import (
@@ -36,6 +37,14 @@ DEFAULT_MODEL = "google/gemma-4-E2B-it"
 MAX_CHUNK_SECONDS = 30
 BATCH_THRESHOLD_SECONDS = 30
 BATCH_OVERLAP_SECONDS = 5
+
+# Silence gate — Gemma 4, like VibeVoice, is prompt-conditioned and echoes its
+# prompt/context back as a phantom transcript on near-silent windows. Windows with
+# < SILENCE_MIN_VOICED_MS of voiced audio (frame RMS > SILENCE_ENERGY_FLOOR on a
+# [-1,1] signal) skip the model and emit nothing. Thresholds validated on real
+# captures (echo windows 0-60ms voiced; real speech 510ms+).
+SILENCE_ENERGY_FLOOR = 0.01
+SILENCE_MIN_VOICED_MS = 200.0
 
 # 4-bit/8-bit must never touch the audio/vision towers: their Gemma4ClippableLinear
 # calls torch.finfo(weight.dtype), which breaks on uint8 quantized weights. The
@@ -142,6 +151,16 @@ class Gemma4Transcriber:
             os.getenv("BATCH_OVERLAP_SECONDS", str(BATCH_OVERLAP_SECONDS))
         )
         self.prompt = os.getenv("TRANSCRIPTION_PROMPT", DEFAULT_TRANSCRIPTION_PROMPT)
+
+        self.silence_gate_enabled = os.getenv(
+            "SILENCE_GATE_ENABLED", "1"
+        ).strip().lower() not in ("0", "false", "no", "off")
+        self.silence_energy_floor = float(
+            os.getenv("SILENCE_ENERGY_FLOOR") or SILENCE_ENERGY_FLOOR
+        )
+        self.silence_min_voiced_ms = float(
+            os.getenv("SILENCE_MIN_VOICED_MS") or SILENCE_MIN_VOICED_MS
+        )
         # Quantization: bf16 (default — E2B is ~10GB, fits a 24GB GPU full
         # precision), 8bit, or 4bit (for smaller GPUs).
         self.quant = os.getenv("GEMMA4_QUANT", "bf16").lower()
@@ -247,6 +266,24 @@ class Gemma4Transcriber:
         # Skip very short chunks (likely silence/noise)
         if duration < 1.0:
             return TranscriptionResult(text="", segments=[], duration=duration)
+
+        # Silence gate: skip near-silent windows. A prompt-conditioned ASR echoes
+        # its prompt/context back as a phantom transcript on silence, so emit nothing.
+        if self.silence_gate_enabled:
+            audio_array, sr = load_audio_file(
+                audio_file_path, target_rate=STANDARD_SAMPLE_RATE
+            )
+            if is_silent(
+                audio_array,
+                sr,
+                energy_floor=self.silence_energy_floor,
+                min_voiced_ms=self.silence_min_voiced_ms,
+            ):
+                logger.info(
+                    f"Silence gate: {audio_file_path} has < {self.silence_min_voiced_ms:.0f}ms "
+                    f"voiced audio (floor={self.silence_energy_floor}); skipping ASR, emitting silence"
+                )
+                return TranscriptionResult(text="", segments=[], duration=duration)
 
         prompt = prompt_override or self.prompt
         if context_info:

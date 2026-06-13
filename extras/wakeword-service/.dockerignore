@@ -3,6 +3,7 @@
 !consumer.py
 !detector.py
 !samples.py
+!verifier.py
 !pyproject.toml
 !README.md
 !models/

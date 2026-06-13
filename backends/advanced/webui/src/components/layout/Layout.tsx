@@ -22,7 +22,7 @@ export default function Layout() {
 
     ...(isAdmin ? [
       { path: '/upload', label: 'Upload Audio', icon: Upload },
-      { path: '/data-cleaning', label: 'Data Cleaning', icon: Sparkles },
+      { path: '/data-audit', label: 'Data Audit', icon: Sparkles },
       { path: '/wakeword-lab', label: 'Wake-Word Lab', icon: Target },
       { path: '/queue', label: 'Queue & Events', icon: Layers },
       { path: '/plugins', label: 'Plugins', icon: Puzzle },

@@ -50,6 +50,8 @@ def _owns(user: User, client_id: str) -> bool:
 class PrimeRequest(BaseModel):
     # Optional: when omitted, prime the caller's currently-active stream.
     client_id: str | None = None
+    # Which wake word to enroll for (required for /prime; ignored by /unprime).
+    wakeword: str | None = None
 
 
 class LabelRequest(BaseModel):
@@ -89,11 +91,14 @@ async def list_streams(current_user: User = Depends(current_active_user)):
 
 @router.post("/prime")
 async def prime(req: PrimeRequest, current_user: User = Depends(current_active_user)):
-    """Arm a one-shot positive capture on a live stream.
+    """Arm a one-shot positive capture of ``wakeword`` on a live stream.
 
     With no ``client_id`` we resolve the caller's active stream (preferring the
-    browser recorder), so the Live Record button is a single zero-arg call.
+    browser recorder), so the Live Record button is a single call. ``wakeword``
+    declares which word is being enrolled (clean per-word positive collection).
     """
+    if not req.wakeword:
+        raise HTTPException(status_code=400, detail="wakeword is required to prime")
     async with _client() as client:
         try:
             client_id = req.client_id
@@ -115,9 +120,13 @@ async def prime(req: PrimeRequest, current_user: User = Depends(current_active_u
             elif not _owns(current_user, client_id):
                 raise HTTPException(status_code=403, detail="Not your stream")
 
-            resp = await client.post("/prime", json={"client_id": client_id})
-            if resp.status_code == 404:
-                raise HTTPException(status_code=404, detail=resp.json().get("detail"))
+            resp = await client.post(
+                "/prime", json={"client_id": client_id, "wakeword": req.wakeword}
+            )
+            if resp.status_code in (400, 404):
+                raise HTTPException(
+                    status_code=resp.status_code, detail=resp.json().get("detail")
+                )
             resp.raise_for_status()
         except httpx.HTTPError as e:
             raise HTTPException(
@@ -165,13 +174,18 @@ async def unprime(req: PrimeRequest, current_user: User = Depends(current_active
 
 @router.get("/samples")
 async def list_samples(
+    wakeword: str = Query(...),
     bucket: str = Query("pending"),
     current_user: User = Depends(current_active_user),
 ):
-    """List captured clips in a bucket, scoped to the caller's streams."""
+    """List a wake word's captured clips in a bucket, scoped to the caller's streams."""
     async with _client() as client:
         try:
-            resp = await client.get("/samples", params={"bucket": bucket})
+            resp = await client.get(
+                "/samples", params={"wakeword": wakeword, "bucket": bucket}
+            )
+            if resp.status_code == 400:
+                raise HTTPException(status_code=400, detail=resp.json().get("detail"))
             resp.raise_for_status()
         except httpx.HTTPError as e:
             raise HTTPException(
@@ -192,6 +206,24 @@ async def sample_stats(current_user: User = Depends(current_active_user)):
     async with _client() as client:
         try:
             resp = await client.get("/samples/stats")
+            resp.raise_for_status()
+        except httpx.HTTPError as e:
+            raise HTTPException(
+                status_code=503, detail=f"Wake-word service unreachable: {e}"
+            )
+    return resp.json()
+
+
+@router.post("/samples/dedupe")
+async def dedupe_samples(
+    wakeword: str = Query(...), current_user: User = Depends(current_active_user)
+):
+    """Remove exact-duplicate clips within a wake word (keeps one per group)."""
+    async with _client() as client:
+        try:
+            resp = await client.post("/samples/dedupe", params={"wakeword": wakeword})
+            if resp.status_code == 400:
+                raise HTTPException(status_code=400, detail=resp.json().get("detail"))
             resp.raise_for_status()
         except httpx.HTTPError as e:
             raise HTTPException(
@@ -225,6 +257,58 @@ async def label_sample(
         try:
             resp = await client.post(
                 f"/samples/{clip_id}/label", json={"label": req.label}
+            )
+            if resp.status_code in (400, 404):
+                raise HTTPException(
+                    status_code=resp.status_code, detail=resp.json().get("detail")
+                )
+            resp.raise_for_status()
+        except httpx.HTTPError as e:
+            raise HTTPException(
+                status_code=503, detail=f"Wake-word service unreachable: {e}"
+            )
+    return resp.json()
+
+
+@router.post("/samples/{clip_id}/move")
+async def move_sample(
+    clip_id: str,
+    wakeword: str = Query(...),
+    bucket: str = Query("pending"),
+    current_user: User = Depends(current_active_user),
+):
+    """Move a clip to a different wake word's bucket (default pending)."""
+    async with _client() as client:
+        try:
+            resp = await client.post(
+                f"/samples/{clip_id}/move",
+                params={"wakeword": wakeword, "bucket": bucket},
+            )
+            if resp.status_code in (400, 404):
+                raise HTTPException(
+                    status_code=resp.status_code, detail=resp.json().get("detail")
+                )
+            resp.raise_for_status()
+        except httpx.HTTPError as e:
+            raise HTTPException(
+                status_code=503, detail=f"Wake-word service unreachable: {e}"
+            )
+    return resp.json()
+
+
+@router.post("/samples/{clip_id}/copy")
+async def copy_sample(
+    clip_id: str,
+    wakeword: str = Query(...),
+    bucket: str = Query("pending"),
+    current_user: User = Depends(current_active_user),
+):
+    """Copy a clip into another wake word's bucket (source stays) — shared FP fan-out."""
+    async with _client() as client:
+        try:
+            resp = await client.post(
+                f"/samples/{clip_id}/copy",
+                params={"wakeword": wakeword, "bucket": bucket},
             )
             if resp.status_code in (400, 404):
                 raise HTTPException(

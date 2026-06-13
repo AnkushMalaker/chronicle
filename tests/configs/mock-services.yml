@@ -80,8 +80,9 @@ backend:
   audio:
     # Enable always_persist for testing - creates placeholder conversations immediately
     always_persist_enabled: true
-  transcription:
-    use_provider_segments: true
+  diarization:
+    # Trust provider segments (mock provider returns pre-built segments)
+    diarization_source: provider
 speaker_recognition:
   enabled: false
   timeout: 60

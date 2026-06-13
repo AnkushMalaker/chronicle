@@ -11,7 +11,6 @@ interface Conversation {
   created_at?: string
   client_id: string
   segment_count?: number
-  memory_count?: number
   deleted?: boolean
   deletion_reason?: string
   deleted_at?: string

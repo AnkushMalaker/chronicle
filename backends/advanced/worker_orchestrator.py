@@ -213,8 +213,26 @@ class WorkerOrchestrator:
             # Perform startup
             await self.startup()
 
-            # Wait for shutdown signal
-            await self.shutdown_event.wait()
+            # Wait for either a shutdown signal OR the health-monitor task dying.
+            # The monitor is what restarts failed workers; if it crashes, the
+            # process would otherwise sit here forever "Up" with no supervision.
+            # Treat its death as fatal so the container restart policy recovers it.
+            monitor_task = self.health_monitor.monitor_task
+            shutdown_wait = asyncio.ensure_future(self.shutdown_event.wait())
+            try:
+                await asyncio.wait(
+                    {shutdown_wait, monitor_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                shutdown_wait.cancel()
+
+            if not self.shutdown_event.is_set() and monitor_task.done():
+                exc = monitor_task.exception()
+                raise RuntimeError(
+                    "Health monitor task exited unexpectedly — failing the "
+                    "orchestrator so the container restarts and supervision resumes"
+                ) from exc
 
         except Exception as e:
             logger.exception(f"❌ Orchestrator error: {e}")

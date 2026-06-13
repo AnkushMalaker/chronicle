@@ -5,6 +5,7 @@ import {
   Pause,
   CheckCircle,
   XCircle,
+  MinusCircle,
   RotateCcw,
   StopCircle,
   Eye,
@@ -116,7 +117,7 @@ interface EventRecord {
   event: string;
   user_id: string;
   plugins_subscribed: string[];
-  plugins_executed: Array<{ plugin_id: string; success: boolean; message: string }>;
+  plugins_executed: Array<{ plugin_id: string; success: boolean; message: string; data?: Record<string, any> | null }>;
   metadata: Record<string, any>;
 }
 
@@ -128,6 +129,7 @@ const EVENT_TYPE_COLORS: Record<string, string> = {
   'button.single_press': 'bg-orange-100 text-orange-700',
   'button.double_press': 'bg-orange-100 text-orange-700',
   'plugin_action': 'bg-indigo-100 text-indigo-700',
+  'wake_word.detected': 'bg-teal-100 text-teal-700',
 };
 const DEFAULT_EVENT_COLOR = 'bg-gray-100 text-gray-700';
 const getEventColor = (eventType: string) => EVENT_TYPE_COLORS[eventType] || DEFAULT_EVENT_COLOR;
@@ -2064,8 +2066,13 @@ const Queue: React.FC = () => {
                   <tbody className="divide-y divide-gray-200">
                     {filtered.map((evt, idx) => {
                       const pluginsExecuted = evt.plugins_executed || [];
-                      const allSuccess = pluginsExecuted.length > 0 && pluginsExecuted.every(p => p.success);
-                      const anyFailure = pluginsExecuted.some(p => !p.success);
+                      // A plugin can intentionally no-op (e.g. wake word armed on a
+                      // silent capture). Those carry data.skipped and should read as
+                      // "Skipped", not a failure.
+                      const ranPlugins = pluginsExecuted.filter(p => !p.data?.skipped);
+                      const allSuccess = ranPlugins.length > 0 && ranPlugins.every(p => p.success);
+                      const anyFailure = ranPlugins.some(p => !p.success);
+                      const allSkipped = pluginsExecuted.length > 0 && ranPlugins.length === 0;
 
                       return (
                         <tr key={idx} className="hover:bg-gray-50">
@@ -2090,6 +2097,8 @@ const Queue: React.FC = () => {
                             <div className="flex items-center space-x-2">
                               {pluginsExecuted.length === 0 ? (
                                 <span className="text-xs text-gray-400">no plugins ran</span>
+                              ) : allSkipped ? (
+                                <span className="text-xs text-gray-500">Skipped</span>
                               ) : allSuccess ? (
                                 <span className="flex items-center space-x-1 text-xs text-green-600">
                                   <CheckCircle className="w-3.5 h-3.5" />
@@ -2607,28 +2616,43 @@ const Queue: React.FC = () => {
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Plugin Results</label>
                 <div className="space-y-2">
-                  {(selectedEvent.plugins_executed || []).map((p, i) => (
-                    <div
-                      key={i}
-                      className={`p-3 rounded-lg border ${p.success ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}
-                    >
-                      <div className="flex items-center space-x-2 mb-1">
-                        {p.success
-                          ? <CheckCircle className="w-4 h-4 text-green-600" />
-                          : <XCircle className="w-4 h-4 text-red-600" />
-                        }
-                        <span className="text-sm font-medium">{p.plugin_id}</span>
-                        <span className={`text-xs px-1.5 py-0.5 rounded ${p.success ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-                          {p.success ? 'OK' : 'Error'}
-                        </span>
+                  {(selectedEvent.plugins_executed || []).map((p, i) => {
+                    const skipped = !!p.data?.skipped;
+                    const tone = skipped
+                      ? { card: 'bg-gray-50 border-gray-200', badge: 'bg-gray-100 text-gray-600', text: 'text-gray-700', label: 'Skipped' }
+                      : p.success
+                        ? { card: 'bg-green-50 border-green-200', badge: 'bg-green-100 text-green-700', text: 'text-green-800', label: 'OK' }
+                        : { card: 'bg-red-50 border-red-200', badge: 'bg-red-100 text-red-700', text: 'text-red-800', label: 'Error' };
+                    // Show the plugin's structured output minus the skip flags we
+                    // already render via the badge/detail.
+                    const { skipped: _s, skip_reason: _r, detail, ...restData } = p.data || {};
+                    return (
+                      <div key={i} className={`p-3 rounded-lg border ${tone.card}`}>
+                        <div className="flex items-center space-x-2 mb-1">
+                          {skipped
+                            ? <MinusCircle className="w-4 h-4 text-gray-500" />
+                            : p.success
+                              ? <CheckCircle className="w-4 h-4 text-green-600" />
+                              : <XCircle className="w-4 h-4 text-red-600" />
+                          }
+                          <span className="text-sm font-medium">{p.plugin_id}</span>
+                          <span className={`text-xs px-1.5 py-0.5 rounded ${tone.badge}`}>
+                            {tone.label}
+                          </span>
+                        </div>
+                        {(p.message || detail) && (
+                          <p className={`text-sm ml-6 ${tone.text}`}>
+                            {p.message || detail}
+                          </p>
+                        )}
+                        {Object.keys(restData).length > 0 && (
+                          <pre className="text-xs text-gray-700 bg-white/60 border border-gray-200 rounded p-2 mt-2 ml-6 overflow-auto max-h-40 whitespace-pre-wrap break-words">
+                            {JSON.stringify(restData, null, 2)}
+                          </pre>
+                        )}
                       </div>
-                      {p.message && (
-                        <p className={`text-sm ml-6 ${p.success ? 'text-green-800' : 'text-red-800'}`}>
-                          {p.message}
-                        </p>
-                      )}
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
 

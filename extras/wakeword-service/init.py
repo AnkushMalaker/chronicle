@@ -45,7 +45,8 @@ def configure(non_interactive: bool = False) -> None:
 
     defaults = {
         "REDIS_URL": "redis://redis:6379/0",
-        "WAKEWORD_PORT": "8770",
+        # Host 8770 is used by the tts/kittentts service; wakeword maps to host 8771.
+        "WAKEWORD_PORT": "8771",
         "WAKEWORD_THRESHOLD": "0.9",
         "WAKEWORD_PATIENCE": "2",
         "WAKEWORD_DEBOUNCE_SECS": "3.0",

@@ -121,7 +121,10 @@ def apply_edits(content: str, edits: List[Edit], path: str) -> str:
             what = label or "the exact text"
             raise EditError(
                 f"Could not find {what} in {path}. The old text must match exactly "
-                f"including all whitespace and newlines."
+                f"including all whitespace and newlines. If it matched when you read "
+                f"the note, the note was changed by a concurrent writer: read_note it "
+                f"again and re-apply only your SMALLEST targeted edit against the "
+                f"current content — do NOT re-write or re-append whole sections."
             )
         except _Ambiguous as a:
             what = label or "the text"

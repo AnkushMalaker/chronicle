@@ -240,6 +240,7 @@ async def async_generate(
     model: str | None = None,
     temperature: float | None = None,
     operation: str | None = None,
+    default_model_type: str = "llm",
 ) -> str:
     """Async wrapper for LLM text generation.
 
@@ -254,7 +255,9 @@ async def async_generate(
     if operation:
         registry = get_models_registry()
         if registry:
-            op = registry.get_llm_operation(operation)
+            op = registry.get_llm_operation(
+                operation, default_model_type=default_model_type
+            )
             client = op.get_client(is_async=True)
             api_params = op.to_api_params()
             if temperature is not None:
@@ -265,7 +268,18 @@ async def async_generate(
                 api_params.pop("temperature", None)
             api_params["messages"] = [{"role": "user", "content": prompt}]
             response = await client.chat.completions.create(**api_params)
-            return response.choices[0].message.content.strip()
+            choice = response.choices[0]
+            content = (choice.message.content or "").strip()
+            if not content:
+                # Reasoning models can consume the whole completion budget on
+                # reasoning and return empty content with finish_reason=length.
+                raise RuntimeError(
+                    f"LLM returned empty content for operation {operation!r} "
+                    f"(model={api_params.get('model')}, "
+                    f"finish_reason={choice.finish_reason}) — if 'length', "
+                    f"raise the operation's max_tokens"
+                )
+            return content
 
     # Fallback: use singleton client
     client = get_llm_client()
@@ -314,3 +328,46 @@ async def async_health_check() -> Dict:
     """Async LLM health check."""
     client = get_llm_client()
     return await client.health_check()
+
+
+async def async_health_check_fast() -> Optional[Dict]:
+    """Health check for a SEPARATE fast LLM, or None if none is configured.
+
+    Returns None when ``defaults.fast_llm`` is unset or points at the same model
+    as ``defaults.llm`` (fast tasks reuse the main LLM, already covered by
+    :func:`async_health_check`).
+    """
+    import openai as _openai
+
+    registry = get_models_registry()
+    if not registry:
+        return None
+    fast_name = registry.defaults.get("fast_llm")
+    if not fast_name or fast_name == registry.defaults.get("llm"):
+        return None
+    fast = registry.get_by_name(fast_name)
+    if not fast:
+        return None
+
+    result = {"base_url": fast.model_url, "default_model": fast.model_name}
+    if not fast.api_key or not fast.model_url or not fast.model_name:
+        return {**result, "status": "⚠️ Configuration incomplete", "healthy": False}
+    try:
+        client = create_openai_client(
+            api_key=fast.api_key, base_url=fast.model_url, is_async=True
+        )
+        await asyncio.wait_for(client.models.list(), timeout=5.0)
+        return {**result, "status": "✅ Connected", "healthy": True}
+    except _openai.AuthenticationError:
+        return {**result, "status": "❌ Auth Failed — check API key", "healthy": False}
+    except asyncio.TimeoutError:
+        return {**result, "status": "❌ Connection Timeout", "healthy": False}
+    except _openai.APIConnectionError:
+        return {
+            **result,
+            "status": "❌ Connection Failed — service unreachable",
+            "healthy": False,
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Fast LLM health check failed: {e}")
+        return {**result, "status": f"❌ Error: {e}", "healthy": False}

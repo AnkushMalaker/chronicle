@@ -110,8 +110,3 @@ def get_mongo_collections():
         "users": app_config.users_col,
         "speakers": app_config.speakers_col,
     }
-
-
-def get_redis_config():
-    """Get Redis configuration."""
-    return {"url": app_config.redis_url, "encoding": "utf-8", "decode_responses": False}

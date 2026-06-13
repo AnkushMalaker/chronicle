@@ -12,16 +12,18 @@ import base64
 import io
 import json
 import logging
-import time
 import wave
 
 import redis.asyncio as redis
 from redis import exceptions as redis_exceptions
 
-from advanced_omi_backend.plugins.events import PluginEvent
+from advanced_omi_backend.heartbeat import beat
 from advanced_omi_backend.plugins.router import PluginRouter
 from advanced_omi_backend.services.transcription import get_transcription_provider
-from advanced_omi_backend.services.tts_client import synthesize_speech
+from advanced_omi_backend.services.wakeword.executor import (
+    execute_voice_command,
+    get_current_conversation_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,8 @@ class WakeWordDispatcher:
         logger.info(f"🔔 WakeWordDispatcher listening on {DETECTIONS_STREAM}")
 
         while self.running:
+            # Heartbeat so the workers healthcheck can tell this loop is turning.
+            await beat(self.redis_client, "wakeword-dispatch")
             try:
                 messages = await self.redis_client.xreadgroup(
                     GROUP_NAME,
@@ -163,86 +167,30 @@ class WakeWordDispatcher:
             asr_status = "transcribed"
             command = await self._transcribe(base64.b64decode(audio_b64), sample_rate)
 
-        conversation_id = await self._current_conversation_id(session_id)
-
-        data = {
-            "command": command,
-            "client_id": payload.get("client_id", session_id),
-            "session_id": session_id,
-            "conversation_id": conversation_id,
-            "score": payload.get("score"),
-            "reason": payload.get("reason"),
-            "asr_status": asr_status,
-            "transcript": command,  # alias for plugins that read transcript
-        }
-
-        logger.info(
-            f"🔔 Dispatching wake_word.detected (user={user_id}, "
-            f"session={session_id}, asr_status={asr_status}, command='{command[:50]}')"
+        conversation_id = await get_current_conversation_id(
+            self.redis_client, session_id
         )
-        results = await self.plugin_router.dispatch_event(
-            event=PluginEvent.WAKE_WORD_DETECTED,
-            user_id=user_id,
-            data=data,
-            metadata={"client_id": payload.get("client_id", session_id)},
-        )
-
-        # Surface the recognized command (+ Hermes reply) on the live-recording UI.
-        reply = next((r.message for r in results if getattr(r, "message", None)), "")
         client_id = payload.get("client_id", session_id)
-        await self._publish_sse(
-            user_id,
-            "wake.command",
-            {
-                "command": command,
-                "reply": reply,
-                "conversation_id": conversation_id,
-                "client_id": client_id,
-                "asr_status": asr_status,
-            },
+
+        # Funnel through the shared executor so the acoustic wake path and the
+        # streaming follow-up path dispatch, reply, emit SSE, and arm the
+        # follow-up window identically.
+        await execute_voice_command(
+            self.redis_client,
+            self.plugin_router,
+            user_id=user_id,
+            session_id=session_id,
+            client_id=client_id,
+            command=command,
+            conversation_id=conversation_id,
+            source="wake",
+            asr_status=asr_status,
+            has_speech=has_speech,
+            wakeword=payload.get("wakeword"),
+            also_fired=payload.get("also_fired", []),
+            score=payload.get("score"),
+            reason=payload.get("reason"),
         )
-
-        # Speak the reply on the device (best-effort). The device can't reach the
-        # backend, so we ship the synthesized audio bytes down the downlink channel
-        # and the relay serves them on the LAN.
-        if reply:
-            await self._speak_on_device(client_id, reply)
-
-    async def _speak_on_device(self, client_id: str, text: str) -> None:
-        """Synthesize ``text`` and push it to the device via its downlink channel."""
-        if not client_id:
-            return
-        audio = await synthesize_speech(text)
-        if not audio:
-            return
-        msg = {
-            "type": "play-audio",
-            "data": {
-                "audio_b64": base64.b64encode(audio).decode("ascii"),
-                "format": "wav",
-            },
-        }
-        try:
-            await self.redis_client.publish(
-                f"device:downlink:{client_id}", json.dumps(msg)
-            )
-            logger.info(f"🔊 Sent TTS reply ({len(audio)}B) to device {client_id}")
-        except Exception as e:  # noqa: BLE001 - speech output is best-effort
-            logger.debug(f"Failed to publish TTS downlink for {client_id}: {e}")
-
-    async def _publish_sse(self, user_id: str, event_type: str, data: dict) -> None:
-        """Publish an SSE event to the user's channel (best-effort, never raises)."""
-        if not user_id:
-            return
-        try:
-            message = json.dumps(
-                {"event": event_type, "data": data, "timestamp": time.time()}
-            )
-            await self.redis_client.publish(f"sse:{user_id}", message)
-        except (
-            Exception
-        ) as e:  # noqa: BLE001 - SSE is best-effort, never break dispatch
-            logger.debug(f"Failed to publish SSE {event_type}: {e}")
 
     async def _transcribe(self, pcm: bytes, sample_rate: int) -> str:
         """Batch-transcribe captured command PCM via the configured STT provider."""
@@ -255,8 +203,10 @@ class WakeWordDispatcher:
             )
             return ""
         try:
+            # Wake-word command clips are latency-sensitive — use the ASR service's
+            # dedicated priority lane so they don't queue behind a long batch.
             result = await provider.transcribe(
-                _pcm_to_wav(pcm, sample_rate), sample_rate
+                _pcm_to_wav(pcm, sample_rate), sample_rate, priority=True
             )
         except (
             Exception
@@ -264,14 +214,3 @@ class WakeWordDispatcher:
             logger.error(f"Wake-word command transcription failed: {e}", exc_info=True)
             return ""
         return (result.get("text") or "").strip()
-
-    async def _current_conversation_id(self, session_id: str):
-        if not session_id:
-            return None
-        try:
-            val = await self.redis_client.get(f"conversation:current:{session_id}")
-            if val is not None:
-                return val.decode() if isinstance(val, bytes) else val
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"Could not read current conversation for {session_id}: {e}")
-        return None

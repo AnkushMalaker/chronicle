@@ -40,7 +40,8 @@ COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Service code + vendored ONNX models (hermes.onnx, smart-turn, silero, feature).
-COPY app.py consumer.py detector.py samples.py ./
+# models/ also carries the second-stage verifier weights (hey_hermes_verifier.npz).
+COPY app.py consumer.py detector.py samples.py verifier.py ./
 COPY models ./models
 COPY tones ./tones
 

@@ -66,6 +66,12 @@ class BasePlugin(ABC):
         self.enabled = config.get("enabled", False)
         self.events = config.get("events", [])
         self.condition = config.get("condition", {"type": "always"})
+        # Lower runs earlier. Plugins form an ordered chain of responsibility per
+        # event: a plugin that handles a command returns should_continue=False to
+        # stop the chain; returning None (or should_continue=True) passes it to
+        # the next plugin. This is the configurable routing hierarchy (a future
+        # drag-to-reorder UI would just edit this value in config/plugins.yml).
+        self.priority = config.get("priority", 100)
 
     def register_prompts(self, registry) -> None:
         """Register plugin prompts with the prompt registry.

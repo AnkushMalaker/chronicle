@@ -5,7 +5,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { useDiarizationSettings, useLLMOperations, useMemoryProvider, useMiscSettings } from '../hooks/useSystem'
 
 interface DiarizationSettings {
-  diarization_source: 'deepgram' | 'pyannote'
+  diarization_source: 'provider' | 'pyannote'
   similarity_threshold: number
   min_duration: number
   collar: number
@@ -25,7 +25,7 @@ export default function Settings() {
 
   // Local state for editable settings
   const [diarizationSettings, setDiarizationSettings] = useState<DiarizationSettings>({
-    diarization_source: 'pyannote',
+    diarization_source: 'provider',
     similarity_threshold: 0.15,
     min_duration: 0.5,
     collar: 2.0,
@@ -42,7 +42,6 @@ export default function Settings() {
 
   const [miscSettings, setMiscSettings] = useState({
     always_persist_enabled: false,
-    use_provider_segments: false,
     per_segment_speaker_id: false,
     streaming_fallback_timeout_seconds: 120,
     always_batch_retranscribe: false,
@@ -312,16 +311,16 @@ export default function Settings() {
                   <input
                     type="radio"
                     name="diarization_source"
-                    value="deepgram"
-                    checked={diarizationSettings.diarization_source === 'deepgram'}
+                    value="provider"
+                    checked={diarizationSettings.diarization_source === 'provider'}
                     onChange={(e) => setDiarizationSettings(prev => ({
                       ...prev,
-                      diarization_source: e.target.value as 'deepgram' | 'pyannote'
+                      diarization_source: e.target.value as 'provider' | 'pyannote'
                     }))}
                     className="mr-2"
                   />
                   <span className="text-sm text-gray-700 dark:text-gray-300">
-                    <strong>Deepgram</strong> - Use cloud-based diarization (requires API key)
+                    <strong>Provider</strong> - Trust speaker segments from the transcription provider when available
                   </span>
                 </label>
                 <label className="flex items-center">
@@ -332,40 +331,22 @@ export default function Settings() {
                     checked={diarizationSettings.diarization_source === 'pyannote'}
                     onChange={(e) => setDiarizationSettings(prev => ({
                       ...prev,
-                      diarization_source: e.target.value as 'deepgram' | 'pyannote'
+                      diarization_source: e.target.value as 'provider' | 'pyannote'
                     }))}
                     className="mr-2"
                   />
                   <span className="text-sm text-gray-700 dark:text-gray-300">
-                    <strong>Pyannote</strong> - Use local diarization with configurable parameters
+                    <strong>Pyannote</strong> - Always re-diarize locally with configurable parameters
                   </span>
                 </label>
               </div>
               <div className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-                {diarizationSettings.diarization_source === 'deepgram'
-                  ? 'Deepgram handles diarization automatically. The parameters below apply only to speaker identification.'
-                  : 'Pyannote provides local diarization with full parameter control.'
+                {diarizationSettings.diarization_source === 'provider'
+                  ? 'Diarized segments from the transcription provider are used as-is; Pyannote runs as a fallback when the provider does not diarize. The parameters below apply to the fallback and speaker identification.'
+                  : 'Pyannote re-diarizes every transcript locally with full parameter control.'
                 }
               </div>
             </div>
-
-            {/* Warning for Deepgram with Pyannote params */}
-            {diarizationSettings.diarization_source === 'deepgram' && (
-              <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-md p-3">
-                <div className="flex">
-                  <AlertCircle className="h-5 w-5 text-yellow-400 mr-2 flex-shrink-0" />
-                  <div>
-                    <h4 className="text-sm font-medium text-yellow-800 dark:text-yellow-300">
-                      Note: Deepgram Diarization Mode
-                    </h4>
-                    <p className="text-sm text-yellow-700 dark:text-yellow-400 mt-1">
-                      Ignored parameters hidden: speaker count, collar, timing settings.
-                      Only similarity threshold applies to speaker identification.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            )}
 
             {/* Similarity Threshold (always shown) */}
             <div>
@@ -389,9 +370,8 @@ export default function Settings() {
               </div>
             </div>
 
-            {/* Pyannote-specific parameters (conditionally shown) */}
-            {diarizationSettings.diarization_source === 'pyannote' && (
-              <>
+            {/* Pyannote parameters (apply when pyannote diarizes, including provider fallback) */}
+            <>
                 {/* Min Duration */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
@@ -495,8 +475,7 @@ export default function Settings() {
                     />
                   </div>
                 </div>
-              </>
-            )}
+            </>
 
             {/* Save Button */}
             <div className="pt-4 border-t border-gray-200 dark:border-gray-600">
@@ -528,6 +507,14 @@ export default function Settings() {
                 <div className="text-sm text-gray-600 dark:text-gray-400">
                   Create conversations for all audio sessions, even when no speech is detected
                 </div>
+                {miscSettings.live_segmentation === 'off' && !miscSettings.always_persist_enabled && (
+                  <div className="mt-2 flex items-start gap-1.5 text-sm font-medium text-red-600 dark:text-red-400">
+                    <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                    <span>
+                      Overridden to <strong>on</strong> for this backend: with Live Segmentation set to <strong>Off</strong> there is no live transcript to detect speech on, so audio must always be persisted — otherwise batch transcription at conversation end would have nothing to read. Your saved setting is unchanged and takes effect again if you enable a live transcript mode.
+                    </span>
+                  </div>
+                )}
               </div>
               <label className="relative inline-flex items-center cursor-pointer ml-4">
                 <input
@@ -536,30 +523,6 @@ export default function Settings() {
                   onChange={(e) => setMiscSettings(prev => ({
                     ...prev,
                     always_persist_enabled: e.target.checked
-                  }))}
-                  className="sr-only peer"
-                />
-                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
-              </label>
-            </div>
-
-            {/* Use Provider Segments Toggle */}
-            <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-md">
-              <div className="flex-1">
-                <div className="font-medium text-gray-900 dark:text-gray-100">
-                  Use Provider Segments
-                </div>
-                <div className="text-sm text-gray-600 dark:text-gray-400">
-                  Use speech segments from transcription provider instead of speaker service diarization
-                </div>
-              </div>
-              <label className="relative inline-flex items-center cursor-pointer ml-4">
-                <input
-                  type="checkbox"
-                  checked={miscSettings.use_provider_segments}
-                  onChange={(e) => setMiscSettings(prev => ({
-                    ...prev,
-                    use_provider_segments: e.target.checked
                   }))}
                   className="sr-only peer"
                 />

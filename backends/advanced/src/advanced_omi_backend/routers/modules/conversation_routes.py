@@ -14,7 +14,7 @@ from advanced_omi_backend.controllers import conversation_controller
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.users import User
 from advanced_omi_backend.utils.audio_chunk_utils import (
-    get_opus_for_time_range,
+    get_trimmed_opus_for_time_range,
     reconstruct_audio_segment,
 )
 
@@ -167,25 +167,25 @@ async def activate_transcript_version(
     )
 
 
-@router.post("/{conversation_id}/activate-memory/{version_id}")
-async def activate_memory_version(
-    conversation_id: str,
-    version_id: str,
-    current_user: User = Depends(current_active_user),
-):
-    """Activate a specific memory version. Users can only modify their own conversations."""
-    return await conversation_controller.activate_memory_version(
-        conversation_id, version_id, current_user
-    )
-
-
 @router.get("/{conversation_id}/versions")
 async def get_conversation_version_history(
     conversation_id: str, current_user: User = Depends(current_active_user)
 ):
-    """Get version history for a conversation. Users can only access their own conversations."""
+    """Get transcript version history for a conversation. Users can only access their own conversations."""
     return await conversation_controller.get_conversation_version_history(
         conversation_id, current_user
+    )
+
+
+@router.get("/{conversation_id}/memory-audit")
+async def get_conversation_memory_audit(
+    conversation_id: str,
+    limit: int = 100,
+    current_user: User = Depends(current_active_user),
+):
+    """Get the memory vault change history (audit ledger) for a conversation."""
+    return await conversation_controller.get_conversation_memory_audit(
+        conversation_id, current_user, limit
     )
 
 
@@ -315,8 +315,8 @@ async def get_audio_segment(
     """
     Get audio segment from a conversation.
 
-    With format=opus (default), serves raw ogg/opus chunks directly — zero
-    decoding. With format=wav, decodes to exact time-clipped WAV.
+    With format=opus (default), serves a single ogg/opus stream trimmed to
+    the exact time range. With format=wav, decodes to exact time-clipped WAV.
     """
     import time
 
@@ -355,7 +355,7 @@ async def get_audio_segment(
 
     if format == "opus":
         try:
-            opus_data = await get_opus_for_time_range(
+            opus_data = await get_trimmed_opus_for_time_range(
                 conversation_id=conversation_id, start_time=start, end_time=end
             )
         except ValueError as e:

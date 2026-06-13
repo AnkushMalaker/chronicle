@@ -2,13 +2,33 @@
 Audio stream producer - publishes audio chunks to Redis Streams.
 """
 
-import json
 import logging
 import time
+from dataclasses import dataclass
 
 import redis.asyncio as redis
 
+from advanced_omi_backend.redis_factory import REDIS_URL, create_async_redis
+from advanced_omi_backend.services.audio_stream.session_store import SessionStore
+
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SessionBuffer:
+    """In-memory audio accumulator for one session.
+
+    Holds incoming PCM until enough has arrived to emit a sample-aligned chunk
+    to the session's Redis stream. Identity fields are duplicated here (they also
+    live in the Redis session hash) so chunk/end messages can be built without a
+    Redis round-trip on the hot path.
+    """
+
+    user_id: str
+    client_id: str
+    stream_name: str
+    buffer: bytes = b""
+    chunk_count: int = 0
 
 
 class AudioStreamProducer:
@@ -30,10 +50,10 @@ class AudioStreamProducer:
             redis_client: Connected Redis client
         """
         self.redis_client = redis_client
+        self.store = SessionStore(redis_client)
 
-        # Per-session audio buffers for sample-aligned chunking
-        # {session_id: {"buffer": bytes, "chunk_count": int, "stream_name": str, ...}}
-        self.session_buffers = {}
+        # Per-session audio buffers for sample-aligned chunking: {session_id: SessionBuffer}
+        self.session_buffers: dict[str, SessionBuffer] = {}
 
     async def init_session(
         self,
@@ -62,47 +82,25 @@ class AudioStreamProducer:
         """
         # Client-specific stream naming (one stream per client for isolation)
         stream_name = f"audio:stream:{client_id}"
-        session_key = f"audio:session:{session_id}"
 
-        await self.redis_client.hset(
-            session_key,
-            mapping={
-                # User & Client tracking
-                "user_id": user_id,
-                "user_email": user_email,
-                "client_id": client_id,
-                "connection_id": connection_id,
-                # Stream configuration
-                "stream_name": stream_name,
-                "provider": provider,
-                "mode": mode,
-                # Timestamps
-                "started_at": str(time.time()),
-                "last_chunk_at": str(time.time()),
-                # Counters
-                "chunks_published": "0",
-                # Job tracking (populated by queue_controller when jobs start)
-                "speech_detection_job_id": "",
-                "audio_persistence_job_id": "",
-                # Connection state
-                "websocket_connected": "true",
-                # Session status
-                "status": "active",
-            },
+        # The session hash is the SINGLE SOURCE OF TRUTH for session state; the
+        # SessionStore owns its schema. No TTL — sessions live until explicitly
+        # cleaned up (TTLs destroy state mid-session, causing zombie jobs).
+        await self.store.init_session(
+            session_id,
+            user_id=user_id,
+            client_id=client_id,
+            stream_name=stream_name,
+            user_email=user_email,
+            connection_id=connection_id,
+            mode=mode,
+            provider=provider,
         )
 
-        # No TTL — sessions live until explicitly cleaned up via finalize_session()
-        # or mark_session_complete(). TTLs destroy state mid-session, causing zombie jobs.
-
         # Initialize audio buffer for this session
-        self.session_buffers[session_id] = {
-            "buffer": b"",
-            "chunk_count": 0,
-            "user_id": user_id,
-            "client_id": client_id,
-            "stream_name": stream_name,
-            "provider": provider,
-        }
+        self.session_buffers[session_id] = SessionBuffer(
+            user_id=user_id, client_id=client_id, stream_name=stream_name
+        )
 
         logger.info(
             f"📊 Initialized session {session_id} → stream {stream_name} (provider: {provider})"
@@ -115,13 +113,7 @@ class AudioStreamProducer:
         Args:
             session_id: Session identifier
         """
-        session_key = f"audio:session:{session_id}"
-
-        # Increment chunk count
-        await self.redis_client.hincrby(session_key, "chunks_published", 1)
-
-        # Update last chunk time
-        await self.redis_client.hset(session_key, "last_chunk_at", str(time.time()))
+        await self.store.bump_chunk_count(session_id)
 
     async def send_session_end_signal(self, session_id: str):
         """
@@ -134,28 +126,20 @@ class AudioStreamProducer:
             return
 
         buffer = self.session_buffers[session_id]
-        stream_name = buffer["stream_name"]
+        stream_name = buffer.stream_name
 
-        # Send special "end" message to signal workers to flush
-        # Read audio format from Redis session metadata (stored at audio-start time)
-        sample_rate, channels, sample_width = 16000, 1, 2
-        try:
-            session_key = f"audio:session:{session_id}"
-            audio_format_raw = await self.redis_client.hget(session_key, "audio_format")
-            if audio_format_raw:
-                audio_format = json.loads(audio_format_raw)
-                sample_rate = int(audio_format.get("rate", 16000))
-                channels = int(audio_format.get("channels", 1))
-                sample_width = int(audio_format.get("width", 2))
-        except Exception:
-            pass  # Fall back to defaults
+        # Send special "end" message to signal workers to flush.
+        # Read audio format from Redis session metadata (stored at audio-start time).
+        sample_rate, channels, sample_width = await self.store.get_audio_format(
+            session_id
+        )
 
         end_signal = {
             b"audio_data": b"",  # Empty audio data
             b"session_id": session_id.encode(),
             b"chunk_id": b"END",  # Special marker
-            b"user_id": buffer["user_id"].encode(),
-            b"client_id": buffer["client_id"].encode(),
+            b"user_id": buffer.user_id.encode(),
+            b"client_id": buffer.client_id.encode(),
             b"timestamp": str(time.time()).encode(),
             b"sample_rate": str(sample_rate).encode(),
             b"channels": str(channels).encode(),
@@ -166,31 +150,6 @@ class AudioStreamProducer:
             stream_name, end_signal, maxlen=25000, approximate=True
         )
         logger.info(f"📡 Sent end-of-session signal for {session_id} to {stream_name}")
-
-    async def get_session(self, session_id: str) -> dict:
-        """
-        Get session metadata from Redis.
-
-        Args:
-            session_id: Session identifier
-
-        Returns:
-            Dictionary with session metadata, empty dict if not found
-        """
-        session_key = f"audio:session:{session_id}"
-        session_data = await self.redis_client.hgetall(session_key)
-
-        # Convert bytes to strings for easier handling
-        return (
-            {
-                k.decode() if isinstance(k, bytes) else k: (
-                    v.decode() if isinstance(v, bytes) else v
-                )
-                for k, v in session_data.items()
-            }
-            if session_data
-            else {}
-        )
 
     async def update_session_job_ids(
         self,
@@ -206,17 +165,11 @@ class AudioStreamProducer:
             speech_detection_job_id: Speech detection job ID (optional)
             audio_persistence_job_id: Audio persistence job ID (optional)
         """
-        session_key = f"audio:session:{session_id}"
-        updates = {}
-
-        if speech_detection_job_id:
-            updates["speech_detection_job_id"] = speech_detection_job_id
-        if audio_persistence_job_id:
-            updates["audio_persistence_job_id"] = audio_persistence_job_id
-
-        if updates:
-            await self.redis_client.hset(session_key, mapping=updates)
-            logger.debug(f"📊 Updated job IDs for session {session_id}: {updates}")
+        await self.store.set_job_ids(
+            session_id,
+            speech_detection_job_id=speech_detection_job_id,
+            audio_persistence_job_id=audio_persistence_job_id,
+        )
 
     async def finalize_session(
         self, session_id: str, completion_reason: str | None = None
@@ -229,39 +182,26 @@ class AudioStreamProducer:
             completion_reason: Optional reason for session completion (e.g., "websocket_disconnect", "user_stopped")
                               This is set atomically with status to avoid race conditions.
         """
-        session_key = f"audio:session:{session_id}"
-
-        # Build mapping with status and optional completion_reason
-        mapping = {"status": "finalizing", "finalized_at": str(time.time())}
-
-        # Set completion_reason atomically with status to prevent race conditions
+        # Mark status=finalizing (+reason) atomically and notify the monitoring loop
+        # via pub/sub. The completion_reason is set together with status to avoid the
+        # race where a worker sees a finalizing status without its reason.
         if completion_reason:
-            mapping["completion_reason"] = completion_reason
-            if completion_reason == "websocket_disconnect":
-                mapping["websocket_connected"] = "false"
             logger.info(
                 f"📊 Finalizing session {session_id} with reason: {completion_reason}"
             )
-
-        await self.redis_client.hset(session_key, mapping=mapping)
-
-        # Notify monitoring loop via pub/sub (instant, no polling needed)
-        signal = json.dumps(
-            {"type": "finalize", "reason": completion_reason or "unknown"}
-        )
-        await self.redis_client.publish(f"session:signal:{session_id}", signal)
+        await self.store.mark_finalizing(session_id, completion_reason)
 
         # Send end_marker to Redis stream so streaming consumer can close the connection
         if session_id in self.session_buffers:
             buffer = self.session_buffers[session_id]
-            stream_name = buffer["stream_name"]
+            stream_name = buffer.stream_name
 
             # Send end_marker message to signal stream end
             end_marker_data = {
                 b"end_marker": b"true",
                 b"session_id": session_id.encode(),
-                b"user_id": buffer["user_id"].encode(),
-                b"client_id": buffer["client_id"].encode(),
+                b"user_id": buffer.user_id.encode(),
+                b"client_id": buffer.client_id.encode(),
                 b"timestamp": str(time.time()).encode(),
             }
 
@@ -304,22 +244,23 @@ class AudioStreamProducer:
         Returns:
             List of Redis message IDs (may send multiple chunks per call)
         """
-        # Initialize buffer if needed (in case init_session wasn't called)
+        # Initialize buffer if needed. This is a fallback — init_session() normally
+        # creates it first; reaching here means audio arrived before session init.
         if session_id not in self.session_buffers:
-            stream_name = f"audio:stream:{client_id}"  # Client-specific stream
-            self.session_buffers[session_id] = {
-                "buffer": b"",
-                "chunk_count": 0,
-                "user_id": user_id,
-                "client_id": client_id,
-                "stream_name": stream_name,
-                "provider": "deepgram",
-            }
+            logger.warning(
+                f"⚠️ add_audio_chunk before init_session for {session_id}; "
+                f"creating buffer on the fly"
+            )
+            self.session_buffers[session_id] = SessionBuffer(
+                user_id=user_id,
+                client_id=client_id,
+                stream_name=f"audio:stream:{client_id}",  # Client-specific stream
+            )
 
         session_buffer = self.session_buffers[session_id]
 
         # Add incoming audio to buffer
-        session_buffer["buffer"] += audio_data
+        session_buffer.buffer += audio_data
 
         # Calculate target chunk size (0.25 seconds of audio)
         # bytes_per_second = sample_rate * channels * sample_width
@@ -329,16 +270,16 @@ class AudioStreamProducer:
 
         # Publish fixed-size chunks from buffer
         message_ids = []
-        stream_name = session_buffer["stream_name"]
+        stream_name = session_buffer.stream_name
 
-        while len(session_buffer["buffer"]) >= target_chunk_size:
+        while len(session_buffer.buffer) >= target_chunk_size:
             # Extract exactly target_chunk_size bytes
-            chunk_audio = session_buffer["buffer"][:target_chunk_size]
-            session_buffer["buffer"] = session_buffer["buffer"][target_chunk_size:]
+            chunk_audio = session_buffer.buffer[:target_chunk_size]
+            session_buffer.buffer = session_buffer.buffer[target_chunk_size:]
 
             # Increment chunk count
-            session_buffer["chunk_count"] += 1
-            chunk_id_formatted = f"{session_buffer['chunk_count']:05d}"
+            session_buffer.chunk_count += 1
+            chunk_id_formatted = f"{session_buffer.chunk_count:05d}"
 
             # Prepare chunk data
             chunk_data = {
@@ -366,22 +307,19 @@ class AudioStreamProducer:
             await self.update_session_chunk_count(session_id)
 
             # Log every 10th chunk to avoid spam
-            if (
-                session_buffer["chunk_count"] % 10 == 0
-                or session_buffer["chunk_count"] <= 5
-            ):
+            if session_buffer.chunk_count % 10 == 0 or session_buffer.chunk_count <= 5:
                 logger.debug(
                     f"📤 Added fixed-size chunk {chunk_id_formatted} to {stream_name} "
                     f"({len(chunk_audio)} bytes = {len(chunk_audio)/bytes_per_second:.3f}s, "
-                    f"buffer remaining: {len(session_buffer['buffer'])} bytes)"
+                    f"buffer remaining: {len(session_buffer.buffer)} bytes)"
                 )
 
         # Log buffer accumulation if no chunks were sent
         if not message_ids:
             logger.debug(
                 f"📦 Buffering audio for {session_id}: "
-                f"{len(session_buffer['buffer'])}/{target_chunk_size} bytes "
-                f"(need {target_chunk_size - len(session_buffer['buffer'])} more)"
+                f"{len(session_buffer.buffer)}/{target_chunk_size} bytes "
+                f"(need {target_chunk_size - len(session_buffer.buffer)} more)"
             )
 
         return message_ids
@@ -413,23 +351,23 @@ class AudioStreamProducer:
         session_buffer = self.session_buffers[session_id]
 
         # Send any remaining buffered audio
-        if len(session_buffer["buffer"]) > 0:
-            chunk_audio = session_buffer["buffer"]
-            session_buffer["buffer"] = b""
+        if len(session_buffer.buffer) > 0:
+            chunk_audio = session_buffer.buffer
+            session_buffer.buffer = b""
 
             # Increment chunk count
-            session_buffer["chunk_count"] += 1
-            chunk_id_formatted = f"{session_buffer['chunk_count']:05d}"
+            session_buffer.chunk_count += 1
+            chunk_id_formatted = f"{session_buffer.chunk_count:05d}"
 
-            stream_name = session_buffer["stream_name"]
+            stream_name = session_buffer.stream_name
 
             # Prepare chunk data
             chunk_data = {
                 b"audio_data": chunk_audio,
                 b"session_id": session_id.encode(),
                 b"chunk_id": chunk_id_formatted.encode(),
-                b"user_id": session_buffer["user_id"].encode(),
-                b"client_id": session_buffer["client_id"].encode(),
+                b"user_id": session_buffer.user_id.encode(),
+                b"client_id": session_buffer.client_id.encode(),
                 b"timestamp": str(time.time()).encode(),
                 b"sample_rate": str(sample_rate).encode(),
                 b"channels": str(channels).encode(),
@@ -469,20 +407,13 @@ def get_audio_stream_producer() -> AudioStreamProducer:
     global _producer_instance
 
     if _producer_instance is None:
-        import os
-
-        import redis.asyncio as redis_async
-
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
         # Create async Redis client (synchronous call, connection happens on first use)
-        redis_client = redis_async.from_url(
-            redis_url, encoding="utf-8", decode_responses=False
-        )
+        redis_client = create_async_redis(decode_responses=False)
 
         _producer_instance = AudioStreamProducer(redis_client)
         logger.info(
-            f"Created AudioStreamProducer singleton with Redis URL: {redis_url}"
+            f"Created AudioStreamProducer singleton with Redis URL: {REDIS_URL}"
         )
 
     return _producer_instance

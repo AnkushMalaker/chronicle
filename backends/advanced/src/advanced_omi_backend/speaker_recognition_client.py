@@ -190,9 +190,11 @@ class SpeakerRecognitionClient:
                 f"🎤 Calling speaker service with conversation_id: {conversation_id[:12]}..."
             )
 
-            # Read diarization source from config system
+            # Pyannote parameters from diarization settings. This path always
+            # diarizes via the speaker service; transcripts whose provider
+            # already diarized are routed to identify_provider_segments()
+            # by the speaker job instead.
             config = get_diarization_settings()
-            diarization_source = config.get("diarization_source", "pyannote")
 
             async with aiohttp.ClientSession() as session:
                 # Prepare form data with conversation_id + backend_token
@@ -200,69 +202,31 @@ class SpeakerRecognitionClient:
                 form_data.add_field("conversation_id", conversation_id)
                 form_data.add_field("backend_token", backend_token)
 
-                if diarization_source == "deepgram":
-                    # DEEPGRAM DIARIZATION PATH: We EXPECT transcript has speaker info from Deepgram
-                    # Only need speaker identification of existing segments
-                    logger.info(
-                        "Using Deepgram diarization path - transcript should have speaker segments, identifying speakers"
-                    )
+                # Send existing transcript for diarization and speaker matching
+                form_data.add_field("transcript_data", json.dumps(transcript_data))
+                form_data.add_field(
+                    "user_id", "1"
+                )  # TODO: Implement proper user mapping
+                form_data.add_field(
+                    "similarity_threshold",
+                    str(config.get("similarity_threshold", 0.45)),
+                )
 
-                    # TODO: Implement proper speaker identification for Deepgram segments
-                    # For now, use diarize-identify-match as fallback until we implement segment identification
-                    logger.warning(
-                        "Deepgram segment identification not yet implemented, using diarize-identify-match as fallback"
-                    )
+                # Add pyannote diarization parameters
+                form_data.add_field(
+                    "min_duration", str(config.get("min_duration", 0.5))
+                )
+                form_data.add_field("collar", str(config.get("collar", 2.0)))
+                form_data.add_field(
+                    "min_duration_off", str(config.get("min_duration_off", 1.5))
+                )
+                if config.get("min_speakers"):
+                    form_data.add_field("min_speakers", str(config.get("min_speakers")))
+                if config.get("max_speakers"):
+                    form_data.add_field("max_speakers", str(config.get("max_speakers")))
 
-                    form_data.add_field("transcript_data", json.dumps(transcript_data))
-                    form_data.add_field(
-                        "user_id", "1"
-                    )  # TODO: Implement proper user mapping
-                    form_data.add_field(
-                        "similarity_threshold",
-                        str(config.get("similarity_threshold", 0.45)),
-                    )
-                    form_data.add_field(
-                        "min_duration", str(config.get("min_duration", 0.5))
-                    )
-
-                    # Use /v1/diarize-identify-match endpoint as fallback
-                    endpoint = "/v1/diarize-identify-match"
-
-                else:  # pyannote (default)
-                    # PYANNOTE PATH: Backend has transcript, need diarization + speaker identification
-                    logger.info(
-                        "Using Pyannote path - diarizing backend transcript and identifying speakers"
-                    )
-
-                    # Send existing transcript for diarization and speaker matching
-                    form_data.add_field("transcript_data", json.dumps(transcript_data))
-                    form_data.add_field(
-                        "user_id", "1"
-                    )  # TODO: Implement proper user mapping
-                    form_data.add_field(
-                        "similarity_threshold",
-                        str(config.get("similarity_threshold", 0.45)),
-                    )
-
-                    # Add pyannote diarization parameters
-                    form_data.add_field(
-                        "min_duration", str(config.get("min_duration", 0.5))
-                    )
-                    form_data.add_field("collar", str(config.get("collar", 2.0)))
-                    form_data.add_field(
-                        "min_duration_off", str(config.get("min_duration_off", 1.5))
-                    )
-                    if config.get("min_speakers"):
-                        form_data.add_field(
-                            "min_speakers", str(config.get("min_speakers"))
-                        )
-                    if config.get("max_speakers"):
-                        form_data.add_field(
-                            "max_speakers", str(config.get("max_speakers"))
-                        )
-
-                    # Use /v1/diarize-identify-match endpoint for backend integration
-                    endpoint = "/v1/diarize-identify-match"
+                # Use /v1/diarize-identify-match endpoint for backend integration
+                endpoint = "/v1/diarize-identify-match"
 
                 # Make the request to the consolidated endpoint
                 request_url = f"{self.service_url}{endpoint}"
@@ -284,7 +248,14 @@ class SpeakerRecognitionClient:
                         logger.error(
                             f"🎤 ❌ Speaker service returned status {response.status}: {response_text}"
                         )
-                        return {"segments": []}
+                        # An HTTP error is not an empty result — surface it so the
+                        # job's error handling fails the job instead of reporting
+                        # success with no identified speakers.
+                        return {
+                            "error": "server_error",
+                            "message": f"HTTP {response.status}: {response_text[:500]}",
+                            "segments": [],
+                        }
 
                     result = await response.json()
 
@@ -904,7 +875,11 @@ class SpeakerRecognitionClient:
                         logger.warning(
                             f"🎤 [DIARIZE] ❌ Speaker recognition service returned status {response.status}: {response_text}"
                         )
-                        return {"segments": []}
+                        return {
+                            "error": "server_error",
+                            "message": f"HTTP {response.status}: {response_text[:500]}",
+                            "segments": [],
+                        }
 
                     result = await response.json()
                     segments_count = len(result.get("segments", []))

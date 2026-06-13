@@ -21,16 +21,25 @@ import redis.asyncio as redis
 from redis import exceptions as redis_exceptions
 
 from advanced_omi_backend.client_manager import get_client_owner_async
+from advanced_omi_backend.heartbeat import beat
 from advanced_omi_backend.models.user import get_user_by_id
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.plugins.router import PluginRouter
+from advanced_omi_backend.services.audio_stream.session_store import SessionStore
 from advanced_omi_backend.services.transcription import get_transcription_provider
+from advanced_omi_backend.services.wakeword.followup import maybe_handle_followup
 from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 from advanced_omi_backend.utils.audio_utils import pcm_to_wav_bytes
 
 logger = logging.getLogger(__name__)
 
 MAX_STREAMING_START_ATTEMPTS = 2
+
+# Attempts when re-establishing a provider stream after a mid-session connection
+# drop (e.g. the provider enforces a max WebSocket session duration). More patient
+# than initial start: audio chunks queue in Redis while we retry, so a successful
+# reconnect loses nothing.
+STREAMING_RECONNECT_ATTEMPTS = 5
 
 # Bail out of process_stream after this many seconds with no incoming chunks.
 # process_stream's normal exit is the end_marker sent by AudioStreamProducer.finalize_session.
@@ -71,6 +80,40 @@ def _normalize_words(words: list) -> None:
             w["start"] = w["start_time"]
         if "end" not in w and "end_time" in w:
             w["end"] = w["end_time"]
+
+
+def _apply_time_offset(result: dict, offset: float) -> None:
+    """Shift all word/segment timestamps in ``result`` by ``offset`` seconds, in-place.
+
+    Streaming providers stamp words relative to their own WebSocket session, not
+    the audio session. When a provider stream is restarted mid-session its clock
+    resets to 0; without re-offsetting, late audio gets timestamps that collide
+    with the start of the conversation and downstream segment-building interleaves
+    the two timelines (words are bucketed into diarized segments by time).
+    """
+    if not offset:
+        return
+    for w in result.get("words") or []:
+        if not isinstance(w, dict):
+            continue
+        if w.get("start") is not None:
+            w["start"] = w["start"] + offset
+        if w.get("end") is not None:
+            w["end"] = w["end"] + offset
+    for s in result.get("segments") or []:
+        if not isinstance(s, dict):
+            continue
+        if s.get("start") is not None:
+            s["start"] = s["start"] + offset
+        if s.get("end") is not None:
+            s["end"] = s["end"] + offset
+        for w in s.get("words") or []:
+            if not isinstance(w, dict):
+                continue
+            if w.get("start") is not None:
+                w["start"] = w["start"] + offset
+            if w.get("end") is not None:
+                w["end"] = w["end"] + offset
 
 
 def _group_words_into_segments(words: list) -> list:
@@ -167,6 +210,7 @@ class StreamingTranscriptionConsumer:
             speaker_client: Speaker recognition client for identifying speakers
         """
         self.redis_client = redis_client
+        self.store = SessionStore(redis_client)
         self.plugin_router = plugin_router
         self.speaker_client = speaker_client
 
@@ -194,6 +238,11 @@ class StreamingTranscriptionConsumer:
         # Active stream tracking - consumer groups handle fan-out
         self.active_streams: Dict[str, Dict] = {}  # {stream_name: {"session_id": ...}}
 
+        # Strong refs to spawned per-stream tasks so they aren't GC'd mid-flight,
+        # and so a crash surfaces (via the done-callback) instead of being a
+        # swallowed "Task exception was never retrieved".
+        self._stream_tasks: set[asyncio.Task] = set()
+
         # Session tracking for WebSocket connections
         self.active_sessions: Dict[str, Dict] = (
             {}
@@ -201,6 +250,12 @@ class StreamingTranscriptionConsumer:
 
         # Audio buffers for speaker identification (raw PCM bytes per session)
         self._audio_buffers: Dict[str, bytearray] = {}
+
+        # Cumulative audio seconds sent to the provider per session, across
+        # provider stream restarts. This is the session-relative clock used to
+        # re-offset provider timestamps after a mid-session reconnect (the
+        # provider clock restarts at 0 on every new WebSocket session).
+        self._session_audio_seconds: Dict[str, float] = {}
 
     async def discover_streams(self) -> list[str]:
         """
@@ -237,16 +292,35 @@ class StreamingTranscriptionConsumer:
                 f"Consumer group {self.group_name} already exists for {stream_name}"
             )
 
-    async def start_session_stream(self, session_id: str, sample_rate: int = 16000):
+    async def start_session_stream(
+        self,
+        session_id: str,
+        sample_rate: int = 16000,
+        attempts: int = MAX_STREAMING_START_ATTEMPTS,
+    ):
         """
         Start WebSocket connection to transcription provider for a session.
+
+        Resumes the session-relative clock: the provider stamps words relative to
+        its own WebSocket session, so on a mid-session restart we record the audio
+        seconds already transcribed as ``time_offset`` and shift all subsequent
+        results by it (see _apply_time_offset).
 
         Args:
             session_id: Session ID (client_id from audio stream)
             sample_rate: Audio sample rate in Hz
+            attempts: Connection attempts before giving up (5s apart)
         """
+        # Audio seconds already sent in prior provider sessions of this audio
+        # session — 0.0 for a fresh session. Falls back to the session hash so
+        # the clock also survives a consumer process restart.
+        time_offset = self._session_audio_seconds.get(session_id)
+        if time_offset is None:
+            time_offset = await self.store.get_transcription_seconds(session_id)
+            self._session_audio_seconds[session_id] = time_offset
+
         last_error = None
-        for attempt in range(MAX_STREAMING_START_ATTEMPTS):
+        for attempt in range(attempts):
             try:
                 await self.provider.start_stream(
                     client_id=session_id,
@@ -257,6 +331,7 @@ class StreamingTranscriptionConsumer:
                 self.active_sessions[session_id] = {
                     "last_activity": time.time(),
                     "sample_rate": sample_rate,
+                    "time_offset": time_offset,
                 }
 
                 # Only buffer audio for speaker identification when provider lacks diarization
@@ -265,36 +340,76 @@ class StreamingTranscriptionConsumer:
 
                 logger.info(
                     f"Started streaming transcription for session: {session_id}"
+                    + (f" (resuming at +{time_offset:.1f}s)" if time_offset else "")
                 )
                 return
 
             except Exception as e:
                 last_error = e
-                if attempt < MAX_STREAMING_START_ATTEMPTS - 1:
+                if attempt < attempts - 1:
                     logger.warning(
                         f"Failed to start stream for {session_id} "
-                        f"(attempt {attempt + 1}/{MAX_STREAMING_START_ATTEMPTS}): {e}. "
+                        f"(attempt {attempt + 1}/{attempts}): {e}. "
                         f"Retrying in 5s..."
                     )
                     await asyncio.sleep(5)
                 else:
                     logger.error(
                         f"Failed to start stream for {session_id} "
-                        f"(attempt {attempt + 1}/{MAX_STREAMING_START_ATTEMPTS}): {e}",
+                        f"(attempt {attempt + 1}/{attempts}): {e}",
                         exc_info=True,
                     )
 
-        # Both attempts failed — set error flag and raise
-        session_key = f"audio:session:{session_id}"
+        # All attempts failed — set error flag and raise
         try:
-            await self.redis_client.hset(
-                session_key, "transcription_error", str(last_error)
-            )
+            await self.store.set_transcription_error(session_id, str(last_error))
             logger.info(f"Set transcription error flag for {session_id}")
         except Exception as redis_error:
             logger.warning(f"Failed to set error flag in Redis: {redis_error}")
 
         raise last_error
+
+    async def _reconnect_session(self, session_id: str) -> bool:
+        """Re-establish the provider stream after a mid-session connection drop.
+
+        Persists the audio-seconds counter (so the clock survives even a consumer
+        restart), tears down the dead provider-side state, and opens a fresh
+        provider stream whose results are shifted by the recorded offset.
+
+        Returns True when a new provider stream is live; False when all attempts
+        failed (start_session_stream has then already set the transcription_error
+        flag — terminal for this session).
+        """
+        seconds_sent = self._session_audio_seconds.get(session_id, 0.0)
+        try:
+            await self.store.set_transcription_seconds(session_id, seconds_sent)
+        except Exception as e:
+            logger.warning(
+                f"Failed to persist transcription clock for {session_id}: {e}"
+            )
+
+        # Tear down dead provider-side state; the socket is already gone so
+        # errors here are expected and ignored.
+        try:
+            await self.provider.end_stream(client_id=session_id)
+        except Exception:
+            pass
+
+        sample_rate = (self.active_sessions.get(session_id) or {}).get(
+            "sample_rate", 16000
+        )
+        try:
+            await self.start_session_stream(
+                session_id,
+                sample_rate=sample_rate,
+                attempts=STREAMING_RECONNECT_ATTEMPTS,
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                f"Could not reconnect streaming transcription for {session_id}: {e}"
+            )
+            return False
 
     async def end_session_stream(self, session_id: str):
         """
@@ -303,6 +418,7 @@ class StreamingTranscriptionConsumer:
         Args:
             session_id: Session ID
         """
+        completion_status = "1"
         try:
             # Get final result from provider
             final_result = await self.provider.end_stream(client_id=session_id)
@@ -311,6 +427,12 @@ class StreamingTranscriptionConsumer:
             if final_result and final_result.get("text"):
                 words = final_result.get("words") or []
                 _normalize_words(words)
+                _apply_time_offset(
+                    final_result,
+                    (self.active_sessions.get(session_id) or {}).get(
+                        "time_offset", 0.0
+                    ),
+                )
 
                 # Check if words carry per-word speaker labels (provider diarization)
                 has_word_speakers = (
@@ -350,12 +472,6 @@ class StreamingTranscriptionConsumer:
                         session_id, final_result, speaker_name=speaker_name
                     )
 
-            self.active_sessions.pop(session_id, None)
-            self._audio_buffers.pop(session_id, None)
-
-            # Signal that streaming transcription is complete for this session
-            completion_key = f"transcription:complete:{session_id}"
-            await self.redis_client.set(completion_key, "1", ex=300)  # 5 min TTL
             logger.info(
                 f"Streaming transcription complete for {session_id} (signal set)"
             )
@@ -363,10 +479,29 @@ class StreamingTranscriptionConsumer:
         except Exception as e:
             logger.error(f"Error ending stream for {session_id}: {e}", exc_info=True)
             # Still signal completion even on error so conversation job doesn't hang
+            completion_status = "error"
+
+        finally:
+            # Cleanup must run on both paths (previously the error path leaked
+            # active_sessions / audio buffer entries).
+            self.active_sessions.pop(session_id, None)
+            self._audio_buffers.pop(session_id, None)
+
+            # Persist the session-relative audio clock so a later re-discovery of
+            # a still-live stream resumes timestamps instead of restarting at 0.
+            seconds_sent = self._session_audio_seconds.pop(session_id, None)
+            if seconds_sent:
+                try:
+                    await self.store.set_transcription_seconds(session_id, seconds_sent)
+                except Exception:
+                    pass  # Best effort
+
+            # Signal that streaming transcription is complete for this session
             try:
                 completion_key = f"transcription:complete:{session_id}"
-                await self.redis_client.set(completion_key, "error", ex=300)
-                logger.warning(f"Set error completion signal for {session_id}")
+                await self.redis_client.set(completion_key, completion_status, ex=300)
+                if completion_status == "error":
+                    logger.warning(f"Set error completion signal for {session_id}")
             except Exception:
                 pass  # Best effort
 
@@ -391,9 +526,16 @@ class StreamingTranscriptionConsumer:
                 client_id=session_id, audio_chunk=audio_chunk
             )
 
-            # Update last activity
-            if session_id in self.active_sessions:
-                self.active_sessions[session_id]["last_activity"] = time.time()
+            # Update last activity and advance the session-relative audio clock
+            # (pipeline audio is PCM 16-bit mono). Counted only after a successful
+            # send — a chunk that dies mid-send is re-sent after reconnect.
+            session = self.active_sessions.get(session_id)
+            if session is not None:
+                session["last_activity"] = time.time()
+                self._session_audio_seconds[session_id] = (
+                    self._session_audio_seconds.get(session_id, 0.0)
+                    + len(audio_chunk) / (session.get("sample_rate", 16000) * 2)
+                )
 
             # Provider returns None if no response yet, or a dict with results
             if result:
@@ -404,6 +546,11 @@ class StreamingTranscriptionConsumer:
 
                 # Normalize provider-specific word field names (e.g. start_time → start)
                 _normalize_words(words)
+
+                # Provider timestamps are relative to its own WebSocket session;
+                # shift by the audio already transcribed in prior provider
+                # sessions so timestamps stay session-relative across reconnects.
+                _apply_time_offset(result, (session or {}).get("time_offset", 0.0))
 
                 # Track transcript at each step
                 logger.info(
@@ -464,15 +611,12 @@ class StreamingTranscriptionConsumer:
 
         except Exception as e:
             if _is_connection_error(e):
+                # Recoverable: process_stream attempts an in-place reconnect.
+                # The transcription_error flag (which terminates speech detection)
+                # is only set if the reconnect ultimately fails
+                # (start_session_stream sets it after exhausting attempts).
                 logger.error(f"Transcription connection lost for {session_id}: {e}")
-                try:
-                    session_key = f"audio:session:{session_id}"
-                    await self.redis_client.hset(
-                        session_key, "transcription_error", f"connection_lost: {e}"
-                    )
-                except Exception:
-                    pass
-                raise  # Let process_stream handle the break
+                raise  # Let process_stream handle reconnect/terminate
             logger.error(
                 f"Error processing audio chunk for {session_id}: {e}", exc_info=True
             )
@@ -689,6 +833,26 @@ class StreamingTranscriptionConsumer:
                     logger.warning(f"Error checking primary speakers: {e}")
                     # Don't block plugins on lookup failure
 
+            # Wake-word follow-up: if a follow-up window is open for this session,
+            # treat this utterance as a contextual follow-up (no wake word needed)
+            # and stop — don't run normal transcript dispatch for it. session_id
+            # here is the client_id (the stream key).
+            try:
+                handled = await maybe_handle_followup(
+                    self.redis_client,
+                    self.plugin_router,
+                    user_id=user_id,
+                    session_id=session_id,
+                    client_id=session_id,
+                    text=result.get("text", ""),
+                )
+                if handled:
+                    return
+            except (
+                Exception
+            ) as e:  # noqa: BLE001 - never let follow-up break transcription
+                logger.error(f"Follow-up handling error: {e}", exc_info=True)
+
             plugin_data = {
                 "transcript": result.get("text", ""),
                 "session_id": session_id,
@@ -744,20 +908,8 @@ class StreamingTranscriptionConsumer:
         }
 
         # Read actual sample rate from the session's audio_format stored in Redis
-        sample_rate = 16000
-        session_key = f"audio:session:{session_id}"
-        try:
-            audio_format_raw = await self.redis_client.hget(session_key, "audio_format")
-            if audio_format_raw:
-                audio_format = json.loads(audio_format_raw)
-                sample_rate = int(audio_format.get("rate", 16000))
-                logger.info(
-                    f"Read sample rate {sample_rate}Hz from session {session_id}"
-                )
-        except Exception as e:
-            logger.warning(
-                f"Failed to read audio_format from Redis for {session_id}: {e}"
-            )
+        sample_rate, _, _ = await self.store.get_audio_format(session_id)
+        logger.info(f"Read sample rate {sample_rate}Hz from session {session_id}")
 
         # Start WebSocket connection to transcription provider
         await self.start_session_stream(session_id, sample_rate=sample_rate)
@@ -840,11 +992,33 @@ class StreamingTranscriptionConsumer:
                                     )
                                 except Exception as e:
                                     if _is_connection_error(e):
-                                        logger.error(
-                                            f"Connection lost — stopping stream {session_id}"
+                                        logger.warning(
+                                            f"Connection lost for {session_id} — "
+                                            f"attempting in-place reconnect"
                                         )
-                                        stream_ended = True
-                                        break  # Don't ACK — leave chunks pending
+                                        if await self._reconnect_session(session_id):
+                                            # Re-send the chunk that died mid-flight
+                                            # to the new provider stream.
+                                            try:
+                                                await self.process_audio_chunk(
+                                                    session_id=session_id,
+                                                    audio_chunk=audio_chunk,
+                                                    chunk_id=msg_id,
+                                                )
+                                            except Exception as resend_err:
+                                                logger.error(
+                                                    f"Re-send of chunk {msg_id} after "
+                                                    f"reconnect failed for {session_id}: "
+                                                    f"{resend_err} — dropping chunk"
+                                                )
+                                            # Reconnected: fall through to ACK
+                                        else:
+                                            logger.error(
+                                                f"Reconnect failed — stopping stream "
+                                                f"{session_id}"
+                                            )
+                                            stream_ended = True
+                                            break  # Don't ACK — leave chunks pending
                                     # Non-connection error: fall through to ACK
                             else:
                                 logger.warning(
@@ -969,16 +1143,41 @@ class StreamingTranscriptionConsumer:
             f"(all {len(_EXPECTED_GROUPS)} consumer groups have 0 pending)"
         )
 
-    async def start_consuming(self):
+    def _on_stream_task_done(self, stream_name: str, task: asyncio.Task) -> None:
+        """Surface a finished per-stream task and free a crashed stream.
+
+        process_stream pops active_streams in its own finally on the normal path
+        (so the pop here is a no-op then). But if it crashed BEFORE that finally
+        — e.g. get_audio_format / start_session_stream raised — the stream would
+        stay marked active and never be re-picked, silently dropping that
+        session. Log the crash loudly and drop the stream so discovery retries it.
+        """
+        self._stream_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(f"Stream task for {stream_name} crashed: {exc}", exc_info=exc)
+            self.active_streams.pop(stream_name, None)
+
+    async def start_consuming(self, heartbeat_name: str | None = None):
         """
         Start consuming audio streams and processing through streaming transcription.
         Uses Redis consumer groups for fan-out (allows batch workers to process same stream).
+
+        Args:
+            heartbeat_name: If set, beat ``worker:heartbeat:{name}`` once per
+                discovery iteration so the workers healthcheck can tell this
+                consumer's main loop is still turning (not wedged-but-alive).
         """
         self.running = True
         logger.info(f"Streaming consumer started (group: {self.group_name})")
 
         try:
             while self.running:
+                if heartbeat_name:
+                    await beat(self.redis_client, heartbeat_name)
+
                 # Discover available streams
                 streams = await self.discover_streams()
 
@@ -1010,8 +1209,15 @@ class StreamingTranscriptionConsumer:
                     # Track stream and spawn task to process it
                     self.active_streams[stream_name] = {"session_id": session_id}
 
-                    # Spawn task to process this stream
-                    asyncio.create_task(self.process_stream(stream_name))
+                    # Spawn task to process this stream. Keep a strong ref and a
+                    # done-callback so a crash before process_stream's own
+                    # try/finally (e.g. provider connect failure) is logged and the
+                    # stream is freed for re-discovery instead of silently stuck.
+                    task = asyncio.create_task(self.process_stream(stream_name))
+                    self._stream_tasks.add(task)
+                    task.add_done_callback(
+                        lambda t, sn=stream_name: self._on_stream_task_done(sn, t)
+                    )
                     logger.info(
                         f"Now consuming from {stream_name} (group: {self.group_name})"
                     )
