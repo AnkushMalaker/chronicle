@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@react-three/fiber": "^8.18.0",
+    "@react-three/handle": "^6.6.30",
     "@react-three/xr": "^6.6.30",
     "r3f-forcegraph": "^1.1.1",
     "react": "^18.3.1",

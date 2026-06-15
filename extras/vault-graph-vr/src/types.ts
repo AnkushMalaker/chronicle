@@ -13,6 +13,10 @@ export interface GraphNode {
   x?: number;
   y?: number;
   z?: number;
+  // d3-force fixed-position pins (set to pin/drag a node, undefined to release):
+  fx?: number;
+  fy?: number;
+  fz?: number;
 }
 
 export interface GraphLink {
