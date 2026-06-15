@@ -1,0 +1,33 @@
+{
+  "name": "vault-graph-vr",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "host": "vite --host",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "graph": "node scripts/build-graph.mjs"
+  },
+  "dependencies": {
+    "@react-three/fiber": "^8.18.0",
+    "@react-three/xr": "^6.6.30",
+    "r3f-forcegraph": "^1.1.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "three": "^0.169.0",
+    "three-spritetext": "^1.10.0"
+  },
+  "overrides": {
+    "zustand": "4.5.7"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/three": "^0.169.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}
