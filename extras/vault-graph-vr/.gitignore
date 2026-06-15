@@ -4,3 +4,6 @@ dist/
 *.tsbuildinfo
 # Generated graph data (regenerate from your vault):
 public/graph.json
+vault-snapshot/
+# In-headset debug captures (screenshots, recordings, relayed logs):
+captures/
