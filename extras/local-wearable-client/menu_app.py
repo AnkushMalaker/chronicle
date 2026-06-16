@@ -23,6 +23,7 @@ from main import (
     detect_device_type,
     load_config,
 )
+from screen_capture import ScreenCaptureManager, request_permissions
 
 logger = logging.getLogger(__name__)
 
@@ -391,16 +392,25 @@ class WearableMenuApp(rumps.App):
     _DEVICE_KEY_PREFIX = "_dev_"
     _NO_DEVICES_KEY = "_no_devices"
 
-    def __init__(self, state: SharedState, ble: BLEManager) -> None:
+    def __init__(
+        self, state: SharedState, ble: BLEManager, capture: ScreenCaptureManager
+    ) -> None:
         super().__init__("Chronicle", title="⊙")
         self.state = state
         self.ble = ble
+        self.capture = capture
 
         # Build initial menu
         self.status_item = rumps.MenuItem("Status: Starting...", callback=None)
         self.disconnect_item = rumps.MenuItem("Disconnect", callback=self.on_disconnect)
         self.devices_header = rumps.MenuItem("Nearby Devices:", callback=None)
         self.scan_item = rumps.MenuItem("Scan Now", callback=self.on_scan)
+        self.capture_item = rumps.MenuItem(
+            "Screen Capture: Off", callback=self.on_toggle_capture
+        )
+        self.perms_item = rumps.MenuItem(
+            "Grant Capture Permissions", callback=self.on_grant_permissions
+        )
         self.logs_item = rumps.MenuItem("View Logs", callback=self.on_view_logs)
 
         self.menu = [
@@ -411,6 +421,8 @@ class WearableMenuApp(rumps.App):
             rumps.MenuItem("  (scanning...)", callback=None),
             None,  # separator
             self.scan_item,
+            self.capture_item,
+            self.perms_item,
             self.logs_item,
             None,  # separator
         ]
@@ -454,6 +466,14 @@ class WearableMenuApp(rumps.App):
 
         # Update device list
         self._rebuild_device_menu(snap["nearby_devices"], snap["connected_device"])
+
+        # Update screen-capture toggle label
+        cap = self.capture.stats.snapshot()
+        if cap["running"]:
+            suffix = f" ({cap['frames']} frames)" if cap["frames"] else ""
+            self.capture_item.title = f"Screen Capture: On{suffix}"
+        else:
+            self.capture_item.title = "Screen Capture: Off"
 
     def _rebuild_device_menu(
         self, devices: list[dict], connected: Optional[dict]
@@ -511,6 +531,23 @@ class WearableMenuApp(rumps.App):
         logger.info("User requested disconnect")
         self.ble.request_disconnect()
 
+    def on_toggle_capture(self, _sender) -> None:
+        """Handle 'Screen Capture' toggle click."""
+        running = self.capture.toggle()
+        logger.info("User toggled screen capture -> %s", "On" if running else "Off")
+
+    def on_grant_permissions(self, _sender) -> None:
+        """Trigger the Screen Recording + Accessibility TCC prompts."""
+        logger.info("User requested capture permissions")
+        status = request_permissions()
+        rumps.notification(
+            "Chronicle — Capture Permissions",
+            "",
+            f"Screen Recording: {'granted' if status['screen_recording'] else 'NOT granted'}  •  "
+            f"Accessibility: {'granted' if status['accessibility'] else 'NOT granted'}. "
+            "Approve in System Settings → Privacy & Security if needed, then restart.",
+        )
+
     def on_view_logs(self, _sender) -> None:
         """Show recent log output in a scrollable dialog."""
         _show_logs_dialog("Chronicle Wearable — Logs", list(log_buffer.lines))
@@ -539,5 +576,8 @@ def run_menu_app() -> None:
     ble = BLEManager(state, bg)
     ble.start_scanning()
 
-    app = WearableMenuApp(state, ble)
+    # Screen + accessibility capture (starts disabled; toggle from the menu)
+    capture = ScreenCaptureManager()
+
+    app = WearableMenuApp(state, ble, capture)
     app.run()

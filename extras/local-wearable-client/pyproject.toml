@@ -11,6 +11,8 @@ dependencies = [
     "websockets",
     "pyyaml",
     "rumps",
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-ApplicationServices>=10.0; sys_platform == 'darwin'",
 ]
 
 [tool.uv.sources]
