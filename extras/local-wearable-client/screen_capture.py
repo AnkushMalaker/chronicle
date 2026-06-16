@@ -7,7 +7,8 @@ where `i` is the display index — `_0` is the main display) and the
 focused-window info is logged.
 
 Everything here is pure PyObjC — no Swift. It uses:
-  - Quartz CoreGraphics (`CGDisplayCreateImage`) for the screenshot
+  - ScreenCaptureKit (`SCScreenshotManager`) for the screenshot, falling back to
+    the deprecated Quartz `CGDisplayCreateImage` on macOS < 14
   - AppKit `NSBitmapImageRep` for JPEG encoding
   - `NSWorkspace` + the Accessibility API (`AXUIElement*`) for focused-window info
 
@@ -44,7 +45,10 @@ from ApplicationServices import (
     kAXErrorSuccess,
 )
 from Quartz import (
+    CGDisplayCopyDisplayMode,
     CGDisplayCreateImage,
+    CGDisplayModeGetPixelHeight,
+    CGDisplayModeGetPixelWidth,
     CGGetActiveDisplayList,
     CGImageGetHeight,
     CGImageGetWidth,
@@ -52,6 +56,24 @@ from Quartz import (
     CGPreflightScreenCaptureAccess,
     CGRequestScreenCaptureAccess,
 )
+
+# ScreenCaptureKit (macOS 12.3+, SCScreenshotManager needs 14.0+) is the modern
+# replacement for the deprecated CGDisplayCreateImage. Import is optional so the
+# module still loads (and falls back to CoreGraphics) on older systems.
+try:
+    from ScreenCaptureKit import (
+        SCContentFilter,
+        SCScreenshotManager,
+        SCShareableContent,
+        SCStreamConfiguration,
+    )
+
+    _SCK_OK = True
+except Exception:  # pragma: no cover - depends on macOS version
+    SCContentFilter = SCScreenshotManager = SCShareableContent = (
+        SCStreamConfiguration
+    ) = None
+    _SCK_OK = False
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +182,18 @@ def read_focused_window() -> dict:
 # --- Screenshot --------------------------------------------------------------
 
 
+def _encode_cgimage_jpeg(cg_image, quality: float) -> Optional[tuple]:
+    """Encode a CGImage to (jpeg_bytes, width, height) via NSBitmapImageRep."""
+    width = CGImageGetWidth(cg_image)
+    height = CGImageGetHeight(cg_image)
+    rep = NSBitmapImageRep.alloc().initWithCGImage_(cg_image)
+    props = {NSImageCompressionFactor: float(quality)}
+    data = rep.representationUsingType_properties_(_JPEG_TYPE, props)
+    if data is None:
+        return None
+    return bytes(data), int(width), int(height)
+
+
 def list_active_displays(max_displays: int = 16) -> list:
     """Return the active display IDs. Index 0 is the main display (the one with
     the menu bar). Falls back to [main display] if enumeration fails."""
@@ -169,24 +203,134 @@ def list_active_displays(max_displays: int = 16) -> list:
     return list(displays[:count])
 
 
-def capture_display_jpeg(display_id, quality: float = 0.6) -> Optional[tuple]:
-    """Capture a single display and return (jpeg_bytes, width, height).
-
-    Returns None if the capture failed (typically: Screen Recording not granted,
-    which yields a null image)."""
-    cg_image = CGDisplayCreateImage(display_id)
-    if cg_image is None:
+def _display_pixel_size(display_id) -> Optional[tuple]:
+    """Native pixel dimensions of a display (handles Retina backing scale)."""
+    mode = CGDisplayCopyDisplayMode(display_id)
+    if mode is None:
         return None
+    return CGDisplayModeGetPixelWidth(mode), CGDisplayModeGetPixelHeight(mode)
 
-    width = CGImageGetWidth(cg_image)
-    height = CGImageGetHeight(cg_image)
 
-    rep = NSBitmapImageRep.alloc().initWithCGImage_(cg_image)
-    props = {NSImageCompressionFactor: float(quality)}
-    data = rep.representationUsingType_properties_(_JPEG_TYPE, props)
-    if data is None:
+class _CaptureBackend:
+    """Returns one (index, jpeg_bytes|None, width, height) tuple per display."""
+
+    name = "base"
+
+    def grab(self, quality: float) -> list:
+        raise NotImplementedError
+
+
+class CoreGraphicsBackend(_CaptureBackend):
+    """Legacy path: CGDisplayCreateImage (deprecated on macOS 14+ but works)."""
+
+    name = "coregraphics"
+
+    def grab(self, quality: float) -> list:
+        out = []
+        for i, display_id in enumerate(list_active_displays()):
+            cg_image = CGDisplayCreateImage(display_id)
+            if cg_image is None:
+                out.append((i, None, 0, 0))
+                continue
+            enc = _encode_cgimage_jpeg(cg_image, quality)
+            if enc is None:
+                out.append((i, None, 0, 0))
+            else:
+                out.append((i, enc[0], enc[1], enc[2]))
+        return out
+
+
+def _sck_shareable_content(timeout: float = 5.0):
+    """Synchronously fetch SCShareableContent (wraps the async completion API)."""
+    box = {}
+    done = threading.Event()
+
+    def handler(content, error):
+        box["content"] = content
+        box["error"] = error
+        done.set()
+
+    SCShareableContent.getShareableContentWithCompletionHandler_(handler)
+    if not done.wait(timeout):
         return None
-    return bytes(data), int(width), int(height)
+    if box.get("error") is not None:
+        logger.warning("SCShareableContent error: %s", box["error"])
+        return None
+    return box.get("content")
+
+
+def _sck_capture_cgimage(content_filter, config, timeout: float = 5.0):
+    """Synchronously capture one CGImage via SCScreenshotManager."""
+    box = {}
+    done = threading.Event()
+
+    def handler(image, error):
+        box["image"] = image
+        box["error"] = error
+        done.set()
+
+    SCScreenshotManager.captureImageWithFilter_configuration_completionHandler_(
+        content_filter, config, handler
+    )
+    if not done.wait(timeout):
+        return None
+    if box.get("error") is not None:
+        logger.warning("SCScreenshotManager error: %s", box["error"])
+        return None
+    return box.get("image")
+
+
+class ScreenCaptureKitBackend(_CaptureBackend):
+    """Modern path: ScreenCaptureKit. Caches the display list and refreshes it
+    periodically so monitor hot-plugs are picked up without a fetch every tick."""
+
+    name = "screencapturekit"
+
+    def __init__(self, refresh_every: int = 30) -> None:
+        self._refresh_every = max(1, refresh_every)
+        self._displays: list = []
+        self._tick = 0
+
+    def _displays_now(self) -> list:
+        if not self._displays or self._tick % self._refresh_every == 0:
+            content = _sck_shareable_content()
+            if content is not None:
+                self._displays = list(content.displays())
+        self._tick += 1
+        return self._displays
+
+    def grab(self, quality: float) -> list:
+        out = []
+        for i, disp in enumerate(self._displays_now()):
+            px = _display_pixel_size(disp.displayID()) or (
+                int(disp.width()),
+                int(disp.height()),
+            )
+            config = SCStreamConfiguration.alloc().init()
+            config.setWidth_(px[0])
+            config.setHeight_(px[1])
+            config.setShowsCursor_(True)
+            content_filter = SCContentFilter.alloc().initWithDisplay_excludingWindows_(
+                disp, []
+            )
+            cg_image = _sck_capture_cgimage(content_filter, config)
+            if cg_image is None:
+                out.append((i, None, 0, 0))
+                continue
+            enc = _encode_cgimage_jpeg(cg_image, quality)
+            if enc is None:
+                out.append((i, None, 0, 0))
+            else:
+                out.append((i, enc[0], enc[1], enc[2]))
+        return out
+
+
+def make_backend() -> _CaptureBackend:
+    """Pick the best available capture backend for this macOS version."""
+    if _SCK_OK:
+        return ScreenCaptureKitBackend()
+    logger.info("ScreenCaptureKit unavailable — using CoreGraphics fallback")
+    return CoreGraphicsBackend()
 
 
 def _frame_path(base_dir: Path, ts: _dt.datetime, screen_index: int) -> Path:
@@ -239,11 +383,13 @@ class ScreenCaptureManager:
         interval: float = 1.0,
         quality: float = 0.6,
         write_frames: bool = True,
+        backend: Optional[_CaptureBackend] = None,
     ) -> None:
         self.capture_dir = Path(capture_dir)
         self.interval = interval
         self.quality = quality
         self.write_frames = write_frames
+        self.backend = backend or make_backend()
         self.stats = CaptureStats()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -265,7 +411,11 @@ class ScreenCaptureManager:
                 "Accessibility not granted — window titles will be unavailable."
             )
         self.capture_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("Screen capture starting — frames -> %s", self.capture_dir)
+        logger.info(
+            "Screen capture starting (%s backend) — frames -> %s",
+            self.backend.name,
+            self.capture_dir,
+        )
         self._stop.clear()
         self.stats.update(running=True, last_error=None)
         self._thread = threading.Thread(
@@ -308,14 +458,12 @@ class ScreenCaptureManager:
     def _capture_once(self) -> None:
         ts = _dt.datetime.now()
         win = read_focused_window()
-        displays = list_active_displays()
 
         # A "frame" is one tick; each tick writes one JPEG per display (_i suffix).
         tick = self.stats.snapshot()["frames"] + 1
         captured = 0
-        for i, display_id in enumerate(displays):
-            result = capture_display_jpeg(display_id, self.quality)
-            if result is None:
+        for i, jpeg, width, height in self.backend.grab(self.quality):
+            if jpeg is None:
                 self.stats.update(
                     errors=self.stats.snapshot()["errors"] + 1,
                     last_error="null image (Screen Recording not granted?)",
@@ -325,7 +473,6 @@ class ScreenCaptureManager:
                 )
                 continue
 
-            jpeg, width, height = result
             if self.write_frames:
                 _frame_path(self.capture_dir, ts, i).write_bytes(jpeg)
             captured += 1
