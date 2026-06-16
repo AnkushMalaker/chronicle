@@ -1,8 +1,10 @@
 """macOS screen + accessibility capture (stage 1).
 
-Captures a full-display screenshot once per second and, for each frame, reads
-the currently focused window's app/title via the Accessibility API. Frames are
-written as JPEGs to a local folder and the focused-window info is logged.
+Captures a screenshot of every active display once per second and, for each
+tick, reads the currently focused window's app/title via the Accessibility API.
+Frames are written as JPEGs to a local folder (one per screen, suffixed `_i`
+where `i` is the display index — `_0` is the main display) and the
+focused-window info is logged.
 
 Everything here is pure PyObjC — no Swift. It uses:
   - Quartz CoreGraphics (`CGDisplayCreateImage`) for the screenshot
@@ -43,6 +45,7 @@ from ApplicationServices import (
 )
 from Quartz import (
     CGDisplayCreateImage,
+    CGGetActiveDisplayList,
     CGImageGetHeight,
     CGImageGetWidth,
     CGMainDisplayID,
@@ -157,12 +160,21 @@ def read_focused_window() -> dict:
 # --- Screenshot --------------------------------------------------------------
 
 
-def capture_main_display_jpeg(quality: float = 0.6) -> Optional[tuple]:
-    """Capture the main display and return (jpeg_bytes, width, height).
+def list_active_displays(max_displays: int = 16) -> list:
+    """Return the active display IDs. Index 0 is the main display (the one with
+    the menu bar). Falls back to [main display] if enumeration fails."""
+    err, displays, count = CGGetActiveDisplayList(max_displays, None, None)
+    if err != 0 or not displays:
+        return [CGMainDisplayID()]
+    return list(displays[:count])
+
+
+def capture_display_jpeg(display_id, quality: float = 0.6) -> Optional[tuple]:
+    """Capture a single display and return (jpeg_bytes, width, height).
 
     Returns None if the capture failed (typically: Screen Recording not granted,
     which yields a null image)."""
-    cg_image = CGDisplayCreateImage(CGMainDisplayID())
+    cg_image = CGDisplayCreateImage(display_id)
     if cg_image is None:
         return None
 
@@ -177,10 +189,11 @@ def capture_main_display_jpeg(quality: float = 0.6) -> Optional[tuple]:
     return bytes(data), int(width), int(height)
 
 
-def _frame_path(base_dir: Path, ts: _dt.datetime) -> Path:
+def _frame_path(base_dir: Path, ts: _dt.datetime, screen_index: int) -> Path:
     day_dir = base_dir / ts.strftime("%Y-%m-%d")
     day_dir.mkdir(parents=True, exist_ok=True)
-    return day_dir / f"{ts.strftime('%H-%M-%S')}_{ts.microsecond // 1000:03d}.jpg"
+    stamp = f"{ts.strftime('%H-%M-%S')}_{ts.microsecond // 1000:03d}"
+    return day_dir / f"{stamp}_{screen_index}.jpg"
 
 
 # --- Capture manager ---------------------------------------------------------
@@ -295,37 +308,45 @@ class ScreenCaptureManager:
     def _capture_once(self) -> None:
         ts = _dt.datetime.now()
         win = read_focused_window()
+        displays = list_active_displays()
 
-        result = capture_main_display_jpeg(self.quality)
-        if result is None:
-            self.stats.update(
-                errors=self.stats.snapshot()["errors"] + 1,
-                last_error="null image (Screen Recording not granted?)",
+        # A "frame" is one tick; each tick writes one JPEG per display (_i suffix).
+        tick = self.stats.snapshot()["frames"] + 1
+        captured = 0
+        for i, display_id in enumerate(displays):
+            result = capture_display_jpeg(display_id, self.quality)
+            if result is None:
+                self.stats.update(
+                    errors=self.stats.snapshot()["errors"] + 1,
+                    last_error="null image (Screen Recording not granted?)",
+                )
+                logger.warning(
+                    "Display %d screenshot returned no image (permission?)", i
+                )
+                continue
+
+            jpeg, width, height = result
+            if self.write_frames:
+                _frame_path(self.capture_dir, ts, i).write_bytes(jpeg)
+            captured += 1
+            logger.info(
+                "tick #%d display %d %dx%d %.0fKB | app=%s window=%s role=%s",
+                tick,
+                i,
+                width,
+                height,
+                len(jpeg) / 1024,
+                win["app"],
+                win["window_title"],
+                win["focused_role"],
             )
-            logger.warning("Screenshot returned no image (permission?)")
-            return
 
-        jpeg, width, height = result
-        if self.write_frames:
-            path = _frame_path(self.capture_dir, ts)
-            path.write_bytes(jpeg)
-
-        snap = self.stats.snapshot()
-        self.stats.update(
-            frames=snap["frames"] + 1,
-            last_app=win["app"],
-            last_window=win["window_title"],
-        )
-        logger.info(
-            "frame #%d %dx%d %.0fKB | app=%s window=%s role=%s",
-            snap["frames"] + 1,
-            width,
-            height,
-            len(jpeg) / 1024,
-            win["app"],
-            win["window_title"],
-            win["focused_role"],
-        )
+        if captured:
+            self.stats.update(
+                frames=tick,
+                last_app=win["app"],
+                last_window=win["window_title"],
+            )
 
 
 # --- Standalone entry point --------------------------------------------------
