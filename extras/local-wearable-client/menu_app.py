@@ -5,8 +5,10 @@ and status display. Runs BLE operations in a background asyncio thread.
 """
 
 import asyncio
+import datetime as _dt
 import logging
 import os
+import subprocess
 import threading
 from collections import deque
 from dataclasses import dataclass, field
@@ -35,6 +37,38 @@ logger = logging.getLogger(__name__)
 # Explicit path (not CWD-relative) so settings persisted by the Capture Settings
 # form are reloaded even when launched under launchd with a different CWD.
 load_dotenv(ENV_PATH)
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _app_version() -> str:
+    """A short identifier of the running source — git short-hash + commit date,
+    so you can confirm at a glance which build the menu bar app is running.
+    Falls back to this file's modification time when git isn't available."""
+    try:
+        out = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                _HERE,
+                "log",
+                "-1",
+                "--format=%h (%cd)",
+                "--date=format:%Y-%m-%d %H:%M",
+            ],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3,
+        ).strip()
+        if out:
+            return out
+    except Exception:
+        pass
+    try:
+        mtime = _dt.datetime.fromtimestamp(os.path.getmtime(__file__))
+        return f"src {mtime:%Y-%m-%d %H:%M}"
+    except Exception:
+        return "unknown"
 
 
 class MemoryLogHandler(logging.Handler):
@@ -544,6 +578,7 @@ class WearableMenuApp(rumps.App):
             "Grant Capture Permissions", callback=self.on_grant_permissions
         )
         self.logs_item = rumps.MenuItem("View Logs", callback=self.on_view_logs)
+        self.version_item = rumps.MenuItem(f"Version: {_app_version()}", callback=None)
 
         self.menu = [
             self.status_item,
@@ -558,6 +593,7 @@ class WearableMenuApp(rumps.App):
             self.perms_item,
             self.logs_item,
             None,  # separator
+            self.version_item,
         ]
         # Disconnect is always clickable — harmless when not connected
 
