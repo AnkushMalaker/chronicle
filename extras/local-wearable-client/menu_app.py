@@ -584,8 +584,22 @@ def run_menu_app() -> None:
     # under the launchd agent: set CAPTURE_AUTOSTART=1, but only begin once Screen
     # Recording is actually granted (otherwise it would log empty frames).
     # CAPTURE_OCR=1 additionally runs Apple Vision OCR on each frame (CPU-heavy).
+    # Storage controls (see CAPTURE.md "Storage"):
+    #   CAPTURE_NO_DEDUP=1        store every frame even if unchanged
+    #   CAPTURE_SKIP_IDLE_SECS=N  skip screenshots while idle >= N s (0 disables)
+    #   CAPTURE_RETENTION_DAYS=N  delete screenshots older than N days (0 = keep)
     capture_ocr = os.getenv("CAPTURE_OCR", "").lower() in ("1", "true", "yes")
-    capture = ScreenCaptureManager(ocr=capture_ocr)
+    capture_dedup = os.getenv("CAPTURE_NO_DEDUP", "").lower() not in (
+        "1",
+        "true",
+        "yes",
+    )
+    capture = ScreenCaptureManager(
+        ocr=capture_ocr,
+        dedup=capture_dedup,
+        skip_idle_secs=float(os.getenv("CAPTURE_SKIP_IDLE_SECS", "90")),
+        retention_days=int(os.getenv("CAPTURE_RETENTION_DAYS", "14")),
+    )
     if os.getenv("CAPTURE_AUTOSTART", "").lower() in ("1", "true", "yes"):
         if screen_recording_ok():
             capture.start()

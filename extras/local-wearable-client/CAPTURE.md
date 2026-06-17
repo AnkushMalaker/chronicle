@@ -34,16 +34,18 @@ One JSON object per tick is appended to `~/ChronicleCaptures/<date>/events.jsonl
   "app": "Cursor", "bundle_id": "com.todesktop...", "pid": 1234,
   "window_title": "screen_capture.py — friend-lite",
   "url": null, "focused_role": "AXTextArea", "focused_subrole": null,
-  "selected_text_len": 0, "idle_seconds": 2.3,
+  "selected_text_len": 0, "idle_seconds": 2.3, "screenshots": "captured",
   "displays": [
-    {"index": 0, "file": "2026-06-17/10-24-28_551_0.jpg", "w": 2560, "h": 1440, "ocr_file": null},
-    {"index": 1, "file": "2026-06-17/10-24-28_551_1.jpg", "w": 3024, "h": 1964, "ocr_file": null}
+    {"index": 0, "file": "2026-06-17/10-24-28_551_0.jpg", "w": 2560, "h": 1440, "ocr_file": null, "changed": true},
+    {"index": 1, "file": "2026-06-17/10-24-28_551_1.jpg", "w": 3024, "h": 1964, "ocr_file": null, "changed": true}
   ]
 }
 ```
 
-`file`/`ocr_file` are relative to the capture dir. Disable the sidecar with
-`--no-events` (standalone) — but then there's nothing to analyze.
+`file`/`ocr_file` are relative to the capture dir. `changed` is false when the
+frame was deduped (file points at the last stored one); `screenshots` is
+`"skipped_idle"` when capture was skipped for idleness (see **Storage**). Disable
+the sidecar with `--no-events` (standalone) — but then there's nothing to analyze.
 
 ## OCR (optional, opt-in)
 
@@ -53,6 +55,55 @@ CPU-heavy at 1 fps, so it's **off by default**.
 
 - Standalone: `uv run python screen_capture.py --ocr`
 - Under the agent: set `CAPTURE_OCR=1` in `.env`
+
+## Storage
+
+At 1 fps × 2 displays × full-res JPEG ≈ **~1 MB/s ≈ ~25 GB/day** — unusable raw.
+The guiding principle: **metadata is cheap, pixels are expensive.** The
+`events.jsonl` timeline (~6 MB/day) is the system of record for analytics and is
+**kept forever**; only the screenshots are managed, by three simple rules:
+
+1. **Dedup identical frames.** Each frame is SHA-1 hashed; if it matches the last
+   stored frame for that display, no new file is written — the event reuses the
+   previous file and marks `"changed": false`. Static screens (reading, meetings,
+   AFK with a still mouse) cost ~nothing.
+2. **Skip while idle.** After no input for `CAPTURE_SKIP_IDLE_SECS` (default 90s),
+   screenshots are skipped entirely; the event is still logged
+   (`"screenshots": "skipped_idle"`) so the timeline stays continuous.
+3. **Delete old screenshots.** A sweep on start + hourly removes `.jpg`/`.txt`
+   older than `CAPTURE_RETENTION_DAYS` (default 14). `events.jsonl` is never deleted.
+
+| Env (agent) | Flag (standalone) | Default | Meaning |
+|-------------|-------------------|---------|---------|
+| `CAPTURE_NO_DEDUP=1` | `--no-dedup` | off | store every frame, even unchanged |
+| `CAPTURE_SKIP_IDLE_SECS` | `--skip-idle` | 90 | skip screenshots while idle ≥ N s (0 disables) |
+| `CAPTURE_RETENTION_DAYS` | `--retention-days` | 14 | delete screenshots older than N days (0 = keep) |
+
+**Reading it back:** each event's `displays[i].file` always points to a valid
+JPEG — a fresh one, or the last unchanged one. Identical `file` across
+consecutive events means the screen didn't change. So "what was on screen at time
+T" is just that file; dedup is transparent to readers.
+
+### Going further (not implemented)
+
+The big lever during *active* use (every frame differs, so dedup can't help) is
+**inter-frame video encoding** — store frames as an H.264/HEVC chunk instead of
+independent JPEGs so the codec keeps only deltas. That's what Rewind and Omi's
+macOS app do (`VideoChunkEncoder` → `.hevc`) and Screenpipe (ffmpeg → mp4). A
+**perceptual hash** (dHash + Hamming distance) would additionally dedup
+"near-identical" frames (ignoring a blinking cursor or the menu-bar clock) that
+exact SHA-1 misses. Both are larger lifts; the three rules + retention bound disk
+for now.
+
+### References (cloned under `untracked/`, gitignored)
+
+- **ActivityWatch** — open-source activity-timeline tracker. SQLite event store
+  with a "heartbeat" merge model and **no screenshots**; the metadata-first design
+  here mirrors it.
+- **Screenpipe** — open-source 24/7 screen capture + OCR (a Rewind alternative);
+  encodes video and stores OCR/metadata in SQLite.
+- **ManicTime** — commercial (not open source, so not cloned); same split of a
+  forever activity timeline vs. retention-limited screenshots.
 
 ## Analytics
 

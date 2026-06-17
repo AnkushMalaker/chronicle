@@ -27,6 +27,7 @@ Standalone test:
 
 import argparse
 import datetime as _dt
+import hashlib
 import json
 import logging
 import os
@@ -479,6 +480,9 @@ class ScreenCaptureManager:
         write_frames: bool = True,
         write_events: bool = True,
         ocr: bool = False,
+        dedup: bool = True,
+        skip_idle_secs: float = 90.0,
+        retention_days: int = 14,
         backend: Optional[_CaptureBackend] = None,
     ) -> None:
         self.capture_dir = Path(capture_dir)
@@ -487,6 +491,12 @@ class ScreenCaptureManager:
         self.write_frames = write_frames
         self.write_events = write_events
         self.ocr = ocr
+        # --- Storage controls (see CAPTURE.md "Storage") ---
+        self.dedup = dedup  # skip writing frames identical to the last stored one
+        self.skip_idle_secs = skip_idle_secs  # >0: skip screenshots while idle
+        self.retention_days = (
+            retention_days  # delete screenshots older than this (0=keep)
+        )
         self.backend = backend or make_backend()
         self.stats = CaptureStats()
         self._thread: Optional[threading.Thread] = None
@@ -494,6 +504,11 @@ class ScreenCaptureManager:
         # Per-day events.jsonl handle (rotated by date in _append_event).
         self._events_fh = None
         self._events_date: Optional[str] = None
+        # Dedup state per display index: last stored hash / file / ocr_file.
+        self._last_hash: dict = {}
+        self._last_file: dict = {}
+        self._last_ocr: dict = {}
+        self._last_sweep: float = 0.0
 
     @property
     def is_running(self) -> bool:
@@ -513,10 +528,15 @@ class ScreenCaptureManager:
             )
         self.capture_dir.mkdir(parents=True, exist_ok=True)
         logger.info(
-            "Screen capture starting (%s backend) — frames -> %s",
+            "Screen capture starting (%s backend) — frames -> %s "
+            "[dedup=%s skip_idle=%ss retention=%sd]",
             self.backend.name,
             self.capture_dir,
+            self.dedup,
+            self.skip_idle_secs,
+            self.retention_days,
         )
+        self._sweep_retention()
         self._stop.clear()
         self.stats.update(running=True, last_error=None)
         self._thread = threading.Thread(
@@ -558,10 +578,45 @@ class ScreenCaptureManager:
                     )
                     logger.error("Capture iteration failed: %s", e, exc_info=True)
 
+            # Sweep old screenshots roughly hourly.
+            if time.monotonic() - self._last_sweep > 3600:
+                self._sweep_retention()
+
             # Pace to the interval, accounting for capture time.
             elapsed = time.monotonic() - tick
             self._stop.wait(max(0.0, self.interval - elapsed))
         self.stats.update(running=False)
+
+    def _sweep_retention(self) -> None:
+        """Delete screenshots (.jpg) and OCR (.txt) older than retention_days.
+        events.jsonl is always kept — it's tiny and powers analytics."""
+        self._last_sweep = time.monotonic()
+        if self.retention_days <= 0:
+            return
+        cutoff = _dt.date.today() - _dt.timedelta(days=self.retention_days)
+        deleted = 0
+        try:
+            for d in self.capture_dir.iterdir():
+                if not d.is_dir():
+                    continue
+                try:
+                    day = _dt.date.fromisoformat(d.name)
+                except ValueError:
+                    continue
+                if day >= cutoff:
+                    continue
+                for pattern in ("*.jpg", "*.txt"):
+                    for f in d.glob(pattern):
+                        f.unlink(missing_ok=True)
+                        deleted += 1
+        except Exception as e:
+            logger.warning("Retention sweep failed: %s", e)
+        if deleted:
+            logger.info(
+                "Retention: deleted %d screenshot/OCR files older than %d days",
+                deleted,
+                self.retention_days,
+            )
 
     def _append_event(self, ts: _dt.datetime, event: dict) -> None:
         """Append one JSON object (one line) to the per-day events.jsonl."""
@@ -581,58 +636,79 @@ class ScreenCaptureManager:
         win = read_focused_window()
         idle = user_idle_seconds()
 
-        # A "frame" is one tick; each tick writes one JPEG per display (_i suffix).
+        # A "frame" is one tick. Storage controls (see CAPTURE.md "Storage"):
+        #  - skip_idle: while idle >= threshold the screen isn't changing, so
+        #    skip screenshots entirely; still log the event for the timeline.
+        #  - dedup: skip writing a frame identical to the last stored one and
+        #    reuse that file in the event (transparent to readers).
         tick = self.stats.snapshot()["frames"] + 1
+        idle_skip = (
+            self.skip_idle_secs > 0 and idle is not None and idle >= self.skip_idle_secs
+        )
+
         captured = 0
         displays_meta = []
-        for i, jpeg, width, height in self.backend.grab(self.quality):
-            if jpeg is None:
-                self.stats.update(
-                    errors=self.stats.snapshot()["errors"] + 1,
-                    last_error="null image (Screen Recording not granted?)",
+        if not idle_skip:
+            for i, jpeg, width, height in self.backend.grab(self.quality):
+                if jpeg is None:
+                    self.stats.update(
+                        errors=self.stats.snapshot()["errors"] + 1,
+                        last_error="null image (Screen Recording not granted?)",
+                    )
+                    logger.warning(
+                        "Display %d screenshot returned no image (permission?)", i
+                    )
+                    continue
+
+                digest = hashlib.sha1(jpeg).hexdigest()
+                unchanged = self.dedup and self._last_hash.get(i) == digest
+
+                if unchanged:
+                    rel_file = self._last_file.get(i)
+                    ocr_file = self._last_ocr.get(i)
+                else:
+                    frame_p = _frame_path(self.capture_dir, ts, i)
+                    rel_file = None
+                    if self.write_frames:
+                        frame_p.write_bytes(jpeg)
+                        rel_file = str(frame_p.relative_to(self.capture_dir))
+                    ocr_file = None
+                    if self.ocr:
+                        text = ocr_jpeg(jpeg)
+                        if text:
+                            txt_p = frame_p.with_suffix(".txt")
+                            txt_p.write_text(text, encoding="utf-8")
+                            ocr_file = str(txt_p.relative_to(self.capture_dir))
+                    self._last_hash[i] = digest
+                    self._last_file[i] = rel_file
+                    self._last_ocr[i] = ocr_file
+
+                displays_meta.append(
+                    {
+                        "index": i,
+                        "file": rel_file,
+                        "w": width,
+                        "h": height,
+                        "ocr_file": ocr_file,
+                        "changed": not unchanged,
+                    }
                 )
-                logger.warning(
-                    "Display %d screenshot returned no image (permission?)", i
+                captured += 1
+                logger.info(
+                    "tick #%d display %d %dx%d %.0fKB %s | app=%s window=%s",
+                    tick,
+                    i,
+                    width,
+                    height,
+                    len(jpeg) / 1024,
+                    "new" if not unchanged else "dup",
+                    win["app"],
+                    win["window_title"],
                 )
-                continue
 
-            frame_p = _frame_path(self.capture_dir, ts, i)
-            rel_file = None
-            if self.write_frames:
-                frame_p.write_bytes(jpeg)
-                rel_file = str(frame_p.relative_to(self.capture_dir))
-
-            ocr_file = None
-            if self.ocr:
-                text = ocr_jpeg(jpeg)
-                if text:
-                    txt_p = frame_p.with_suffix(".txt")
-                    txt_p.write_text(text, encoding="utf-8")
-                    ocr_file = str(txt_p.relative_to(self.capture_dir))
-
-            displays_meta.append(
-                {
-                    "index": i,
-                    "file": rel_file,
-                    "w": width,
-                    "h": height,
-                    "ocr_file": ocr_file,
-                }
-            )
-            captured += 1
-            logger.info(
-                "tick #%d display %d %dx%d %.0fKB | app=%s window=%s role=%s",
-                tick,
-                i,
-                width,
-                height,
-                len(jpeg) / 1024,
-                win["app"],
-                win["window_title"],
-                win["focused_role"],
-            )
-
-        if not captured:
+        # A genuine capture failure (no idle-skip but nothing captured) is an
+        # error state — don't log a misleading event.
+        if not idle_skip and captured == 0:
             return
 
         self.stats.update(
@@ -654,6 +730,7 @@ class ScreenCaptureManager:
                 "focused_subrole": win["focused_subrole"],
                 "selected_text_len": win["selected_text_len"],
                 "idle_seconds": round(idle, 1) if idle is not None else None,
+                "screenshots": "skipped_idle" if idle_skip else "captured",
                 "displays": displays_meta,
             }
             try:
@@ -685,6 +762,23 @@ def _main() -> None:
         help="run Apple Vision OCR on each frame (writes .txt sidecars; CPU-heavy)",
     )
     parser.add_argument(
+        "--no-dedup",
+        action="store_true",
+        help="store every frame even if identical to the last (default: dedup)",
+    )
+    parser.add_argument(
+        "--skip-idle",
+        type=float,
+        default=90.0,
+        help="skip screenshots while idle >= N seconds (0 disables; default 90)",
+    )
+    parser.add_argument(
+        "--retention-days",
+        type=int,
+        default=14,
+        help="delete screenshots older than N days (0 = keep forever; default 14)",
+    )
+    parser.add_argument(
         "--dir", default=str(DEFAULT_CAPTURE_DIR), help="output directory for frames"
     )
     args = parser.parse_args()
@@ -711,6 +805,9 @@ def _main() -> None:
         write_frames=not args.no_write,
         write_events=not args.no_events,
         ocr=args.ocr,
+        dedup=not args.no_dedup,
+        skip_idle_secs=args.skip_idle,
+        retention_days=args.retention_days,
     )
     if args.ocr and not _VISION_OK:
         logger.warning("--ocr requested but pyobjc-framework-Vision not available")
