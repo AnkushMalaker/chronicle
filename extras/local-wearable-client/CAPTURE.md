@@ -44,13 +44,34 @@ uv run python screen_capture.py --seconds 5      # writes frames, logs focused w
 uv run python screen_capture.py --no-write       # log AX info only
 ```
 
+### "user declined TCCs" / no Screen Recording prompt
+
+If you see `SCStreamErrorDomain Code=-3801 "The user declined TCCs"` (or
+`screen_recording=False` with no prompt), macOS has a cached **denial** for the
+host process (your terminal/interpreter) and won't re-prompt. Either:
+
+- Add your terminal app under System Settings → Privacy & Security →
+  **Screen Recording**, toggle it on, then **fully quit and reopen** the terminal; or
+- Reset the cached decision and re-run to get a fresh prompt:
+  ```bash
+  tccutil reset ScreenCapture
+  uv run python screen_capture.py --seconds 5
+  ```
+
+This terminal-identity flakiness is exactly what the `.app` bundle below fixes —
+build it and grant Screen Recording to the app instead.
+
 ## Building the .app (stable permissions)
 
 ```bash
 ./build_app.sh                       # ad-hoc signed (grants reset on each rebuild)
 CODESIGN_ID="Chronicle Dev" ./build_app.sh   # self-signed cert -> grants persist
-open "dist/Chronicle Wearable.app"
+open "bundle/dist/Chronicle Wearable.app"
 ```
+
+The build runs from the `bundle/` subdir (`bundle/setup_app.py`) — that dir has
+no `pyproject.toml`, which is required because py2app errors on this package's
+PEP 621 dependencies. Output lands in `bundle/dist/`.
 
 To make grants survive rebuilds, create a self-signed **Code Signing**
 certificate (Keychain Access → Certificate Assistant → Create a Certificate →

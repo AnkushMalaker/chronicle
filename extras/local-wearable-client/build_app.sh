@@ -14,7 +14,8 @@
 #
 # Without CODESIGN_ID it falls back to ad-hoc signing (fine for a one-off test).
 set -euo pipefail
-cd "$(dirname "$0")"
+# Build from the isolated bundle/ dir (no pyproject.toml there -> py2app is happy).
+cd "$(dirname "$0")/bundle"
 
 APP_NAME="Chronicle Wearable.app"
 SIGN_ID="${CODESIGN_ID:--}"   # default: ad-hoc
@@ -25,12 +26,18 @@ rm -rf build dist
 echo "==> Building with py2app"
 uv run --with py2app python setup_app.py py2app
 
+# py2app names the bundle after the script (menu_app.app); give it a friendly name.
+if [ -d "dist/menu_app.app" ]; then
+  rm -rf "dist/${APP_NAME}"
+  mv "dist/menu_app.app" "dist/${APP_NAME}"
+fi
+
 echo "==> Code-signing (identity: ${SIGN_ID})"
 codesign --force --deep --sign "${SIGN_ID}" "dist/${APP_NAME}"
 
 echo
-echo "Built: dist/${APP_NAME}"
-echo "Run:   open \"dist/${APP_NAME}\""
+echo "Built: extras/local-wearable-client/bundle/dist/${APP_NAME}"
+echo "Run:   open \"bundle/dist/${APP_NAME}\""
 echo
 echo "First launch will prompt for Screen Recording (re-open the app once after"
 echo "approving) and you must toggle Accessibility on manually in"
