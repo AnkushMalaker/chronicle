@@ -48,6 +48,11 @@ from ApplicationServices import (
 )
 from Foundation import NSData
 from Quartz import (
+    CGBitmapContextCreate,
+    CGBitmapContextCreateImage,
+    CGColorSpaceCreateDeviceRGB,
+    CGContextDrawImage,
+    CGContextSetInterpolationQuality,
     CGDisplayCopyDisplayMode,
     CGDisplayCreateImage,
     CGDisplayModeGetPixelHeight,
@@ -57,7 +62,11 @@ from Quartz import (
     CGImageGetWidth,
     CGMainDisplayID,
     CGPreflightScreenCaptureAccess,
+    CGRectMake,
     CGRequestScreenCaptureAccess,
+    kCGImageAlphaPremultipliedLast,
+    kCGInterpolationHigh,
+    kCGInterpolationLow,
 )
 
 # ScreenCaptureKit (macOS 12.3+, SCScreenshotManager needs 14.0+) is the modern
@@ -311,6 +320,50 @@ def _encode_cgimage_jpeg(cg_image, quality: float) -> Optional[tuple]:
     return bytes(data), int(width), int(height)
 
 
+def _scaled_cgimage(cg_image, target_w: int, target_h: int, interpolation):
+    """Return a CGImage redrawn at target_w x target_h, or None on failure."""
+    target_w = max(1, int(target_w))
+    target_h = max(1, int(target_h))
+    color_space = CGColorSpaceCreateDeviceRGB()
+    # data=None lets CoreGraphics allocate; bytesPerRow=0 lets it pick the stride.
+    ctx = CGBitmapContextCreate(
+        None, target_w, target_h, 8, 0, color_space, kCGImageAlphaPremultipliedLast
+    )
+    if ctx is None:
+        return None
+    CGContextSetInterpolationQuality(ctx, interpolation)
+    CGContextDrawImage(ctx, CGRectMake(0, 0, target_w, target_h), cg_image)
+    return CGBitmapContextCreateImage(ctx)
+
+
+def _thumb_hash(cg_image, thumb_max: int) -> Optional[str]:
+    """SHA-1 of a small downscaled thumbnail of the image. Hashing a thumbnail
+    (rather than the full-res JPEG) is cheap and ignores trivial pixel noise, so
+    near-identical frames dedup reliably. Returns None if scaling fails."""
+    src_w = CGImageGetWidth(cg_image)
+    src_h = CGImageGetHeight(cg_image)
+    if src_w == 0 or src_h == 0:
+        return None
+    scale = min(1.0, thumb_max / float(max(src_w, src_h)))
+    thumb = _scaled_cgimage(cg_image, src_w * scale, src_h * scale, kCGInterpolationLow)
+    if thumb is None:
+        return None
+    enc = _encode_cgimage_jpeg(thumb, 0.4)
+    if enc is None:
+        return None
+    return hashlib.sha1(enc[0]).hexdigest()
+
+
+def _finish_frame(cg_image, quality: float, thumb_max: int) -> Optional[tuple]:
+    """Encode a (already scaled) CGImage and compute its dedup hash.
+    Returns (jpeg_bytes, width, height, thumb_hash) or None."""
+    enc = _encode_cgimage_jpeg(cg_image, quality)
+    if enc is None:
+        return None
+    jpeg, width, height = enc
+    return jpeg, width, height, _thumb_hash(cg_image, thumb_max)
+
+
 def list_active_displays(max_displays: int = 16) -> list:
     """Return the active display IDs. Index 0 is the main display (the one with
     the menu bar). Falls back to [main display] if enumeration fails."""
@@ -329,31 +382,40 @@ def _display_pixel_size(display_id) -> Optional[tuple]:
 
 
 class _CaptureBackend:
-    """Returns one (index, jpeg_bytes|None, width, height) tuple per display."""
+    """Returns one (index, jpeg_bytes|None, width, height, thumb_hash) tuple per
+    display. Frames are saved at ``scale`` of native resolution; ``thumb_max`` is
+    the max dimension of the thumbnail used for the dedup hash."""
 
     name = "base"
 
-    def grab(self, quality: float) -> list:
+    def grab(self, quality: float, scale: float, thumb_max: int) -> list:
         raise NotImplementedError
 
 
 class CoreGraphicsBackend(_CaptureBackend):
-    """Legacy path: CGDisplayCreateImage (deprecated on macOS 14+ but works)."""
+    """Legacy path: CGDisplayCreateImage (deprecated on macOS 14+ but works).
+    Captures at native resolution, then downscales to ``scale`` before encoding."""
 
     name = "coregraphics"
 
-    def grab(self, quality: float) -> list:
+    def grab(self, quality: float, scale: float, thumb_max: int) -> list:
         out = []
         for i, display_id in enumerate(list_active_displays()):
             cg_image = CGDisplayCreateImage(display_id)
             if cg_image is None:
-                out.append((i, None, 0, 0))
+                out.append((i, None, 0, 0, None))
                 continue
-            enc = _encode_cgimage_jpeg(cg_image, quality)
-            if enc is None:
-                out.append((i, None, 0, 0))
-            else:
-                out.append((i, enc[0], enc[1], enc[2]))
+            if scale < 1.0:
+                scaled = _scaled_cgimage(
+                    cg_image,
+                    CGImageGetWidth(cg_image) * scale,
+                    CGImageGetHeight(cg_image) * scale,
+                    kCGInterpolationHigh,
+                )
+                if scaled is not None:
+                    cg_image = scaled
+            enc = _finish_frame(cg_image, quality, thumb_max)
+            out.append((i, *enc) if enc else (i, None, 0, 0, None))
         return out
 
 
@@ -416,7 +478,7 @@ class ScreenCaptureKitBackend(_CaptureBackend):
         self._tick += 1
         return self._displays
 
-    def grab(self, quality: float) -> list:
+    def grab(self, quality: float, scale: float, thumb_max: int) -> list:
         out = []
         for i, disp in enumerate(self._displays_now()):
             px = _display_pixel_size(disp.displayID()) or (
@@ -424,21 +486,20 @@ class ScreenCaptureKitBackend(_CaptureBackend):
                 int(disp.height()),
             )
             config = SCStreamConfiguration.alloc().init()
-            config.setWidth_(px[0])
-            config.setHeight_(px[1])
+            # Capture directly at the target (scaled) resolution — ScreenCaptureKit
+            # downscales in the compositor, so we never produce the full-res bitmap.
+            config.setWidth_(max(1, int(px[0] * scale)))
+            config.setHeight_(max(1, int(px[1] * scale)))
             config.setShowsCursor_(True)
             content_filter = SCContentFilter.alloc().initWithDisplay_excludingWindows_(
                 disp, []
             )
             cg_image = _sck_capture_cgimage(content_filter, config)
             if cg_image is None:
-                out.append((i, None, 0, 0))
+                out.append((i, None, 0, 0, None))
                 continue
-            enc = _encode_cgimage_jpeg(cg_image, quality)
-            if enc is None:
-                out.append((i, None, 0, 0))
-            else:
-                out.append((i, enc[0], enc[1], enc[2]))
+            enc = _finish_frame(cg_image, quality, thumb_max)
+            out.append((i, *enc) if enc else (i, None, 0, 0, None))
         return out
 
 
@@ -505,6 +566,8 @@ class ScreenCaptureManager:
         dedup: bool = True,
         skip_idle_secs: float = 90.0,
         retention_days: int = 14,
+        save_scale: float = 0.5,
+        thumb_max: int = 256,
         backend: Optional[_CaptureBackend] = None,
     ) -> None:
         self.capture_dir = Path(capture_dir)
@@ -513,6 +576,11 @@ class ScreenCaptureManager:
         self.write_frames = write_frames
         self.write_events = write_events
         self.ocr = ocr
+        # Fraction of native resolution to save frames at (0.5 = half res); full
+        # res is ~1.4MB/frame, half res is roughly a quarter of that.
+        self.save_scale = max(0.05, min(1.0, save_scale))
+        # Max dimension of the thumbnail used for the dedup hash.
+        self.thumb_max = max(16, int(thumb_max))
         # --- Storage controls (see CAPTURE.md "Storage") ---
         self.dedup = dedup  # skip writing frames identical to the last stored one
         self.skip_idle_secs = skip_idle_secs  # >0: skip screenshots while idle
@@ -677,7 +745,9 @@ class ScreenCaptureManager:
         captured = 0
         displays_meta = []
         if skip_reason is None:
-            for i, jpeg, width, height in self.backend.grab(self.quality):
+            for i, jpeg, width, height, phash in self.backend.grab(
+                self.quality, self.save_scale, self.thumb_max
+            ):
                 if jpeg is None:
                     self.stats.update(
                         errors=self.stats.snapshot()["errors"] + 1,
@@ -688,7 +758,9 @@ class ScreenCaptureManager:
                     )
                     continue
 
-                digest = hashlib.sha1(jpeg).hexdigest()
+                # Dedup on a downscaled-thumbnail hash (fall back to the full
+                # frame if thumbnailing failed, so we never falsely dedup).
+                digest = phash or hashlib.sha1(jpeg).hexdigest()
                 unchanged = self.dedup and self._last_hash.get(i) == digest
 
                 if unchanged:
@@ -807,6 +879,18 @@ def _main() -> None:
         help="delete screenshots older than N days (0 = keep forever; default 14)",
     )
     parser.add_argument(
+        "--scale",
+        type=float,
+        default=0.5,
+        help="save frames at this fraction of native resolution (default 0.5 = half)",
+    )
+    parser.add_argument(
+        "--thumb-max",
+        type=int,
+        default=256,
+        help="max dimension of the thumbnail used for the dedup hash (default 256)",
+    )
+    parser.add_argument(
         "--dir", default=str(DEFAULT_CAPTURE_DIR), help="output directory for frames"
     )
     args = parser.parse_args()
@@ -836,6 +920,8 @@ def _main() -> None:
         dedup=not args.no_dedup,
         skip_idle_secs=args.skip_idle,
         retention_days=args.retention_days,
+        save_scale=args.scale,
+        thumb_max=args.thumb_max,
     )
     if args.ocr and not _VISION_OK:
         logger.warning("--ocr requested but pyobjc-framework-Vision not available")

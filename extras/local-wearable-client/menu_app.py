@@ -18,6 +18,7 @@ from bleak import BleakScanner
 from dotenv import load_dotenv
 from main import (
     CONFIG_PATH,
+    ENV_PATH,
     check_config,
     connect_and_stream,
     detect_device_type,
@@ -31,7 +32,9 @@ from screen_capture import (
 
 logger = logging.getLogger(__name__)
 
-load_dotenv()
+# Explicit path (not CWD-relative) so settings persisted by the Capture Settings
+# form are reloaded even when launched under launchd with a different CWD.
+load_dotenv(ENV_PATH)
 
 
 class MemoryLogHandler(logging.Handler):
@@ -96,6 +99,128 @@ def _show_logs_dialog(title: str, lines) -> None:
     alert.addButtonWithTitle_("Close")
     alert.setAccessoryView_(scroll)
     alert.runModal()
+
+
+# Capture-settings form: (attr on manager, .env key, label, kind). For booleans,
+# ``invert`` means the .env key stores the negated value (CAPTURE_NO_DEDUP).
+_SETTINGS_FIELDS = [
+    ("save_scale", "CAPTURE_SCALE", "Save resolution (0.05–1.0):", "float", False),
+    (
+        "skip_idle_secs",
+        "CAPTURE_SKIP_IDLE_SECS",
+        "Skip while idle ≥ (sec, 0=off):",
+        "float",
+        False,
+    ),
+    (
+        "retention_days",
+        "CAPTURE_RETENTION_DAYS",
+        "Delete after (days, 0=keep):",
+        "int",
+        False,
+    ),
+    ("thumb_max", "CAPTURE_THUMB_MAX", "Dedup hash thumbnail (px):", "int", False),
+    ("dedup", "CAPTURE_NO_DEDUP", "Dedup identical frames", "bool", True),
+    ("ocr", "CAPTURE_OCR", "Run OCR on each frame (CPU-heavy)", "bool", False),
+]
+
+
+def _show_settings_dialog(capture, env_path: str) -> bool:
+    """Show the capture-settings form. On Save, validates, applies changes live to
+    the running ``capture`` manager, and persists them to ``env_path`` (.env) so
+    they survive a restart. Returns True if saved, False if cancelled/invalid."""
+    from AppKit import NSAlert, NSButton, NSSwitchButton, NSTextField, NSView
+    from dotenv import set_key
+    from Foundation import NSMakeRect
+
+    row_h, label_w, field_w, pad = 30, 230, 110, 10
+    width = label_w + field_w + 3 * pad
+    height = len(_SETTINGS_FIELDS) * row_h
+
+    view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
+    widgets = {}
+    for i, (attr, _key, label, kind, _inv) in enumerate(_SETTINGS_FIELDS):
+        # Rows top-to-bottom (AppKit origin is bottom-left).
+        y = height - (i + 1) * row_h
+        current = getattr(capture, attr)
+        if kind == "bool":
+            box = NSButton.alloc().initWithFrame_(
+                NSMakeRect(pad, y, width - 2 * pad, row_h - 6)
+            )
+            box.setButtonType_(NSSwitchButton)
+            box.setTitle_(label)
+            box.setState_(1 if current else 0)
+            view.addSubview_(box)
+            widgets[attr] = box
+        else:
+            lbl = NSTextField.alloc().initWithFrame_(
+                NSMakeRect(pad, y, label_w, row_h - 6)
+            )
+            lbl.setStringValue_(label)
+            lbl.setBezeled_(False)
+            lbl.setDrawsBackground_(False)
+            lbl.setEditable_(False)
+            lbl.setSelectable_(False)
+            view.addSubview_(lbl)
+            fld = NSTextField.alloc().initWithFrame_(
+                NSMakeRect(label_w + 2 * pad, y, field_w, row_h - 6)
+            )
+            txt = f"{current:g}" if kind == "float" else str(int(current))
+            fld.setStringValue_(txt)
+            view.addSubview_(fld)
+            widgets[attr] = fld
+
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_("Capture Settings")
+    alert.setInformativeText_("Changes apply immediately and persist across restarts.")
+    alert.addButtonWithTitle_("Save")
+    alert.addButtonWithTitle_("Cancel")
+    alert.setAccessoryView_(view)
+    if alert.runModal() != 1000:  # NSAlertFirstButtonReturn == Save
+        return False
+
+    # Parse + validate before applying anything.
+    parsed = {}
+    for attr, _key, label, kind, _inv in _SETTINGS_FIELDS:
+        w = widgets[attr]
+        if kind == "bool":
+            parsed[attr] = bool(w.state())
+            continue
+        raw = str(w.stringValue()).strip()
+        try:
+            val = float(raw) if kind == "float" else int(raw)
+        except ValueError:
+            rumps.notification(
+                "Chronicle — Capture Settings",
+                "",
+                f"Invalid value for “{label.rstrip(':')}”: {raw!r}",
+            )
+            return False
+        parsed[attr] = val
+
+    # Clamp to sane ranges.
+    parsed["save_scale"] = max(0.05, min(1.0, parsed["save_scale"]))
+    parsed["skip_idle_secs"] = max(0.0, parsed["skip_idle_secs"])
+    parsed["retention_days"] = max(0, parsed["retention_days"])
+    parsed["thumb_max"] = max(16, parsed["thumb_max"])
+
+    # Apply live (the capture loop reads these attributes each tick) + persist.
+    for attr, key, _label, kind, invert in _SETTINGS_FIELDS:
+        val = parsed[attr]
+        setattr(capture, attr, val)
+        if kind == "bool":
+            env_val = "1" if (val if not invert else not val) else "0"
+        elif kind == "int":
+            env_val = str(int(val))
+        else:
+            env_val = f"{val:g}"
+        try:
+            set_key(env_path, key, env_val, quote_mode="never")
+        except Exception as e:
+            logger.warning("Failed to persist %s to .env: %s", key, e)
+
+    logger.info("Capture settings updated: %s", parsed)
+    return True
 
 
 # --- Shared state -----------------------------------------------------------
@@ -412,6 +537,9 @@ class WearableMenuApp(rumps.App):
         self.capture_item = rumps.MenuItem(
             "Screen Capture: Off", callback=self.on_toggle_capture
         )
+        self.settings_item = rumps.MenuItem(
+            "Capture Settings…", callback=self.on_capture_settings
+        )
         self.perms_item = rumps.MenuItem(
             "Grant Capture Permissions", callback=self.on_grant_permissions
         )
@@ -426,6 +554,7 @@ class WearableMenuApp(rumps.App):
             None,  # separator
             self.scan_item,
             self.capture_item,
+            self.settings_item,
             self.perms_item,
             self.logs_item,
             None,  # separator
@@ -540,6 +669,11 @@ class WearableMenuApp(rumps.App):
         running = self.capture.toggle()
         logger.info("User toggled screen capture -> %s", "On" if running else "Off")
 
+    def on_capture_settings(self, _sender) -> None:
+        """Open the capture-settings form (resolution, dedup, OCR, retention)."""
+        logger.info("User opened capture settings")
+        _show_settings_dialog(self.capture, ENV_PATH)
+
     def on_grant_permissions(self, _sender) -> None:
         """Trigger the Screen Recording + Accessibility TCC prompts."""
         logger.info("User requested capture permissions")
@@ -588,6 +722,7 @@ def run_menu_app() -> None:
     #   CAPTURE_NO_DEDUP=1        store every frame even if unchanged
     #   CAPTURE_SKIP_IDLE_SECS=N  skip screenshots while idle >= N s (0 disables)
     #   CAPTURE_RETENTION_DAYS=N  delete screenshots older than N days (0 = keep)
+    #   CAPTURE_SCALE=F           save frames at fraction F of native res (default 0.5)
     capture_ocr = os.getenv("CAPTURE_OCR", "").lower() in ("1", "true", "yes")
     capture_dedup = os.getenv("CAPTURE_NO_DEDUP", "").lower() not in (
         "1",
@@ -599,6 +734,8 @@ def run_menu_app() -> None:
         dedup=capture_dedup,
         skip_idle_secs=float(os.getenv("CAPTURE_SKIP_IDLE_SECS", "90")),
         retention_days=int(os.getenv("CAPTURE_RETENTION_DAYS", "14")),
+        save_scale=float(os.getenv("CAPTURE_SCALE", "0.5")),
+        thumb_max=int(os.getenv("CAPTURE_THUMB_MAX", "256")),
     )
     if os.getenv("CAPTURE_AUTOSTART", "").lower() in ("1", "true", "yes"):
         if screen_recording_ok():

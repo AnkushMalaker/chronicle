@@ -61,25 +61,36 @@ CPU-heavy at 1 fps, so it's **off by default**.
 At 1 fps × 2 displays × full-res JPEG ≈ **~1 MB/s ≈ ~25 GB/day** — unusable raw.
 The guiding principle: **metadata is cheap, pixels are expensive.** The
 `events.jsonl` timeline (~6 MB/day) is the system of record for analytics and is
-**kept forever**; only the screenshots are managed, by three simple rules:
+**kept forever**; only the screenshots are managed, by these rules:
 
-1. **Dedup identical frames.** Each frame is SHA-1 hashed; if it matches the last
-   stored frame for that display, no new file is written — the event reuses the
-   previous file and marks `"changed": false`. Static screens (reading, meetings,
-   AFK with a still mouse) cost ~nothing.
-2. **Skip while idle or locked.** After no input for `CAPTURE_SKIP_IDLE_SECS`
+1. **Save at reduced resolution.** Frames are saved at `CAPTURE_SCALE` of native
+   resolution (default **0.5** = half). Full-res Retina frames run up to ~1.4 MB
+   each; half res cuts that to roughly a quarter. ScreenCaptureKit downscales in
+   the compositor, so on modern macOS the full-res bitmap is never even produced.
+2. **Dedup identical frames.** Each frame is hashed via a small downscaled
+   thumbnail (max dim 256px); if it matches the last stored frame for that
+   display, no new file is written — the event reuses the previous file and marks
+   `"changed": false`. Hashing a thumbnail (rather than the full JPEG) is cheap
+   and ignores trivial pixel noise, so near-identical frames dedup reliably.
+   Static screens (reading, meetings, AFK with a still mouse) cost ~nothing.
+3. **Skip while idle or locked.** After no input for `CAPTURE_SKIP_IDLE_SECS`
    (default 90s), or whenever the screen is locked/screensavered, screenshots are
    skipped entirely; the event is still logged
    (`"screenshots": "skipped_idle"` / `"skipped_locked"`) so the timeline stays
    continuous.
-3. **Delete old screenshots.** A sweep on start + hourly removes `.jpg`/`.txt`
+4. **Delete old screenshots.** A sweep on start + hourly removes `.jpg`/`.txt`
    older than `CAPTURE_RETENTION_DAYS` (default 14). `events.jsonl` is never deleted.
 
 | Env (agent) | Flag (standalone) | Default | Meaning |
 |-------------|-------------------|---------|---------|
+| `CAPTURE_SCALE` | `--scale` | 0.5 | save frames at this fraction of native resolution |
 | `CAPTURE_NO_DEDUP=1` | `--no-dedup` | off | store every frame, even unchanged |
 | `CAPTURE_SKIP_IDLE_SECS` | `--skip-idle` | 90 | skip screenshots while idle ≥ N s (0 disables) |
 | `CAPTURE_RETENTION_DAYS` | `--retention-days` | 14 | delete screenshots older than N days (0 = keep) |
+| `CAPTURE_THUMB_MAX` | `--thumb-max` | 256 | max dimension of the thumbnail used for the dedup hash |
+
+Under the menu bar app these are editable live via **Capture Settings…** — changes
+apply to the running capture immediately and are persisted to `.env` for next launch.
 
 **Reading it back:** each event's `displays[i].file` always points to a valid
 JPEG — a fresh one, or the last unchanged one. Identical `file` across
@@ -95,10 +106,11 @@ snapshots now, then a background worker compacts JPEGs older than ~10 min into
 screen content; ~100 frames per chunk, `bframes=0` so frames stay seekable). Rewind
 and Omi's macOS app do the same with a `VideoChunkEncoder` → `.hevc`. Our layout is
 already compatible (per-day JPEGs + an `events.jsonl` index that points at frame
-files), so this would slot in as a post-processing step. A **perceptual hash**
-(dHash + Hamming, or a downscaled-thumbnail hash + histogram diff like Screenpipe)
-would also dedup "near-identical" frames (blinking cursor, menu-bar clock) that
-exact SHA-1 misses. To shrink the metadata too, **ActivityWatch's heartbeat-merge**
+files), so this would slot in as a post-processing step. The dedup hash already
+runs on a downscaled thumbnail; going further to a true **perceptual hash** (dHash
++ Hamming distance, or adding a histogram diff like Screenpipe) would also dedup
+"near-identical" frames (blinking cursor, menu-bar clock) that the exact
+thumbnail hash still misses. To shrink the metadata too, **ActivityWatch's heartbeat-merge**
 collapses consecutive identical app/title spans into one row — worth adopting if
 `events.jsonl` ever grows uncomfortable.
 
