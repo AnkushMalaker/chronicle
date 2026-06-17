@@ -23,7 +23,11 @@ from main import (
     detect_device_type,
     load_config,
 )
-from screen_capture import ScreenCaptureManager, request_permissions
+from screen_capture import (
+    ScreenCaptureManager,
+    request_permissions,
+    screen_recording_ok,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -576,8 +580,18 @@ def run_menu_app() -> None:
     ble = BLEManager(state, bg)
     ble.start_scanning()
 
-    # Screen + accessibility capture (starts disabled; toggle from the menu)
+    # Screen + accessibility capture (toggle from the menu). Optionally auto-start
+    # under the launchd agent: set CAPTURE_AUTOSTART=1, but only begin once Screen
+    # Recording is actually granted (otherwise it would log empty frames).
     capture = ScreenCaptureManager()
+    if os.getenv("CAPTURE_AUTOSTART", "").lower() in ("1", "true", "yes"):
+        if screen_recording_ok():
+            capture.start()
+        else:
+            logger.warning(
+                "CAPTURE_AUTOSTART set but Screen Recording not granted — "
+                "use 'Grant Capture Permissions' in the menu, then restart."
+            )
 
     app = WearableMenuApp(state, ble, capture)
     app.run()

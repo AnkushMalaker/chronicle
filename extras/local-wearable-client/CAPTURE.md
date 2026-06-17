@@ -29,63 +29,92 @@ Screen Recording and Accessibility are **independent** grants:
 - Missing **Accessibility** → `window`/`role` come back empty; the app name
   still resolves.
 
-TCC attaches a grant to the **host binary**. Running `uv run python …` from a
-terminal attaches the grant to that terminal/interpreter (flaky, and you'd be
-granting e.g. Cursor broad rights). The fix is the `.app` bundle below, so
-grants attach to the Chronicle app itself.
+TCC attaches a grant to the **responsible process**. How the app is launched
+decides what that is:
 
-> Screen Recording only takes effect after the granted app is **fully
-> relaunched**.
+- **From a terminal** (`uv run python …`): the responsible process is the
+  *terminal app* (Terminal/iTerm/Cursor) — so you'd be granting that terminal,
+  which is flaky and over-broad.
+- **From the launchd agent** (recommended, below): there is no terminal, so the
+  responsible process is the agent's own **Python** process. The grant attaches
+  to that Python and is independent of any terminal.
 
-## Quick test (no bundle)
+> Screen Recording only takes effect after the granted process is **restarted**.
+
+## Quick test (from a terminal)
 
 ```bash
 uv run python screen_capture.py --seconds 5      # writes frames, logs focused window
 uv run python screen_capture.py --no-write       # log AX info only
 ```
 
-### "user declined TCCs" / no Screen Recording prompt
-
 If you see `SCStreamErrorDomain Code=-3801 "The user declined TCCs"` (or
-`screen_recording=False` with no prompt), macOS has a cached **denial** for the
-host process (your terminal/interpreter) and won't re-prompt. Either:
-
-- Add your terminal app under System Settings → Privacy & Security →
-  **Screen Recording**, toggle it on, then **fully quit and reopen** the terminal; or
-- Reset the cached decision and re-run to get a fresh prompt:
-  ```bash
-  tccutil reset ScreenCapture
-  uv run python screen_capture.py --seconds 5
-  ```
-
-This terminal-identity flakiness is exactly what the `.app` bundle below fixes —
-build it and grant Screen Recording to the app instead.
-
-## Building the .app (stable permissions)
+`screen_recording=False` with no prompt), macOS cached a **denial** for the host
+process (your terminal) and won't re-prompt. Either add your terminal under
+System Settings → Privacy & Security → **Screen Recording** and relaunch it, or
+reset and re-run:
 
 ```bash
-./build_app.sh                       # ad-hoc signed (grants reset on each rebuild)
-CODESIGN_ID="Chronicle Dev" ./build_app.sh   # self-signed cert -> grants persist
-open "bundle/dist/Chronicle Wearable.app"
+tccutil reset ScreenCapture
+uv run python screen_capture.py --seconds 5
 ```
 
-The build runs from the `bundle/` subdir (`bundle/setup_app.py`) — that dir has
-no `pyproject.toml`, which is required because py2app errors on this package's
-PEP 621 dependencies. Output lands in `bundle/dist/`.
+This terminal-identity flakiness is exactly why the launchd agent is the better
+home for the always-on capture — grants attach to the agent's Python, not your
+terminal.
 
-To make grants survive rebuilds, create a self-signed **Code Signing**
-certificate (Keychain Access → Certificate Assistant → Create a Certificate →
-Self Signed Root, type "Code Signing") and pass its name via `CODESIGN_ID`.
+## Deployment: the launchd agent
 
-After first launch: approve the Screen Recording prompt and **re-open the app**;
-enable the app under System Settings → Privacy & Security → **Accessibility**
-(no prompt is shown for AX — you toggle it manually).
+The menu bar app (screen capture toggle included) runs as a launchd user agent.
+This is the intended always-on deployment — no separate `.app` to build.
 
-## Why the app is not sandboxed
+```bash
+./start.sh install      # installs the launchd agent + a Spotlight launcher
+./start.sh logs         # tail the agent log
+./start.sh uninstall    # remove it
+```
 
-`setup_app.py` does not request the App Sandbox entitlement. A sandboxed app
-**cannot** use the Accessibility API to read other apps' windows — that's
-incompatible with the sandbox. Screenshot + focused-window reads require an
-unsandboxed app (this is the same reason Omi's own macOS app is unsandboxed).
-The app is still fully under TCC control — each capability needs its explicit
-user grant.
+The agent runs the menu app via `uv run` with the project as the working
+directory, so `.env` / `devices.yml` load normally (nothing is frozen).
+
+### Granting capture permissions to the agent
+
+1. `./start.sh install` and let the agent start (the ⊙ menu bar icon appears).
+2. Menu → **Grant Capture Permissions**. This triggers the Screen Recording and
+   Accessibility prompts *for the agent's Python* (its own TCC identity, not your
+   terminal's). Approve both.
+3. Restart the agent so Screen Recording takes effect:
+   ```bash
+   ./start.sh kickstart      # or: launchctl kickstart -k gui/$(id -u)/com.chronicle.wearable-client
+   ```
+4. Menu → **Screen Capture: Off → On** (or set `CAPTURE_AUTOSTART=1`, below).
+
+If the prompt doesn't appear, the binary still shows up (greyed) in System
+Settings → Privacy & Security → Screen Recording / Accessibility after the first
+attempt — toggle it on there, then `kickstart`.
+
+### Auto-start capture under the agent
+
+By default capture starts **off** (toggle from the menu). To have it begin
+automatically on agent launch, set `CAPTURE_AUTOSTART=1` in `.env` (the installer
+copies `.env` into the agent's environment). It only starts once Screen Recording
+is actually granted; otherwise it logs a warning and waits for the toggle.
+
+### Caveat: Python version upgrades
+
+The grant is tied to the Python binary `uv` runs. If `uv` upgrades its managed
+Python (e.g. 3.12.8 → 3.12.9), the path changes and you'll need to re-grant. Pin
+it to avoid surprises:
+
+```bash
+echo "3.12.8" > .python-version    # keep uv on a fixed Python -> stable grant
+```
+
+## Why no sandbox / no frozen .app
+
+- **No App Sandbox**: a sandboxed process **cannot** use the Accessibility API to
+  read other apps' windows. The agent's Python runs unsandboxed (still fully
+  under TCC — every capability needs its explicit grant).
+- **No py2app/PyInstaller bundle**: `uv` ships a *standalone* Python, which
+  py2app can't freeze (it expects a framework build — fails on `zlib.__file__`).
+  The launchd agent avoids freezing entirely by running the source directly.
