@@ -1,8 +1,10 @@
 # Screen + Accessibility Capture
 
-The menu bar app can capture your screen (1 fps, one JPEG per display) and read
-the focused window's app/title via the macOS Accessibility API. Implementation
-lives in `screen_capture.py`; it's pure PyObjC (no Swift).
+The menu bar app captures your screen (1 fps, one JPEG per display), reads the
+focused window's context via the macOS Accessibility API, and writes a
+structured metadata sidecar (`events.jsonl`) you can run analytics over.
+Implementation lives in `screen_capture.py` (pure PyObjC, no Swift);
+`analyze.py` reports app/title/URL time from the sidecar.
 
 ## What gets captured
 
@@ -10,15 +12,63 @@ lives in `screen_capture.py`; it's pure PyObjC (no Swift).
 |------|--------|------------------|
 | Screenshot pixels (per display) | ScreenCaptureKit (`SCScreenshotManager`), falls back to `CGDisplayCreateImage` on macOS < 14 | **Screen Recording** |
 | Frontmost app name / bundle id | `NSWorkspace.frontmostApplication()` | none |
-| Focused **window title** + focused element **role** | Accessibility API (`AXUIElement*`) | **Accessibility** |
+| User-idle seconds (since last input) | `CGEventSourceSecondsSinceLastEventType` | none |
+| Focused **window title**, element **role/subrole**, **URL** (browsers/doc apps), **selected-text length** | Accessibility API (`AXUIElement*`) | **Accessibility** |
+| On-screen text (**OCR**, opt-in) | Apple Vision (`VNRecognizeTextRequest`) | (uses the screenshot) |
 
 Frames are written to `~/ChronicleCaptures/<date>/<HH-MM-SS_mmm>_<i>.jpg`
 (`<i>` = display index, `_0` is the main display). Override the location with
 `CAPTURE_DIR`.
 
-The Accessibility read is deliberately minimal — only the window title and the
-focused element's *role* (e.g. `AXTextArea`), never text-field contents or the
-full UI tree.
+The Accessibility read is deliberately minimal — window title, element role, the
+URL, and the **length** of any selected text (not its content). It never reads
+text-field contents or walks the full UI tree.
+
+## Metadata sidecar (`events.jsonl`)
+
+One JSON object per tick is appended to `~/ChronicleCaptures/<date>/events.jsonl`:
+
+```json
+{
+  "ts": "2026-06-17T10:24:28.551", "epoch": 1750148668.551,
+  "app": "Cursor", "bundle_id": "com.todesktop...", "pid": 1234,
+  "window_title": "screen_capture.py — friend-lite",
+  "url": null, "focused_role": "AXTextArea", "focused_subrole": null,
+  "selected_text_len": 0, "idle_seconds": 2.3,
+  "displays": [
+    {"index": 0, "file": "2026-06-17/10-24-28_551_0.jpg", "w": 2560, "h": 1440, "ocr_file": null},
+    {"index": 1, "file": "2026-06-17/10-24-28_551_1.jpg", "w": 3024, "h": 1964, "ocr_file": null}
+  ]
+}
+```
+
+`file`/`ocr_file` are relative to the capture dir. Disable the sidecar with
+`--no-events` (standalone) — but then there's nothing to analyze.
+
+## OCR (optional, opt-in)
+
+Apple Vision OCR runs on each frame when enabled, writing recognized text to a
+`.txt` sidecar next to each JPEG and referencing it from `ocr_file`. It's
+CPU-heavy at 1 fps, so it's **off by default**.
+
+- Standalone: `uv run python screen_capture.py --ocr`
+- Under the agent: set `CAPTURE_OCR=1` in `.env`
+
+## Analytics
+
+```bash
+uv run python analyze.py                    # today, by app
+uv run python analyze.py --days 7           # last 7 days
+uv run python analyze.py --date 2026-06-17  # one day  (or --date all)
+uv run python analyze.py --by title         # group by window title
+uv run python analyze.py --by url           # group by URL
+```
+
+It attributes the gap between consecutive ticks to whatever was focused, buckets
+inactivity (`idle_seconds >= --idle-threshold`, default 120s) as `(idle)`, and
+ignores gaps longer than `--max-gap` (default 5s) so paused/stopped periods
+don't invent time. Pure stdlib — you can copy `events.jsonl` off the Mac and run
+it anywhere.
 
 ## Permissions (TCC)
 
@@ -109,6 +159,13 @@ it to avoid surprises:
 ```bash
 echo "3.12.8" > .python-version    # keep uv on a fixed Python -> stable grant
 ```
+
+## Privacy
+
+Everything stays on disk under `~/ChronicleCaptures` — screenshots, `events.jsonl`,
+and any OCR `.txt` files. Nothing is uploaded by this module. URLs and OCR text
+*are* recorded when enabled (OCR is opt-in); selected text is stored as a length
+only, never its content. Delete a day by removing its `<date>` folder.
 
 ## Why no sandbox / no frozen .app
 

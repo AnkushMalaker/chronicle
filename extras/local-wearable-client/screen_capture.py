@@ -12,21 +12,22 @@ Everything here is pure PyObjC — no Swift. It uses:
   - AppKit `NSBitmapImageRep` for JPEG encoding
   - `NSWorkspace` + the Accessibility API (`AXUIElement*`) for focused-window info
 
-Two macOS permissions are required (TCC), both attached to the *host binary*:
+Two macOS permissions are required (TCC):
   - Screen Recording  -> `CGRequestScreenCaptureAccess()`
   - Accessibility     -> `AXIsProcessTrustedWithOptions({prompt: True})`
 
-When run from `uv`/python directly the grants attach to the interpreter (fine
-for testing). For daily use, bundle this into a signed `.app` so the grants
-stick to your app's bundle id instead.
+The grant attaches to the *responsible process*. Run from a terminal it's the
+terminal; run under the launchd agent (the daily deployment) it's the agent's
+own Python. See CAPTURE.md for deployment + permissions.
 
 Standalone test:
     uv run python screen_capture.py            # 1 fps, prints focused window, Ctrl-C to stop
-    uv run python screen_capture.py --seconds 10
+    uv run python screen_capture.py --seconds 10 --ocr
 """
 
 import argparse
 import datetime as _dt
+import json
 import logging
 import os
 import threading
@@ -44,6 +45,7 @@ from ApplicationServices import (
     AXUIElementCreateApplication,
     kAXErrorSuccess,
 )
+from Foundation import NSData
 from Quartz import (
     CGDisplayCopyDisplayMode,
     CGDisplayCreateImage,
@@ -75,6 +77,28 @@ except Exception:  # pragma: no cover - depends on macOS version
     ) = None
     _SCK_OK = False
 
+# User-idle time (seconds since last HID input) — used to attribute foreground
+# time to "idle" rather than the focused app during analytics.
+try:
+    from Quartz import (
+        CGEventSourceSecondsSinceLastEventType,
+        kCGAnyInputEventType,
+        kCGEventSourceStateHIDSystemState,
+    )
+
+    _IDLE_OK = True
+except Exception:  # pragma: no cover
+    _IDLE_OK = False
+
+# Apple Vision OCR is optional (opt-in via CAPTURE_OCR) — it's CPU-heavy at 1 fps.
+try:
+    import Vision
+
+    _VISION_OK = True
+except Exception:  # pragma: no cover
+    Vision = None
+    _VISION_OK = False
+
 logger = logging.getLogger(__name__)
 
 # JPEG file-type constant moved/renamed across pyobjc versions.
@@ -89,6 +113,9 @@ _kAXFocusedWindowAttribute = "AXFocusedWindow"
 _kAXFocusedUIElementAttribute = "AXFocusedUIElement"
 _kAXTitleAttribute = "AXTitle"
 _kAXRoleAttribute = "AXRole"
+_kAXSubroleAttribute = "AXSubrole"
+_kAXSelectedTextAttribute = "AXSelectedText"
+_kAXURLAttribute = "AXURL"
 _kAXTrustedCheckOptionPrompt = "AXTrustedCheckOptionPrompt"
 
 DEFAULT_CAPTURE_DIR = Path(
@@ -129,6 +156,52 @@ def request_permissions() -> dict:
     return {"screen_recording": rec, "accessibility": acc}
 
 
+# --- Idle time + OCR ----------------------------------------------------------
+
+
+def user_idle_seconds() -> Optional[float]:
+    """Seconds since the last user HID input (mouse/keyboard). None if the API
+    is unavailable. Used to attribute foreground time to "idle" in analytics."""
+    if not _IDLE_OK:
+        return None
+    try:
+        return float(
+            CGEventSourceSecondsSinceLastEventType(
+                kCGEventSourceStateHIDSystemState, kCGAnyInputEventType
+            )
+        )
+    except Exception:
+        return None
+
+
+def ocr_jpeg(jpeg_bytes: bytes, fast: bool = True) -> Optional[str]:
+    """Run Apple Vision text recognition on JPEG bytes. Returns the recognized
+    text (newline-joined), or None if Vision is unavailable / found nothing.
+
+    Synchronous: ``performRequests:error:`` blocks, so results are ready on the
+    request afterwards (no completion handler needed)."""
+    if not _VISION_OK or not jpeg_bytes:
+        return None
+    try:
+        data = NSData.dataWithBytes_length_(jpeg_bytes, len(jpeg_bytes))
+        handler = Vision.VNImageRequestHandler.alloc().initWithData_options_(data, None)
+        request = Vision.VNRecognizeTextRequest.alloc().init()
+        # 0 = accurate, 1 = fast. Fast + no language correction for 1 fps.
+        request.setRecognitionLevel_(1 if fast else 0)
+        request.setUsesLanguageCorrection_(not fast)
+        handler.performRequests_error_([request], None)
+        observations = request.results() or []
+        lines = []
+        for obs in observations:
+            candidates = obs.topCandidates_(1)
+            if candidates:
+                lines.append(candidates[0].string())
+        return "\n".join(lines) if lines else None
+    except Exception as e:
+        logger.warning("OCR failed: %s", e)
+        return None
+
+
 # --- Accessibility: focused window read --------------------------------------
 
 
@@ -141,11 +214,14 @@ def _ax_copy(element, attribute: str):
 
 
 def read_focused_window() -> dict:
-    """Read the frontmost app + its focused window title via the AX API.
+    """Read the frontmost app + focused-window context via the AX API.
 
-    Returns a dict with: app, bundle_id, pid, window_title, focused_role.
-    Missing pieces come back as None (e.g. if AX isn't granted, titles are None
-    but the app name still resolves via NSWorkspace).
+    Returns: app, bundle_id, pid, window_title, focused_role, focused_subrole,
+    url (best-effort; browsers/document apps that expose AXURL), and
+    selected_text_len (length only — the content itself is not stored).
+
+    Missing pieces come back as None/0 (e.g. if AX isn't granted, titles are
+    None but the app name still resolves via NSWorkspace).
     """
     info = {
         "app": None,
@@ -153,6 +229,9 @@ def read_focused_window() -> dict:
         "pid": None,
         "window_title": None,
         "focused_role": None,
+        "focused_subrole": None,
+        "url": None,
+        "selected_text_len": 0,
     }
 
     front = NSWorkspace.sharedWorkspace().frontmostApplication()
@@ -175,6 +254,21 @@ def read_focused_window() -> dict:
     focused = _ax_copy(app_el, _kAXFocusedUIElementAttribute)
     if focused is not None:
         info["focused_role"] = _ax_copy(focused, _kAXRoleAttribute)
+        info["focused_subrole"] = _ax_copy(focused, _kAXSubroleAttribute)
+        selected = _ax_copy(focused, _kAXSelectedTextAttribute)
+        if isinstance(selected, str):
+            info["selected_text_len"] = len(selected)
+
+    # Best-effort URL: browsers/document apps expose AXURL on the window (or the
+    # focused element). Shallow check only — no full UI-tree walk.
+    url = _ax_copy(window, _kAXURLAttribute) if window is not None else None
+    if url is None and focused is not None:
+        url = _ax_copy(focused, _kAXURLAttribute)
+    if url is not None:
+        try:
+            info["url"] = url.absoluteString()
+        except Exception:
+            info["url"] = str(url)
 
     return info
 
@@ -383,16 +477,23 @@ class ScreenCaptureManager:
         interval: float = 1.0,
         quality: float = 0.6,
         write_frames: bool = True,
+        write_events: bool = True,
+        ocr: bool = False,
         backend: Optional[_CaptureBackend] = None,
     ) -> None:
         self.capture_dir = Path(capture_dir)
         self.interval = interval
         self.quality = quality
         self.write_frames = write_frames
+        self.write_events = write_events
+        self.ocr = ocr
         self.backend = backend or make_backend()
         self.stats = CaptureStats()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        # Per-day events.jsonl handle (rotated by date in _append_event).
+        self._events_fh = None
+        self._events_date: Optional[str] = None
 
     @property
     def is_running(self) -> bool:
@@ -426,6 +527,13 @@ class ScreenCaptureManager:
     def stop(self) -> None:
         self._stop.set()
         self.stats.update(running=False)
+        if self._events_fh is not None:
+            try:
+                self._events_fh.close()
+            except Exception:
+                pass
+            self._events_fh = None
+            self._events_date = None
         logger.info("Screen capture stopping")
 
     def toggle(self) -> bool:
@@ -455,13 +563,28 @@ class ScreenCaptureManager:
             self._stop.wait(max(0.0, self.interval - elapsed))
         self.stats.update(running=False)
 
+    def _append_event(self, ts: _dt.datetime, event: dict) -> None:
+        """Append one JSON object (one line) to the per-day events.jsonl."""
+        date = ts.strftime("%Y-%m-%d")
+        if self._events_date != date or self._events_fh is None:
+            if self._events_fh is not None:
+                self._events_fh.close()
+            path = self.capture_dir / date / "events.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._events_fh = open(path, "a", encoding="utf-8")
+            self._events_date = date
+        self._events_fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+        self._events_fh.flush()
+
     def _capture_once(self) -> None:
         ts = _dt.datetime.now()
         win = read_focused_window()
+        idle = user_idle_seconds()
 
         # A "frame" is one tick; each tick writes one JPEG per display (_i suffix).
         tick = self.stats.snapshot()["frames"] + 1
         captured = 0
+        displays_meta = []
         for i, jpeg, width, height in self.backend.grab(self.quality):
             if jpeg is None:
                 self.stats.update(
@@ -473,8 +596,29 @@ class ScreenCaptureManager:
                 )
                 continue
 
+            frame_p = _frame_path(self.capture_dir, ts, i)
+            rel_file = None
             if self.write_frames:
-                _frame_path(self.capture_dir, ts, i).write_bytes(jpeg)
+                frame_p.write_bytes(jpeg)
+                rel_file = str(frame_p.relative_to(self.capture_dir))
+
+            ocr_file = None
+            if self.ocr:
+                text = ocr_jpeg(jpeg)
+                if text:
+                    txt_p = frame_p.with_suffix(".txt")
+                    txt_p.write_text(text, encoding="utf-8")
+                    ocr_file = str(txt_p.relative_to(self.capture_dir))
+
+            displays_meta.append(
+                {
+                    "index": i,
+                    "file": rel_file,
+                    "w": width,
+                    "h": height,
+                    "ocr_file": ocr_file,
+                }
+            )
             captured += 1
             logger.info(
                 "tick #%d display %d %dx%d %.0fKB | app=%s window=%s role=%s",
@@ -488,12 +632,34 @@ class ScreenCaptureManager:
                 win["focused_role"],
             )
 
-        if captured:
-            self.stats.update(
-                frames=tick,
-                last_app=win["app"],
-                last_window=win["window_title"],
-            )
+        if not captured:
+            return
+
+        self.stats.update(
+            frames=tick,
+            last_app=win["app"],
+            last_window=win["window_title"],
+        )
+
+        if self.write_events:
+            event = {
+                "ts": ts.isoformat(timespec="milliseconds"),
+                "epoch": round(ts.timestamp(), 3),
+                "app": win["app"],
+                "bundle_id": win["bundle_id"],
+                "pid": win["pid"],
+                "window_title": win["window_title"],
+                "url": win["url"],
+                "focused_role": win["focused_role"],
+                "focused_subrole": win["focused_subrole"],
+                "selected_text_len": win["selected_text_len"],
+                "idle_seconds": round(idle, 1) if idle is not None else None,
+                "displays": displays_meta,
+            }
+            try:
+                self._append_event(ts, event)
+            except Exception as e:
+                logger.warning("Failed to write event: %s", e)
 
 
 # --- Standalone entry point --------------------------------------------------
@@ -507,6 +673,16 @@ def _main() -> None:
     parser.add_argument("--interval", type=float, default=1.0, help="capture interval")
     parser.add_argument(
         "--no-write", action="store_true", help="don't write JPEGs, just log AX info"
+    )
+    parser.add_argument(
+        "--no-events",
+        action="store_true",
+        help="don't write the events.jsonl metadata sidecar",
+    )
+    parser.add_argument(
+        "--ocr",
+        action="store_true",
+        help="run Apple Vision OCR on each frame (writes .txt sidecars; CPU-heavy)",
     )
     parser.add_argument(
         "--dir", default=str(DEFAULT_CAPTURE_DIR), help="output directory for frames"
@@ -533,7 +709,11 @@ def _main() -> None:
         capture_dir=Path(args.dir),
         interval=args.interval,
         write_frames=not args.no_write,
+        write_events=not args.no_events,
+        ocr=args.ocr,
     )
+    if args.ocr and not _VISION_OK:
+        logger.warning("--ocr requested but pyobjc-framework-Vision not available")
     mgr.start()
     try:
         if args.seconds > 0:

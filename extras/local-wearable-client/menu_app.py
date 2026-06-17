@@ -583,7 +583,9 @@ def run_menu_app() -> None:
     # Screen + accessibility capture (toggle from the menu). Optionally auto-start
     # under the launchd agent: set CAPTURE_AUTOSTART=1, but only begin once Screen
     # Recording is actually granted (otherwise it would log empty frames).
-    capture = ScreenCaptureManager()
+    # CAPTURE_OCR=1 additionally runs Apple Vision OCR on each frame (CPU-heavy).
+    capture_ocr = os.getenv("CAPTURE_OCR", "").lower() in ("1", "true", "yes")
+    capture = ScreenCaptureManager(ocr=capture_ocr)
     if os.getenv("CAPTURE_AUTOSTART", "").lower() in ("1", "true", "yes"):
         if screen_recording_ok():
             capture.start()
