@@ -91,6 +91,14 @@ try:
 except Exception:  # pragma: no cover
     _IDLE_OK = False
 
+# Screen-lock / screensaver detection — skip capturing a locked screen.
+try:
+    from Quartz import CGSessionCopyCurrentDictionary
+
+    _LOCK_OK = True
+except Exception:  # pragma: no cover
+    _LOCK_OK = False
+
 # Apple Vision OCR is optional (opt-in via CAPTURE_OCR) — it's CPU-heavy at 1 fps.
 try:
     import Vision
@@ -173,6 +181,20 @@ def user_idle_seconds() -> Optional[float]:
         )
     except Exception:
         return None
+
+
+def screen_is_locked() -> bool:
+    """True if the screen is locked / screensaver is up. We skip capturing then
+    (a locked screen has nothing useful and ScreenCaptureKit may stall)."""
+    if not _LOCK_OK:
+        return False
+    try:
+        info = CGSessionCopyCurrentDictionary()
+        if not info:
+            return False
+        return bool(info.get("CGSSessionScreenIsLocked", 0))
+    except Exception:
+        return False
 
 
 def ocr_jpeg(jpeg_bytes: bytes, fast: bool = True) -> Optional[str]:
@@ -645,10 +667,16 @@ class ScreenCaptureManager:
         idle_skip = (
             self.skip_idle_secs > 0 and idle is not None and idle >= self.skip_idle_secs
         )
+        if screen_is_locked():
+            skip_reason = "skipped_locked"
+        elif idle_skip:
+            skip_reason = "skipped_idle"
+        else:
+            skip_reason = None
 
         captured = 0
         displays_meta = []
-        if not idle_skip:
+        if skip_reason is None:
             for i, jpeg, width, height in self.backend.grab(self.quality):
                 if jpeg is None:
                     self.stats.update(
@@ -706,9 +734,9 @@ class ScreenCaptureManager:
                     win["window_title"],
                 )
 
-        # A genuine capture failure (no idle-skip but nothing captured) is an
-        # error state — don't log a misleading event.
-        if not idle_skip and captured == 0:
+        # A genuine capture failure (not a deliberate skip but nothing captured)
+        # is an error state — don't log a misleading event.
+        if skip_reason is None and captured == 0:
             return
 
         self.stats.update(
@@ -730,7 +758,7 @@ class ScreenCaptureManager:
                 "focused_subrole": win["focused_subrole"],
                 "selected_text_len": win["selected_text_len"],
                 "idle_seconds": round(idle, 1) if idle is not None else None,
-                "screenshots": "skipped_idle" if idle_skip else "captured",
+                "screenshots": skip_reason or "captured",
                 "displays": displays_meta,
             }
             try:

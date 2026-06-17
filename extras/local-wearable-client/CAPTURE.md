@@ -44,7 +44,7 @@ One JSON object per tick is appended to `~/ChronicleCaptures/<date>/events.jsonl
 
 `file`/`ocr_file` are relative to the capture dir. `changed` is false when the
 frame was deduped (file points at the last stored one); `screenshots` is
-`"skipped_idle"` when capture was skipped for idleness (see **Storage**). Disable
+`"skipped_idle"` / `"skipped_locked"` when capture was skipped (see **Storage**). Disable
 the sidecar with `--no-events` (standalone) — but then there's nothing to analyze.
 
 ## OCR (optional, opt-in)
@@ -67,9 +67,11 @@ The guiding principle: **metadata is cheap, pixels are expensive.** The
    stored frame for that display, no new file is written — the event reuses the
    previous file and marks `"changed": false`. Static screens (reading, meetings,
    AFK with a still mouse) cost ~nothing.
-2. **Skip while idle.** After no input for `CAPTURE_SKIP_IDLE_SECS` (default 90s),
-   screenshots are skipped entirely; the event is still logged
-   (`"screenshots": "skipped_idle"`) so the timeline stays continuous.
+2. **Skip while idle or locked.** After no input for `CAPTURE_SKIP_IDLE_SECS`
+   (default 90s), or whenever the screen is locked/screensavered, screenshots are
+   skipped entirely; the event is still logged
+   (`"screenshots": "skipped_idle"` / `"skipped_locked"`) so the timeline stays
+   continuous.
 3. **Delete old screenshots.** A sweep on start + hourly removes `.jpg`/`.txt`
    older than `CAPTURE_RETENTION_DAYS` (default 14). `events.jsonl` is never deleted.
 
@@ -87,21 +89,36 @@ T" is just that file; dedup is transparent to readers.
 ### Going further (not implemented)
 
 The big lever during *active* use (every frame differs, so dedup can't help) is
-**inter-frame video encoding** — store frames as an H.264/HEVC chunk instead of
-independent JPEGs so the codec keeps only deltas. That's what Rewind and Omi's
-macOS app do (`VideoChunkEncoder` → `.hevc`) and Screenpipe (ffmpeg → mp4). A
-**perceptual hash** (dHash + Hamming distance) would additionally dedup
-"near-identical" frames (ignoring a blinking cursor or the menu-bar clock) that
-exact SHA-1 misses. Both are larger lifts; the three rules + retention bound disk
-for now.
+the **JPEG-then-compact-to-video** pattern that Screenpipe uses: write fast JPEG
+snapshots now, then a background worker compacts JPEGs older than ~10 min into
+**H.265/HEVC** chunks (Screenpipe reports **10–30× compression** on mostly-static
+screen content; ~100 frames per chunk, `bframes=0` so frames stay seekable). Rewind
+and Omi's macOS app do the same with a `VideoChunkEncoder` → `.hevc`. Our layout is
+already compatible (per-day JPEGs + an `events.jsonl` index that points at frame
+files), so this would slot in as a post-processing step. A **perceptual hash**
+(dHash + Hamming, or a downscaled-thumbnail hash + histogram diff like Screenpipe)
+would also dedup "near-identical" frames (blinking cursor, menu-bar clock) that
+exact SHA-1 misses. To shrink the metadata too, **ActivityWatch's heartbeat-merge**
+collapses consecutive identical app/title spans into one row — worth adopting if
+`events.jsonl` ever grows uncomfortable.
 
 ### References (cloned under `untracked/`, gitignored)
 
-- **ActivityWatch** — open-source activity-timeline tracker. SQLite event store
-  with a "heartbeat" merge model and **no screenshots**; the metadata-first design
-  here mirrors it.
-- **Screenpipe** — open-source 24/7 screen capture + OCR (a Rewind alternative);
-  encodes video and stores OCR/metadata in SQLite.
+- **ActivityWatch** — open-source activity-timeline tracker. **No screenshots**;
+  stores focus/AFK *events* in SQLite (WAL) and uses a **heartbeat-merge** model:
+  consecutive heartbeats with identical `data`, within a `pulsetime` gap, are
+  merged into one span by `UPDATE`-ing its end time (`aw_transform/heartbeats.py`,
+  `aw-server-rust/.../datastore.rs`). It keeps everything forever with **no
+  retention** — staying tiny purely via merging. Our metadata-first design mirrors
+  it (we just don't merge yet).
+- **Screenpipe** — open-source 24/7 screen capture + OCR (Rewind alternative).
+  Two-phase storage: JPEG snapshots → background compaction to **H.265 MP4**;
+  **two dedup layers** (downscaled-thumbnail hash + histogram pixel-diff to skip
+  capture, and an accessibility-text `content_hash`/`simhash` to skip the DB write,
+  with periodic force-write valves); SQLite timeline (`frames` → chunk+offset or
+  `snapshot_path`, plus app/window/url/a11y + FTS5 search); **opt-in retention,
+  default 14 days** (same as ours), in `Media` (files only) or `All` (+ vacuum)
+  mode; skips work while `screen_is_locked()`. Event-driven cadence (not fixed fps).
 - **ManicTime** — commercial (not open source, so not cloned); same split of a
   forever activity timeline vs. retention-limited screenshots.
 
