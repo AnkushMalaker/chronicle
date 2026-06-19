@@ -24,12 +24,8 @@ localhost TAILSCALE_IP {
         reverse_proxy speaker-service:8085
     }
 
-    # Everything else - proxy to Web UI
+    # Everything else - proxy to Web UI (plain HTTP; the dev server is not TLS)
     handle {
-        reverse_proxy web-ui:WEB_UI_PORT_PLACEHOLDER {
-            transport http {
-                tls_insecure_skip_verify
-            }
-        }
+        reverse_proxy web-ui:WEB_UI_PORT_PLACEHOLDER
     }
 }

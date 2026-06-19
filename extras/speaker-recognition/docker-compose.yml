@@ -132,9 +132,10 @@ services:
       - ../../certs:/certs:ro
       - caddy_speaker_data:/data
       - caddy_speaker_config:/config
-    depends_on:
-      web-ui:
-        condition: service_healthy
+    # No depends_on the web-ui: caddy resolves upstreams lazily per-request, so a
+    # not-yet-ready UI just 502s briefly instead of blocking the stack `up` (which,
+    # gated on health, used to trip services.py's 120s start timeout). Mirrors the
+    # advanced backend's caddy, which doesn't gate on webui-dev either.
     restart: unless-stopped
 
   # Edge agent sidecar — advertises this service on the Tailnet

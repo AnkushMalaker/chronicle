@@ -301,7 +301,11 @@ class SpeakerRecognitionSetup:
                 )
 
         if enable_https:
-            self.config["REACT_UI_HTTPS"] = "true"
+            # The dev server stays plain HTTP; Caddy terminates TLS and proxies to it
+            # over HTTP (like the advanced backend's webui-dev). REACT_UI_HTTPS drives
+            # both vite and the container healthcheck, so keep it false. Caddy-on is
+            # tracked separately via HTTPS_CERT_MODE.
+            self.config["REACT_UI_HTTPS"] = "false"
             self.config["REACT_UI_PORT"] = "5175"
 
             # Decide how the TLS cert is managed (same logic the wizard uses).
@@ -374,6 +378,7 @@ class SpeakerRecognitionSetup:
         else:
             self.config["REACT_UI_HTTPS"] = "false"
             self.config["REACT_UI_PORT"] = "5174"
+            self.config["HTTPS_CERT_MODE"] = ""
 
             self.console.print()
             self.console.print("[bold]HTTP Mode URLs:[/bold]")
@@ -452,9 +457,10 @@ class SpeakerRecognitionSetup:
             else "CPU"
         )
         self.console.print(f"✅ Compute Mode: {compute_mode} ({pytorch_version})")
-        self.console.print(
-            f"✅ HTTPS Enabled: {self.config.get('REACT_UI_HTTPS', 'false')}"
+        https_status = (
+            "enabled (Caddy)" if self.config.get("HTTPS_CERT_MODE") else "disabled"
         )
+        self.console.print(f"✅ HTTPS: {https_status}")
         if self.config.get("DEEPGRAM_API_KEY"):
             self.console.print(f"✅ Deepgram API Key: Configured")
 
@@ -500,7 +506,7 @@ class SpeakerRecognitionSetup:
         self.console.print()
 
         self.console.print("1. Start the speaker recognition service:")
-        if self.config.get("REACT_UI_HTTPS") == "true":
+        if self.config.get("HTTPS_CERT_MODE"):
             self.console.print("   [cyan]docker compose up --build -d[/cyan]")
         else:
             self.console.print(
