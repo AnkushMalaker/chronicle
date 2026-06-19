@@ -56,6 +56,7 @@ untracked/*
 backends/advanced/data/*
 backends/advanced/diarization_config.json
 extras/local-wearable-client/devices.yml
+extras/llm-services/cache/**
 !extras/local-wearable-client/devices.yml.template
 extras/havpe-relay/firmware/secrets.yaml
 extras/test-audios/*

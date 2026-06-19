@@ -11,6 +11,9 @@ services:
     environment:
       # Shares the backend's Redis (same chronicle-network).
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      # Optional HF token (gated weights). HuBERT-base is cached at build time from
+      # the PyTorch CDN, so this is plumbing for future HF-hosted backends.
+      - HF_TOKEN=${HF_TOKEN:-}
       # Wake words to run in parallel, as name:file pairs (file under models/).
       # Order = arming priority (lower-FP phrase first). The wake-word NAME is
       # decoupled from the model FILE so a retrained model is swapped without

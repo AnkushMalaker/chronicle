@@ -8,6 +8,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from dotenv import set_key
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
@@ -155,6 +156,22 @@ SERVICES = {
             "description": "Text-to-speech (TADA / Fish Speech / KittenTTS)",
         },
     },
+}
+
+# Repo-root .env is the canonical store for the shared Hugging Face token: the wizard
+# reads/writes it here, and each service's init.py also falls back to it. So a token
+# set once (here or by hand) flows to every service that pulls models from HF.
+ROOT_ENV_PATH = ".env"
+
+# Services whose containers pull (possibly gated) models from HuggingFace and thus
+# benefit from an HF token (avoids 429 IP rate-limits, unlocks gated repos). The
+# wizard prompts once if any of these is selected and passes --hf-token to each.
+HF_TOKEN_SERVICES = {
+    "speaker-recognition",
+    "asr-services",
+    "llm-services",
+    "tts",
+    "wakeword-service",
 }
 
 
@@ -422,11 +439,17 @@ def run_service_setup(
         service = SERVICES["extras"][service_name]
         cmd = service["cmd"].copy()
 
+        # Centralized HF token: every HuggingFace-backed service gets the same token
+        # (resolved once by setup_hf_token_if_needed / join_cluster) so its init.py
+        # writes it into that service's .env.
+        if service_name in HF_TOKEN_SERVICES and hf_token:
+            cmd.extend(["--hf-token", hf_token])
+
         # Add HTTPS configuration for services that support it
         if service_name == "speaker-recognition" and https_enabled and server_ip:
             cmd.extend(["--enable-https", "--server-ip", server_ip])
 
-        # For speaker-recognition, pass HF_TOKEN from centralized configuration
+        # For speaker-recognition, pass remaining centralized configuration
         if service_name == "speaker-recognition":
             # Define the speaker env path
             speaker_env_path = "extras/speaker-recognition/.env"
@@ -439,10 +462,7 @@ def run_service_setup(
                     "[blue][INFO][/blue] Using AMD Strix Halo profile for speaker recognition"
                 )
 
-            # HF Token should have been provided via setup_hf_token_if_needed()
-            if hf_token:
-                cmd.extend(["--hf-token", hf_token])
-            else:
+            if not hf_token:
                 console.print(
                     "[yellow][WARNING][/yellow] No HF_TOKEN provided - speaker recognition may fail to download models"
                 )
@@ -788,8 +808,45 @@ def setup_git_hooks():
         console.print(f"⚠️  [yellow]Could not setup git hooks: {e} (optional)[/yellow]")
 
 
+def _existing_hf_token():
+    """Existing HF token, sourced like other shared secrets: backend .env first
+    (the canonical hub on a main machine), then the repo-root .env (the per-node
+    store for backend-less join nodes), then the legacy speaker-recognition .env.
+    """
+    for path in (
+        "backends/advanced/.env",
+        ROOT_ENV_PATH,
+        "extras/speaker-recognition/.env",
+    ):
+        value = read_env_value(path, "HF_TOKEN")
+        if value and not is_placeholder(
+            value,
+            "your_huggingface_token_here",
+            "your-huggingface-token-here",
+            "hf_xxxxx",
+        ):
+            return value
+    return None
+
+
+def _persist_hf_token(hf_token):
+    """Write the resolved token to the canonical store: backend .env if it exists
+    (main machine), else the repo-root .env (backend-less join node). Both are
+    gitignored. Each service's init.py reads from the same locations.
+    """
+    backend_env = Path("backends/advanced/.env")
+    target = str(backend_env) if backend_env.exists() else ROOT_ENV_PATH
+    Path(target).touch(mode=0o600, exist_ok=True)
+    set_key(target, "HF_TOKEN", hf_token, quote_mode="never")
+    return target
+
+
 def setup_hf_token_if_needed(selected_services):
-    """Prompt for Hugging Face token if needed by selected services.
+    """Prompt once for a shared Hugging Face token if any selected service needs it.
+
+    Sources/stores it like other shared secrets (backend .env, falling back to the
+    repo-root .env for join nodes) and returns it so run_service_setup can pass it to
+    each service's init.py.
 
     Args:
         selected_services: List of service names selected by user
@@ -797,48 +854,51 @@ def setup_hf_token_if_needed(selected_services):
     Returns:
         HF_TOKEN string if provided, None otherwise
     """
-    # Check if any selected services need HF_TOKEN
-    needs_hf_token = "speaker-recognition" in selected_services
-
-    if not needs_hf_token:
+    needing = [s for s in selected_services if s in HF_TOKEN_SERVICES]
+    if not needing:
         return None
 
     console.print("\n🤗 [bold cyan]Hugging Face Token Configuration[/bold cyan]")
-    console.print("Required for speaker recognition (PyAnnote models)")
+    console.print(
+        "Used by HuggingFace-backed services ([cyan]"
+        + ", ".join(needing)
+        + "[/cyan]) — unlocks gated models and avoids download rate-limits."
+    )
     console.print(
         "\n[blue][INFO][/blue] Get your token from: https://huggingface.co/settings/tokens"
     )
-    console.print()
-    console.print(
-        "[yellow]⚠️  You must also accept the model agreements for these gated models:[/yellow]"
-    )
-    console.print("   1. [cyan]Speaker Diarization[/cyan]")
-    console.print(
-        "      https://huggingface.co/pyannote/speaker-diarization-community-1"
-    )
-    console.print("   2. [cyan]Segmentation Model[/cyan]")
-    console.print("      https://huggingface.co/pyannote/segmentation-3.0")
-    console.print("   3. [cyan]Segmentation Model[/cyan]")
-    console.print("      https://huggingface.co/pyannote/segmentation-3.1")
-    console.print("   4. [cyan]Embedding Model[/cyan]")
-    console.print(
-        "      https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM"
-    )
-    console.print()
-    console.print(
-        "[yellow]→[/yellow] Open each link and click 'Agree and access repository'"
-    )
-    console.print("[yellow]→[/yellow] Use the same Hugging Face account as your token")
+
+    # The pyannote models are gated and need explicit per-model agreement; only show
+    # this when speaker-recognition is among the selected services.
+    if "speaker-recognition" in needing:
+        console.print()
+        console.print(
+            "[yellow]⚠️  Speaker recognition also needs you to accept these gated model agreements:[/yellow]"
+        )
+        console.print("   1. [cyan]Speaker Diarization[/cyan]")
+        console.print(
+            "      https://huggingface.co/pyannote/speaker-diarization-community-1"
+        )
+        console.print("   2. [cyan]Segmentation Model[/cyan]")
+        console.print("      https://huggingface.co/pyannote/segmentation-3.0")
+        console.print("   3. [cyan]Segmentation Model[/cyan]")
+        console.print("      https://huggingface.co/pyannote/segmentation-3.1")
+        console.print("   4. [cyan]Embedding Model[/cyan]")
+        console.print(
+            "      https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM"
+        )
+        console.print()
+        console.print(
+            "[yellow]→[/yellow] Open each link and click 'Agree and access repository'"
+        )
+        console.print(
+            "[yellow]→[/yellow] Use the same Hugging Face account as your token"
+        )
     console.print()
 
-    # Check for existing token from speaker-recognition service
-    speaker_env_path = "extras/speaker-recognition/.env"
-    existing_token = read_env_value(speaker_env_path, "HF_TOKEN")
-
-    # Use the masked prompt function
     hf_token = prompt_with_existing_masked(
         prompt_text="Hugging Face Token",
-        existing_value=existing_token,
+        existing_value=_existing_hf_token(),
         placeholders=[
             "your_huggingface_token_here",
             "your-huggingface-token-here",
@@ -849,12 +909,15 @@ def setup_hf_token_if_needed(selected_services):
     )
 
     if hf_token:
-        masked = mask_value(hf_token)
-        console.print(f"[green]✅ HF_TOKEN configured: {masked}[/green]\n")
+        target = _persist_hf_token(hf_token)
+        console.print(
+            f"[green]✅ HF_TOKEN configured: {mask_value(hf_token)}[/green] "
+            f"[dim](saved to {target})[/dim]\n"
+        )
         return hf_token
     else:
         console.print(
-            "[yellow]⚠️  No HF_TOKEN provided - speaker recognition may fail[/yellow]\n"
+            "[yellow]⚠️  No HF_TOKEN provided — gated/large HuggingFace models may fail to download[/yellow]\n"
         )
         return None
 
@@ -1566,9 +1629,15 @@ def join_cluster():
     # 4. Enable ONLY these services in config.yml — a join node runs no backend.
     persist_enabled_services(chosen)
 
+    # 4b. A join node has no backend .env, so the shared HF token lives in the repo-root
+    #     .env here. Prompt once (if any chosen service needs it) and pass it through.
+    hf_token = setup_hf_token_if_needed(chosen)
+
     # 5. Configure each chosen service (runs its init.py interactively).
     for svc in chosen:
-        run_service_setup(svc, chosen, hardware_profile=hardware_profile)
+        run_service_setup(
+            svc, chosen, hf_token=hf_token, hardware_profile=hardware_profile
+        )
 
     # 6. Start the service(s) + the node agent (which advertises on the Tailnet).
     #    build=True because images won't exist yet on a fresh node.
@@ -1595,6 +1664,80 @@ def join_cluster():
     )
 
 
+def check_container_engine() -> bool:
+    """Container-engine prereq — Chronicle runs everything in containers.
+
+    Resolves the configured engine (docker default, or podman via config.yml /
+    CONTAINER_ENGINE) and verifies both the engine binary and its compose front-end
+    are installed and the runtime is reachable. Mirrors the Tailscale prereq style:
+    on any problem we explain it and let the user continue at their own risk, since
+    there is no container-less install path.
+
+    Returns True to proceed, False to abort the wizard.
+    """
+    engine = services.container_engine()
+    compose = (
+        services.compose_base()
+    )  # e.g. ['docker', 'compose'] or ['podman-compose']
+
+    if shutil.which(engine) is None:
+        console.print(
+            f"[red]✗ {engine} isn't installed.[/red] Chronicle runs every service in "
+            "containers —\n"
+            "  there is no install path without a container engine. Install "
+            f"[cyan]{engine}[/cyan]\n"
+            "  (https://docs.docker.com/engine/install/ or https://podman.io/docs/installation),\n"
+            "  then re-run this wizard."
+        )
+        return Confirm.ask(
+            "Continue anyway? (nothing will start until a container engine is installed)",
+            default=False,
+        )
+
+    # compose front-end: docker ships it as a plugin (`docker compose`), podman as a
+    # separate `podman-compose` binary — check whichever the resolved command needs.
+    compose_bin = compose[0]
+    if shutil.which(compose_bin) is None:
+        hint = (
+            "It ships with Docker Desktop / the docker-compose-plugin package."
+            if compose_bin == "docker"
+            else "Install it with [cyan]pip install podman-compose[/cyan] (or your package manager)."
+        )
+        console.print(
+            f"[red]✗ {' '.join(compose)} isn't available.[/red] Chronicle uses it to "
+            "build and run\n"
+            f"  the service stack. {hint}"
+        )
+        return Confirm.ask("Continue anyway?", default=False)
+
+    # Runtime liveness: `<engine> info` exits non-zero if the daemon/runtime is down
+    # (e.g. Docker Desktop not started, dockerd not running).
+    try:
+        up = (
+            subprocess.run([engine, "info"], capture_output=True, timeout=20).returncode
+            == 0
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        up = False
+    if not up:
+        console.print(
+            f"[red]✗ {engine} is installed but the runtime isn't reachable.[/red] "
+            f"Start it\n"
+            "  (e.g. launch Docker Desktop, or run [cyan]sudo systemctl start docker[/cyan]) "
+            "and re-run."
+        )
+        return Confirm.ask(
+            "Continue anyway? (services won't start until the engine is running)",
+            default=False,
+        )
+
+    console.print(
+        f"[green]✅[/green] Container engine: [cyan]{engine}[/cyan] "
+        f"(compose: [cyan]{' '.join(compose)}[/cyan])"
+    )
+    return True
+
+
 def main():
     """Main orchestration logic"""
     console.print("🎉 [bold green]Welcome to Chronicle![/bold green]\n")
@@ -1606,9 +1749,15 @@ def main():
         "[dim]When unsure, just press Enter — the defaults will work.[/dim]\n"
     )
 
-    # Ensure config.yml exists (create from template if needed)
+    # Ensure config.yml exists (create from template if needed) — also resolves which
+    # container engine (docker/podman) the rest of the wizard will use.
     config_mgr = ConfigManager()
     config_mgr.ensure_config_yml()
+
+    # Container-engine prereq — everything below runs in containers, so bail early
+    # (with a clear reason) rather than failing deep in a build/start step.
+    if not check_container_engine():
+        return
 
     # Setup git hooks first
     setup_git_hooks()

@@ -4,6 +4,7 @@ Chronicle TTS Services Setup Script
 Interactive configuration for provider-based TTS services
 """
 
+import argparse
 import os
 import shutil
 import sys
@@ -355,7 +356,29 @@ def setup_kittentts(model_id: str) -> None:
     )
 
 
-def main():
+def resolve_hf_token(arg_token: Optional[str]) -> Optional[str]:
+    """HF token, in priority order: --hf-token arg, backend .env, repo-root .env,
+    this service's own .env.
+
+    Mirrors how the wizard sources shared secrets: ``backends/advanced/.env`` is the
+    canonical hub on a main machine; the repo-root ``.env`` is the per-node store for
+    backend-less cluster-join nodes. (TADA needs the token for the gated Llama base.)
+    """
+    if arg_token:
+        return arg_token
+    repo_root = SCRIPT_DIR.parent.parent
+    for path in (
+        repo_root / "backends" / "advanced" / ".env",
+        repo_root / ".env",
+        ENV_FILE,
+    ):
+        value = read_env_value(str(path), "HF_TOKEN")
+        if value:
+            return value
+    return None
+
+
+def main(hf_token: Optional[str] = None):
     """Main setup flow."""
     provider_key = setup_provider()
     if provider_key is None:
@@ -399,6 +422,12 @@ def main():
 
     write_env(provider_key, model_id, cuda_version, port, language)
 
+    # HF token: TADA needs it for the gated Llama 3.2 base; Fish benefits to avoid
+    # HF rate-limits. Resolved from --hf-token / existing .env / repo-root .env.
+    resolved_token = resolve_hf_token(hf_token)
+    if resolved_token:
+        set_key(str(ENV_FILE), "HF_TOKEN", resolved_token, quote_mode="never")
+
     # Show next steps
     provider = PROVIDERS[provider_key]
     service_name = provider["service"]
@@ -421,4 +450,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="TTS Services Setup")
+    parser.add_argument(
+        "--hf-token",
+        help="Hugging Face token (TADA's gated Llama base / avoids HF rate-limits)",
+    )
+    cli_args = parser.parse_args()
+    main(hf_token=cli_args.hf_token)

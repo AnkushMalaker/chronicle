@@ -208,6 +208,23 @@ class ASRServicesSetup:
         """Read a value from existing .env file (delegates to shared utility)"""
         return read_env_value(".env", key)
 
+    def resolve_hf_token(self) -> Optional[str]:
+        """HF token, in priority order: --hf-token arg, backend .env, repo-root .env,
+        this service's own .env.
+
+        Mirrors how the wizard sources shared secrets: ``backends/advanced/.env`` is
+        the canonical hub on a main machine; the repo-root ``.env`` is the per-node
+        store for backend-less cluster-join nodes. Both are two levels up from here.
+        """
+        arg_token = getattr(self.args, "hf_token", None)
+        if arg_token:
+            return arg_token
+        for path in ("../../backends/advanced/.env", "../../.env", ".env"):
+            value = read_env_value(path, "HF_TOKEN")
+            if value:
+                return value
+        return None
+
     def backup_existing_env(self):
         """Backup existing .env file"""
         env_path = Path(".env")
@@ -712,6 +729,12 @@ class ASRServicesSetup:
             # Provider-specific configuration
             self.setup_provider_config(provider, model)
 
+            # HF token: several providers pull (possibly gated) models from
+            # HuggingFace; a token avoids rate-limits and unlocks gated repos.
+            hf_token = self.resolve_hf_token()
+            if hf_token:
+                self.config["HF_TOKEN"] = hf_token
+
             # Generate files
             self.print_header("Configuration Complete!")
             self.generate_env_file()
@@ -760,6 +783,10 @@ def main():
         "--pytorch-cuda-version",
         choices=["cu126", "cu128", "strixhalo"],
         help="PyTorch CUDA version",
+    )
+    parser.add_argument(
+        "--hf-token",
+        help="Hugging Face token (avoids HF rate-limits / unlocks gated repos)",
     )
 
     args = parser.parse_args()

@@ -4,3 +4,7 @@ models/*.gguf
 # Environment file (contains config)
 .env
 .env.backup.*
+
+# llama.cpp HuggingFace model cache (keep the dir, ignore downloads)
+cache/*
+!cache/.gitkeep

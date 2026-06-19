@@ -51,6 +51,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import discovery  # noqa: E402  (repo-root discovery.py)
 import services  # noqa: E402  (repo-root services.py)
+import status  # noqa: E402  (repo-root status.py — restart-count helper)
 from setup_utils import detect_cuda_version, detect_tailscale_info  # noqa: E402
 
 logging.basicConfig(
@@ -218,15 +219,55 @@ def _containers_running(name: str) -> bool:
         return False
 
 
+# A crash-looping container keeps flickering "Up <1s" so its health endpoint never
+# answers — without this it would forever read "starting". Past this many container
+# restarts we call it "unhealthy" instead. RestartCount is lifetime-cumulative but we
+# only consult it while the endpoint is down AND containers are up, so a genuinely
+# booting service (RestartCount stays 0 — it hasn't crashed) still reads "starting".
+RESTART_LOOP_THRESHOLD = 3
+
+
+def _max_restart_count(name: str) -> int:
+    """Highest container RestartCount for this service (0 if unknown).
+
+    Engine-aware via status.get_restart_counts (docker/podman inspect RestartCount).
+    """
+    service_path = REPO_ROOT / services.SERVICES[name]["path"]
+    try:
+        containers = services.compose_ps_json(service_path)
+    except Exception:
+        return 0
+    names = [c["name"] for c in containers if c.get("name")]
+    if not names:
+        return 0
+    counts = status.get_restart_counts(names)
+    return max(counts.values(), default=0)
+
+
+def _effective_health(name: str) -> tuple[str, str]:
+    """(health, detail) with the container-state overrides the raw endpoint check
+    can't see: distinguish a booting service from a crash loop.
+
+    "stopped" from check_service_health only means the endpoint isn't answering. If
+    containers are up we look at the restart count: a fresh boot (GPU model loads take
+    minutes) still has RestartCount 0 → "starting"; a crash loop has climbed past the
+    threshold → "unhealthy".
+    """
+    health, detail = services.check_service_health(name)
+    if health == "stopped" and _containers_running(name):
+        restarts = _max_restart_count(name)
+        if restarts >= RESTART_LOOP_THRESHOLD:
+            return (
+                "unhealthy",
+                f"crash loop: containers restarted {restarts}× without becoming healthy",
+            )
+        return ("starting", "containers up, waiting for health endpoint")
+    return health, detail
+
+
 def _service_entry(name: str) -> dict:
     service = services.SERVICES[name]
-    health, detail = services.check_service_health(name)
-    # "stopped" only means the health endpoint isn't answering. If containers are
-    # up, the service is booting (GPU model loads take minutes) — report
-    # "starting" so the UI doesn't offer Start again.
-    if health == "stopped" and _containers_running(name):
-        health = "starting"
-        detail = "containers up, waiting for health endpoint"
+    health, detail = _effective_health(name)
     return {
         "name": name,
         "description": service["description"],
@@ -265,14 +306,14 @@ def _service_labels(svc_name: str, hostname: str) -> dict:
     itself. ``host``/``type`` are kept for the Network page (it groups by host).
     All values are strings (minidisc labels are str→str).
     """
-    health, _detail = services.check_service_health(svc_name)
+    health, _detail = _effective_health(svc_name)
     return {
         "host": hostname,
         "type": "service",
         "service": svc_name,
         "enabled": "1",
         "running": "1" if _containers_running(svc_name) else "0",
-        "health": health,  # healthy | partial | unhealthy | stopped
+        "health": health,  # healthy | partial | unhealthy | starting | stopped
     }
 
 

@@ -40,6 +40,7 @@ services:
               capabilities: [gpu]
     environment:
       - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
       - ASR_MODEL=${ASR_MODEL:-nvidia/parakeet-tdt-0.6b-v3}
       # Legacy support
       - PARAKEET_MODEL=${PARAKEET_MODEL:-${ASR_MODEL:-nvidia/parakeet-tdt-0.6b-v3}}
@@ -82,6 +83,7 @@ services:
               capabilities: [gpu]
     environment:
       - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
       - ASR_MODEL=${NEMOTRON_MODEL:-nvidia/nemotron-3.5-asr-streaming-0.6b}
       - DEVICE=${DEVICE:-cuda}
       # Cache-aware streaming attention context "[left,right]" (80ms .. 1.12s
@@ -122,6 +124,7 @@ services:
               capabilities: [gpu]
     environment:
       - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
       - ASR_MODEL=${ASR_MODEL:-Systran/faster-whisper-large-v3}
       - COMPUTE_TYPE=${COMPUTE_TYPE:-float16}
       - DEVICE=${DEVICE:-cuda}
@@ -158,6 +161,7 @@ services:
               capabilities: [gpu]
     environment:
       - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
       - ASR_MODEL=${ASR_MODEL:-microsoft/VibeVoice-ASR-HF}
       - VIBEVOICE_ATTN_IMPL=${VIBEVOICE_ATTN_IMPL:-flash_attention_2}
       - DEVICE=${DEVICE:-cuda}
@@ -211,6 +215,7 @@ services:
               capabilities: [gpu]
     environment:
       - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
       # Once the model is cached, run fully offline so startup never depends on
       # DNS/HF reachability. huggingface_hub 1.x (httpx) turns a transient name-
       # resolution failure into a fatal "client has been closed" crash instead of
@@ -272,6 +277,7 @@ services:
               capabilities: [gpu]
     environment:
       - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
       - ASR_MODEL=${AF_NEXT_MODEL:-nvidia/audio-flamingo-next-hf}
       - DEVICE=${DEVICE:-cuda}
       # AF-Next must run bf16: at fp16 a ~7B model overflows and on some inputs
@@ -315,6 +321,7 @@ services:
               capabilities: [gpu]
     environment:
       - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
       - ASR_MODEL=${ASR_MODEL:-openai/whisper-large-v3}
       - USE_FLASH_ATTENTION=${USE_FLASH_ATTENTION:-false}
       - DEVICE=${DEVICE:-cuda}
@@ -343,6 +350,7 @@ services:
               capabilities: [gpu]
     environment:
       - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
     command: >
       ${ASR_MODEL:-Qwen/Qwen3-ASR-1.7B}
       --gpu-memory-utilization ${QWEN3_GPU_MEM:-0.8}
@@ -425,6 +433,7 @@ services:
       - "${RENDER_GID:-989}"  # render group (Arch default; Ubuntu typically 107)
     environment:
       - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
       - ASR_MODEL=${ASR_MODEL:-microsoft/VibeVoice-ASR-HF}
       # sdpa is supported on ROCm; flash_attention_2 requires CUDA
       - VIBEVOICE_ATTN_IMPL=sdpa
@@ -473,6 +482,7 @@ services:
       - "${RENDER_GID:-989}"  # render group (Arch default; Ubuntu typically 107)
     environment:
       - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
       - ASR_MODEL=${ASR_MODEL:-nvidia/parakeet-tdt-0.6b-v3}
       # Legacy support
       - PARAKEET_MODEL=${PARAKEET_MODEL:-${ASR_MODEL:-nvidia/parakeet-tdt-0.6b-v3}}
@@ -510,6 +520,7 @@ services:
               capabilities: [gpu]
     environment:
       - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
       - PARAKEET_MODEL=${PARAKEET_MODEL:-nvidia/parakeet-tdt-0.6b-v3}
       # Enhanced chunking configuration
       - CHUNKING_ENABLED=${CHUNKING_ENABLED:-true}
