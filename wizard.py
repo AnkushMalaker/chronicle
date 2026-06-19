@@ -1486,6 +1486,32 @@ def join_cluster():
         "your Tailnet. Your main Chronicle backend then discovers and uses them.\n"
     )
 
+    # 0. Tailscale prereq — discovery AND advertising both need it. Check up front so
+    # a missing/down Tailscale gives the real cause, not a misleading "no backend found".
+    if shutil.which("tailscale") is None:
+        console.print(
+            "[red]✗ Tailscale isn't installed.[/red] A join node finds the hub and advertises\n"
+            "  its services over your Tailnet. Install it (https://tailscale.com/download),\n"
+            "  run [cyan]sudo tailscale up[/cyan], then re-run this wizard."
+        )
+        return
+    try:
+        ts_connected = (
+            subprocess.run(["tailscale", "status"], capture_output=True).returncode == 0
+        )
+    except OSError:
+        ts_connected = False
+    if not ts_connected:
+        console.print(
+            "[red]✗ Tailscale is installed but not connected.[/red] Run "
+            "[cyan]sudo tailscale up[/cyan]\n  (approve this device on your tailnet), then re-run."
+        )
+        if not Confirm.ask(
+            "Continue anyway? (discovery/advertising won't work — you'd wire service URLs manually)",
+            default=False,
+        ):
+            return
+
     # 1. Discover the hub + what's already advertised in the cluster.
     console.print("🔍 Looking for your Chronicle backend on the Tailnet…")
     backend_url = discovery.discover_service(discovery.CHRONICLE_BACKEND)
