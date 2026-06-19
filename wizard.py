@@ -20,12 +20,14 @@ from config_manager import ConfigManager
 from setup_utils import (
     decide_cert_mode,
     detect_tailscale_info,
+    enable_tailscaled_at_boot,
     generate_tailscale_certs,
     is_placeholder,
     mask_value,
     prompt_password,
     prompt_with_existing_masked,
     read_env_value,
+    tailscaled_enabled_at_boot,
 )
 
 console = Console()
@@ -1778,6 +1780,29 @@ def join_cluster():
         ):
             return
 
+    # 0b. Tailscale running now ≠ Tailscale after a reboot. If the unit is started but
+    # not enabled, it silently won't come back on boot and the node drops off the
+    # Tailnet (services unreachable) until someone notices. Offer to make it stick.
+    if tailscaled_enabled_at_boot() is False:
+        console.print(
+            "[yellow]⚠️  Tailscale is running but not enabled to start on boot.[/yellow]\n"
+            "   After a reboot this node would silently drop off the Tailnet (services\n"
+            "   unreachable) until you start it again manually."
+        )
+        if Confirm.ask(
+            "Enable tailscaled to start on boot now? (sudo systemctl enable --now tailscaled)",
+            default=True,
+        ):
+            if enable_tailscaled_at_boot():
+                console.print(
+                    "[green]✅[/green] tailscaled enabled — it'll survive reboots now."
+                )
+            else:
+                console.print(
+                    "[red]✗ Couldn't enable it.[/red] Run it yourself: "
+                    "[cyan]sudo systemctl enable --now tailscaled[/cyan]"
+                )
+
     # 1. Discover the hub + what's already advertised in the cluster.
     console.print("🔍 Looking for your Chronicle backend on the Tailnet…")
     backend_url = discovery.discover_service(discovery.CHRONICLE_BACKEND)
@@ -2283,6 +2308,33 @@ def main():
                     "[blue][INFO][/blue] Trusted automatically for *.ts.net and real "
                     "domains; IP/localhost get a self-signed cert you accept in the browser."
                 )
+
+            # If this box is served over a Tailscale address, both reachability and
+            # (Caddy-managed) cert renewal depend on tailscaled being up. Started-but-
+            # not-enabled means it silently won't come back after a reboot — offer to
+            # make it stick, same as the join-node path.
+            served_over_tailscale = server_ip.endswith(".ts.net") or (
+                bool(ts_ip) and server_ip == ts_ip
+            )
+            if served_over_tailscale and tailscaled_enabled_at_boot() is False:
+                console.print(
+                    "\n[yellow]⚠️  Tailscale is running but not enabled to start on boot.[/yellow]\n"
+                    "   After a reboot this box would silently drop off the Tailnet —\n"
+                    "   the dashboard/API would be unreachable and the TLS cert wouldn't renew."
+                )
+                if Confirm.ask(
+                    "Enable tailscaled to start on boot now? (sudo systemctl enable --now tailscaled)",
+                    default=True,
+                ):
+                    if enable_tailscaled_at_boot():
+                        console.print(
+                            "[green]✅[/green] tailscaled enabled — it'll survive reboots now."
+                        )
+                    else:
+                        console.print(
+                            "[red]✗ Couldn't enable it.[/red] Run it yourself: "
+                            "[cyan]sudo systemctl enable --now tailscaled[/cyan]"
+                        )
 
     obsidian_enabled = False
 
