@@ -1113,12 +1113,38 @@ def _stop_service_manager():
 _REPO_ROOT = Path(__file__).resolve().parent
 _SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
 
-# unit name -> (services.py subcommand for ExecStart, human description)
+# unit name -> per-unit systemd config. Keys:
+#   subcmd            services.py subcommand for ExecStart
+#   description       human description (Unit/Description=)
+#   type              systemd service Type (default "exec")
+#   restart           Restart= value (omit for oneshot)
+#   remain_after_exit RemainAfterExit=yes (oneshot that should read as "active")
+#   timeout_start_sec TimeoutStartSec= (oneshot stack `up` can be slow)
+#   after             list of After= ordering deps
+#   enable_now        enable --now on install (True) vs enable for boot only (False)
 _SYSTEMD_UNITS = {
-    "chronicle-service-manager": (
-        "manager run",
-        "Chronicle node agent (WebUI control + Tailnet service advertising)",
-    ),
+    "chronicle-service-manager": {
+        "subcmd": "manager run",
+        "description": "Chronicle node agent (WebUI control + Tailnet service advertising)",
+        "type": "exec",
+        "restart": "always",
+        "restart_sec": 5,
+        "enable_now": True,
+    },
+    # Boot persistence for the container stack. Rootless Podman is daemonless, so
+    # unlike Docker nothing re-applies `restart:` policies after a reboot — this
+    # oneshot runs the same `services.py start --all` that ./start.sh uses to bring
+    # the enabled stacks (per config.yml) back up. Ordered after the node agent;
+    # enabled for boot only (install does not kick off a full stack `up`).
+    "chronicle-stack": {
+        "subcmd": "start --all",
+        "description": "Chronicle container stack (start enabled services on boot)",
+        "type": "oneshot",
+        "remain_after_exit": True,
+        "timeout_start_sec": 900,
+        "after": ["chronicle-service-manager.service"],
+        "enable_now": False,
+    },
 }
 
 _SYSTEMD_STATES = {
@@ -1177,11 +1203,11 @@ def _service_manager_managed() -> bool:
 
 
 def _write_systemd_unit(unit: str) -> Path:
-    subcmd, description = _SYSTEMD_UNITS[unit]
+    cfg = _SYSTEMD_UNITS[unit]
     uv_path = shutil.which("uv") or "uv"
     # A systemd user unit gets a minimal PATH (no ~/.local/bin), so neither uv
-    # nor binaries the agents shell out to (e.g. tailscale) would resolve.
-    # Pin a sane PATH that includes uv's own directory.
+    # nor binaries the agents shell out to (e.g. tailscale, podman-compose) would
+    # resolve. Pin a sane PATH that includes uv's own directory.
     uv_dir = str(Path(uv_path).parent)
     unit_path_env = ":".join(
         [
@@ -1196,23 +1222,35 @@ def _write_systemd_unit(unit: str) -> Path:
         ]
     )
     _SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
-    unit_path = _SYSTEMD_USER_DIR / f"{unit}.service"
-    unit_path.write_text(
-        f"""[Unit]
-Description={description}
 
-[Service]
-Type=exec
-WorkingDirectory={_REPO_ROOT}
-Environment=PATH={unit_path_env}
-ExecStart={uv_path} run --with-requirements setup-requirements.txt python {_REPO_ROOT / "services.py"} {subcmd}
-Restart=always
-RestartSec=5
+    unit_lines = [f"Description={cfg['description']}"]
+    for after in cfg.get("after", []):
+        unit_lines.append(f"After={after}")
 
-[Install]
-WantedBy=default.target
-"""
+    service_lines = [
+        f"Type={cfg.get('type', 'exec')}",
+        f"WorkingDirectory={_REPO_ROOT}",
+        f"Environment=PATH={unit_path_env}",
+        f"ExecStart={uv_path} run --with-requirements setup-requirements.txt "
+        f"python {_REPO_ROOT / 'services.py'} {cfg['subcmd']}",
+    ]
+    if cfg.get("remain_after_exit"):
+        service_lines.append("RemainAfterExit=yes")
+    if cfg.get("restart"):
+        service_lines.append(f"Restart={cfg['restart']}")
+        service_lines.append(f"RestartSec={cfg.get('restart_sec', 5)}")
+    if cfg.get("timeout_start_sec") is not None:
+        service_lines.append(f"TimeoutStartSec={cfg['timeout_start_sec']}")
+
+    content = (
+        "[Unit]\n"
+        + "\n".join(unit_lines)
+        + "\n\n[Service]\n"
+        + "\n".join(service_lines)
+        + "\n\n[Install]\nWantedBy=default.target\n"
     )
+    unit_path = _SYSTEMD_USER_DIR / f"{unit}.service"
+    unit_path.write_text(content)
     return unit_path
 
 
@@ -1224,16 +1262,20 @@ def _install_systemd_unit(unit: str) -> bool:
         _cleanup_legacy_discovery()
 
     path = _write_systemd_unit(unit)
-    # Keep the user instance (and thus the agent) alive after logout / reboot.
+    # Keep the user instance (and thus the unit) alive after logout / reboot.
     subprocess.run(["loginctl", "enable-linger"], capture_output=True, text=True)
     _systemctl_user("daemon-reload")
-    result = _systemctl_user("enable", "--now", unit, capture=False)
+    # The stack oneshot is boot-only: enabling it should register it for boot, not
+    # trigger a full `start --all` as a side effect of install (./start.sh owns the
+    # running stack). The agent enables --now so it comes up immediately.
+    enable_now = _SYSTEMD_UNITS[unit].get("enable_now", True)
+    enable_args = ["enable", "--now", unit] if enable_now else ["enable", unit]
+    result = _systemctl_user(*enable_args, capture=False)
     if result.returncode != 0:
         console.print(f"[red]❌ Failed to enable {unit}[/red]")
         return False
-    console.print(
-        f"[green]✅ Installed & started {unit} (systemd user service)[/green]"
-    )
+    suffix = "& started" if enable_now else "(will start on boot)"
+    console.print(f"[green]✅ Installed {suffix} {unit} (systemd user service)[/green]")
     console.print(f"[dim]   Unit: {path}[/dim]")
     return True
 
@@ -1767,6 +1809,12 @@ def show_status():
     else:
         console.print("[dim]🛠  Service manager not running[/dim]")
 
+    # Stack-on-boot oneshot (Podman has no daemon to revive containers on reboot)
+    if _unit_enabled("chronicle-stack"):
+        console.print(
+            "[green]🔁 Stack auto-start on boot enabled (systemd user service)[/green]"
+        )
+
     console.print("\n💡 [dim]Use './start.sh' to start all configured services[/dim]")
 
 
@@ -1952,9 +2000,10 @@ def main():
         elif args.manager_action == "run":
             _service_manager_exec()
         elif args.manager_action == "install":
-            install_systemd_agents(["chronicle-service-manager"])
+            # Installs the node agent AND the stack-on-boot oneshot.
+            install_systemd_agents()
         elif args.manager_action == "uninstall":
-            uninstall_systemd_agents(["chronicle-service-manager"])
+            uninstall_systemd_agents()
 
     elif args.command == "remote-control":
         if args.remote_control_action == "start":

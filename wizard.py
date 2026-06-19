@@ -1358,18 +1358,23 @@ def select_memory_provider(config_yml: dict = None) -> str:
 
 
 def maybe_install_agent_services():
-    """Offer to install the native node agent as a systemd user service.
+    """Offer to install the boot-persistence systemd user services.
 
-    The node agent (:8775 — WebUI control + Tailnet advertising) runs natively on
-    the host, not in Docker, so it doesn't come back after a reboot the way the
-    containers do. Installing it as a systemd *user* service (with linger) fixes that.
+    Installs two units (with linger): the native node agent (:8775 — WebUI control
+    + Tailnet advertising), which runs on the host and so doesn't survive a reboot
+    on its own; and a oneshot that runs ``start --all`` on boot to bring the
+    container stack back. The latter matters under rootless Podman, which — unlike
+    Docker — has no daemon to re-apply ``restart:`` policies after a reboot.
     """
     console.print("\n🔁 [bold cyan]Auto-start on boot (Optional)[/bold cyan]")
     console.print(
-        "The node agent (:8775 — WebUI control + Tailnet service advertising) runs"
+        "Installs systemd user services so both the node agent (:8775) and your"
     )
     console.print(
-        "natively on the host, so it doesn't restart on reboot like the containers do."
+        "container stack come back after a reboot. (Rootless Podman, unlike Docker,"
+    )
+    console.print(
+        "has no daemon to revive containers on boot, so this is needed there.)"
     )
 
     if not services._systemd_user_available():
