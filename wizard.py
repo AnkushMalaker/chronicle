@@ -8,12 +8,13 @@ import shutil
 import subprocess
 from pathlib import Path
 
-import discovery
-import services
-from config_manager import ConfigManager
 from dotenv import set_key
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
+
+import discovery
+import services
+from config_manager import ConfigManager
 
 # Import shared setup utilities
 from setup_utils import (
@@ -1946,14 +1947,23 @@ def main():
     # LLM Provider selection (asked once here, passed to init.py — avoids double-ask)
     llm_provider = select_llm_provider(config_yml, transcription_provider)
 
+    # Memory Provider selection (asked once here, passed to init.py — avoids double-ask)
+    memory_provider = select_memory_provider(config_yml)
+
+    # Service Selection (pass provider choices so we skip asking about auto-added services)
+    selected_services = select_services(
+        transcription_provider, config_yml, memory_provider, llm_provider
+    )
+
     # ── Service source: where each remote-capable compute service runs ──────────
     # Hub flow defaults to "on this hub", but offers own/external endpoint, pinning a
-    # Tailnet-advertised node, or deferring to runtime discovery. Only for the
-    # discovery-aware offline ASR providers and the Chronicle-managed llama.cpp LLM.
+    # Tailnet-advertised node, or deferring to runtime discovery. A *remote* ASR/LLM
+    # choice (own/Tailnet/later) also suppresses auto-adding the local service below.
     OFFLINE_DISCOVERABLE_ASR = {"parakeet", "qwen3-asr", "gemma4", "af-next"}
-    asr_url, asr_discover = None, False
+    asr_url, asr_discover, asr_remote = None, False, False
     if transcription_provider in OFFLINE_DISCOVERABLE_ASR:
         src = select_service_source("ASR", "chronicle-asr")
+        asr_remote = src["mode"] != "local"
         if src["mode"] == "local":
             asr_url = "http://host.docker.internal:8767"
         elif src["mode"] in ("own", "tailnet"):
@@ -1961,9 +1971,10 @@ def main():
         elif src["mode"] == "later":
             asr_discover = True
 
-    llm_base_url, llm_discover = None, False
+    llm_base_url, llm_discover, llm_remote = None, False, False
     if llm_provider == "llamacpp":
         src = select_service_source("Local LLM (llama.cpp)", "chronicle-llm")
+        llm_remote = src["mode"] != "local"
         if src["mode"] == "local":
             llm_base_url = "http://host.docker.internal:8083/v1"
         elif src["mode"] in ("own", "tailnet"):
@@ -1974,8 +1985,7 @@ def main():
             llm_discover = True
 
     # Speaker Recognition + TTS: when NOT run locally, optionally point the backend at
-    # a remote/own endpoint or let it auto-discover one on the Tailnet. (When run
-    # locally — i.e. in selected_services — the existing local wiring applies.)
+    # a remote/own endpoint or let it auto-discover one on the Tailnet.
     speaker_url, speaker_discover = None, False
     if "speaker-recognition" not in selected_services:
         try:
@@ -2010,18 +2020,11 @@ def main():
         except EOFError:
             pass
 
-    # Memory Provider selection (asked once here, passed to init.py — avoids double-ask)
-    memory_provider = select_memory_provider(config_yml)
-
-    # Service Selection (pass provider choices so we skip asking about auto-added services)
-    selected_services = select_services(
-        transcription_provider, config_yml, memory_provider, llm_provider
-    )
-
-    # Auto-add asr-services if any local ASR was chosen (batch or streaming)
+    # Auto-add asr-services if a LOCAL ASR was chosen (not a remote/discover source)
     local_asr_providers = ("parakeet", "vibevoice", "qwen3-asr", "gemma4", "af-next")
-    needs_asr = transcription_provider in local_asr_providers or (
-        streaming_provider and streaming_provider in local_asr_providers
+    needs_asr = not asr_remote and (
+        transcription_provider in local_asr_providers
+        or (streaming_provider and streaming_provider in local_asr_providers)
     )
     if needs_asr and "asr-services" not in selected_services:
         reason = (
@@ -2034,8 +2037,12 @@ def main():
         )
         selected_services.append("asr-services")
 
-    # Auto-add llm-services if llama.cpp was selected as LLM provider
-    if llm_provider == "llamacpp" and "llm-services" not in selected_services:
+    # Auto-add llm-services if llama.cpp runs LOCALLY (not a remote/discover source)
+    if (
+        llm_provider == "llamacpp"
+        and not llm_remote
+        and "llm-services" not in selected_services
+    ):
         exists, _ = check_service_exists(
             "llm-services", SERVICES["extras"]["llm-services"]
         )
