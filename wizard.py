@@ -308,12 +308,19 @@ def select_services(
             console.print(f"  ⏸️  {service_config['description']} - [dim]{msg}[/dim]")
             continue
 
+        # Default to whatever was enabled last time (config.yml services map is the
+        # source of truth) so a re-run is press-Enter-through. Smart per-service
+        # heuristics below can still flip a never-configured service on.
+        prior_enabled = bool(
+            (config_yml.get("services") or {}).get(service_name, False)
+        )
+
         # Determine smart default based on existing config
         if service_name == "speaker-recognition":
-            # Default to True if speaker-recognition .env exists and has a valid (non-placeholder) HF_TOKEN
+            # Also default True if speaker-recognition .env has a valid HF_TOKEN
             speaker_env = "extras/speaker-recognition/.env"
             existing_hf = read_env_value(speaker_env, "HF_TOKEN")
-            default_enable = bool(
+            default_enable = prior_enabled or bool(
                 existing_hf
                 and not is_placeholder(
                     existing_hf,
@@ -323,10 +330,10 @@ def select_services(
                 )
             )
         elif service_name == "openmemory-mcp":
-            # Default to True if memory provider was selected as openmemory_mcp
-            default_enable = memory_provider == "openmemory_mcp"
+            # Also default True if memory provider was selected as openmemory_mcp
+            default_enable = prior_enabled or (memory_provider == "openmemory_mcp")
         else:
-            default_enable = False
+            default_enable = prior_enabled
 
         try:
             enable_service = Confirm.ask(
@@ -984,8 +991,41 @@ def _scan_tailnet_services(discovery_name: str) -> list:
         return []
 
 
+def _infer_source_mode(current):
+    """Infer a prior source mode from an existing URL value (for press-Enter defaults).
+
+    ``None`` = not configured before; ``""`` = was set empty (discover/later); a local
+    host → local; a Tailscale address → tailnet; anything else → own.
+    """
+    if current is None:
+        return None
+    if current == "":
+        return "later"
+    low = current.lower()
+    if any(
+        h in low
+        for h in (
+            "host.docker.internal",
+            "localhost",
+            "127.0.0.1",
+            "172.17.0.1",
+            "speaker-service",
+        )
+    ):
+        return "local"
+    if ".ts.net" in low or any(
+        low.split("://")[-1].startswith(p) for p in ("100.", "fd7a:")
+    ):
+        return "tailnet"
+    return "own"
+
+
 def select_service_source(
-    label: str, discovery_name: str, allow_later: bool = True, allow_local: bool = True
+    label: str,
+    discovery_name: str,
+    allow_later: bool = True,
+    allow_local: bool = True,
+    current: str = None,
 ):
     """Ask WHERE a remote-capable service runs (hub default), returning a source dict.
 
@@ -996,7 +1036,9 @@ def select_service_source(
       {"mode": "later"}                       — leave unset; backend discovers it at runtime
 
     ``allow_local=False`` drops the on-this-hub option (used when the service was
-    already declined for local setup), defaulting to discover-later.
+    already declined for local setup), defaulting to discover-later. ``current`` is the
+    previously-configured URL ('' = was discover) used to default the menu + prefill, so
+    a re-run is press-Enter-through.
     """
     console.print(f"\n🛰️  [bold cyan]{label} — where does it run?[/bold cyan]")
     # Stable choice keys regardless of which options are shown.
@@ -1012,7 +1054,15 @@ def select_service_source(
         )
     for k, (_mode, desc) in options.items():
         console.print(f"  {k}) {desc}")
+
     default_choice = "1" if allow_local else ("4" if allow_later else "2")
+    # Default to the previously-configured source so a re-run is press-Enter-through.
+    prior_mode = _infer_source_mode(current)
+    mode_to_key = {m: k for k, (m, _d) in options.items()}
+    if prior_mode in mode_to_key:
+        default_choice = mode_to_key[prior_mode]
+        console.print(f"[dim]  (previously: {prior_mode})[/dim]")
+
     # No-op fallback when a sub-step is abandoned: prefer local, else discover-later.
     _fallback = {"mode": "local"} if allow_local else {"mode": "later"}
     try:
@@ -1023,10 +1073,13 @@ def select_service_source(
         choice = default_choice
 
     if choice == "2":
+        own_default = current if _infer_source_mode(current) == "own" else ""
         try:
-            url = Prompt.ask(f"{label} endpoint URL (e.g. http://host:8767)").strip()
+            url = Prompt.ask(
+                f"{label} endpoint URL (e.g. http://host:8767)", default=own_default
+            ).strip()
         except EOFError:
-            url = ""
+            url = own_default
         if url:
             return {"mode": "own", "url": url}
         console.print("[yellow]No URL entered — falling back.[/yellow]")
@@ -1047,11 +1100,19 @@ def select_service_source(
         console.print(f"[green]Found {len(found)} on the Tailnet:[/green]")
         for i, a in enumerate(found, 1):
             console.print(f"  {i}) {a['host']} — {a['url']}")
+        # Pre-select the previously-pinned node if it's still advertised.
+        default_pick = "1"
+        if current:
+            base = current.rstrip("/").removesuffix("/v1")
+            for i, a in enumerate(found, 1):
+                if a["url"].rstrip("/") == base:
+                    default_pick = str(i)
+                    break
         try:
-            pick = Prompt.ask("Pick one", default="1")
+            pick = Prompt.ask("Pick one", default=default_pick)
             idx = int(pick) - 1
         except (EOFError, ValueError):
-            idx = 0
+            idx = int(default_pick) - 1
         if 0 <= idx < len(found):
             console.print(f"[green]✅[/green] Using {found[idx]['url']}")
             return {"mode": "tailnet", "url": found[idx]["url"]}
@@ -1959,10 +2020,18 @@ def main():
     # Hub flow defaults to "on this hub", but offers own/external endpoint, pinning a
     # Tailnet-advertised node, or deferring to runtime discovery. A *remote* ASR/LLM
     # choice (own/Tailnet/later) also suppresses auto-adding the local service below.
+    backend_env = "backends/advanced/.env"
     OFFLINE_DISCOVERABLE_ASR = {"parakeet", "qwen3-asr", "gemma4", "af-next"}
+    _ASR_ENV_KEY = {
+        "parakeet": "PARAKEET_ASR_URL",
+        "qwen3-asr": "QWEN3_ASR_URL",
+        "gemma4": "GEMMA4_ASR_URL",
+        "af-next": "AF_NEXT_ASR_URL",
+    }
     asr_url, asr_discover, asr_remote = None, False, False
     if transcription_provider in OFFLINE_DISCOVERABLE_ASR:
-        src = select_service_source("ASR", "chronicle-asr")
+        asr_current = read_env_value(backend_env, _ASR_ENV_KEY[transcription_provider])
+        src = select_service_source("ASR", "chronicle-asr", current=asr_current)
         asr_remote = src["mode"] != "local"
         if src["mode"] == "local":
             asr_url = "http://host.docker.internal:8767"
@@ -1973,7 +2042,10 @@ def main():
 
     llm_base_url, llm_discover, llm_remote = None, False, False
     if llm_provider == "llamacpp":
-        src = select_service_source("Local LLM (llama.cpp)", "chronicle-llm")
+        llm_current = read_env_value(backend_env, "LLM_BASE_URL")
+        src = select_service_source(
+            "Local LLM (llama.cpp)", "chronicle-llm", current=llm_current
+        )
         llm_remote = src["mode"] != "local"
         if src["mode"] == "local":
             llm_base_url = "http://host.docker.internal:8083/v1"
@@ -1988,12 +2060,22 @@ def main():
     # a remote/own endpoint or let it auto-discover one on the Tailnet.
     speaker_url, speaker_discover = None, False
     if "speaker-recognition" not in selected_services:
+        speaker_current = read_env_value(backend_env, "SPEAKER_SERVICE_URL")
+        prior_remote = _infer_source_mode(speaker_current) in (
+            "own",
+            "tailnet",
+            "later",
+        )
         try:
             if Confirm.ask(
-                "Use a remote / external Speaker Recognition service?", default=False
+                "Use a remote / external Speaker Recognition service?",
+                default=prior_remote,
             ):
                 src = select_service_source(
-                    "Speaker Recognition", "chronicle-speaker", allow_local=False
+                    "Speaker Recognition",
+                    "chronicle-speaker",
+                    allow_local=False,
+                    current=speaker_current,
                 )
                 if src["mode"] in ("own", "tailnet"):
                     speaker_url = src["url"]
@@ -2008,10 +2090,17 @@ def main():
         # longer defaults CHRONICLE_TTS_URL, so an unset value would mean 'discover').
         tts_url = "http://host.docker.internal:8770"
     else:
+        tts_current = read_env_value(backend_env, "CHRONICLE_TTS_URL")
+        prior_set = _infer_source_mode(tts_current) in ("own", "tailnet", "later")
         try:
-            if Confirm.ask("Configure a Text-to-Speech (TTS) endpoint?", default=False):
+            if Confirm.ask(
+                "Configure a Text-to-Speech (TTS) endpoint?", default=prior_set
+            ):
                 src = select_service_source(
-                    "Text-to-Speech", "chronicle-tts", allow_local=False
+                    "Text-to-Speech",
+                    "chronicle-tts",
+                    allow_local=False,
+                    current=tts_current,
                 )
                 if src["mode"] in ("own", "tailnet"):
                     tts_url = src["url"]
