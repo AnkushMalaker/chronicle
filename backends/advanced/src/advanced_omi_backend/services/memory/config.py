@@ -161,7 +161,7 @@ def build_memory_config_from_env() -> MemoryConfig:
         embedding_model = (
             embed_def.model_name if embed_def else "text-embedding-3-small"
         )
-        base_url = llm_def.model_url
+        base_url = llm_def.resolved_url()
         memory_logger.info(
             f"🔧 Memory config (registry): LLM={model}, Embedding={embedding_model}, Base URL={base_url}"
         )

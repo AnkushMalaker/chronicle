@@ -1303,7 +1303,7 @@ async def test_llm_model(model_name: Optional[str]):
 
         client = create_openai_client(
             api_key=model_def.api_key or "",
-            base_url=model_def.model_url,
+            base_url=model_def.resolved_url(),
             is_async=True,
         )
 

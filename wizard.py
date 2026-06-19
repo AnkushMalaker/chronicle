@@ -8,13 +8,12 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from dotenv import set_key
-from rich.console import Console
-from rich.prompt import Confirm, Prompt
-
 import discovery
 import services
 from config_manager import ConfigManager
+from dotenv import set_key
+from rich.console import Console
+from rich.prompt import Confirm, Prompt
 
 # Import shared setup utilities
 from setup_utils import (
@@ -384,6 +383,14 @@ def run_service_setup(
     memory_provider=None,
     hardware_profile=None,
     live_segmentation="streaming_stt",
+    asr_url=None,
+    asr_discover=False,
+    llm_base_url=None,
+    llm_discover=False,
+    speaker_url=None,
+    speaker_discover=False,
+    tts_url=None,
+    tts_discover=False,
 ):
     """Execute individual service setup script"""
     if service_name == "advanced":
@@ -391,14 +398,42 @@ def run_service_setup(
 
         # For advanced backend, pass URLs of other selected services and HTTPS config
         cmd = service["cmd"].copy()
+        # Speaker Recognition URL: local service → compose DNS name; otherwise honor
+        # the wizard's source choice (remote endpoint, or discover on the Tailnet).
         if "speaker-recognition" in selected_services:
             cmd.extend(["--speaker-service-url", "http://speaker-service:8085"])
-        if "asr-services" in selected_services:
+        elif speaker_discover:
+            cmd.append("--speaker-discover")
+        elif speaker_url:
+            cmd.extend(["--speaker-service-url", speaker_url])
+
+        # TTS endpoint source (own/remote/Tailnet/discover).
+        if tts_discover:
+            cmd.append("--tts-discover")
+        elif tts_url:
+            cmd.extend(["--tts-url", tts_url])
+
+        # Legacy local-parakeet wiring — skipped when the wizard chose an ASR source
+        # (own/Tailnet/discover), which drives the URL via --asr-url/--asr-discover.
+        if "asr-services" in selected_services and not (asr_url or asr_discover):
             cmd.extend(["--parakeet-asr-url", "host.docker.internal:8767"])
 
         # Pass transcription provider choice from wizard
         if transcription_provider:
             cmd.extend(["--transcription-provider", transcription_provider])
+
+        # ASR source (where the offline provider runs): discover on the Tailnet,
+        # or pin an own/remote/picked URL. Overrides the local default above.
+        if asr_discover:
+            cmd.append("--asr-discover")
+        elif asr_url:
+            cmd.extend(["--asr-url", asr_url])
+
+        # LLM source for the Chronicle-managed llama.cpp endpoint.
+        if llm_discover:
+            cmd.append("--llm-discover")
+        elif llm_base_url:
+            cmd.extend(["--llm-base-url", llm_base_url])
 
         # Pass streaming provider (different from batch) for re-transcription setup
         if streaming_provider:
@@ -927,6 +962,107 @@ STREAMING_CAPABLE = {"deepgram", "smallest", "qwen3-asr", "gemma4"}
 
 # STT providers that can also serve as LLM (unified multimodal models)
 UNIFIED_CAPABLE_STT = {"gemma4"}
+
+
+def _scan_tailnet_services(discovery_name: str) -> list:
+    """Advertised instances of a chronicle-* service on the Tailnet as [{host, url}].
+
+    Empty when Tailscale/minidisc is unavailable or nothing is advertised.
+    """
+    try:
+        found = []
+        for svc in discovery.list_all_services() or []:
+            if svc.get("name") != discovery_name:
+                continue
+            addr, port = svc.get("address"), svc.get("port")
+            host = (svc.get("labels") or {}).get("host", addr)
+            if addr and port:
+                found.append({"host": host, "url": f"http://{addr}:{port}"})
+        return found
+    except Exception:
+        return []
+
+
+def select_service_source(
+    label: str, discovery_name: str, allow_later: bool = True, allow_local: bool = True
+):
+    """Ask WHERE a remote-capable service runs (hub default), returning a source dict.
+
+    Returns one of:
+      {"mode": "local"}                       — run it on this hub (caller's default flow)
+      {"mode": "own",     "url": "<url>"}     — an existing/external endpoint
+      {"mode": "tailnet", "url": "<url>"}     — pin a node advertised on the Tailnet now
+      {"mode": "later"}                       — leave unset; backend discovers it at runtime
+
+    ``allow_local=False`` drops the on-this-hub option (used when the service was
+    already declined for local setup), defaulting to discover-later.
+    """
+    console.print(f"\n🛰️  [bold cyan]{label} — where does it run?[/bold cyan]")
+    # Stable choice keys regardless of which options are shown.
+    options: dict[str, tuple[str, str]] = {}
+    if allow_local:
+        options["1"] = ("local", "On this hub (run it here)")
+    options["2"] = ("own", "My own / external endpoint (enter a URL)")
+    options["3"] = ("tailnet", "Pick a node advertised on the Tailnet now")
+    if allow_later:
+        options["4"] = (
+            "later",
+            "Configure from the Tailnet later (auto-discover at runtime)",
+        )
+    for k, (_mode, desc) in options.items():
+        console.print(f"  {k}) {desc}")
+    default_choice = "1" if allow_local else ("4" if allow_later else "2")
+    # No-op fallback when a sub-step is abandoned: prefer local, else discover-later.
+    _fallback = {"mode": "local"} if allow_local else {"mode": "later"}
+    try:
+        choice = Prompt.ask("Enter choice", default=default_choice)
+    except EOFError:
+        choice = default_choice
+    if choice not in options:
+        choice = default_choice
+
+    if choice == "2":
+        try:
+            url = Prompt.ask(f"{label} endpoint URL (e.g. http://host:8767)").strip()
+        except EOFError:
+            url = ""
+        if url:
+            return {"mode": "own", "url": url}
+        console.print("[yellow]No URL entered — falling back.[/yellow]")
+        return _fallback
+
+    if choice == "3":
+        found = _scan_tailnet_services(discovery_name)
+        if not found:
+            console.print(
+                f"[yellow]No '{discovery_name}' advertised on the Tailnet.[/yellow] "
+                + (
+                    "Falling back to 'configure later'."
+                    if allow_later
+                    else "Using fallback."
+                )
+            )
+            return {"mode": "later"} if allow_later else _fallback
+        console.print(f"[green]Found {len(found)} on the Tailnet:[/green]")
+        for i, a in enumerate(found, 1):
+            console.print(f"  {i}) {a['host']} — {a['url']}")
+        try:
+            pick = Prompt.ask("Pick one", default="1")
+            idx = int(pick) - 1
+        except (EOFError, ValueError):
+            idx = 0
+        if 0 <= idx < len(found):
+            console.print(f"[green]✅[/green] Using {found[idx]['url']}")
+            return {"mode": "tailnet", "url": found[idx]["url"]}
+        return {"mode": "later"} if allow_later else _fallback
+
+    if choice == "4" and allow_later:
+        console.print(
+            "[green]✅[/green] Will auto-discover on the Tailnet at runtime (no URL pinned)"
+        )
+        return {"mode": "later"}
+
+    return _fallback
 
 
 def select_transcription_provider(
@@ -1810,6 +1946,70 @@ def main():
     # LLM Provider selection (asked once here, passed to init.py — avoids double-ask)
     llm_provider = select_llm_provider(config_yml, transcription_provider)
 
+    # ── Service source: where each remote-capable compute service runs ──────────
+    # Hub flow defaults to "on this hub", but offers own/external endpoint, pinning a
+    # Tailnet-advertised node, or deferring to runtime discovery. Only for the
+    # discovery-aware offline ASR providers and the Chronicle-managed llama.cpp LLM.
+    OFFLINE_DISCOVERABLE_ASR = {"parakeet", "qwen3-asr", "gemma4", "af-next"}
+    asr_url, asr_discover = None, False
+    if transcription_provider in OFFLINE_DISCOVERABLE_ASR:
+        src = select_service_source("ASR", "chronicle-asr")
+        if src["mode"] == "local":
+            asr_url = "http://host.docker.internal:8767"
+        elif src["mode"] in ("own", "tailnet"):
+            asr_url = src["url"]
+        elif src["mode"] == "later":
+            asr_discover = True
+
+    llm_base_url, llm_discover = None, False
+    if llm_provider == "llamacpp":
+        src = select_service_source("Local LLM (llama.cpp)", "chronicle-llm")
+        if src["mode"] == "local":
+            llm_base_url = "http://host.docker.internal:8083/v1"
+        elif src["mode"] in ("own", "tailnet"):
+            # Discovered/picked URLs are bare host:port → ensure the OpenAI /v1 path.
+            u = src["url"].rstrip("/")
+            llm_base_url = u if u.endswith("/v1") else u + "/v1"
+        elif src["mode"] == "later":
+            llm_discover = True
+
+    # Speaker Recognition + TTS: when NOT run locally, optionally point the backend at
+    # a remote/own endpoint or let it auto-discover one on the Tailnet. (When run
+    # locally — i.e. in selected_services — the existing local wiring applies.)
+    speaker_url, speaker_discover = None, False
+    if "speaker-recognition" not in selected_services:
+        try:
+            if Confirm.ask(
+                "Use a remote / external Speaker Recognition service?", default=False
+            ):
+                src = select_service_source(
+                    "Speaker Recognition", "chronicle-speaker", allow_local=False
+                )
+                if src["mode"] in ("own", "tailnet"):
+                    speaker_url = src["url"]
+                else:
+                    speaker_discover = True
+        except EOFError:
+            pass
+
+    tts_url, tts_discover = None, False
+    if "tts" in selected_services:
+        # Running TTS locally on the host — pin the local endpoint (the compose no
+        # longer defaults CHRONICLE_TTS_URL, so an unset value would mean 'discover').
+        tts_url = "http://host.docker.internal:8770"
+    else:
+        try:
+            if Confirm.ask("Configure a Text-to-Speech (TTS) endpoint?", default=False):
+                src = select_service_source(
+                    "Text-to-Speech", "chronicle-tts", allow_local=False
+                )
+                if src["mode"] in ("own", "tailnet"):
+                    tts_url = src["url"]
+                else:
+                    tts_discover = True
+        except EOFError:
+            pass
+
     # Memory Provider selection (asked once here, passed to init.py — avoids double-ask)
     memory_provider = select_memory_provider(config_yml)
 
@@ -2070,6 +2270,14 @@ def main():
             memory_provider=memory_provider,
             hardware_profile=hardware_profile,
             live_segmentation=live_segmentation,
+            asr_url=asr_url,
+            asr_discover=asr_discover,
+            llm_base_url=llm_base_url,
+            llm_discover=llm_discover,
+            speaker_url=speaker_url,
+            speaker_discover=speaker_discover,
+            tts_url=tts_url,
+            tts_discover=tts_discover,
         ):
             success_count += 1
 
