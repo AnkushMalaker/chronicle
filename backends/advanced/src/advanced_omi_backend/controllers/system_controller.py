@@ -40,11 +40,11 @@ logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
 
 
-async def get_network_discovery(app):
+async def get_network_discovery(app, current_user=None):
     """Return Tailscale status and discovered minidisc services.
 
     The *app* parameter is the FastAPI application instance (kept for API
-    compatibility but no longer used — discovery-agent handles advertising).
+    compatibility but no longer used — the node agent handles advertising).
     """
     import asyncio as _asyncio
 
@@ -62,7 +62,7 @@ async def get_network_discovery(app):
 
     result["tailscale_available"] = is_tailscale_available()
 
-    # Read advertised services written by services.py's discovery agent.
+    # Read advertised services written by the node agent (edge/service_manager.py).
     # The file is at config/advertised-services.json (volume-mounted from repo root).
     _advertised_path = Path("/app/config/advertised-services.json")
     if _advertised_path.exists():
@@ -115,19 +115,18 @@ async def get_network_discovery(app):
     # Connected WebSocket clients (phones, relays, etc.)
     from advanced_omi_backend.client_manager import get_client_manager
 
+    # Devices are the user's *remembered* devices (the registry) joined with live
+    # connection state — so a known device shows whether it's online now or when it was
+    # last seen, with its editable friendly name. "connected" is derived from real
+    # activity (the live ClientState's last_activity), never a persisted flag.
+    from advanced_omi_backend.controllers import client_controller
+
     mgr = get_client_manager()
-    connected_devices = []
-    for client_id, state in mgr.get_all_clients().items():
-        device_name = client_id.split("-", 1)[1] if "-" in client_id else client_id
-        connected_devices.append(
-            {
-                "client_id": client_id,
-                "device_name": device_name,
-                "user_email": state.user_email,
-                "connected": state.connected,
-            }
-        )
-    result["connected_devices"] = connected_devices
+    if current_user is not None:
+        devices = (await client_controller.list_devices(current_user, mgr))["devices"]
+    else:
+        devices = []
+    result["connected_devices"] = devices
 
     return result
 
@@ -570,6 +569,102 @@ async def save_diarization_settings_controller(settings: dict):
     except Exception as e:
         logger.exception("Error saving diarization settings")
         raise e
+
+
+# ---------------------------------------------------------------------------
+# ASR context / hint-mechanism settings
+#
+# Each STT provider consumes recognition hints in exactly one way (see
+# ModelDef.capabilities): "keyword_boosting" (acoustic hot-word boost, never
+# echoed) or "context_prompt" (LLM context that informs but must not be echoed).
+# context_prompt providers (e.g. Gemma 4) are NOT given the wake-word boost list;
+# instead the user authors a free-form context string, stored per-model under
+# backend.asr.context.<model_name> in config.yml.
+# ---------------------------------------------------------------------------
+
+
+def _asr_hint_type(capabilities) -> str:
+    caps = set(capabilities or [])
+    if "context_prompt" in caps:
+        return "context_prompt"
+    if "keyword_boosting" in caps:
+        return "keyword_boosting"
+    return "none"
+
+
+def _asr_model_info(model) -> Optional[dict]:
+    """Summarise an STT model's hint mechanism + resolved context for the UI."""
+    if not model:
+        return None
+    from advanced_omi_backend.config_loader import get_backend_config
+
+    asr_cfg = get_backend_config("asr") or {}
+    ctx_map = asr_cfg.get("context", {}) or {}
+    override = ctx_map.get(model.name)
+    inline = getattr(model, "asr_context", None)
+    context = override if override is not None else (inline or "")
+    return {
+        "name": model.name,
+        "provider": model.model_provider,
+        "description": model.description,
+        "capabilities": list(model.capabilities or []),
+        "hint_type": _asr_hint_type(model.capabilities),
+        "context": context or "",
+    }
+
+
+async def get_asr_context_config():
+    """Return the active batch + streaming STT provider hint mechanisms."""
+    registry = get_models_registry()
+    if not registry:
+        raise HTTPException(status_code=503, detail="Model registry unavailable")
+    return {
+        "batch": _asr_model_info(registry.get_default("stt")),
+        "stream": _asr_model_info(registry.get_default("stt_stream")),
+        "status": "success",
+    }
+
+
+async def save_asr_context_controller(payload: dict):
+    """Persist a context string for a context_prompt STT provider."""
+    model_name = (payload.get("model_name") or "").strip()
+    context = payload.get("context", "")
+    if not model_name:
+        raise HTTPException(status_code=400, detail="model_name is required")
+    if not isinstance(context, str):
+        raise HTTPException(status_code=400, detail="context must be a string")
+
+    registry = get_models_registry()
+    model = registry.get_by_name(model_name) if registry else None
+    if not model:
+        raise HTTPException(status_code=404, detail=f"Unknown model '{model_name}'")
+    if "context_prompt" not in set(model.capabilities or []):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model '{model_name}' does not use a context prompt; ASR context "
+                "only applies to context_prompt providers."
+            ),
+        )
+
+    if not save_config_section("backend.asr.context", {model_name: context.strip()}):
+        raise HTTPException(status_code=500, detail="Failed to save ASR context")
+
+    # Refresh the in-process registry and signal workers so the new context is
+    # picked up on the next transcription (same pattern as a provider switch).
+    load_models_config(force_reload=True)
+    try:
+        from advanced_omi_backend.services.plugin_service import signal_worker_restart
+
+        signal_worker_restart()
+    except Exception as e:
+        logger.warning(f"Could not signal worker restart after ASR context save: {e}")
+
+    return {
+        "status": "success",
+        "model_name": model_name,
+        "context": context.strip(),
+    }
 
 
 async def get_misc_settings():
@@ -2254,37 +2349,59 @@ _ASR_PROVIDER_TO_STT_MODEL = {
     "nemotron": "stt-nemotron-batch",
 }
 
+# Streaming ASR provider → stt_stream model name. Mirror of the streaming options
+# in services.py (STREAMING_ASR_PROVIDER_OPTIONS); a streaming switch repoints
+# defaults.stt_stream so live transcription uses the newly selected provider.
+_STREAMING_ASR_PROVIDER_TO_STT_STREAM_MODEL = {
+    "nemotron": "stt-nemotron-stream",
+    "smallest": "stt-smallest-stream",
+    "deepgram": "stt-deepgram-stream",
+    "qwen3-asr": "stt-qwen3-asr-stream",
+}
+
 
 async def set_external_service_provider(name: str, body: dict):
     """Switch the active provider (ASR/TTS) for a host-managed service.
 
-    For ASR this also repoints defaults.stt in config.yml at the matching
-    model registry entry and hot-reloads the registry (+ signals workers),
-    so the pipeline actually uses the newly started provider.
+    For ASR this also repoints config.yml at the matching model registry entry
+    and hot-reloads the registry (+ signals workers), so the pipeline actually
+    uses the newly selected provider. The batch lane drives defaults.stt; the
+    streaming lane (body["lane"] == "streaming") drives defaults.stt_stream.
     """
     result = await _service_manager_request("POST", f"/services/{name}/provider", body)
 
     if name == "asr-services":
-        stt_model = _ASR_PROVIDER_TO_STT_MODEL.get(body.get("provider", ""))
+        streaming = body.get("lane") == "streaming"
+        default_key = "stt_stream" if streaming else "stt"
+        model_map = (
+            _STREAMING_ASR_PROVIDER_TO_STT_STREAM_MODEL
+            if streaming
+            else _ASR_PROVIDER_TO_STT_MODEL
+        )
+        stt_model = model_map.get(body.get("provider", ""))
         if stt_model:
             from advanced_omi_backend.services.plugin_service import (
                 signal_worker_restart,
             )
 
-            save_config_section("defaults", {"stt": stt_model})
+            save_config_section("defaults", {default_key: stt_model})
             load_models_config(force_reload=True)
             signal_worker_restart()
             logger.info(
-                "ASR provider switched to %s — defaults.stt set to %s, "
+                "ASR %s provider switched to %s — defaults.%s set to %s, "
                 "registry reloaded, workers signaled",
+                "streaming" if streaming else "batch",
                 body.get("provider"),
+                default_key,
                 stt_model,
             )
             result["stt_model"] = stt_model
         else:
             logger.warning(
-                "No STT model mapping for ASR provider %r — defaults.stt unchanged",
+                "No STT model mapping for ASR provider %r (lane=%s) — defaults.%s unchanged",
                 body.get("provider"),
+                body.get("lane", "batch"),
+                default_key,
             )
 
     return result
@@ -2293,3 +2410,26 @@ async def set_external_service_provider(name: str, body: dict):
 async def get_external_service_operation(operation_id: str):
     """Poll a long-running service operation on the agent."""
     return await _service_manager_request("GET", f"/operations/{operation_id}")
+
+
+async def get_remote_control_status():
+    """Status of the host's Claude remote-control session (for the System page).
+
+    Returns available=False (instead of raising) when the agent is not configured
+    or unreachable, so the WebUI can hide/disable the card.
+    """
+    url, token = _service_manager_config()
+    if not url or not token:
+        return {"available": False, "reason": "not_configured"}
+    try:
+        data = await _service_manager_request("GET", "/remote-control")
+    except HTTPException as e:
+        if e.status_code in (502, 503):
+            return {"available": False, "reason": "unreachable", "detail": e.detail}
+        raise
+    return {"available": True, **data}
+
+
+async def remote_control_action(action: str):
+    """Start/stop/restart the host's Claude remote-control session via the agent."""
+    return await _service_manager_request("POST", f"/remote-control/{action}")

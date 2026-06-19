@@ -55,6 +55,15 @@ async def get_memory_audit(
     )
 
 
+@router.get("/audit/{entry_id}/diff")
+async def get_memory_audit_diff(
+    entry_id: str,
+    current_user: User = Depends(current_active_user),
+):
+    """Before→after diff for one ledger entry (reconstructs the prior note state)."""
+    return await memory_controller.get_memory_audit_diff(current_user, entry_id)
+
+
 @router.get("/with-transcripts")
 async def get_memories_with_transcripts(
     current_user: User = Depends(current_active_user),

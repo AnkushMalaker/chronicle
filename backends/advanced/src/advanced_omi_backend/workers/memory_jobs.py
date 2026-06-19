@@ -28,7 +28,11 @@ from advanced_omi_backend.observability.otel_setup import (
     traced_job,
 )
 from advanced_omi_backend.plugins.events import PluginEvent
-from advanced_omi_backend.services.memory.audit import memory_trigger
+from advanced_omi_backend.services.memory.audit import (
+    MemoryCause,
+    UpdateStrategy,
+    memory_provenance,
+)
 from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
 from advanced_omi_backend.services.sse_publisher import publish_sse_event
 
@@ -234,26 +238,25 @@ async def process_memory_job(
             )
             return {"success": True, "skipped": True, "reason": "No primary speakers"}
 
-    # Detect reprocess trigger from RQ job metadata
+    # Read provenance from RQ job metadata. `cause` is descriptive (recorded on
+    # the ledger); `strategy` is control flow (which update pathway runs). They
+    # are independent — see services/memory/audit.py.
     from rq import get_current_job as _get_current_job
 
     current_rq_job = _get_current_job()
-    trigger = (
-        current_rq_job.meta.get("trigger")
-        if current_rq_job and current_rq_job.meta
-        else None
-    )
+    job_meta = current_rq_job.meta if current_rq_job and current_rq_job.meta else {}
+    cause = job_meta.get("cause") or MemoryCause.AUTO_EXTRACTION.value
+    strategy = job_meta.get("strategy") or UpdateStrategy.FULL.value
 
-    # Process memory — choose pathway based on trigger. The trigger label is
-    # recorded on any vault changes the provider makes (memory_audit ledger).
     memory_service = get_memory_service()
-    audit_trigger = trigger or "memory_extraction"
 
-    with memory_trigger(audit_trigger):
-        if trigger == "reprocess_after_speaker":
-            # === Speaker reprocess pathway ===
-            # Compute diff between old and new transcript versions
-            memory_result = await _process_speaker_reprocess(
+    with memory_provenance(cause, strategy):
+        if strategy == UpdateStrategy.SPEAKER_DIFF:
+            # === Speaker-diff pathway ===
+            # Targeted update from the speaker-label diff between transcript
+            # versions (used by speaker reprocess and diarization-annotation
+            # apply); falls back to a full extraction if no diff is available.
+            memory_result = await _process_speaker_diff_update(
                 memory_service=memory_service,
                 conversation_model=conversation_model,
                 full_conversation=full_conversation,
@@ -386,7 +389,7 @@ async def process_memory_job(
         return {"success": False, "error": "Memory service returned False"}
 
 
-async def _process_speaker_reprocess(
+async def _process_speaker_diff_update(
     memory_service,
     conversation_model,
     full_conversation: str,
@@ -518,12 +521,19 @@ async def _process_speaker_reprocess(
 def enqueue_memory_processing(
     conversation_id: str,
     priority: JobPriority = JobPriority.NORMAL,
+    *,
+    cause: MemoryCause = MemoryCause.AUTO_EXTRACTION,
+    strategy: UpdateStrategy = UpdateStrategy.FULL,
 ):
     """
     Enqueue a memory processing job.
 
     The job fetches all needed data (client_id, user_id, user_email) from the
     conversation document internally, so only conversation_id is needed.
+
+    ``cause`` records *why* the memory is being (re)processed on the audit ledger;
+    ``strategy`` selects *how* the vault is updated (full re-extraction vs. a
+    targeted speaker-label diff). See services/memory/audit.py.
 
     Returns RQ Job object for tracking.
     """
@@ -541,6 +551,11 @@ def enqueue_memory_processing(
         result_ttl=JOB_RESULT_TTL,
         job_id=f"memory_{conversation_id[:8]}",
         description=f"Process memory for conversation {conversation_id[:8]}",
+        meta={
+            "conversation_id": conversation_id,
+            "cause": cause.value,
+            "strategy": strategy.value,
+        },
     )
 
     logger.info(

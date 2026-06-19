@@ -475,6 +475,29 @@ class ChronicleSetup:
                 {"stt": "stt-gemma4", "stt_stream": "stt-gemma4-stream"}
             )
 
+            # Gemma 4 is an LLM-backbone ASR (capability "context_prompt"): it takes
+            # free-form context, NOT acoustic keyword boosting. Unlike VibeVoice/
+            # Deepgram, it would echo a wake-word boost list into the transcript, so
+            # the backend withholds that list and uses this context string instead.
+            existing_gemma4_context = (
+                self.config_manager.get_full_config()
+                .get("backend", {})
+                .get("asr", {})
+                .get("context", {})
+                .get("stt-gemma4", "")
+            )
+            self.console.print(
+                "[blue][INFO][/blue] Gemma 4 takes free-form context (domain, names, "
+                "jargon) to disambiguate recognition. It informs transcription but is "
+                "never transcribed. Leave blank to skip."
+            )
+            gemma4_context = self.prompt_value(
+                "Gemma 4 ASR context (optional)", existing_gemma4_context
+            )
+            self.config_manager.update_backend_config(
+                {"asr": {"context": {"stt-gemma4": gemma4_context.strip()}}}
+            )
+
             self.console.print(
                 "[green][SUCCESS][/green] Gemma 4 configured in config.yml and .env"
             )

@@ -344,17 +344,22 @@ class Conversation(Document):
 
         return data
 
+    def get_transcript_version(
+        self, version_id: str
+    ) -> Optional["Conversation.TranscriptVersion"]:
+        """Find a transcript version by id, or None if it doesn't exist."""
+        for version in self.transcript_versions:
+            if version.version_id == version_id:
+                return version
+        return None
+
     @computed_field
     @property
     def active_transcript(self) -> Optional["Conversation.TranscriptVersion"]:
         """Get the currently active transcript version."""
         if not self.active_transcript_version:
             return None
-
-        for version in self.transcript_versions:
-            if version.version_id == self.active_transcript_version:
-                return version
-        return None
+        return self.get_transcript_version(self.active_transcript_version)
 
     # Convenience properties that return data from active transcript version
     @computed_field

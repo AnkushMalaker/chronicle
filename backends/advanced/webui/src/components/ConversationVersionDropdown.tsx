@@ -10,6 +10,9 @@ interface TranscriptVersion {
   model?: string
   created_at: string
   processing_time_seconds?: number
+  // How speaker labels were produced: "provider" (ASR self-diarized),
+  // "pyannote" (speaker-recognition service), or null/undefined (no diarization).
+  diarization_source?: string | null
   metadata?: any
 }
 
@@ -88,6 +91,18 @@ export default function ConversationVersionDropdown({
     return new Date(dateString).toLocaleDateString()
   }
 
+  // Human label + chip color for where speaker labels came from.
+  const diarizationInfo = (source?: string | null) => {
+    switch (source) {
+      case 'provider':
+        return { label: 'diarized: ASR provider', cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' }
+      case 'pyannote':
+        return { label: 'diarized: speaker-recognition', cls: 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300' }
+      default:
+        return { label: 'no diarization', cls: 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400' }
+    }
+  }
+
   // Don't show anything unless there are multiple transcript versions
   if (!versionInfo || (versionInfo.transcript_count || 0) <= 1) {
     return null
@@ -140,8 +155,11 @@ export default function ConversationVersionDropdown({
                       )}
                       <span className="font-medium">{formatVersionLabel(version, index)}</span>
                     </div>
-                    <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      {formatDate(version.created_at)} • {version.segments?.length || 0} segments
+                    <div className="text-xs text-gray-500 dark:text-gray-400 mt-1 flex items-center flex-wrap gap-1">
+                      <span>{formatDate(version.created_at)} • {version.segments?.length || 0} segments</span>
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${diarizationInfo(version.diarization_source).cls}`}>
+                        {diarizationInfo(version.diarization_source).label}
+                      </span>
                     </div>
                   </div>
                   {activating === version.version_id && (

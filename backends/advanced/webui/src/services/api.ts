@@ -157,6 +157,58 @@ export const conversationsApi = {
   closeActiveConversation: (clientId: string) => api.post(`/api/conversations/${clientId}/close`),
 }
 
+// One recorded change to the memory vault (the audit ledger). Content lives in
+// the per-entry diff endpoint, not the list, so the list stays light.
+export interface MemoryAuditEntry {
+  id: string
+  user_id: string
+  conversation_id: string | null
+  operation: 'create' | 'update' | 'delete' | 'rename' | 'delete_all'
+  note_path: string | null
+  // Provenance: `cause` is why the memory changed, `strategy` is how the vault
+  // was updated (control flow). `source_kind`/`source_label`/`actor` are the
+  // backend-classified taxonomy the UI renders directly.
+  cause: string | null
+  strategy: string | null
+  source_kind: 'extraction' | 'reprocess' | 'human' | 'agent' | 'bulk' | 'other'
+  source_label: string
+  actor: 'system' | 'user' | 'human_external' | 'agent'
+  provider: string
+  agent_mode: boolean
+  before_hash: string | null
+  after_hash: string | null
+  after_bytes: number | null
+  summary: string | null
+  extra: Record<string, unknown>
+  created_at: string | null
+  has_diff: boolean
+}
+
+export interface MemoryAuditDiff {
+  id: string
+  note_path: string | null
+  operation: string
+  cause: string | null
+  created_at: string | null
+  before_text: string | null
+  after_text: string | null
+  diff: string
+  diff_available: boolean
+  reason?: string
+}
+
+export const memoryApi = {
+  // Memory vault change ledger (newest first). `user_id` honored for admins only.
+  getAudit: (params?: { limit?: number; conversation_id?: string; user_id?: string }) =>
+    api.get<{ user_id: string; count: number; entries: MemoryAuditEntry[] }>(
+      '/api/memories/audit',
+      { params }
+    ),
+  // Lazily-fetched before→after diff for one ledger entry.
+  getAuditDiff: (entryId: string) =>
+    api.get<MemoryAuditDiff>(`/api/memories/audit/${entryId}/diff`),
+}
+
 export const annotationsApi = {
   // Create annotations
   createMemoryAnnotation: (data: {
@@ -274,6 +326,12 @@ export const usersApi = {
   delete: (id: string) => api.delete(`/api/users/${id}`),
 }
 
+export const clientsApi = {
+  list: () => api.get('/api/clients'),
+  rename: (clientId: string, name: string) => api.patch(`/api/clients/${clientId}`, { name }),
+  forget: (clientId: string) => api.delete(`/api/clients/${clientId}`),
+}
+
 export const systemApi = {
   getHealth: () => api.get('/health'),
   getReadiness: () => api.get('/readiness'),
@@ -284,6 +342,11 @@ export const systemApi = {
   getActiveClients: () => api.get('/api/clients/active'),
   getDiarizationSettings: () => api.get('/api/diarization-settings'),
   saveDiarizationSettings: (settings: any) => api.post('/api/diarization-settings', settings),
+
+  // ASR hint mechanism (keyword boosting vs LLM context prompt) + per-provider context
+  getAsrContext: () => api.get('/api/asr-context'),
+  saveAsrContext: (model_name: string, context: string) =>
+    api.post('/api/asr-context', { model_name, context }),
 
   // Miscellaneous Configuration Settings
   getMiscSettings: () => api.get('/api/misc-settings'),
@@ -372,10 +435,20 @@ export const systemApi = {
   getExternalServices: () => api.get('/api/admin/services'),
   externalServiceAction: (name: string, action: 'start' | 'stop' | 'restart', options?: { build?: boolean; force?: boolean }) =>
     api.post(`/api/admin/services/${name}/${action}`, options ?? {}),
-  setExternalServiceProvider: (name: string, provider: string, build: boolean = false) =>
-    api.post(`/api/admin/services/${name}/provider`, { provider, build }),
+  setExternalServiceProvider: (
+    name: string,
+    provider: string,
+    build: boolean = false,
+    lane: 'batch' | 'streaming' = 'batch',
+  ) =>
+    api.post(`/api/admin/services/${name}/provider`, { provider, build, lane }),
   getExternalServiceOperation: (operationId: string) =>
     api.get(`/api/admin/services/operations/${operationId}`),
+
+  // Claude remote-control session (control Claude Code from your phone)
+  getRemoteControl: () => api.get('/api/admin/remote-control'),
+  remoteControlAction: (action: 'start' | 'stop' | 'restart') =>
+    api.post(`/api/admin/remote-control/${action}`),
 
   // Observability
   getObservabilityConfig: () => api.get('/api/observability'),
@@ -872,7 +945,8 @@ export interface WakeStream {
 export interface WakeWordConfig {
   name: string
   model: string
-  verifier: boolean
+  verifier: boolean          // a verifier file is loaded for this word (capability)
+  verifier_enabled: boolean  // and it is currently consulted (the runtime toggle)
   threshold: number
   patience: number
   collect_only: boolean
@@ -911,6 +985,20 @@ export const wakewordApi = {
       '/api/wakeword/models'
     ),
   getStreams: () => api.get<{ streams: WakeStream[] }>('/api/wakeword/streams'),
+  // Toggle a word between normal dispatch and collect-only (shadow) mode. Admin
+  // only; effective live and persisted across restarts. Returns refreshed config.
+  setCollectOnly: (wakeword: string, collect_only: boolean) =>
+    api.post<{ wakewords: WakeWordConfig[] }>('/api/wakeword/collect_only', {
+      wakeword,
+      collect_only,
+    }),
+  // Toggle a word's second-stage verifier on/off. Admin only; the verifier stays
+  // loaded (disabling falls back to stage-1). Effective live and persisted.
+  setVerifierEnabled: (wakeword: string, enabled: boolean) =>
+    api.post<{ wakewords: WakeWordConfig[] }>('/api/wakeword/verifier_enabled', {
+      wakeword,
+      enabled,
+    }),
   // Enroll a specific word. No client_id -> backend primes the caller's recorder.
   prime: (wakeword: string, client_id?: string) =>
     api.post('/api/wakeword/prime', { wakeword, ...(client_id ? { client_id } : {}) }),

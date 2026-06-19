@@ -102,9 +102,16 @@ async def vault_sync_pair(
     user_id = current_user.user_id
     folder_id = _folder_id(user_id)
 
-    # Ensure the per-user vault dir exists so Syncthing has a valid folder path.
-    # Same host dir is visible to Syncthing at /vaults/{user_id}.
-    (_BACKEND_VAULTS_DIR / Path(user_id).name).mkdir(parents=True, exist_ok=True)
+    # Ensure the per-user vault dir AND Syncthing's folder marker exist so Syncthing
+    # has a valid folder path. Same host dir is visible to Syncthing at /vaults/{user_id}.
+    # Syncthing auto-creates the .stfolder marker only when a folder is first added; if the
+    # vault dir is later recreated (e.g. a data reset wipes conversation_docs/{user_id}) the
+    # marker is lost and Syncthing refuses to scan it ("folder marker missing"), silently
+    # freezing sync at the last index. Re-asserting it here — co-located with the dir mkdir,
+    # at the one point we set the folder up for Syncthing — keeps pairing self-healing.
+    vault_dir = _BACKEND_VAULTS_DIR / Path(user_id).name
+    vault_dir.mkdir(parents=True, exist_ok=True)
+    (vault_dir / ".stfolder").mkdir(exist_ok=True)
     folder_path = f"{_SYNCTHING_VAULTS_DIR}/{Path(user_id).name}"
 
     async with _client() as client:
@@ -182,3 +189,15 @@ async def _ensure_folder(
         json={"ignore": _VAULT_IGNORE_PATTERNS},
     )
     ignores.raise_for_status()
+
+    # A re-pair with unchanged config won't restart the folder runner, so a folder that
+    # was stuck in "folder marker missing" error state (marker now recreated above) won't
+    # recover until the periodic rescan. Trigger a scan so pairing recovers it immediately.
+    scan = await client.post("/rest/db/scan", params={"folder": folder_id})
+    if scan.status_code >= 400:
+        logger.warning(
+            "Vault folder %s rescan after pair returned %s: %s",
+            folder_id,
+            scan.status_code,
+            scan.text,
+        )

@@ -136,32 +136,6 @@ class ClientManager:
         logger.info(f"✅ Created and registered client {client_id} for user {user_id}")
         return client_state
 
-    def remove_client(self, client_id: str) -> bool:
-        """
-        Atomically remove and deregister a client.
-
-        This method ensures that client removal and deregistration happen atomically.
-
-        Args:
-            client_id: Client identifier to remove
-
-        Returns:
-            True if client was removed, False if client didn't exist
-        """
-        if client_id not in self._active_clients:
-            logger.warning(f"Attempted to remove non-existent client {client_id}")
-            return False
-
-        # Get client state for cleanup
-        client_state = self._active_clients[client_id]
-
-        # Atomically remove from storage and deregister mapping
-        del self._active_clients[client_id]
-        unregister_client_user_mapping(client_id)
-
-        logger.info(f"✅ Removed and deregistered client {client_id}")
-        return True
-
     async def remove_client_with_cleanup(self, client_id: str) -> bool:
         """
         Atomically remove client with full cleanup.
@@ -197,20 +171,6 @@ class ClientManager:
             List of active client IDs
         """
         return list(self._active_clients.keys())
-
-    def add_existing_client(self, client_id: str, client_state: "ClientState"):
-        """
-        Add an existing client state (for migration purposes).
-
-        Args:
-            client_id: Client identifier
-            client_state: Existing ClientState object
-        """
-        if client_id in self._active_clients:
-            logger.warning(f"Overwriting existing client {client_id}")
-
-        self._active_clients[client_id] = client_state
-        logger.info(f"Added existing client {client_id} to ClientManager")
 
     def get_client_info_summary(self) -> list:
         """
@@ -499,17 +459,27 @@ async def get_client_manager_dependency() -> ClientManager:
 
 def generate_client_id(user: "User", device_name: Optional[str] = None) -> str:
     """
-    Generate a unique client_id in the format: user_id_suffix-device_suffix[-counter]
+    Generate a STABLE client_id in the format: user_id_suffix-device_suffix
 
-    This function checks both the database (user.registered_clients) and active
-    connections to ensure no conflicts with existing or currently connected clients.
+    The client_id is deterministic for a given (user, device_name): the same device
+    reconnecting always maps to the same id. This is the device's stable identity —
+    a reconnect reuses it (and evict-on-reconnect collapses any lingering connection
+    onto the new one) instead of minting a fresh id every time.
+
+    NOTE: there is deliberately NO uniqueness counter. The old `-N` counter, checked
+    against the ever-growing `user.registered_clients` history, turned every reconnect
+    of one device into a brand-new id (havpe, havpe-2, … havpe-286) and made the
+    registry and the Network page balloon. Device names are expected to be unique per
+    physical device (set per relay/app); two distinct devices sharing a name should be
+    renamed, not silently disambiguated into divergent identities.
 
     Args:
         user: The User object
         device_name: Optional device name (e.g., 'havpe', 'phone', 'tablet')
 
     Returns:
-        client_id in format: user_id_suffix-device_suffix or user_id_suffix-device_suffix-N for duplicates
+        client_id as user_id_suffix-device_suffix (or user_id_suffix-<uuid> when no
+        device name is supplied).
     """
     # Use last 6 characters of MongoDB ObjectId as user identifier
     user_id_suffix = str(user.id)[-6:]
@@ -519,31 +489,8 @@ def generate_client_id(user: "User", device_name: Optional[str] = None) -> str:
         sanitized_device = "".join(
             c for c in device_name.lower() if c.isalnum() or c == "-"
         )[:10]
-        base_client_id = f"{user_id_suffix}-{sanitized_device}"
+        return f"{user_id_suffix}-{sanitized_device}"
 
-        # Check for existing client IDs in database
-        existing_client_ids = user.get_client_ids()
-
-        # Also check active clients to prevent conflicts with currently connected clients
-        client_manager = get_client_manager()
-        active_client_ids = set()
-        if client_manager.is_initialized():
-            active_client_ids = set(client_manager.get_all_clients().keys())
-
-        # Combine both sets of existing IDs
-        all_existing_ids = set(existing_client_ids) | active_client_ids
-
-        # If base client_id doesn't exist anywhere, use it
-        if base_client_id not in all_existing_ids:
-            return base_client_id
-
-        # If it exists, find the next available counter
-        counter = 2
-        while f"{base_client_id}-{counter}" in all_existing_ids:
-            counter += 1
-
-        return f"{base_client_id}-{counter}"
-    else:
-        # Generate UUID-based suffix if no device name provided
-        uuid_suffix = str(uuid.uuid4())[:8]  # Use first 8 chars of UUID for readability
-        return f"{user_id_suffix}-{uuid_suffix}"
+    # No device name → fall back to a UUID suffix (still unique, just not stable).
+    uuid_suffix = str(uuid.uuid4())[:8]
+    return f"{user_id_suffix}-{uuid_suffix}"

@@ -391,6 +391,37 @@ async def process_transcription_result(
             conversation.client_id if hasattr(conversation, "client_id") else None
         )
 
+    # Guard: a batch / re-transcription that comes back without usable structure
+    # (no words AND no segments) must NOT replace a good existing transcript.
+    # nemo batch occasionally returns bare text with no word/segment timing; promoting
+    # it as the active version silently drops diarization and playback alignment from
+    # the streaming version that was already there. Skip instead of clobbering — only
+    # real content (with timing) should become the active version. An actual provider
+    # error is a different path (it raises upstream); an empty result is not an error.
+    new_has_text = bool((transcript_text or "").strip())
+    new_has_structure = bool(words) or bool(segments)
+    existing = conversation.active_transcript
+    existing_is_populated = bool(
+        existing
+        and (existing.words or existing.segments)
+        and (existing.transcript or "").strip()
+    )
+    if (not new_has_text or not new_has_structure) and existing_is_populated:
+        logger.warning(
+            f"⚠️ {provider_name} '{trigger}' for {conversation_id} returned an empty/"
+            f"contentless transcript (text={new_has_text}, words={len(words)}, "
+            f"segments={len(segments)}); keeping existing active version "
+            f"'{existing.version_id}' instead of replacing it."
+        )
+        return {
+            "success": False,
+            "skipped": True,
+            "reason": "empty_or_contentless_transcription",
+            "conversation_id": conversation_id,
+            "version_id": version_id,
+            "kept_active_version": existing.version_id,
+        }
+
     # Trigger transcript-level plugins BEFORE speech validation
     if transcript_text:
         try:
@@ -480,12 +511,6 @@ async def process_transcription_result(
     # Get provider capabilities for downstream processing decisions
     provider_has_diarization = provider_capabilities.get("diarization", False)
 
-    # Check speaker recognition configuration
-    from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
-
-    speaker_client = SpeakerRecognitionClient()
-    speaker_recognition_enabled = speaker_client.enabled
-
     # Build speaker segments
     speaker_segments = []
     diarization_source = None
@@ -526,7 +551,13 @@ async def process_transcription_result(
             segments_created_by = "provider_diarization"
         else:
             segments_created_by = "provider"
-    elif not speaker_recognition_enabled and words:
+    elif transcript_text and transcript_text.strip():
+        # No provider segments: emit a single Speaker 0 segment spanning the whole
+        # transcript so any non-empty result is always renderable in the UI (mirrors
+        # the streaming path). Use word timings when present, else span 0..end. If
+        # speaker recognition is enabled, recognize_speakers_job refines this later —
+        # but we no longer *rely* on it (a word-less batch result, e.g. nemotron's
+        # prompt-model decode, used to leave the conversation with 0 segments).
         start_time_audio = words[0].get("start", 0.0) if words else 0.0
         end_time_audio = words[-1].get("end", 0.0) if words else 0.0
         speaker_segments = [

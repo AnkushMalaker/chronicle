@@ -92,6 +92,8 @@ export interface ExternalServiceProvider {
   current: string
   streaming_current?: string
   available: { key: string; label: string }[]
+  // Streaming-lane (stt_stream) provider options; present only for asr-services.
+  streaming_available?: { key: string; label: string }[]
 }
 
 export interface ExternalService {
@@ -111,6 +113,7 @@ export interface ServiceOperation {
   status: 'running' | 'done' | 'failed'
   ok: boolean | null
   log: string
+  phase?: string
 }
 
 export interface ExternalServicesData {

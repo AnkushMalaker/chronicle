@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Mic, Radio, Trash2, Check, X, RefreshCw, Target, AlertTriangle, Square, Volume2, ShieldCheck, Eye, HelpCircle, CopyX, ArrowRightLeft } from 'lucide-react'
 import { wakewordApi, WakeStream, WakeSample, WakeWordConfig, WakeStats } from '../services/api'
+import { useAuth } from '../contexts/AuthContext'
 
 type Bucket = 'pending' | 'positive' | 'negative'
 
@@ -18,6 +19,7 @@ const BUCKET_LABELS: Record<Bucket, string> = {
 const pretty = (name: string) => name.replace(/_/g, ' ')
 
 export default function WakeWordLab() {
+  const { isAdmin } = useAuth()
   const [words, setWords] = useState<WakeWordConfig[]>([])
   const [streams, setStreams] = useState<WakeStream[]>([])
   const [stats, setStats] = useState<Record<string, WakeStats>>({})
@@ -55,6 +57,31 @@ export default function WakeWordLab() {
     refreshMeta()
     setDataVersion((v) => v + 1)
   }, [refreshMeta])
+
+  // Flip a word between normal dispatch and collect-only (shadow) mode. The
+  // service returns the refreshed per-word config, which we splice straight into
+  // local state so the badge/toggle updates without a round-trip refresh.
+  const toggleCollectOnly = useCallback(async (name: string, value: boolean) => {
+    try {
+      const { data } = await wakewordApi.setCollectOnly(name, value)
+      setWords(data.wakewords)
+      setError(null)
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || 'Could not change collect-only mode')
+    }
+  }, [])
+
+  // Flip a word's second-stage verifier on/off (the verifier stays loaded; off
+  // falls back to the stage-1 model). Same splice-in-place refresh as above.
+  const toggleVerifier = useCallback(async (name: string, value: boolean) => {
+    try {
+      const { data } = await wakewordApi.setVerifierEnabled(name, value)
+      setWords(data.wakewords)
+      setError(null)
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || 'Could not change verifier mode')
+    }
+  }, [])
 
   const refreshAll = useCallback(async () => {
     setLoading(true)
@@ -165,7 +192,10 @@ export default function WakeWordLab() {
               streams={streams}
               gain={gain}
               dataVersion={dataVersion}
+              isAdmin={isAdmin}
               onChanged={onSectionChanged}
+              onToggleCollectOnly={toggleCollectOnly}
+              onToggleVerifier={toggleVerifier}
               onError={setError}
             />
           ))}
@@ -182,7 +212,10 @@ function WakeWordSection({
   streams,
   gain,
   dataVersion,
+  isAdmin,
   onChanged,
+  onToggleCollectOnly,
+  onToggleVerifier,
   onError,
 }: {
   word: WakeWordConfig
@@ -191,7 +224,10 @@ function WakeWordSection({
   streams: WakeStream[]
   gain: number
   dataVersion: number
+  isAdmin: boolean
   onChanged: () => void
+  onToggleCollectOnly: (name: string, value: boolean) => void
+  onToggleVerifier: (name: string, value: boolean) => void
   onError: (msg: string | null) => void
 }) {
   const [bucket, setBucket] = useState<Bucket>('pending')
@@ -313,22 +349,67 @@ function WakeWordSection({
         <span className="rounded bg-gray-100 dark:bg-gray-800 px-2 py-0.5 font-mono text-xs text-gray-600 dark:text-gray-400">
           {word.model}
         </span>
-        {word.verifier ? (
-          <span className="flex items-center gap-1 rounded bg-green-100 dark:bg-green-900/40 px-2 py-0.5 text-xs text-green-700 dark:text-green-300">
-            <ShieldCheck className="h-3.5 w-3.5" /> verifier
-          </span>
-        ) : (
+        {!word.verifier ? (
           <span className="rounded bg-gray-100 dark:bg-gray-800 px-2 py-0.5 text-xs text-gray-500 dark:text-gray-400">
             no verifier
           </span>
-        )}
-        {word.collect_only && (
-          <span
-            className="flex items-center gap-1 rounded bg-amber-100 dark:bg-amber-900/40 px-2 py-0.5 text-xs text-amber-700 dark:text-amber-300"
-            title="Collect-only: fires to gather false-positive review data but does not trigger the assistant"
+        ) : isAdmin ? (
+          <button
+            onClick={() => onToggleVerifier(word.name, !word.verifier_enabled)}
+            title={
+              word.verifier_enabled
+                ? 'Second-stage verifier is ON — each arm is confirmed by the verifier before it dispatches; arms it judges false are dropped. Click to disable (fall back to the stage-1 model alone).'
+                : 'Verifier is OFF — arms dispatch on the stage-1 acoustic model alone (no second-stage check). The verifier is still loaded. Click to re-enable it.'
+            }
+            className={`flex items-center gap-1 rounded px-2 py-0.5 text-xs transition-colors ${
+              word.verifier_enabled
+                ? 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300 hover:bg-green-200 dark:hover:bg-green-900'
+                : 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'
+            }`}
           >
-            <Eye className="h-3.5 w-3.5" /> collect-only
+            <ShieldCheck className="h-3.5 w-3.5" /> verifier {word.verifier_enabled ? 'on' : 'off'}
+          </button>
+        ) : (
+          <span
+            className={`flex items-center gap-1 rounded px-2 py-0.5 text-xs ${
+              word.verifier_enabled
+                ? 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300'
+                : 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400'
+            }`}
+            title={
+              word.verifier_enabled
+                ? 'Second-stage verifier active — arms are confirmed before dispatch'
+                : 'Verifier loaded but disabled — arms dispatch on the stage-1 model alone'
+            }
+          >
+            <ShieldCheck className="h-3.5 w-3.5" /> verifier {word.verifier_enabled ? 'on' : 'off'}
           </span>
+        )}
+        {isAdmin ? (
+          <button
+            onClick={() => onToggleCollectOnly(word.name, !word.collect_only)}
+            title={
+              word.collect_only
+                ? 'Collect-only is ON — this word fires live to gather false-positive review data but does NOT trigger the assistant. Click to make it a normal wake word again.'
+                : 'Normal wake word — fires trigger the assistant. Click to switch to collect-only (shadow): fires live to gather review data without dispatching, playing a tone, or blocking other words.'
+            }
+            className={`flex items-center gap-1 rounded px-2 py-0.5 text-xs transition-colors ${
+              word.collect_only
+                ? 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 hover:bg-amber-200 dark:hover:bg-amber-900'
+                : 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'
+            }`}
+          >
+            <Eye className="h-3.5 w-3.5" /> collect-only {word.collect_only ? 'on' : 'off'}
+          </button>
+        ) : (
+          word.collect_only && (
+            <span
+              className="flex items-center gap-1 rounded bg-amber-100 dark:bg-amber-900/40 px-2 py-0.5 text-xs text-amber-700 dark:text-amber-300"
+              title="Collect-only: fires to gather false-positive review data but does not trigger the assistant"
+            >
+              <Eye className="h-3.5 w-3.5" /> collect-only
+            </span>
+          )
         )}
         <span className="text-xs text-gray-500 dark:text-gray-400">
           thr {word.threshold} · patience {word.patience}

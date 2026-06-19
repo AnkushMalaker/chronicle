@@ -24,6 +24,7 @@ const Finetuning = lazy(() => import('./pages/Finetuning'))
 const Network = lazy(() => import('./pages/Network'))
 const DataAudit = lazy(() => import('./pages/DataAudit'))
 const WakeWordLab = lazy(() => import('./pages/WakeWordLab'))
+const MemoryLedger = lazy(() => import('./pages/MemoryLedger'))
 
 
 function PageSkeleton() {
@@ -95,6 +96,13 @@ function App() {
                   <PageErrorBoundary>
                     <Suspense fallback={<PageSkeleton />}>
                       <ConversationsRouter />
+                    </Suspense>
+                  </PageErrorBoundary>
+                } />
+                <Route path="memory-ledger" element={
+                  <PageErrorBoundary>
+                    <Suspense fallback={<PageSkeleton />}>
+                      <MemoryLedger />
                     </Suspense>
                   </PageErrorBoundary>
                 } />

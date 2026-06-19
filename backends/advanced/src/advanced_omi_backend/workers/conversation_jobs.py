@@ -1106,6 +1106,55 @@ async def _update_live_transcript(
     )
 
 
+def _rebase_timestamps_to_conversation_start(
+    words_data: list, segments_data: list
+) -> None:
+    """Re-base streaming word/segment timestamps to the conversation's own start.
+
+    Streaming-provider timestamps are relative to the long-lived provider WebSocket
+    session, which spans EVERY conversation in this WS connection (the audio stream
+    and provider stream are per-connection, not per-conversation, and never reset at
+    conversation boundaries). So a conversation opened late in a session gets word
+    and segment timestamps far past its own audio length — e.g. 785s into a 338s
+    conversation — which breaks alignment with the per-conversation WAV (which is
+    always 0-based) and makes playback/speech-region overlays nonsensical.
+
+    Each conversation's transcript should be 0-based, like its WAV. We shift every
+    word/segment so the earliest one starts at 0. Mutates the lists in place. A
+    normal single-conversation session already starts near 0, so the shift there is
+    at most the brief pre-speech lead-in (negligible); the drift case is what this
+    corrects.
+    """
+    starts = []
+    for w in words_data:
+        if isinstance(w.get("start"), (int, float)):
+            starts.append(w["start"])
+    for s in segments_data:
+        if isinstance(s.get("start"), (int, float)):
+            starts.append(s["start"])
+        for sw in s.get("words", []) or []:
+            if isinstance(sw.get("start"), (int, float)):
+                starts.append(sw["start"])
+
+    if not starts:
+        return
+    base = min(starts)
+    if base <= 0:
+        return
+
+    def _shift(item: dict) -> None:
+        for key in ("start", "end"):
+            if isinstance(item.get(key), (int, float)):
+                item[key] = max(0.0, item[key] - base)
+
+    for w in words_data:
+        _shift(w)
+    for s in segments_data:
+        _shift(s)
+        for sw in s.get("words", []) or []:
+            _shift(sw)
+
+
 async def _save_streaming_transcript(
     session_id: str,
     conversation_id: str,
@@ -1152,6 +1201,14 @@ async def _save_streaming_transcript(
     version_id = f"streaming_{session_id[:12]}"
     transcript_text = final_transcript.get("text", "")
     words_data = final_transcript.get("words", [])  # All words from aggregator
+
+    # Re-base provider timestamps to this conversation's own start so they align with
+    # the per-conversation WAV (0-based). Without this, conversations opened late in a
+    # long-lived WS session carry session-relative timestamps past their own length.
+    # Mutates words_data and the segments list (same object reused below) in place.
+    _rebase_timestamps_to_conversation_start(
+        words_data, final_transcript.get("segments", [])
+    )
 
     # Convert words to Word objects (including per-word speaker labels if present)
     words = [

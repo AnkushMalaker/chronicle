@@ -89,6 +89,63 @@ def _parse_hot_words_to_keyterm(hot_words_str: str) -> str:
     return " ".join(terms)
 
 
+# ASR hint mechanisms (see ModelDef.capabilities). A provider consumes context in
+# exactly one of two ways, which must NOT be conflated:
+#   keyword_boosting — a hot-word list used as an acoustic recognition hint that
+#       biases decoding without ever appearing in the output (Deepgram keyterm,
+#       VibeVoice prompt, Parakeet context_info). Safe to feed plugin wake-words.
+#   context_prompt — an LLM-backbone ASR that takes free-form context as prompt
+#       text. Feeding it the wake-word list makes it echo those words into the
+#       transcript (the leak we are fixing), so it gets the user-authored
+#       asr_context ONLY — never the boost list.
+CAP_KEYWORD_BOOSTING = "keyword_boosting"
+CAP_CONTEXT_PROMPT = "context_prompt"
+
+
+def _resolve_asr_context(model) -> str:
+    """Resolve the user-authored context string for a context_prompt provider.
+
+    Precedence: the ``backend.asr.context.<model_name>`` override (written by the
+    System page / wizard) over the inline ``asr_context`` shipped on the model
+    entry. Returns "" when neither is set.
+    """
+    try:
+        from advanced_omi_backend.config_loader import get_backend_config
+
+        asr_cfg = get_backend_config("asr") or {}
+        ctx_map = asr_cfg.get("context", {}) or {}
+        override = ctx_map.get(model.name)
+        if override is not None and str(override).strip():
+            return str(override).strip()
+    except Exception as e:
+        logger.debug(f"Failed to read backend.asr.context override: {e}")
+    inline = getattr(model, "asr_context", None)
+    return inline.strip() if isinstance(inline, str) else ""
+
+
+def _resolve_asr_hint(
+    model, capabilities: set, caller_context: Optional[str], prompt_hot_words: str
+) -> tuple[Optional[str], str]:
+    """Decide which kind of ASR hint to send to ``model`` and its text.
+
+    Returns ``(kind, text)`` where ``kind`` is:
+      "context" — free-form LLM context (context_prompt providers); the wake-word
+          boost list is deliberately excluded so the LLM does not echo it.
+      "keyword" — acoustic hot-word boost list (every other provider; current
+          behaviour). Empty text means "no hint".
+    """
+    if CAP_CONTEXT_PROMPT in capabilities:
+        context = (
+            caller_context.strip() if caller_context else _resolve_asr_context(model)
+        )
+        return ("context", context)
+
+    # Default (keyword/acoustic) path — preserves prior behaviour for all
+    # non-LLM providers: merge prompt-registry hot words with plugin wake-words.
+    base = caller_context if caller_context else prompt_hot_words
+    return ("keyword", _merge_hot_words(base, _get_plugin_keywords()).strip())
+
+
 def _dotted_get(d: dict | list | None, dotted: Optional[str]):
     """Safely extract a value from nested dict/list using dotted paths.
 
@@ -263,22 +320,33 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
         if "diarize" in query:
             query["diarize"] = "true" if diarize else "false"
 
-        # Use caller-provided context or fall back to LangFuse prompt store,
-        # then merge with plugin wake words / keywords for ASR boosting.
-        if context_info:
-            hot_words_str = context_info
-        else:
-            hot_words_str = ""
+        # Resolve the ASR hint by the provider's hint mechanism (see
+        # _resolve_asr_hint): keyword_boosting providers get the merged hot-word
+        # boost list; context_prompt (LLM) providers get the user-authored
+        # asr_context ONLY — never the wake-word list, which they would echo.
+        prompt_hot_words = ""
+        if not context_info:
             try:
                 registry = get_prompt_registry()
-                hot_words_str = await registry.get_prompt("asr.hot_words")
+                prompt_hot_words = await registry.get_prompt("asr.hot_words")
             except Exception as e:
                 logger.debug(f"Failed to fetch asr.hot_words prompt: {e}")
 
-        hot_words_str = _merge_hot_words(hot_words_str, _get_plugin_keywords())
+        hint_kind, hot_words_str = _resolve_asr_hint(
+            self.model, self._capabilities, context_info, prompt_hot_words
+        )
+        if hot_words_str:
+            logger.debug(
+                f"ASR hint for {self.model.name}: kind={hint_kind}, "
+                f"text={hot_words_str[:80]!r}"
+            )
 
-        # For Deepgram: inject as keyterm query param
-        if self.model.model_provider == "deepgram" and hot_words_str.strip():
+        # For Deepgram: inject keyword boost as the keyterm query param.
+        if (
+            CAP_KEYWORD_BOOSTING in self._capabilities
+            and self.model.model_provider == "deepgram"
+            and hot_words_str.strip()
+        ):
             keyterm = _parse_hot_words_to_keyterm(hot_words_str)
             if keyterm:
                 query["keyterm"] = keyterm
@@ -484,9 +552,19 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
         except Exception as e:
             logger.debug(f"Failed to fetch asr.hot_words for streaming: {e}")
 
-        merged_hot_words = _merge_hot_words(prompt_hot_words, _get_plugin_keywords())
+        # Streaming keyword boosting is only wired for Deepgram (keyterm). A
+        # context_prompt streaming provider would get nothing here — and the
+        # gemma4 /stream endpoint does not accept context at all, so there is no
+        # LLM-echo leak on the streaming path.
+        _, merged_hot_words = _resolve_asr_hint(
+            self.model, self._capabilities, None, prompt_hot_words
+        )
 
-        if self.model.model_provider == "deepgram" and merged_hot_words:
+        if (
+            CAP_KEYWORD_BOOSTING in self._capabilities
+            and self.model.model_provider == "deepgram"
+            and merged_hot_words
+        ):
             keyterm = _parse_hot_words_to_keyterm(merged_hot_words)
             if keyterm:
                 query_dict["keyterm"] = keyterm

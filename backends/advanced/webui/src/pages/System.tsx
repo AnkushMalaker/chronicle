@@ -1,11 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Activity, RefreshCw, CheckCircle, XCircle, AlertCircle, Users, Database, Server, MoreVertical, RotateCcw, Power, Smartphone, Copy, Check } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
+import { Link } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useSystemData, useRestartWorkers, useRestartBackend } from '../hooks/useSystem'
 import { systemApi } from '../services/api'
 import ExternalServices from '../components/ExternalServices'
+import AsrContextSettings from '../components/AsrContextSettings'
+import RemoteControl from '../components/RemoteControl'
 
 function getBackendHttpUrl(): string {
   const { protocol, hostname, port } = window.location
@@ -205,9 +208,6 @@ export default function System() {
     return displayNames[service] || service.replace('_', ' ').toUpperCase()
   }
 
-  const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleString()
-  }
 
   if (!isAdmin) {
     return (
@@ -570,6 +570,16 @@ export default function System() {
         <ExternalServices isAdmin={isAdmin} />
       </div>
 
+      {/* ASR recognition hints (keyword boosting vs LLM context prompt) */}
+      <div className="mb-6">
+        <AsrContextSettings isAdmin={isAdmin} />
+      </div>
+
+      {/* Claude remote-control session (spawn Claude Code sessions from the phone) */}
+      <div className="mb-6">
+        <RemoteControl isAdmin={isAdmin} />
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Services Status */}
         {healthData?.services && (
@@ -694,38 +704,22 @@ export default function System() {
           </div>
         )}
 
-        {/* Active Clients */}
+        {/* Active Clients — full device management lives on the Network page (Devices),
+            which is the superset (online + offline, rename/forget, last-seen). Keep a
+            live count here with a link, rather than duplicating the table. */}
         <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
           <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center">
             <Users className="h-5 w-5 mr-2 text-blue-600" />
             Active Clients ({activeClients.length})
           </h3>
-          {activeClients.length > 0 ? (
-            <div className="space-y-2 max-h-48 overflow-y-auto">
-              {activeClients.map((client: any) => (
-                <div key={client.id} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-md">
-                  <div>
-                    <div className="font-medium text-gray-900 dark:text-gray-100">{client.id}</div>
-                    <div className="text-sm text-gray-600 dark:text-gray-400">
-                      User: {client.user_id}
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-sm text-gray-600 dark:text-gray-400">
-                      Connected: {formatDate(client.connected_at)}
-                    </div>
-                    <div className="text-sm text-gray-600 dark:text-gray-400">
-                      Last: {formatDate(client.last_activity)}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-gray-500 dark:text-gray-400 text-center py-4">
-              No active clients
-            </p>
-          )}
+          <p className="text-sm text-gray-600 dark:text-gray-400">
+            {activeClients.length > 0
+              ? `${activeClients.length} client${activeClients.length !== 1 ? 's' : ''} currently connected.`
+              : 'No clients currently connected.'}{' '}
+            <Link to="/network" className="text-blue-600 dark:text-blue-400 hover:underline">
+              Manage all devices on the Network page →
+            </Link>
+          </p>
         </div>
 
         {/* Debug Metrics */}

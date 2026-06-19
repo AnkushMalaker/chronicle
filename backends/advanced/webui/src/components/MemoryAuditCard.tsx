@@ -6,7 +6,8 @@ interface MemoryAuditEntry {
   id: string
   operation: string
   note_path?: string | null
-  trigger?: string | null
+  // Backend-classified provenance label (see services/memory/audit.py).
+  source_label?: string | null
   agent_mode?: boolean
   summary?: string | null
   created_at?: string | null
@@ -17,14 +18,6 @@ const OPERATION_STYLES: Record<string, string> = {
   update: 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300',
   delete: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300',
   delete_all: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300',
-}
-
-// Human-readable label for what initiated a change.
-const TRIGGER_LABELS: Record<string, string> = {
-  memory_extraction: 'extraction',
-  reprocess_after_speaker: 'speaker reprocess',
-  obsidian_sync: 'Obsidian edit',
-  delete_all: 'cleared',
 }
 
 function formatTime(value?: string | null): string {
@@ -95,7 +88,7 @@ export default function MemoryAuditCard({ conversationId }: { conversationId: st
                   </span>
                 </div>
                 <div className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                  {entry.trigger ? (TRIGGER_LABELS[entry.trigger] || entry.trigger) : 'system'}
+                  {entry.source_label || 'system'}
                   {entry.summary ? ` • ${entry.summary}` : ''}
                 </div>
               </div>

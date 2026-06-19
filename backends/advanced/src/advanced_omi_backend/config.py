@@ -27,6 +27,16 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 CHUNK_DIR = Path("./audio_chunks")  # Mounted to ./data/audio_chunks by Docker
 
+# Liveness: close a WebSocket that sends nothing for this many seconds. A streaming
+# device emits chunks every ~0.25s, so this only ever trips on a genuinely dead peer
+# (including a relay holding the socket open after its device vanished). Doubles as the
+# freshness window used to decide whether a client counts as "connected" on the Network
+# page. Default 5 min — conservative enough that an idle-but-alive client (armed device,
+# app holding a control socket) isn't churned, while still bounding a zombie to minutes
+# instead of forever. A falsely-reaped client simply auto-reconnects. Lower it if you
+# want tighter detection and your clients stream or ping continuously.
+WS_IDLE_TIMEOUT_SECS = float(os.getenv("WS_IDLE_TIMEOUT_SECS", "300"))
+
 
 # ============================================================================
 # Configuration Functions (OmegaConf-based)
@@ -229,6 +239,46 @@ def get_live_segmentation() -> str:
         OmegaConf.to_container(cfg.get("defaults", {}), resolve=True) if cfg else {}
     ) or {}
     return defaults_settings.get("live_segmentation", "streaming_stt")
+
+
+# ============================================================================
+# Wake-Word Command Source (OmegaConf-based)
+# ============================================================================
+
+# Valid values for backend.wakeword.command_source.
+WAKEWORD_COMMAND_SOURCES = ("batch", "streaming", "batch_then_streaming")
+
+
+def get_wakeword_command_source() -> str:
+    """How the acoustic wake-word command text is obtained.
+
+    The standalone wakeword-service captures the post-wake-word turn and the
+    dispatcher turns it into a command string. This controls how:
+
+    - ``"batch"``: batch-transcribe the captured command audio via the configured
+      batch STT provider. Highest quality, but the command silently fails if that
+      service is down (the streaming live transcript is unaffected, so it looks
+      like only commands break).
+    - ``"streaming"``: trust the live streaming transcript for the capture window
+      and skip batch ASR entirely. Useful when the streaming provider is as good
+      as (or better than) the batch one, or to avoid running a second ASR.
+    - ``"batch_then_streaming"`` (default): batch ASR, but fall back to the
+      streaming transcript — with a WARNING log and a degraded ``asr_status`` —
+      when batch is unreachable or returns an empty command.
+
+    Lives at ``backend.wakeword.command_source`` in config.yml.
+    """
+    cfg = get_backend_config("wakeword")
+    settings = OmegaConf.to_container(cfg, resolve=True) if cfg else {}
+    source = (settings or {}).get("command_source", "batch_then_streaming")
+    if source not in WAKEWORD_COMMAND_SOURCES:
+        logger.warning(
+            "Invalid backend.wakeword.command_source=%r; falling back to "
+            "'batch_then_streaming'",
+            source,
+        )
+        return "batch_then_streaming"
+    return source
 
 
 # ============================================================================

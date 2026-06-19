@@ -90,12 +90,17 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
     }
   }
 
-  const switchProvider = async (service: ExternalService, provider: string) => {
-    if (!provider || provider === service.provider?.current) return
+  const switchProvider = async (
+    service: ExternalService,
+    provider: string,
+    lane: 'batch' | 'streaming' = 'batch',
+  ) => {
+    const current = lane === 'streaming' ? service.provider?.streaming_current : service.provider?.current
+    if (!provider || provider === current) return
     setError(null)
     setLastFailedOp(null)
     try {
-      const response = await systemApi.setExternalServiceProvider(service.name, provider, buildImages)
+      const response = await systemApi.setExternalServiceProvider(service.name, provider, buildImages, lane)
       setActiveOp(response.data.operation)
     } catch (e: any) {
       setError(e.response?.data?.detail ?? e.message)
@@ -147,7 +152,8 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
         <div className="mb-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md p-3 flex items-center space-x-2">
           <RefreshCw className="h-4 w-4 text-blue-500 animate-spin" />
           <span className="text-sm text-blue-700 dark:text-blue-300">
-            {operationLabel(activeOp)}… this can take a few minutes.
+            {operationLabel(activeOp)}
+            {activeOp.phase ? ` — ${activeOp.phase}` : '… this can take a few minutes.'}
           </span>
         </div>
       )}
@@ -209,18 +215,40 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
 
                 <div className="flex items-center space-x-2">
                   {service.provider && service.provider.available.length > 0 && (
-                    <select
-                      value={service.provider.current}
-                      onChange={e => switchProvider(service, e.target.value)}
-                      disabled={busy}
-                      className="text-sm px-2 py-1.5 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 disabled:opacity-50"
-                      title="Active provider — changing switches and restarts the service"
-                    >
-                      {!service.provider.current && <option value="">(no provider set)</option>}
-                      {service.provider.available.map(p => (
-                        <option key={p.key} value={p.key}>{p.label}</option>
-                      ))}
-                    </select>
+                    <div className="flex flex-col gap-1">
+                      <label className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+                        {service.provider.streaming_available?.length ? <span className="w-14 shrink-0">Batch</span> : null}
+                        <select
+                          value={service.provider.current}
+                          onChange={e => switchProvider(service, e.target.value, 'batch')}
+                          disabled={busy}
+                          className="text-sm px-2 py-1.5 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 disabled:opacity-50"
+                          title="Active batch (file/full-audio) provider — changing switches and restarts the service"
+                        >
+                          {!service.provider.current && <option value="">(no provider set)</option>}
+                          {service.provider.available.map(p => (
+                            <option key={p.key} value={p.key}>{p.label}</option>
+                          ))}
+                        </select>
+                      </label>
+                      {service.provider.streaming_available && service.provider.streaming_available.length > 0 && (
+                        <label className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+                          <span className="w-14 shrink-0">Streaming</span>
+                          <select
+                            value={service.provider.streaming_current ?? ''}
+                            onChange={e => switchProvider(service, e.target.value, 'streaming')}
+                            disabled={busy}
+                            className="text-sm px-2 py-1.5 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 disabled:opacity-50"
+                            title="Active streaming (live transcription) provider — changing switches and restarts the service"
+                          >
+                            {!service.provider.streaming_current && <option value="">(no provider set)</option>}
+                            {service.provider.streaming_available.map(p => (
+                              <option key={p.key} value={p.key}>{p.label}</option>
+                            ))}
+                          </select>
+                        </label>
+                      )}
+                    </div>
                   )}
 
                   {stopped ? (

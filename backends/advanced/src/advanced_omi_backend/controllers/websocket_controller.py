@@ -20,6 +20,7 @@ from starlette.websockets import WebSocketState
 
 from advanced_omi_backend.auth import websocket_auth
 from advanced_omi_backend.client_manager import generate_client_id, get_client_manager
+from advanced_omi_backend.config import WS_IDLE_TIMEOUT_SECS
 from advanced_omi_backend.constants import (
     OMI_CHANNELS,
     OMI_SAMPLE_RATE,
@@ -47,6 +48,19 @@ application_logger = logging.getLogger("audio_processing")
 
 # Track pending WebSocket connections to prevent race conditions
 pending_connections: set[str] = set()
+
+# Per-client_id locks serializing connection setup. A reconnecting device (same
+# client_id) must evict its stale connection and create a fresh ClientState as one
+# atomic step, so two concurrent connections can't interleave and orphan state.
+_client_setup_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_client_setup_lock(client_id: str) -> asyncio.Lock:
+    lock = _client_setup_locks.get(client_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _client_setup_locks[client_id] = lock
+    return lock
 
 
 async def subscribe_to_interim_results(websocket: WebSocket, session_id: str) -> None:
@@ -240,6 +254,24 @@ async def subscribe_to_device_downlink(websocket: WebSocket, client_id: str) -> 
                 pass
 
 
+async def receive_with_idle_timeout(ws: WebSocket) -> dict:
+    """`ws.receive()` with a liveness deadline.
+
+    A live device streams audio every ~0.25s, so if nothing arrives for
+    WS_IDLE_TIMEOUT_SECS the peer is dead (or a relay is holding the socket open
+    after its device vanished). We raise WebSocketDisconnect so the handler's
+    `finally` runs the same full cleanup as a clean close, reaping the zombie.
+    """
+    try:
+        return dict(await asyncio.wait_for(ws.receive(), timeout=WS_IDLE_TIMEOUT_SECS))
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"⏰ WebSocket idle for {WS_IDLE_TIMEOUT_SECS:.0f}s with no data — "
+            f"treating peer as disconnected"
+        )
+        raise WebSocketDisconnect(code=1001, reason="idle timeout")
+
+
 async def parse_wyoming_protocol(ws: WebSocket) -> tuple[dict, Optional[bytes]]:
     """Parse Wyoming protocol: JSON header line followed by optional binary payload.
 
@@ -248,7 +280,7 @@ async def parse_wyoming_protocol(ws: WebSocket) -> tuple[dict, Optional[bytes]]:
     """
     # Read data from WebSocket
     logger.debug(f"parse_wyoming_protocol: About to call ws.receive()")
-    message = await ws.receive()
+    message = await receive_with_idle_timeout(ws)
     logger.debug(
         f"parse_wyoming_protocol: Received message with keys: {message.keys() if message else 'None'}"
     )
@@ -278,7 +310,7 @@ async def parse_wyoming_protocol(ws: WebSocket) -> tuple[dict, Optional[bytes]]:
         payload = None
         payload_length = header.get("payload_length")
         if payload_length is not None and payload_length > 0:
-            payload_msg = await ws.receive()
+            payload_msg = await receive_with_idle_timeout(ws)
             if "bytes" in payload_msg:
                 payload = payload_msg["bytes"]
             else:
@@ -297,12 +329,28 @@ async def parse_wyoming_protocol(ws: WebSocket) -> tuple[dict, Optional[bytes]]:
 
 
 async def create_client_state(client_id: str, user, device_name: Optional[str] = None):
-    """Create and register a new client state."""
+    """Create and register a new client state.
+
+    If a connection with the same client_id already exists (a reconnecting device
+    whose previous connection is still lingering — e.g. a relay-held zombie), the
+    stale connection is evicted first so the newest connection always wins. The
+    per-client lock makes evict+create atomic against concurrent reconnects.
+    """
     # Get client manager
     client_manager = get_client_manager()
 
-    # Use ClientManager for atomic client creation and registration
-    client_state = client_manager.create_client(client_id, user.user_id, user.email)
+    async with _get_client_setup_lock(client_id):
+        # Newest-wins: tear down any stale connection holding this client_id. This
+        # finalizes its sessions and removes it so create_client below won't raise.
+        if client_manager.has_client(client_id):
+            logger.warning(
+                f"♻️ Client {client_id} reconnecting while a previous connection is "
+                f"still registered — evicting the stale connection (newest wins)"
+            )
+            await cleanup_client_state(client_id)
+
+        # Use ClientManager for atomic client creation and registration
+        client_state = client_manager.create_client(client_id, user.user_id, user.email)
 
     # Also track in persistent mapping (for database queries + cross-container Redis)
     from advanced_omi_backend.client_manager import track_client_user_relationship_async
@@ -350,6 +398,7 @@ async def cleanup_client_state(client_id: str):
         # Find all sessions for this client and mark them complete
         store = SessionStore(async_redis)
         sessions_closed = 0
+        session_ids: list[str] = []
 
         async for view in store.iter_views():
             is_match = view.client_id == client_id
@@ -365,6 +414,7 @@ async def cleanup_client_state(client_id: str):
                 continue
 
             session_id = view.session_id
+            session_ids.append(session_id)
 
             # If session is still active, finalize it first (sets status + completion_reason atomically)
             if view.status in (SessionStatus.ACTIVE, None):
@@ -429,6 +479,36 @@ async def cleanup_client_state(client_id: str):
         else:
             logger.debug(f"No Redis stream found for client {client_id}")
 
+        # Hygiene: bound per-session keys that otherwise leak when a session ends
+        # without a conversation ever opening (no speech) or via graceless disconnect.
+        # We set TTLs rather than hard-delete so the speech-detection job keeps its
+        # grace window to read final results and open a conversation from buffered audio.
+        for session_id in session_ids:
+            for key, ttl in (
+                (
+                    f"transcription:results:{session_id}",
+                    300,
+                ),  # backstop for no-speech sessions
+                (
+                    f"conversation:current:{session_id}",
+                    3600,
+                ),  # backstop for always_persist
+            ):
+                try:
+                    if await async_redis.exists(key):
+                        await async_redis.expire(key, ttl)
+                except Exception as ttl_error:
+                    logger.debug(f"Could not set TTL on {key}: {ttl_error}")
+
+        # The speech_detection_job pointer is a stale 24h key once the session ends;
+        # shorten it so it can't mislead later lookups (the job itself exits naturally).
+        try:
+            await async_redis.expire(f"speech_detection_job:{client_id}", 3600)
+        except Exception as ttl_error:
+            logger.debug(
+                f"Could not shorten speech_detection_job TTL for {client_id}: {ttl_error}"
+            )
+
         await async_redis.close()
 
     except Exception as session_error:
@@ -444,6 +524,15 @@ async def cleanup_client_state(client_id: str):
         logger.info(f"Client {client_id} cleaned up successfully")
     else:
         logger.warning(f"Client {client_id} was not found for cleanup")
+
+    # Stamp the device's last_seen in the registry so the Network page shows an
+    # accurate "last seen" once it's offline (the live ClientState is now gone).
+    try:
+        from advanced_omi_backend.users import touch_client_last_seen
+
+        await touch_client_last_seen(client_id)
+    except Exception as e:
+        logger.debug(f"Could not stamp last_seen for {client_id}: {e}")
 
 
 # Shared helper functions for WebSocket handlers
@@ -1484,6 +1573,7 @@ async def handle_omi_websocket(
         while True:
             # Parse Wyoming protocol
             header, payload = await parse_wyoming_protocol(ws)
+            client_state.touch()  # liveness: inbound activity keeps this client fresh
 
             if header["type"] == "audio-start":
                 application_logger.info(
@@ -1586,6 +1676,7 @@ async def handle_pcm_websocket(
                         f"📨 About to receive control message for {client_id}"
                     )
                     header, payload = await parse_wyoming_protocol(ws)
+                    client_state.touch()  # liveness: inbound activity keeps this client fresh
                     application_logger.debug(
                         f"✅ Received message type: {header.get('type')} for {client_id}"
                     )
@@ -1650,7 +1741,8 @@ async def handle_pcm_websocket(
                     )
 
                     try:
-                        message = await ws.receive()
+                        message = await receive_with_idle_timeout(ws)
+                        client_state.touch()  # liveness: inbound activity keeps this client fresh
 
                         if (
                             "type" in message
@@ -1692,7 +1784,9 @@ async def handle_pcm_websocket(
                                         "payload_length"
                                     )
                                     if payload_length and payload_length > 0:
-                                        payload_msg = await ws.receive()
+                                        payload_msg = await receive_with_idle_timeout(
+                                            ws
+                                        )
                                         if "bytes" in payload_msg:
                                             audio_data = payload_msg["bytes"]
                                             packet_count += 1

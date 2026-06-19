@@ -21,8 +21,10 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterator, List
 
@@ -64,6 +66,40 @@ def _safe_relpath(path: str) -> str:
     if not stem or any(not d for d in dirs):
         raise VaultToolError(f"Invalid path '{path}': empty folder or note title.")
     return str(Path(*dirs, stem + ".md"))
+
+
+_H2_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
+
+
+def _section_counts(text: str) -> Counter:
+    """Count occurrences of each top-level ``## Section`` heading (case-insensitive)."""
+    return Counter(m.group(1).lower() for m in _H2_RE.finditer(text))
+
+
+def _assert_no_new_section_dupes(rel: str, before: str, after: str) -> None:
+    """Reject a mutation that *introduces* a duplicated ``## Section`` heading.
+
+    A structured note (person/topic/etc.) carries each section — ``## About``,
+    ``## Mentions``, … — exactly once. The classic agent failure is re-emitting the
+    whole note template (or re-pasting a section) so the body stacks 2–3×. This is
+    a deterministic backstop at the tool boundary: it blocks the corrupt write
+    regardless of how the model misbehaved, and surfaces a corrective message.
+
+    We compare against ``before`` and only reject *new* duplication, so an edit to
+    an already-duplicated note can still proceed (e.g. while repairing it).
+    """
+    bc = _section_counts(before)
+    ac = _section_counts(after)
+    offenders = sorted(h for h, n in ac.items() if n > 1 and n > bc.get(h, 0))
+    if offenders:
+        pretty = ", ".join(f"'## {h}' (×{ac[h]})" for h in offenders)
+        raise VaultToolError(
+            f"Refusing to write '{rel}': it would duplicate section heading(s) "
+            f"{pretty}. A note must contain each section once. Do NOT re-emit the "
+            f"note template or paste a whole section into an existing note — "
+            f"read_note it and edit_note only the genuinely new lines into the "
+            f"section that already exists."
+        )
 
 
 class VaultTools:
@@ -236,6 +272,7 @@ class VaultTools:
                 new_content = apply_edits(content, parsed, path)
             except EditError as e:
                 raise VaultToolError(str(e))
+            _assert_no_new_section_dupes(path, content, new_content)
             fp.write_text(new_content, encoding="utf-8")
             self.touched.add(self._resolve_ci(_safe_relpath(path)))
         return f"Edited {path} ({len(edits)} replacement(s))."
@@ -250,6 +287,18 @@ class VaultTools:
                     f"overwrite=true only if you intend to replace it entirely."
                 )
             existed = fp.exists()
+            # Long-lived structured notes are maintained incrementally — overwriting
+            # one wholesale either duplicates the body or drops accumulated facts.
+            # Force those updates through edit_note.
+            top_folder = Path(rel).parts[0] if len(Path(rel).parts) > 1 else ""
+            if existed and overwrite and top_folder in ("People", "Topics"):
+                raise VaultToolError(
+                    f"Refusing to overwrite existing note '{rel}'. People/Topics notes "
+                    f"accumulate facts over time — never replace them wholesale. "
+                    f"read_note it and edit_note only the new lines."
+                )
+            before = fp.read_text(encoding="utf-8") if existed else ""
+            _assert_no_new_section_dupes(rel, before, content)
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(content, encoding="utf-8")
             self.touched.add(rel)

@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from advanced_omi_backend.auth import current_active_user
+from advanced_omi_backend.auth import current_active_user, current_superuser
 from advanced_omi_backend.users import User
 
 logger = logging.getLogger(__name__)
@@ -58,12 +58,75 @@ class LabelRequest(BaseModel):
     label: str  # "wake" -> positive, "not_wake" -> negative
 
 
+class CollectOnlyRequest(BaseModel):
+    wakeword: str
+    collect_only: bool  # True -> shadow (farm-only), False -> normal dispatch word
+
+
+class VerifierEnabledRequest(BaseModel):
+    wakeword: str
+    enabled: bool  # True -> consult the second-stage verifier, False -> stage-1 only
+
+
 @router.get("/models")
 async def list_models(current_user: User = Depends(current_active_user)):
     """Wake-word models the service has on disk (for the acoustic-condition picker)."""
     async with _client() as client:
         try:
             resp = await client.get("/models")
+            resp.raise_for_status()
+        except httpx.HTTPError as e:
+            raise HTTPException(
+                status_code=503, detail=f"Wake-word service unreachable: {e}"
+            )
+    return resp.json()
+
+
+@router.post("/collect_only")
+async def set_collect_only(
+    req: CollectOnlyRequest, current_user: User = Depends(current_superuser)
+):
+    """Toggle a wake word's collect-only (shadow) mode. Admin only — it changes the
+    detector's global behavior for every stream, so it isn't user-scoped like the
+    prime/label flow. The change takes effect live and persists across restarts.
+    """
+    async with _client() as client:
+        try:
+            resp = await client.post(
+                "/collect_only",
+                json={"wakeword": req.wakeword, "collect_only": req.collect_only},
+            )
+            if resp.status_code in (400, 404):
+                raise HTTPException(
+                    status_code=resp.status_code, detail=resp.json().get("detail")
+                )
+            resp.raise_for_status()
+        except httpx.HTTPError as e:
+            raise HTTPException(
+                status_code=503, detail=f"Wake-word service unreachable: {e}"
+            )
+    return resp.json()
+
+
+@router.post("/verifier_enabled")
+async def set_verifier_enabled(
+    req: VerifierEnabledRequest, current_user: User = Depends(current_superuser)
+):
+    """Toggle a wake word's second-stage verifier on/off. Admin only — like
+    collect-only it changes detector behavior for every stream. The verifier stays
+    loaded; disabling falls back to the stage-1 model alone. Effective live and
+    persisted across restarts.
+    """
+    async with _client() as client:
+        try:
+            resp = await client.post(
+                "/verifier_enabled",
+                json={"wakeword": req.wakeword, "enabled": req.enabled},
+            )
+            if resp.status_code in (400, 404):
+                raise HTTPException(
+                    status_code=resp.status_code, detail=resp.json().get("detail")
+                )
             resp.raise_for_status()
         except httpx.HTTPError as e:
             raise HTTPException(

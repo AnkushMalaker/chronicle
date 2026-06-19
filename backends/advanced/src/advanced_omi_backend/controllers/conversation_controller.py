@@ -31,6 +31,13 @@ from advanced_omi_backend.plugins.events import ConversationCloseReason, PluginE
 from advanced_omi_backend.redis_factory import create_async_redis
 from advanced_omi_backend.services.audio_stream.session_store import SessionStore
 from advanced_omi_backend.services.memory import get_memory_service
+from advanced_omi_backend.services.memory.audit import (
+    MemoryCause,
+    UpdateStrategy,
+    actor_for,
+    source_kind_for,
+    source_label_for,
+)
 from advanced_omi_backend.users import User
 from advanced_omi_backend.workers.conversation_jobs import generate_title_summary_job
 from advanced_omi_backend.workers.memory_jobs import (
@@ -904,6 +911,7 @@ def _enqueue_transcript_reprocessing(
         transcript_version_id=version_id,
         depends_on_job=transcript_job,
         end_reason=end_reason,
+        memory_cause=MemoryCause.TRANSCRIPT_REPROCESS,
     )
 
     return version_id, transcript_job, post_jobs
@@ -929,12 +937,7 @@ def _resolve_transcript_version(conversation: Conversation, version_id: str) -> 
             )
         resolved_id = active_id
 
-    version_obj = None
-    for v in conversation.transcript_versions:
-        if v.version_id == resolved_id:
-            version_obj = v
-            break
-
+    version_obj = conversation.get_transcript_version(resolved_id)
     if not version_obj:
         return (
             JSONResponse(
@@ -984,7 +987,11 @@ def _enqueue_speaker_reprocessing_chain(
         result_ttl=JOB_RESULT_TTL,
         job_id=f"memory_{conversation_id[:12]}",
         description=f"Extract memories for {conversation_id[:8]}",
-        meta={"conversation_id": conversation_id, "trigger": "reprocess_after_speaker"},
+        meta={
+            "conversation_id": conversation_id,
+            "cause": MemoryCause.SPEAKER_REPROCESS.value,
+            "strategy": UpdateStrategy.SPEAKER_DIFF.value,
+        },
     )
     logger.info(
         f"Chained memory job {memory_job.id} after speaker job {speaker_job.id}"
@@ -998,7 +1005,7 @@ def _enqueue_speaker_reprocessing_chain(
         depends_on=memory_job,
         job_id=f"title_summary_{conversation_id[:12]}",
         description=f"Regenerate title/summary for {conversation_id[:8]}",
-        meta={"conversation_id": conversation_id, "trigger": "reprocess_after_speaker"},
+        meta={"conversation_id": conversation_id},
     )
     logger.info(
         f"Chained title/summary job {title_summary_job.id} after memory job {memory_job.id}"
@@ -1220,6 +1227,8 @@ async def reprocess_memory(
         job = enqueue_memory_processing(
             conversation_id=conversation_id,
             priority=JobPriority.NORMAL,
+            cause=MemoryCause.MEMORY_REPLAY,
+            strategy=UpdateStrategy.FULL,
         )
 
         logger.info(
@@ -1505,14 +1514,25 @@ async def get_conversation_memory_audit(
 
 
 def _memory_audit_to_dict(entry) -> dict:
-    """Serialize a MemoryAuditEntry for API responses."""
+    """Serialize a MemoryAuditEntry for API responses.
+
+    Provenance is exposed both raw (``cause``/``strategy``) and pre-classified
+    (``source_kind``/``source_label``/``actor``) so the WebUI renders an honest
+    label without re-deriving the taxonomy from magic strings.
+    """
     return {
         "id": str(entry.id),
         "user_id": entry.user_id,
         "conversation_id": entry.conversation_id,
         "operation": entry.operation,
         "note_path": entry.note_path,
-        "trigger": entry.trigger,
+        "cause": entry.cause,
+        "strategy": entry.strategy,
+        "source_kind": source_kind_for(entry.cause, entry.agent_mode, entry.operation),
+        "source_label": source_label_for(
+            entry.cause, entry.agent_mode, entry.operation
+        ),
+        "actor": actor_for(entry.cause, entry.agent_mode, entry.operation),
         "provider": entry.provider,
         "agent_mode": entry.agent_mode,
         "before_hash": entry.before_hash,
@@ -1521,4 +1541,9 @@ def _memory_audit_to_dict(entry) -> dict:
         "summary": entry.summary,
         "extra": entry.extra,
         "created_at": entry.created_at.isoformat() if entry.created_at else None,
+        # Whether a before→after diff can be fetched for this entry. True when the
+        # post-change content was retained, or for deletes (the prior recorded
+        # change supplies the removed content). False for legacy entries written
+        # before content was retained and for note-less delete_all operations.
+        "has_diff": entry.after_text is not None or entry.operation == "delete",
     }

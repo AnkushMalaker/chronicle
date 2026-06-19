@@ -1040,13 +1040,21 @@ async def apply_diarization_annotations(
             annotation.processed_by = "apply"
             await annotation.save()
 
-        # Chain memory reprocessing
+        # Chain memory reprocessing. Diarization-only edits change speaker
+        # attribution, so use the same speaker-diff strategy as a speaker
+        # reprocess (it falls back to a full re-extraction if no diff applies).
         from advanced_omi_backend.models.job import JobPriority
+        from advanced_omi_backend.services.memory.audit import (
+            MemoryCause,
+            UpdateStrategy,
+        )
         from advanced_omi_backend.workers.memory_jobs import enqueue_memory_processing
 
         enqueue_memory_processing(
             conversation_id=conversation_id,
             priority=JobPriority.NORMAL,
+            cause=MemoryCause.ANNOTATION_APPLY,
+            strategy=UpdateStrategy.SPEAKER_DIFF,
         )
 
         return JSONResponse(
@@ -1226,13 +1234,20 @@ async def apply_all_annotations(
             annotation.status = AnnotationStatus.ACCEPTED
             await annotation.save()
 
-        # Trigger memory reprocessing (once for all changes)
+        # Trigger memory reprocessing (once for all changes). Combined apply may
+        # change transcript text as well as speakers, so re-extract in full.
         from advanced_omi_backend.models.job import JobPriority
+        from advanced_omi_backend.services.memory.audit import (
+            MemoryCause,
+            UpdateStrategy,
+        )
         from advanced_omi_backend.workers.memory_jobs import enqueue_memory_processing
 
         enqueue_memory_processing(
             conversation_id=conversation_id,
             priority=JobPriority.NORMAL,
+            cause=MemoryCause.ANNOTATION_APPLY,
+            strategy=UpdateStrategy.FULL,
         )
 
         return JSONResponse(

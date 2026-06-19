@@ -70,8 +70,9 @@ ENV PYTHONPATH=/app/src:/app
 # Copy application code
 COPY . .
 
-# Copy configuration files if they exist
-COPY diarization_config.json* ./
+# diarization_config.json (if present) is already included by "COPY . ." above.
+# A separate optional-glob COPY ("json*") errors under buildah/podman when the
+# file is absent, and is redundant under docker — so it's intentionally omitted.
 
 # Copy and make startup script executable
 COPY start.sh ./
@@ -114,8 +115,9 @@ ENV PYTHONPATH=/app/src:/app
 # Copy application code
 COPY . .
 
-# Copy configuration files if they exist
-COPY diarization_config.json* ./
+# diarization_config.json (if present) is already included by "COPY . ." above.
+# A separate optional-glob COPY ("json*") errors under buildah/podman when the
+# file is absent, and is redundant under docker — so it's intentionally omitted.
 
 # Copy and make startup script executable
 COPY start.sh ./

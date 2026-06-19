@@ -10,7 +10,7 @@ import logging
 import re
 import string
 import time
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Awaitable, Callable, Dict, List, NamedTuple, Optional
 
 from advanced_omi_backend.redis_factory import create_sync_redis
 
@@ -229,7 +229,12 @@ class PluginRouter:
         }
 
     async def dispatch_event(
-        self, event: str, user_id: str, data: Dict, metadata: Optional[Dict] = None
+        self,
+        event: str,
+        user_id: str,
+        data: Dict,
+        metadata: Optional[Dict] = None,
+        on_plugin_done: Optional[Callable[..., Awaitable[None]]] = None,
     ) -> List[PluginResult]:
         """
         Dispatch event to all subscribed plugins.
@@ -239,6 +244,13 @@ class PluginRouter:
             user_id: User ID for context
             data: Event-specific data
             metadata: Optional metadata
+            on_plugin_done: Optional async observer called after each plugin in the
+                chain runs, as ``await on_plugin_done(plugin_id, duration_ms,
+                result, is_last)``. ``result`` is the PluginResult or ``None`` (a
+                decline). Lets callers trace per-plugin latency and react to a
+                handoff (e.g. the voice path plays a "thinking" tone when the fast
+                handler declines and a slower one takes over). Best-effort: an
+                observer exception is logged and never breaks dispatch.
 
         Returns:
             List of plugin results
@@ -263,7 +275,8 @@ class PluginRouter:
                 f"🔌 ROUTER: Found {len(plugin_ids)} subscribed plugin(s): {plugin_ids}"
             )
 
-        for plugin_id in plugin_ids:
+        last_index = len(plugin_ids) - 1
+        for index, plugin_id in enumerate(plugin_ids):
             plugin = self.plugins[plugin_id]
 
             if not plugin.enabled:
@@ -291,7 +304,28 @@ class PluginRouter:
                     services=self._services,
                 )
 
+                started = time.perf_counter()
                 result = await self._execute_plugin(plugin, event, context)
+                duration_ms = (time.perf_counter() - started) * 1000.0
+
+                # Notify the observer for every plugin that actually ran — including
+                # declines (result is None), so callers can time a "miss" and react
+                # to the handoff to the next handler in the chain.
+                if on_plugin_done is not None:
+                    try:
+                        await on_plugin_done(
+                            plugin_id,
+                            duration_ms,
+                            result,
+                            is_last=(index == last_index),
+                        )
+                    except (
+                        Exception
+                    ):  # noqa: BLE001 - observer must never break dispatch
+                        logger.debug(
+                            f"on_plugin_done observer failed for '{plugin_id}'",
+                            exc_info=True,
+                        )
 
                 if result:
                     status_icon = "✓" if result.success else "✗"

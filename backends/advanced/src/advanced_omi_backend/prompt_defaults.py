@@ -359,28 +359,27 @@ Rules:
     registry.register_default(
         "conversation.detailed_summary",
         template="""\
-Generate a comprehensive, detailed summary of this conversation transcript.
+Summarize this conversation transcript, accurately and in proportion to how much was actually said.
 
 {{memory_section}}INSTRUCTIONS:
-Your task is to create a high-quality, detailed summary of a conversation transcription that captures the full information and context of what was discussed. This is NOT a brief summary - provide comprehensive coverage.
+Write a clear summary of the conversation. Match the length to the content: a long, substantive conversation deserves a thorough multi-paragraph summary; a short or trivial exchange (a single question, a quick command, a few words) deserves only a sentence or two. Do not pad.
 
 Rules:
 - We know it's a conversation, so no need to say "This conversation involved..."
-- Provide complete coverage of all topics, points, and important details discussed
-- Correct obvious transcription errors and remove filler words (um, uh, like, you know)
-- Organize information logically by topic or chronologically as appropriate
-- Use clear, well-structured paragraphs or bullet points, but make the length relative to the amound of content.
-- Maintain the meaning and intent of what was said, but improve clarity and coherence
-- Include relevant context, decisions made, action items mentioned, and conclusions reached
-{{speaker_instruction}}- Write in a natural, flowing narrative style
-- Only include word-for-word quotes if it's more efficiency than rephrasing
-- Focus on substantive content - what was actually discussed and decided
+- Ground everything strictly in the transcript. Do NOT invent or infer details, decisions, action items, plans, names, dates, or next steps that were not actually said.
+- Only mention decisions, action items, or conclusions if they were explicitly stated in the transcript.
+- Correct obvious transcription errors and remove filler words (um, uh, like, you know), but never change the meaning.
+- Organize information logically by topic or chronologically as appropriate.
+- Use clear, well-structured prose or bullet points; keep the length proportional to the amount of content.
+- If the transcript is trivial or says very little, summarize it in a sentence or two rather than elaborating.
+{{speaker_instruction}}- Write in a natural, flowing style.
+- Only include word-for-word quotes when a quote is clearer than rephrasing.
 
-Think of this as creating a high-quality information set that someone could use to understand everything important that happened in this conversation without reading the full transcript.
+Any "CONTEXT ABOUT THE USER" shown above is background only — use it to interpret what was said, never as material to add. Do not summarize the context; only summarize the transcript.
 
-DETAILED SUMMARY:""",
+SUMMARY:""",
         name="Conversation Detailed Summary",
-        description="Generates a comprehensive multi-paragraph summary of a conversation.",
+        description="Generates a proportional-length summary of a conversation, grounded strictly in the transcript.",
         category="conversation",
         variables=["speaker_instruction", "memory_section"],
         is_dynamic=True,

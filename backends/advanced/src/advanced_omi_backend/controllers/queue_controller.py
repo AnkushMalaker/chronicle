@@ -20,6 +20,7 @@ from rq.registry import DeferredJobRegistry, ScheduledJobRegistry
 
 from advanced_omi_backend.config_loader import get_service_config
 from advanced_omi_backend.redis_factory import create_sync_redis
+from advanced_omi_backend.services.memory.audit import MemoryCause, UpdateStrategy
 from advanced_omi_backend.services.sse_publisher import publish_sse_event
 
 logger = logging.getLogger(__name__)
@@ -507,6 +508,8 @@ def start_post_conversation_jobs(
     client_id: Optional[str] = None,
     end_reason: str = "file_upload",
     skip_speaker_recognition: bool = False,
+    memory_cause: MemoryCause = MemoryCause.AUTO_EXTRACTION,
+    memory_strategy: UpdateStrategy = UpdateStrategy.FULL,
 ) -> Dict[str, str]:
     """
     Start post-conversation processing jobs after conversation is created.
@@ -611,6 +614,12 @@ def start_post_conversation_jobs(
             f"🔍 DEBUG: Creating memory job with job_id={memory_job_id}, conversation_id={conversation_id[:12]}"
         )
 
+        # Memory job carries provenance (cause/strategy) on top of the shared meta.
+        memory_meta = {
+            **job_meta,
+            "cause": memory_cause.value,
+            "strategy": memory_strategy.value,
+        }
         memory_job = memory_queue.enqueue(
             process_memory_job,
             conversation_id,
@@ -619,7 +628,7 @@ def start_post_conversation_jobs(
             depends_on=speaker_dependency,  # Either speaker_job or upstream dependency
             job_id=memory_job_id,
             description=f"Memory extraction for conversation {conversation_id[:8]}",
-            meta=job_meta,
+            meta=memory_meta,
         )
         if speaker_job:
             logger.info(

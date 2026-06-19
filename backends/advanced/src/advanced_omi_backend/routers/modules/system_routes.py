@@ -38,7 +38,7 @@ async def get_network_discovery(
     request: Request, current_user: User = Depends(current_superuser)
 ):
     """Get Tailscale and minidisc service discovery status. Admin only."""
-    return await system_controller.get_network_discovery(request.app)
+    return await system_controller.get_network_discovery(request.app, current_user)
 
 
 @router.get("/config/diagnostics")
@@ -81,6 +81,20 @@ async def save_diarization_settings(
 ):
     """Save diarization settings. Admin only."""
     return await system_controller.save_diarization_settings_controller(settings)
+
+
+@router.get("/asr-context")
+async def get_asr_context_config(current_user: User = Depends(current_superuser)):
+    """Get the active STT providers' hint mechanism + context. Admin only."""
+    return await system_controller.get_asr_context_config()
+
+
+@router.post("/asr-context")
+async def save_asr_context(
+    payload: dict, current_user: User = Depends(current_superuser)
+):
+    """Save a context string for a context_prompt STT provider. Admin only."""
+    return await system_controller.save_asr_context_controller(payload)
 
 
 @router.get("/misc-settings")
@@ -645,6 +659,8 @@ class ServiceProviderRequest(BaseModel):
 
     provider: str
     build: bool = False
+    # "batch" (default) switches the stt provider; "streaming" switches stt_stream.
+    lane: str = "batch"
 
 
 @router.get("/admin/services")
@@ -687,6 +703,25 @@ async def external_service_action(
     return await system_controller.external_service_action(
         name, action, (body or ServiceActionRequest()).dict()
     )
+
+
+@router.get("/admin/remote-control")
+async def get_remote_control_status(current_user: User = Depends(current_superuser)):
+    """Status of the host's Claude remote-control session. Admin only.
+
+    Returns available=False when no service manager agent is configured/reachable.
+    """
+    return await system_controller.get_remote_control_status()
+
+
+@router.post("/admin/remote-control/{action}")
+async def remote_control_action(
+    action: str, current_user: User = Depends(current_superuser)
+):
+    """Start/stop/restart the host's Claude remote-control session. Admin only."""
+    if action not in ("start", "stop", "restart"):
+        raise HTTPException(status_code=404, detail=f"Unknown action: {action}")
+    return await system_controller.remote_control_action(action)
 
 
 # Memory Provider Configuration Endpoints

@@ -24,7 +24,7 @@ import httpx
 
 from advanced_omi_backend.redis_factory import create_async_redis
 
-from .audit import memory_trigger, record_vault_change
+from .audit import MemoryCause, memory_provenance, record_vault_change
 
 logger = logging.getLogger("memory_service.audit")
 
@@ -89,7 +89,7 @@ async def _record_event(data: dict) -> None:
         except Exception:  # noqa: BLE001 — file may be gone again already
             after = None
 
-    with memory_trigger("obsidian_sync"):
+    with memory_provenance(MemoryCause.OBSIDIAN_SYNC):
         await record_vault_change(
             user_id=user_id,
             conversation_id=_conversation_id_for(item),

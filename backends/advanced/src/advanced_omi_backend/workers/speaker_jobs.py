@@ -185,16 +185,26 @@ async def recognise_speakers_job(
     # Get user_id from conversation
     user_id = conversation.user_id
 
-    # Find the transcript version to update
-    transcript_version = None
-    for version in conversation.transcript_versions:
-        if version.version_id == version_id:
-            transcript_version = version
-            break
-
+    # Resolve the transcript version to update. The handed-in version_id is the one
+    # the upstream transcription step produced and set active. When that step declined
+    # to create a new version (e.g. an empty/contentless batch re-transcription that
+    # kept the existing streaming transcript), version_id won't exist — so fall back to
+    # whatever transcript is currently active, which is exactly what upstream kept.
+    transcript_version = conversation.get_transcript_version(version_id)
     if not transcript_version:
-        logger.error(f"Transcript version {version_id} not found")
-        return {"success": False, "error": "Transcript version not found"}
+        transcript_version = conversation.active_transcript
+        if transcript_version:
+            logger.warning(
+                f"Transcript version {version_id} not found; falling back to active "
+                f"version {transcript_version.version_id} (upstream likely kept the "
+                f"existing transcript)"
+            )
+            version_id = transcript_version.version_id
+        else:
+            logger.error(
+                f"Transcript version {version_id} not found and no active version exists"
+            )
+            return {"success": False, "error": "Transcript version not found"}
 
     # Check if speaker recognition is enabled
     speaker_client = SpeakerRecognitionClient()

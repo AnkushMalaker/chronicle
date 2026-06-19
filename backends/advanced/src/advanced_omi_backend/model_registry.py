@@ -74,7 +74,24 @@ class ModelDef(BaseModel):
     )
     capabilities: List[str] = Field(
         default_factory=list,
-        description="Provider capabilities: word_timestamps, segments, diarization (for STT providers)",
+        description=(
+            "Provider capabilities. Output capabilities: word_timestamps, segments, "
+            "diarization. ASR hint mechanism (mutually exclusive): "
+            "'keyword_boosting' — accepts a hot-word list as an acoustic recognition "
+            "hint that biases decoding without leaking into the transcript "
+            "(Deepgram keyterm, VibeVoice prompt, Parakeet); 'context_prompt' — an "
+            "LLM-backbone ASR that takes free-form context as prompt text (Gemma 4). "
+            "context_prompt providers are given the user-authored asr_context only, "
+            "never the wake-word boost list (which an LLM would echo into output)."
+        ),
+    )
+    asr_context: Optional[str] = Field(
+        default=None,
+        description=(
+            "Free-form context string for 'context_prompt' STT providers (e.g. a "
+            "domain/topic description). Informs an LLM-backbone ASR without being "
+            "transcribed. User overrides are stored under backend.asr.context.<name>."
+        ),
     )
 
     @field_validator("model_name", mode="before")

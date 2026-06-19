@@ -1,8 +1,8 @@
 import { useState } from 'react'
-import { Network as NetworkIcon, RefreshCw, CheckCircle, XCircle, Wifi, WifiOff, Radio, Search, Server, Smartphone } from 'lucide-react'
-import { useQuery } from '@tanstack/react-query'
+import { Network as NetworkIcon, RefreshCw, CheckCircle, XCircle, Wifi, WifiOff, Radio, Search, Server, Smartphone, Pencil, Trash2, Check, X } from 'lucide-react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '../contexts/AuthContext'
-import { systemApi } from '../services/api'
+import { systemApi, clientsApi } from '../services/api'
 
 interface DiscoveredService {
   name: string
@@ -22,9 +22,11 @@ interface AdvertisedService {
 interface ConnectedDevice {
   client_id: string
   device_name: string
+  name?: string  // user-editable friendly label
   user_email?: string
   connected: boolean
   has_active_conversation: boolean
+  last_seen?: number  // seconds since last inbound message
 }
 
 interface NetworkData {
@@ -33,6 +35,15 @@ interface NetworkData {
   discovered_services: DiscoveredService[]
   connected_devices?: ConnectedDevice[]
   error?: string
+}
+
+// Human-readable "last seen" from seconds-since-last-message.
+function formatAgo(secs?: number): string {
+  if (secs == null) return 'unknown'
+  if (secs < 60) return `${Math.round(secs)}s ago`
+  if (secs < 3600) return `${Math.round(secs / 60)}m ago`
+  if (secs < 86400) return `${Math.round(secs / 3600)}h ago`
+  return `${Math.round(secs / 86400)}d ago`
 }
 
 const SERVICE_DISPLAY: Record<string, { label: string; description: string }> = {
@@ -52,6 +63,24 @@ function getServiceDisplay(name: string) {
   return { label: suffix.charAt(0).toUpperCase() + suffix.slice(1), description: '' }
 }
 
+// The advertising node's OWN view of a service's health, carried in the minidisc
+// labels (health/running) that the node agent refreshes live. Distinct from the
+// reachability icon, which is this backend's own probe of the service URL.
+function healthBadge(health?: string): { text: string; cls: string } | null {
+  switch (health) {
+    case 'healthy':
+      return { text: 'healthy', cls: 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' }
+    case 'partial':
+      return { text: 'partial', cls: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300' }
+    case 'unhealthy':
+      return { text: 'unhealthy', cls: 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300' }
+    case 'stopped':
+      return { text: 'stopped', cls: 'bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-300' }
+    default:
+      return null
+  }
+}
+
 // Group discovered services by host
 function groupByHost(services: DiscoveredService[]): Record<string, DiscoveredService[]> {
   const groups: Record<string, DiscoveredService[]> = {}
@@ -65,7 +94,10 @@ function groupByHost(services: DiscoveredService[]): Record<string, DiscoveredSe
 
 export default function Network() {
   const { isAdmin } = useAuth()
+  const queryClient = useQueryClient()
   const [isScanning, setIsScanning] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [draftName, setDraftName] = useState('')
 
   const { data, isLoading, refetch, dataUpdatedAt } = useQuery<NetworkData>({
     queryKey: ['system', 'network'],
@@ -76,6 +108,26 @@ export default function Network() {
     enabled: isAdmin,
     staleTime: 60_000,
   })
+
+  const startEdit = (d: ConnectedDevice) => {
+    setEditingId(d.client_id)
+    setDraftName(d.name || d.device_name || d.client_id)
+  }
+  const cancelEdit = () => {
+    setEditingId(null)
+    setDraftName('')
+  }
+  const saveEdit = async (clientId: string) => {
+    const name = draftName.trim()
+    if (name) await clientsApi.rename(clientId, name)
+    cancelEdit()
+    await queryClient.invalidateQueries({ queryKey: ['system', 'network'] })
+  }
+  const forgetDevice = async (clientId: string) => {
+    if (!window.confirm('Forget this device? It will reappear if it reconnects.')) return
+    await clientsApi.forget(clientId)
+    await queryClient.invalidateQueries({ queryKey: ['system', 'network'] })
+  }
 
   const handleScan = async () => {
     setIsScanning(true)
@@ -222,18 +274,38 @@ export default function Network() {
         </h3>
         {Object.keys(nodeGroups).length > 0 ? (
           <div className="space-y-4">
-            {Object.entries(nodeGroups).map(([host, services]) => {
-              const hasEdge = services.some(s => s.labels?.type === 'edge')
+            {Object.entries(nodeGroups).map(([host, allServices]) => {
+              // The node agent advertises a `chronicle-node` self-entry carrying this
+              // node's identity (arch/gpu) — pull it out for the header rather than
+              // showing it as a service row.
+              const nodeEntry = allServices.find(s => s.labels?.type === 'node')
+              const services = allServices.filter(s => s.labels?.type !== 'node')
+              const hasEdge = allServices.some(s => s.labels?.type === 'edge')
+              const arch = nodeEntry?.labels?.arch
+              const hasGpu = nodeEntry?.labels?.gpu === '1'
               return (
                 <div key={host} className="border border-gray-200 dark:border-gray-600 rounded-lg overflow-hidden">
                   {/* Node header */}
                   <div className="flex items-center justify-between px-4 py-2.5 bg-gray-100 dark:bg-gray-700">
-                    <div className="flex items-center space-x-2">
+                    <div className="flex items-center space-x-2 flex-wrap">
                       <Server className="h-4 w-4 text-gray-500 dark:text-gray-400" />
                       <span className="font-medium text-gray-900 dark:text-gray-100 font-mono text-sm">{host}</span>
+                      {nodeEntry && (
+                        <span className="text-xs px-1.5 py-0.5 bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300 rounded">
+                          node
+                        </span>
+                      )}
                       {hasEdge && (
                         <span className="text-xs px-1.5 py-0.5 bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300 rounded">
                           edge
+                        </span>
+                      )}
+                      {arch && (
+                        <span className="text-xs text-gray-500 dark:text-gray-400 font-mono">{arch}</span>
+                      )}
+                      {hasGpu && (
+                        <span className="text-xs px-1.5 py-0.5 bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300 rounded">
+                          GPU
                         </span>
                       )}
                     </div>
@@ -246,6 +318,7 @@ export default function Network() {
                     {services.map((svc) => {
                       const display = getServiceDisplay(svc.name)
                       const isLocal = advertisedNames.has(svc.name)
+                      const hb = healthBadge(svc.labels?.health)
                       return (
                         <div key={svc.name} className={`p-3 ${!svc.url ? 'opacity-60' : ''}`}>
                           <div className="flex items-center justify-between">
@@ -254,6 +327,11 @@ export default function Network() {
                                 <span className="font-medium text-gray-900 dark:text-gray-100">
                                   {display.label}
                                 </span>
+                                {hb && (
+                                  <span className={`text-xs px-1.5 py-0.5 rounded ${hb.cls}`}>
+                                    {hb.text}
+                                  </span>
+                                )}
                                 {isLocal && svc.url && (
                                   <span className="text-xs px-1.5 py-0.5 bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300 rounded">
                                     local
@@ -302,45 +380,77 @@ export default function Network() {
         )}
       </div>
 
-      {/* Connected Devices */}
+      {/* Devices */}
       <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
         <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center">
           <Smartphone className="h-5 w-5 mr-2 text-blue-600" />
-          Connected Devices
+          Devices
         </h3>
         {data?.connected_devices && data.connected_devices.length > 0 ? (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {data.connected_devices.map((device) => (
               <div key={device.client_id} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-md">
-                <div>
-                  <div className="font-medium text-gray-900 dark:text-gray-100">{device.device_name}</div>
+                <div className="min-w-0">
+                  {editingId === device.client_id ? (
+                    <div className="flex items-center gap-1">
+                      <input
+                        autoFocus
+                        value={draftName}
+                        onChange={(e) => setDraftName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') saveEdit(device.client_id)
+                          if (e.key === 'Escape') cancelEdit()
+                        }}
+                        className="px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 w-36"
+                      />
+                      <button onClick={() => saveEdit(device.client_id)} title="Save" className="p-1 text-green-600 hover:text-green-700">
+                        <Check className="h-4 w-4" />
+                      </button>
+                      <button onClick={cancelEdit} title="Cancel" className="p-1 text-gray-500 hover:text-gray-700">
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1.5 group">
+                      <span className="font-medium text-gray-900 dark:text-gray-100 truncate">{device.name || device.device_name}</span>
+                      <button onClick={() => startEdit(device)} title="Rename" className="p-0.5 text-gray-400 hover:text-blue-600 opacity-0 group-hover:opacity-100">
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  )}
                   {device.user_email && (
-                    <div className="text-sm text-gray-500 dark:text-gray-400">{device.user_email}</div>
+                    <div className="text-sm text-gray-500 dark:text-gray-400 truncate">{device.user_email}</div>
                   )}
                   <code className="text-xs text-gray-400 dark:text-gray-500 font-mono">{device.client_id}</code>
                 </div>
                 <div className="ml-3 flex-shrink-0 flex flex-col items-end space-y-1">
                   {device.connected ? (
                     <span className="text-xs px-2 py-1 bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 rounded">
-                      connected
+                      online
                     </span>
                   ) : (
                     <span className="text-xs px-2 py-1 bg-gray-100 text-gray-600 dark:bg-gray-600 dark:text-gray-300 rounded">
-                      disconnected
+                      offline
                     </span>
                   )}
+                  <span className="text-xs text-gray-400 dark:text-gray-500">
+                    last seen {formatAgo(device.last_seen)}
+                  </span>
                   {device.has_active_conversation && (
                     <span className="text-xs px-2 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded">
                       streaming
                     </span>
                   )}
+                  <button onClick={() => forgetDevice(device.client_id)} title="Forget device" className="p-0.5 text-gray-400 hover:text-red-600">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
                 </div>
               </div>
             ))}
           </div>
         ) : (
           <p className="text-gray-500 dark:text-gray-400 text-center py-4">
-            No devices connected via WebSocket
+            No devices registered yet
           </p>
         )}
       </div>
@@ -351,19 +461,27 @@ export default function Network() {
         <div className="flex flex-wrap gap-4 text-sm text-gray-600 dark:text-gray-400">
           <div className="flex items-center space-x-1.5">
             <CheckCircle className="h-4 w-4 text-green-500" />
-            <span>Reachable</span>
+            <span>Reachable (this backend's probe)</span>
           </div>
           <div className="flex items-center space-x-1.5">
             <XCircle className="h-4 w-4 text-yellow-500" />
             <span>Found but /health unreachable</span>
           </div>
           <div className="flex items-center space-x-1.5">
-            <span className="text-xs px-1.5 py-0.5 bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300 rounded">edge</span>
-            <span>Remote edge node</span>
+            <span className="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300">healthy</span>
+            <span>Source node's own health (live)</span>
           </div>
           <div className="flex items-center space-x-1.5">
-            <span className="text-xs text-gray-400">not found</span>
-            <span>Not discovered on Tailnet</span>
+            <span className="text-xs px-1.5 py-0.5 bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300 rounded">node</span>
+            <span>Full node agent (control + advertise)</span>
+          </div>
+          <div className="flex items-center space-x-1.5">
+            <span className="text-xs px-1.5 py-0.5 bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300 rounded">edge</span>
+            <span>Advertise-only edge node</span>
+          </div>
+          <div className="flex items-center space-x-1.5">
+            <span className="text-xs px-1.5 py-0.5 bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300 rounded">GPU</span>
+            <span>NVIDIA GPU present</span>
           </div>
         </div>
       </div>

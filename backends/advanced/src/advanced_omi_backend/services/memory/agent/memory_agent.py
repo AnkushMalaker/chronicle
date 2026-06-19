@@ -136,11 +136,17 @@ plausibly recur and matters.
    contents) to find a person/topic/fact. Reuse exact existing note names so links resolve.
 2. `write_note` the conversation note from the Conversation template; put every identified
    person in `people:` and every theme in `topics:` as [[wikilinks]].
-3. For each person/topic/thing: if its note exists, READ it then `edit_note` to append
-   genuinely new facts (under `## About`, plus a dated `## Mentions` line); otherwise
-   `write_note` it from the matching template. Don't duplicate facts already present.
+3. For each person/topic/thing: if its note exists, READ it then `edit_note` ONLY to
+   append genuinely new facts (under `## About`, plus a dated `## Mentions` line);
+   otherwise `write_note` it from the matching template. `write_note` is for CREATING a
+   note — never use it (and never use overwrite) to "update" an existing person/topic
+   note, and never paste the template scaffold (`## About`/`## Conversations`/
+   `## Mentions`) into a note that already has it. Each section must appear exactly
+   once. Don't duplicate facts already present.
 4. `edit_note` old_text must match the file EXACTLY and UNIQUELY — include surrounding
-   context (e.g. the section header line). Edit frontmatter as text too.
+   context (e.g. the section header line). Your new_text is the existing anchor plus the
+   one or two new bullet lines — NOT a re-paste of the whole section. Edit frontmatter as
+   text too.
 5. Other conversations may be recorded into this vault CONCURRENTLY, so a note can change
    between your read and your edit. If an edit fails to match, read_note the file again
    and re-apply only the smallest new edit against its current content — never re-write

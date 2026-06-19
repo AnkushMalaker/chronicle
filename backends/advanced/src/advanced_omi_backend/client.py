@@ -7,6 +7,7 @@ conversation lifecycle live in the Redis-streams / RQ-job pipeline, not here.
 """
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -24,6 +25,11 @@ class ClientState:
 
     # Liveness flag, flipped by disconnect().
     connected: bool = True
+
+    # Wall-clock time of the last inbound WebSocket message, stamped via touch().
+    # Drives the idle read-timeout reaper and the Network page's "last seen" / honest
+    # connected status. Defaults to creation time so a freshly-created client is fresh.
+    last_activity: float = field(default_factory=time.time)
 
     # Markers (e.g., button events) collected during the session,
     # drained onto the conversation when it is persisted.
@@ -53,6 +59,12 @@ class ClientState:
     def add_marker(self, marker: dict) -> None:
         """Add a marker (e.g., button event) to the current session."""
         self.markers.append(marker)
+
+    def touch(self) -> None:
+        """Record inbound activity. Called on every received WebSocket message so the
+        idle-timeout reaper and the Network page can tell a live client from a zombie.
+        """
+        self.last_activity = time.time()
 
     async def disconnect(self) -> None:
         """Clean disconnect of client state."""

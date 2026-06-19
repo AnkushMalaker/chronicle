@@ -8,8 +8,9 @@ changed, when, and what triggered the change*.
 
 Entries are written by the chronicle memory provider (the only provider that owns
 a vault) from the memory RQ worker, and read back through the API for display.
-This is audit-only — there is no restore; the ledger records history, it does not
-hold prior content.
+Each entry retains the post-change note content (``after_text``) so the ledger can
+show an exact before→after diff: the "before" is reconstructed from the previous
+recorded change to the same note. There is no restore — the ledger records history.
 """
 
 from datetime import datetime, timezone
@@ -34,10 +35,16 @@ class MemoryAuditEntry(Document):
         None,
         description="Vault-relative path of the changed note (e.g. 'People/Alice.md')",
     )
-    trigger: Optional[str] = Field(
+    cause: Optional[str] = Field(
         None,
-        description="What initiated the change: memory_extraction, "
-        "reprocess_after_speaker, delete_all, manual",
+        description="Why the memory changed (provenance), one of MemoryCause: "
+        "auto_extraction, memory_replay, transcript_reprocess, speaker_reprocess, "
+        "annotation_apply, obsidian_sync, delete_all. See services/memory/audit.py.",
+    )
+    strategy: Optional[str] = Field(
+        None,
+        description="How the provider updated the vault (UpdateStrategy): "
+        "full re-extraction or speaker_diff. Control-flow detail, not a label.",
     )
     provider: str = Field(
         default="chronicle", description="Memory provider that owns the vault"
@@ -47,7 +54,8 @@ class MemoryAuditEntry(Document):
         description="Whether the vault-first memory agent produced this change",
     )
 
-    # What changed (audit-only: hashes/sizes, not content)
+    # What changed: hashes/sizes for integrity, plus the post-change content so a
+    # before→after diff can be reconstructed from the note's recorded history.
     before_hash: Optional[str] = Field(
         None,
         description="SHA-256 of the note before the change (None if newly created)",
@@ -57,6 +65,11 @@ class MemoryAuditEntry(Document):
     )
     after_bytes: Optional[int] = Field(
         None, description="Size of the note after the change, in bytes"
+    )
+    after_text: Optional[str] = Field(
+        None,
+        description="Full note content after the change (None if deleted). Used to "
+        "reconstruct diffs; the 'before' is the prior recorded change to this note.",
     )
     summary: Optional[str] = Field(
         None,

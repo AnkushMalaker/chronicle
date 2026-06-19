@@ -423,6 +423,16 @@ async def lifespan(app: FastAPI):
         application_logger.warning(f"Syncthing memory-audit listener not started: {e}")
         app.state.syncthing_audit_task = None
 
+    # Backstop reaper: force-cleans stale clients (zombie "connected" devices) and
+    # orphaned audio streams the primary idle-timeout path may have missed.
+    try:
+        from advanced_omi_backend.services.stream_reaper import run_stream_reaper
+
+        app.state.stream_reaper_task = asyncio.create_task(run_stream_reaper())
+    except Exception as e:
+        application_logger.warning(f"Stream reaper not started: {e}")
+        app.state.stream_reaper_task = None
+
     total_startup = time.monotonic() - startup_start
     application_logger.info(
         f"Application ready in {total_startup:.2f}s - using application-level processing architecture."
@@ -455,6 +465,15 @@ async def lifespan(app: FastAPI):
                 application_logger.info("Syncthing memory-audit listener stopped")
         except Exception as e:
             application_logger.error(f"Error stopping memory-audit listener: {e}")
+
+        # Stop the stream reaper
+        try:
+            reaper_task = getattr(app.state, "stream_reaper_task", None)
+            if reaper_task is not None:
+                reaper_task.cancel()
+                application_logger.info("Stream reaper stopped")
+        except Exception as e:
+            application_logger.error(f"Error stopping stream reaper: {e}")
 
         # Shutdown BackgroundTaskManager
         try:
