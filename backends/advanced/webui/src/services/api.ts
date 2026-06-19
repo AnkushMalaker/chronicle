@@ -433,17 +433,22 @@ export const systemApi = {
 
   // External service management (host service-manager agent)
   getExternalServices: () => api.get('/api/admin/services'),
-  externalServiceAction: (name: string, action: 'start' | 'stop' | 'restart', options?: { build?: boolean; force?: boolean }) =>
+  externalServiceAction: (
+    name: string,
+    action: 'start' | 'stop' | 'restart',
+    options?: { build?: boolean; force?: boolean; node?: string | null },
+  ) =>
     api.post(`/api/admin/services/${name}/${action}`, options ?? {}),
   setExternalServiceProvider: (
     name: string,
     provider: string,
     build: boolean = false,
     lane: 'batch' | 'streaming' = 'batch',
+    node?: string | null,
   ) =>
-    api.post(`/api/admin/services/${name}/provider`, { provider, build, lane }),
-  getExternalServiceOperation: (operationId: string) =>
-    api.get(`/api/admin/services/operations/${operationId}`),
+    api.post(`/api/admin/services/${name}/provider`, { provider, build, lane, node }),
+  getExternalServiceOperation: (operationId: string, node?: string | null) =>
+    api.get(`/api/admin/services/operations/${operationId}`, { params: node ? { node } : undefined }),
 
   // Claude remote-control session (control Claude Code from your phone)
   getRemoteControl: () => api.get('/api/admin/remote-control'),

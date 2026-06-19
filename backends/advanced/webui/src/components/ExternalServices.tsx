@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { AlertCircle, CheckCircle, Circle, Play, RefreshCw, RotateCcw, Square, Wrench, XCircle } from 'lucide-react'
+import { AlertCircle, CheckCircle, Circle, Play, RefreshCw, RotateCcw, Server, Square, Wrench, XCircle } from 'lucide-react'
 import { systemApi } from '../services/api'
 import { useExternalServices, ExternalService, ServiceOperation } from '../hooks/useSystem'
 
@@ -54,7 +54,7 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
     if (!activeOp || activeOp.status !== 'running') return
     const timer = setInterval(async () => {
       try {
-        const response = await systemApi.getExternalServiceOperation(activeOp.id)
+        const response = await systemApi.getExternalServiceOperation(activeOp.id, activeOp.node)
         const op: ServiceOperation = response.data
         if (op.status !== 'running') {
           setActiveOp(null)
@@ -83,6 +83,7 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
       const response = await systemApi.externalServiceAction(service.name, action, {
         build: buildImages,
         force: service.name === 'backend',
+        node: service.node,
       })
       setActiveOp(response.data.operation)
     } catch (e: any) {
@@ -100,7 +101,7 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
     setError(null)
     setLastFailedOp(null)
     try {
-      const response = await systemApi.setExternalServiceProvider(service.name, provider, buildImages, lane)
+      const response = await systemApi.setExternalServiceProvider(service.name, provider, buildImages, lane, service.node)
       setActiveOp(response.data.operation)
     } catch (e: any) {
       setError(e.response?.data?.detail ?? e.message)
@@ -128,6 +129,25 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
     // Not configured at all — hide the section
     return null
   }
+
+  // Group enabled services by node. With only the local node this is a single flat
+  // group (no header, unchanged look); in a cluster, each node gets its own header.
+  const enabledServices = (data.services ?? []).filter(s => s.enabled)
+  const byNode = new Map<string, ExternalService[]>()
+  for (const s of enabledServices) {
+    const key = s.node ?? 'local'
+    const list = byNode.get(key) ?? []
+    list.push(s)
+    byNode.set(key, list)
+  }
+  // Local node first, then remote nodes alphabetically.
+  const serviceGroups = Array.from(byNode.entries()).sort(([, a], [, b]) => {
+    const ar = a[0]?.remote ? 1 : 0
+    const br = b[0]?.remote ? 1 : 0
+    if (ar !== br) return ar - br
+    return (a[0]?.node ?? '').localeCompare(b[0]?.node ?? '')
+  })
+  const showNodeHeaders = serviceGroups.length > 1 || enabledServices.some(s => s.remote)
 
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
@@ -186,8 +206,27 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
         </div>
       )}
 
-      <div className="space-y-3">
-        {(data.services ?? []).filter(s => s.enabled).map(service => {
+      <div className="space-y-4">
+        {serviceGroups.map(([nodeKey, groupServices]) => (
+          <div key={nodeKey} className="space-y-2">
+            {showNodeHeaders && (
+              <div className="flex items-center gap-2 px-1">
+                <Server className="h-4 w-4 text-gray-500 dark:text-gray-400" />
+                <span className="font-mono text-sm font-medium text-gray-700 dark:text-gray-300">
+                  {groupServices[0]?.node ?? nodeKey}
+                </span>
+                <span
+                  className={`text-xs px-1.5 py-0.5 rounded ${
+                    groupServices[0]?.remote
+                      ? 'bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300'
+                      : 'bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-300'
+                  }`}
+                >
+                  {groupServices[0]?.remote ? 'remote node' : 'this node'}
+                </span>
+              </div>
+            )}
+            {groupServices.map(service => {
           const stopped = service.health === 'stopped'
           const starting = service.health === 'starting'
           return (
@@ -293,7 +332,9 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
               </div>
             </div>
           )
-        })}
+            })}
+          </div>
+        ))}
       </div>
 
       <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">

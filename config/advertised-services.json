@@ -1,17 +1,7 @@
 [
   {
-    "name": "chronicle-backend",
-    "port": 8000,
-    "label": "Advanced Backend + WebUI"
-  },
-  {
-    "name": "chronicle-speaker",
-    "port": 8085,
-    "label": "Speaker Recognition Service"
-  },
-  {
-    "name": "chronicle-asr",
-    "port": 8767,
-    "label": "Gemma 4 ASR"
+    "name": "chronicle-llm",
+    "port": 8083,
+    "label": "Local LLM via llama.cpp (chat + embeddings)"
   }
 ]

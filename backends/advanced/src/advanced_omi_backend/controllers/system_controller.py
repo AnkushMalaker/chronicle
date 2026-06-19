@@ -2279,9 +2279,15 @@ def _service_manager_config() -> tuple[str, str]:
 
 
 async def _service_manager_request(
-    method: str, path: str, json_body: dict | None = None
+    method: str, path: str, json_body: dict | None = None, *, params: dict | None = None
 ):
-    """Proxy a request to the service manager agent. Raises HTTPException on failure."""
+    """Proxy a request to the LOCAL service manager agent. Raises on failure.
+
+    The backend always talks to its local agent — cross-node merge + control
+    forwarding happens inside the agent (a host process with a real Tailnet
+    identity), because a container can't present a Tailnet source IP for the peer
+    agents' tailnet-trust to accept.
+    """
     url, token = _service_manager_config()
     if not url or not token:
         raise HTTPException(
@@ -2294,6 +2300,7 @@ async def _service_manager_request(
                 method,
                 f"{url}{path}",
                 json=json_body,
+                params=params,
                 headers={"Authorization": f"Bearer {token}"},
             )
     except httpx.HTTPError as e:
@@ -2309,11 +2316,24 @@ async def _service_manager_request(
     return resp.json()
 
 
-async def get_external_services():
-    """List host-managed services with health and provider info.
+async def _local_node_host() -> str | None:
+    """This node's hostname per the local agent — used to tell whether a provider
+    switch targets the local pipeline (so we repoint hub config.yml) or a remote node.
+    """
+    try:
+        node = await _service_manager_request("GET", "/node")
+    except HTTPException:
+        return None
+    return node.get("host")
 
-    Returns available=False (instead of an error) when the agent is not
-    configured or unreachable, so the WebUI can hide/disable the section.
+
+async def get_external_services():
+    """List host-managed services across the cluster with health and provider info.
+
+    The local agent merges this node's services with peer nodes' (each tagged with a
+    ``node`` host + ``remote`` flag) so the WebUI can group and route control calls.
+    Returns available=False (instead of an error) when the local agent is not
+    configured or unreachable.
     """
     url, token = _service_manager_config()
     if not url or not token:
@@ -2328,8 +2348,13 @@ async def get_external_services():
 
 
 async def external_service_action(name: str, action: str, body: dict):
-    """Start/stop/restart a host-managed service via the agent."""
-    return await _service_manager_request("POST", f"/services/{name}/{action}", body)
+    """Start/stop/restart a host-managed service. ``body["node"]`` selects the owning
+    node; the local agent forwards to that node when it isn't the local one."""
+    result = await _service_manager_request("POST", f"/services/{name}/{action}", body)
+    # Tag the operation with its node so the WebUI polls the right agent.
+    if isinstance(result.get("operation"), dict):
+        result["operation"]["node"] = body.get("node")
+    return result
 
 
 # ASR_PROVIDER key (extras/asr-services/.env, drives which container runs) →
@@ -2367,10 +2392,19 @@ async def set_external_service_provider(name: str, body: dict):
     and hot-reloads the registry (+ signals workers), so the pipeline actually
     uses the newly selected provider. The batch lane drives defaults.stt; the
     streaming lane (body["lane"] == "streaming") drives defaults.stt_stream.
-    """
-    result = await _service_manager_request("POST", f"/services/{name}/provider", body)
 
-    if name == "asr-services":
+    ``body["node"]`` selects the owning node (the local agent forwards to a remote
+    node when set). For a *remote* node we skip the hub-side config.yml/registry
+    repoint (that's a local-pipeline concern — the hub operator points defaults at the
+    remote provider separately).
+    """
+    node = body.get("node")
+    result = await _service_manager_request("POST", f"/services/{name}/provider", body)
+    if isinstance(result.get("operation"), dict):
+        result["operation"]["node"] = node
+
+    is_local = not node or node == await _local_node_host()
+    if name == "asr-services" and is_local:
         streaming = body.get("lane") == "streaming"
         default_key = "stt_stream" if streaming else "stt"
         model_map = (
@@ -2407,9 +2441,16 @@ async def set_external_service_provider(name: str, body: dict):
     return result
 
 
-async def get_external_service_operation(operation_id: str):
-    """Poll a long-running service operation on the agent."""
-    return await _service_manager_request("GET", f"/operations/{operation_id}")
+async def get_external_service_operation(operation_id: str, node: str | None = None):
+    """Poll a long-running service operation. ``node`` is forwarded to the local agent,
+    which routes the poll to the remote node that owns the operation."""
+    params = {"node": node} if node else None
+    result = await _service_manager_request(
+        "GET", f"/operations/{operation_id}", params=params
+    )
+    if isinstance(result, dict):
+        result["node"] = node
+    return result
 
 
 async def get_remote_control_status():
