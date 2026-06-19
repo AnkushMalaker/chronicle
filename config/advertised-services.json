@@ -1,7 +1,0 @@
-[
-  {
-    "name": "chronicle-llm",
-    "port": 8083,
-    "label": "Local LLM via llama.cpp (chat + embeddings)"
-  }
-]
