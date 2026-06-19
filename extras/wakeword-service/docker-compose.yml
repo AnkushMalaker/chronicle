@@ -15,9 +15,11 @@ services:
       # Order = arming priority (lower-FP phrase first). The wake-word NAME is
       # decoupled from the model FILE so a retrained model is swapped without
       # renaming its sample-data dir or plugin condition.
-      #   hey_hermes -> hey_hermes_c.onnx (FP-hardened conformer, verifier on top)
-      #   hermes     -> hermes.onnx       (single word; FP-prone, higher op-point)
-      - WAKEWORD_MODELS=${WAKEWORD_MODELS:-hey_hermes:hey_hermes_f.onnx,hermes:hermes_b.onnx}
+      #   hey_hermes -> hey_hermes_f.onnx           (FP-hardened conformer, verifier on top)
+      #   hermes     -> hermes_hubert_convattn.pt   (HuBERT+conv-attn backend, runs on GPU)
+      # The .pt model routes to the HuBERT backend (detector.py); the image carries
+      # CUDA torch + cached HuBERT-base, and the GPU reservation below is required.
+      - WAKEWORD_MODELS=${WAKEWORD_MODELS:-hey_hermes:hey_hermes_f.onnx,hermes:hermes_hubert_convattn.pt}
       - SMART_TURN_MODEL_PATH=/app/models/smart-turn-v3.2-cpu.onnx
       - SILERO_VAD_MODEL_PATH=/app/models/silero_vad.onnx
       - WAKEWORD_THRESHOLD=${WAKEWORD_THRESHOLD:-0.9}
@@ -33,6 +35,9 @@ services:
       # its second-stage verifier landed (models/hermes_verifier.npz rejects ~97%
       # of its raw firings, taking it from ~14 FP/hr to <1/hr). Re-add a word here
       # to farm it silently. Empty = all configured words dispatch.
+      # This is the INITIAL default only: the Wake-Word Lab can toggle collect-only
+      # per word at runtime, persisting the choice to data/collect_only.json (in the
+      # mounted ./data volume), which then takes precedence over this on restart.
       - WAKEWORD_COLLECT_ONLY=${WAKEWORD_COLLECT_ONLY:-}
       - WAKEWORD_SCORE_LOG=${WAKEWORD_SCORE_LOG:-0}
       - WAKEWORD_DEBOUNCE_SECS=${WAKEWORD_DEBOUNCE_SECS:-3.0}
@@ -58,6 +63,19 @@ services:
       - ./models:/app/models
       - ./data:/app/data
     restart: unless-stopped
+    # The "hermes" word runs the HuBERT .pt model on GPU. docker compose v2 honors
+    # this reservation for `docker compose up` (no swarm needed).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            # count: all (not "1"): podman-compose maps count:N to the CDI device
+            # nvidia.com/gpu=<index>, but WSL's nvidia-ctk only generates the
+            # "nvidia.com/gpu=all" device (no per-index entries), so count:1 is
+            # unresolvable there. "all" resolves on both docker and podman/WSL.
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8770/health"]
       interval: 30s

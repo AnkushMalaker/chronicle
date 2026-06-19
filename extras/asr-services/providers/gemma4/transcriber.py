@@ -14,6 +14,7 @@ change quality. Every Gemma 4 size ships a matching ``*-it-assistant`` drafter
 (``gemma-4-E2B-it-assistant`` is 78M params).
 """
 
+import base64
 import logging
 import os
 import re
@@ -21,7 +22,12 @@ import tempfile
 import wave
 
 import torch
-from common.audio_utils import STANDARD_SAMPLE_RATE, is_silent, load_audio_file
+from common.audio_utils import (
+    STANDARD_SAMPLE_RATE,
+    is_silent,
+    load_audio_bytes,
+    load_audio_file,
+)
 from common.batching import split_audio_file, stitch_transcription_results
 from common.response_models import Segment, Speaker, TranscriptionResult
 from transformers import (
@@ -109,6 +115,27 @@ _JUDGE_INSTRUCTIONS = {
         "- Key facts (numbers, names) are wrong"
     ),
 }
+
+
+def _normalize_chat_content(content: list) -> list:
+    """Decode chat content audio parts into the array form the Gemma processor expects.
+
+    Only OpenAI-style ``{"type":"input_audio","input_audio":{"data":<b64>,"format":"wav"}}``
+    needs work (no file to hand the processor): decode the base64 ONCE to a numpy array via
+    ``load_audio_bytes`` (no temp file). Everything else — text, already-decoded ndarray audio,
+    and local path refs ``{"type":"audio","audio":"<path>"}`` — passes through untouched; the
+    processor loads paths natively (its own loader), which keeps path-ref results identical to
+    the /transcribe path and avoids any decode at all.
+    """
+    out = []
+    for part in content:
+        if part.get("type") == "input_audio":
+            audio_bytes = base64.b64decode(part["input_audio"]["data"])
+            array, _ = load_audio_bytes(audio_bytes)
+            out.append({"type": "audio", "audio": array})
+        else:
+            out.append(part)
+    return out
 
 
 def _parse_diarized_text(
@@ -287,7 +314,18 @@ class Gemma4Transcriber:
 
         prompt = prompt_override or self.prompt
         if context_info:
-            prompt += f"\n* Context/keywords: {context_info}"
+            # Gemma 4 is an LLM, so naively appending the context made it transcribe
+            # the context words themselves (e.g. injected wake words leaked into the
+            # output). Frame the context as reference-only and forbid echoing it.
+            # The backend already withholds the wake-word boost list from
+            # context_prompt providers; this is defence in depth.
+            prompt += (
+                "\n\nReference context (background only — names, jargon, and "
+                "spellings that may occur in the audio). Use it solely to "
+                "disambiguate what is actually spoken. Never transcribe, repeat, or "
+                "append this context; if none of it is spoken, ignore it entirely:\n"
+                f"{context_info}"
+            )
 
         logger.info(f"Using prompt: {prompt[:100]}...")
 
@@ -359,7 +397,41 @@ class Gemma4Transcriber:
                 audio_file_path, context_info, prompt_override
             )
 
-        # Batch mode: split into overlapping chunks
+        # Batch mode: drain the shared progress generator and return its final
+        # result. The generator is also exposed (via the service layer) for
+        # NDJSON progress streaming on long audio.
+        result: TranscriptionResult | None = None
+        for event in self._transcribe_batched_with_progress(
+            audio_file_path,
+            context_info=context_info,
+            prompt_override=prompt_override,
+        ):
+            if event["type"] == "result":
+                result = event["result"]
+        assert result is not None, "batched transcription yielded no result event"
+        return result
+
+    def _transcribe_batched_with_progress(
+        self,
+        audio_file_path: str,
+        context_info: str | None = None,
+        prompt_override: str | None = None,
+    ):
+        """Transcribe long audio in overlapping windows, reporting progress.
+
+        Splits the audio into windows, transcribes each, and stitches the
+        results. A progress event is yielded after every window so the HTTP
+        client keeps receiving bytes during a multi-minute transcription
+        (preventing read timeouts on long audio); the final result is yielded
+        last as a ``TranscriptionResult`` object.
+
+        Yields:
+            {"type": "progress", "current": i, "total": n} after each window
+            {"type": "result", "result": TranscriptionResult} as the final item
+        """
+        with wave.open(audio_file_path, "rb") as wf:
+            duration = wf.getnframes() / wf.getframerate()
+
         logger.info(
             f"Audio is {duration:.1f}s (>{self.batch_threshold}s), "
             f"batching with {self.batch_duration}s windows, {self.batch_overlap}s overlap"
@@ -383,7 +455,12 @@ class Gemma4Transcriber:
             except OSError:
                 pass
 
-        return stitch_transcription_results(batch_results, self.batch_overlap)
+            yield {"type": "progress", "current": i + 1, "total": len(windows)}
+
+        yield {
+            "type": "result",
+            "result": stitch_transcription_results(batch_results, self.batch_overlap),
+        }
 
     def generate_chat(
         self,
@@ -410,19 +487,17 @@ class Gemma4Transcriber:
 
         effective_max_tokens = max_tokens or 2000
 
-        # Normalize plain-string content to structured format for multimodal processor
+        # Normalize content to the structured form the multimodal processor expects:
+        # plain strings -> a single text part; lists may carry audio parts (base64
+        # input_audio or path refs) which _normalize_chat_content decodes to arrays.
         normalized = []
         for msg in messages:
             content = msg.get("content", "")
             if isinstance(content, str):
-                normalized.append(
-                    {
-                        "role": msg["role"],
-                        "content": [{"type": "text", "text": content}],
-                    }
-                )
+                content = [{"type": "text", "text": content}]
             else:
-                normalized.append(msg)
+                content = _normalize_chat_content(content)
+            normalized.append({"role": msg["role"], "content": content})
 
         inputs = self.processor.apply_chat_template(
             normalized,

@@ -8,9 +8,12 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from config_manager import ConfigManager
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
+
+import discovery
+import services
+from config_manager import ConfigManager
 
 # Import shared setup utilities
 from setup_utils import (
@@ -497,7 +500,6 @@ def run_service_setup(
                     "[blue][INFO][/blue] Using AMD Strix Halo profile for ASR services"
                 )
             elif cuda_version and cuda_version in [
-                "cu121",
                 "cu126",
                 "cu128",
                 "strixhalo",
@@ -1355,6 +1357,213 @@ def select_memory_provider(config_yml: dict = None) -> str:
             )
 
 
+def maybe_install_agent_services():
+    """Offer to install the native node agent as a systemd user service.
+
+    The node agent (:8775 — WebUI control + Tailnet advertising) runs natively on
+    the host, not in Docker, so it doesn't come back after a reboot the way the
+    containers do. Installing it as a systemd *user* service (with linger) fixes that.
+    """
+    console.print("\n🔁 [bold cyan]Auto-start on boot (Optional)[/bold cyan]")
+    console.print(
+        "The node agent (:8775 — WebUI control + Tailnet service advertising) runs"
+    )
+    console.print(
+        "natively on the host, so it doesn't restart on reboot like the containers do."
+    )
+
+    if not services._systemd_user_available():
+        services._print_systemd_unavailable_help()
+        return
+
+    try:
+        install = Confirm.ask(
+            "Install it as a systemd user service so it auto-starts on boot?",
+            default=True,
+        )
+    except EOFError:
+        console.print("Using default: Yes")
+        install = True
+
+    if install:
+        services.install_systemd_agents()
+
+
+def maybe_enable_remote_control():
+    """Offer to run a Claude remote-control session so you can start Claude Code
+    sessions on this machine from the Claude mobile app.
+
+    Off by default: this launches `claude remote-control` (in tmux) and, if you
+    accept, installs it as a systemd user service so it survives reboots. Requires
+    the claude CLI (logged in) and tmux on the host.
+    """
+    console.print("\n📱 [bold cyan]Claude Code from your phone (Optional)[/bold cyan]")
+    console.print(
+        "Run a `claude remote-control` server on this host so you can spawn new"
+    )
+    console.print(
+        "Claude Code sessions from the Claude mobile app (Code tab). It runs in tmux"
+    )
+    console.print(
+        "and can auto-start on boot. Toggle it any time from the WebUI System page."
+    )
+
+    if shutil.which("claude") is None:
+        console.print(
+            "[dim]claude CLI not found — skipping. Install Claude Code and log in, "
+            "then run: services.py remote-control install[/dim]"
+        )
+        return
+    if shutil.which("tmux") is None:
+        console.print("[dim]tmux not found — skipping (install tmux first).[/dim]")
+        return
+
+    try:
+        enable = Confirm.ask(
+            "Enable Claude remote-control (start new sessions from your phone)?",
+            default=False,
+        )
+    except EOFError:
+        console.print("Using default: No")
+        enable = False
+
+    if not enable:
+        return
+
+    if services._systemd_user_available():
+        services.install_remote_control()
+    else:
+        # No systemd user instance (e.g. WSL without systemd=true) — start it now
+        # in tmux; it won't survive a reboot.
+        services._print_systemd_unavailable_help()
+        services.start_remote_control()
+
+
+# Services that make sense to run on a service-only node joining a cluster
+# (the compute-heavy / GPU ones the backend reaches over the Tailnet).
+JOINABLE_SERVICES = {
+    "asr-services": "Offline speech-to-text (ASR) — GPU",
+    "speaker-recognition": "Speaker identification — GPU",
+    "tts": "Text-to-speech — GPU",
+    "llm-services": "Local LLM via llama.cpp — GPU",
+    "wakeword-service": "Acoustic wake-word detection",
+}
+
+
+def select_setup_type():
+    """Ask whether this machine is the main hub or is joining an existing cluster.
+
+    Returns ``"join"`` for a service-only node that contributes a service to an
+    existing backend, else ``"main"`` (the normal full single-machine / hub setup).
+    Defaults to ``"main"`` so re-running the wizard on the hub is unchanged.
+    """
+    console.print("\n🏗️  [bold cyan]Setup type[/bold cyan]")
+    console.print(
+        "  1) Main machine — run the Chronicle backend here (single machine or cluster hub)"
+    )
+    console.print(
+        "  2) Join a cluster — this machine only runs a service (e.g. GPU ASR) and"
+    )
+    console.print(
+        "     advertises it to an existing backend on your Tailnet (no backend here)"
+    )
+    console.print()
+    choice = Prompt.ask("Enter choice", default="1")
+    return "join" if choice.strip() == "2" else "main"
+
+
+def join_cluster():
+    """Configure THIS machine as a service-only node joining an existing cluster.
+
+    Discovers the hub (backend) on the Tailnet, lets you pick which service(s) this
+    box provides, runs their init wizards, starts them, and runs the node agent so
+    they advertise on the Tailnet — the hub discovers and uses them automatically.
+    This box does NOT run the backend.
+    """
+    console.print("\n🔗 [bold cyan]Join an existing Chronicle cluster[/bold cyan]")
+    console.print(
+        "This machine will run one or more services (e.g. GPU ASR) and advertise them on\n"
+        "your Tailnet. Your main Chronicle backend then discovers and uses them.\n"
+    )
+
+    # 1. Discover the hub + what's already advertised in the cluster.
+    console.print("🔍 Looking for your Chronicle backend on the Tailnet…")
+    backend_url = discovery.discover_service(discovery.CHRONICLE_BACKEND)
+    claimed = {s.get("name") for s in discovery.list_all_services()}
+    if backend_url:
+        console.print(f"[green]✅[/green] Found backend at [cyan]{backend_url}[/cyan]")
+    else:
+        console.print(
+            "[yellow]⚠️  No backend discovered on the Tailnet.[/yellow] Make sure your main\n"
+            "   machine is running with Tailscale and this box is on the same Tailnet."
+        )
+        if not Confirm.ask("Continue anyway?", default=True):
+            return
+    if claimed:
+        console.print("\n[dim]Already advertised on the Tailnet:[/dim]")
+        for name in sorted(n for n in claimed if n):
+            console.print(f"   [dim]• {name}[/dim]")
+
+    # 2. Pick the service(s) this node will provide.
+    disc_names = services._DISCOVERY_NAMES  # lifecycle name → chronicle-* name
+    console.print("\n📦 [bold]Which service(s) will THIS machine provide?[/bold]")
+    keys = list(JOINABLE_SERVICES)
+    for i, svc in enumerate(keys, 1):
+        taken = disc_names.get(svc) in claimed
+        tag = (
+            "  [yellow](already in cluster — a 2nd one is usually unnecessary)[/yellow]"
+            if taken
+            else ""
+        )
+        console.print(f"  {i}) {svc} — {JOINABLE_SERVICES[svc]}{tag}")
+    raw = Prompt.ask("Enter number(s), comma-separated", default="1")
+    chosen: list[str] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if part.isdigit() and 1 <= int(part) <= len(keys):
+            svc = keys[int(part) - 1]
+            if svc not in chosen:
+                chosen.append(svc)
+    if not chosen:
+        console.print("[red]No valid services selected. Aborting.[/red]")
+        return
+    console.print(f"[green]✅[/green] This node will provide: {', '.join(chosen)}")
+
+    # 3. Hardware profile (e.g. Strix Halo) for GPU services.
+    hardware_profile = select_hardware_profile(chosen, None, None)
+
+    # 4. Enable ONLY these services in config.yml — a join node runs no backend.
+    persist_enabled_services(chosen)
+
+    # 5. Configure each chosen service (runs its init.py interactively).
+    for svc in chosen:
+        run_service_setup(svc, chosen, hardware_profile=hardware_profile)
+
+    # 6. Start the service(s) + the node agent (which advertises on the Tailnet).
+    #    build=True because images won't exist yet on a fresh node.
+    console.print("\n🚀 Starting services + node agent…")
+    services.start_services(chosen, build=True)
+
+    # 7. Offer boot persistence for the node agent (systemd user service).
+    maybe_install_agent_services()
+
+    # 8. Next steps + the one wiring gotcha.
+    console.print("\n🎉 [bold green]This node has joined the cluster![/bold green]")
+    console.print(
+        "   • It's advertising on your Tailnet — it'll appear on the backend's Network page."
+    )
+    console.print(
+        "   • [yellow]Wiring note:[/yellow] if your backend pins the service URL to "
+        "host.docker.internal/localhost"
+    )
+    console.print(
+        "     (e.g. PARAKEET_ASR_URL), clear it or point it at this box's Tailscale name so the"
+    )
+    console.print(
+        "     backend uses THIS node; otherwise minidisc discovery wires it automatically."
+    )
+
+
 def main():
     """Main orchestration logic"""
     console.print("🎉 [bold green]Welcome to Chronicle![/bold green]\n")
@@ -1378,6 +1587,12 @@ def main():
 
     # Read existing config.yml once — used as defaults for ALL wizard questions below
     config_yml = config_mgr.get_full_config()
+
+    # Fork: a service-only node joining an existing cluster takes a separate, much
+    # shorter path (no backend / LLM / memory setup here) and returns.
+    if select_setup_type() == "join":
+        join_cluster()
+        return
 
     # Ask about the real-time STREAMING provider FIRST.
     streaming_provider = select_streaming_provider(config_yml)
@@ -1698,6 +1913,14 @@ def main():
     # This ensures plugins can add their secrets to the existing .env file
     # without the backend init overwriting them
     setup_plugins()
+
+    # Optional: install the native host agents (service manager + discovery) as
+    # systemd user services so they auto-start on boot like the containers do.
+    if "advanced" in selected_services:
+        maybe_install_agent_services()
+        # Optional (off by default): a Claude remote-control session so you can
+        # start Claude Code sessions on this host from the Claude mobile app.
+        maybe_enable_remote_control()
 
     # Final Summary
     console.print(f"\n🎊 [bold green]Setup Complete![/bold green]")

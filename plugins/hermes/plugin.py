@@ -20,7 +20,6 @@ import time
 from typing import Any, Dict, List, Optional
 
 import httpx
-
 from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
 
 logger = logging.getLogger(__name__)
@@ -67,7 +66,11 @@ class HermesPlugin(BasePlugin):
                 - api_url: Hermes server base URL (scheme://host:port, e.g. a
                   Tailscale MagicDNS name or LAN IP). ``/v1`` is optional.
                 - model: Model name advertised by the Hermes server (default "hermes")
-                - timeout: Request timeout in seconds (default 120)
+                - timeout: Read/response timeout in seconds (default 120) — the
+                  agent may take a while to think, so this stays generous.
+                - connect_timeout: Connection-establish timeout in seconds
+                  (default 5) — kept short so an unreachable host fails fast
+                  instead of hanging for the whole response budget.
                 - system_prompt: System prompt sent with each request
                 - api_key: Optional bearer token (from HERMES_API_KEY in .env)
         """
@@ -76,7 +79,12 @@ class HermesPlugin(BasePlugin):
             config.get("api_url", "http://localhost:8642")
         )
         self.model = config.get("model", "hermes")
+        # Split the timeout: a short connect (fail fast when the agent host is
+        # unreachable) but a generous read (the agent is allowed to take its time
+        # to respond). A single flat timeout would make an unreachable host hang
+        # for the full response budget on the connect attempt.
         self.timeout = int(config.get("timeout", 120))
+        self.connect_timeout = float(config.get("connect_timeout", 5))
         # Hermes has its own core system prompt; anything here is layered on top.
         # Empty by default so Hermes's own identity is used unchanged.
         self.system_prompt = (config.get("system_prompt") or "").strip()
@@ -147,7 +155,11 @@ class HermesPlugin(BasePlugin):
         logger.info(
             f"Initializing Hermes plugin (URL: {self.api_url}, model: {self.model})"
         )
-        self._client = httpx.AsyncClient(timeout=self.timeout)
+        # Short connect, generous read/write/pool: a dead host fails in
+        # ~connect_timeout s instead of hanging for the full response budget.
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(self.timeout, connect=self.connect_timeout)
+        )
 
         # Best-effort connectivity check against the unauthenticated /health endpoint.
         try:
@@ -278,8 +290,28 @@ class HermesPlugin(BasePlugin):
                 message="Hermes returned an unexpected response.",
                 should_continue=True,
             )
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            # Host unreachable / refused — the short connect timeout fires here.
+            logger.error(f"Could not connect to Hermes ({self.api_url}): {e!r}")
+            return PluginResult(
+                success=False,
+                message="Sorry, I couldn't reach Hermes.",
+                should_continue=True,
+            )
+        except (httpx.ReadTimeout, httpx.PoolTimeout, httpx.WriteTimeout) as e:
+            # Connected fine but Hermes never sent a response within the read
+            # budget — a hung/overloaded agent, NOT a connectivity problem.
+            logger.error(
+                f"Hermes connected but did not respond within {self.timeout}s "
+                f"(read timeout): {e!r}"
+            )
+            return PluginResult(
+                success=False,
+                message="Hermes took too long to respond.",
+                should_continue=True,
+            )
         except Exception as e:
-            logger.error(f"Failed to reach Hermes: {e}")
+            logger.error(f"Failed to reach Hermes: {e!r}")
             return PluginResult(
                 success=False,
                 message=f"Couldn't reach Hermes: {e}",
@@ -374,7 +406,9 @@ class HermesPlugin(BasePlugin):
 
         try:
             start = time.time()
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(10, connect=5)
+            ) as client:
                 resp = await client.get(f"{api_url}/v1/models", headers=headers)
             latency_ms = int((time.time() - start) * 1000)
 

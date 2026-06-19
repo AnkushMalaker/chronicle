@@ -310,6 +310,25 @@ class ConfigManager:
         if "provider" in updates and self.env_path:
             self._update_env_file("MEMORY_PROVIDER", updates["provider"])
 
+    def update_backend_config(self, updates: Dict[str, Any]):
+        """
+        Update the ``backend`` section of config.yml (deep merge).
+
+        Used for backend-scoped settings such as ASR context
+        (``backend.asr.context.<model_name>``), diarization, etc.
+
+        Args:
+            updates: Dict of updates to merge into the backend config
+        """
+        config = self._load_config_yml()
+
+        if "backend" not in config:
+            config["backend"] = {}
+
+        self._deep_merge(config["backend"], updates)
+
+        self._save_config_yml(config)
+
     def _deep_merge(self, base: dict, updates: dict) -> None:
         """
         Recursively merge updates into base dictionary.

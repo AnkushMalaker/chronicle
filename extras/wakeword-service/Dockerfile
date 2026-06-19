@@ -41,7 +41,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Service code + vendored ONNX models (hermes.onnx, smart-turn, silero, feature).
 # models/ also carries the second-stage verifier weights (hey_hermes_verifier.npz).
-COPY app.py consumer.py detector.py samples.py verifier.py ./
+COPY app.py consumer.py detector.py samples.py verifier.py hubert_detector.py ./
 COPY models ./models
 COPY tones ./tones
 
@@ -53,6 +53,17 @@ RUN NW_MODELS="/usr/local/lib/python3.12/site-packages/nanowakeword/interpreter/
         cp /app/models/melspectrogram.onnx "$NW_MODELS/mel_spectrogram/"; fi && \
     if [ -f /app/models/embedding_model.onnx ]; then \
         cp /app/models/embedding_model.onnx "$NW_MODELS/embedding/"; fi
+
+# HuBERT backend (.pt wake models, e.g. hermes_hubert_convattn.pt): CUDA torch +
+# torchaudio (the cu121 wheels bundle the CUDA runtime libs; the host only needs the
+# NVIDIA driver + the nvidia container runtime). The HuBERT-base weights are then
+# pre-cached into the image so no model download happens at runtime. Routing in
+# detector.py sends ``.pt`` models here and ``.onnx`` to NanoInterpreter, so an
+# ONNX-only deploy still works (it just carries torch unused).
+RUN pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cu121 \
+        "torch==2.5.1" "torchaudio==2.5.1"
+RUN python -c "import torchaudio; torchaudio.pipelines.HUBERT_BASE.get_model(); print('HuBERT-base cached')"
 
 ENV WAKEWORD_MODEL_PATH=/app/models/hey_hermes.onnx \
     SMART_TURN_MODEL_PATH=/app/models/smart-turn-v3.2-cpu.onnx \

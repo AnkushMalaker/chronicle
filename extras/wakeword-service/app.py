@@ -23,6 +23,7 @@ Runs a small FastAPI app for health/status + the data-collection flywheel API.
 """
 
 import asyncio
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -133,6 +134,72 @@ THRESHOLDS = _parse_kv(WAKEWORD_THRESHOLDS, float)
 PATIENCES = _parse_kv(WAKEWORD_PATIENCES, int)
 COLLECT_ONLY = [w.strip() for w in WAKEWORD_COLLECT_ONLY.split(",") if w.strip()]
 
+# Runtime collect-only overrides set from the Wake-Word Lab UI are persisted here
+# (in the mounted ./data volume, so they survive restarts and work even when the
+# backend runs on a different machine and can't reach the compose .env). Once this
+# file exists it is authoritative over WAKEWORD_COLLECT_ONLY, which is then just the
+# initial default for a fresh deployment.
+COLLECT_ONLY_STATE_PATH = os.path.join(
+    os.path.dirname(DATA_DIR.rstrip("/")), "collect_only.json"
+)
+
+
+def _initial_collect_only() -> list[str]:
+    """Collect-only words at startup: persisted UI override if present, else the
+    env default. Filtered to currently-configured words (a word dropped from
+    WAKEWORD_MODELS is silently ignored)."""
+    words = COLLECT_ONLY
+    if os.path.exists(COLLECT_ONLY_STATE_PATH):
+        try:
+            with open(COLLECT_ONLY_STATE_PATH) as fh:
+                data = json.load(fh)
+            if isinstance(data, list):
+                words = [str(w) for w in data]
+        except (OSError, ValueError) as e:
+            logger.warning(
+                f"could not read collect-only state {COLLECT_ONLY_STATE_PATH}: {e} "
+                f"— falling back to WAKEWORD_COLLECT_ONLY"
+            )
+    return [w for w in words if w in MODELS]
+
+
+def _save_collect_only(words) -> None:
+    """Persist the current collect-only set so it survives a restart."""
+    with open(COLLECT_ONLY_STATE_PATH, "w") as fh:
+        json.dump(sorted(words), fh)
+
+
+# Runtime verifier on/off overrides from the Lab UI, persisted alongside the
+# collect-only state (same ./data volume, same restart/cross-machine semantics).
+# Stores the set of words whose verifier is toggled OFF; a word absent here keeps
+# its verifier ON (when one is loaded). Authoritative over defaults once written.
+VERIFIER_DISABLED_STATE_PATH = os.path.join(
+    os.path.dirname(DATA_DIR.rstrip("/")), "verifier_disabled.json"
+)
+
+
+def _initial_verifier_disabled() -> list[str]:
+    """Words with their verifier disabled at startup: the persisted UI override if
+    present (filtered to currently-configured words), else none."""
+    if os.path.exists(VERIFIER_DISABLED_STATE_PATH):
+        try:
+            with open(VERIFIER_DISABLED_STATE_PATH) as fh:
+                data = json.load(fh)
+            if isinstance(data, list):
+                return [str(w) for w in data if w in MODELS]
+        except (OSError, ValueError) as e:
+            logger.warning(
+                f"could not read verifier-disabled state "
+                f"{VERIFIER_DISABLED_STATE_PATH}: {e} — defaulting to all enabled"
+            )
+    return []
+
+
+def _save_verifier_disabled(words) -> None:
+    """Persist the current verifier-disabled set so it survives a restart."""
+    with open(VERIFIER_DISABLED_STATE_PATH, "w") as fh:
+        json.dump(sorted(words), fh)
+
 
 def _resolve_verifiers() -> dict[str, str]:
     """Per-word verifier paths: explicit override, else ``<name>_verifier.npz`` if
@@ -155,7 +222,7 @@ VERIFIERS = _resolve_verifiers()
 def _validate_models() -> None:
     """Refuse to start unless every configured wake model file exists on disk."""
     available = (
-        sorted(f for f in os.listdir(MODELS_DIR) if f.endswith(".onnx"))
+        sorted(f for f in os.listdir(MODELS_DIR) if f.endswith((".onnx", ".pt")))
         if os.path.isdir(MODELS_DIR)
         else []
     )
@@ -202,8 +269,10 @@ async def lifespan(app: FastAPI):
         min_command_speech_secs=MIN_COMMAND_SPEECH_SECS,
         verifiers=VERIFIERS,
         verifier_threshold=VERIFIER_THRESHOLD,
-        collect_only=COLLECT_ONLY,
+        collect_only=_initial_collect_only(),
+        verifiers_disabled=_initial_verifier_disabled(),
     )
+    app.state.detector = detector
     store = SampleStore(DATA_DIR, WAKEWORDS, legacy_wakeword=LEGACY_WAKEWORD)
     app.state.store = store
     consumer = WakeWordConsumer(
@@ -230,19 +299,41 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Hermes Wake-Word Service", lifespan=lifespan)
 
 
+def _collect_only_now() -> set:
+    """The live collect-only set (the detector's, once started) so summaries
+    reflect runtime UI toggles, not just the boot-time env/state."""
+    detector = getattr(app.state, "detector", None)
+    return set(detector.collect_only) if detector is not None else set(COLLECT_ONLY)
+
+
+def _verifier_disabled_now() -> set:
+    """The live set of words whose verifier is toggled OFF (the detector's, once
+    started), so summaries reflect runtime UI toggles."""
+    detector = getattr(app.state, "detector", None)
+    return set(detector.verifiers_disabled) if detector is not None else set()
+
+
 def _wakeword_summaries() -> list[dict]:
     """Per-word config summary for the dashboard."""
-    return [
-        {
-            "name": name,
-            "model": os.path.basename(MODELS[name]),
-            "verifier": name in VERIFIERS and os.path.exists(VERIFIERS[name]),
-            "threshold": THRESHOLDS.get(name, THRESHOLD),
-            "patience": PATIENCES.get(name, PATIENCE),
-            "collect_only": name in COLLECT_ONLY,
-        }
-        for name in WAKEWORDS
-    ]
+    collect_only = _collect_only_now()
+    verifier_disabled = _verifier_disabled_now()
+    out = []
+    for name in WAKEWORDS:
+        has_verifier = name in VERIFIERS and os.path.exists(VERIFIERS[name])
+        out.append(
+            {
+                "name": name,
+                "model": os.path.basename(MODELS[name]),
+                # ``verifier`` = a verifier file is loaded for this word (capability);
+                # ``verifier_enabled`` = it is currently consulted (the UI toggle).
+                "verifier": has_verifier,
+                "verifier_enabled": has_verifier and name not in verifier_disabled,
+                "threshold": THRESHOLDS.get(name, THRESHOLD),
+                "patience": PATIENCES.get(name, PATIENCE),
+                "collect_only": name in collect_only,
+            }
+        )
+    return out
 
 
 @app.get("/health")
@@ -324,12 +415,69 @@ class LabelRequest(BaseModel):
     label: str  # "wake" -> positive, "not_wake" -> negative
 
 
+class CollectOnlyRequest(BaseModel):
+    wakeword: str
+    collect_only: bool  # True -> shadow (farm-only), False -> normal dispatch word
+
+
+class VerifierEnabledRequest(BaseModel):
+    wakeword: str
+    enabled: bool  # True -> consult the second-stage verifier, False -> stage-1 only
+
+
 def _require_wakeword(wakeword: str) -> None:
     if wakeword not in MODELS:
         raise HTTPException(
             status_code=400,
             detail=f"unknown wake word '{wakeword}' (have {WAKEWORDS})",
         )
+
+
+@app.post("/collect_only")
+async def set_collect_only(req: CollectOnlyRequest):
+    """Toggle a wake word between normal dispatch and collect-only (shadow) mode.
+
+    Collect-only words fire live to farm false-positive review data but never
+    dispatch a command / play a tone / block a real wake word. Mutates the running
+    detector's live set (effective on the next frame) and persists the choice so it
+    survives a restart. Returns the refreshed per-word summaries.
+    """
+    _require_wakeword(req.wakeword)
+    detector: HermesDetector = app.state.detector
+    if req.collect_only:
+        detector.collect_only.add(req.wakeword)
+    else:
+        detector.collect_only.discard(req.wakeword)
+    _save_collect_only(detector.collect_only)
+    logger.info(
+        f"collect-only {'ON' if req.collect_only else 'OFF'} for '{req.wakeword}' "
+        f"(now: {sorted(detector.collect_only) or '(none)'})"
+    )
+    return {"wakewords": _wakeword_summaries()}
+
+
+@app.post("/verifier_enabled")
+async def set_verifier_enabled(req: VerifierEnabledRequest):
+    """Toggle a wake word's second-stage verifier on/off at runtime.
+
+    The verifier stays LOADED either way — disabling only skips its check so arms
+    dispatch on the stage-1 acoustic model alone. Useful to A/B the verifier's
+    false-positive suppression, or to fall back to stage-1 if a verifier regresses.
+    Mutates the running detector (effective next frame) and persists the choice.
+    Has no effect for a word with no verifier loaded. Returns refreshed summaries.
+    """
+    _require_wakeword(req.wakeword)
+    detector: HermesDetector = app.state.detector
+    if req.enabled:
+        detector.verifiers_disabled.discard(req.wakeword)
+    else:
+        detector.verifiers_disabled.add(req.wakeword)
+    _save_verifier_disabled(detector.verifiers_disabled)
+    logger.info(
+        f"verifier {'ON' if req.enabled else 'OFF'} for '{req.wakeword}' "
+        f"(disabled now: {sorted(detector.verifiers_disabled) or '(none)'})"
+    )
+    return {"wakewords": _wakeword_summaries()}
 
 
 @app.get("/streams")

@@ -109,8 +109,58 @@ class Gemma4Service(BaseASRService):
         )
         return result
 
+    def supports_batch_progress(self, audio_duration: float) -> bool:
+        """Stream NDJSON progress for audio long enough to be batched.
+
+        Without this, long audio is transcribed on the single-JSON path and the
+        HTTP response is withheld until every window finishes — which exceeds
+        the client's read timeout and fails the request mid-transcription.
+        """
+        if self.transcriber is None:
+            return False
+        return self.transcriber.supports_batch_progress(audio_duration)
+
+    def transcribe_with_progress(
+        self,
+        audio_file_path: str,
+        context_info: Optional[str] = None,
+        prompt: Optional[str] = None,
+        **kwargs,
+    ):
+        """Yield progress counters then the final result for long audio.
+
+        Delegates to the transcriber's batched generator (run synchronously via
+        run_in_executor by the endpoint) and converts the final result object
+        to the NDJSON wire shape.
+        """
+        if kwargs:
+            logger.warning(
+                f"transcribe_with_progress: ignoring unsupported kwargs: {list(kwargs.keys())}"
+            )
+        if self.transcriber is None:
+            raise RuntimeError("Service not initialized")
+        for event in self.transcriber._transcribe_batched_with_progress(
+            audio_file_path,
+            context_info=context_info,
+            prompt_override=prompt,
+        ):
+            if event["type"] == "result":
+                yield {"type": "result", **event["result"].to_dict()}
+            else:
+                yield event
+
     def get_capabilities(self) -> list[str]:
-        return ["timestamps", "diarization", "llm"]
+        # No "diarization": Gemma 4 E2B does NOT diarize. Even with explicit/forceful
+        # "Speaker N:" prompts it collapses multi-speaker audio into one speaker (0/8 correct
+        # on 3-speaker clips, 2/12 on 2-speaker; see
+        # extras/ml-experiments/experiments/gemma4_diarization). Advertising diarization made
+        # transcription_jobs falsely stamp diarization_source="provider".
+        #
+        # "context_prompt": Gemma 4 consumes ASR context as LLM prompt text (not an
+        # acoustic keyword-boost), so the backend feeds it the user-authored
+        # asr_context only and withholds the wake-word boost list, which it would
+        # otherwise echo into the transcript.
+        return ["timestamps", "llm", "context_prompt"]
 
 
 def main():

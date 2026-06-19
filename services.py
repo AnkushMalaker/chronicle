@@ -8,15 +8,20 @@ import argparse
 import json
 import os
 import secrets
+import shlex
+import shutil
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import yaml
 from dotenv import dotenv_values, set_key
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
+
 from setup_utils import ensure_tailscale_cert, read_env_value
 
 console = Console()
@@ -36,6 +41,131 @@ def load_config_yml():
             f"[yellow]⚠️  Warning: Could not load config/config.yml: {e}[/yellow]"
         )
         return None
+
+
+def _engine_config():
+    """Resolve (engine, compose_argv). Precedence: env > config.yml > docker default.
+
+    The compose front-end differs per engine: docker uses the compose plugin
+    (`docker compose`); podman uses `podman-compose`, whose CLI path performs CDI
+    GPU injection (podman 4.x's docker-compat socket API does not).
+    """
+    cfg = load_config_yml() or {}
+    engine = (
+        os.environ.get("CONTAINER_ENGINE") or cfg.get("container_engine") or "docker"
+    )
+    default_compose = "podman-compose" if engine == "podman" else "docker compose"
+    compose_raw = (
+        os.environ.get("COMPOSE_CMD") or cfg.get("compose_cmd") or default_compose
+    )
+    return engine, shlex.split(compose_raw)
+
+
+def container_engine():
+    """Container engine binary: 'docker' (default) or 'podman'."""
+    return _engine_config()[0]
+
+
+def compose_base():
+    """Base argv for compose up/down/build/restart.
+
+    e.g. ['docker', 'compose'] or ['podman-compose']. shlex-split handles both the
+    two-token plugin form and the single-token podman-compose form transparently.
+    """
+    return list(_engine_config()[1])
+
+
+def compose_ps_json(service_path):
+    """List a service's containers as normalized {name, state, status, health} dicts.
+
+    Abstracts over docker vs podman, whose `ps` outputs differ:
+    - docker: `docker compose ps --format json` (one JSON object per line; native
+      fields Name/State/Status/Health).
+    - podman: podman-compose's `ps` is NOT docker-compatible, so query the engine
+      directly, scoped by the compose project working-dir label that podman-compose
+      stamps on every container. Native podman fields are Names[]/State/Status, with
+      health embedded in Status (e.g. "Up 3 seconds (healthy)").
+
+    Raises on a failed command; callers handle the exception.
+    """
+    engine = container_engine()
+    service_path = Path(service_path)
+
+    if engine == "podman":
+        label = (
+            "label=com.docker.compose.project.working_dir=" f"{service_path.resolve()}"
+        )
+        result = subprocess.run(
+            [engine, "ps", "-a", "--filter", label, "--format", "json"],
+            cwd=service_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "podman ps failed")
+        out = result.stdout.strip()
+        if not out:
+            return []
+        raw = (
+            json.loads(out)
+            if out.startswith("[")
+            else [json.loads(line) for line in out.splitlines() if line.strip()]
+        )
+        containers = []
+        for c in raw:
+            names = c.get("Names") or []
+            name = (
+                names[0]
+                if isinstance(names, list) and names
+                else c.get("Name", "unknown")
+            )
+            status = c.get("Status", "unknown")
+            if "(healthy)" in status:
+                health = "healthy"
+            elif "(unhealthy)" in status:
+                health = "unhealthy"
+            elif "starting" in status:
+                health = "starting"
+            else:
+                health = "none"
+            containers.append(
+                {
+                    "name": name,
+                    "state": c.get("State", "unknown"),
+                    "status": status,
+                    "health": health,
+                }
+            )
+        return containers
+
+    # docker
+    result = subprocess.run(
+        compose_base() + ["ps", "--format", "json"],
+        cwd=service_path,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "docker compose ps failed")
+    containers = []
+    for line in result.stdout.strip().split("\n"):
+        if not line:
+            continue
+        try:
+            c = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        containers.append(
+            {
+                "name": c.get("Name", "unknown"),
+                "state": c.get("State", "unknown"),
+                "status": c.get("Status", "unknown"),
+                "health": c.get("Health", "none"),
+            }
+        )
+    return containers
 
 
 SERVICES = {
@@ -106,7 +236,7 @@ SERVICES = {
     "tts": {
         "path": "extras/tts",
         "compose_file": "docker-compose.yml",
-        "description": "Text-to-Speech (TADA / Fish Speech / KittenTTS)",
+        "description": "Text-to-Speech (TADA / Fish Speech / KittenTTS / Kokoro)",
         "ports": ["8770"],
         "health_endpoints": [
             ("tts", "TTS_PORT", "8770", "/health"),
@@ -132,11 +262,11 @@ _ADVERTISED_SERVICES_PATH = (
 
 _ASR_PROVIDER_LABELS = {
     "vibevoice": "VibeVoice ASR",
-    "vibevoice-strixhalo": "VibeVoice ASR",
+    "vibevoice-strixhalo": "VibeVoice ASR (Strix Halo)",
     "faster-whisper": "Faster Whisper ASR",
     "transformers": "Transformers ASR",
     "nemo": "NeMo ASR",
-    "nemo-strixhalo": "NeMo ASR",
+    "nemo-strixhalo": "NeMo ASR (Strix Halo)",
     "parakeet": "Parakeet ASR",
     "qwen3-asr": "Qwen3 ASR",
     "gemma4": "Gemma 4 ASR",
@@ -148,6 +278,7 @@ _TTS_PROVIDER_TO_SERVICE = {
     "tada": "tada-tts",
     "fish_speech": "fish-tts",
     "kittentts": "kittentts-tts",
+    "kokoro": "kokoro-tts",
 }
 
 # Batch ASR provider (ASR_PROVIDER) → docker compose service in extras/asr-services.
@@ -166,13 +297,77 @@ ASR_PROVIDER_TO_SERVICE = {
     "nemotron": "nemotron-stream-asr",
 }
 
-# Optional streaming ASR provider (STREAMING_ASR_PROVIDER) → docker compose service.
-# Lets a low-latency streaming stt_stream run alongside a different batch stt
-# provider (e.g. batch=vibevoice on 8767, streaming=nemotron on 8772).
-STREAMING_ASR_PROVIDER_TO_SERVICE = {
-    "nemotron": "nemotron-stream-asr",
-    "qwen3-asr": "qwen3-asr-bridge",
+# Streaming ASR provider (STREAMING_ASR_PROVIDER) options. Single source of truth
+# for the System-page streaming selector: maps the provider key to its docker
+# compose service (None = cloud provider, no local container), the stt_stream
+# model registry entry the pipeline should use, and a UI label. A streaming
+# stt_stream can run alongside a different batch stt provider (e.g. batch=vibevoice
+# on 8767, streaming=nemotron on 8772) or be a pure cloud service (smallest/deepgram).
+STREAMING_ASR_PROVIDER_OPTIONS = {
+    "nemotron": {
+        "service": "nemotron-stream-asr",
+        "model": "stt-nemotron-stream",
+        "label": "Nemotron 3.5 (local · 8772)",
+    },
+    "smallest": {
+        "service": None,
+        "model": "stt-smallest-stream",
+        "label": "Smallest.ai PULSE (cloud)",
+    },
+    "deepgram": {
+        "service": None,
+        "model": "stt-deepgram-stream",
+        "label": "Deepgram Nova 3 (cloud)",
+    },
+    "qwen3-asr": {
+        "service": "qwen3-asr-bridge",
+        "model": "stt-qwen3-asr-stream",
+        "label": "Qwen3-ASR (local)",
+    },
 }
+
+# Provider key → docker compose service for streaming providers that run a local
+# container (cloud providers are absent). Derived from the options above so the
+# start logic and the UI selector never drift.
+STREAMING_ASR_PROVIDER_TO_SERVICE = {
+    key: opt["service"]
+    for key, opt in STREAMING_ASR_PROVIDER_OPTIONS.items()
+    if opt["service"]
+}
+
+
+def active_streaming_asr_provider() -> str:
+    """Return the provider key whose stt_stream model is the active default.
+
+    Reads ``defaults.stt_stream`` from config.yml (the real pipeline source of
+    truth — cloud providers leave STREAMING_ASR_PROVIDER empty) and reverse-maps
+    it through STREAMING_ASR_PROVIDER_OPTIONS. Empty string if unset/unknown.
+    """
+    try:
+        cfg = yaml.safe_load(
+            (Path(__file__).parent / "config" / "config.yml").read_text()
+        )
+        model = (cfg.get("defaults") or {}).get("stt_stream")
+    except (OSError, yaml.YAMLError):
+        return ""
+    for key, opt in STREAMING_ASR_PROVIDER_OPTIONS.items():
+        if opt["model"] == model:
+            return key
+    return ""
+
+
+def _asr_health_port(env_values: dict, default_port) -> str:
+    """Resolve the port the active ASR provider actually serves health on.
+
+    Most providers bind ASR_PORT (8767). Nemotron is special: when it's the
+    batch provider it serves both batch + streaming from the nemotron-stream-asr
+    container, which binds NEMOTRON_STREAM_PORT (8772) — NOT ASR_PORT. Probing
+    ASR_PORT there leaves the service stuck "starting" forever.
+    """
+    provider = (env_values.get("ASR_PROVIDER") or "").strip("'\"")
+    if provider == "nemotron":
+        return str(env_values.get("NEMOTRON_STREAM_PORT", "8772")).strip("'\"")
+    return str(env_values.get("ASR_PORT", default_port)).strip("'\"")
 
 
 def _get_advertised_services() -> list[tuple[str, int, str]]:
@@ -188,10 +383,11 @@ def _get_advertised_services() -> list[tuple[str, int, str]]:
         _label, port_env, default_port, _path = endpoints[0]
         if port_env:
             env_path = Path(service["path"]) / ".env"
-            if env_path.exists():
-                port = int(dotenv_values(env_path).get(port_env, default_port))
+            env_values = dotenv_values(env_path) if env_path.exists() else {}
+            if svc_name == "asr-services" and port_env == "ASR_PORT":
+                port = int(_asr_health_port(env_values, default_port))
             else:
-                port = int(default_port)
+                port = int(env_values.get(port_env, default_port))
         else:
             port = int(default_port)
 
@@ -209,13 +405,6 @@ def _get_advertised_services() -> list[tuple[str, int, str]]:
 
         triples.append((discovery_name, port, label))
     return triples
-
-
-def _build_advertise_string() -> str:
-    """Build ADVERTISE=name:port,... string from configured services."""
-    return ",".join(
-        f"{name}:{port}" for name, port, _label in _get_advertised_services()
-    )
 
 
 def _write_advertised_services(triples: list[tuple[str, int, str]]) -> None:
@@ -339,7 +528,12 @@ def check_service_health(service_name):
     any_unhealthy = False
 
     for label, port_env, default_port, path in endpoints:
-        port = env_values.get(port_env, default_port) if port_env else default_port
+        if service_name == "asr-services" and port_env == "ASR_PORT":
+            port = _asr_health_port(env_values, default_port)
+        elif port_env:
+            port = env_values.get(port_env, default_port)
+        else:
+            port = default_port
         url = f"http://localhost:{port}{path}"
         try:
             resp = requests.get(url, timeout=2)
@@ -422,7 +616,7 @@ def run_compose_command(service_name, command, build=False, force_recreate=False
     # Step 1: If build is requested, run build separately first (no timeout for CUDA builds)
     if build and command == "up":
         # Build command - need to specify profiles for build too
-        build_cmd = ["docker", "compose"]
+        build_cmd = compose_base()
 
         # Add profiles to build command (needed for profile-specific services)
         if service_name == "backend":
@@ -522,16 +716,20 @@ def run_compose_command(service_name, command, build=False, force_recreate=False
                 if not line:
                     continue
 
+                # escape() the raw build line so brackets in build output
+                # (e.g. "COPY ... [/app/.venv ...]") aren't parsed as rich markup,
+                # which previously raised MarkupError and aborted the build.
+                safe = escape(line)
                 if "error" in line.lower() or "failed" in line.lower():
-                    console.print(f"  [red]{line}[/red]")
+                    console.print(f"  [red]{safe}[/red]")
                 elif "Successfully" in line or "built" in line.lower():
-                    console.print(f"  [green]{line}[/green]")
+                    console.print(f"  [green]{safe}[/green]")
                 elif "Building" in line or "Step" in line:
-                    console.print(f"  [cyan]{line}[/cyan]")
+                    console.print(f"  [cyan]{safe}[/cyan]")
                 elif "warning" in line.lower():
-                    console.print(f"  [yellow]{line}[/yellow]")
+                    console.print(f"  [yellow]{safe}[/yellow]")
                 else:
-                    console.print(f"  [dim]{line}[/dim]")
+                    console.print(f"  [dim]{safe}[/dim]")
 
             process.wait()
 
@@ -550,7 +748,7 @@ def run_compose_command(service_name, command, build=False, force_recreate=False
     if force_recreate:
         up_flags.append("--force-recreate")
 
-    cmd = ["docker", "compose"]
+    cmd = compose_base()
 
     # Add profiles for backend service (down/status/restart cover ALL profiles so no
     # profile-gated container is left orphaned; up only enables wanted profiles).
@@ -726,7 +924,7 @@ def run_compose_command(service_name, command, build=False, force_recreate=False
             if result.stderr:
                 console.print("[red]Error output:[/red]")
                 for line in result.stderr.splitlines():
-                    console.print(f"  [dim]{line}[/dim]")
+                    console.print(f"  [dim]{escape(line)}[/dim]")
             return False
 
     except subprocess.TimeoutExpired:
@@ -743,8 +941,9 @@ def ensure_docker_network():
     """Ensure chronicle-network exists"""
     try:
         # Check if network already exists
+        engine = container_engine()
         result = subprocess.run(
-            ["docker", "network", "inspect", "chronicle-network"],
+            [engine, "network", "inspect", "chronicle-network"],
             capture_output=True,
             check=False,
         )
@@ -753,7 +952,7 @@ def ensure_docker_network():
             # Network doesn't exist, create it
             console.print("[blue]📡 Creating chronicle-network...[/blue]")
             subprocess.run(
-                ["docker", "network", "create", "chronicle-network"],
+                [engine, "network", "create", "chronicle-network"],
                 check=True,
                 capture_output=True,
             )
@@ -769,94 +968,6 @@ def ensure_docker_network():
         return False
 
 
-# --- Discovery agent (native process, not Docker) ---
-
-_DISCOVERY_PID = Path(__file__).parent / "edge" / ".discovery-agent.pid"
-_DISCOVERY_LOG = Path(__file__).parent / "edge" / "discovery-agent.log"
-
-
-def _discovery_agent_running() -> bool:
-    """Check if discovery agent process is alive."""
-    if not _DISCOVERY_PID.exists():
-        return False
-    try:
-        pid = int(_DISCOVERY_PID.read_text().strip())
-        os.kill(pid, 0)
-        return True
-    except (ValueError, OSError):
-        _DISCOVERY_PID.unlink(missing_ok=True)
-        return False
-
-
-def _start_discovery_agent():
-    """Start discovery agent as a native background process.
-
-    Runs outside Docker so it can bind to the Tailscale interface directly
-    (Docker Desktop VMs cannot see tailscale0).
-    """
-    if _discovery_agent_running():
-        console.print("[dim]📡 Discovery agent already running[/dim]")
-        return True
-
-    agent_script = Path(__file__).parent / "edge" / "agent.py"
-    if not agent_script.exists():
-        console.print("[yellow]⚠️  edge/agent.py not found, skipping discovery[/yellow]")
-        return False
-
-    pairs = _get_advertised_services()
-    if not pairs:
-        console.print("[dim]📡 No services to advertise, skipping discovery[/dim]")
-        return False
-
-    _write_advertised_services(pairs)
-    advertise = ",".join(f"{name}:{port}" for name, port, _label in pairs)
-
-    env = dict(os.environ)
-    env["ADVERTISE"] = advertise
-
-    log_file = open(_DISCOVERY_LOG, "a")
-    try:
-        proc = subprocess.Popen(
-            ["uv", "run", "--with", "minidisc-python", "python", str(agent_script)],
-            env=env,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-    except Exception as e:
-        console.print(f"[red]❌ Failed to start discovery agent: {e}[/red]")
-        log_file.close()
-        return False
-
-    log_file.close()
-    _DISCOVERY_PID.write_text(str(proc.pid))
-    console.print(f"[green]✅ Discovery agent started (PID {proc.pid})[/green]")
-    return True
-
-
-def _stop_discovery_agent():
-    """Stop the discovery agent process."""
-    if not _DISCOVERY_PID.exists():
-        _remove_advertised_services()
-        return
-
-    try:
-        pid = int(_DISCOVERY_PID.read_text().strip())
-        os.killpg(pid, signal.SIGTERM)
-        for _ in range(10):
-            try:
-                os.kill(pid, 0)
-                time.sleep(0.5)
-            except OSError:
-                break
-        console.print(f"[green]✅ Discovery agent stopped (PID {pid})[/green]")
-    except (ValueError, OSError):
-        console.print("[dim]Discovery agent already stopped[/dim]")
-    finally:
-        _DISCOVERY_PID.unlink(missing_ok=True)
-        _remove_advertised_services()
-
-
 # --- Service manager agent (native process, not Docker) ---
 # Host-side HTTP API (edge/service_manager.py) that lets the backend (and thus
 # the WebUI System page) start/stop/restart services and switch ASR/TTS
@@ -869,6 +980,8 @@ _SERVICE_MANAGER_PORT = "8775"
 
 def _service_manager_running() -> bool:
     """Check if service manager agent process is alive."""
+    if _service_manager_managed():
+        return _unit_active("chronicle-service-manager")
     if not _SERVICE_MANAGER_PID.exists():
         return False
     try:
@@ -902,6 +1015,14 @@ def _ensure_service_manager_token() -> str:
 
 def _start_service_manager():
     """Start the service manager agent as a native background process."""
+    # Heal legacy installs: the old standalone discovery agent is now folded in.
+    _cleanup_legacy_discovery()
+    if _service_manager_managed():
+        _systemctl_user("start", "chronicle-service-manager", capture=False)
+        console.print(
+            "[dim]🛠  Service manager managed by systemd (ensured started)[/dim]"
+        )
+        return True
     if _service_manager_running():
         console.print("[dim]🛠  Service manager already running[/dim]")
         return True
@@ -951,7 +1072,14 @@ def _start_service_manager():
 
 def _stop_service_manager():
     """Stop the service manager agent process."""
+    if _service_manager_managed():
+        console.print(
+            "[dim]🛠  Service manager is a systemd service — left running "
+            "(use 'systemctl --user stop chronicle-service-manager' to stop)[/dim]"
+        )
+        return
     if not _SERVICE_MANAGER_PID.exists():
+        _remove_advertised_services()
         return
 
     try:
@@ -968,6 +1096,471 @@ def _stop_service_manager():
         console.print("[dim]Service manager already stopped[/dim]")
     finally:
         _SERVICE_MANAGER_PID.unlink(missing_ok=True)
+        # The node agent was the advertiser — clear the local manifest on stop.
+        _remove_advertised_services()
+
+
+# --- systemd user-service integration (auto-start agents on boot) ---
+#
+# The service manager and discovery agents are native host processes, not
+# containers, so a plain ``./start.sh`` launch does not survive a reboot the way
+# Docker's restart policy revives the containers. Optionally install them as
+# systemd *user* services (with linger enabled) so they come back on boot. The
+# unit's ExecStart re-invokes ``services.py <agent> run`` — a foreground runner
+# that reuses the same token/advertise setup and then ``exec``s the agent, so
+# systemd tracks the agent process directly.
+
+_REPO_ROOT = Path(__file__).resolve().parent
+_SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
+
+# unit name -> (services.py subcommand for ExecStart, human description)
+_SYSTEMD_UNITS = {
+    "chronicle-service-manager": (
+        "manager run",
+        "Chronicle node agent (WebUI control + Tailnet service advertising)",
+    ),
+}
+
+_SYSTEMD_STATES = {
+    "running",
+    "degraded",
+    "starting",
+    "initializing",
+    "maintenance",
+    "stopping",
+}
+
+
+def _systemctl_user(*args, capture=True):
+    """Run ``systemctl --user`` and return the CompletedProcess."""
+    return subprocess.run(
+        ["systemctl", "--user", *args],
+        capture_output=capture,
+        text=True,
+    )
+
+
+def _systemd_user_available() -> bool:
+    """True if a systemd *user* instance is reachable.
+
+    Not the case on hosts without systemd, or on WSL without ``systemd=true``
+    in /etc/wsl.conf (the user bus is then unavailable).
+    """
+    if shutil.which("systemctl") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "is-system-running"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return (result.stdout or "").strip() in _SYSTEMD_STATES
+
+
+def _unit_enabled(unit: str) -> bool:
+    if shutil.which("systemctl") is None:
+        return False
+    return _systemctl_user("is-enabled", unit).returncode == 0
+
+
+def _unit_active(unit: str) -> bool:
+    if shutil.which("systemctl") is None:
+        return False
+    return _systemctl_user("is-active", unit).returncode == 0
+
+
+def _service_manager_managed() -> bool:
+    return _unit_enabled("chronicle-service-manager")
+
+
+def _write_systemd_unit(unit: str) -> Path:
+    subcmd, description = _SYSTEMD_UNITS[unit]
+    uv_path = shutil.which("uv") or "uv"
+    # A systemd user unit gets a minimal PATH (no ~/.local/bin), so neither uv
+    # nor binaries the agents shell out to (e.g. tailscale) would resolve.
+    # Pin a sane PATH that includes uv's own directory.
+    uv_dir = str(Path(uv_path).parent)
+    unit_path_env = ":".join(
+        [
+            uv_dir,
+            str(Path.home() / ".local" / "bin"),
+            "/usr/local/sbin",
+            "/usr/local/bin",
+            "/usr/sbin",
+            "/usr/bin",
+            "/sbin",
+            "/bin",
+        ]
+    )
+    _SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
+    unit_path = _SYSTEMD_USER_DIR / f"{unit}.service"
+    unit_path.write_text(
+        f"""[Unit]
+Description={description}
+
+[Service]
+Type=exec
+WorkingDirectory={_REPO_ROOT}
+Environment=PATH={unit_path_env}
+ExecStart={uv_path} run --with-requirements setup-requirements.txt python {_REPO_ROOT / "services.py"} {subcmd}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+"""
+    )
+    return unit_path
+
+
+def _install_systemd_unit(unit: str) -> bool:
+    """Write, enable and start a single user unit. Assumes systemd is available."""
+    # Stop any background (Popen) instance first so the unit can bind the port.
+    if unit == "chronicle-service-manager":
+        _stop_service_manager()
+        _cleanup_legacy_discovery()
+
+    path = _write_systemd_unit(unit)
+    # Keep the user instance (and thus the agent) alive after logout / reboot.
+    subprocess.run(["loginctl", "enable-linger"], capture_output=True, text=True)
+    _systemctl_user("daemon-reload")
+    result = _systemctl_user("enable", "--now", unit, capture=False)
+    if result.returncode != 0:
+        console.print(f"[red]❌ Failed to enable {unit}[/red]")
+        return False
+    console.print(
+        f"[green]✅ Installed & started {unit} (systemd user service)[/green]"
+    )
+    console.print(f"[dim]   Unit: {path}[/dim]")
+    return True
+
+
+def _uninstall_systemd_unit(unit: str) -> bool:
+    if shutil.which("systemctl") is None:
+        console.print("[dim]systemctl not found — nothing to uninstall[/dim]")
+        return False
+    _systemctl_user("disable", "--now", unit, capture=False)
+    (_SYSTEMD_USER_DIR / f"{unit}.service").unlink(missing_ok=True)
+    _systemctl_user("daemon-reload")
+    console.print(f"[green]✅ Removed {unit} systemd user service[/green]")
+    return True
+
+
+def _print_systemd_unavailable_help():
+    console.print(
+        "[yellow]⚠️  No systemd user instance available — cannot install services.[/yellow]"
+    )
+    console.print(
+        "[dim]   On WSL, enable it: add a '[boot]' section with 'systemd=true' to "
+        "/etc/wsl.conf, run 'wsl --shutdown', then reopen the terminal.[/dim]"
+    )
+
+
+def install_systemd_agents(units=None) -> bool:
+    """Install the given agent units (default: all) as systemd user services."""
+    units = units or list(_SYSTEMD_UNITS)
+    if not _systemd_user_available():
+        _print_systemd_unavailable_help()
+        return False
+    ok = True
+    for unit in units:
+        ok = _install_systemd_unit(unit) and ok
+    if ok:
+        console.print(
+            "[dim]These agents will now auto-start on boot. Manage them with "
+            "'systemctl --user status/stop/restart <unit>'.[/dim]"
+        )
+    return ok
+
+
+def uninstall_systemd_agents(units=None) -> bool:
+    units = units or list(_SYSTEMD_UNITS)
+    ok = True
+    for unit in units:
+        ok = _uninstall_systemd_unit(unit) and ok
+    return ok
+
+
+def _cleanup_legacy_discovery() -> None:
+    """Remove the old standalone discovery agent, now folded into the node agent.
+
+    Older installs ran a separate ``chronicle-discovery`` systemd user unit and/or
+    a native ``edge/.discovery-agent.pid`` process. The node agent (service
+    manager) now does the advertising, so a leftover discovery agent would
+    double-advertise — and its unit's ExecStart (``services.py discovery run``) no
+    longer exists, so it would crash-loop. Disable + remove it. Idempotent.
+    """
+    unit = "chronicle-discovery"
+    unit_file = _SYSTEMD_USER_DIR / f"{unit}.service"
+    if shutil.which("systemctl") and (_unit_enabled(unit) or unit_file.exists()):
+        _systemctl_user("disable", "--now", unit)
+        unit_file.unlink(missing_ok=True)
+        _systemctl_user("daemon-reload")
+        console.print("[dim]🧹 Removed legacy chronicle-discovery systemd unit[/dim]")
+
+    pid_file = Path(__file__).parent / "edge" / ".discovery-agent.pid"
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text().strip())
+            os.killpg(pid, signal.SIGTERM)
+            console.print(f"[dim]🧹 Stopped legacy discovery agent (PID {pid})[/dim]")
+        except (ValueError, OSError):
+            pass
+        pid_file.unlink(missing_ok=True)
+
+
+def _service_manager_exec():
+    """Foreground exec of the service manager agent (for systemd ExecStart)."""
+    agent_script = _REPO_ROOT / "edge" / "service_manager.py"
+    if not agent_script.exists():
+        console.print("[red]❌ edge/service_manager.py not found[/red]")
+        sys.exit(1)
+    os.environ["SERVICE_MANAGER_TOKEN"] = _ensure_service_manager_token()
+    os.environ.setdefault("SERVICE_MANAGER_PORT", _SERVICE_MANAGER_PORT)
+    os.chdir(_REPO_ROOT)
+    # Absolute uv path: a systemd user unit's PATH does not include ~/.local/bin.
+    uv = shutil.which("uv") or "uv"
+    os.execv(
+        uv,
+        [
+            uv,
+            "run",
+            "--with-requirements",
+            "setup-requirements.txt",
+            "--with",
+            "fastapi",
+            "--with",
+            "uvicorn",
+            "python",
+            str(agent_script),
+        ],
+    )
+
+
+# --- Claude remote-control session (control Claude Code from your phone) ---
+#
+# `claude remote-control` runs a persistent server that accepts multiple sessions
+# you spawn from the Claude mobile app / claude.ai/code. It is an interactive TUI,
+# so it needs a pty — we run it inside a detached tmux session (also lets you
+# `tmux attach -t chronicle-rc` at the desktop). Persistence is via a systemd user
+# unit (tmux oneshot) so it survives reboot, with a WebUI start/stop toggle.
+
+_CLAUDE_RC_UNIT = "chronicle-remote-control"
+_CLAUDE_RC_SESSION = os.environ.get("CLAUDE_RC_SESSION", "chronicle-rc")
+
+
+def _claude_rc_dir() -> Path:
+    """Directory the remote-control server (and its spawned sessions) runs in."""
+    return Path(os.environ.get("CLAUDE_RC_DIR") or _REPO_ROOT)
+
+
+def _claude_rc_name() -> str:
+    """Session name shown in claude.ai/code (defaults to the hostname)."""
+    return os.environ.get("CLAUDE_RC_NAME") or os.uname().nodename
+
+
+def _claude_rc_command() -> list[str]:
+    """The `claude remote-control` argv (same-dir spawn, default permission mode)."""
+    claude = shutil.which("claude") or "claude"
+    return [
+        claude,
+        "remote-control",
+        "--spawn=same-dir",
+        "--permission-mode=default",
+        "--name",
+        _claude_rc_name(),
+    ]
+
+
+def _tmux_session_running(session: str) -> bool:
+    if shutil.which("tmux") is None:
+        return False
+    return (
+        subprocess.run(
+            ["tmux", "has-session", "-t", session],
+            capture_output=True,
+            text=True,
+        ).returncode
+        == 0
+    )
+
+
+def _remote_control_managed() -> bool:
+    return _unit_enabled(_CLAUDE_RC_UNIT)
+
+
+def remote_control_status() -> dict:
+    """Current state of the Claude remote-control session."""
+    return {
+        "running": _tmux_session_running(_CLAUDE_RC_SESSION),
+        "managed": _remote_control_managed(),
+        "session": _CLAUDE_RC_SESSION,
+        "dir": str(_claude_rc_dir()),
+        "name": _claude_rc_name(),
+        "tmux_available": shutil.which("tmux") is not None,
+        "claude_available": shutil.which("claude") is not None,
+    }
+
+
+def _start_remote_control_tmux() -> bool:
+    """Launch the remote-control server in a detached tmux session (idempotent)."""
+    if shutil.which("tmux") is None:
+        console.print(
+            "[red]❌ tmux not found — install tmux to run remote-control[/red]"
+        )
+        return False
+    if shutil.which("claude") is None:
+        console.print(
+            "[red]❌ claude CLI not found — install Claude Code and log in first[/red]"
+        )
+        return False
+    if _tmux_session_running(_CLAUDE_RC_SESSION):
+        console.print(
+            f"[dim]📱 Claude remote-control already running (tmux: {_CLAUDE_RC_SESSION})[/dim]"
+        )
+        return True
+    rc_dir = _claude_rc_dir()
+    # Pass the claude command as one string so tmux's shell runs it; when it exits
+    # the session ends, so `has-session` faithfully reflects whether it is alive.
+    cmd = " ".join(shlex.quote(part) for part in _claude_rc_command())
+    result = subprocess.run(
+        ["tmux", "new-session", "-d", "-s", _CLAUDE_RC_SESSION, "-c", str(rc_dir), cmd],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        console.print(
+            f"[red]❌ Failed to start remote-control: {result.stderr.strip()}[/red]"
+        )
+        return False
+    console.print(
+        f"[green]✅ Claude remote-control started in {rc_dir} "
+        f"(tmux: {_CLAUDE_RC_SESSION}, name: {_claude_rc_name()})[/green]"
+    )
+    console.print(
+        "[dim]   Spawn sessions from the Claude mobile app / claude.ai/code → Code tab.[/dim]"
+    )
+    return True
+
+
+def _stop_remote_control_tmux() -> bool:
+    if not _tmux_session_running(_CLAUDE_RC_SESSION):
+        console.print("[dim]📱 Claude remote-control already stopped[/dim]")
+        return True
+    subprocess.run(
+        ["tmux", "kill-session", "-t", _CLAUDE_RC_SESSION],
+        capture_output=True,
+        text=True,
+    )
+    console.print("[green]✅ Claude remote-control stopped[/green]")
+    return True
+
+
+def start_remote_control() -> bool:
+    """Start remote-control, deferring to systemd when it manages the unit."""
+    if _remote_control_managed():
+        _systemctl_user("start", _CLAUDE_RC_UNIT, capture=False)
+        console.print(
+            "[dim]📱 Remote-control managed by systemd (ensured started)[/dim]"
+        )
+        return True
+    return _start_remote_control_tmux()
+
+
+def stop_remote_control() -> bool:
+    if _remote_control_managed():
+        _systemctl_user("stop", _CLAUDE_RC_UNIT, capture=False)
+        console.print("[dim]📱 Remote-control (systemd) stopped[/dim]")
+        return True
+    return _stop_remote_control_tmux()
+
+
+def _write_remote_control_unit() -> Path:
+    """Write the chronicle-remote-control systemd user unit (tmux oneshot)."""
+    tmux = shutil.which("tmux") or "/usr/bin/tmux"
+    rc_dir = _claude_rc_dir()
+    cmd = " ".join(shlex.quote(part) for part in _claude_rc_command())
+    uv_dir = str(Path(shutil.which("uv") or "uv").parent)
+    unit_path_env = ":".join(
+        [
+            uv_dir,
+            str(Path.home() / ".local" / "bin"),
+            "/usr/local/sbin",
+            "/usr/local/bin",
+            "/usr/sbin",
+            "/usr/bin",
+            "/sbin",
+            "/bin",
+        ]
+    )
+    _SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
+    unit_path = _SYSTEMD_USER_DIR / f"{_CLAUDE_RC_UNIT}.service"
+    # Type=oneshot + RemainAfterExit: ExecStart spawns the detached tmux session and
+    # returns; ExecStop tears it down. tmux supplies the pty the TUI needs.
+    unit_path.write_text(
+        f"""[Unit]
+Description=Chronicle Claude remote-control session (control Claude Code from your phone)
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory={rc_dir}
+Environment=PATH={unit_path_env}
+ExecStart={tmux} new-session -d -s {_CLAUDE_RC_SESSION} -c {rc_dir} {shlex.quote(cmd)}
+ExecStop={tmux} kill-session -t {_CLAUDE_RC_SESSION}
+
+[Install]
+WantedBy=default.target
+"""
+    )
+    return unit_path
+
+
+def install_remote_control() -> bool:
+    """Install + start the remote-control session as a systemd user service."""
+    if shutil.which("claude") is None:
+        console.print(
+            "[red]❌ claude CLI not found — install Claude Code and log in first[/red]"
+        )
+        return False
+    if shutil.which("tmux") is None:
+        console.print("[red]❌ tmux not found — install tmux first[/red]")
+        return False
+    if not _systemd_user_available():
+        _print_systemd_unavailable_help()
+        return False
+    # Drop any manual tmux instance so the unit owns the session name.
+    _stop_remote_control_tmux()
+    path = _write_remote_control_unit()
+    subprocess.run(["loginctl", "enable-linger"], capture_output=True, text=True)
+    _systemctl_user("daemon-reload")
+    result = _systemctl_user("enable", "--now", _CLAUDE_RC_UNIT, capture=False)
+    if result.returncode != 0:
+        console.print(f"[red]❌ Failed to enable {_CLAUDE_RC_UNIT}[/red]")
+        return False
+    console.print(
+        f"[green]✅ Installed & started {_CLAUDE_RC_UNIT} (systemd user service)[/green]"
+    )
+    console.print(f"[dim]   Unit: {path}[/dim]")
+    console.print(
+        f"[dim]   Sessions run in {_claude_rc_dir()}; spawn them from the Claude app "
+        "(Code tab). Override dir/name with CLAUDE_RC_DIR / CLAUDE_RC_NAME.[/dim]"
+    )
+    return True
+
+
+def uninstall_remote_control() -> bool:
+    if shutil.which("systemctl") is None:
+        console.print("[dim]systemctl not found — nothing to uninstall[/dim]")
+        return False
+    _systemctl_user("disable", "--now", _CLAUDE_RC_UNIT, capture=False)
+    (_SYSTEMD_USER_DIR / f"{_CLAUDE_RC_UNIT}.service").unlink(missing_ok=True)
+    _systemctl_user("daemon-reload")
+    console.print(f"[green]✅ Removed {_CLAUDE_RC_UNIT} systemd user service[/green]")
+    return True
 
 
 def start_services(services, build=False, force_recreate=False):
@@ -1006,11 +1599,9 @@ def start_services(services, build=False, force_recreate=False):
         f"\n[green]🎉 {success_count}/{len(services)} services started successfully[/green]"
     )
 
-    # Start discovery agent alongside backend
-    if "backend" in services and check_service_enabled("backend"):
-        _start_discovery_agent()
-
-    # Start service manager agent (WebUI start/stop control) on any start
+    # Start the node agent (WebUI control + Tailnet advertising) on any start.
+    # It advertises this node's enabled services regardless of whether the
+    # backend runs here, so service-only nodes (e.g. a GPU/RPi box) advertise too.
     _start_service_manager()
 
     # Show access URLs if backend was started
@@ -1052,10 +1643,9 @@ def stop_services(services, stop_manager=False):
     """
     console.print(f"🛑 [bold]Stopping {len(services)} services...[/bold]")
 
-    # Stop discovery agent when stopping backend
-    if "backend" in services:
-        _stop_discovery_agent()
-
+    # The node agent (advertiser + control) is decoupled from the backend — it
+    # only stops on a full ``stop --all`` so individual services can still be
+    # restarted from the UI and advertising survives a backend-only stop.
     if stop_manager:
         _stop_service_manager()
 
@@ -1127,12 +1717,7 @@ def restart_services(services, recreate=False):
         f"\n[green]🎉 {success_count}/{len(services)} services restarted successfully[/green]"
     )
 
-    # Restart discovery agent alongside backend
-    if "backend" in services and check_service_enabled("backend"):
-        _stop_discovery_agent()
-        _start_discovery_agent()
-
-    # Ensure service manager agent is running
+    # Ensure the node agent (control + advertising) is running
     _start_service_manager()
 
 
@@ -1168,15 +1753,13 @@ def show_status():
 
     console.print(table)
 
-    # Discovery agent status
-    if _discovery_agent_running():
-        pid = int(_DISCOVERY_PID.read_text().strip())
-        console.print(f"\n[green]📡 Discovery agent running (PID {pid})[/green]")
-    else:
-        console.print("\n[dim]📡 Discovery agent not running[/dim]")
-
-    # Service manager agent status
-    if _service_manager_running():
+    # Node agent status (control + Tailnet advertising)
+    if _service_manager_managed():
+        state = "running" if _unit_active("chronicle-service-manager") else "stopped"
+        console.print(
+            f"[green]🛠  Service manager {state} (systemd user service, port {_SERVICE_MANAGER_PORT})[/green]"
+        )
+    elif _service_manager_running():
         pid = int(_SERVICE_MANAGER_PID.read_text().strip())
         console.print(
             f"[green]🛠  Service manager running (PID {pid}, port {_SERVICE_MANAGER_PORT})[/green]"
@@ -1248,7 +1831,20 @@ def main():
         "manager", help="Manage the service manager agent (WebUI start/stop control)"
     )
     manager_parser.add_argument(
-        "manager_action", choices=["start", "stop", "restart"], help="Agent action"
+        "manager_action",
+        choices=["start", "stop", "restart", "run", "install", "uninstall"],
+        help="Agent action ('run' = foreground, for systemd; 'install'/'uninstall' = systemd user service)",
+    )
+
+    # Claude remote-control session command
+    rc_parser = subparsers.add_parser(
+        "remote-control",
+        help="Manage the Claude remote-control session (control Claude Code from your phone)",
+    )
+    rc_parser.add_argument(
+        "remote_control_action",
+        choices=["start", "stop", "restart", "status", "install", "uninstall"],
+        help="Action ('install'/'uninstall' = systemd user service for boot persistence)",
     )
 
     args = parser.parse_args()
@@ -1353,6 +1949,27 @@ def main():
         elif args.manager_action == "restart":
             _stop_service_manager()
             _start_service_manager()
+        elif args.manager_action == "run":
+            _service_manager_exec()
+        elif args.manager_action == "install":
+            install_systemd_agents(["chronicle-service-manager"])
+        elif args.manager_action == "uninstall":
+            uninstall_systemd_agents(["chronicle-service-manager"])
+
+    elif args.command == "remote-control":
+        if args.remote_control_action == "start":
+            start_remote_control()
+        elif args.remote_control_action == "stop":
+            stop_remote_control()
+        elif args.remote_control_action == "restart":
+            stop_remote_control()
+            start_remote_control()
+        elif args.remote_control_action == "status":
+            console.print(remote_control_status())
+        elif args.remote_control_action == "install":
+            install_remote_control()
+        elif args.remote_control_action == "uninstall":
+            uninstall_remote_control()
 
 
 if __name__ == "__main__":

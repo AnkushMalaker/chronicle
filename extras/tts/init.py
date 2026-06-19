@@ -63,10 +63,48 @@ PROVIDERS = {
         "service": "kittentts-tts",
         "capabilities": ["lightweight", "cpu", "preset_voices"],
     },
+    "kokoro": {
+        "name": "Kokoro",
+        "description": "Kokoro-82M - lightweight GPU/CPU TTS (<~1GB VRAM), fixed preset voices, 8 languages (Apache 2.0)",
+        "models": {
+            "hexgrad/Kokoro-82M": "Kokoro-82M (~82M params, <~1GB VRAM, default)",
+        },
+        "default_model": "hexgrad/Kokoro-82M",
+        "service": "kokoro-tts",
+        "capabilities": ["lightweight", "low_vram", "preset_voices"],
+    },
 }
 
 # Preset voices for KittenTTS (no zero-shot cloning).
 KITTEN_VOICES = ["Bella", "Jasper", "Luna", "Bruno", "Rosie", "Hugo", "Kiki", "Leo"]
+
+# A curated subset of Kokoro preset voices (full list in the model's VOICES.md).
+# Prefix encodes language+gender: a=American, b=British; f=female, m=male.
+KOKORO_VOICES = [
+    "af_heart",
+    "af_bella",
+    "af_nicole",
+    "af_sarah",
+    "am_michael",
+    "am_adam",
+    "bf_emma",
+    "bf_isabella",
+    "bm_george",
+    "bm_lewis",
+]
+
+# Kokoro language code → label. 'a'/'b' are American/British English.
+KOKORO_LANGS = {
+    "a": "American English",
+    "b": "British English",
+    "e": "Spanish",
+    "f": "French",
+    "h": "Hindi",
+    "i": "Italian",
+    "j": "Japanese",
+    "p": "Brazilian Portuguese",
+    "z": "Mandarin Chinese",
+}
 
 console = Console()
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -225,6 +263,69 @@ def write_env_kittentts(
     console.print(f"\n[green]Configuration written to {ENV_FILE}[/green]")
 
 
+def write_env_kokoro(
+    model_id: str,
+    voice: str,
+    lang_code: str,
+    speed: str,
+    cuda_version: str,
+    port: str = "8770",
+) -> None:
+    """Write .env file for the Kokoro provider (dedicated KOKORO_* vars)."""
+    _backup_env()
+
+    # Kokoro uses its own env vars so the heavy Fish/TADA settings don't bleed
+    # into it (matches docker-compose.yml).
+    ENV_FILE.touch()
+    set_key(str(ENV_FILE), "TTS_PROVIDER", "kokoro", quote_mode="never")
+    set_key(str(ENV_FILE), "KOKORO_TTS_MODEL", model_id, quote_mode="never")
+    set_key(str(ENV_FILE), "KOKORO_TTS_VOICE", voice, quote_mode="never")
+    set_key(str(ENV_FILE), "KOKORO_TTS_LANG_CODE", lang_code, quote_mode="never")
+    set_key(str(ENV_FILE), "KOKORO_TTS_SPEED", speed, quote_mode="never")
+    set_key(str(ENV_FILE), "KOKORO_TTS_PORT", port, quote_mode="never")
+    set_key(str(ENV_FILE), "PYTORCH_CUDA_VERSION", cuda_version, quote_mode="never")
+
+    console.print(f"\n[green]Configuration written to {ENV_FILE}[/green]")
+
+
+def setup_kokoro(model_id: str) -> None:
+    """Setup flow for Kokoro (GPU/CPU, no HF token, preset voices)."""
+    console.print("\n[bold]Language:[/bold]")
+    for code, label in KOKORO_LANGS.items():
+        console.print(f"  {code} - {label}")
+    lang_code = Prompt.ask(
+        "Language code",
+        choices=list(KOKORO_LANGS.keys()),
+        default="a",
+    )
+    voice = Prompt.ask(
+        "Preset voice (prefix: a=American/b=British, f=female/m=male)",
+        choices=KOKORO_VOICES,
+        default="af_heart",
+    )
+    speed = Prompt.ask("Speech speed multiplier", default="1.0")
+    cuda_version = setup_cuda()
+    port = Prompt.ask("TTS service port", default="8770")
+
+    write_env_kokoro(model_id, voice, lang_code, speed, cuda_version, port)
+
+    console.print(
+        Panel(
+            f"[bold green]Setup Complete![/bold green]\n\n"
+            f"Start the service:\n"
+            f"  cd extras/tts\n"
+            f"  docker compose up kokoro-tts -d --build\n\n"
+            f"Test the service:\n"
+            f"  curl http://localhost:{port}/health\n\n"
+            f"Synthesize speech:\n"
+            f"  curl -X POST http://localhost:{port}/synthesize \\\n"
+            f"    -F 'text=Hello, this is a test.' \\\n"
+            f"    -o output.wav",
+            border_style="green",
+        )
+    )
+
+
 def setup_kittentts(model_id: str) -> None:
     """CPU-only setup flow for KittenTTS (no CUDA, no HF token, preset voices)."""
     voice = Prompt.ask(
@@ -265,6 +366,11 @@ def main():
     # KittenTTS is CPU-only with a distinct config — handle it separately.
     if provider_key == "kittentts":
         setup_kittentts(model_id)
+        return
+
+    # Kokoro uses its own KOKORO_* env vars and a preset-voice/language flow.
+    if provider_key == "kokoro":
+        setup_kokoro(model_id)
         return
 
     cuda_version = setup_cuda()

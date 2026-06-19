@@ -2,6 +2,7 @@
 !app.py
 !consumer.py
 !detector.py
+!hubert_detector.py
 !samples.py
 !verifier.py
 !pyproject.toml

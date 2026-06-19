@@ -2,7 +2,7 @@
 Unit tests for CUDA version configuration in ASR service Dockerfiles.
 
 Tests the configurable PYTORCH_CUDA_VERSION build arg that allows selecting
-different CUDA versions (cu121, cu126, cu128) for different GPU architectures.
+different CUDA versions (cu126, cu128) for different GPU architectures.
 """
 
 import os
@@ -61,10 +61,9 @@ class TestDockerfileCUDASupport:
         assert arg_match, "PYTORCH_CUDA_VERSION should have default value"
         default_version = arg_match.group(1)
         assert default_version in [
-            "cu121",
             "cu126",
             "cu128",
-        ], f"Default CUDA version {default_version} should be cu121, cu126, or cu128"
+        ], f"Default CUDA version {default_version} should be cu126 or cu128"
 
     def test_vibevoice_dockerfile_uses_cuda_arg_in_uv_sync(
         self, vibevoice_dockerfile_path
@@ -156,12 +155,12 @@ class TestCUDAVersionEnvironmentVariable:
 
     def test_cuda_version_env_var_format(self):
         """Test that CUDA version environment variables follow correct format."""
-        valid_versions = ["cu121", "cu126", "cu128"]
+        valid_versions = ["cu126", "cu128"]
 
         for version in valid_versions:
             assert re.match(
                 r"^cu\d{3}$", version
-            ), f"{version} should match pattern cu### (e.g., cu121, cu126)"
+            ), f"{version} should match pattern cu### (e.g., cu126, cu128)"
 
     def test_cuda_version_from_env(self):
         """Test reading CUDA version from environment."""
@@ -172,7 +171,7 @@ class TestCUDAVersionEnvironmentVariable:
             cuda_version = os.getenv("PYTORCH_CUDA_VERSION")
 
             assert cuda_version == test_version
-            assert cuda_version in ["cu121", "cu126", "cu128"]
+            assert cuda_version in ["cu126", "cu128"]
 
     def test_cuda_version_default_fallback(self):
         """Test that default CUDA version is used when env var not set."""
@@ -202,8 +201,8 @@ class TestGPUArchitectureCUDAMapping:
         arch_to_cuda = {
             "sm_120": "cu128",  # RTX 5090, RTX 50 series
             "sm_90": "cu126",  # RTX 4090, H100
-            "sm_89": "cu121",  # RTX 4090
-            "sm_86": "cu121",  # RTX 3090, A6000
+            "sm_89": "cu126",  # RTX 4090
+            "sm_86": "cu126",  # RTX 3090, A6000
         }
 
         assert (
@@ -213,18 +212,17 @@ class TestGPUArchitectureCUDAMapping:
     # Architectures supported by each CUDA version (minimum cu version that supports them)
     # Used as authoritative reference for architecture-to-CUDA mapping tests.
     CUDA_ARCH_SUPPORT = {
-        "cu121": {"sm_75", "sm_80", "sm_86", "sm_89"},
         "cu126": {"sm_75", "sm_80", "sm_86", "sm_89", "sm_90"},
         "cu128": {"sm_75", "sm_80", "sm_86", "sm_89", "sm_90", "sm_120"},
     }
 
-    def test_older_gpus_work_with_cu121(self):
-        """Test that older GPUs (sm_86, sm_80) work with cu121."""
+    def test_older_gpus_work_with_cu126(self):
+        """Test that older GPUs (sm_86, sm_80) work with cu126."""
         older_archs = ["sm_86", "sm_80", "sm_75"]  # RTX 3090, A100, RTX 2080
-        cu121_supported = self.CUDA_ARCH_SUPPORT["cu121"]
+        cu126_supported = self.CUDA_ARCH_SUPPORT["cu126"]
 
         for arch in older_archs:
-            assert arch in cu121_supported, f"{arch} should be supported by CUDA 12.1"
+            assert arch in cu126_supported, f"{arch} should be supported by CUDA 12.6"
 
 
 class TestPyProjectCUDAExtras:
@@ -236,14 +234,14 @@ class TestPyProjectCUDAExtras:
         return Path(__file__).parent.parent / "pyproject.toml"
 
     def test_pyproject_has_cuda_extras(self, pyproject_path):
-        """Test that pyproject.toml defines cu121, cu126, cu128 extras."""
+        """Test that pyproject.toml defines cu126, cu128 extras."""
         if not pyproject_path.exists():
             pytest.skip("pyproject.toml not found")
 
         content = pyproject_path.read_text()
 
         # Should have [project.optional-dependencies] or [tool.uv] with extras
-        cuda_versions = ["cu121", "cu126", "cu128"]
+        cuda_versions = ["cu126", "cu128"]
 
         for version in cuda_versions:
             # Look for the CUDA version as an extra

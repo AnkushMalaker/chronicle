@@ -359,17 +359,16 @@ class ASRServicesSetup:
             )
 
             cuda_choices = {
-                "1": "CUDA 12.1 (cu121)",
-                "2": "CUDA 12.6 (cu126) - Recommended",
-                "3": "CUDA 12.8 (cu128)",
+                "1": "CUDA 12.6 (cu126) - Recommended",
+                "2": "CUDA 12.8 (cu128)",
             }
-            cuda_to_choice = {"cu121": "1", "cu126": "2", "cu128": "3"}
-            default_choice = cuda_to_choice.get(detected_cuda, "2")
+            cuda_to_choice = {"cu126": "1", "cu128": "2"}
+            default_choice = cuda_to_choice.get(detected_cuda, "1")
 
             choice = self.prompt_choice(
                 "Choose CUDA version:", cuda_choices, default_choice
             )
-            choice_to_cuda = {"1": "cu121", "2": "cu126", "3": "cu128"}
+            choice_to_cuda = {"1": "cu126", "2": "cu128"}
             cuda_version = choice_to_cuda[choice]
 
         self.config["PYTORCH_CUDA_VERSION"] = cuda_version
@@ -759,7 +758,7 @@ def main():
     parser.add_argument("--model", help="Model identifier (HuggingFace repo or path)")
     parser.add_argument(
         "--pytorch-cuda-version",
-        choices=["cu121", "cu126", "cu128", "strixhalo"],
+        choices=["cu126", "cu128", "strixhalo"],
         help="PyTorch CUDA version",
     )
 

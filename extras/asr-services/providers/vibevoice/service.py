@@ -122,10 +122,14 @@ class VibeVoiceService(BaseASRService):
         """
         if self.transcriber is None:
             raise RuntimeError("Service not initialized")
-        yield from self.transcriber._transcribe_batched_with_progress(
+        for event in self.transcriber._transcribe_batched_with_progress(
             audio_file_path,
             hotwords=context_info,
-        )
+        ):
+            if event["type"] == "result":
+                yield {"type": "result", **event["result"].to_dict()}
+            else:
+                yield event
 
 
 def _run_lora_training(

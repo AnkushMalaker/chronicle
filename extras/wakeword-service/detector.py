@@ -40,11 +40,26 @@ from typing import Optional
 
 import numpy as np
 from nanowakeword import NanoInterpreter
+
+
+def _load_interp(path: str):
+    """Pick the wake backend by model file: ``.pt`` -> HuBERT+conv-attn (GPU),
+    else the stock nanowakeword ONNX interpreter. Both expose the same
+    ``load_model``/``predict``/``reset``/``models`` surface. The HuBERT backend
+    (and its heavy torch import) is loaded LAZILY — only when a ``.pt`` model is
+    configured — so the stock CPU image never needs torch."""
+    if path.endswith(".pt"):
+        from hubert_detector import HubertInterpreter
+
+        return HubertInterpreter.load_model(path)
+    return NanoInterpreter.load_model(path)
+
+
 from pipecat.audio.turn.base_turn_analyzer import EndOfTurnState
 from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroOnnxModel
-from verifier import WakeVerifier
+from verifier import HubertVerifier, WakeVerifier
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +229,7 @@ class HermesDetector:
         thresholds: Optional[dict[str, float]] = None,
         patiences: Optional[dict[str, int]] = None,
         collect_only: Optional[list[str]] = None,
+        verifiers_disabled: Optional[list[str]] = None,
     ):
         """Initialize the detector.
 
@@ -259,6 +275,10 @@ class HermesDetector:
         # review data but never dispatch a command / play a tone / block a real
         # wake word — used to farm FPs live for a not-yet-trusted word.
         self.collect_only = set(collect_only or [])
+        # Words whose second-stage verifier is toggled OFF at runtime (from the
+        # Wake-Word Lab). The verifier stays LOADED — this only skips its check so
+        # arms dispatch on the stage-1 model alone. Mutable; flipped via the UI.
+        self.verifiers_disabled = set(verifiers_disabled or [])
         self.threshold = threshold
         self.patience = patience
         self.thresholds = {
@@ -307,7 +327,7 @@ class HermesDetector:
                 f"(threshold={self.thresholds[wakeword]}, "
                 f"patience={self.patiences[wakeword]})"
             )
-            probe = NanoInterpreter.load_model(path)
+            probe = _load_interp(path)
             key = next(iter(probe.models.keys()))
             self._wake_keys[wakeword] = key
             # Cache the wake ONNX input name so the verifier can score raw feature
@@ -321,15 +341,23 @@ class HermesDetector:
 
         # Optional second-stage verifiers (FP suppression), one per word. Loaded
         # once, shared read-only across clients (pure-numpy scoring, no state).
-        self.verifiers: dict[str, WakeVerifier] = {}
+        self.verifiers: dict[str, WakeVerifier | HubertVerifier] = {}
         for wakeword, vpath in (verifiers or {}).items():
             if wakeword not in self.models:
                 logger.warning(f"verifier for unknown word '{wakeword}' — ignored")
                 continue
             if vpath and os.path.exists(vpath):
-                self.verifiers[wakeword] = WakeVerifier(
-                    vpath, threshold=verifier_threshold
-                )
+                # HuBERT words (.pt) score a 768-d HuBERT arm-window embedding;
+                # nanowakeword words score the 96-d Google window. Pick the matching
+                # verifier (both pure-numpy, share the folded-logreg .npz schema).
+                if self.models[wakeword].endswith(".pt"):
+                    self.verifiers[wakeword] = HubertVerifier(
+                        vpath, threshold=verifier_threshold
+                    )
+                else:
+                    self.verifiers[wakeword] = WakeVerifier(
+                        vpath, threshold=verifier_threshold
+                    )
                 logger.info(f"verifier enabled for '{wakeword}' ({vpath})")
             elif vpath:
                 logger.warning(
@@ -357,9 +385,7 @@ class HermesDetector:
         )
         analyzer.set_sample_rate(SAMPLE_RATE)
         return ClientWakeState(
-            interpreters={
-                w: NanoInterpreter.load_model(p) for w, p in self.models.items()
-            },
+            interpreters={w: _load_interp(p) for w, p in self.models.items()},
             consec={w: 0 for w in self.wakewords},
             turn_analyzer=analyzer,
             vad_model=SileroOnnxModel(self._vad_model_path, force_onnx_cpu=True),
@@ -519,12 +545,22 @@ class HermesDetector:
                 # verifier and for false-positive review.
                 tf, tc = self._snapshot_buffers(state.interpreters[cand])
                 verifier = self.verifiers.get(cand)
-                if verifier is not None and tf is not None:
-                    passed, vprob = verifier.verify(
-                        tf,
-                        state.interpreters[cand].models[self._wake_keys[cand]],
-                        self._wake_in_names[cand],
-                    )
+                if verifier is not None and cand not in self.verifiers_disabled:
+                    if isinstance(verifier, HubertVerifier):
+                        # HuBERT words expose no Google feature buffer; the verifier
+                        # scores the arm-window HuBERT embedding the interpreter just
+                        # computed (the frame that tripped patience).
+                        passed, vprob = verifier.verify_embedding(
+                            state.interpreters[cand].arm_window_embedding()
+                        )
+                    elif tf is not None:
+                        passed, vprob = verifier.verify(
+                            tf,
+                            state.interpreters[cand].models[self._wake_keys[cand]],
+                            self._wake_in_names[cand],
+                        )
+                    else:  # no buffer to judge — fail open (never block a wake)
+                        passed, vprob = True, 1.0
                     if not passed:
                         # Reject: clear THIS word's patience but keep streaming (no
                         # interpreter reset, no debounce) so a real wake right after

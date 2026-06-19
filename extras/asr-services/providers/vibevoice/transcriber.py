@@ -327,7 +327,17 @@ class VibeVoiceTranscriber:
             logger.info(
                 f"Audio is {duration:.1f}s (>{self.batch_threshold}s), using batched transcription"
             )
-            return self._transcribe_batched(audio_file_path, hotwords=context_info)
+            # Drain the shared progress generator and return its final result.
+            # The generator is also exposed (via the service layer) for NDJSON
+            # progress streaming on long audio.
+            result: Optional[TranscriptionResult] = None
+            for event in self._transcribe_batched_with_progress(
+                audio_file_path, hotwords=context_info
+            ):
+                if event["type"] == "result":
+                    result = event["result"]
+            assert result is not None, "batched transcription yielded no result event"
+            return result
         else:
             logger.info(f"Audio is {duration:.1f}s, using single-shot transcription")
             return self._transcribe_single(audio_file_path, context_info=context_info)
@@ -444,20 +454,24 @@ class VibeVoiceTranscriber:
 
         return self._map_to_result(parsed_segments)
 
-    def _transcribe_batched(
+    def _transcribe_batched_with_progress(
         self,
         audio_file_path: str,
         hotwords: Optional[str] = None,
-    ) -> TranscriptionResult:
+    ):
         """
-        Transcribe a long audio file by splitting into overlapping windows.
+        Transcribe a long audio file by splitting into overlapping windows,
+        reporting progress after each one.
 
-        Args:
-            audio_file_path: Path to the full audio file
-            hotwords: Optional hot words string passed through to each window
+        A progress event is yielded after every window so the HTTP client keeps
+        receiving bytes during a multi-minute transcription (preventing read
+        timeouts on long audio); the final result is yielded last as a
+        ``TranscriptionResult`` object. Both the streaming path (via the service
+        layer) and the plain ``transcribe()`` path drive this generator.
 
-        Returns:
-            Stitched TranscriptionResult from all windows
+        Yields:
+            {"type": "progress", "current": i, "total": n} after each window
+            {"type": "result", "result": TranscriptionResult} as the final item
         """
         windows = split_audio_file(
             audio_file_path,
@@ -485,52 +499,14 @@ class VibeVoiceTranscriber:
             finally:
                 os.unlink(temp_path)
 
-        return stitch_transcription_results(
-            batch_results, overlap_seconds=self.batch_overlap
-        )
-
-    def _transcribe_batched_with_progress(
-        self,
-        audio_file_path: str,
-        hotwords: Optional[str] = None,
-    ):
-        """
-        Transcribe a long audio file with progress reporting.
-
-        Yields:
-            {"type": "progress", "current": i, "total": n} after each window
-            {"type": "result", ...} as the final item (TranscriptionResult.to_dict())
-        """
-        windows = split_audio_file(
-            audio_file_path,
-            batch_duration=self.batch_duration,
-            overlap=self.batch_overlap,
-        )
-
-        batch_results = []
-
-        for i, (temp_path, start_time, end_time) in enumerate(windows):
-            try:
-                logger.info(
-                    f"Batch {i + 1}/{len(windows)}: [{start_time:.0f}s - {end_time:.0f}s]"
-                )
-
-                result = self._transcribe_single(temp_path, context_info=hotwords)
-                batch_results.append((result, start_time, end_time))
-                logger.info(
-                    f"Batch {i + 1} done: {len(result.segments)} segments, "
-                    f"{len(result.text)} chars"
-                )
-
-            finally:
-                os.unlink(temp_path)
-
             yield {"type": "progress", "current": i + 1, "total": len(windows)}
 
-        final = stitch_transcription_results(
-            batch_results, overlap_seconds=self.batch_overlap
-        )
-        yield {"type": "result", **final.to_dict()}
+        yield {
+            "type": "result",
+            "result": stitch_transcription_results(
+                batch_results, overlap_seconds=self.batch_overlap
+            ),
+        }
 
     def supports_batch_progress(self, audio_duration: float) -> bool:
         """Return True if this audio is long enough to use batched transcription with progress."""

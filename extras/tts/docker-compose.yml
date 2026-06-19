@@ -98,6 +98,45 @@ services:
       start_period: 90s
     restart: unless-stopped
 
+  # ============================================================================
+  # Kokoro Provider (Kokoro-82M — low-VRAM GPU/CPU TTS with preset voices)
+  # ============================================================================
+  # ~82M params, fits comfortably under ~1GB VRAM. Fixed preset voices (no
+  # cloning). Uses dedicated KOKORO_* env vars so the heavy Fish/TADA settings
+  # in .env don't bleed into it.
+  kokoro-tts:
+    build:
+      context: .
+      dockerfile: providers/kokoro/Dockerfile
+      args:
+        PYTORCH_CUDA_VERSION: ${PYTORCH_CUDA_VERSION:-cu126}
+    image: ${CHRONICLE_REGISTRY:-}chronicle-tts-kokoro:${CHRONICLE_TAG:-latest}
+    ports:
+      - "${KOKORO_TTS_PORT:-8770}:8770"
+    volumes:
+      - ./model_cache:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
+      - TTS_MODEL=${KOKORO_TTS_MODEL:-hexgrad/Kokoro-82M}
+      - TTS_VOICE=${KOKORO_TTS_VOICE:-af_heart}
+      - TTS_LANG_CODE=${KOKORO_TTS_LANG_CODE:-a}
+      - TTS_SPEED=${KOKORO_TTS_SPEED:-1.0}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8770/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    restart: unless-stopped
+
   # Edge agent sidecar — advertises this service on the Tailnet
   edge-agent:
     build:

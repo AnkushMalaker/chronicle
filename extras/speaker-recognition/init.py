@@ -157,7 +157,7 @@ class SpeakerRecognitionSetup:
 
     def detect_cuda_version(self) -> str:
         """Detect system CUDA version (delegates to shared utility)"""
-        return detect_cuda_version(default="cu121")
+        return detect_cuda_version(default="cu126")
 
     def setup_compute_mode(self):
         """Configure compute mode (CPU/GPU)"""
@@ -227,8 +227,8 @@ class SpeakerRecognitionSetup:
             detected_cuda = self.detect_cuda_version()
 
             # Map to default choice number
-            cuda_to_choice = {"cu121": "1", "cu126": "2", "cu128": "3"}
-            default_choice = cuda_to_choice.get(detected_cuda, "2")
+            cuda_to_choice = {"cu126": "1", "cu128": "2"}
+            default_choice = cuda_to_choice.get(detected_cuda, "1")
 
             self.console.print()
             self.console.print(
@@ -237,15 +237,14 @@ class SpeakerRecognitionSetup:
             self.console.print()
 
             cuda_choices = {
-                "1": "CUDA 12.1 (cu121)",
-                "2": "CUDA 12.6 (cu126)",
-                "3": "CUDA 12.8 (cu128)",
+                "1": "CUDA 12.6 (cu126)",
+                "2": "CUDA 12.8 (cu128)",
             }
             cuda_choice = self.prompt_choice(
                 "Choose CUDA version for PyTorch:", cuda_choices, default_choice
             )
 
-            choice_to_cuda = {"1": "cu121", "2": "cu126", "3": "cu128"}
+            choice_to_cuda = {"1": "cu126", "2": "cu128"}
             self.config["PYTORCH_CUDA_VERSION"] = choice_to_cuda[cuda_choice]
 
         self.console.print(
@@ -555,7 +554,7 @@ def main():
     )
     parser.add_argument(
         "--pytorch-cuda-version",
-        choices=["cpu", "cu121", "cu126", "cu128", "strixhalo"],
+        choices=["cpu", "cu126", "cu128", "strixhalo"],
         help="PyTorch runtime selection for Docker profile/build",
     )
     parser.add_argument("--deepgram-api-key", help="Deepgram API key (optional)")

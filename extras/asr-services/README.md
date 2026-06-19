@@ -284,6 +284,28 @@ extras/asr-services/
 3. **Unified API**: All providers expose identical endpoints
 4. **Config profiles**: Pre-made .env files for common setups
 
+### Long-audio progress streaming (read-timeout contract)
+
+For batched providers, a long file can take many minutes to transcribe. The
+`/transcribe` endpoint must keep sending bytes during that work, or the client's
+HTTP read timeout (300s by default) fires mid-transcription and the request fails
+with `ReadTimeout` even though inference is still running.
+
+The base handler (`common/base_service.py`) handles this by returning an **NDJSON
+streaming response** that emits a `{"type": "progress", ...}` line per window —
+but **only when the service class overrides** `supports_batch_progress()` and
+`transcribe_with_progress()`. The defaults return `False` / `NotImplementedError`,
+which falls back to the single-JSON path (response withheld until the whole file
+is done).
+
+> ⚠️ **Known gap — `af_next`**: the `af_next` provider implements
+> `supports_batch_progress`/`transcribe_with_progress` only on its *transcriber*,
+> not on its *service* class, so the base handler never sees them and it always
+> takes the non-streaming path. Long audio through `af_next` will hit the client
+> read timeout. `vibevoice` and `gemma4` wire these methods through on the
+> service class and stream progress correctly — mirror that pattern when fixing
+> `af_next`.
+
 ## Development
 
 ### Local Development

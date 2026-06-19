@@ -37,6 +37,12 @@ class RelayConfig:
     auth_password: str
     device_name: str
     esphome_device_ip: str = ""
+    # If the device sends nothing for this long, treat it as gone and close the
+    # backend WS. Without this a silently-dead device (power off, Wi-Fi drop, no
+    # TCP FIN) leaves readline() blocked forever and the backend sees an immortal
+    # "connected" client. The device streams continuously when alive, so this only
+    # trips on a real disconnect.
+    device_idle_timeout: float = 300.0
 
     @classmethod
     def from_env(cls) -> "RelayConfig":
@@ -67,6 +73,7 @@ class RelayConfig:
             auth_password=os.getenv("AUTH_PASSWORD", ""),
             device_name=os.getenv("DEVICE_NAME", "havpe"),
             esphome_device_ip=os.getenv("ESPHOME_DEVICE_IP", ""),
+            device_idle_timeout=float(os.getenv("DEVICE_IDLE_TIMEOUT", "300")),
         )
 
 
@@ -96,6 +103,7 @@ async def forward_tcp_to_ws(
     *,
     on_audio_chunk: Callable[[bytes, int], None] | None = None,
     on_audio_event: Callable[[str, dict], None] | None = None,
+    idle_timeout: float | None = None,
 ) -> None:
     """Forward Wyoming messages from device TCP to backend WebSocket.
 
@@ -103,9 +111,22 @@ async def forward_tcp_to_ws(
         on_audio_chunk: Called with (payload, payload_length) for each audio-chunk.
         on_audio_event: Called with (msg_type, header) for non-audio-chunk messages
                         (e.g. audio-start, audio-stop).
+        idle_timeout: If set, treat the device as gone when it sends nothing for this
+                      many seconds and end the session (closing the backend WS) so the
+                      backend doesn't keep a zombie "connected" client.
     """
     while True:
-        line = await reader.readline()
+        try:
+            if idle_timeout is not None:
+                line = await asyncio.wait_for(reader.readline(), timeout=idle_timeout)
+            else:
+                line = await reader.readline()
+        except asyncio.TimeoutError:
+            logger.warning(
+                "TCP→WS: device idle for %.0fs — treating as disconnected, ending session",
+                idle_timeout,
+            )
+            break
         if not line:
             break
 
@@ -308,6 +329,7 @@ async def run_device_session(
                         ws_lock,
                         on_audio_chunk=on_audio_chunk,
                         on_audio_event=on_audio_event,
+                        idle_timeout=config.device_idle_timeout,
                     ),
                     name="tcp→ws",
                 ),

@@ -233,7 +233,11 @@ class VaultSyncManager:
                 logger.error("Syncthing: %s", msg)
         self._logged_errors = set(detailed)
         if detailed:
-            folder_error = detailed[0] if len(detailed) == 1 else f"{detailed[0]} (+{len(detailed) - 1} more)"
+            folder_error = (
+                detailed[0]
+                if len(detailed) == 1
+                else f"{detailed[0]} (+{len(detailed) - 1} more)"
+            )
 
         self.state.update(
             connected=connected, completion=completion, folder_error=folder_error
@@ -264,6 +268,7 @@ class VaultSyncApp(rumps.App):
             rumps.MenuItem("Choose Vault Folder…", callback=self.on_choose_folder),
             rumps.MenuItem("Sync Now / Re-pair", callback=self.on_repair),
             None,
+            rumps.MenuItem("Open Syncthing UI", callback=self.on_open_syncthing),
             rumps.MenuItem("View Logs", callback=self.on_view_logs),
         ]
 
@@ -291,9 +296,7 @@ class VaultSyncApp(rumps.App):
                 self.title = "◈!"  # ◈!
                 # Truncate for the menu; the full error is in the log buffer (View Logs).
                 short = (
-                    folder_error
-                    if len(folder_error) <= 80
-                    else folder_error[:79] + "…"
+                    folder_error if len(folder_error) <= 80 else folder_error[:79] + "…"
                 )
                 self.status_item.title = f"Status: Folder error — {short}"
             elif comp is not None and comp >= 99.9 and connected:
@@ -330,6 +333,11 @@ class VaultSyncApp(rumps.App):
     def on_repair(self, _sender) -> None:
         logger.info("User requested re-pair")
         self.manager.pair_async()
+
+    def on_open_syncthing(self, _sender) -> None:
+        url = self.manager.syncthing.base_url
+        logger.info("Opening Syncthing UI at %s", url)
+        subprocess.run(["open", url], check=False)
 
     def on_view_logs(self, _sender) -> None:
         _show_logs_dialog("Chronicle Vault Sync — Logs", list(log_buffer.lines))

@@ -96,6 +96,30 @@ KITTEN_TTS_SPEED=1.0                             # Speech speed multiplier
 KITTEN_TTS_PORT=8770                             # Service port
 ```
 
+### Kokoro (hexgrad)
+
+[Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) is a lightweight (~82M param)
+StyleTTS2-based TTS that runs comfortably **under ~1GB VRAM** on GPU (and on CPU too). It
+hit #1 on the TTS Arena leaderboard despite its size, with quality well above KittenTTS.
+Fixed preset voices (no cloning), Apache 2.0. The quality-per-VRAM sweet spot when a GPU is
+available but Fish/TADA are too heavy.
+
+| Model | Parameters | Languages | VRAM |
+|-------|-----------|-----------|------|
+| `hexgrad/Kokoro-82M` | ~82M | 8 (en, es, fr, hi, it, ja, pt, zh) | <~1GB |
+
+**Capabilities:** lightweight, low-VRAM, preset voices.
+
+Started via the `kokoro-tts` service. It uses dedicated `KOKORO_TTS_*` env vars (so the
+heavy Fish/TADA settings in `.env` don't bleed into it):
+```bash
+KOKORO_TTS_MODEL=hexgrad/Kokoro-82M    # Model to use
+KOKORO_TTS_VOICE=af_heart              # Preset voice (a=American/b=British, f=female/m=male)
+KOKORO_TTS_LANG_CODE=a                 # a/b=English, e=es, f=fr, h=hi, i=it, j=ja, p=pt, z=zh
+KOKORO_TTS_SPEED=1.0                   # Speech speed multiplier
+KOKORO_TTS_PORT=8770                   # Service port
+```
+
 ## API Endpoints
 
 | Endpoint | Method | Description |
@@ -138,7 +162,8 @@ extras/tts/
 │   │   ├── startup.py        # Container startup orchestrator
 │   │   ├── service.py        # FastAPI service wrapper
 │   │   └── synthesizer.py    # HTTP client to fish-speech API
-│   └── kittentts/            # KittenML KittenTTS provider (CPU, ~25MB ONNX)
+│   ├── kittentts/            # KittenML KittenTTS provider (CPU, ~25MB ONNX)
+│   └── kokoro/               # Kokoro-82M provider (GPU/CPU, <~1GB VRAM, preset voices)
 ├── docker-compose.yml
 ├── pyproject.toml
 ├── init.py                   # Interactive setup script

@@ -87,6 +87,75 @@ def advertise_service(
     return None
 
 
+def start_advertising(entries: list, backoff: Optional[list] = None):
+    """Advertise multiple services on the Tailnet from a single minidisc registry.
+
+    ``entries`` is a list of ``(name, port, labels)`` tuples. One registry is
+    started and every entry advertised through it; the registry handle is
+    returned and the caller MUST keep a reference to it — minidisc stops
+    advertising once the handle is garbage-collected.
+
+    Returns None (non-fatal) if minidisc is unavailable or the registry could not
+    bind the Tailscale interface — common on Docker Desktop/WSL2, where it may not
+    be bindable immediately, hence the retry/backoff. Advertising is best-effort.
+
+    NOTE: the containerized edge sidecar (``edge/agent.py``) keeps its own copy of
+    this start/backoff logic because its Docker build context excludes this module.
+    """
+    try:
+        import threading
+        import time
+
+        import minidisc
+    except ImportError:
+        logger.debug("minidisc not installed — skipping advertisement")
+        return None
+
+    # start_registry() blocks on ready.wait() with no timeout; if the server
+    # thread can't bind the Tailscale interface it hangs forever. Run it with a
+    # timeout and retry with backoff (the interface may not be bindable yet).
+    def _try_start_registry():
+        holder = []
+
+        def _go():
+            holder.append(minidisc.start_registry())
+
+        t = threading.Thread(target=_go, daemon=True)
+        t.start()
+        t.join(timeout=10)
+        return holder[0] if holder else None
+
+    registry = None
+    for delay in backoff if backoff is not None else [0, 10, 30, 60]:
+        if delay:
+            time.sleep(delay)
+        try:
+            registry = _try_start_registry()
+        except Exception as e:  # noqa: BLE001 - advertising is best-effort
+            logger.debug("minidisc registry start failed (non-fatal): %s", e)
+            registry = None
+        if registry:
+            break
+        logger.warning(
+            "minidisc registry startup timed out (Tailscale interface not bindable yet)"
+        )
+
+    if not registry:
+        logger.warning(
+            "Could not start minidisc registry — Tailnet advertising disabled"
+        )
+        return None
+
+    for name, port, labels in entries:
+        try:
+            registry.advertise_service(port, name, labels or {})
+            logger.info("Advertising '%s' on port %d via minidisc", name, port)
+        except Exception as e:  # noqa: BLE001 - one bad entry shouldn't kill the rest
+            logger.debug("Failed to advertise '%s' (non-fatal): %s", name, e)
+
+    return registry
+
+
 def discover_service(
     name: str,
     labels: Optional[dict] = None,

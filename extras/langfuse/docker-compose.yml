@@ -162,3 +162,7 @@ volumes:
 networks:
   chronicle-network:
     external: true
+  # Intra-stack network for langfuse's own services (postgres/clickhouse/minio/web).
+  # docker-compose creates this implicitly; podman-compose requires it declared
+  # explicitly once another network (chronicle-network) is present. No-op under docker.
+  default: {}

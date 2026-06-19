@@ -211,6 +211,37 @@ def load_audio_file(
     return audio_array, sample_rate
 
 
+def load_audio_bytes(
+    audio_bytes: bytes, target_rate: int = STANDARD_SAMPLE_RATE
+) -> Tuple[np.ndarray, int]:
+    """Load WAV audio from raw bytes into a numpy array (in-memory, no temp file).
+
+    Mirrors ``load_audio_file`` but reads from a bytes buffer — used to decode
+    base64 ``input_audio`` parts from the chat/completions API without round-tripping
+    through disk.
+
+    Args:
+        audio_bytes: WAV-encoded audio data.
+        target_rate: Target sample rate (resamples if different).
+
+    Returns:
+        Tuple of (mono float32 audio_array normalized to [-1, 1], sample_rate).
+    """
+    with wave.open(io.BytesIO(audio_bytes), "rb") as wav_file:
+        sample_rate = wav_file.getframerate()
+        channels = wav_file.getnchannels()
+        sample_width = wav_file.getsampwidth()
+        raw = wav_file.readframes(wav_file.getnframes())
+
+    audio_array = convert_audio_to_numpy(raw, sample_rate, sample_width, channels)
+    if channels > 1:
+        audio_array = convert_to_mono(audio_array, channels)
+    if sample_rate != target_rate:
+        audio_array = resample_audio(audio_array, sample_rate, target_rate)
+        sample_rate = target_rate
+    return audio_array, sample_rate
+
+
 def save_audio_file(
     audio_array: np.ndarray,
     file_path: Union[str, Path],

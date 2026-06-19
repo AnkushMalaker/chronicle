@@ -140,7 +140,7 @@ jobs:
           OWNER_LC=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
 
           # CUDA variants from pyproject.toml
-          CUDA_VARIANTS=("cpu" "cu121" "cu126" "cu128")
+          CUDA_VARIANTS=("cpu" "cu126" "cu128")
 
           # Base services (no CUDA variants, no profiles)
           # Image names must match what docker-compose.yml expects (chronicle-backend, chronicle-webui)
@@ -193,10 +193,10 @@ jobs:
             docker system prune -af || true
           done
 
-          # Build and push parakeet-asr with CUDA variants (cu121, cu126, cu128)
+          # Build and push parakeet-asr with CUDA variants (cu126, cu128)
           echo "::group::Building and pushing parakeet-asr CUDA variants"
           cd ../../extras/asr-services
-          for cuda_variant in cu121 cu126 cu128; do
+          for cuda_variant in cu126 cu128; do
             echo "Building parakeet-asr-${cuda_variant}"
             export PYTORCH_CUDA_VERSION="${cuda_variant}"
             docker compose build parakeet-asr
@@ -294,7 +294,6 @@ jobs:
 
           ### Parakeet ASR (pick your CUDA version)
           \`\`\`bash
-          docker pull ghcr.io/${OWNER_LC}/chronicle-asr-nemo-cu121:${VERSION}
           docker pull ghcr.io/${OWNER_LC}/chronicle-asr-nemo-cu126:${VERSION}
           docker pull ghcr.io/${OWNER_LC}/chronicle-asr-nemo-cu128:${VERSION}
           \`\`\`
@@ -302,7 +301,6 @@ jobs:
           ### Speaker Recognition (pick your variant)
           \`\`\`bash
           docker pull ghcr.io/${OWNER_LC}/chronicle-speaker-cpu:${VERSION}
-          docker pull ghcr.io/${OWNER_LC}/chronicle-speaker-cu121:${VERSION}
           docker pull ghcr.io/${OWNER_LC}/chronicle-speaker-cu126:${VERSION}
           docker pull ghcr.io/${OWNER_LC}/chronicle-speaker-cu128:${VERSION}
           \`\`\`

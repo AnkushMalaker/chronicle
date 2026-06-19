@@ -541,7 +541,7 @@ def detect_cuda_version(default: str = "cu126") -> str:
         default: Default CUDA version if detection fails (default: "cu126")
 
     Returns:
-        PyTorch CUDA version string: "cu121", "cu126", or "cu128"
+        PyTorch CUDA version string: "cu126" or "cu128"
     """
     try:
         result = subprocess.run(
@@ -553,10 +553,8 @@ def detect_cuda_version(default: str = "cu126") -> str:
                 major, minor = int(match.group(1)), int(match.group(2))
                 if (major, minor) >= (12, 8):
                     return "cu128"
-                elif (major, minor) >= (12, 6):
-                    return "cu126"
-                elif (major, minor) >= (12, 1):
-                    return "cu121"
+                # cu126 is the lowest supported build (torch>=2.7 dropped cu121)
+                return "cu126"
     except (subprocess.SubprocessError, FileNotFoundError):
         pass
     return default

@@ -168,6 +168,7 @@ cd extras/tts
 docker compose up tada-tts -d --build        # HumeAI TADA (GPU, voice cloning)
 docker compose up fish-tts -d --build        # Fish Speech (GPU, 50+ langs, emotion tags)
 docker compose up kittentts-tts -d --build   # KittenTTS (~25MB CPU ONNX, no GPU)
+docker compose up kokoro-tts -d --build       # Kokoro-82M (<~1GB VRAM GPU/CPU, preset voices)
 ```
 
 ## Architecture Overview
@@ -477,6 +478,7 @@ Provider-based text-to-speech (`extras/tts/`), built on the same provider patter
 | **TADA** (HumeAI) | `tada-tts` | GPU | Zero-shot voice cloning, 1:1 token alignment (no hallucinations), MIT. `tada-1b` (English) / `tada-3b-ml` (9 langs). Needs `HF_TOKEN` (Llama 3.2 base is gated). |
 | **Fish Speech** (Fish Audio) | `fish-tts` | GPU | Dual-AR, 50+ langs, inline emotion/prosody tags (`[laugh]`, `[whispers]`), streaming. `s2-pro` (default) / `openaudio-s1-mini` / `fish-speech-1.5`. Optional `torch.compile`. |
 | **KittenTTS** (KittenML) | `kittentts-tts` | CPU | Ultra-light (~25MB) ONNX, no GPU/API key, preset voices, English only. Uses dedicated `KITTEN_TTS_*` env vars. |
+| **Kokoro** (hexgrad) | `kokoro-tts` | GPU/CPU | Lightweight (~82M, **<~1GB VRAM**) StyleTTS2, preset voices, 8 langs, Apache-2.0. Quality-per-VRAM sweet spot. Uses dedicated `KOKORO_TTS_*` env vars. |
 
 ### Setup & Run
 
@@ -623,6 +625,7 @@ For detailed technical documentation, see:
 - **[@Docs/overview.md](Docs/overview.md)**: Architecture overview and technical deep dive
 - **[@Docs/init-system.md](Docs/init-system.md)**: Initialization system and service management
 - **[@Docs/ssl-certificates.md](Docs/ssl-certificates.md)**: HTTPS/SSL setup details
+- **[@Docs/podman.md](Docs/podman.md)**: Running with Podman instead of Docker (engine selection, rootless/GPU setup)
 - **[@Docs/audio-pipeline-architecture.md](Docs/audio-pipeline-architecture.md)**: Audio pipeline design
 - **[@backends/advanced/Docs/auth.md](backends/advanced/Docs/auth.md)**: Authentication architecture
 - **[backends/advanced/Docs/architecture.md](backends/advanced/Docs/architecture.md)**: Backend architecture details
