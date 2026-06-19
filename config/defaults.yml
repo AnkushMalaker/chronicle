@@ -124,6 +124,10 @@ models:
     api_family: http
     model_url: https://api.deepgram.com/v1
     api_key: ${oc.env:DEEPGRAM_API_KEY,''}
+    # keyword_boosting: hot words sent as the `keyterm` query param (acoustic bias,
+    # never echoed into output).
+    capabilities:
+      - keyword_boosting
     operations:
       stt_transcribe:
         method: POST
@@ -154,6 +158,10 @@ models:
     api_family: http
     model_url: http://${oc.env:PARAKEET_ASR_URL,172.17.0.1:8767}
     api_key: ''
+    # keyword_boosting: hot words sent as the `context_info` form field (acoustic
+    # recognition hint, never echoed into output).
+    capabilities:
+      - keyword_boosting
     operations:
       stt_transcribe:
         method: POST
@@ -167,14 +175,19 @@ models:
             segments: segments
 
   - name: stt-gemma4
-    description: Google Gemma 4 E2B-it (batch, prompt-based diarization, MTP)
+    description: Google Gemma 4 E2B-it (batch, LLM-backbone, MTP)
     model_type: stt
     model_provider: gemma4
     api_family: http
     model_url: http://${oc.env:GEMMA4_ASR_URL,host.docker.internal:8767}
     api_key: ''
+    # context_prompt: Gemma 4 is an LLM and consumes context as prompt text, so it
+    # is given the user-authored asr_context only — NOT the plugin wake-word boost
+    # list, which it would echo into the transcript. (No diarization: E2B collapses
+    # multi-speaker audio to one speaker; see gemma4/service.py get_capabilities.)
     capabilities:
-      - diarization
+      - context_prompt
+    asr_context: ''
     operations:
       stt_transcribe:
         method: POST
@@ -197,6 +210,7 @@ models:
     capabilities:
       - segments
       - diarization
+      - keyword_boosting
     operations:
       stt_transcribe:
         method: POST
@@ -219,6 +233,7 @@ models:
     capabilities:
       - multilingual
       - language_detection
+      - keyword_boosting
     operations:
       stt_transcribe:
         method: POST
@@ -290,6 +305,7 @@ models:
     api_key: ${oc.env:DEEPGRAM_API_KEY,''}
     capabilities:
       - diarization
+      - keyword_boosting
     operations:
       query:
         model: nova-3
@@ -372,8 +388,9 @@ models:
     # Same gemma4-asr service as the batch entry; the /stream path is the WS endpoint.
     model_url: ws://${oc.env:GEMMA4_ASR_URL,host.docker.internal:8767}/stream
     api_key: ''
-    capabilities:
-      - diarization
+    # No diarization (E2B collapses speakers). The /stream endpoint does not accept
+    # context, so no keyword_boosting/context_prompt — it gets no ASR hints.
+    capabilities: []
     operations:
       query: {}
       end:
