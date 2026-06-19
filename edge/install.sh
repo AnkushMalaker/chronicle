@@ -5,12 +5,17 @@
 #   curl -sSL https://raw.githubusercontent.com/.../edge/install.sh | bash -s -- speaker-recognition
 #   curl -sSL ... | bash -s -- asr-services --branch dev
 #
-# Prerequisites: docker (with compose), tailscale (connected), uv, git
+# Prerequisites: docker (with compose) or podman (with podman-compose), tailscale (connected), uv, git
+#   Engine selected via CONTAINER_ENGINE (default docker); compose via COMPOSE_CMD.
 set -euo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────
 BRANCH="main"
 REPO_URL="https://github.com/SimpleOpenSoftware/chronicle.git"
+# Default: run the native node agent (control + advertise, reboot-survivable via
+# systemd). --advertise-only uses the legacy containerized sidecar instead
+# (advertise only, no control, no host process).
+ADVERTISE_ONLY=0
 
 # Resolve CHRONICLE_HOME: explicit env var > detect existing clone > default
 if [[ -n "${CHRONICLE_HOME:-}" ]]; then
@@ -45,8 +50,12 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --branch) BRANCH="$2"; shift 2 ;;
         --repo)   REPO_URL="$2"; shift 2 ;;
+        --advertise-only|--sidecar) ADVERTISE_ONLY=1; shift ;;
         --help|-h)
-            echo "Usage: $0 <service-name> [--branch <branch>] [--repo <url>]"
+            echo "Usage: $0 <service-name> [--branch <branch>] [--repo <url>] [--advertise-only]"
+            echo ""
+            echo "  Default: installs the native node agent (control + advertise, survives reboot)."
+            echo "  --advertise-only: legacy containerized sidecar (advertise only, no control)."
             echo ""
             echo "Available services:"
             for svc in "${!SERVICE_PATHS[@]}"; do echo "  $svc"; done | sort
@@ -81,12 +90,23 @@ check_cmd() {
 }
 
 info "Checking prerequisites..."
-check_cmd docker
+# Container engine: docker (default) or podman. Override with CONTAINER_ENGINE.
+ENGINE="${CONTAINER_ENGINE:-docker}"
+check_cmd "$ENGINE"
 check_cmd git
 check_cmd uv
 
-# Check docker compose (plugin or standalone)
-if docker compose version &>/dev/null; then
+# Resolve the compose command (COMPOSE_CMD wins; else derive from the engine)
+if [ -n "${COMPOSE_CMD:-}" ]; then
+    COMPOSE="$COMPOSE_CMD"
+elif [ "$ENGINE" = "podman" ]; then
+    if command -v podman-compose &>/dev/null; then
+        COMPOSE="podman-compose"
+    else
+        err "podman-compose not found. Install it (e.g. 'uv tool install podman-compose')."
+        exit 1
+    fi
+elif docker compose version &>/dev/null; then
     COMPOSE="docker compose"
 elif command -v docker-compose &>/dev/null; then
     COMPOSE="docker-compose"
@@ -166,13 +186,16 @@ else
 fi
 
 # ── Run init.py if it exists (interactive config) ─────────────────────
-INIT_ARGS=""
-if [[ -n "$BACKEND_URL" ]]; then
-    INIT_ARGS="--backend-url $BACKEND_URL"
-fi
-
 INIT_SCRIPT="$SERVICE_DIR/init.py"
 if [[ -f "$INIT_SCRIPT" ]]; then
+    # Only pass --backend-url to init scripts that declare it (e.g. havpe-relay).
+    # The ASR/speaker/tts/llm servers don't accept it — they're discovered BY the
+    # backend, not the other way round — and their argparse uses parse_args(), so
+    # passing it unconditionally aborted them with "unrecognized arguments".
+    INIT_ARGS=""
+    if [[ -n "$BACKEND_URL" ]] && grep -q "backend-url" "$INIT_SCRIPT"; then
+        INIT_ARGS="--backend-url $BACKEND_URL"
+    fi
     info "Running configuration wizard for $SERVICE_NAME..."
     cd "$SERVICE_DIR"
     uv run --with-requirements "$CHRONICLE_HOME/setup-requirements.txt" python init.py $INIT_ARGS </dev/tty
@@ -186,37 +209,75 @@ else
     warn "No init script found — using defaults."
 fi
 
-# ── Create Docker network ─────────────────────────────────────────────
-docker network create chronicle-network 2>/dev/null || true
+# ── Create container network ──────────────────────────────────────────
+"$ENGINE" network create chronicle-network 2>/dev/null || true
 
-# ── Start service + edge agent ────────────────────────────────────────
-cd "$SERVICE_DIR"
-info "Starting $SERVICE_NAME + edge agent..."
-
-# Determine GPU profile if applicable (same logic as services.py)
-PROFILES="--profile edge"
-if [[ -f .env ]]; then
-    PYTORCH_VERSION=$(grep -s '^PYTORCH_CUDA_VERSION=' .env | cut -d= -f2 | tr -d "'" | tr -d '"' || echo "")
-    if [[ "$PYTORCH_VERSION" == "strixhalo" ]]; then
-        PROFILES="$PROFILES --profile strixhalo"
-    elif [[ "$PYTORCH_VERSION" == cu* ]]; then
-        PROFILES="$PROFILES --profile gpu"
-    elif [[ -n "$PYTORCH_VERSION" ]]; then
-        PROFILES="$PROFILES --profile cpu"
-    fi
+# ── Start the service ─────────────────────────────────────────────────
+# havpe-relay isn't a services.py-managed service, so it can only use the
+# advertise-only sidecar (the node agent can't start/advertise it).
+if [[ "$SERVICE_NAME" == "havpe-relay" && "$ADVERTISE_ONLY" != "1" ]]; then
+    info "havpe-relay isn't node-agent-managed — using the advertise-only sidecar."
+    ADVERTISE_ONLY=1
 fi
 
-$COMPOSE $PROFILES up --build -d
+if [[ "$ADVERTISE_ONLY" == "1" ]]; then
+    # Secondary path: service + a containerized advertise-only sidecar that rides
+    # this compose project's lifecycle. No host process, but advertise-only.
+    cd "$SERVICE_DIR"
+    info "Starting $SERVICE_NAME + advertise-only edge sidecar..."
+    PROFILES="--profile edge"
+    if [[ -f .env ]]; then
+        PYTORCH_VERSION=$(grep -s '^PYTORCH_CUDA_VERSION=' .env | cut -d= -f2 | tr -d "'" | tr -d '"' || echo "")
+        if [[ "$PYTORCH_VERSION" == "strixhalo" ]]; then
+            PROFILES="$PROFILES --profile strixhalo"
+        elif [[ "$PYTORCH_VERSION" == cu* ]]; then
+            PROFILES="$PROFILES --profile gpu"
+        elif [[ -n "$PYTORCH_VERSION" ]]; then
+            PROFILES="$PROFILES --profile cpu"
+        fi
+    fi
+    $COMPOSE $PROFILES up --build -d
+    MODE_DESC="advertise-only sidecar (no control)"
+    STATUS_CMD="cd $SERVICE_DIR && $COMPOSE $PROFILES ps"
+    LOGS_CMD="cd $SERVICE_DIR && $COMPOSE $PROFILES logs -f"
+    STOP_CMD="cd $SERVICE_DIR && $COMPOSE $PROFILES down"
+else
+    # Default path: native node agent — starts the service AND advertises it on the
+    # Tailnet (with live health) AND survives reboot via a systemd user service.
+    # services.py drives compose (incl. GPU profiles), so we don't replicate it here.
+    cd "$CHRONICLE_HOME"
+    info "Enabling $SERVICE_NAME in config.yml (node-only; backend stays off)..."
+    uv run --with-requirements setup-requirements.txt python3 - "$SERVICE_NAME" <<'PY'
+import sys
+from config_manager import ConfigManager
+svc = sys.argv[1]
+m = ConfigManager()
+m.ensure_config_yml()
+services = dict(m.get_full_config().get("services") or {})
+services[svc] = True
+services["backend"] = False  # a join node never runs the backend
+m.set_enabled_services(services)
+print(f"enabled {svc}")
+PY
+    info "Starting $SERVICE_NAME + node agent (advertises on the Tailnet)..."
+    uv run --with-requirements setup-requirements.txt python3 services.py start "$SERVICE_NAME" --build
+    info "Installing node agent for boot persistence (skipped if systemd unavailable)..."
+    uv run --with-requirements setup-requirements.txt python3 services.py manager install || true
+    MODE_DESC="node agent (advertise + control, reboot-survivable)"
+    STATUS_CMD="cd $CHRONICLE_HOME && ./status.sh"
+    LOGS_CMD="$ENGINE ps   # then: $ENGINE logs -f <container>"
+    STOP_CMD="cd $CHRONICLE_HOME && uv run --with-requirements setup-requirements.txt python3 services.py stop $SERVICE_NAME"
+fi
 
 ok "────────────────────────────────────────"
 ok "  $SERVICE_NAME is running!"
 ok ""
 ok "  Tailscale IP:  $TAILSCALE_IP"
-ok "  Service dir:   $SERVICE_DIR"
+ok "  Mode:          $MODE_DESC"
 ok ""
-ok "  Check status:  cd $SERVICE_DIR && $COMPOSE ps"
-ok "  View logs:     cd $SERVICE_DIR && $COMPOSE logs -f"
-ok "  Stop:          cd $SERVICE_DIR && $COMPOSE $PROFILES down"
+ok "  Status:  $STATUS_CMD"
+ok "  Logs:    $LOGS_CMD"
+ok "  Stop:    $STOP_CMD"
 ok ""
 ok "  The service should appear on the Network page"
 ok "  of your Chronicle backend dashboard."

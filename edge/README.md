@@ -46,37 +46,51 @@ CHRONICLE_HOME=~/my-services curl -sSL ... | bash -s -- havpe-relay
 
 1. Clones the repo to `~/chronicle/` (or `$CHRONICLE_HOME`)
 2. Runs the service's interactive config wizard (API keys, credentials, etc.)
-3. Starts the service + an edge-agent sidecar container
-4. The edge-agent advertises the service on your Tailnet via minidisc
-5. Service appears on the **Network** page of your Chronicle dashboard
+3. Starts the service and the **node agent** (`edge/service_manager.py`) — a small
+   native host process that advertises the service on your Tailnet *and* survives
+   reboot via a systemd user service
+4. Service appears on the **Network** page of your Chronicle dashboard, with live
+   health
+
+The node agent is the default. Pass **`--advertise-only`** (alias `--sidecar`) to use
+the legacy containerized `edge-agent` sidecar instead — advertise-only, no control, no
+host process. (`havpe-relay` always uses the sidecar; it isn't node-agent-managed.)
 
 ## Manage Edge Services
 
+**Default (node agent):**
+```bash
+cd ~/chronicle
+./status.sh                                   # node + service health
+uv run --with-requirements setup-requirements.txt python services.py stop <service>
+```
+
+**Advertise-only sidecar (`--advertise-only`):**
 ```bash
 cd ~/chronicle/extras/<service-dir>
-
-# Status
-docker compose --profile edge ps
-
-# Logs
-docker compose --profile edge logs -f
-
-# Stop
-docker compose --profile edge down
-
-# Restart
-docker compose --profile edge up -d
+docker compose --profile edge ps      # status
+docker compose --profile edge logs -f # logs
+docker compose --profile edge down    # stop
 ```
 
 ## How It Works
 
-The edge-agent is a tiny Docker sidecar that advertises the service on your Tailnet using minidisc. The main Chronicle backend discovers it automatically — no manual IP configuration needed.
+By default the **node agent** runs natively on the edge box: it starts the service via
+`services.py` and advertises it on your Tailnet via minidisc (Tailscale already running
+on the host). The main Chronicle backend discovers it automatically — no manual IP
+configuration needed. Running natively is required because the agent also drives
+`docker compose` against the host (host bind-mount paths) and, on Docker Desktop/WSL2, a
+container can't bind the Tailscale interface to advertise.
 
 ```
 RPi / GPU VM                          Main Server
 ─────────────                         ───────────
-Docker: speaker-service               Docker: chronicle-backend
-Docker: edge-agent (sidecar)   ←TS→   GET /api/system/network
+Docker: asr-service                   Docker: chronicle-backend
+Host:   node agent (native)    ←TS→   GET /api/system/network
         ↓                                    ↓
-   advertises on Tailnet              Network page shows node
+   advertises on Tailnet              Network page shows node + health
 ```
+
+With `--advertise-only`, the advertiser is instead a tiny Docker sidecar (`edge-agent`,
+`network_mode: host` + `tailscaled.sock`) that rides the service's compose lifecycle —
+no host process, but no control and no WSL2 support.

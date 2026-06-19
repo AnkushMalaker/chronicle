@@ -1,11 +1,19 @@
 """
-Service manager agent — start/stop Chronicle services from the WebUI.
+Node agent — control + advertise a Chronicle node, from the WebUI.
 
 A small host-side HTTP API that wraps services.py (the docker compose
-orchestrator). Runs natively on the host — like the discovery agent — because
-containers can't run docker compose with host bind-mount paths. One agent per
-machine; on distributed deployments the backend points SERVICE_MANAGER_URL at
-the agent on whichever box hosts the services.
+orchestrator). Runs natively on the host — it MUST, because docker compose needs
+host bind-mount paths and (on Docker Desktop/WSL2) a container can't bind the
+Tailscale interface to advertise. One agent per machine.
+
+It does two jobs that were previously two separate native processes:
+  1. CONTROL   — start/stop/restart services + switch ASR/TTS providers (the
+                 backend proxies the WebUI System page here via SERVICE_MANAGER_URL).
+  2. ADVERTISE — announce this node's services (and itself, as ``chronicle-node``)
+                 on the Tailnet via minidisc, so other nodes/the backend discover
+                 them. This folds in the old standalone discovery agent.
+
+It also exposes node identity (/node) and a live cluster view (/cluster).
 
 Launched by services.py (any ./start.sh) with:
   SERVICE_MANAGER_TOKEN  — shared secret, required (auto-generated into
@@ -16,13 +24,15 @@ Launched by services.py (any ./start.sh) with:
 
 All endpoints except /health require "Authorization: Bearer <token>".
 Compose operations run in a background thread (builds can take minutes);
-POST endpoints return 202 with an operation id to poll.
+POST endpoints return 202 with an operation id to poll. Tailnet advertising runs
+in its own daemon thread so a bind failure never blocks the control API.
 """
 
 import io
 import logging
 import os
-import subprocess
+import platform
+import shutil
 import sys
 import threading
 import time
@@ -39,7 +49,9 @@ from rich.console import Console
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+import discovery  # noqa: E402  (repo-root discovery.py)
 import services  # noqa: E402  (repo-root services.py)
+from setup_utils import detect_cuda_version, detect_tailscale_info  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,6 +65,15 @@ PORT = int(os.environ.get("SERVICE_MANAGER_PORT", "8775"))
 HOST = os.environ.get("SERVICE_MANAGER_HOST", "0.0.0.0")
 
 VALID_ACTIONS = ("start", "stop", "restart")
+
+# Retained minidisc registry handle — advertising stops if this is GC'd, so it
+# must live for the process lifetime. Set by the advertising daemon thread.
+_advertise_registry = None
+_advertise_lock = threading.Lock()
+# How often the advertising thread refreshes live state (health/running) into the
+# minidisc labels. advertise_service is keyed by port, so a refresh replaces the
+# entry in place rather than duplicating it.
+_ADVERTISE_REFRESH_SECS = int(os.environ.get("ADVERTISE_REFRESH_SECS", "30"))
 
 # Provider-switchable services: service name → (env file key, provider→compose map)
 _PROVIDER_ENV_KEYS = {
@@ -89,6 +110,7 @@ def _record_operation(service: str, action: str) -> dict:
         "status": "running",
         "ok": None,
         "log": "",
+        "phase": "",  # human-readable progress step, updated as the op runs
         "started_at": time.time(),
         "finished_at": None,
     }
@@ -103,14 +125,18 @@ def _record_operation(service: str, action: str) -> dict:
 
 
 def _run_operation(op: dict, fn):
-    """Run a compose operation in a thread, capturing services.py console output."""
+    """Run a compose operation in a thread, capturing services.py console output.
+
+    ``fn`` is called with the op dict so it can publish progress via
+    ``op["phase"]`` (polled by the WebUI).
+    """
 
     def _go():
         buf = io.StringIO()
         original_console = services.console
         services.console = Console(file=buf, force_terminal=False, width=120)
         try:
-            ok = fn()
+            ok = fn(op)
             op["ok"] = bool(ok)
             op["status"] = "done" if ok else "failed"
         except Exception as e:
@@ -167,25 +193,28 @@ def _provider_info(service_name: str) -> dict | None:
         ],
     }
     if service_name == "asr-services":
-        info["streaming_current"] = (
-            env_values.get("STREAMING_ASR_PROVIDER") or ""
-        ).strip("'\"")
+        # The active streaming provider is whatever defaults.stt_stream resolves to
+        # (cloud providers leave STREAMING_ASR_PROVIDER empty), not just the env var.
+        info["streaming_current"] = services.active_streaming_asr_provider()
+        info["streaming_available"] = [
+            {"key": key, "label": opt["label"]}
+            for key, opt in services.STREAMING_ASR_PROVIDER_OPTIONS.items()
+        ]
     return info
 
 
 def _containers_running(name: str) -> bool:
-    """Whether any compose container for this service is currently running."""
+    """Whether any compose container for this service is currently running.
+
+    Uses the engine-aware status helper (docker compose ps vs podman ps by compose
+    project label) so it works under both docker and podman-compose.
+    """
     service_path = REPO_ROOT / services.SERVICES[name]["path"]
     try:
-        result = subprocess.run(
-            ["docker", "compose", "ps", "--status=running", "-q"],
-            cwd=service_path,
-            capture_output=True,
-            text=True,
-            timeout=15,
+        return any(
+            c.get("state") == "running" for c in services.compose_ps_json(service_path)
         )
-        return result.returncode == 0 and bool(result.stdout.strip())
-    except (subprocess.TimeoutExpired, OSError):
+    except Exception:
         return False
 
 
@@ -209,6 +238,127 @@ def _service_entry(name: str) -> dict:
     }
 
 
+# ── Tailnet advertising (folds in the old standalone discovery agent) ────────
+
+
+def _node_labels() -> dict:
+    """minidisc labels for this node's self-advertisement (``chronicle-node``).
+
+    Stays consistent with the existing ``{host, type}`` schema (the WebUI Network
+    page groups discovered services by ``labels.host`` and badges ``type=='edge'``).
+    ``type='node'`` distinguishes the orchestrator from advertise-only edge nodes.
+    All values must be strings (minidisc labels are str→str).
+    """
+    return {
+        "host": os.uname().nodename,
+        "type": "node",
+        "arch": platform.machine(),
+        "gpu": "1" if shutil.which("nvidia-smi") else "0",
+    }
+
+
+def _service_labels(svc_name: str, hostname: str) -> dict:
+    """Per-service minidisc labels carrying LIVE state, not just 'enabled'.
+
+    Reflects this node's own view — whether containers are up and the health
+    verdict — so a consumer learns what's actually live from the advertisement
+    itself. ``host``/``type`` are kept for the Network page (it groups by host).
+    All values are strings (minidisc labels are str→str).
+    """
+    health, _detail = services.check_service_health(svc_name)
+    return {
+        "host": hostname,
+        "type": "service",
+        "service": svc_name,
+        "enabled": "1",
+        "running": "1" if _containers_running(svc_name) else "0",
+        "health": health,  # healthy | partial | unhealthy | stopped
+    }
+
+
+def _build_advertise_entries(triples) -> list:
+    """(name, port, labels) for every enabled service + this node, with live state.
+
+    ``triples`` are the ``(discovery_name, port, display_label)`` from
+    ``services._get_advertised_services()`` (passed in to avoid recomputing).
+    """
+    hostname = os.uname().nodename
+    disc_to_svc = {disc: svc for svc, disc in services._DISCOVERY_NAMES.items()}
+    entries = [
+        (
+            disc_name,
+            port,
+            _service_labels(disc_to_svc.get(disc_name, disc_name), hostname),
+        )
+        for disc_name, port, _display in triples
+    ]
+    entries.append(("chronicle-node", PORT, _node_labels()))
+    return entries
+
+
+def _advertise_worker():
+    """Advertise this node's services + itself on the Tailnet, refreshing live
+    state on a timer.
+
+    Runs in a daemon thread so a minidisc bind failure (common on Docker
+    Desktop/WSL2) never blocks the control API. ``advertise_service`` is keyed by
+    port, so re-advertising updates labels in place (no duplicates);
+    ``unlist_service`` drops services that are no longer enabled.
+    """
+    global _advertise_registry
+    registry = None
+    advertised_ports: set = set()
+
+    while True:
+        try:
+            triples = services._get_advertised_services()
+        except Exception:
+            logger.exception("Failed to compute advertised services")
+            triples = []
+        entries = _build_advertise_entries(triples)
+
+        # Local manifest the backend Network page reads — written regardless of
+        # whether minidisc binds, so the "advertising" list shows even where the
+        # Tailscale interface isn't reachable.
+        try:
+            services._write_advertised_services(triples)
+        except Exception:
+            logger.exception("Failed to write advertised-services.json")
+
+        if registry is None:
+            registry = discovery.start_advertising(entries)
+            if registry is not None:
+                with _advertise_lock:
+                    _advertise_registry = registry
+                advertised_ports = {port for _n, port, _l in entries}
+                logger.info("Advertising %d entr(ies) on the Tailnet", len(entries))
+            else:
+                logger.warning(
+                    "Tailnet advertising unavailable (minidisc/tailscale not reachable); "
+                    "retrying in %ds",
+                    _ADVERTISE_REFRESH_SECS,
+                )
+        else:
+            current = {port for _n, port, _l in entries}
+            for name, port, labels in entries:
+                try:
+                    registry.advertise_service(port, name, labels)
+                except Exception as e:  # noqa: BLE001 - refresh is best-effort
+                    logger.debug("re-advertise %s failed (non-fatal): %s", name, e)
+            for stale in advertised_ports - current:
+                try:
+                    registry.unlist_service(stale)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("unlist port %d failed (non-fatal): %s", stale, e)
+            advertised_ports = current
+
+        time.sleep(_ADVERTISE_REFRESH_SECS)
+
+
+def _start_advertising_thread():
+    threading.Thread(target=_advertise_worker, daemon=True, name="advertise").start()
+
+
 # ── Routes ───────────────────────────────────────────────────────────────────
 
 
@@ -221,11 +371,42 @@ class ActionBody(BaseModel):
 class ProviderBody(BaseModel):
     provider: str
     build: bool = False
+    # "batch" switches ASR_PROVIDER (the stt model); "streaming" switches the
+    # STREAMING_ASR_PROVIDER (the stt_stream model). Only meaningful for asr-services.
+    lane: str = "batch"
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "host": os.uname().nodename}
+    return {"status": "ok", "host": os.uname().nodename, "agent_port": PORT}
+
+
+@app.get("/node", dependencies=[Depends(require_token)])
+def node_info():
+    """This node's identity + hardware capabilities + per-service status.
+
+    Used (now/by future cluster control) to place services sensibly — e.g. don't
+    offer GPU-only services on an arm64 box with no NVIDIA GPU.
+    """
+    dns, ip = detect_tailscale_info()
+    return {
+        "host": os.uname().nodename,
+        "tailscale": {"dns": dns, "ip": ip},
+        "arch": platform.machine(),
+        "gpu": {
+            # detect_cuda_version returns "" here when nvidia-smi is absent/unparseable
+            "cuda": detect_cuda_version(default=""),
+            "nvidia_smi": shutil.which("nvidia-smi") is not None,
+        },
+        "agent_port": PORT,
+        "services": [_service_entry(name) for name in services.SERVICES],
+    }
+
+
+@app.get("/cluster", dependencies=[Depends(require_token)])
+def cluster():
+    """Live view of all chronicle-* services advertised on the Tailnet."""
+    return {"services": discovery.list_all_services()}
 
 
 @app.get("/services", dependencies=[Depends(require_token)])
@@ -253,27 +434,65 @@ def set_provider(name: str, body: ProviderBody):
         raise HTTPException(
             status_code=400, detail=f"{name} does not support provider switching"
         )
-    env_key, provider_map = _PROVIDER_ENV_KEYS[name]
-    if body.provider not in provider_map:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown provider '{body.provider}'. Available: {', '.join(provider_map)}",
-        )
 
     env_path = REPO_ROOT / services.SERVICES[name]["path"] / ".env"
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.touch(exist_ok=True)
-    set_key(str(env_path), env_key, body.provider, quote_mode="never")
+
+    streaming = name == "asr-services" and body.lane == "streaming"
+    # When True, the local-container set doesn't change, so we skip compose
+    # entirely (the backend repoints defaults.stt_stream + signals workers).
+    skip_compose = False
+
+    if streaming:
+        # Streaming lane: STREAMING_ASR_PROVIDER selects the stt_stream model.
+        # Cloud providers (smallest/deepgram) have no local container, so the env
+        # var is cleared and only the batch container is (re)started.
+        env_key = "STREAMING_ASR_PROVIDER"
+        options = services.STREAMING_ASR_PROVIDER_OPTIONS
+        if body.provider not in options:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown streaming provider '{body.provider}'. Available: {', '.join(options)}",
+            )
+        # The streaming companion container (if any) for old vs new selection.
+        old_provider = (
+            dotenv_values(env_path).get("STREAMING_ASR_PROVIDER") or ""
+        ).strip("'\"")
+        old_service = services.STREAMING_ASR_PROVIDER_TO_SERVICE.get(old_provider)
+        new_service = options[body.provider]["service"]
+        # Only local-container providers belong in STREAMING_ASR_PROVIDER (it drives
+        # which companion container `up` starts); cloud providers leave it empty.
+        env_value = body.provider if new_service else ""
+        # If the local container set is unchanged (e.g. cloud→cloud like
+        # smallest→deepgram), don't churn containers — repointing the stt_stream
+        # model is enough, and we avoid a needless heavy batch-model reload.
+        skip_compose = old_service == new_service
+    else:
+        env_key, provider_map = _PROVIDER_ENV_KEYS[name]
+        if body.provider not in provider_map:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown provider '{body.provider}'. Available: {', '.join(provider_map)}",
+            )
+        env_value = body.provider
+
+    set_key(str(env_path), env_key, env_value, quote_mode="never")
 
     was_running = services.check_service_health(name)[0] != "stopped"
 
-    def fn():
+    def fn(op):
+        if skip_compose:
+            op["phase"] = "Applying provider (no container change)…"
+            return True
         # down first: providers share one port, so the old container must go
         # before the new one binds.
+        op["phase"] = "Stopping current service…"
         ok = services.run_compose_command(name, "down")
-        if ok and was_running:
-            ok = services.run_compose_command(name, "up", build=body.build)
-        return ok
+        if not (ok and was_running):
+            return ok
+        op["phase"] = f"Starting {body.provider}…"
+        return services.run_compose_command(name, "up", build=body.build)
 
     op = _start_operation(name, f"provider:{body.provider}", fn)
     return {"operation": op}
@@ -302,26 +521,76 @@ def service_action(name: str, action: str, body: ActionBody | None = None):
                 status_code=400,
                 detail=f"{name} is not enabled in config/config.yml — run the wizard first",
             )
-        fn = lambda: services.run_compose_command(
-            name, "up", build=body.build
-        )  # noqa: E731
+
+        def fn(op):
+            op["phase"] = "Starting…"
+            return services.run_compose_command(name, "up", build=body.build)
+
     elif action == "stop":
-        fn = lambda: services.run_compose_command(name, "down")  # noqa: E731
+
+        def fn(op):
+            op["phase"] = "Stopping…"
+            return services.run_compose_command(name, "down")
+
     else:  # restart — down + up so provider/env changes take effect
-        fn = lambda: (  # noqa: E731
-            services.run_compose_command(name, "down")
-            and services.run_compose_command(name, "up", build=body.build)
-        )
+
+        def fn(op):
+            op["phase"] = "Stopping…"
+            if not services.run_compose_command(name, "down"):
+                return False
+            op["phase"] = "Starting…"
+            return services.run_compose_command(name, "up", build=body.build)
 
     op = _start_operation(name, action, fn)
     return {"operation": op}
+
+
+# ── Claude remote-control session ────────────────────────────────────────────
+#
+# Lets the WebUI start/stop a `claude remote-control` server (in tmux) on this
+# host, so new Claude Code sessions can be spawned from the phone. Backed by the
+# services.py helpers (tmux + optional systemd unit).
+
+_RC_ACTIONS = ("start", "stop", "restart")
+
+
+@app.get("/remote-control", dependencies=[Depends(require_token)])
+def remote_control_status():
+    return services.remote_control_status()
+
+
+@app.post("/remote-control/{action}", dependencies=[Depends(require_token)])
+def remote_control_action(action: str):
+    if action not in _RC_ACTIONS:
+        raise HTTPException(status_code=404, detail=f"Unknown action: {action}")
+    try:
+        if action == "start":
+            ok = services.start_remote_control()
+        elif action == "stop":
+            ok = services.stop_remote_control()
+        else:  # restart
+            services.stop_remote_control()
+            ok = services.start_remote_control()
+    except Exception as e:  # noqa: BLE001 - surface failure to the WebUI
+        logger.exception("remote-control %s failed", action)
+        raise HTTPException(
+            status_code=500, detail=f"remote-control {action} failed: {e}"
+        )
+    if not ok:
+        raise HTTPException(
+            status_code=500,
+            detail=f"remote-control {action} did not succeed (tmux/claude available?)",
+        )
+    return services.remote_control_status()
 
 
 def main():
     if not TOKEN:
         logger.error("SERVICE_MANAGER_TOKEN not set — refusing to start")
         sys.exit(1)
-    logger.info("Service manager listening on %s:%d", HOST, PORT)
+    # Advertise on the Tailnet in the background — never blocks the control API.
+    _start_advertising_thread()
+    logger.info("Node agent listening on %s:%d", HOST, PORT)
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
 
 
