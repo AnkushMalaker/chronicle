@@ -9,6 +9,8 @@ import { playDownlinkAudio } from '../utils/audioPlayback';
 interface UseAudioStreamerOptions {
   /** Called when a new JWT token is obtained via auto-re-login */
   onTokenRefreshed?: (token: string) => void;
+  /** When false, the socket connects once and does NOT auto-reconnect on drop. */
+  autoReconnectEnabled?: boolean;
 }
 
 interface UseAudioStreamer {
@@ -117,6 +119,12 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
 
   // Track if we received an auth error so onclose doesn't blindly reconnect
   const authFailedRef = useRef<boolean>(false);
+
+  // User preference: when false, connect once (no auto-reconnect on drop).
+  const autoReconnectEnabledRef = useRef<boolean>(options?.autoReconnectEnabled ?? true);
+  useEffect(() => {
+    autoReconnectEnabledRef.current = options?.autoReconnectEnabled ?? true;
+  }, [options?.autoReconnectEnabled]);
 
   // Zombie-socket detection: timestamp of the last pong from the backend.
   const lastPongRef = useRef<number>(0);
@@ -229,6 +237,12 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
   const attemptReconnect = useCallback(() => {
     if (manuallyStoppedRef.current || !currentUrlRef.current) {
       console.log('[AudioStreamer] Not reconnecting: manually stopped or missing URL');
+      return;
+    }
+    // "Connect once" mode: don't auto-reconnect on drop.
+    if (!autoReconnectEnabledRef.current) {
+      console.log('[AudioStreamer] Auto-reconnect disabled (connect-once mode)');
+      setStateSafe(setIsConnecting, false);
       return;
     }
 
@@ -384,7 +398,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
           if (websocketRef.current === ws) websocketRef.current = null;
 
           // Auth failure: try re-login instead of blind reconnect
-          if (authFailedRef.current && !manuallyStoppedRef.current) {
+          if (authFailedRef.current && !manuallyStoppedRef.current && autoReconnectEnabledRef.current) {
             authFailedRef.current = false;
             console.log('[AudioStreamer] Auth failure detected, attempting re-login...');
             setStateSafe(setError, 'Session expired. Re-authenticating...');
@@ -406,8 +420,12 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
           }
 
           if (!isManual && !manuallyStoppedRef.current) {
-            setStateSafe(setError, 'Connection closed; attempting to reconnect.');
-            attemptReconnect();
+            if (autoReconnectEnabledRef.current) {
+              setStateSafe(setError, 'Connection closed; attempting to reconnect.');
+              attemptReconnect();
+            } else {
+              setStateSafe(setError, 'Connection closed.');
+            }
           }
         };
       } catch (e) {

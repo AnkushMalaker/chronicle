@@ -8,6 +8,7 @@ const DEEPGRAM_API_KEY_KEY = 'DEEPGRAM_API_KEY_KEY';
 const USER_ID_KEY = 'USER_ID_KEY';
 const AUTH_EMAIL_KEY = 'AUTH_EMAIL_KEY';
 const SERVICE_MANAGER_URL_KEY = 'SERVICE_MANAGER_URL_KEY';
+const AUTO_RECONNECT_ENABLED_KEY = 'AUTO_RECONNECT_ENABLED_KEY';
 // SecureStore keys must be alphanumeric + ._- (no other punctuation).
 const AUTH_PASSWORD_KEY = 'AUTH_PASSWORD_KEY';
 const JWT_TOKEN_KEY = 'JWT_TOKEN_KEY';
@@ -227,6 +228,26 @@ export const getJwtToken = async (): Promise<string | null> => {
   } catch (error) {
     console.error('[Storage] Error retrieving JWT token:', error);
     return null;
+  }
+};
+
+// Auto-reconnect preference: true (default) = stay connected / persistent
+// reconnect; false = connect once (no auto-reconnect on drop).
+export const saveAutoReconnectEnabled = async (enabled: boolean): Promise<void> => {
+  try {
+    await AsyncStorage.setItem(AUTO_RECONNECT_ENABLED_KEY, enabled ? '1' : '0');
+  } catch (error) {
+    console.error('[Storage] Error saving auto-reconnect preference:', error);
+  }
+};
+
+export const getAutoReconnectEnabled = async (): Promise<boolean> => {
+  try {
+    const v = await AsyncStorage.getItem(AUTO_RECONNECT_ENABLED_KEY);
+    return v === null ? true : v === '1'; // default ON
+  } catch (error) {
+    console.error('[Storage] Error retrieving auto-reconnect preference:', error);
+    return true;
   }
 };
 

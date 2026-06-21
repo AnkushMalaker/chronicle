@@ -18,6 +18,8 @@ interface UseAutoReconnectParams {
     disconnectFromDevice: () => Promise<void>;
   };
   scanning: boolean;
+  /** When false, the device connects once and does NOT auto-reconnect on drop/launch. */
+  autoReconnectEnabled?: boolean;
 }
 
 export interface AutoReconnectState {
@@ -37,6 +39,7 @@ export const useAutoReconnect = ({
   permissionGranted,
   deviceConnection,
   scanning,
+  autoReconnectEnabled = true,
 }: UseAutoReconnectParams): AutoReconnectState => {
   const [lastKnownDeviceId, setLastKnownDeviceId] = useState<string | null>(null);
   const [isAttemptingAutoReconnect, setIsAttemptingAutoReconnect] = useState(false);
@@ -57,6 +60,11 @@ export const useAutoReconnect = ({
   const lastKnownDeviceIdRef = useRef<string | null>(null);
   // Self-reference so a failed retry can reschedule itself for persistent retry.
   const scheduleRetryRef = useRef<((deviceId: string, isQuickFailure: boolean) => void) | null>(null);
+  // User preference mirror for use inside async timers / mount-only listeners.
+  const autoReconnectEnabledRef = useRef<boolean>(autoReconnectEnabled);
+  useEffect(() => {
+    autoReconnectEnabledRef.current = autoReconnectEnabled;
+  }, [autoReconnectEnabled]);
 
   // Mirror of the connected device id for use inside the (mount-only) AppState listener.
   const connectedDeviceIdRef = useRef<string | null>(null);
@@ -95,6 +103,11 @@ export const useAutoReconnect = ({
   const scheduleRetry = useCallback(
     (deviceId: string, isQuickFailure: boolean) => {
       if (!deviceId) return;
+      // "Connect once" mode: don't auto-reconnect on drop/launch failure.
+      if (!autoReconnectEnabledRef.current) {
+        clearRetryTimers();
+        return;
+      }
 
       // Adjust backoff: a quick failure (or a never-connected launch attempt)
       // grows the delay; a healthy connection that dropped resets it.
@@ -221,6 +234,7 @@ export const useAutoReconnect = ({
   // Auto-reconnect on app launch (existing behavior)
   useEffect(() => {
     if (
+      autoReconnectEnabled &&
       bluetoothState === BluetoothState.PoweredOn &&
       permissionGranted &&
       lastKnownDeviceId &&
@@ -251,6 +265,7 @@ export const useAutoReconnect = ({
       attemptAutoConnect();
     }
   }, [
+    autoReconnectEnabled,
     bluetoothState, permissionGranted, lastKnownDeviceId,
     deviceConnection.connectedDeviceId, deviceConnection.isConnecting,
     scanning, deviceConnection.connectToDevice,
@@ -276,6 +291,7 @@ export const useAutoReconnect = ({
   useEffect(() => {
     const subscription = AppState.addEventListener('change', nextState => {
       if (nextState !== 'active') return;
+      if (!autoReconnectEnabledRef.current) return;
       const deviceId = lastKnownDeviceIdRef.current;
       if (deviceId && !connectedDeviceIdRef.current) {
         setTriedAutoReconnectForCurrentId(false);

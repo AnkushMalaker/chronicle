@@ -6,6 +6,8 @@ import {
   getUserId,
   getAuthEmail,
   getJwtToken,
+  getAutoReconnectEnabled,
+  saveAutoReconnectEnabled,
 } from '../utils/storage';
 import { recoverBackendUrl } from '../services/serviceManager';
 import { httpUrlToWebSocketUrl } from '../utils/urlConversion';
@@ -18,9 +20,11 @@ export interface AppSettings {
   isAuthenticated: boolean;
   currentUserEmail: string | null;
   jwtToken: string | null;
+  autoReconnectEnabled: boolean;
   handleSetAndSaveWebSocketUrl: (url: string) => Promise<void>;
   handleSetAndSaveUserId: (id: string) => Promise<void>;
   handleAuthStatusChange: (authenticated: boolean, email: string | null, token: string | null) => void;
+  handleToggleAutoReconnect: () => void;
 }
 
 export const useAppSettings = (): AppSettings => {
@@ -29,6 +33,7 @@ export const useAppSettings = (): AppSettings => {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null);
   const [jwtToken, setJwtToken] = useState<string | null>(null);
+  const [autoReconnectEnabled, setAutoReconnectEnabled] = useState<boolean>(true);
 
   useEffect(() => {
     const loadSettings = async () => {
@@ -65,6 +70,8 @@ export const useAppSettings = (): AppSettings => {
         setJwtToken(storedToken);
         setIsAuthenticated(true);
       }
+
+      setAutoReconnectEnabled(await getAutoReconnectEnabled());
     };
     loadSettings();
   }, []);
@@ -85,14 +92,24 @@ export const useAppSettings = (): AppSettings => {
     setJwtToken(token);
   }, []);
 
+  const handleToggleAutoReconnect = useCallback(() => {
+    setAutoReconnectEnabled(prev => {
+      const next = !prev;
+      saveAutoReconnectEnabled(next);
+      return next;
+    });
+  }, []);
+
   return {
     webSocketUrl,
     userId,
     isAuthenticated,
     currentUserEmail,
     jwtToken,
+    autoReconnectEnabled,
     handleSetAndSaveWebSocketUrl,
     handleSetAndSaveUserId,
     handleAuthStatusChange,
+    handleToggleAutoReconnect,
   };
 };

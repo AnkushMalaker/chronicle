@@ -23,6 +23,8 @@ interface DeviceDetailsProps {
   onSetUserId: (userId: string) => void;
   isAudioListenerRetrying?: boolean;
   audioListenerRetryAttempts?: number;
+  autoReconnectEnabled?: boolean;
+  onToggleAutoReconnect?: () => void;
 }
 
 export const DeviceDetails: React.FC<DeviceDetailsProps> = ({
@@ -44,7 +46,9 @@ export const DeviceDetails: React.FC<DeviceDetailsProps> = ({
   userId,
   onSetUserId,
   isAudioListenerRetrying,
-  audioListenerRetryAttempts
+  audioListenerRetryAttempts,
+  autoReconnectEnabled = true,
+  onToggleAutoReconnect,
 }) => {
   const { colors } = useTheme();
   const s = createStyles(colors);
@@ -108,19 +112,41 @@ export const DeviceDetails: React.FC<DeviceDetailsProps> = ({
       </View>
 
       <View style={s.subSection}>
-        <TouchableOpacity
-          style={[
-            s.button,
-            isListeningAudio || isAudioListenerRetrying ? { backgroundColor: colors.warning } : null,
-            { marginTop: 15 }
-          ]}
-          onPress={isListeningAudio || isAudioListenerRetrying ? onStopAudioListener : onStartAudioListener}
-        >
-          <Text style={s.buttonText}>
-            {isListeningAudio ? "Stop Audio Listener" :
-             isAudioListenerRetrying ? "Stop Retry" : "Start Audio Listener"}
+        <View style={s.listenerRow}>
+          <TouchableOpacity
+            style={[
+              s.button,
+              s.listenerButton,
+              isListeningAudio || isAudioListenerRetrying ? { backgroundColor: colors.warning } : null,
+            ]}
+            onPress={isListeningAudio || isAudioListenerRetrying ? onStopAudioListener : onStartAudioListener}
+          >
+            <Text style={s.buttonText}>
+              {isListeningAudio ? "Stop Audio Listener" :
+               isAudioListenerRetrying ? "Stop Retry" : "Start Audio Listener"}
+            </Text>
+          </TouchableOpacity>
+
+          {onToggleAutoReconnect && (
+            <TouchableOpacity
+              style={[s.lockButton, autoReconnectEnabled ? s.lockButtonOn : null]}
+              onPress={onToggleAutoReconnect}
+              accessibilityRole="switch"
+              accessibilityState={{ checked: autoReconnectEnabled }}
+              accessibilityLabel={autoReconnectEnabled ? 'Auto-reconnect on' : 'Connect once'}
+            >
+              <Text style={s.lockIcon}>{autoReconnectEnabled ? '🔒' : '🔓'}</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
+        {onToggleAutoReconnect && (
+          <Text style={s.lockHint}>
+            {autoReconnectEnabled
+              ? '🔒 Stays connected — auto-reconnects if the connection drops.'
+              : '🔓 Connect once — won’t auto-reconnect if it drops.'}
           </Text>
-        </TouchableOpacity>
+        )}
 
         {isAudioListenerRetrying && (
           <View style={s.retryContainer}>
@@ -207,6 +233,37 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     color: 'white',
     fontSize: 16,
     fontWeight: '600',
+  },
+  listenerRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    marginTop: 15,
+    gap: 10,
+  },
+  listenerButton: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  lockButton: {
+    width: 52,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.inputBorder,
+    backgroundColor: colors.inputBackground,
+  },
+  lockButtonOn: {
+    borderColor: colors.primary,
+    backgroundColor: colors.card,
+  },
+  lockIcon: {
+    fontSize: 22,
+  },
+  lockHint: {
+    fontSize: 12,
+    color: colors.textTertiary,
+    marginTop: 8,
   },
   infoContainerSM: {
     marginTop: 10,

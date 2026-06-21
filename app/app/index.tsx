@@ -47,6 +47,7 @@ export default function App() {
 
   // Audio
   const audioStreamer = useAudioStreamer({
+    autoReconnectEnabled: settings.autoReconnectEnabled,
     onTokenRefreshed: (newToken) => {
       // Update app-level auth state when auto-re-login refreshes the token
       if (settings.currentUserEmail) {
@@ -131,6 +132,7 @@ export default function App() {
     permissionGranted,
     deviceConnection,
     scanning: false,
+    autoReconnectEnabled: settings.autoReconnectEnabled,
   });
 
   // Scanning
@@ -425,6 +427,8 @@ export default function App() {
                   onSetUserId={settings.handleSetAndSaveUserId}
                   isAudioListenerRetrying={isAudioListenerRetrying}
                   audioListenerRetryAttempts={audioListenerRetryAttempts}
+                  autoReconnectEnabled={settings.autoReconnectEnabled}
+                  onToggleAutoReconnect={settings.handleToggleAutoReconnect}
                 />
               )}
             </>
