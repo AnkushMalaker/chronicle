@@ -10,7 +10,9 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -512,6 +514,57 @@ def tailscale_socket_path() -> Optional[str]:
         if Path(path).exists():
             return path
     return None
+
+
+def tailscaled_enabled_at_boot() -> Optional[bool]:
+    """
+    Whether the tailscaled systemd unit is enabled to start on boot.
+
+    Returns:
+        True  — `systemctl is-enabled tailscaled` reports enabled (it'll come back
+                after a reboot).
+        False — the unit exists but is disabled/static (started manually only;
+                won't survive a reboot — the classic "Tailscale gone after reboot").
+        None  — can't tell: not Linux, no systemd/systemctl, or no tailscaled unit
+                (e.g. Tailscale.app on macOS, or a non-systemd init). Nothing to offer.
+    """
+    if sys.platform != "linux" or shutil.which("systemctl") is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-enabled", "tailscaled"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    state = result.stdout.strip()
+    if state == "enabled":
+        return True
+    # "disabled" / "static" → won't auto-start. Unknown unit → systemctl prints
+    # nothing to stdout (message goes to stderr, rc=1) → treat as "can't tell".
+    if state in ("disabled", "static"):
+        return False
+    return None
+
+
+def enable_tailscaled_at_boot() -> bool:
+    """
+    Enable (and start) the tailscaled unit so it survives reboots.
+
+    Runs `sudo systemctl enable --now tailscaled`. Returns True on success. Uses sudo
+    because enabling a system unit needs root; the user may be prompted for a password.
+    """
+    try:
+        return (
+            subprocess.run(
+                ["sudo", "systemctl", "enable", "--now", "tailscaled"]
+            ).returncode
+            == 0
+        )
+    except OSError:
+        return False
 
 
 def decide_cert_mode(server_address: str) -> str:

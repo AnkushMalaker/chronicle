@@ -58,7 +58,12 @@ models:
     model_provider: llamacpp
     api_family: openai
     model_name: glm-4.7-flash
-    model_url: http://host.docker.internal:8083/v1
+    # Empty LLM_BASE_URL → resolve a tailnet-advertised chronicle-llm live (with /v1
+    # appended); else the host-local default. An explicit URL always wins.
+    model_url: ${oc.env:LLM_BASE_URL,''}
+    discovery_service: chronicle-llm
+    discovery_path: /v1
+    discovery_default: http://host.docker.internal:8083/v1
     api_key: no-key
     model_params:
       temperature: 0.2
@@ -156,7 +161,12 @@ models:
     model_type: stt
     model_provider: parakeet
     api_family: http
-    model_url: http://${oc.env:PARAKEET_ASR_URL,172.17.0.1:8767}
+    # Empty PARAKEET_ASR_URL → resolve a tailnet-advertised chronicle-asr live
+    # (config-from-tailnet-later); else fall back to the host-local default. An
+    # explicit URL (own/remote endpoint) always wins. Scheme is added if missing.
+    model_url: ${oc.env:PARAKEET_ASR_URL,''}
+    discovery_service: chronicle-asr
+    discovery_default: http://172.17.0.1:8767
     api_key: ''
     # keyword_boosting: hot words sent as the `context_info` form field (acoustic
     # recognition hint, never echoed into output).
@@ -179,7 +189,9 @@ models:
     model_type: stt
     model_provider: gemma4
     api_family: http
-    model_url: http://${oc.env:GEMMA4_ASR_URL,host.docker.internal:8767}
+    model_url: ${oc.env:GEMMA4_ASR_URL,''}
+    discovery_service: chronicle-asr
+    discovery_default: http://host.docker.internal:8767
     api_key: ''
     # context_prompt: Gemma 4 is an LLM and consumes context as prompt text, so it
     # is given the user-authored asr_context only — NOT the plugin wake-word boost
@@ -205,7 +217,9 @@ models:
     model_type: stt
     model_provider: af_next
     api_family: http
-    model_url: http://${oc.env:AF_NEXT_ASR_URL,host.docker.internal:8767}
+    model_url: ${oc.env:AF_NEXT_ASR_URL,''}
+    discovery_service: chronicle-asr
+    discovery_default: http://host.docker.internal:8767
     api_key: ''
     capabilities:
       - segments
@@ -228,7 +242,9 @@ models:
     model_type: stt
     model_provider: qwen3-asr
     api_family: http
-    model_url: http://${oc.env:QWEN3_ASR_URL,host.docker.internal:8767}
+    model_url: ${oc.env:QWEN3_ASR_URL,''}
+    discovery_service: chronicle-asr
+    discovery_default: http://host.docker.internal:8767
     api_key: ''
     capabilities:
       - multilingual

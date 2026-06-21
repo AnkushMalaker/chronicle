@@ -230,6 +230,28 @@ class ChronicleSetup:
 
         self.console.print("[green][SUCCESS][/green] Admin account configured")
 
+    def _asr_url_for(
+        self, env_key: str, default: str = "http://host.docker.internal:8767"
+    ):
+        """Resolve an offline ASR provider's URL env value from the wizard's source choice.
+
+        - --asr-discover  → '' (left empty so the backend discovers chronicle-asr on
+          the Tailnet live — 'configure from the Tailnet later')
+        - --asr-url <url> → that URL (own / picked-from-Tailnet endpoint)
+        - otherwise       → prompt (interactive standalone run), defaulting to local
+        """
+        if getattr(self.args, "asr_discover", False):
+            self.console.print(
+                f"[blue][INFO][/blue] {env_key} left empty — backend will discover "
+                "chronicle-asr on the Tailnet at runtime"
+            )
+            return ""
+        if getattr(self.args, "asr_url", None):
+            self.console.print(f"[green]✅[/green] {env_key} = {self.args.asr_url}")
+            return self.args.asr_url
+        existing = read_env_value(".env", env_key) or default
+        return self.prompt_value(f"{env_key}", existing)
+
     def setup_transcription(self):
         """Configure transcription provider - updates config.yml and .env"""
         # Check if transcription provider was provided via command line
@@ -343,14 +365,9 @@ class ChronicleSetup:
 
         elif choice == "2":
             self.console.print("[blue][INFO][/blue] Offline Parakeet ASR selected")
-            existing_parakeet_url = (
-                read_env_value(".env", "PARAKEET_ASR_URL")
-                or "http://host.docker.internal:8767"
-            )
-            parakeet_url = self.prompt_value("Parakeet ASR URL", existing_parakeet_url)
-
-            # Write URL to .env for ${PARAKEET_ASR_URL} placeholder in config.yml
-            self.config["PARAKEET_ASR_URL"] = parakeet_url
+            # Write URL to .env for ${PARAKEET_ASR_URL} placeholder in config.yml.
+            # Empty ("" from --asr-discover) → runtime Tailnet discovery.
+            self.config["PARAKEET_ASR_URL"] = self._asr_url_for("PARAKEET_ASR_URL")
 
             # Update config.yml to use Parakeet
             self.config_manager.update_config_defaults({"stt": "stt-parakeet-batch"})
@@ -398,20 +415,17 @@ class ChronicleSetup:
             self.console.print(
                 "[blue][INFO][/blue] Qwen3-ASR selected (52 languages, streaming + batch via vLLM)"
             )
-            existing_qwen3_url_raw = read_env_value(".env", "QWEN3_ASR_URL")
-            existing_qwen3_url = (
-                f"http://{existing_qwen3_url_raw}"
-                if existing_qwen3_url_raw
-                else "http://host.docker.internal:8767"
+            qwen3_url = self._asr_url_for("QWEN3_ASR_URL")
+            # Stored without scheme (resolved_url re-adds it); empty → Tailnet discovery.
+            self.config["QWEN3_ASR_URL"] = (
+                qwen3_url.replace("http://", "").rstrip("/") if qwen3_url else ""
             )
-            qwen3_url = self.prompt_value("Qwen3-ASR URL", existing_qwen3_url)
-
-            # Write URL to .env for ${QWEN3_ASR_URL} placeholder in config.yml
-            self.config["QWEN3_ASR_URL"] = qwen3_url.replace("http://", "").rstrip("/")
-
-            # Also set streaming URL (same host, port 8769)
-            stream_host = qwen3_url.replace("http://", "").split(":")[0]
-            self.config["QWEN3_ASR_STREAM_URL"] = f"{stream_host}:8769"
+            # Streaming companion (same host, port 8769); empty when discovering.
+            if qwen3_url:
+                stream_host = qwen3_url.replace("http://", "").split(":")[0]
+                self.config["QWEN3_ASR_STREAM_URL"] = f"{stream_host}:8769"
+            else:
+                self.config["QWEN3_ASR_STREAM_URL"] = ""
 
             # Update config.yml to use Qwen3-ASR
             self.config_manager.update_config_defaults({"stt": "stt-qwen3-asr"})
@@ -462,12 +476,7 @@ class ChronicleSetup:
             self.console.print(
                 "[blue][INFO][/blue] Gemma 4 E2B-it selected (prompt-based diarization, batch + streaming)"
             )
-            existing_gemma4_url = (
-                read_env_value(".env", "GEMMA4_ASR_URL") or "host.docker.internal:8767"
-            )
-            gemma4_url = self.prompt_value("Gemma 4 ASR URL", existing_gemma4_url)
-
-            self.config["GEMMA4_ASR_URL"] = gemma4_url
+            self.config["GEMMA4_ASR_URL"] = self._asr_url_for("GEMMA4_ASR_URL")
 
             # The same gemma4-asr service serves both batch (/transcribe) and
             # streaming (/stream), so enable both defaults at once.
@@ -519,14 +528,7 @@ class ChronicleSetup:
                 "Noncommercial License — research use only. Do not deploy in commercial "
                 "products."
             )
-            existing_af_next_url = (
-                read_env_value(".env", "AF_NEXT_ASR_URL") or "host.docker.internal:8767"
-            )
-            af_next_url = self.prompt_value(
-                "Audio Flamingo Next ASR URL", existing_af_next_url
-            )
-
-            self.config["AF_NEXT_ASR_URL"] = af_next_url
+            self.config["AF_NEXT_ASR_URL"] = self._asr_url_for("AF_NEXT_ASR_URL")
 
             self.config_manager.update_config_defaults({"stt": "stt-af-next"})
 
@@ -898,15 +900,24 @@ class ChronicleSetup:
             self.config_manager.update_config_defaults(
                 {"llm": "llamacpp-llm", "embedding": "llamacpp-embed"}
             )
-            self.console.print(
-                "[green][SUCCESS][/green] llama.cpp configured in config.yml"
-            )
+            # Source of the llama.cpp endpoint (the llamacpp-llm entry reads LLM_BASE_URL):
+            #   --llm-discover     → '' (backend discovers chronicle-llm on the Tailnet)
+            #   --llm-base-url URL → pin a remote/own endpoint
+            #   otherwise          → leave LLM_BASE_URL alone (host-local default applies)
+            if getattr(self.args, "llm_discover", False):
+                self.config["LLM_BASE_URL"] = ""
+                self.console.print(
+                    "[blue][INFO][/blue] LLM_BASE_URL left empty — backend will discover "
+                    "chronicle-llm on the Tailnet at runtime"
+                )
+            elif getattr(self.args, "llm_base_url", None):
+                self.config["LLM_BASE_URL"] = self.args.llm_base_url
+                self.console.print(
+                    f"[green]✅[/green] LLM_BASE_URL = {self.args.llm_base_url}"
+                )
             self.console.print("[blue][INFO][/blue] Set defaults.llm: llamacpp-llm")
             self.console.print(
                 "[blue][INFO][/blue] Set defaults.embedding: llamacpp-embed"
-            )
-            self.console.print(
-                "[blue][INFO][/blue] LLM services will be configured via extras/llm-services"
             )
 
         elif choice == "6":
@@ -1123,8 +1134,30 @@ class ChronicleSetup:
                 f"[green]✅[/green] Parakeet ASR: {self.args.parakeet_asr_url} (configured via wizard)"
             )
 
+        # Speaker / TTS source = "configure from the Tailnet later": leave the URL
+        # empty so the backend discovers chronicle-speaker / chronicle-tts at runtime.
+        speaker_discover = getattr(self.args, "speaker_discover", False)
+        if speaker_discover:
+            self.config["SPEAKER_SERVICE_URL"] = ""
+            self.console.print(
+                "[blue][INFO][/blue] SPEAKER_SERVICE_URL left empty — backend will "
+                "discover chronicle-speaker on the Tailnet at runtime"
+            )
+
+        if getattr(self.args, "tts_discover", False):
+            self.config["CHRONICLE_TTS_URL"] = ""
+            self.console.print(
+                "[blue][INFO][/blue] CHRONICLE_TTS_URL left empty — backend will "
+                "discover chronicle-tts on the Tailnet at runtime"
+            )
+        elif getattr(self.args, "tts_url", None):
+            self.config["CHRONICLE_TTS_URL"] = self.args.tts_url
+            self.console.print(
+                f"[green]✅[/green] TTS: {self.args.tts_url} (configured via wizard)"
+            )
+
         # Only show interactive section if not all configured via args
-        if not has_speaker_arg:
+        if not has_speaker_arg and not speaker_discover:
             try:
                 enable_speaker = Confirm.ask(
                     "Enable Speaker Recognition?", default=False
@@ -1785,6 +1818,22 @@ def main():
         help="Speaker Recognition service URL (default: prompt user)",
     )
     parser.add_argument(
+        "--speaker-discover",
+        action="store_true",
+        help="Leave SPEAKER_SERVICE_URL empty so the backend discovers "
+        "chronicle-speaker on the Tailnet at runtime.",
+    )
+    parser.add_argument(
+        "--tts-url",
+        help="Text-to-speech endpoint URL (own/remote/Tailnet-picked) → CHRONICLE_TTS_URL.",
+    )
+    parser.add_argument(
+        "--tts-discover",
+        action="store_true",
+        help="Leave CHRONICLE_TTS_URL empty so the backend discovers chronicle-tts "
+        "on the Tailnet at runtime.",
+    )
+    parser.add_argument(
         "--parakeet-asr-url", help="Parakeet ASR service URL (default: prompt user)"
     )
     parser.add_argument(
@@ -1800,6 +1849,27 @@ def main():
             "none",
         ],
         help="Transcription provider (default: prompt user)",
+    )
+    parser.add_argument(
+        "--asr-url",
+        help="Offline ASR endpoint URL (own/remote/Tailnet-picked). Written to the "
+        "selected provider's *_ASR_URL env var.",
+    )
+    parser.add_argument(
+        "--asr-discover",
+        action="store_true",
+        help="Leave the ASR URL empty so the backend discovers chronicle-asr on the "
+        "Tailnet at runtime ('configure from the Tailnet later').",
+    )
+    parser.add_argument(
+        "--llm-base-url",
+        help="Pin the llama.cpp LLM endpoint (own/remote/Tailnet-picked) via LLM_BASE_URL.",
+    )
+    parser.add_argument(
+        "--llm-discover",
+        action="store_true",
+        help="Leave LLM_BASE_URL empty so the backend discovers chronicle-llm on the "
+        "Tailnet at runtime.",
     )
     parser.add_argument(
         "--enable-https",

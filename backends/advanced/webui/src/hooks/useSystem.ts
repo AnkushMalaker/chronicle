@@ -104,6 +104,9 @@ export interface ExternalService {
   health: 'healthy' | 'partial' | 'unhealthy' | 'stopped' | 'starting'
   health_detail: string
   provider: ExternalServiceProvider | null
+  // The node (host) this service runs on, and whether it's a remote cluster node.
+  node?: string | null
+  remote?: boolean
 }
 
 export interface ServiceOperation {
@@ -114,6 +117,8 @@ export interface ServiceOperation {
   ok: boolean | null
   log: string
   phase?: string
+  // Node the operation runs on — used to poll the owning node's agent.
+  node?: string | null
 }
 
 export interface ExternalServicesData {

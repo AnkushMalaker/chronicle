@@ -29,6 +29,7 @@ in its own daemon thread so a bind failure never blocks the control API.
 """
 
 import io
+import ipaddress
 import logging
 import os
 import platform
@@ -37,11 +38,13 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import requests
 import uvicorn
 from dotenv import dotenv_values, set_key
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from rich.console import Console
@@ -51,6 +54,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import discovery  # noqa: E402  (repo-root discovery.py)
 import services  # noqa: E402  (repo-root services.py)
+import status  # noqa: E402  (repo-root status.py — restart-count helper)
 from setup_utils import detect_cuda_version, detect_tailscale_info  # noqa: E402
 
 logging.basicConfig(
@@ -63,6 +67,23 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ.get("SERVICE_MANAGER_TOKEN", "")
 PORT = int(os.environ.get("SERVICE_MANAGER_PORT", "8775"))
 HOST = os.environ.get("SERVICE_MANAGER_HOST", "0.0.0.0")
+
+# Cluster control: trust requests that arrive from a Tailscale-range source IP even
+# without the bearer token, so the hub can control this node's services without
+# sharing tokens across the cluster. Tailnet IPs are only routable between your own
+# tailnet peers, so this scopes "tokenless" control to trusted devices. Set
+# SERVICE_MANAGER_TRUST_TAILNET=0 to require the token from everyone.
+TRUST_TAILNET = os.environ.get("SERVICE_MANAGER_TRUST_TAILNET", "1").lower() not in (
+    "0",
+    "false",
+    "no",
+    "",
+)
+# Tailscale's address ranges: IPv4 CGNAT 100.64.0.0/10 and the ULA IPv6 block.
+_TAILNET_NETS = (
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("fd7a:115c:a1e0::/48"),
+)
 
 VALID_ACTIONS = ("start", "stop", "restart")
 
@@ -85,13 +106,32 @@ app = FastAPI(title="Chronicle Service Manager", docs_url=None, redoc_url=None)
 _bearer = HTTPBearer(auto_error=False)
 
 
+def _is_tailnet_ip(host: str | None) -> bool:
+    """Whether host is a Tailscale-range address (the request came from a tailnet peer)."""
+    if not host:
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any(ip in net for net in _TAILNET_NETS)
+
+
 def require_token(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ):
+    # Valid bearer token always passes (local backend / docker-bridge callers).
+    if TOKEN and credentials is not None and credentials.credentials == TOKEN:
+        return
+    # Otherwise, trust a tailnet peer (the hub controlling this node over the Tailnet).
+    if TRUST_TAILNET and _is_tailnet_ip(
+        request.client.host if request.client else None
+    ):
+        return
     if not TOKEN:
         raise HTTPException(status_code=503, detail="Agent has no token configured")
-    if credentials is None or credentials.credentials != TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid or missing token")
+    raise HTTPException(status_code=401, detail="Invalid or missing token")
 
 
 # ── Operations: one compose operation at a time, polled by id ────────────────
@@ -218,15 +258,55 @@ def _containers_running(name: str) -> bool:
         return False
 
 
+# A crash-looping container keeps flickering "Up <1s" so its health endpoint never
+# answers — without this it would forever read "starting". Past this many container
+# restarts we call it "unhealthy" instead. RestartCount is lifetime-cumulative but we
+# only consult it while the endpoint is down AND containers are up, so a genuinely
+# booting service (RestartCount stays 0 — it hasn't crashed) still reads "starting".
+RESTART_LOOP_THRESHOLD = 3
+
+
+def _max_restart_count(name: str) -> int:
+    """Highest container RestartCount for this service (0 if unknown).
+
+    Engine-aware via status.get_restart_counts (docker/podman inspect RestartCount).
+    """
+    service_path = REPO_ROOT / services.SERVICES[name]["path"]
+    try:
+        containers = services.compose_ps_json(service_path)
+    except Exception:
+        return 0
+    names = [c["name"] for c in containers if c.get("name")]
+    if not names:
+        return 0
+    counts = status.get_restart_counts(names)
+    return max(counts.values(), default=0)
+
+
+def _effective_health(name: str) -> tuple[str, str]:
+    """(health, detail) with the container-state overrides the raw endpoint check
+    can't see: distinguish a booting service from a crash loop.
+
+    "stopped" from check_service_health only means the endpoint isn't answering. If
+    containers are up we look at the restart count: a fresh boot (GPU model loads take
+    minutes) still has RestartCount 0 → "starting"; a crash loop has climbed past the
+    threshold → "unhealthy".
+    """
+    health, detail = services.check_service_health(name)
+    if health == "stopped" and _containers_running(name):
+        restarts = _max_restart_count(name)
+        if restarts >= RESTART_LOOP_THRESHOLD:
+            return (
+                "unhealthy",
+                f"crash loop: containers restarted {restarts}× without becoming healthy",
+            )
+        return ("starting", "containers up, waiting for health endpoint")
+    return health, detail
+
+
 def _service_entry(name: str) -> dict:
     service = services.SERVICES[name]
-    health, detail = services.check_service_health(name)
-    # "stopped" only means the health endpoint isn't answering. If containers are
-    # up, the service is booting (GPU model loads take minutes) — report
-    # "starting" so the UI doesn't offer Start again.
-    if health == "stopped" and _containers_running(name):
-        health = "starting"
-        detail = "containers up, waiting for health endpoint"
+    health, detail = _effective_health(name)
     return {
         "name": name,
         "description": service["description"],
@@ -236,6 +316,82 @@ def _service_entry(name: str) -> dict:
         "health_detail": detail,
         "provider": _provider_info(name),
     }
+
+
+# ── Cluster routing: control OTHER nodes' services via their agents ───────────
+# The backend (in a container) can't present a Tailnet source IP, so it proxies
+# everything to THIS agent. This agent runs natively on the host with a real
+# Tailnet identity, so host→host calls to peer agents are tailnet-trusted — that's
+# why cross-node merge + forwarding lives here, not in the backend.
+
+_REMOTE_TIMEOUT = 10.0
+
+
+def _self_host() -> str:
+    return os.uname().nodename
+
+
+def _remote_node_agents() -> list[dict]:
+    """Other nodes' agents on the Tailnet as ``[{host, url}]`` (excludes self).
+
+    Each full node advertises itself as ``chronicle-node`` on its agent port, so a
+    discovered node entry is exactly that node's control URL.
+    """
+    self_host = _self_host()
+    agents: list[dict] = []
+    try:
+        for svc in discovery.list_all_services() or []:
+            labels = svc.get("labels", {})
+            if labels.get("type") != "node":
+                continue
+            host = labels.get("host")
+            address = svc.get("address")
+            port = svc.get("port")
+            if host and address and port and host != self_host:
+                agents.append({"host": host, "url": f"http://{address}:{port}"})
+    except Exception:  # noqa: BLE001 - discovery is best-effort
+        logger.warning("remote node discovery failed", exc_info=True)
+    return agents
+
+
+def _remote_services(agent: dict) -> list[dict]:
+    """A peer node's own services (scope=local avoids re-merge), tagged with its host."""
+    try:
+        resp = requests.get(
+            f"{agent['url']}/services",
+            params={"scope": "local"},
+            timeout=_REMOTE_TIMEOUT,
+        )
+        if resp.ok:
+            return [
+                {**s, "node": agent["host"], "remote": True}
+                for s in resp.json().get("services", [])
+            ]
+    except requests.RequestException:
+        logger.debug("remote /services failed for %s", agent.get("host"))
+    return []
+
+
+def _remote_request(node: str, method: str, path: str, json_body: dict | None = None):
+    """Forward a control request to a peer node's agent (host→host, tailnet-trusted)."""
+    agent = next((a for a in _remote_node_agents() if a["host"] == node), None)
+    if agent is None:
+        raise HTTPException(
+            status_code=404, detail=f"No node agent found for host {node!r}"
+        )
+    try:
+        resp = requests.request(
+            method, f"{agent['url']}{path}", json=json_body, timeout=_REMOTE_TIMEOUT
+        )
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Node {node} unreachable: {e}")
+    if resp.status_code >= 400:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except ValueError:
+            detail = resp.text
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+    return resp.json()
 
 
 # ── Tailnet advertising (folds in the old standalone discovery agent) ────────
@@ -265,14 +421,14 @@ def _service_labels(svc_name: str, hostname: str) -> dict:
     itself. ``host``/``type`` are kept for the Network page (it groups by host).
     All values are strings (minidisc labels are str→str).
     """
-    health, _detail = services.check_service_health(svc_name)
+    health, _detail = _effective_health(svc_name)
     return {
         "host": hostname,
         "type": "service",
         "service": svc_name,
         "enabled": "1",
         "running": "1" if _containers_running(svc_name) else "0",
-        "health": health,  # healthy | partial | unhealthy | stopped
+        "health": health,  # healthy | partial | unhealthy | starting | stopped
     }
 
 
@@ -366,6 +522,9 @@ class ActionBody(BaseModel):
     build: bool = False
     recreate: bool = False
     force: bool = False
+    # Owning node host. When set and != this node, the request is forwarded to that
+    # node's agent (host→host, tailnet-trusted). Omitted / self → handled locally.
+    node: str | None = None
 
 
 class ProviderBody(BaseModel):
@@ -374,6 +533,8 @@ class ProviderBody(BaseModel):
     # "batch" switches ASR_PROVIDER (the stt model); "streaming" switches the
     # STREAMING_ASR_PROVIDER (the stt_stream model). Only meaningful for asr-services.
     lane: str = "batch"
+    # Owning node host (see ActionBody.node).
+    node: str | None = None
 
 
 @app.get("/health")
@@ -410,17 +571,38 @@ def cluster():
 
 
 @app.get("/services", dependencies=[Depends(require_token)])
-def list_services():
+def list_services(scope: str = "cluster"):
+    """This node's services, tagged with node host.
+
+    Default ``scope=cluster`` also folds in peer nodes' services (fanned out to their
+    agents in parallel, best-effort). ``scope=local`` returns only this node — used by
+    peers' fan-out so the merge doesn't recurse.
+    """
     with _ops_lock:
         running = [o for o in _operations.values() if o["status"] == "running"]
-    return {
-        "services": [_service_entry(name) for name in services.SERVICES],
-        "operation": running[0] if running else None,
-    }
+    self_host = _self_host()
+    local = [
+        {**_service_entry(name), "node": self_host, "remote": False}
+        for name in services.SERVICES
+    ]
+    operation = running[0] if running else None
+    if scope == "local":
+        return {"services": local, "operation": operation}
+
+    agents = _remote_node_agents()
+    remote: list[dict] = []
+    if agents:
+        with ThreadPoolExecutor(max_workers=min(8, len(agents))) as pool:
+            for svc_list in pool.map(_remote_services, agents):
+                remote.extend(svc_list)
+    return {"services": local + remote, "operation": operation}
 
 
 @app.get("/operations/{op_id}", dependencies=[Depends(require_token)])
-def get_operation(op_id: str):
+def get_operation(op_id: str, node: str | None = None):
+    # Remote operations live on the node that started them.
+    if node and node != _self_host():
+        return _remote_request(node, "GET", f"/operations/{op_id}")
     with _ops_lock:
         op = _operations.get(op_id)
     if not op:
@@ -430,6 +612,15 @@ def get_operation(op_id: str):
 
 @app.post("/services/{name}/provider", dependencies=[Depends(require_token)])
 def set_provider(name: str, body: ProviderBody):
+    # Forward to the owning node's agent if this isn't it (node stripped so the
+    # peer handles it as local).
+    if body.node and body.node != _self_host():
+        return _remote_request(
+            body.node,
+            "POST",
+            f"/services/{name}/provider",
+            {**body.dict(), "node": None},
+        )
     if name not in _PROVIDER_ENV_KEYS:
         raise HTTPException(
             status_code=400, detail=f"{name} does not support provider switching"
@@ -501,11 +692,21 @@ def set_provider(name: str, body: ProviderBody):
 # NOTE: declared after /services/{name}/provider so "provider" never matches {action}.
 @app.post("/services/{name}/{action}", dependencies=[Depends(require_token)])
 def service_action(name: str, action: str, body: ActionBody | None = None):
+    body = body or ActionBody()
+    # Forward to the owning node's agent if this isn't it.
+    if body.node and body.node != _self_host():
+        if action not in VALID_ACTIONS:
+            raise HTTPException(status_code=404, detail=f"Unknown action: {action}")
+        return _remote_request(
+            body.node,
+            "POST",
+            f"/services/{name}/{action}",
+            {**body.dict(), "node": None},
+        )
     if name not in services.SERVICES:
         raise HTTPException(status_code=404, detail=f"Unknown service: {name}")
     if action not in VALID_ACTIONS:
         raise HTTPException(status_code=404, detail=f"Unknown action: {action}")
-    body = body or ActionBody()
 
     # Stopping/restarting the backend kills the WebUI (and this request's caller).
     # Require an explicit force flag so it can't happen by accident.

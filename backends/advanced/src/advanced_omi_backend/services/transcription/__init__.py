@@ -273,7 +273,7 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
         method = (op.get("method") or "POST").upper()
         path = op.get("path") or "/listen"
         # Build URL
-        base = self.model.model_url.rstrip("/")
+        base = self.model.resolved_url().rstrip("/")
         url = base + ("/" + path.lstrip("/"))
 
         # Check if we should use multipart file upload (for Parakeet)
@@ -465,7 +465,7 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
 
     async def health_check(self) -> dict:
         """Check batch STT service reachability and auth by hitting the base URL."""
-        base = self.model.model_url.rstrip("/")
+        base = self.model.resolved_url().rstrip("/")
         headers = {}
         if self.model.api_key:
             op = (self.model.operations or {}).get("stt_transcribe") or {}
@@ -531,7 +531,7 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
     async def start_stream(
         self, client_id: str, sample_rate: int = 16000, diarize: bool = False
     ):
-        base_url = self.model.model_url
+        base_url = self.model.resolved_url()
         ops = self.model.operations or {}
 
         # Build WebSocket URL with query parameters (for Deepgram streaming)
@@ -767,7 +767,7 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
 
     async def health_check(self) -> dict:
         """Check streaming STT service by attempting a WebSocket handshake."""
-        base_url = self.model.model_url
+        base_url = self.model.resolved_url()
         ops = self.model.operations or {}
         headers = {}
         if self.model.api_key:

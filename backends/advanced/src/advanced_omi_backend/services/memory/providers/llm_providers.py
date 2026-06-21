@@ -162,7 +162,7 @@ class OpenAIProvider(LLMProviderBase):
 
         # Store parameters for LLM (used by embeddings and connection test)
         self.api_key = self.llm_def.api_key or ""
-        self.base_url = self.llm_def.model_url
+        self.base_url = self.llm_def.resolved_url()
         self.model = self.llm_def.model_name
 
         # Store parameters for embeddings (use separate config if available)
@@ -173,7 +173,7 @@ class OpenAIProvider(LLMProviderBase):
             self.embed_def.api_key if self.embed_def else self.api_key
         )
         self.embedding_base_url = (
-            self.embed_def.model_url if self.embed_def else self.base_url
+            self.embed_def.resolved_url() if self.embed_def else self.base_url
         )
 
         # Validate API keys for cloud providers - local providers (llamacpp, ollama) don't need real keys

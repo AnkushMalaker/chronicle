@@ -7,7 +7,6 @@ Interactive configuration for llama.cpp-based LLM and embedding services
 import argparse
 import os
 import shutil
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -16,7 +15,7 @@ from typing import Any, Dict, Optional
 from dotenv import set_key
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Confirm, Prompt
+from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
 
@@ -25,31 +24,38 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from config_manager import ConfigManager
 from setup_utils import read_env_value
 
-# LLM model options (HuggingFace GGUF repos)
+# LLM model options. The `hf` field is a HuggingFace `repo:quant` reference that
+# llama.cpp's server downloads and caches automatically on first start (via
+# `--hf-repo` / LLAMA_ARG_HF_REPO), so no local GGUF file is required.
 LLM_MODELS = {
+    "ggml-org/gemma-4-12B-it-GGUF": {
+        "hf": "ggml-org/gemma-4-12B-it-GGUF:Q4_K_M",
+        "description": "Gemma 4 12B Instruct Q4_K_M (~7GB, strong general model)",
+        "ctx_size": 8192,
+    },
     "bartowski/zai-org_GLM-4.7-Flash-GGUF": {
-        "file": "zai-org_GLM-4.7-Flash-Q4_K_M.gguf",
+        "hf": "bartowski/zai-org_GLM-4.7-Flash-GGUF:Q4_K_M",
         "description": "GLM-4.7-Flash Q4_K_M (~18GB, 30B MoE / 3B active, fast)",
         "ctx_size": 8192,
     },
     "bartowski/Qwen2.5-7B-Instruct-GGUF": {
-        "file": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+        "hf": "bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M",
         "description": "Qwen 2.5 7B Instruct Q4_K_M (~4.7GB, multilingual)",
         "ctx_size": 8192,
     },
     "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF": {
-        "file": "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+        "hf": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF:Q4_K_M",
         "description": "Llama 3.1 8B Instruct Q4_K_M (~4.9GB, popular)",
         "ctx_size": 8192,
     },
 }
 
-DEFAULT_LLM_REPO = "bartowski/zai-org_GLM-4.7-Flash-GGUF"
+DEFAULT_LLM_REPO = "ggml-org/gemma-4-12B-it-GGUF"
 
 # Embedding model options
 EMBED_MODELS = {
     "nomic-ai/nomic-embed-text-v1.5-GGUF": {
-        "file": "nomic-embed-text-v1.5.Q8_0.gguf",
+        "hf": "nomic-ai/nomic-embed-text-v1.5-GGUF:Q8_0",
         "description": "Nomic Embed Text v1.5 Q8 (~140MB, 768 dims)",
         "dimensions": 768,
     },
@@ -105,6 +111,23 @@ class LLMServicesSetup:
     def read_existing_env_value(self, key: str) -> Optional[str]:
         return read_env_value(".env", key)
 
+    def resolve_hf_token(self) -> Optional[str]:
+        """HF token, in priority order: --hf-token arg, backend .env, repo-root .env,
+        this service's own .env.
+
+        Mirrors how the wizard sources shared secrets: ``backends/advanced/.env`` is
+        the canonical hub on a main machine; the repo-root ``.env`` is the per-node
+        store for backend-less cluster-join nodes. Both are two levels up from here.
+        """
+        arg_token = getattr(self.args, "hf_token", None)
+        if arg_token:
+            return arg_token
+        for path in ("../../backends/advanced/.env", "../../.env", ".env"):
+            value = read_env_value(path, "HF_TOKEN")
+            if value:
+                return value
+        return None
+
     def backup_existing_env(self):
         env_path = Path(".env")
         if env_path.exists():
@@ -126,7 +149,9 @@ class LLMServicesSetup:
             model_choices[str(i)] = f"{info['description']}{default_marker}"
 
         custom_key = str(len(repos) + 1)
-        model_choices[custom_key] = "Custom GGUF (enter filename)"
+        model_choices[custom_key] = (
+            "Custom GGUF (HuggingFace repo:quant, or local filename)"
+        )
 
         # Find default choice
         default_choice = "1"
@@ -138,13 +163,30 @@ class LLMServicesSetup:
         choice = self.prompt_choice("Choose chat model:", model_choices, default_choice)
 
         if choice == custom_key:
-            filename = self.prompt_value(
-                "Enter GGUF filename (must be in extras/llm-services/models/)"
+            self.console.print()
+            self.console.print(
+                "[blue][INFO][/blue] Enter a HuggingFace GGUF reference such as "
+                "[cyan]ggml-org/gemma-4-12B-it-GGUF:Q4_K_M[/cyan] and it will be "
+                "downloaded automatically. Or enter a local GGUF filename already "
+                "placed in extras/llm-services/models/."
+            )
+            ref = self.prompt_value(
+                "HuggingFace repo:quant reference, or local GGUF filename"
             )
             ctx_size = self.prompt_value("Context size", "8192")
+
+            # A "/" means it's a HuggingFace repo reference (llama.cpp auto-downloads);
+            # otherwise treat it as a local filename in the mounted models/ directory.
+            ref = ref.strip().removeprefix("https://huggingface.co/")
+            if "/" in ref:
+                return None, {
+                    "hf": ref,
+                    "description": f"Custom HuggingFace model ({ref})",
+                    "ctx_size": int(ctx_size),
+                }
             return None, {
-                "file": filename,
-                "description": f"Custom model ({filename})",
+                "file": ref,
+                "description": f"Custom local model ({ref})",
                 "ctx_size": int(ctx_size),
             }
         else:
@@ -174,100 +216,38 @@ class LLMServicesSetup:
         )
         self.config["N_GPU_LAYERS"] = n_gpu_layers
 
-    def download_models(self, llm_repo, llm_info, embed_repo, embed_info):
-        """Offer to download model files."""
-        self.print_section("Model Download")
+    def download_models(self, llm_info, embed_info):
+        """Report how each selected model will be obtained.
+
+        HuggingFace models (``hf`` set) are downloaded and cached by the llama.cpp
+        server itself on first start, so nothing is fetched here. Local models
+        (``file`` set) must already be present in extras/llm-services/models/.
+        """
+        self.print_section("Model Source")
 
         models_dir = Path("models")
         models_dir.mkdir(exist_ok=True)
 
-        llm_file = models_dir / llm_info["file"]
-        embed_file = models_dir / embed_info["file"]
-
-        missing = []
-        if not llm_file.exists():
-            missing.append(("chat", llm_repo, llm_info["file"]))
-        else:
-            self.console.print(
-                f"[green]✅[/green] Chat model exists: {llm_info['file']}"
-            )
-
-        if not embed_file.exists():
-            missing.append(("embedding", embed_repo, embed_info["file"]))
-        else:
-            self.console.print(
-                f"[green]✅[/green] Embedding model exists: {embed_info['file']}"
-            )
-
-        if not missing:
-            self.console.print("[green]✅[/green] All model files present")
-            return
-
-        self.console.print()
-        for kind, repo, filename in missing:
-            self.console.print(f"[yellow]⚠️  Missing {kind} model: {filename}[/yellow]")
-
-        try:
-            download_now = Confirm.ask(
-                "Download missing models now? (may take a while for large files)",
-                default=True,
-            )
-        except EOFError:
-            download_now = False
-
-        if download_now:
-            for kind, repo, filename in missing:
-                if repo is None:
-                    self.console.print(
-                        f"[yellow]⚠️  Custom model '{filename}' - place it in extras/llm-services/models/ manually[/yellow]"
-                    )
-                    continue
-
+        for kind, info in (("Chat", llm_info), ("Embedding", embed_info)):
+            hf_ref = info.get("hf")
+            if hf_ref:
                 self.console.print(
-                    f"[cyan]📥 Downloading {kind} model: {filename}...[/cyan]"
+                    f"[blue][INFO][/blue] {kind} model [cyan]{hf_ref}[/cyan] will be "
+                    "downloaded automatically by llama.cpp on first start "
+                    "(cached in extras/llm-services/cache/)."
                 )
-                try:
-                    dest = str(models_dir / filename)
-                    if shutil.which("huggingface-cli"):
-                        subprocess.run(
-                            [
-                                "huggingface-cli",
-                                "download",
-                                repo,
-                                filename,
-                                "--local-dir",
-                                str(models_dir),
-                                "--local-dir-use-symlinks",
-                                "False",
-                            ],
-                            check=True,
-                        )
-                    elif shutil.which("wget"):
-                        url = f"https://huggingface.co/{repo}/resolve/main/{filename}"
-                        subprocess.run(["wget", "-O", dest, url], check=True)
-                    elif shutil.which("curl"):
-                        url = f"https://huggingface.co/{repo}/resolve/main/{filename}"
-                        subprocess.run(["curl", "-L", "-o", dest, url], check=True)
-                    else:
-                        self.console.print(
-                            "[yellow]⚠️  No download tool found. Install huggingface-cli, wget, or curl.[/yellow]"
-                        )
-                        self.console.print(
-                            f"[blue][INFO][/blue] Run: ./download-models.sh"
-                        )
-                        continue
+                continue
 
-                    self.console.print(f"[green]✅[/green] Downloaded {filename}")
-                except subprocess.CalledProcessError:
-                    self.console.print(f"[red]❌[/red] Failed to download {filename}")
-                    self.console.print(
-                        f"[blue][INFO][/blue] Run manually: ./download-models.sh"
-                    )
-        else:
-            self.console.print()
-            self.console.print(
-                "[blue][INFO][/blue] Download models later with: ./download-models.sh"
-            )
+            filename = info["file"]
+            if (models_dir / filename).exists():
+                self.console.print(
+                    f"[green]✅[/green] {kind} model present: {filename}"
+                )
+            else:
+                self.console.print(
+                    f"[yellow]⚠️  {kind} model file not found: place "
+                    f"'{filename}' in extras/llm-services/models/ before starting.[/yellow]"
+                )
 
     def generate_env_file(self):
         """Generate .env file from configuration."""
@@ -354,10 +334,12 @@ class LLMServicesSetup:
         table.add_column("Setting", style="cyan")
         table.add_column("Value", style="green")
 
-        table.add_row("Chat Model", llm_info["file"])
+        table.add_row("Chat Model", llm_info.get("hf") or llm_info.get("file", ""))
         table.add_row("Chat Port", self.config.get("LLM_PORT", "8081"))
         table.add_row("Context Size", str(self.config.get("CTX_SIZE", "8192")))
-        table.add_row("Embedding Model", embed_info["file"])
+        table.add_row(
+            "Embedding Model", embed_info.get("hf") or embed_info.get("file", "")
+        )
         table.add_row("Embedding Port", self.config.get("EMBED_PORT", "8082"))
         table.add_row("Embedding Dimensions", str(embed_info.get("dimensions", "768")))
         table.add_row("GPU Layers", self.config.get("N_GPU_LAYERS", "-1"))
@@ -390,22 +372,33 @@ class LLMServicesSetup:
 
         try:
             # Select models
-            llm_repo, llm_info = self.select_llm_model()
-            embed_repo, embed_info = self.select_embed_model()
+            _, llm_info = self.select_llm_model()
+            _, embed_info = self.select_embed_model()
 
             # GPU configuration
             self.setup_gpu_config()
 
-            # Set config values
-            self.config["LLM_MODEL_FILE"] = llm_info["file"]
-            self.config["EMBED_MODEL_FILE"] = embed_info["file"]
+            # Set config values. Either LLM_HF_REPO (auto-download) or
+            # LLM_MODEL_FILE (local file) drives the model source; the compose
+            # file prefers the HF repo when it is set.
+            self.config["LLM_HF_REPO"] = llm_info.get("hf", "")
+            self.config["EMBED_HF_REPO"] = embed_info.get("hf", "")
+            self.config["LLM_MODEL_FILE"] = llm_info.get("file", "model.gguf")
+            self.config["EMBED_MODEL_FILE"] = embed_info.get("file", "embed-model.gguf")
             self.config["CTX_SIZE"] = str(llm_info.get("ctx_size", 8192))
             self.config["EMBED_CTX_SIZE"] = "2048"
             self.config["LLM_PORT"] = "8083"
             self.config["EMBED_PORT"] = "8082"
 
-            # Download models
-            self.download_models(llm_repo, llm_info, embed_repo, embed_info)
+            # HF token: llama.cpp pulls GGUFs from HuggingFace, so a token avoids IP
+            # rate-limiting (429) and unlocks gated repos. Resolve from --hf-token,
+            # else keep an existing value, else the repo-root .env.
+            hf_token = self.resolve_hf_token()
+            if hf_token:
+                self.config["HF_TOKEN"] = hf_token
+
+            # Report model sources
+            self.download_models(llm_info, embed_info)
 
             # Generate files
             self.print_header("Configuration Complete!")
@@ -452,6 +445,10 @@ def main():
         "--ctx-size",
         default="8192",
         help="Context size for chat model",
+    )
+    parser.add_argument(
+        "--hf-token",
+        help="Hugging Face token (avoids HF rate-limits / unlocks gated repos)",
     )
 
     args = parser.parse_args()

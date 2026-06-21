@@ -106,7 +106,7 @@ async def health_check():
             _llm_def = registry.models.get(_llm_name)
             _llm_provider = _llm_def.model_provider if _llm_def else "openai"
             _llm_model = _llm_def.model_name if _llm_def else None
-            _llm_base_url = _llm_def.model_url if _llm_def else None
+            _llm_base_url = _llm_def.resolved_url() if _llm_def else None
     except Exception as e:
         logger.warning(f"Failed to load model config for health check: {e}")
     health_status = {
@@ -141,7 +141,7 @@ async def health_check():
             ),
             "llm_provider": (_llm_def.model_provider if _llm_def else None),
             "llm_model": (_llm_def.model_name if _llm_def else None),
-            "llm_base_url": (_llm_def.model_url if _llm_def else None),
+            "llm_base_url": (_llm_def.resolved_url() if _llm_def else None),
         },
     }
 

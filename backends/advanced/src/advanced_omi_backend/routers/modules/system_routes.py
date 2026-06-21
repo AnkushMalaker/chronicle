@@ -652,6 +652,9 @@ class ServiceActionRequest(BaseModel):
     build: bool = False
     recreate: bool = False
     force: bool = False
+    # Owning node host (from the merged service list). Omitted / local host → local
+    # agent; another host → that node's agent over the Tailnet.
+    node: str | None = None
 
 
 class ServiceProviderRequest(BaseModel):
@@ -661,6 +664,8 @@ class ServiceProviderRequest(BaseModel):
     build: bool = False
     # "batch" (default) switches the stt provider; "streaming" switches stt_stream.
     lane: str = "batch"
+    # Owning node host (see ServiceActionRequest.node).
+    node: str | None = None
 
 
 @router.get("/admin/services")
@@ -674,10 +679,16 @@ async def list_external_services(current_user: User = Depends(current_superuser)
 
 @router.get("/admin/services/operations/{operation_id}")
 async def get_external_service_operation(
-    operation_id: str, current_user: User = Depends(current_superuser)
+    operation_id: str,
+    node: str | None = None,
+    current_user: User = Depends(current_superuser),
 ):
-    """Poll a long-running service start/stop/build operation. Admin only."""
-    return await system_controller.get_external_service_operation(operation_id)
+    """Poll a long-running service start/stop/build operation. Admin only.
+
+    ``node`` routes the poll to the agent that owns the operation (remote ops live
+    on the remote node's agent).
+    """
+    return await system_controller.get_external_service_operation(operation_id, node)
 
 
 @router.post("/admin/services/{name}/provider")

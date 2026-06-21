@@ -203,7 +203,7 @@ class LLMClientFactory:
                 params = llm_def.model_params or {}
                 return OpenAILLMClient(
                     api_key=llm_def.api_key,
-                    base_url=llm_def.model_url,
+                    base_url=llm_def.resolved_url(),
                     model=llm_def.model_name,
                     temperature=params.get("temperature", 0.1),
                 )
@@ -349,12 +349,13 @@ async def async_health_check_fast() -> Optional[Dict]:
     if not fast:
         return None
 
-    result = {"base_url": fast.model_url, "default_model": fast.model_name}
-    if not fast.api_key or not fast.model_url or not fast.model_name:
+    fast_url = fast.resolved_url()
+    result = {"base_url": fast_url, "default_model": fast.model_name}
+    if not fast.api_key or not fast_url or not fast.model_name:
         return {**result, "status": "⚠️ Configuration incomplete", "healthy": False}
     try:
         client = create_openai_client(
-            api_key=fast.api_key, base_url=fast.model_url, is_async=True
+            api_key=fast.api_key, base_url=fast_url, is_async=True
         )
         await asyncio.wait_for(client.models.list(), timeout=5.0)
         return {**result, "status": "✅ Connected", "healthy": True}

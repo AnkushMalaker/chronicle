@@ -223,7 +223,7 @@ async def run_asr_finetuning_job() -> dict:
             "message": "No STT model configured",
         }
 
-    vibevoice_url = stt_model.model_url.rstrip("/")
+    vibevoice_url = stt_model.resolved_url().rstrip("/")
 
     # Find applied annotations (TRANSCRIPT and DIARIZATION) not yet consumed by ASR training
     annotations = await Annotation.find(

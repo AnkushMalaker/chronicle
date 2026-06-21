@@ -10,6 +10,7 @@ Environment variable resolution is handled by OmegaConf in the config module.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -26,6 +27,43 @@ from pydantic import (
 # Import config merging for defaults.yml + config.yml integration
 # OmegaConf handles environment variable resolution (${VAR:-default} syntax)
 from advanced_omi_backend.config import get_config
+
+logger = logging.getLogger(__name__)
+
+# Tailnet service-URL discovery cache. A model whose model_url is empty but which
+# carries a `discovery_service` (e.g. chronicle-asr / chronicle-llm) resolves its URL
+# live from minidisc — so a remote ASR/LLM node coming online is picked up without
+# re-config. Cached briefly so the hot transcription/LLM paths don't do a minidisc
+# lookup on every call.
+_DISCOVERY_TTL_SECS = 30.0
+_discovery_cache: Dict[str, tuple[float, str]] = {}
+
+
+def _with_scheme(url: str) -> str:
+    """Prepend http:// to a scheme-less host:port (env vars often store bare host:port).
+    Leaves '' and already-schemed URLs (http/https/ws/wss) untouched."""
+    if url and "://" not in url:
+        return "http://" + url
+    return url
+
+
+def _discover_service_url(service_name: str) -> str:
+    """Minidisc URL for a chronicle-* service, cached for _DISCOVERY_TTL_SECS. '' if none."""
+    now = time.monotonic()
+    cached = _discovery_cache.get(service_name)
+    if cached and now - cached[0] < _DISCOVERY_TTL_SECS:
+        return cached[1]
+    url = ""
+    try:
+        from discovery import resolve_service_url
+
+        url = resolve_service_url(None, service_name, default="") or ""
+    except Exception:  # noqa: BLE001 - discovery is best-effort
+        url = ""
+    _discovery_cache[service_name] = (now, url)
+    if url:
+        logger.debug("Discovered %s at %s (tailnet)", service_name, url)
+    return url
 
 
 class ModelDef(BaseModel):
@@ -93,6 +131,30 @@ class ModelDef(BaseModel):
             "transcribed. User overrides are stored under backend.asr.context.<name>."
         ),
     )
+    discovery_service: Optional[str] = Field(
+        default=None,
+        description=(
+            "minidisc service name (e.g. 'chronicle-asr', 'chronicle-llm'). When set "
+            "and model_url is empty, the base URL is resolved live from the Tailnet, so "
+            "a remote ASR/LLM node coming online is used without re-config. An explicit "
+            "model_url (env/config) always takes precedence over discovery."
+        ),
+    )
+    discovery_default: Optional[str] = Field(
+        default=None,
+        description=(
+            "Fallback base URL used when discovery_service is set but nothing is "
+            "advertised yet (e.g. a host-local default)."
+        ),
+    )
+    discovery_path: Optional[str] = Field(
+        default=None,
+        description=(
+            "Path appended to a *discovered* bare host:port (e.g. '/v1' for an "
+            "OpenAI-compatible LLM). Not applied to an explicit model_url or "
+            "discovery_default (those are expected to already be complete)."
+        ),
+    )
 
     @field_validator("model_name", mode="before")
     @classmethod
@@ -120,6 +182,25 @@ class ModelDef(BaseModel):
                 return None
             return v
         return v
+
+    def resolved_url(self) -> str:
+        """Effective base URL, resolving Tailnet discovery when not explicitly set.
+
+        Order: explicit model_url (env/config) → minidisc discovery_service (with
+        discovery_path appended to the bare host:port) → discovery_default. An
+        advertised remote node is picked up live (cached), so a 'configure from the
+        Tailnet later' setup needs no re-config when the node comes online. URLs
+        without a scheme get http:// prepended. Returns '' when nothing is available.
+        """
+        if self.model_url:
+            return _with_scheme(self.model_url)
+        if self.discovery_service:
+            discovered = _discover_service_url(self.discovery_service)
+            if discovered:
+                if self.discovery_path:
+                    discovered = discovered.rstrip("/") + self.discovery_path
+                return _with_scheme(discovered)
+        return _with_scheme(self.discovery_default or "")
 
     @model_validator(mode="after")
     def validate_model(self) -> ModelDef:
@@ -182,7 +263,7 @@ class ResolvedLLMOperation(BaseModel):
 
     @property
     def base_url(self) -> str:
-        return self.model_def.model_url
+        return self.model_def.resolved_url()
 
     def to_api_params(self) -> Dict[str, Any]:
         """Returns kwargs for client.chat.completions.create().
@@ -218,7 +299,7 @@ class ResolvedLLMOperation(BaseModel):
 
         return create_openai_client(
             api_key=self.model_def.api_key or "",
-            base_url=self.model_def.model_url,
+            base_url=self.model_def.resolved_url(),
             is_async=is_async,
         )
 
