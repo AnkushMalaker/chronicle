@@ -31,6 +31,9 @@ import hashlib
 import json
 import logging
 import os
+import re
+import shutil
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -172,6 +175,11 @@ def request_permissions() -> dict:
     acc = accessibility_ok(prompt=True)
     logger.info("Permissions — screen_recording=%s accessibility=%s", rec, acc)
     return {"screen_recording": rec, "accessibility": acc}
+
+
+# JPEG quality for the full-res frame fed to OCR (not saved to disk). High, so
+# text edges stay crisp for recognition; the on-disk frames use ``quality``.
+OCR_JPEG_QUALITY = 0.9
 
 
 # --- Idle time + OCR ----------------------------------------------------------
@@ -391,6 +399,12 @@ class _CaptureBackend:
     def grab(self, quality: float, scale: float, thumb_max: int) -> list:
         raise NotImplementedError
 
+    def grab_full(self, index: int, quality: float) -> Optional[bytes]:
+        """Capture a single display at native (full) resolution and return JPEG
+        bytes. Used only for OCR on changed frames — the saved frame stays
+        downscaled. Returns None if the display/capture is unavailable."""
+        return None
+
 
 class CoreGraphicsBackend(_CaptureBackend):
     """Legacy path: CGDisplayCreateImage (deprecated on macOS 14+ but works).
@@ -417,6 +431,16 @@ class CoreGraphicsBackend(_CaptureBackend):
             enc = _finish_frame(cg_image, quality, thumb_max)
             out.append((i, *enc) if enc else (i, None, 0, 0, None))
         return out
+
+    def grab_full(self, index: int, quality: float) -> Optional[bytes]:
+        displays = list_active_displays()
+        if index >= len(displays):
+            return None
+        cg_image = CGDisplayCreateImage(displays[index])
+        if cg_image is None:
+            return None
+        enc = _encode_cgimage_jpeg(cg_image, quality)
+        return enc[0] if enc else None
 
 
 def _sck_shareable_content(timeout: float = 5.0):
@@ -502,6 +526,30 @@ class ScreenCaptureKitBackend(_CaptureBackend):
             out.append((i, *enc) if enc else (i, None, 0, 0, None))
         return out
 
+    def grab_full(self, index: int, quality: float) -> Optional[bytes]:
+        # Reuse the display list cached by the grab() earlier this tick; don't
+        # bump _tick so the periodic refresh cadence is unaffected.
+        displays = self._displays
+        if index >= len(displays):
+            return None
+        disp = displays[index]
+        px = _display_pixel_size(disp.displayID()) or (
+            int(disp.width()),
+            int(disp.height()),
+        )
+        config = SCStreamConfiguration.alloc().init()
+        config.setWidth_(max(1, int(px[0])))
+        config.setHeight_(max(1, int(px[1])))
+        config.setShowsCursor_(True)
+        content_filter = SCContentFilter.alloc().initWithDisplay_excludingWindows_(
+            disp, []
+        )
+        cg_image = _sck_capture_cgimage(content_filter, config)
+        if cg_image is None:
+            return None
+        enc = _encode_cgimage_jpeg(cg_image, quality)
+        return enc[0] if enc else None
+
 
 def make_backend() -> _CaptureBackend:
     """Pick the best available capture backend for this macOS version."""
@@ -516,6 +564,51 @@ def _frame_path(base_dir: Path, ts: _dt.datetime, screen_index: int) -> Path:
     day_dir.mkdir(parents=True, exist_ok=True)
     stamp = f"{ts.strftime('%H-%M-%S')}_{ts.microsecond // 1000:03d}"
     return day_dir / f"{stamp}_{screen_index}.jpg"
+
+
+# --- Video compaction (JPEG -> HEVC) -----------------------------------------
+
+# Frame filenames are "<HH>-<MM>-<SS>_<mmm>_<index>.jpg" (see _frame_path).
+_FRAME_RE = re.compile(r"^(\d{2})-(\d{2})-(\d{2})_(\d{3})_(\d+)\.jpg$")
+# The launchd agent runs with a minimal PATH that omits Homebrew's bin dirs.
+_BIN_FALLBACKS = ("/opt/homebrew/bin", "/usr/local/bin")
+
+
+def _which(name: str) -> Optional[str]:
+    """Resolve a binary by PATH, falling back to common Homebrew locations."""
+    found = shutil.which(name)
+    if found:
+        return found
+    for d in _BIN_FALLBACKS:
+        cand = os.path.join(d, name)
+        if os.path.exists(cand):
+            return cand
+    return None
+
+
+def battery_ok(min_pct: int = 20) -> bool:
+    """True if it's safe to run a CPU/GPU burst now: on AC power, on a desktop
+    with no battery, or on battery with charge >= ``min_pct``. Unknown -> True
+    (don't block work just because the battery couldn't be read)."""
+    try:
+        out = subprocess.run(
+            ["pmset", "-g", "batt"], capture_output=True, text=True, timeout=5
+        ).stdout
+    except Exception:
+        return True
+    if "AC Power" in out:
+        return True
+    m = re.search(r"(\d+)%", out)
+    return int(m.group(1)) >= min_pct if m else True
+
+
+def _pointer_fields(pointer) -> dict:
+    """Expand a stored frame pointer into event ``displays[]`` fields. A raw
+    pointer is a relative ``.jpg`` path (or None); a compacted pointer is a
+    ``{"video","frame"}`` dict referencing a frame inside an HEVC chunk."""
+    if isinstance(pointer, dict):
+        return {"file": None, "video": pointer["video"], "frame": pointer["frame"]}
+    return {"file": pointer}
 
 
 # --- Capture manager ---------------------------------------------------------
@@ -568,6 +661,10 @@ class ScreenCaptureManager:
         retention_days: int = 14,
         save_scale: float = 0.5,
         thumb_max: int = 256,
+        compact_every_mins: int = 30,
+        compact_after_secs: float = 600.0,
+        compact_quality: int = 60,
+        compact_min_battery: int = 20,
         backend: Optional[_CaptureBackend] = None,
     ) -> None:
         self.capture_dir = Path(capture_dir)
@@ -587,6 +684,20 @@ class ScreenCaptureManager:
         self.retention_days = (
             retention_days  # delete screenshots older than this (0=keep)
         )
+        # --- Compaction: collapse old JPEGs into HEVC video (see CAPTURE.md) ---
+        self.compact_every_mins = max(0, int(compact_every_mins))  # 0 = disabled
+        self.compact_after_secs = max(60.0, float(compact_after_secs))
+        self.compact_quality = max(0, min(100, int(compact_quality)))
+        self.compact_min_battery = max(0, min(100, int(compact_min_battery)))
+        self._ffmpeg = _which("ffmpeg")
+        self._ffprobe = _which("ffprobe")
+        self._last_compact: float = 0.0
+        if self.compact_every_mins > 0 and not self._ffmpeg:
+            logger.warning(
+                "Compaction enabled but ffmpeg not found — disabling. "
+                "Install it (brew install ffmpeg) to compact frames to video."
+            )
+            self.compact_every_mins = 0
         self.backend = backend or make_backend()
         self.stats = CaptureStats()
         self._thread: Optional[threading.Thread] = None
@@ -619,13 +730,17 @@ class ScreenCaptureManager:
         self.capture_dir.mkdir(parents=True, exist_ok=True)
         logger.info(
             "Screen capture starting (%s backend) — frames -> %s "
-            "[dedup=%s skip_idle=%ss retention=%sd]",
+            "[dedup=%s skip_idle=%ss retention=%sd compact=%s]",
             self.backend.name,
             self.capture_dir,
             self.dedup,
             self.skip_idle_secs,
             self.retention_days,
+            f"every {self.compact_every_mins}min @q{self.compact_quality}"
+            if self.compact_every_mins > 0
+            else "off",
         )
+        self._cleanup_compaction_temps()
         self._sweep_retention()
         self._stop.clear()
         self.stats.update(running=True, last_error=None)
@@ -672,14 +787,31 @@ class ScreenCaptureManager:
             if time.monotonic() - self._last_sweep > 3600:
                 self._sweep_retention()
 
+            # Compact old JPEGs into HEVC on a cadence, but only while power
+            # allows. If the battery is too low we skip without stamping
+            # _last_compact, so it runs as soon as the machine is on AC again.
+            if (
+                self.compact_every_mins > 0
+                and time.monotonic() - self._last_compact
+                >= self.compact_every_mins * 60
+                and battery_ok(self.compact_min_battery)
+            ):
+                try:
+                    self._compact_frames()
+                except Exception as e:  # never let the loop die
+                    logger.error("Compaction failed: %s", e, exc_info=True)
+                finally:
+                    self._last_compact = time.monotonic()
+
             # Pace to the interval, accounting for capture time.
             elapsed = time.monotonic() - tick
             self._stop.wait(max(0.0, self.interval - elapsed))
         self.stats.update(running=False)
 
     def _sweep_retention(self) -> None:
-        """Delete screenshots (.jpg) and OCR (.txt) older than retention_days.
-        events.jsonl is always kept — it's tiny and powers analytics."""
+        """Delete screenshots (.jpg), HEVC chunks (.mp4) and OCR (.txt) older
+        than retention_days. events.jsonl is always kept — it's tiny and powers
+        analytics."""
         self._last_sweep = time.monotonic()
         if self.retention_days <= 0:
             return
@@ -695,7 +827,7 @@ class ScreenCaptureManager:
                     continue
                 if day >= cutoff:
                     continue
-                for pattern in ("*.jpg", "*.txt"):
+                for pattern in ("*.jpg", "*.txt", "*.mp4"):
                     for f in d.glob(pattern):
                         f.unlink(missing_ok=True)
                         deleted += 1
@@ -703,10 +835,237 @@ class ScreenCaptureManager:
             logger.warning("Retention sweep failed: %s", e)
         if deleted:
             logger.info(
-                "Retention: deleted %d screenshot/OCR files older than %d days",
+                "Retention: deleted %d screenshot/chunk/OCR files older than %d days",
                 deleted,
                 self.retention_days,
             )
+
+    # --- Compaction (JPEG -> HEVC) ----------------------------------------
+
+    def _cleanup_compaction_temps(self) -> None:
+        """Remove leftovers from an interrupted compaction run (incomplete
+        chunks, list files, half-written event rewrites)."""
+        try:
+            for d in self.capture_dir.iterdir():
+                if not d.is_dir():
+                    continue
+                for pattern in ("*.mp4.part", ".compact_*.txt", "events.jsonl.tmp"):
+                    for f in d.glob(pattern):
+                        f.unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning("Compaction temp cleanup failed: %s", e)
+
+    def _load_events(self, path: Path) -> list:
+        """Read a day's events.jsonl into a list of dicts (empty if missing)."""
+        events: list = []
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        events.append(json.loads(line))
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.warning("Could not read %s for compaction: %s", path, e)
+        return events
+
+    @staticmethod
+    def _dims_from_events(events: list) -> dict:
+        """Map each raw-frame relative path -> (w, h) from event entries."""
+        dims: dict = {}
+        for ev in events:
+            for d in ev.get("displays", []):
+                f = d.get("file")
+                if f:
+                    dims[f] = (d.get("w"), d.get("h"))
+        return dims
+
+    def _compact_frames(self) -> None:
+        """Collapse JPEGs older than ``compact_after_secs`` into per-display HEVC
+        chunks, rewrite the events.jsonl pointers, then delete the JPEGs. Runs on
+        the capture thread, so it shares dedup state and the events handle with
+        the writer (no locking needed). Ordering is crash-safe: chunk -> events
+        rewrite -> dedup-pointer fixup -> delete JPEGs."""
+        if not self._ffmpeg:
+            return
+        cutoff = time.time() - self.compact_after_secs
+        for daydir in sorted(p for p in self.capture_dir.iterdir() if p.is_dir()):
+            try:
+                day = _dt.date.fromisoformat(daydir.name)
+            except ValueError:
+                continue
+
+            # Gather compactable JPEGs (older than cutoff), grouped by display.
+            groups: dict = {}
+            for f in daydir.glob("*.jpg"):
+                m = _FRAME_RE.match(f.name)
+                if not m:
+                    continue
+                hh, mm, ss, ms, idx = m.groups()
+                epoch = _dt.datetime.combine(
+                    day, _dt.time(int(hh), int(mm), int(ss), int(ms) * 1000)
+                ).timestamp()
+                if epoch >= cutoff:
+                    continue
+                groups.setdefault(int(idx), []).append(f.name)
+            if not groups:
+                continue
+
+            events = self._load_events(daydir / "events.jsonl")
+            dims = self._dims_from_events(events)
+
+            mapping: dict = {}  # "<date>/<name>.jpg" -> {"video":..., "frame":..}
+            for idx in sorted(groups):
+                names = sorted(groups[idx])  # chronological (fixed-width stamps)
+                for run in self._split_by_dims(daydir.name, names, dims):
+                    self._encode_chunk(daydir, idx, run, mapping)
+            if not mapping:
+                continue
+
+            self._rewrite_events(daydir / "events.jsonl", daydir.name, events, mapping)
+
+            # Keep live dedup pointers valid if they referenced a compacted JPEG.
+            for i, ptr in list(self._last_file.items()):
+                if isinstance(ptr, str) and ptr in mapping:
+                    self._last_file[i] = mapping[ptr]
+
+            # Delete the now-compacted JPEGs (keep .txt OCR sidecars).
+            for rel in mapping:
+                (self.capture_dir / rel).unlink(missing_ok=True)
+            logger.info(
+                "Compacted %d frames in %s into HEVC (%d chunk(s))",
+                len(mapping),
+                daydir.name,
+                len({m["video"] for m in mapping.values()}),
+            )
+
+    @staticmethod
+    def _split_by_dims(date_str: str, names: list, dims: dict) -> list:
+        """Split a chronological list of frame names into runs of equal (w,h);
+        a resolution change mid-stream would corrupt a single HEVC stream."""
+        runs: list = []
+        cur: list = []
+        cur_dim = object()  # sentinel != any real (w,h) or None
+        for name in names:
+            dim = dims.get(f"{date_str}/{name}")
+            if cur and dim != cur_dim:
+                runs.append(cur)
+                cur = []
+            cur.append(name)
+            cur_dim = dim
+        if cur:
+            runs.append(cur)
+        return runs
+
+    def _encode_chunk(self, daydir: Path, idx: int, names: list, mapping: dict) -> None:
+        """Encode one resolution-uniform run of JPEGs into an HEVC chunk and add
+        its frame pointers to ``mapping``. No-op (leaves JPEGs) on any failure."""
+        if not names:
+            return
+        stem = names[0][: -len(".jpg")]  # "<HH-MM-SS_mmm>_<idx>"
+        suffix = f"_{idx}"
+        time_part = stem[: -len(suffix)] if stem.endswith(suffix) else stem
+        chunk_name = f"screen{idx}_{time_part}.mp4"
+        list_name = f".compact_{idx}_{time_part}.txt"
+        list_path = daydir / list_name
+        part_path = daydir / (chunk_name + ".part")
+        chunk_path = daydir / chunk_name
+        try:
+            list_path.write_text(
+                "".join(f"file '{n}'\n" for n in names), encoding="utf-8"
+            )
+            cmd = [
+                self._ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
+                "-r", "1", "-f", "concat", "-safe", "0", "-i", list_name,
+                "-c:v", "hevc_videotoolbox", "-q:v", str(self.compact_quality),
+                "-bf", "0", "-g", "30", "-tag:v", "hvc1", "-pix_fmt", "yuv420p",
+                "-fps_mode", "cfr", "-frames:v", str(len(names)),
+                # Force the muxer: the output name ends in .part, so ffmpeg can't
+                # infer mp4 from the extension.
+                "-f", "mp4", chunk_name + ".part",
+            ]
+            res = subprocess.run(
+                cmd, cwd=str(daydir), capture_output=True, text=True, timeout=300
+            )
+            if res.returncode != 0 or not part_path.exists():
+                logger.warning(
+                    "ffmpeg failed for %s/%s: %s",
+                    daydir.name,
+                    chunk_name,
+                    res.stderr.strip()[:300],
+                )
+                return
+            if not self._verify_chunk(part_path, len(names)):
+                logger.warning(
+                    "Chunk %s/%s frame-count mismatch — skipping",
+                    daydir.name,
+                    chunk_name,
+                )
+                return
+            os.replace(part_path, chunk_path)
+            video_rel = f"{daydir.name}/{chunk_name}"
+            for k, name in enumerate(names):
+                mapping[f"{daydir.name}/{name}"] = {"video": video_rel, "frame": k}
+        except Exception as e:
+            logger.warning("Encoding %s/%s failed: %s", daydir.name, chunk_name, e)
+        finally:
+            list_path.unlink(missing_ok=True)
+            part_path.unlink(missing_ok=True)
+
+    def _verify_chunk(self, chunk: Path, expected: int) -> bool:
+        """True if the encoded chunk decodes to exactly ``expected`` frames.
+        Without ffprobe we trust ffmpeg's exit code + the -frames:v cap."""
+        if not self._ffprobe:
+            return True
+        try:
+            res = subprocess.run(
+                [
+                    self._ffprobe, "-v", "error", "-count_frames",
+                    "-select_streams", "v:0",
+                    "-show_entries", "stream=nb_read_frames",
+                    "-of", "default=nokey=1:noprint_wrappers=1", str(chunk),
+                ],
+                capture_output=True, text=True, timeout=120,
+            )
+            return res.stdout.strip() == str(expected)
+        except Exception:
+            return False
+
+    def _rewrite_events(
+        self, path: Path, date_str: str, events: list, mapping: dict
+    ) -> None:
+        """Rewrite a day's events.jsonl, repointing compacted frames at their
+        chunk (file -> null, add video/frame). Atomic (temp + os.replace); if
+        it's the day currently being appended, the open handle is closed first
+        and lazily reopened by _append_event (an fd left open on the replaced
+        inode would silently drop subsequent appends)."""
+        changed = False
+        for ev in events:
+            for d in ev.get("displays", []):
+                f = d.get("file")
+                if f in mapping:
+                    m = mapping[f]
+                    d["file"] = None
+                    d["video"] = m["video"]
+                    d["frame"] = m["frame"]
+                    changed = True
+        if not changed:
+            return
+        tmp = path.with_name(path.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            for ev in events:
+                fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        if self._events_fh is not None and self._events_date == date_str:
+            try:
+                self._events_fh.close()
+            except Exception:
+                pass
+            self._events_fh = None
+            self._events_date = None
+        os.replace(tmp, path)
 
     def _append_event(self, ts: _dt.datetime, event: dict) -> None:
         """Append one JSON object (one line) to the per-day events.jsonl."""
@@ -764,29 +1123,37 @@ class ScreenCaptureManager:
                 unchanged = self.dedup and self._last_hash.get(i) == digest
 
                 if unchanged:
-                    rel_file = self._last_file.get(i)
+                    # The pointer may be a raw .jpg path or, if the previous
+                    # frame was already compacted, a {"video","frame"} dict.
+                    pointer = self._last_file.get(i)
                     ocr_file = self._last_ocr.get(i)
                 else:
                     frame_p = _frame_path(self.capture_dir, ts, i)
-                    rel_file = None
+                    pointer = None
                     if self.write_frames:
                         frame_p.write_bytes(jpeg)
-                        rel_file = str(frame_p.relative_to(self.capture_dir))
+                        pointer = str(frame_p.relative_to(self.capture_dir))
                     ocr_file = None
                     if self.ocr:
-                        text = ocr_jpeg(jpeg)
+                        # OCR the full-res frame (the saved jpeg is downscaled and
+                        # too soft for reliable recognition). Captured separately,
+                        # only on changed frames; fall back to the saved frame if
+                        # the full-res grab fails. Accurate mode + language
+                        # correction since we only pay this on real changes.
+                        full = self.backend.grab_full(i, OCR_JPEG_QUALITY)
+                        text = ocr_jpeg(full or jpeg, fast=False)
                         if text:
                             txt_p = frame_p.with_suffix(".txt")
                             txt_p.write_text(text, encoding="utf-8")
                             ocr_file = str(txt_p.relative_to(self.capture_dir))
                     self._last_hash[i] = digest
-                    self._last_file[i] = rel_file
+                    self._last_file[i] = pointer
                     self._last_ocr[i] = ocr_file
 
                 displays_meta.append(
                     {
                         "index": i,
-                        "file": rel_file,
+                        **_pointer_fields(pointer),
                         "w": width,
                         "h": height,
                         "ocr_file": ocr_file,
@@ -891,6 +1258,24 @@ def _main() -> None:
         help="max dimension of the thumbnail used for the dedup hash (default 256)",
     )
     parser.add_argument(
+        "--compact-every-mins",
+        type=int,
+        default=30,
+        help="compact old JPEGs to HEVC every N minutes (0 disables; default 30)",
+    )
+    parser.add_argument(
+        "--compact-after",
+        type=float,
+        default=600.0,
+        help="only compact frames older than N seconds (default 600)",
+    )
+    parser.add_argument(
+        "--compact-quality",
+        type=int,
+        default=60,
+        help="HEVC quality 0-100 for compaction (default 60)",
+    )
+    parser.add_argument(
         "--dir", default=str(DEFAULT_CAPTURE_DIR), help="output directory for frames"
     )
     args = parser.parse_args()
@@ -922,6 +1307,9 @@ def _main() -> None:
         retention_days=args.retention_days,
         save_scale=args.scale,
         thumb_max=args.thumb_max,
+        compact_every_mins=args.compact_every_mins,
+        compact_after_secs=args.compact_after,
+        compact_quality=args.compact_quality,
     )
     if args.ocr and not _VISION_OK:
         logger.warning("--ocr requested but pyobjc-framework-Vision not available")

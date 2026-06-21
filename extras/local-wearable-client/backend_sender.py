@@ -1,10 +1,12 @@
 """Backend streaming module — sends audio to Chronicle via Wyoming WebSocket protocol."""
 
 import asyncio
+import base64
 import json
 import logging
 import os
 import ssl
+import tempfile
 from typing import AsyncGenerator, Optional
 from urllib.parse import quote
 
@@ -17,6 +19,49 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 VERIFY_SSL = os.getenv("VERIFY_SSL", "true").lower() == "true"
+# Play backend TTS ("play-audio") responses on the laptop speaker. The wearable
+# has no speaker, so the relay laptop acts as the output device.
+PLAY_BACKEND_AUDIO = os.getenv("PLAY_BACKEND_AUDIO", "true").lower() == "true"
+
+
+async def play_audio_on_laptop(audio_b64: str, fmt: str = "wav") -> None:
+    """Decode base64 audio from a backend play-audio frame and play it on the
+    laptop speaker via macOS `afplay`. Runs as a non-blocking subprocess so the
+    WebSocket keepalive/receive loop is never stalled."""
+    try:
+        audio = base64.b64decode(audio_b64)
+    except Exception as e:
+        logger.warning("play-audio: failed to decode base64 audio: %s", e)
+        return
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            suffix=f".{fmt}", delete=False
+        ) as tmp:
+            tmp.write(audio)
+            tmp_path = tmp.name
+
+        logger.info("play-audio: playing %d bytes on laptop speaker", len(audio))
+        proc = await asyncio.create_subprocess_exec(
+            "afplay",
+            tmp_path,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+        if proc.returncode != 0:
+            logger.warning("play-audio: afplay exited with code %s", proc.returncode)
+    except FileNotFoundError:
+        logger.error("play-audio: `afplay` not found (macOS only); cannot play audio")
+    except Exception as e:
+        logger.error("play-audio: playback failed: %s", e, exc_info=True)
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 def _resolve_backend_url() -> str:
@@ -135,6 +180,20 @@ async def receive_handler(websocket, logger) -> None:
                         "FINAL" if is_final else "partial",
                         text,
                     )
+                elif msg_type == "play-audio":
+                    # Backend TTS response — play it on the laptop speaker since
+                    # the wearable has none. Spawned as a task so playback
+                    # doesn't block receiving further frames / keepalive.
+                    payload = data.get("data", {})
+                    audio_b64 = payload.get("audio_b64", "")
+                    if PLAY_BACKEND_AUDIO and audio_b64:
+                        asyncio.create_task(
+                            play_audio_on_laptop(
+                                audio_b64, payload.get("format", "wav")
+                            )
+                        )
+                    elif not audio_b64:
+                        logger.debug("play-audio frame without audio_b64; ignoring")
                 elif msg_type == "ready":
                     logger.info("Backend ready message: %s", data.get("message"))
                 else:

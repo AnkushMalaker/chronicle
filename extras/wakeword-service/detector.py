@@ -230,6 +230,7 @@ class HermesDetector:
         patiences: Optional[dict[str, int]] = None,
         collect_only: Optional[list[str]] = None,
         verifiers_disabled: Optional[list[str]] = None,
+        disabled: Optional[list[str]] = None,
     ):
         """Initialize the detector.
 
@@ -279,6 +280,9 @@ class HermesDetector:
         # Wake-Word Lab). The verifier stays LOADED — this only skips its check so
         # arms dispatch on the stage-1 model alone. Mutable; flipped via the UI.
         self.verifiers_disabled = set(verifiers_disabled or [])
+        # Words disabled at runtime. Disabled words do not dispatch and do not
+        # emit collect-only shadow events.
+        self.disabled = set(disabled or [])
         self.threshold = threshold
         self.patience = patience
         self.thresholds = {
@@ -486,8 +490,13 @@ class HermesDetector:
 
             # Words ready to fire this frame, split by mode.
             ready = [w for w in self.wakewords if state.consec[w] >= self.patiences[w]]
-            collect_ready = [w for w in ready if w in self.collect_only]
-            dispatch_ready = [w for w in ready if w not in self.collect_only]
+            enabled_ready = [w for w in ready if w not in self.disabled]
+            # Disabled words should not keep accumulating patience forever.
+            for w in ready:
+                if w in self.disabled:
+                    state.consec[w] = 0
+            collect_ready = [w for w in enabled_ready if w in self.collect_only]
+            dispatch_ready = [w for w in enabled_ready if w not in self.collect_only]
 
             # 1) Collect-only (shadow) firing: snapshot the trigger window for FP
             # review, but DON'T enter the shared armed/capture state (so it never

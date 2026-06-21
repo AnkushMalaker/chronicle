@@ -15,6 +15,7 @@ The flywheel this serves:
 
 import logging
 import os
+from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -32,6 +33,9 @@ router = APIRouter(prefix="/wakeword", tags=["wakeword"])
 WAKEWORD_SERVICE_URL = os.getenv(
     "WAKEWORD_SERVICE_URL", "http://chronicle-wakeword-service:8770"
 )
+SERVICE_MANAGER_URL = (os.getenv("SERVICE_MANAGER_URL") or "").rstrip("/")
+SERVICE_MANAGER_TOKEN = os.getenv("SERVICE_MANAGER_TOKEN") or ""
+WAKEWORD_SERVICE_NAME = os.getenv("WAKEWORD_SERVICE_NAME", "wakeword-service")
 
 
 def _client() -> httpx.AsyncClient:
@@ -45,6 +49,122 @@ def _suffix(user: User) -> str:
 
 def _owns(user: User, client_id: str) -> bool:
     return user.is_superuser or (client_id or "").startswith(_suffix(user))
+
+
+def _service_manager_ready() -> bool:
+    return bool(SERVICE_MANAGER_URL and SERVICE_MANAGER_TOKEN)
+
+
+def _service_manager_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {SERVICE_MANAGER_TOKEN}"}
+
+
+def _service_manager_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(base_url=SERVICE_MANAGER_URL, timeout=20.0)
+
+
+def _extract_wakeword_names(models_body: dict[str, Any]) -> list[str]:
+    words = []
+    for item in models_body.get("wakewords", []):
+        name = item.get("name")
+        if isinstance(name, str) and name:
+            words.append(name)
+    return words
+
+
+def _word_mode(word: dict[str, Any]) -> Literal["dispatch", "collect_only", "off"]:
+    if bool(word.get("disabled", False)):
+        return "off"
+    if bool(word.get("collect_only", False)):
+        return "collect_only"
+    return "dispatch"
+
+
+async def _get_wakeword_models() -> dict[str, Any]:
+    async with _client() as client:
+        resp = await client.get("/models")
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def _set_collect_only_for_words(
+    wakewords: list[str], collect_only: bool
+) -> list[dict[str, Any]]:
+    updated = []
+    async with _client() as client:
+        for wakeword in wakewords:
+            resp = await client.post(
+                "/collect_only",
+                json={"wakeword": wakeword, "collect_only": collect_only},
+            )
+            if resp.status_code in (400, 404):
+                raise HTTPException(
+                    status_code=resp.status_code, detail=resp.json().get("detail")
+                )
+            resp.raise_for_status()
+            updated.append(resp.json())
+    return updated
+
+
+async def _set_disabled_for_words(
+    wakewords: list[str], disabled: bool
+) -> list[dict[str, Any]]:
+    updated = []
+    async with _client() as client:
+        for wakeword in wakewords:
+            resp = await client.post(
+                "/disabled",
+                json={"wakeword": wakeword, "disabled": disabled},
+            )
+            if resp.status_code in (400, 404):
+                raise HTTPException(
+                    status_code=resp.status_code, detail=resp.json().get("detail")
+                )
+            resp.raise_for_status()
+            updated.append(resp.json())
+    return updated
+
+
+async def _get_service_state(name: str) -> dict[str, Any] | None:
+    if not _service_manager_ready():
+        return None
+    async with _service_manager_client() as sm_client:
+        resp = await sm_client.get("/services", headers=_service_manager_headers())
+        resp.raise_for_status()
+    for service in resp.json().get("services", []):
+        if service.get("name") == name:
+            return service
+    return None
+
+
+async def _service_action(name: str, action: Literal["start", "stop"]) -> dict[str, Any]:
+    if not _service_manager_ready():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Service manager is not configured. "
+                "Set SERVICE_MANAGER_URL and SERVICE_MANAGER_TOKEN for off-mode control."
+            ),
+        )
+    async with _service_manager_client() as sm_client:
+        resp = await sm_client.post(
+            f"/services/{name}/{action}",
+            headers=_service_manager_headers(),
+            json={},
+        )
+        if resp.status_code >= 400:
+            detail = resp.text
+            try:
+                detail = resp.json().get("detail", detail)
+            except ValueError:
+                pass
+            raise HTTPException(status_code=resp.status_code, detail=detail)
+        return resp.json()
+
+
+class WakewordModeRequest(BaseModel):
+    mode: Literal["dispatch", "collect_only", "off"]
+    wakeword: str | None = None
 
 
 class PrimeRequest(BaseModel):
@@ -66,6 +186,163 @@ class CollectOnlyRequest(BaseModel):
 class VerifierEnabledRequest(BaseModel):
     wakeword: str
     enabled: bool  # True -> consult the second-stage verifier, False -> stage-1 only
+
+
+class DisabledRequest(BaseModel):
+    wakeword: str
+    disabled: bool  # True -> fully off for this word; False -> enabled
+
+
+@router.get("/mode")
+async def get_wakeword_mode(current_user: User = Depends(current_active_user)):
+    """Get wake-word mode state for mobile control center.
+
+    Returns:
+      - running/service status
+      - per-word mode (dispatch / collect_only / off)
+      - global_mode:
+        - off: service down/unavailable
+        - collect_only: all words in collect-only
+        - dispatch: all words in dispatch
+        - mixed: words in different modes
+    """
+    service_state = None
+    if _service_manager_ready():
+        try:
+            service_state = await _get_service_state(WAKEWORD_SERVICE_NAME)
+        except httpx.HTTPError as e:
+            logger.warning("Failed to read service-manager state for wakeword: %s", e)
+
+    # If service manager explicitly says stopped, trust that over probing /models.
+    if service_state and service_state.get("health") == "stopped":
+        return {
+            "global_mode": "off",
+            "running": False,
+            "service": WAKEWORD_SERVICE_NAME,
+            "wakewords": [],
+        }
+
+    try:
+        models = await _get_wakeword_models()
+    except httpx.HTTPError:
+        return {
+            "global_mode": "off",
+            "running": False,
+            "service": WAKEWORD_SERVICE_NAME,
+            "wakewords": [],
+        }
+
+    wakewords = models.get("wakewords", []) or []
+    modes = {_word_mode(w) for w in wakewords}
+    if not wakewords:
+        global_mode = "dispatch"
+    elif len(modes) == 1:
+        global_mode = next(iter(modes))
+    else:
+        global_mode = "mixed"
+
+    return {
+        "global_mode": global_mode,
+        "running": True,
+        "service": WAKEWORD_SERVICE_NAME,
+        "wakewords": [
+            {
+                **w,
+                "mode": _word_mode(w),
+            }
+            for w in wakewords
+        ],
+    }
+
+
+@router.post("/mode")
+async def set_wakeword_mode(
+    req: WakewordModeRequest, current_user: User = Depends(current_superuser)
+):
+    """Set wake-word mode globally or for a single word.
+
+    If ``wakeword`` is omitted:
+      - off: hard off (stop wakeword service via service-manager)
+      - dispatch/collect_only: apply mode to all configured wake words
+
+    If ``wakeword`` is provided:
+      - applies mode only to that word.
+    """
+    if req.mode == "off" and req.wakeword is None:
+        action_result = await _service_action(WAKEWORD_SERVICE_NAME, "stop")
+        return {
+            "global_mode": "off",
+            "running": False,
+            "service": WAKEWORD_SERVICE_NAME,
+            "action": action_result,
+            "wakewords": [],
+        }
+
+    # For non-hard-off updates, ensure service is running if we can.
+    service_state = await _get_service_state(WAKEWORD_SERVICE_NAME)
+    if service_state and service_state.get("health") == "stopped":
+        await _service_action(WAKEWORD_SERVICE_NAME, "start")
+
+    try:
+        models = await _get_wakeword_models()
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Wake-word service unavailable while setting mode: {e}",
+        )
+
+    wakewords = _extract_wakeword_names(models)
+    if req.wakeword is not None:
+        if req.wakeword not in wakewords:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Unknown wake word '{req.wakeword}'. Available: {wakewords}",
+            )
+        target_words = [req.wakeword]
+    else:
+        target_words = wakewords
+
+    if not wakewords:
+        return {
+            "global_mode": "dispatch",
+            "running": True,
+            "service": WAKEWORD_SERVICE_NAME,
+            "wakewords": [],
+            "message": "No wake words configured.",
+        }
+
+    if req.mode == "dispatch":
+        await _set_disabled_for_words(target_words, disabled=False)
+        await _set_collect_only_for_words(target_words, collect_only=False)
+    elif req.mode == "collect_only":
+        await _set_disabled_for_words(target_words, disabled=False)
+        await _set_collect_only_for_words(target_words, collect_only=True)
+    else:  # off, per-word or "soft off all"
+        await _set_collect_only_for_words(target_words, collect_only=False)
+        await _set_disabled_for_words(target_words, disabled=True)
+
+    refreshed = await _get_wakeword_models()
+    refreshed_words = refreshed.get("wakewords", []) or []
+    modes = {_word_mode(w) for w in refreshed_words}
+    if not refreshed_words:
+        global_mode = "dispatch"
+    elif len(modes) == 1:
+        global_mode = next(iter(modes))
+    else:
+        global_mode = "mixed"
+
+    return {
+        "global_mode": global_mode,
+        "running": True,
+        "service": WAKEWORD_SERVICE_NAME,
+        "wakewords": [
+            {
+                **w,
+                "mode": _word_mode(w),
+            }
+            for w in refreshed_words
+        ],
+    }
 
 
 @router.get("/models")
@@ -122,6 +399,29 @@ async def set_verifier_enabled(
             resp = await client.post(
                 "/verifier_enabled",
                 json={"wakeword": req.wakeword, "enabled": req.enabled},
+            )
+            if resp.status_code in (400, 404):
+                raise HTTPException(
+                    status_code=resp.status_code, detail=resp.json().get("detail")
+                )
+            resp.raise_for_status()
+        except httpx.HTTPError as e:
+            raise HTTPException(
+                status_code=503, detail=f"Wake-word service unreachable: {e}"
+            )
+    return resp.json()
+
+
+@router.post("/disabled")
+async def set_disabled(
+    req: DisabledRequest, current_user: User = Depends(current_superuser)
+):
+    """Toggle a wake word fully off/on. Admin only."""
+    async with _client() as client:
+        try:
+            resp = await client.post(
+                "/disabled",
+                json={"wakeword": req.wakeword, "disabled": req.disabled},
             )
             if resp.status_code in (400, 404):
                 raise HTTPException(

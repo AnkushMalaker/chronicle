@@ -169,6 +169,35 @@ def _save_collect_only(words) -> None:
         json.dump(sorted(words), fh)
 
 
+# Runtime per-word OFF overrides from the UI. Disabled words neither dispatch
+# nor emit collect-only shadow events. Persisted in the same mounted data dir.
+DISABLED_STATE_PATH = os.path.join(
+    os.path.dirname(DATA_DIR.rstrip("/")), "disabled.json"
+)
+
+
+def _initial_disabled() -> list[str]:
+    """Words disabled at startup from persisted state (or none)."""
+    if os.path.exists(DISABLED_STATE_PATH):
+        try:
+            with open(DISABLED_STATE_PATH) as fh:
+                data = json.load(fh)
+            if isinstance(data, list):
+                return [str(w) for w in data if w in MODELS]
+        except (OSError, ValueError) as e:
+            logger.warning(
+                f"could not read disabled state {DISABLED_STATE_PATH}: {e} "
+                f"— defaulting to all enabled"
+            )
+    return []
+
+
+def _save_disabled(words) -> None:
+    """Persist the current disabled set so it survives a restart."""
+    with open(DISABLED_STATE_PATH, "w") as fh:
+        json.dump(sorted(words), fh)
+
+
 # Runtime verifier on/off overrides from the Lab UI, persisted alongside the
 # collect-only state (same ./data volume, same restart/cross-machine semantics).
 # Stores the set of words whose verifier is toggled OFF; a word absent here keeps
@@ -271,6 +300,7 @@ async def lifespan(app: FastAPI):
         verifier_threshold=VERIFIER_THRESHOLD,
         collect_only=_initial_collect_only(),
         verifiers_disabled=_initial_verifier_disabled(),
+        disabled=_initial_disabled(),
     )
     app.state.detector = detector
     store = SampleStore(DATA_DIR, WAKEWORDS, legacy_wakeword=LEGACY_WAKEWORD)
@@ -313,10 +343,17 @@ def _verifier_disabled_now() -> set:
     return set(detector.verifiers_disabled) if detector is not None else set()
 
 
+def _disabled_now() -> set:
+    """The live set of disabled wake words (runtime UI toggles)."""
+    detector = getattr(app.state, "detector", None)
+    return set(detector.disabled) if detector is not None else set()
+
+
 def _wakeword_summaries() -> list[dict]:
     """Per-word config summary for the dashboard."""
     collect_only = _collect_only_now()
     verifier_disabled = _verifier_disabled_now()
+    disabled = _disabled_now()
     out = []
     for name in WAKEWORDS:
         has_verifier = name in VERIFIERS and os.path.exists(VERIFIERS[name])
@@ -331,6 +368,7 @@ def _wakeword_summaries() -> list[dict]:
                 "threshold": THRESHOLDS.get(name, THRESHOLD),
                 "patience": PATIENCES.get(name, PATIENCE),
                 "collect_only": name in collect_only,
+                "disabled": name in disabled,
             }
         )
     return out
@@ -425,6 +463,11 @@ class VerifierEnabledRequest(BaseModel):
     enabled: bool  # True -> consult the second-stage verifier, False -> stage-1 only
 
 
+class DisabledRequest(BaseModel):
+    wakeword: str
+    disabled: bool  # True -> fully off for this word; False -> enabled
+
+
 def _require_wakeword(wakeword: str) -> None:
     if wakeword not in MODELS:
         raise HTTPException(
@@ -476,6 +519,27 @@ async def set_verifier_enabled(req: VerifierEnabledRequest):
     logger.info(
         f"verifier {'ON' if req.enabled else 'OFF'} for '{req.wakeword}' "
         f"(disabled now: {sorted(detector.verifiers_disabled) or '(none)'})"
+    )
+    return {"wakewords": _wakeword_summaries()}
+
+
+@app.post("/disabled")
+async def set_disabled(req: DisabledRequest):
+    """Toggle a wake word fully off/on at runtime.
+
+    Disabled words neither dispatch commands nor emit collect-only shadow events.
+    Effective immediately and persisted across restarts.
+    """
+    _require_wakeword(req.wakeword)
+    detector: HermesDetector = app.state.detector
+    if req.disabled:
+        detector.disabled.add(req.wakeword)
+    else:
+        detector.disabled.discard(req.wakeword)
+    _save_disabled(detector.disabled)
+    logger.info(
+        f"disabled {'ON' if req.disabled else 'OFF'} for '{req.wakeword}' "
+        f"(disabled now: {sorted(detector.disabled) or '(none)'})"
     )
     return {"wakewords": _wakeword_summaries()}
 

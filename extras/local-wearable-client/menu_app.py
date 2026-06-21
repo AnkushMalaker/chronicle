@@ -28,6 +28,7 @@ from main import (
 )
 from screen_capture import (
     ScreenCaptureManager,
+    accessibility_ok,
     request_permissions,
     screen_recording_ok,
 )
@@ -156,7 +157,45 @@ _SETTINGS_FIELDS = [
     ("thumb_max", "CAPTURE_THUMB_MAX", "Dedup hash thumbnail (px):", "int", False),
     ("dedup", "CAPTURE_NO_DEDUP", "Dedup identical frames", "bool", True),
     ("ocr", "CAPTURE_OCR", "Run OCR on each frame (CPU-heavy)", "bool", False),
+    (
+        "compact_every_mins",
+        "CAPTURE_COMPACT_EVERY_MINS",
+        "Compact to video every (min; 0=off, not recommended):",
+        "int",
+        False,
+    ),
+    (
+        "compact_quality",
+        "CAPTURE_COMPACT_QUALITY",
+        "Video quality (0–100):",
+        "int",
+        False,
+    ),
 ]
+
+
+def _open_captures_dir(path) -> None:
+    """Reveal the captures directory in Finder (creating it if missing)."""
+    try:
+        os.makedirs(path, exist_ok=True)
+        subprocess.run(["open", str(path)], check=False)
+    except Exception as e:
+        logger.warning("Failed to open captures dir %s: %s", path, e)
+
+
+def _open_privacy_pane(anchor: str) -> None:
+    """Open a System Settings → Privacy & Security pane (e.g. ``Privacy_ScreenCapture``).
+
+    macOS does not let an app revoke its own TCC grant programmatically, so
+    "revoking" means sending the user to the pane where they can toggle it off.
+    """
+    try:
+        subprocess.run(
+            ["open", f"x-apple.systempreferences:com.apple.preference.security?{anchor}"],
+            check=False,
+        )
+    except Exception as e:
+        logger.warning("Failed to open privacy pane %s: %s", anchor, e)
 
 
 def _show_settings_dialog(capture, env_path: str) -> bool:
@@ -204,14 +243,70 @@ def _show_settings_dialog(capture, env_path: str) -> bool:
             view.addSubview_(fld)
             widgets[attr] = fld
 
+    # One button per capture permission. When a grant is already in place there's
+    # nothing left to grant, so it becomes a "Revoke …" button that opens System
+    # Settings (macOS won't let an app drop its own TCC grant programmatically).
+    rec_granted = screen_recording_ok()
+    acc_granted = accessibility_ok()
+    rec_title = "Revoke Screen Recording…" if rec_granted else "Grant Screen Recording"
+    acc_title = "Revoke Accessibility…" if acc_granted else "Grant Accessibility"
+
     alert = NSAlert.alloc().init()
     alert.setMessageText_("Capture Settings")
     alert.setInformativeText_("Changes apply immediately and persist across restarts.")
-    alert.addButtonWithTitle_("Save")
-    alert.addButtonWithTitle_("Cancel")
+    alert.addButtonWithTitle_("Save")  # 1000
+    alert.addButtonWithTitle_("Open Screenshots…")  # 1001
+    alert.addButtonWithTitle_(rec_title)  # 1002
+    alert.addButtonWithTitle_(acc_title)  # 1003
+    alert.addButtonWithTitle_("Cancel")  # 1004
     alert.setAccessoryView_(view)
-    if alert.runModal() != 1000:  # NSAlertFirstButtonReturn == Save
-        return False
+
+    # Open/Grant/Revoke are side actions: perform them and re-open the same dialog
+    # so any values typed so far are preserved (the view/widgets are reused).
+    while True:
+        resp = alert.runModal()
+        if resp == 1001:  # Open Screenshots…
+            _open_captures_dir(capture.capture_dir)
+            continue
+        if resp == 1002:  # Grant / Revoke Screen Recording
+            if rec_granted:
+                _open_privacy_pane("Privacy_ScreenCapture")
+                rumps.notification(
+                    "Chronicle — Screen Recording",
+                    "",
+                    "Already granted. To revoke, toggle Chronicle off in "
+                    "System Settings → Privacy & Security → Screen Recording.",
+                )
+            else:
+                granted = screen_recording_ok(prompt=True)
+                rumps.notification(
+                    "Chronicle — Screen Recording",
+                    "",
+                    f"{'Granted' if granted else 'NOT granted'}. Approve in System "
+                    "Settings → Privacy & Security if needed, then restart.",
+                )
+            continue
+        if resp == 1003:  # Grant / Revoke Accessibility
+            if acc_granted:
+                _open_privacy_pane("Privacy_Accessibility")
+                rumps.notification(
+                    "Chronicle — Accessibility",
+                    "",
+                    "Already granted. To revoke, toggle Chronicle off in "
+                    "System Settings → Privacy & Security → Accessibility.",
+                )
+            else:
+                granted = accessibility_ok(prompt=True)
+                rumps.notification(
+                    "Chronicle — Accessibility",
+                    "",
+                    f"{'Granted' if granted else 'NOT granted'}. Approve in System "
+                    "Settings → Privacy & Security if needed, then restart.",
+                )
+            continue
+        if resp != 1000:  # NSAlertFirstButtonReturn == Save; anything else cancels
+            return False
+        break
 
     # Parse + validate before applying anything.
     parsed = {}
@@ -237,6 +332,8 @@ def _show_settings_dialog(capture, env_path: str) -> bool:
     parsed["skip_idle_secs"] = max(0.0, parsed["skip_idle_secs"])
     parsed["retention_days"] = max(0, parsed["retention_days"])
     parsed["thumb_max"] = max(16, parsed["thumb_max"])
+    parsed["compact_every_mins"] = max(0, parsed["compact_every_mins"])
+    parsed["compact_quality"] = max(0, min(100, parsed["compact_quality"]))
 
     # Apply live (the capture loop reads these attributes each tick) + persist.
     for attr, key, _label, kind, invert in _SETTINGS_FIELDS:
@@ -574,9 +671,6 @@ class WearableMenuApp(rumps.App):
         self.settings_item = rumps.MenuItem(
             "Capture Settings…", callback=self.on_capture_settings
         )
-        self.perms_item = rumps.MenuItem(
-            "Grant Capture Permissions", callback=self.on_grant_permissions
-        )
         self.logs_item = rumps.MenuItem("View Logs", callback=self.on_view_logs)
         self.version_item = rumps.MenuItem(f"Version: {_app_version()}", callback=None)
 
@@ -590,7 +684,6 @@ class WearableMenuApp(rumps.App):
             self.scan_item,
             self.capture_item,
             self.settings_item,
-            self.perms_item,
             self.logs_item,
             None,  # separator
             self.version_item,
@@ -710,18 +803,6 @@ class WearableMenuApp(rumps.App):
         logger.info("User opened capture settings")
         _show_settings_dialog(self.capture, ENV_PATH)
 
-    def on_grant_permissions(self, _sender) -> None:
-        """Trigger the Screen Recording + Accessibility TCC prompts."""
-        logger.info("User requested capture permissions")
-        status = request_permissions()
-        rumps.notification(
-            "Chronicle — Capture Permissions",
-            "",
-            f"Screen Recording: {'granted' if status['screen_recording'] else 'NOT granted'}  •  "
-            f"Accessibility: {'granted' if status['accessibility'] else 'NOT granted'}. "
-            "Approve in System Settings → Privacy & Security if needed, then restart.",
-        )
-
     def on_view_logs(self, _sender) -> None:
         """Show recent log output in a scrollable dialog."""
         _show_logs_dialog("Chronicle Wearable — Logs", list(log_buffer.lines))
@@ -743,6 +824,12 @@ def run_menu_app() -> None:
     log_buffer.setFormatter(logging.Formatter(log_format))
     logging.getLogger().addHandler(log_buffer)
 
+    # Request capture permissions up front by default. The TCC prompts only
+    # appear if a grant is actually missing (an already-granted check returns
+    # silently), so this is a no-op on subsequent launches. A manual re-trigger
+    # lives in Capture Settings for when a grant was previously denied.
+    request_permissions()
+
     state = SharedState()
     bg = AsyncioThread()
     bg.start()
@@ -759,6 +846,10 @@ def run_menu_app() -> None:
     #   CAPTURE_SKIP_IDLE_SECS=N  skip screenshots while idle >= N s (0 disables)
     #   CAPTURE_RETENTION_DAYS=N  delete screenshots older than N days (0 = keep)
     #   CAPTURE_SCALE=F           save frames at fraction F of native res (default 0.5)
+    #   CAPTURE_COMPACT_EVERY_MINS=N  collapse old JPEGs into HEVC every N min (0 = off)
+    #   CAPTURE_COMPACT_QUALITY=Q  HEVC quality 0-100 (default 60)
+    #   CAPTURE_COMPACT_AFTER_SECS=N  only compact frames older than N s (default 600)
+    #   CAPTURE_COMPACT_MIN_BATTERY=P  skip compaction on battery below P% (default 20)
     capture_ocr = os.getenv("CAPTURE_OCR", "").lower() in ("1", "true", "yes")
     capture_dedup = os.getenv("CAPTURE_NO_DEDUP", "").lower() not in (
         "1",
@@ -772,6 +863,10 @@ def run_menu_app() -> None:
         retention_days=int(os.getenv("CAPTURE_RETENTION_DAYS", "14")),
         save_scale=float(os.getenv("CAPTURE_SCALE", "0.5")),
         thumb_max=int(os.getenv("CAPTURE_THUMB_MAX", "256")),
+        compact_every_mins=int(os.getenv("CAPTURE_COMPACT_EVERY_MINS", "30")),
+        compact_after_secs=float(os.getenv("CAPTURE_COMPACT_AFTER_SECS", "600")),
+        compact_quality=int(os.getenv("CAPTURE_COMPACT_QUALITY", "60")),
+        compact_min_battery=int(os.getenv("CAPTURE_COMPACT_MIN_BATTERY", "20")),
     )
     if os.getenv("CAPTURE_AUTOSTART", "").lower() in ("1", "true", "yes"):
         if screen_recording_ok():
@@ -779,7 +874,7 @@ def run_menu_app() -> None:
         else:
             logger.warning(
                 "CAPTURE_AUTOSTART set but Screen Recording not granted — "
-                "use 'Grant Capture Permissions' in the menu, then restart."
+                "use 'Grant Screen Recording' in Capture Settings, then restart."
             )
 
     app = WearableMenuApp(state, ble, capture)
