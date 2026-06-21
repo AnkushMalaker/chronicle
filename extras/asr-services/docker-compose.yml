@@ -250,6 +250,60 @@ services:
     restart: unless-stopped
 
   # ============================================================================
+  # Granite Speech Provider (IBM Granite Speech, LLM-backbone batch ASR)
+  # ============================================================================
+  granite-asr:
+    build:
+      context: .
+      dockerfile: providers/granite/Dockerfile
+      args:
+        PYTORCH_CUDA_VERSION: ${PYTORCH_CUDA_VERSION:-cu126}
+    image: ${CHRONICLE_REGISTRY:-}chronicle-asr-granite:${CHRONICLE_TAG:-latest}
+    ports:
+      - "${ASR_PORT:-8767}:8765"
+    volumes:
+      - ./model_cache:/models
+      - ./debug:/app/debug
+      - ./results:/app/results
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
+      # Once the model is cached, run fully offline so startup never depends on
+      # DNS/HF reachability (huggingface_hub 1.x turns a transient name-resolution
+      # failure into a fatal crash). Default 0 so first-run can still download.
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-0}
+      # MMS_FA forced-alignment model (used for diarization timing) is fetched by
+      # torchaudio from download.pytorch.org into TORCH_HOME — point it at the
+      # mounted cache so it persists across container rebuilds.
+      - TORCH_HOME=${TORCH_HOME:-/models/torch}
+      - ASR_MODEL=${GRANITE_MODEL:-ibm-granite/granite-speech-4.1-2b-plus}
+      - DEVICE=${DEVICE:-cuda}
+      # Granite must run bf16 (don't inherit a global TORCH_DTYPE=float16, which
+      # overflows on LLM-backbone ASR the same way it did on Gemma 4 / AF-Next).
+      - TORCH_DTYPE=${GRANITE_TORCH_DTYPE:-bfloat16}
+      - MAX_NEW_TOKENS=${GRANITE_MAX_NEW_TOKENS:-512}
+      # Provider diarization (default on): two passes per window (the model-card
+      # timestamp + speaker-attribution prompts) → speaker segments with real
+      # timestamps, so the backend skips pyannote. Set 0 for raw transcription only.
+      - GRANITE_DIARIZE=${GRANITE_DIARIZE:-1}
+      - GRANITE_DIARIZE_MAX_NEW_TOKENS=${GRANITE_DIARIZE_MAX_NEW_TOKENS:-1024}
+      - BATCH_THRESHOLD_SECONDS=${GRANITE_BATCH_THRESHOLD_SECONDS:-30}
+      - BATCH_DURATION_SECONDS=${GRANITE_BATCH_DURATION_SECONDS:-30}
+      - BATCH_OVERLAP_SECONDS=${GRANITE_BATCH_OVERLAP_SECONDS:-5}
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    restart: unless-stopped
+
+  # ============================================================================
   # NVIDIA Audio Flamingo Next Provider (Think variant by default)
   # Promptable audio LM with timestamped multi-talker diarization.
   # License: NVIDIA OneWay Noncommercial — research use only.

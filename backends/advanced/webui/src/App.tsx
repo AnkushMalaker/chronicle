@@ -25,6 +25,7 @@ const Network = lazy(() => import('./pages/Network'))
 const DataAudit = lazy(() => import('./pages/DataAudit'))
 const WakeWordLab = lazy(() => import('./pages/WakeWordLab'))
 const MemoryLedger = lazy(() => import('./pages/MemoryLedger'))
+const SystemEvents = lazy(() => import('./pages/SystemEvents'))
 
 
 function PageSkeleton() {
@@ -117,6 +118,13 @@ function App() {
                   <PageErrorBoundary>
                     <Suspense fallback={<PageSkeleton />}>
                       <System />
+                    </Suspense>
+                  </PageErrorBoundary>
+                } />
+                <Route path="system-errors" element={
+                  <PageErrorBoundary>
+                    <Suspense fallback={<PageSkeleton />}>
+                      <SystemEvents />
                     </Suspense>
                   </PageErrorBoundary>
                 } />

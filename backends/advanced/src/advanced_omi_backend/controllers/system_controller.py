@@ -1100,8 +1100,8 @@ async def get_memory_provider():
         if current_provider in ("friend-lite", "friend_lite"):
             current_provider = "chronicle"
 
-        # Get available providers
-        available_providers = ["chronicle", "openmemory_mcp", "graphiti"]
+        # Chronicle (agentic vault) is currently the only provider.
+        available_providers = ["chronicle"]
 
         return {
             "current_provider": current_provider,
@@ -1117,9 +1117,9 @@ async def get_memory_provider():
 async def set_memory_provider(provider: str):
     """Set memory provider and update .env file."""
     try:
-        # Validate provider
+        # Validate provider. Chronicle (agentic vault) is currently the only provider.
         provider = provider.lower().strip()
-        valid_providers = ["chronicle", "openmemory_mcp", "graphiti"]
+        valid_providers = ["chronicle"]
 
         if provider not in valid_providers:
             raise ValueError(
@@ -1331,110 +1331,6 @@ async def test_llm_model(model_name: Optional[str]):
             "error": str(e),
             "status": "error",
         }
-
-
-# Chat Configuration Management Functions
-
-
-async def get_chat_config_yaml() -> str:
-    """Get chat system prompt as plain text."""
-    try:
-        config_path = _find_config_path()
-
-        default_prompt = """You are a helpful AI assistant with access to the user's personal memories and conversation history.
-
-Use the provided memories and conversation context to give personalized, contextual responses. If memories are relevant, reference them naturally in your response. Be conversational and helpful.
-
-If no relevant memories are available, respond normally based on the conversation context."""
-
-        if not os.path.exists(config_path):
-            return default_prompt
-
-        with open(config_path, "r") as f:
-            full_config = _yaml.load(f) or {}
-
-        chat_config = full_config.get("chat", {})
-        system_prompt = chat_config.get("system_prompt", default_prompt)
-
-        # Return just the prompt text, not the YAML structure
-        return system_prompt
-
-    except Exception as e:
-        logger.error(f"Error loading chat config: {e}")
-        raise
-
-
-async def save_chat_config_yaml(prompt_text: str) -> dict:
-    """Save chat system prompt from plain text."""
-    try:
-        config_path = _find_config_path()
-
-        # Validate plain text prompt
-        if not prompt_text or not isinstance(prompt_text, str):
-            raise ValueError("Prompt must be a non-empty string")
-
-        prompt_text = prompt_text.strip()
-        if len(prompt_text) < 10:
-            raise ValueError("Prompt too short (minimum 10 characters)")
-        if len(prompt_text) > 10000:
-            raise ValueError("Prompt too long (maximum 10000 characters)")
-
-        # Create chat config dict
-        chat_config = {"system_prompt": prompt_text}
-
-        # Load full config
-        if os.path.exists(config_path):
-            with open(config_path, "r") as f:
-                full_config = _yaml.load(f) or {}
-        else:
-            full_config = {}
-
-        # Backup existing config
-        if os.path.exists(config_path):
-            backup_path = str(config_path) + ".backup"
-            shutil.copy2(config_path, backup_path)
-            logger.info(f"Created config backup at {backup_path}")
-
-        # Update chat section
-        full_config["chat"] = chat_config
-
-        # Save
-        with open(config_path, "w") as f:
-            _yaml.dump(full_config, f)
-
-        # Reload config in memory (hot-reload)
-        load_models_config(force_reload=True)
-
-        logger.info("Chat configuration updated successfully")
-
-        return {"success": True, "message": "Chat configuration updated successfully"}
-
-    except Exception as e:
-        logger.error(f"Error saving chat config: {e}")
-        raise
-
-
-async def validate_chat_config_yaml(prompt_text: str) -> dict:
-    """Validate chat system prompt plain text."""
-    try:
-        # Validate plain text prompt
-        if not isinstance(prompt_text, str):
-            return {"valid": False, "error": "Prompt must be a string"}
-
-        prompt_text = prompt_text.strip()
-        if len(prompt_text) < 10:
-            return {"valid": False, "error": "Prompt too short (minimum 10 characters)"}
-        if len(prompt_text) > 10000:
-            return {
-                "valid": False,
-                "error": "Prompt too long (maximum 10000 characters)",
-            }
-
-        return {"valid": True, "message": "Configuration is valid"}
-
-    except Exception as e:
-        logger.error(f"Error validating chat config: {e}")
-        return {"valid": False, "error": f"Validation error: {str(e)}"}
 
 
 # Plugin Configuration Management Functions

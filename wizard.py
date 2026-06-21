@@ -8,13 +8,12 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from dotenv import set_key
-from rich.console import Console
-from rich.prompt import Confirm, Prompt
-
 import discovery
 import services
 from config_manager import ConfigManager
+from dotenv import set_key
+from rich.console import Console
+from rich.prompt import Confirm, Prompt
 
 # Import shared setup utilities
 from setup_utils import (
@@ -46,6 +45,7 @@ def get_existing_stt_provider(config_yml: dict):
         "stt-smallest-stream": "smallest",
         "stt-gemma4": "gemma4",
         "stt-af-next": "af-next",
+        "stt-granite": "granite",
     }
     return mapping.get(stt)
 
@@ -59,6 +59,7 @@ def get_existing_stream_provider(config_yml: dict):
         "stt-qwen3-asr": "qwen3-asr",
         "stt-qwen3-asr-stream": "qwen3-asr",
         "stt-gemma4-stream": "gemma4",
+        "stt-nemotron-stream": "nemotron",
     }
     return mapping.get(stt_stream)
 
@@ -103,11 +104,6 @@ SERVICES = {
                 "init.py",
             ],
             "description": "Offline speech-to-text",
-        },
-        "openmemory-mcp": {
-            "path": "extras/openmemory-mcp",
-            "cmd": ["./setup.sh"],
-            "description": "OpenMemory MCP server",
         },
         "langfuse": {
             "path": "extras/langfuse",
@@ -275,6 +271,7 @@ def select_services(
         "qwen3-asr",
         "gemma4",
         "af-next",
+        "granite",
     ):
         auto_added.add("asr-services")
     if llm_provider == "llamacpp":
@@ -294,6 +291,7 @@ def select_services(
                     "qwen3-asr": "Qwen3-ASR",
                     "gemma4": "Gemma 4",
                     "af-next": "Audio Flamingo Next",
+                    "granite": "Granite Speech",
                 }.get(transcription_provider, transcription_provider)
             console.print(
                 f"  ✅ {service_config['description']} ({label}) [dim](auto-selected)[/dim]"
@@ -331,9 +329,6 @@ def select_services(
                     "hf_xxxxx",
                 )
             )
-        elif service_name == "openmemory-mcp":
-            # Also default True if memory provider was selected as openmemory_mcp
-            default_enable = prior_enabled or (memory_provider == "openmemory_mcp")
         else:
             default_enable = prior_enabled
 
@@ -379,7 +374,6 @@ def run_service_setup(
     selected_services,
     https_enabled=False,
     server_ip=None,
-    obsidian_enabled=False,
     hf_token=None,
     transcription_provider="deepgram",
     admin_email=None,
@@ -457,19 +451,9 @@ def run_service_setup(
         if https_enabled and server_ip:
             cmd.extend(["--enable-https", "--server-ip", server_ip])
 
-        # Always pass obsidian choice to avoid double-ask
-        if obsidian_enabled:
-            cmd.extend(["--enable-obsidian"])
-        else:
-            cmd.extend(["--no-obsidian"])
-
         # Pass LLM provider choice
         if llm_provider:
             cmd.extend(["--llm-provider", llm_provider])
-
-        # Pass memory provider choice
-        if memory_provider:
-            cmd.extend(["--memory-provider", memory_provider])
 
         # Pass LangFuse keys from langfuse init or external config
         if langfuse_public_key and langfuse_secret_key:
@@ -549,12 +533,20 @@ def run_service_setup(
                     "qwen3-asr": "qwen3-asr",
                     "gemma4": "gemma4",
                     "af-next": "af-next",
+                    "granite": "granite",
+                    "nemotron": "nemotron",
                 }
-            asr_provider = wizard_to_asr_provider.get(transcription_provider)
+            # Prefer the batch provider; fall back to the streaming provider when the
+            # batch one is cloud (no local container) but streaming is local — e.g.
+            # batch=deepgram + streaming=nemotron must still configure the nemotron
+            # container in asr-services.
+            asr_provider = wizard_to_asr_provider.get(
+                transcription_provider
+            ) or wizard_to_asr_provider.get(streaming_provider)
             if asr_provider:
                 cmd.extend(["--provider", asr_provider])
                 console.print(
-                    f"[blue][INFO][/blue] Pre-selecting ASR provider: {asr_provider} (from wizard choice: {transcription_provider})"
+                    f"[blue][INFO][/blue] Pre-selecting ASR provider: {asr_provider}"
                 )
 
             speaker_env_path = "extras/speaker-recognition/.env"
@@ -580,86 +572,6 @@ def run_service_setup(
                 cmd.extend(["--admin-email", admin_email])
             if admin_password:
                 cmd.extend(["--admin-password", admin_password])
-
-        # For openmemory-mcp, try to pass OpenAI API key from backend if available
-        if service_name == "openmemory-mcp":
-            backend_env_path = "backends/advanced/.env"
-            openmemory_env_path = "extras/openmemory-mcp/.env"
-            openai_key = read_env_value(backend_env_path, "OPENAI_API_KEY")
-            backend_openai_base_url = read_env_value(
-                backend_env_path, "OPENAI_BASE_URL"
-            )
-            backend_embedding_model = read_env_value(
-                backend_env_path, "OPENAI_EMBEDDING_MODEL"
-            )
-            backend_embedding_dims = read_env_value(
-                backend_env_path, "OPENAI_EMBEDDING_DIMENSIONS"
-            )
-
-            existing_embeddings_provider = read_env_value(
-                openmemory_env_path, "OPENMEMORY_EMBEDDINGS_PROVIDER"
-            )
-            existing_embeddings_base_url = read_env_value(
-                openmemory_env_path, "OPENMEMORY_EMBEDDINGS_BASE_URL"
-            )
-            existing_embeddings_model = read_env_value(
-                openmemory_env_path, "OPENMEMORY_EMBEDDINGS_MODEL"
-            )
-            existing_embeddings_api_key = read_env_value(
-                openmemory_env_path, "OPENMEMORY_EMBEDDINGS_API_KEY"
-            )
-            existing_embeddings_dims = read_env_value(
-                openmemory_env_path, "OPENMEMORY_EMBEDDINGS_DIMENSIONS"
-            )
-
-            def _has_value(value):
-                return value and value.strip()
-
-            has_openai_key = _has_value(openai_key) and not is_placeholder(
-                openai_key,
-                "your_openai_api_key_here",
-                "your-openai-api-key-here",
-                "your_openai_key_here",
-                "your-openai-key-here",
-            )
-
-            # Prefer an existing OpenMemory local embedding configuration if available.
-            if (
-                existing_embeddings_provider == "local"
-                and _has_value(existing_embeddings_base_url)
-                and _has_value(existing_embeddings_model)
-                and _has_value(existing_embeddings_api_key)
-                and _has_value(existing_embeddings_dims)
-            ):
-                cmd.extend(["--embeddings-provider", "local"])
-                cmd.extend(["--embeddings-base-url", existing_embeddings_base_url])
-                cmd.extend(["--embeddings-model", existing_embeddings_model])
-                cmd.extend(["--embeddings-api-key", existing_embeddings_api_key])
-                cmd.extend(["--embeddings-dimensions", existing_embeddings_dims])
-                console.print(
-                    "[blue][INFO][/blue] Found existing local embeddings config for OpenMemory, reusing"
-                )
-            elif (
-                has_openai_key
-                and _has_value(backend_openai_base_url)
-                and "api.openai.com" not in backend_openai_base_url
-            ):
-                # Backend appears to use a local OpenAI-compatible endpoint.
-                cmd.extend(["--embeddings-provider", "local"])
-                cmd.extend(["--embeddings-base-url", backend_openai_base_url])
-                cmd.extend(["--embeddings-api-key", openai_key])
-                if _has_value(backend_embedding_model):
-                    cmd.extend(["--embeddings-model", backend_embedding_model])
-                if _has_value(backend_embedding_dims):
-                    cmd.extend(["--embeddings-dimensions", backend_embedding_dims])
-                console.print(
-                    "[blue][INFO][/blue] Found OpenAI-compatible local endpoint in backend config, pre-filling OpenMemory local embeddings"
-                )
-            elif has_openai_key:
-                cmd.extend(["--openai-api-key", openai_key])
-                console.print(
-                    "[blue][INFO][/blue] Found existing OPENAI_API_KEY from backend config, reusing"
-                )
 
     console.print(f"\n🔧 [bold]Setting up {service_name}...[/bold]")
 
@@ -968,7 +880,7 @@ def setup_hf_token_if_needed(selected_services):
 
 
 # Providers that support real-time streaming
-STREAMING_CAPABLE = {"deepgram", "smallest", "qwen3-asr", "gemma4"}
+STREAMING_CAPABLE = {"deepgram", "smallest", "qwen3-asr", "gemma4", "nemotron"}
 
 # STT providers that can also serve as LLM (unified multimodal models)
 UNIFIED_CAPABLE_STT = {"gemma4"}
@@ -1149,7 +1061,8 @@ def select_transcription_provider(
         "smallest": "5",
         "gemma4": "6",
         "af-next": "7",
-        "none": "8",
+        "granite": "8",
+        "none": "9",
     }
     choice_to_provider = {v: k for k, v in provider_to_choice.items()}
 
@@ -1175,6 +1088,7 @@ def select_transcription_provider(
             "smallest": "Smallest.ai Pulse",
             "gemma4": "Gemma 4",
             "af-next": "Audio Flamingo Next",
+            "granite": "Granite Speech",
         }
         console.print(
             f"[blue][INFO][/blue] Current: {provider_labels.get(existing_provider, existing_provider)}"
@@ -1189,7 +1103,8 @@ def select_transcription_provider(
         "5": "Smallest.ai Pulse (cloud, streaming + batch)",
         "6": "Gemma 4 (offline, streaming + batch, prompt-based diarization, MTP, GPU)",
         "7": "Audio Flamingo Next (offline, batch, timestamped diarization, GPU; noncommercial license)",
-        "8": "None (skip transcription setup)",
+        "8": "IBM Granite Speech (offline, batch, LLM-backbone, en/fr/de/es/pt, GPU)",
+        "9": "None (skip transcription setup)",
     }
 
     for key, desc in choices.items():
@@ -1240,6 +1155,10 @@ def select_streaming_provider(config_yml: dict = None):
         (
             "gemma4",
             "Gemma 4 (offline, streaming-ish, prompt-based diarization, MTP, GPU)",
+        ),
+        (
+            "nemotron",
+            "Nemotron 3.5 (offline, true cache-aware streaming ~100ms, GPU)",
         ),
     ]
     streaming_choices = {}
@@ -1569,54 +1488,6 @@ def select_llm_provider(
             console.print(f"Using default: {choices.get(default_choice, 'OpenAI')}")
             return {"1": "openai", "2": "ollama", "3": "llamacpp", "4": "none"}.get(
                 default_choice, "openai"
-            )
-
-
-def select_memory_provider(config_yml: dict = None) -> str:
-    """Ask user which memory storage backend to use.
-
-    This is separate from the 'Setup OpenMemory MCP server?' service question.
-    That question is about running the extra service; this is about the backend provider.
-
-    Returns:
-        "chronicle", "openmemory_mcp", or "graphiti"
-    """
-    config_yml = config_yml or {}
-    existing_provider = config_yml.get("memory", {}).get("provider", "chronicle")
-    default_choice = {
-        "chronicle": "1",
-        "openmemory_mcp": "2",
-        "graphiti": "3",
-    }.get(existing_provider, "1")
-
-    console.print("\n🧠 [bold cyan]Memory Storage Backend[/bold cyan]")
-    console.print("Choose where your memories and conversation facts are stored:")
-    console.print()
-
-    choices = {
-        "1": "Chronicle Native (FalkorDB graph + vault, self-hosted)",
-        "2": "OpenMemory MCP (cross-client compatible, requires openmemory-mcp service)",
-        "3": "Graphiti (FalkorDB temporal knowledge graph, self-hosted)",
-    }
-
-    for key, desc in choices.items():
-        marker = " [dim](current)[/dim]" if key == default_choice else ""
-        console.print(f"  {key}) {desc}{marker}")
-    console.print()
-
-    while True:
-        try:
-            choice = Prompt.ask("Enter choice", default=default_choice)
-            if choice in choices:
-                return {"1": "chronicle", "2": "openmemory_mcp", "3": "graphiti"}[
-                    choice
-                ]
-            console.print(
-                f"[red]Invalid choice. Please select from {list(choices.keys())}[/red]"
-            )
-        except EOFError:
-            return {"1": "chronicle", "2": "openmemory_mcp", "3": "graphiti"}.get(
-                default_choice, "chronicle"
             )
 
 
@@ -2033,8 +1904,8 @@ def main():
     # LLM Provider selection (asked once here, passed to init.py — avoids double-ask)
     llm_provider = select_llm_provider(config_yml, transcription_provider)
 
-    # Memory Provider selection (asked once here, passed to init.py — avoids double-ask)
-    memory_provider = select_memory_provider(config_yml)
+    # Chronicle's agentic Markdown vault is the only memory provider — no choice.
+    memory_provider = "chronicle"
 
     # Service Selection (pass provider choices so we skip asking about auto-added services)
     selected_services = select_services(
@@ -2135,7 +2006,15 @@ def main():
             pass
 
     # Auto-add asr-services if a LOCAL ASR was chosen (not a remote/discover source)
-    local_asr_providers = ("parakeet", "vibevoice", "qwen3-asr", "gemma4", "af-next")
+    local_asr_providers = (
+        "parakeet",
+        "vibevoice",
+        "qwen3-asr",
+        "gemma4",
+        "af-next",
+        "granite",
+        "nemotron",
+    )
     needs_asr = not asr_remote and (
         transcription_provider in local_asr_providers
         or (streaming_provider and streaming_provider in local_asr_providers)
@@ -2165,20 +2044,6 @@ def main():
                 "[blue][INFO][/blue] LLM provider is llama.cpp — auto-adding llm-services"
             )
             selected_services.append("llm-services")
-
-    # Auto-add openmemory-mcp service if openmemory_mcp was selected as memory provider
-    if (
-        memory_provider == "openmemory_mcp"
-        and "openmemory-mcp" not in selected_services
-    ):
-        exists, _ = check_service_exists(
-            "openmemory-mcp", SERVICES["extras"]["openmemory-mcp"]
-        )
-        if exists:
-            console.print(
-                "[blue][INFO][/blue] Memory provider is OpenMemory MCP — auto-adding openmemory-mcp service"
-            )
-            selected_services.append("openmemory-mcp")
 
     if not selected_services:
         console.print("\n[yellow]No services selected. Exiting.[/yellow]")
@@ -2336,31 +2201,6 @@ def main():
                             "[cyan]sudo systemctl enable --now tailscaled[/cyan]"
                         )
 
-    obsidian_enabled = False
-
-    if "advanced" in selected_services:
-        # Obsidian is optional (graph-based knowledge management for vault notes)
-        console.print("\n🗂️ [bold cyan]Obsidian Integration (Optional)[/bold cyan]")
-        console.print(
-            "Enable graph-based knowledge management for Obsidian vault notes"
-        )
-        console.print()
-
-        # Load existing obsidian enabled state from config.yml as default
-        existing_obsidian = (
-            config_yml.get("memory", {}).get("obsidian", {}).get("enabled", False)
-        )
-        try:
-            obsidian_enabled = Confirm.ask(
-                "Enable Obsidian integration?", default=existing_obsidian
-            )
-        except EOFError:
-            console.print(f"Using default: {'Yes' if existing_obsidian else 'No'}")
-            obsidian_enabled = existing_obsidian
-
-        if obsidian_enabled:
-            console.print("[green]✅[/green] Obsidian integration will be configured")
-
     # Pure Delegation - Run Each Service Setup
     console.print(f"\n📋 [bold]Setting up {len(selected_services)} services...[/bold]")
 
@@ -2404,7 +2244,6 @@ def main():
             selected_services,
             https_enabled,
             server_ip,
-            obsidian_enabled,
             hf_token,
             transcription_provider,
             admin_email=wizard_admin_email,
@@ -2506,11 +2345,6 @@ def main():
         configured_services.append("speaker-recognition")
     if "asr-services" in selected_services and "asr-services" not in failed_services:
         configured_services.append("asr-services")
-    if (
-        "openmemory-mcp" in selected_services
-        and "openmemory-mcp" not in failed_services
-    ):
-        configured_services.append("openmemory-mcp")
     if "langfuse" in selected_services and "langfuse" not in failed_services:
         configured_services.append("langfuse")
 

@@ -38,6 +38,7 @@ interface Conversation {
   deleted_at?: string
   always_persist?: boolean
   processing_status?: string
+  failure_stage?: string
   is_orphan?: boolean
   starred?: boolean
   starred_at?: string
@@ -1166,8 +1167,9 @@ export default function Conversations() {
                         Unprocessed Audio Session
                       </span>
                       <span className="text-xs text-amber-600 dark:text-amber-400 ml-2">
-                        {conversation.processing_status === 'transcription_failed' ? 'Transcription failed' :
-                         conversation.processing_status === 'reprocessing' ? 'Reprocessing...' :
+                        {conversation.processing_status === 'failed'
+                          ? (conversation.failure_stage === 'summarization' ? 'Summary generation failed' : 'Transcription failed') :
+                         conversation.processing_status === 'active' ? 'Processing…' :
                          conversation.deleted ? `Deleted: ${conversation.deletion_reason}` :
                          conversation.processing_status || 'Pending'}
                         {conversation.audio_total_duration ? ` · ${Math.floor(conversation.audio_total_duration / 60)}:${Math.floor(conversation.audio_total_duration % 60).toString().padStart(2, '0')} audio` : ''}

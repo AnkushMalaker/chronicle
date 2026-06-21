@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import time
+import traceback
 import uuid
 from functools import partial
 from typing import Optional
@@ -34,6 +35,7 @@ from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
     SessionStore,
 )
+from advanced_omi_backend.services.observability import record_event_sync
 from advanced_omi_backend.services.sse_publisher import publish_sse_event
 
 # Thread pool executors for audio decoding
@@ -1535,6 +1537,18 @@ async def _websocket_session(ws, token, device_name, connection_type):
         application_logger.error(
             f"❌ {connection_type} WebSocket error for client {client_id}: {e}",
             exc_info=True,
+        )
+        # Surface error-disconnects as a first-class client event (the catch-all log
+        # handler also captures the line above, but without client_id / category).
+        record_event_sync(
+            severity="error",
+            category="client",
+            source=client_id or "unknown",
+            title=f"{connection_type} client disconnected on error",
+            detail=str(e),
+            traceback=traceback.format_exc(),
+            client_id=client_id,
+            metadata={"connection_type": connection_type},
         )
     finally:
         if downlink_task and not downlink_task.done():

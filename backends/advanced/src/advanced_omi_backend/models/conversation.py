@@ -255,10 +255,20 @@ class Conversation(Document):
         None, description="When the conversation was marked as deleted"
     )
 
-    # Always persist audio flag and processing status
+    # Always persist audio flag and processing status.
+    # Canonical values are the ConversationStatus enum: "active" | "completed" |
+    # "failed". This field is OWNED by apply_status() — derived from facts (does an
+    # active transcript exist?) at terminal points and by the reconciler. Individual
+    # jobs must NOT hand-stamp it; they do their work and let the finalizer reconcile.
     processing_status: Optional[str] = Field(
         None,
-        description="Processing status: pending_transcription, transcription_failed, completed",
+        description="Processing status (ConversationStatus): active, completed, failed",
+    )
+    # When processing_status == "failed", which pipeline stage failed
+    # (e.g. "transcription", "summarization"). Replaces the old overloaded
+    # "transcription_failed" string that conflated distinct failure causes.
+    failure_stage: Optional[str] = Field(
+        None, description="Stage that failed when processing_status == 'failed'"
     )
     always_persist: bool = Field(
         default=False,
@@ -438,6 +448,43 @@ class Conversation(Document):
                 self.active_transcript_version = version_id
                 return True
         return False
+
+    @property
+    def has_meaningful_transcript(self) -> bool:
+        """True when the active transcript version has non-empty text."""
+        av = self.active_transcript
+        return bool(av and (av.transcript or "").strip())
+
+    def apply_status(
+        self, *, settled: bool, failure_stage: str = "transcription"
+    ) -> bool:
+        """Derive and set processing_status from facts. The SINGLE owner of the field.
+
+        The transcript is the conversation's core deliverable, so its presence is the
+        source of truth for success — independent of which jobs ran or what order they
+        ran in. This makes ``failed`` non-absorbing (a later recovery flips it to
+        ``completed``) and removes the need for jobs to hand-stamp the status.
+
+        - has a meaningful transcript            -> COMPLETED
+        - ``settled`` and no transcript          -> FAILED (failure_stage)
+        - otherwise (still in flight)            -> ACTIVE
+
+        ``settled`` means the caller knows the pipeline has reached a terminal point
+        (the finalizer job, a fallback dead-end, or the reconciler's staleness check),
+        so "no transcript" is final rather than "not yet". Returns True if anything
+        changed.
+        """
+        prev = (self.processing_status, self.failure_stage)
+        if self.has_meaningful_transcript:
+            self.processing_status = self.ConversationStatus.COMPLETED.value
+            self.failure_stage = None
+        elif settled:
+            self.processing_status = self.ConversationStatus.FAILED.value
+            self.failure_stage = failure_stage
+        else:
+            self.processing_status = self.ConversationStatus.ACTIVE.value
+            self.failure_stage = None
+        return (self.processing_status, self.failure_stage) != prev
 
     class Settings:
         name = "conversations"

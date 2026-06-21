@@ -4,6 +4,7 @@ Provides basic endpoints for viewing job status and statistics.
 """
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -638,12 +639,42 @@ async def get_stream_stats(
 class FlushJobsRequest(BaseModel):
     older_than_hours: int = 24
     statuses: List[str] = ["finished", "failed", "canceled"]  # RQ standard status names
+    dry_run: bool = (
+        False  # When true, return the jobs that would be removed without deleting
+    )
 
 
 class FlushAllJobsRequest(BaseModel):
     confirm: bool
     include_failed: bool = False  # By default, preserve failed jobs for debugging
     include_finished: bool = False  # By default, preserve finished jobs for debugging
+    dry_run: bool = (
+        False  # When true, return the jobs that would be removed without deleting
+    )
+
+
+def _summarize_job(job: Job, queue_name: str, status: str) -> dict:
+    """Build a compact, JSON-safe descriptor of a job for flush previews."""
+    meta = job.meta or {}
+    ended_at = job.ended_at
+    age_hours = None
+    if ended_at:
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        age_hours = round((now - ended_at).total_seconds() / 3600, 2)
+    return {
+        "job_id": job.id,
+        "job_type": (job.func_name or "").split(".")[-1]
+        or job.description
+        or "unknown",
+        "status": status,
+        "queue": queue_name,
+        "ended_at": ended_at.isoformat() if ended_at else None,
+        "age_hours": age_hours,
+        "description": job.description,
+        "client_id": meta.get("client_id"),
+        "conversation_id": meta.get("conversation_id"),
+        "session_level": bool(meta.get("session_level")),
+    }
 
 
 @router.post("/flush")
@@ -655,8 +686,6 @@ async def flush_jobs(
         raise HTTPException(status_code=403, detail="Admin access required")
 
     try:
-        from datetime import datetime, timedelta, timezone
-
         from rq.registry import (
             CanceledJobRegistry,
             FailedJobRegistry,
@@ -669,48 +698,43 @@ async def flush_jobs(
             hours=request.older_than_hours
         )
         total_removed = 0
+        matched_jobs = []
 
-        # Get all queues
-        queues = QUEUE_NAMES
+        # RQ standard status names → their terminal-job registries
+        registry_factories = {
+            "finished": FinishedJobRegistry,  # RQ standard, not "completed"
+            "failed": FailedJobRegistry,
+            "canceled": CanceledJobRegistry,  # RQ standard (US spelling), not "cancelled"
+        }
 
-        for queue_name in queues:
+        for queue_name in QUEUE_NAMES:
             queue = get_queue(queue_name)
 
-            # Flush from appropriate registries based on requested statuses (RQ standard names)
-            if "finished" in request.statuses:  # RQ standard, not "completed"
-                registry = FinishedJobRegistry(queue=queue)
+            for status in request.statuses:
+                factory = registry_factories.get(status)
+                if factory is None:
+                    continue
+                registry = factory(queue=queue)
                 for job_id in registry.get_job_ids():
                     try:
                         job = Job.fetch(job_id, connection=redis_conn)
+                        # Only jobs whose end time is older than the cutoff
                         if job.ended_at and job.ended_at < cutoff_time:
-                            job.delete()
-                            total_removed += 1
+                            matched_jobs.append(_summarize_job(job, queue_name, status))
+                            if not request.dry_run:
+                                job.delete()
+                                total_removed += 1
                     except Exception as e:
-                        logger.error(f"Error deleting job {job_id}: {e}")
+                        logger.error(f"Error processing job {job_id}: {e}")
 
-            if "failed" in request.statuses:
-                registry = FailedJobRegistry(queue=queue)
-                for job_id in registry.get_job_ids():
-                    try:
-                        job = Job.fetch(job_id, connection=redis_conn)
-                        if job.ended_at and job.ended_at < cutoff_time:
-                            job.delete()
-                            total_removed += 1
-                    except Exception as e:
-                        logger.error(f"Error deleting job {job_id}: {e}")
-
-            if (
-                "canceled" in request.statuses
-            ):  # RQ standard (US spelling), not "cancelled"
-                registry = CanceledJobRegistry(queue=queue)
-                for job_id in registry.get_job_ids():
-                    try:
-                        job = Job.fetch(job_id, connection=redis_conn)
-                        if job.ended_at and job.ended_at < cutoff_time:
-                            job.delete()
-                            total_removed += 1
-                    except Exception as e:
-                        logger.error(f"Error deleting job {job_id}: {e}")
+        if request.dry_run:
+            return {
+                "dry_run": True,
+                "total_matched": len(matched_jobs),
+                "jobs": matched_jobs,
+                "cutoff_time": cutoff_time.isoformat(),
+                "statuses": request.statuses,
+            }
 
         return {
             "total_removed": total_removed,
@@ -735,7 +759,7 @@ async def flush_all_jobs(
     if not current_user.is_superuser:
         raise HTTPException(status_code=403, detail="Admin access required")
 
-    if not request.confirm:
+    if not request.confirm and not request.dry_run:
         raise HTTPException(status_code=400, detail="Confirmation required")
 
     try:
@@ -749,6 +773,74 @@ async def flush_all_jobs(
         )
 
         from advanced_omi_backend.controllers.queue_controller import get_queue
+
+        # Preview mode: list everything that would be flushed without mutating anything.
+        if request.dry_run:
+            matched_jobs = []
+            skipped_session_level = 0
+
+            for queue_name in QUEUE_NAMES:
+                queue = get_queue(queue_name)
+
+                # Queued (pending) jobs live in the queue itself. The real flush empties
+                # the whole queue (queue.empty()), so — unlike the registries below — it
+                # does NOT spare session-level jobs here; the preview matches that.
+                for job in queue.jobs:
+                    matched_jobs.append(_summarize_job(job, queue_name, "queued"))
+
+                preview_registries = [
+                    ("started", StartedJobRegistry(queue=queue)),
+                    ("deferred", DeferredJobRegistry(queue=queue)),
+                    ("scheduled", ScheduledJobRegistry(queue=queue)),
+                    ("canceled", CanceledJobRegistry(queue=queue)),
+                ]
+                if request.include_failed:
+                    preview_registries.append(
+                        ("failed", FailedJobRegistry(queue=queue))
+                    )
+                if request.include_finished:
+                    preview_registries.append(
+                        ("finished", FinishedJobRegistry(queue=queue))
+                    )
+
+                for registry_name, registry in preview_registries:
+                    for job_id in registry.get_job_ids():
+                        try:
+                            job = Job.fetch(job_id, connection=redis_conn)
+                            if job.meta and job.meta.get("session_level"):
+                                skipped_session_level += 1
+                                continue
+                            matched_jobs.append(
+                                _summarize_job(job, queue_name, registry_name)
+                            )
+                        except Exception as e:
+                            logger.warning(f"Error inspecting job {job_id}: {e}")
+
+            # Count (but never delete) the Redis keys this flush would remove
+            redis_keys_matched = 0
+            async_redis = create_async_redis()
+            try:
+                for pattern in ("audio:*", "consumer:*"):
+                    cursor = 0
+                    while True:
+                        cursor, keys = await async_redis.scan(
+                            cursor, match=pattern, count=1000
+                        )
+                        redis_keys_matched += len(keys)
+                        if cursor == 0:
+                            break
+            finally:
+                await async_redis.close()
+
+            return {
+                "dry_run": True,
+                "total_matched": len(matched_jobs),
+                "jobs": matched_jobs,
+                "redis_keys_matched": redis_keys_matched,
+                "skipped_session_level": skipped_session_level,
+                "include_failed": request.include_failed,
+                "include_finished": request.include_finished,
+            }
 
         total_removed = 0
         queues = QUEUE_NAMES
@@ -1013,8 +1105,10 @@ async def get_dashboard_data(
     """
     try:
         from rq.registry import (
+            DeferredJobRegistry,
             FailedJobRegistry,
             FinishedJobRegistry,
+            ScheduledJobRegistry,
             StartedJobRegistry,
         )
 
@@ -1053,6 +1147,18 @@ async def get_dashboard_data(
                         ]
                     elif status_name == "failed":
                         job_ids = list(FailedJobRegistry(queue=queue).get_job_ids())[
+                            :limit
+                        ]
+                    elif status_name == "deferred":
+                        # Chained jobs (speaker → memory → title → event) sit here
+                        # while waiting on an upstream dependency. Surfacing them
+                        # lets users see pending/stuck downstream work (e.g. a
+                        # memory reprocess queued behind a transcript reprocess).
+                        job_ids = list(DeferredJobRegistry(queue=queue).get_job_ids())[
+                            :limit
+                        ]
+                    elif status_name == "scheduled":
+                        job_ids = list(ScheduledJobRegistry(queue=queue).get_job_ids())[
                             :limit
                         ]
                     else:
@@ -1300,6 +1406,8 @@ async def get_dashboard_data(
             "finished", limit=50
         )  # RQ standard, not "completed"
         failed_jobs_task = fetch_jobs_by_status("failed", limit=50)
+        deferred_jobs_task = fetch_jobs_by_status("deferred", limit=100)
+        scheduled_jobs_task = fetch_jobs_by_status("scheduled", limit=100)
         stats_task = fetch_stats()
         streaming_status_task = fetch_streaming_status()
         events_task = fetch_events()
@@ -1310,6 +1418,8 @@ async def get_dashboard_data(
             started_jobs_task,
             finished_jobs_task,
             failed_jobs_task,
+            deferred_jobs_task,
+            scheduled_jobs_task,
             stats_task,
             streaming_status_task,
             events_task,
@@ -1325,17 +1435,19 @@ async def get_dashboard_data(
             results[2] if not isinstance(results[2], Exception) else []
         )  # RQ standard
         failed_jobs = results[3] if not isinstance(results[3], Exception) else []
+        deferred_jobs = results[4] if not isinstance(results[4], Exception) else []
+        scheduled_jobs = results[5] if not isinstance(results[5], Exception) else []
         stats = (
-            results[4] if not isinstance(results[4], Exception) else {"total_jobs": 0}
+            results[6] if not isinstance(results[6], Exception) else {"total_jobs": 0}
         )
         streaming_status = (
-            results[5]
-            if not isinstance(results[5], Exception)
+            results[7]
+            if not isinstance(results[7], Exception)
             else {"active_sessions": []}
         )
-        events = results[6] if not isinstance(results[6], Exception) else []
+        events = results[8] if not isinstance(results[8], Exception) else []
         recent_conversations = []
-        client_jobs_results = results[7:] if len(results) > 7 else []
+        client_jobs_results = results[9:] if len(results) > 9 else []
 
         # Convert client jobs list to dict
         client_jobs = {}
@@ -1369,6 +1481,8 @@ async def get_dashboard_data(
                 "started": started_jobs,  # RQ standard status name
                 "finished": finished_jobs,  # RQ standard status name
                 "failed": failed_jobs,
+                "deferred": deferred_jobs,  # chained jobs waiting on a dependency
+                "scheduled": scheduled_jobs,
             },
             "stats": stats,
             "streaming_status": streaming_status,

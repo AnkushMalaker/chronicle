@@ -36,6 +36,7 @@ from advanced_omi_backend.utils.annotation_export import (
     new_export_id,
     validate_export_id,
 )
+from advanced_omi_backend.utils.audio_chunk_utils import audio_cache_duration_matches
 from advanced_omi_backend.utils.transcript_slicing import (
     build_transcript_text,
     shift_segments,
@@ -495,7 +496,16 @@ async def get_speech_regions(
     duration = conversation.audio_total_duration or 0.0
     va = conversation.vad_analysis
 
-    if not wanted and va is not None and va.speech_regions is not None:
+    # Trust the cached summary only if it still describes the current chunk set.
+    # vad_analysis is derived from the chunks' frame scores; if the chunks changed
+    # in place (e.g. the reconnect-duplicate dedup) the cache's implied duration
+    # (frame_count * frame_hop) no longer matches audio_total_duration — fall back
+    # to deriving from current chunks rather than serving stale regions.
+    va_fresh = va is not None and audio_cache_duration_matches(
+        va.frame_count * va.frame_hop_ms / 1000.0, duration
+    )
+
+    if not wanted and va_fresh and va.speech_regions is not None:
         regions = va.speech_regions
     else:
         # Derive from chunk frame scores with a streaming cursor (score

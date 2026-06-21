@@ -129,7 +129,7 @@ async def audio_streaming_persistence_job(
                 title="Audio Recording (Processing...)",
                 summary="Transcription in progress...",
                 transcript_versions=[],
-                processing_status="pending_transcription",
+                processing_status=Conversation.ConversationStatus.ACTIVE.value,
                 always_persist=True,
             )
             await conversation.insert()
@@ -166,7 +166,10 @@ async def audio_streaming_persistence_job(
 
     from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
     from advanced_omi_backend.models.conversation import Conversation
-    from advanced_omi_backend.utils.audio_chunk_utils import encode_pcm_to_opus
+    from advanced_omi_backend.utils.audio_chunk_utils import (
+        encode_pcm_to_opus,
+        get_resume_position,
+    )
 
     # Conversation rotation state. Seed from the placeholder created above so the
     # first flush persists to MongoDB and the first-iteration rotation check is a
@@ -177,8 +180,16 @@ async def audio_streaming_persistence_job(
 
     # PCM buffer for current 10-second chunk
     pcm_buffer = bytearray()
-    chunk_index = 0  # Sequential chunk counter for current conversation
-    chunk_start_time = 0.0  # Start time of current buffered chunk
+    # Resume chunk numbering from any audio the seeded conversation already has, so
+    # a reconnect re-attaching to an existing placeholder APPENDS rather than
+    # rewriting from index 0 (which created overlapping duplicate chunks).
+    if initial_conversation_id:
+        chunk_index, chunk_start_time = await get_resume_position(
+            initial_conversation_id
+        )
+    else:
+        chunk_index = 0  # Sequential chunk counter for current conversation
+        chunk_start_time = 0.0  # Start time of current buffered chunk
 
     # Read actual sample rate from the session's audio_format stored in Redis
     SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH = await store.get_audio_format(session_id)
@@ -269,9 +280,16 @@ async def audio_streaming_persistence_job(
                     compressed_size / original_size if original_size > 0 else 0.0
                 )
 
-                # Update conversation fields
-                conversation.audio_chunks_count = chunk_count
-                conversation.audio_total_duration = total_duration
+                # Update conversation fields. Use max() against any existing value:
+                # chunk_index resets to 0 if a placeholder is reused for a second
+                # persistence cycle, and a plain assignment would clobber the real
+                # cumulative totals down to the last write (e.g. 82 chunks → 2).
+                conversation.audio_chunks_count = max(
+                    conversation.audio_chunks_count or 0, chunk_count
+                )
+                conversation.audio_total_duration = max(
+                    conversation.audio_total_duration or 0, total_duration
+                )
                 conversation.audio_compression_ratio = compression_ratio
                 await conversation.save()
 
@@ -412,14 +430,17 @@ async def audio_streaming_persistence_job(
                 conversation_count += 1
                 conversation_start_time = time.time()
 
-                # Reset chunk state
+                # Reset chunk state, resuming from any audio this conversation
+                # already has so a rotation back onto a reused id appends instead
+                # of overwriting from index 0 (returns (0, 0.0) for a fresh id).
                 pcm_buffer = bytearray()
-                chunk_index = 0
-                chunk_start_time = 0.0
+                chunk_index, chunk_start_time = await get_resume_position(
+                    current_conversation_id
+                )
 
                 logger.info(
                     f"📁 Started MongoDB persistence for conversation #{conversation_count} "
-                    f"({current_conversation_id[:12]})"
+                    f"({current_conversation_id[:12]}) from chunk_index={chunk_index}"
                 )
         else:
             # Conversation key deleted - conversation ended
@@ -459,7 +480,7 @@ async def audio_streaming_persistence_job(
                     title="Audio Recording (Processing...)",
                     summary="Transcription in progress...",
                     transcript_versions=[],
-                    processing_status="pending_transcription",
+                    processing_status=Conversation.ConversationStatus.ACTIVE.value,
                     always_persist=True,
                 )
                 await conversation.insert()

@@ -30,6 +30,15 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+try:
+    from advanced_omi_backend.services.observability.log_handler import (
+        install_system_event_log_handler,
+    )
+
+    install_system_event_log_handler()
+except Exception:  # noqa: BLE001 — never block worker startup on observability
+    pass
+
 
 async def main():
     """Main worker entry point."""

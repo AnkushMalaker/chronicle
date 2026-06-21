@@ -1,8 +1,9 @@
 import { Link, useLocation, Outlet } from 'react-router-dom'
-import { Music, MessageSquare, MessageCircle, Users, Upload, Settings, LogOut, Sun, Moon, Shield, Radio, Layers, Puzzle, Zap, Activity, Network, Sparkles, Target, ScrollText } from 'lucide-react'
+import { Music, MessageSquare, MessageCircle, Users, Upload, Settings, LogOut, Sun, Moon, Shield, Radio, Layers, Puzzle, Zap, Activity, Network, Sparkles, Target, ScrollText, AlertTriangle } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
 import { useSSE, SSEStatus } from '../../hooks/useSSE'
+import { useSystemEventsSummary } from '../../hooks/useSystemEvents'
 import GlobalRecordingIndicator from './GlobalRecordingIndicator'
 import UserLoopModal from '../UserLoopModal'
 
@@ -13,6 +14,11 @@ export default function Layout() {
 
   // Single SSE connection for real-time updates across all pages
   const sseStatus = useSSE()
+
+  // Live unacknowledged-error count for the nav badge (admin only; refreshed by
+  // the SSE 'system.error' invalidation in useSSE).
+  const { data: sysSummary } = useSystemEventsSummary(24, isAdmin)
+  const unackedErrors = sysSummary?.unacked ?? 0
 
   const navigationItems = [
     { path: '/live-record', label: 'Live Record', icon: Radio },
@@ -30,6 +36,7 @@ export default function Layout() {
       { path: '/finetuning', label: 'Fine-tuning', icon: Zap },
       { path: '/network', label: 'Network', icon: Network },
       { path: '/system', label: 'System Status', icon: Activity },
+      { path: '/system-errors', label: 'System Errors', icon: AlertTriangle },
       { path: '/settings', label: 'Settings', icon: Settings },
     ] : []),
   ]
@@ -100,6 +107,11 @@ export default function Layout() {
                     >
                       <Icon className="h-5 w-5" />
                       <span>{label}</span>
+                      {path === '/system-errors' && unackedErrors > 0 && (
+                        <span className="ml-auto inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-red-600 px-1.5 py-0.5 text-xs font-semibold text-white" title="Unacknowledged events">
+                          {unackedErrors > 99 ? '99+' : unackedErrors}
+                        </span>
+                      )}
                     </Link>
                   </li>
                 ))}

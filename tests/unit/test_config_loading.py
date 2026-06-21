@@ -24,11 +24,11 @@ def test_merge_configs_basic():
 def test_merge_configs_nested():
     """Test nested dictionary merging."""
     defaults = {"memory": {"provider": "chronicle", "timeout": 120}}
-    overrides = {"memory": {"provider": "openmemory_mcp"}}
+    overrides = {"memory": {"provider": "vault-next"}}
 
     result = merge_configs(defaults, overrides)
 
-    assert result["memory"]["provider"] == "openmemory_mcp"  # Override
+    assert result["memory"]["provider"] == "vault-next"  # Override
     assert result["memory"]["timeout"] == 120  # Preserved from defaults
 
 

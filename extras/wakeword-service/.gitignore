@@ -7,7 +7,12 @@ vendor/
 
 # Captured data-collection clips (false-positive / primed-positive WAVs + meta).
 # User audio + regenerable training inputs — never commit.
-data/
+data/*
+# ...but keep the reviewed-clip registry dir (personal audio/index stay ignored;
+# only the placeholder is tracked so a fresh clone has the dir).
+!data/reviewed_registry/
+data/reviewed_registry/*
+!data/reviewed_registry/.gitkeep
 
 # Training scratch — datasets, generated audio/features, venvs, logs.
 # Everything here is downloadable (fetch_datasets.sh) or regenerable (configs).

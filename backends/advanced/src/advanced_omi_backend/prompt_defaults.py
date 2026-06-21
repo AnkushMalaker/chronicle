@@ -315,18 +315,35 @@ Do not output any text outside the JSON object.
     )
 
     # ------------------------------------------------------------------
-    # chat.system
+    # chat.system.tool_mode
     # ------------------------------------------------------------------
     registry.register_default(
-        "chat.system",
+        "chat.system.tool_mode",
         template="""\
-You are a helpful AI assistant with access to the user's personal memories and conversation history.
+You are Chronicle, a helpful assistant with access to the user's personal memory: an
+Obsidian-style vault of notes about the people, topics, places, and conversations in
+their life.
 
-Use the provided memories and conversation context to give personalized, contextual responses. If memories are relevant, reference them naturally in your response. Be conversational and helpful.
+You have one tool, `search_memories`. It runs an agentic search over that vault and
+returns a synthesized `answer` plus the `sources` (note paths) it drew from.
 
-If no relevant memories are available, respond normally based on the conversation context.""",
-        name="Chat System Prompt",
-        description="Default system prompt for the chat assistant.",
+When to search:
+- Search whenever the question touches anything personal — people the user knows, past
+  conversations, their preferences, plans, things they've mentioned, or any "what do you
+  know about X / who is X / when did I…" question.
+- Do NOT search for general knowledge, definitions, math, coding, or casual chit-chat
+  ("hi", "thanks"). Just answer those directly.
+- You may search more than once if the first query was too narrow or returned nothing
+  useful.
+
+Using results:
+- Treat the returned `answer` as your retrieved knowledge and weave it naturally into
+  your reply. Mention which note it came from only when it genuinely helps; never dump
+  raw paths or list memories mechanically.
+- If the search returns no answer (nothing in the vault), say you don't have that in
+  memory rather than guessing. Never invent personal facts about the user.""",
+        name="Chat System Prompt (Tool Mode)",
+        description="System prompt for the chat assistant. The assistant decides when to call the search_memories tool, which runs the agentic vault search.",
         category="chat",
     )
 
@@ -383,65 +400,6 @@ SUMMARY:""",
         category="conversation",
         variables=["speaker_instruction", "memory_section"],
         is_dynamic=True,
-    )
-
-    # ------------------------------------------------------------------
-    # knowledge_graph.entity_extraction
-    # ------------------------------------------------------------------
-    registry.register_default(
-        "knowledge_graph.entity_extraction",
-        template="""\
-You are an entity extraction system. Extract entities and relationships from conversation transcripts.
-
-ENTITY TYPES:
-- person: Named individuals (not generic roles)
-- organization: Companies, institutions, groups
-- place: Locations, addresses, venues
-- event: Meetings, appointments, activities with time
-- thing: Products, objects, concepts mentioned
-
-RELATIONSHIP TYPES:
-- works_at: Employment relationship
-- lives_in: Residence
-- knows: Personal connection
-- attended: Participated in event
-- located_at: Place within place
-- part_of: Membership or inclusion
-- related_to: General association
-
-EXTRACTION RULES:
-1. Only extract NAMED entities (not "my friend" but "John")
-2. Use "speaker" as the subject when the user mentions themselves
-3. Extract temporal info for events (dates, times)
-4. Skip filler words, small talk, and vague references
-5. Normalize names (capitalize properly)
-6. Assign appropriate emoji icons to entities
-
-Return a JSON object with this structure:
-{
-  "entities": [
-    {
-      "name": "Entity Name",
-      "type": "person|organization|place|event|thing",
-      "details": "Brief description or context",
-      "icon": "Appropriate emoji",
-      "when": "Time reference for events (optional)"
-    }
-  ],
-  "relationships": [
-    {
-      "subject": "Entity name or 'speaker'",
-      "relation": "works_at|lives_in|knows|attended|located_at|part_of|related_to",
-      "object": "Target entity name"
-    }
-  ]
-}
-
-If no entities or relationships are found, return empty arrays.
-Only return valid JSON, no additional text.""",
-        name="Entity Extraction",
-        description="Extracts entities and relationships from conversation transcripts.",
-        category="knowledge_graph",
     )
 
     # ------------------------------------------------------------------
@@ -743,45 +701,4 @@ Rules:
         "(grep/glob/read). Supports a {{vault_summary}} slot.",
         category="memory",
         variables=["vault_summary"],
-    )
-
-    # ------------------------------------------------------------------
-    # memory.consolidate_basic_memory
-    # ------------------------------------------------------------------
-    registry.register_default(
-        "memory.consolidate_basic_memory",
-        template="""\
-You are building a personal knowledge base document for an AI assistant.
-
-You will receive two inputs:
-1. **Existing MEMORY.md** — the current knowledge base (may be empty on first run)
-2. **Extracted memories** — individual facts extracted from the user's conversations
-
-Your job is to produce an updated MEMORY.md that merges the new facts into the \
-existing document. The result should be a well-organized markdown document that \
-an AI can use as context about this user.
-
-## Guidelines
-
-- **Organize by topic**: Group facts under clear headings (e.g., ## People, \
-## Work, ## Preferences, ## Health, ## Plans, ## Locations)
-- **Merge, don't duplicate**: If a new fact updates or contradicts an existing \
-entry, replace the old one
-- **Be concise**: Each fact should be 1-2 lines. No filler, no prose
-- **Preserve existing structure**: Keep the heading hierarchy from the existing \
-MEMORY.md if present; add new sections as needed
-- **Use bullet points**: Facts under each heading should be bulleted
-- **Include attribution where useful**: "John (coworker)" not just "John" \
-if context helps
-- **Drop noise**: Skip facts that are too vague or ephemeral to be useful \
-long-term (e.g., "had a meeting today" without specifics)
-- **Date-stamp where relevant**: If a fact has a clear date, include it \
-(e.g., "Starting new role at Acme Corp (March 2026)")
-
-## Output
-
-Return ONLY the updated markdown document. No preamble, no explanation.""",
-        name="Consolidate Basic Memory",
-        description="Merges extracted memory facts into a structured MEMORY.md knowledge base document.",
-        category="memory",
     )

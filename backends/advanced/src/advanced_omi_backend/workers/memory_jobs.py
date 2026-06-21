@@ -133,7 +133,7 @@ async def process_memory_job(
     V2 Architecture:
         1. Extracts memories from conversation transcript
         2. Checks primary speakers filter if configured
-        3. Uses configured memory provider (chronicle or openmemory_mcp)
+        3. Uses the Chronicle memory provider (agentic vault)
         4. Stores memory references in conversation document
 
     Note: Listening jobs are restarted by open_conversation_job (not here).
@@ -250,31 +250,46 @@ async def process_memory_job(
 
     memory_service = get_memory_service()
 
-    with memory_provenance(cause, strategy):
-        if strategy == UpdateStrategy.SPEAKER_DIFF:
-            # === Speaker-diff pathway ===
-            # Targeted update from the speaker-label diff between transcript
-            # versions (used by speaker reprocess and diarization-annotation
-            # apply); falls back to a full extraction if no diff is available.
-            memory_result = await _process_speaker_diff_update(
-                memory_service=memory_service,
-                conversation_model=conversation_model,
-                full_conversation=full_conversation,
-                client_id=client_id,
-                conversation_id=conversation_id,
-                user_id=user_id,
-                user_email=user_email,
-            )
-        else:
-            # === Normal extraction pathway ===
-            memory_result = await memory_service.add_memory(
-                full_conversation,
-                client_id,
-                conversation_id,
-                user_id,
-                user_email,
-                allow_update=True,
-            )
+    # Never let an extraction error escape this job. It sits mid-chain
+    # (recognize_speakers → memory → title_summary → event_complete), and under
+    # RQ a raised exception marks the job failed and leaves every dependent job
+    # DEFERRED FOREVER — so the conversation is stuck in "reprocessing" and never
+    # gets a title/summary. Degrade gracefully (log + return failure dict) so the
+    # chain continues. Common trigger: a long transcript exceeding the memory
+    # LLM's context window (provider HTTP 400).
+    try:
+        with memory_provenance(cause, strategy):
+            if strategy == UpdateStrategy.SPEAKER_DIFF:
+                # === Speaker-diff pathway ===
+                # Targeted update from the speaker-label diff between transcript
+                # versions (used by speaker reprocess and diarization-annotation
+                # apply); falls back to a full extraction if no diff is available.
+                memory_result = await _process_speaker_diff_update(
+                    memory_service=memory_service,
+                    conversation_model=conversation_model,
+                    full_conversation=full_conversation,
+                    client_id=client_id,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    user_email=user_email,
+                )
+            else:
+                # === Normal extraction pathway ===
+                memory_result = await memory_service.add_memory(
+                    full_conversation,
+                    client_id,
+                    conversation_id,
+                    user_id,
+                    user_email,
+                    allow_update=True,
+                )
+    except Exception as e:
+        logger.error(
+            f"❌ Memory extraction failed for conversation {conversation_id} "
+            f"(continuing chain so title/summary still runs): {e}",
+            exc_info=True,
+        )
+        return {"success": False, "error": f"Memory extraction error: {e}"}
 
     if memory_result:
         success, created_memory_ids = memory_result

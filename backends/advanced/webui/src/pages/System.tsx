@@ -217,8 +217,7 @@ export default function System() {
       'memory_service': 'MEMORY SERVICE',
       'speech_to_text': 'SPEECH TO TEXT (BATCH)',
       'speech_to_text_streaming': 'SPEECH TO TEXT (STREAMING)',
-      'speaker_recognition': 'SPEAKER RECOGNITION',
-      'openmemory_mcp': 'OPENMEMORY MCP'
+      'speaker_recognition': 'SPEAKER RECOGNITION'
     }
     return displayNames[service] || service.replace('_', ' ').toUpperCase()
   }

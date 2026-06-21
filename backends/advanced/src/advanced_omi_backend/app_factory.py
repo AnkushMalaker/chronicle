@@ -49,77 +49,6 @@ logger = logging.getLogger(__name__)
 application_logger = logging.getLogger("audio_processing")
 
 
-async def initialize_openmemory_user() -> None:
-    """Initialize and register OpenMemory user if using OpenMemory MCP provider.
-
-    This function:
-    - Checks if OpenMemory MCP is configured as the memory provider
-    - Registers the configured user with OpenMemory server
-    - Creates a test memory and deletes it to trigger user creation
-    - Logs success or warning if OpenMemory is not reachable
-    """
-    from advanced_omi_backend.services.memory.config import (
-        MemoryProvider,
-        build_memory_config_from_env,
-    )
-
-    memory_provider_config = build_memory_config_from_env()
-
-    if memory_provider_config.memory_provider != MemoryProvider.OPENMEMORY_MCP:
-        return
-
-    try:
-        from advanced_omi_backend.services.memory.providers.mcp_client import MCPClient
-
-        # Get configured user_id and server_url
-        openmemory_config = memory_provider_config.openmemory_config
-        user_id = (
-            openmemory_config.get("user_id", "openmemory")
-            if openmemory_config
-            else "openmemory"
-        )
-        server_url = (
-            openmemory_config.get("server_url", "http://host.docker.internal:8765")
-            if openmemory_config
-            else "http://host.docker.internal:8765"
-        )
-        client_name = (
-            openmemory_config.get("client_name", "chronicle")
-            if openmemory_config
-            else "chronicle"
-        )
-
-        application_logger.info(
-            f"Registering OpenMemory user: {user_id} at {server_url}"
-        )
-
-        # Make a lightweight registration call (create and delete dummy memory)
-        async with MCPClient(
-            server_url=server_url, client_name=client_name, user_id=user_id
-        ) as client:
-            # Test connection first
-            is_connected = await client.test_connection()
-            if is_connected:
-                # Create and immediately delete a dummy memory to trigger user creation
-                memory_ids = await client.add_memories(
-                    "Chronicle initialization - user registration test"
-                )
-                if memory_ids:
-                    # Delete the test memory
-                    await client.delete_memory(memory_ids[0])
-                application_logger.info(f"✅ Registered OpenMemory user: {user_id}")
-            else:
-                application_logger.warning(
-                    f"⚠️  OpenMemory MCP not reachable at {server_url}"
-                )
-                application_logger.info(
-                    "User will be auto-created on first memory operation"
-                )
-    except Exception as e:
-        application_logger.warning(f"⚠️  Could not register OpenMemory user: {e}")
-        application_logger.info("User will be auto-created on first memory operation")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan events."""
@@ -140,6 +69,7 @@ async def lifespan(app: FastAPI):
         from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
         from advanced_omi_backend.models.conversation import Conversation
         from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
+        from advanced_omi_backend.models.system_event import SystemEvent
         from advanced_omi_backend.models.user import User
         from advanced_omi_backend.models.waveform import WaveformData
 
@@ -152,6 +82,7 @@ async def lifespan(app: FastAPI):
                 WaveformData,
                 Annotation,
                 MemoryAuditEntry,
+                SystemEvent,
             ],
         )
         application_logger.info("Beanie initialized for all document models")
@@ -322,9 +253,6 @@ async def lifespan(app: FastAPI):
         "Memory service will be initialized on first use (lazy loading)"
     )
 
-    async def _init_openmemory():
-        await initialize_openmemory_user()
-
     async def _init_cron_scheduler():
         try:
             from advanced_omi_backend.controllers.data_audit_controller import (
@@ -401,13 +329,12 @@ async def lifespan(app: FastAPI):
             app.state.plugin_router = None
 
     await asyncio.gather(
-        _init_openmemory(),
         _init_cron_scheduler(),
         _init_plugins(),
     )
 
     application_logger.info(
-        f"Phase 4 (OpenMemory/Cron/Plugins) completed in {time.monotonic() - phase_start:.2f}s"
+        f"Phase 4 (Cron/Plugins) completed in {time.monotonic() - phase_start:.2f}s"
     )
 
     # Inbound vault edits (human edits in Obsidian, delivered by Syncthing) are
@@ -432,6 +359,37 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         application_logger.warning(f"Stream reaper not started: {e}")
         app.state.stream_reaper_task = None
+
+    # Observability: drain the system-event ingest list (filled by RQ workers and the
+    # catch-all log handler) into Mongo + SSE, and poll service health to record
+    # crash-loop / down / recovered transitions.
+    try:
+        from advanced_omi_backend.services.observability import run_event_ingest_drain
+        from advanced_omi_backend.services.observability.health_poller import (
+            run_health_poller,
+        )
+
+        app.state.system_event_drain_task = asyncio.create_task(
+            run_event_ingest_drain()
+        )
+        app.state.health_poller_task = asyncio.create_task(run_health_poller(app))
+    except Exception as e:
+        application_logger.warning(f"Observability tasks not started: {e}")
+        app.state.system_event_drain_task = None
+        app.state.health_poller_task = None
+
+    # Self-heal: periodically reconcile conversation processing_status from facts so
+    # a crashed/timed-out job can't leave a conversation stuck (e.g. recovered but
+    # still showing "failed"). Belt-and-suspenders to the terminal finalizer.
+    try:
+        from advanced_omi_backend.services.status_reconciler import (
+            run_status_reconciler,
+        )
+
+        app.state.status_reconciler_task = asyncio.create_task(run_status_reconciler())
+    except Exception as e:
+        application_logger.warning(f"Status reconciler not started: {e}")
+        app.state.status_reconciler_task = None
 
     total_startup = time.monotonic() - startup_start
     application_logger.info(
@@ -474,6 +432,19 @@ async def lifespan(app: FastAPI):
                 application_logger.info("Stream reaper stopped")
         except Exception as e:
             application_logger.error(f"Error stopping stream reaper: {e}")
+
+        # Stop the observability tasks (event drain + health poller)
+        for _attr, _label in (
+            ("system_event_drain_task", "System-event drain"),
+            ("health_poller_task", "Health poller"),
+        ):
+            try:
+                _task = getattr(app.state, _attr, None)
+                if _task is not None:
+                    _task.cancel()
+                    application_logger.info(f"{_label} stopped")
+            except Exception as e:
+                application_logger.error(f"Error stopping {_label}: {e}")
 
         # Shutdown BackgroundTaskManager
         try:

@@ -91,9 +91,11 @@ export interface ExternalServiceProvider {
   env_key: string
   current: string
   streaming_current?: string
-  available: { key: string; label: string }[]
+  // `local` = the provider runs a local container (switching to/from it is heavy:
+  // start/stop, possibly a model download). Absent/false = cloud (config-only switch).
+  available: { key: string; label: string; local?: boolean }[]
   // Streaming-lane (stt_stream) provider options; present only for asr-services.
-  streaming_available?: { key: string; label: string }[]
+  streaming_available?: { key: string; label: string; local?: boolean }[]
 }
 
 export interface ExternalService {

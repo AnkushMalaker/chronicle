@@ -49,7 +49,6 @@ fi
 # so that docker-compose can find it when CHRONICLE_TAG=<TAG> is set.
 IMAGES=(
     "chronicle-backend:chronicle-backend"
-    "chronicle-webui:chronicle-webui"
     "chronicle-speaker:chronicle-speaker"
     "chronicle-speaker-strixhalo:chronicle-speaker-strixhalo"
     "chronicle-speaker-webui:chronicle-speaker-webui"

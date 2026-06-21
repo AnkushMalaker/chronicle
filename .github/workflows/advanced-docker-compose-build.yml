@@ -143,10 +143,11 @@ jobs:
           CUDA_VARIANTS=("cpu" "cu126" "cu128")
 
           # Base services (no CUDA variants, no profiles)
-          # Image names must match what docker-compose.yml expects (chronicle-backend, chronicle-webui)
+          # Image names must match what docker-compose.yml expects (chronicle-backend).
+          # The webui is dev-server only (webui-dev, built locally from Dockerfile.dev),
+          # so there is no prebuilt webui image to distribute.
           base_service_specs=(
             "chronicle-backend|chronicle-backend|docker-compose.yml|."
-            "webui|chronicle-webui|docker-compose.yml|."
           )
 
           # Build and push base services
@@ -289,7 +290,6 @@ jobs:
           ### Core Services
           \`\`\`bash
           docker pull ghcr.io/${OWNER_LC}/chronicle-backend:${VERSION}
-          docker pull ghcr.io/${OWNER_LC}/chronicle-webui:${VERSION}
           \`\`\`
 
           ### Parakeet ASR (pick your CUDA version)

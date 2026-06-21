@@ -422,21 +422,6 @@ memory:
       dates, locations, numbers, and key details. Keep items concise and useful.
 
       '
-  openmemory_mcp:
-    server_url: http://localhost:8765
-    client_name: chronicle
-    user_id: default
-    timeout: 30
-  obsidian:
-    enabled: false
-    falkordb_host: falkordb
-    falkordb_port: 6379
-    timeout: 30
-  knowledge_graph:
-    enabled: false
-    falkordb_host: falkordb
-    falkordb_port: 6379
-    timeout: 30
 
 speaker_recognition:
   # Enable/disable speaker recognition (overrides DISABLE_SPEAKER_RECOGNITION env var)

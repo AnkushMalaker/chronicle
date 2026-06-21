@@ -16,7 +16,7 @@ Chronicle uses a unified initialization system with clean separation of concerns
 - **Configuration** (`wizard.py`) - Set up service configurations, API keys, and .env files
 - **Service Management** (`services.py`) - Start, stop, and manage running services
 
-The root orchestrator handles service selection and delegates configuration to individual service scripts. In general, setup scripts only configure and do not start services automatically. Exceptions: `extras/asr-services` and `extras/openmemory-mcp` are startup scripts. This prevents unnecessary resource usage and gives you control over when services actually run.
+The root orchestrator handles service selection and delegates configuration to individual service scripts. In general, setup scripts only configure and do not start services automatically. Exception: `extras/asr-services` is a startup script. This prevents unnecessary resource usage and gives you control over when services actually run.
 
 > **New to Chronicle?** Most users should start with the [Quick Start Guide](../quickstart.md) instead of this detailed reference.
 
@@ -31,7 +31,6 @@ The root orchestrator handles service selection and delegates configuration to i
 - **Backend**: `backends/advanced/init.py` - Complete Python-based interactive setup
 - **Speaker Recognition**: `extras/speaker-recognition/init.py` - Python-based interactive setup
 - **ASR Services**: `extras/asr-services/setup.sh` - Service startup script
-- **OpenMemory MCP**: `extras/openmemory-mcp/setup.sh` - External server startup
 
 ## Usage
 
@@ -67,16 +66,12 @@ cd extras/speaker-recognition
 # ASR Services only
 cd extras/asr-services
 ./setup.sh
-
-# OpenMemory MCP only
-cd extras/openmemory-mcp
-./setup.sh
 ```
 
 ## Service Details
 
 ### Advanced Backend
-- **Interactive setup** for authentication, LLM, transcription, and memory providers
+- **Interactive setup** for authentication, LLM, and transcription (memory is the agentic Markdown vault — no provider choice)
 - **Accepts arguments**: `--speaker-service-url`, `--parakeet-asr-url`
 - **Generates**: Complete `.env` file with all required configuration
 - **Default ports**: Backend (8000), WebUI (5173)
@@ -92,12 +87,6 @@ cd extras/openmemory-mcp
 - **Service port**: 8767
 - **Purpose**: Offline speech-to-text processing
 - **No configuration required**
-
-### OpenMemory MCP
-- **Starts**: External OpenMemory MCP server
-- **Service port**: 8765
-- **WebUI**: Available at http://localhost:8765
-- **Purpose**: Cross-client memory compatibility
 
 ## Automatic URL Coordination
 
@@ -128,7 +117,6 @@ Note (Linux): If `host.docker.internal` is unavailable, add `extra_hosts: - "hos
 | **Advanced Backend** | 8000 | 5173 | http://localhost:8000 (API), http://localhost:5173 (Dashboard) |
 | **Speaker Recognition** | 8085 | 5175* | http://localhost:8085 (API), http://localhost:5175 (WebUI) |
 | **Parakeet ASR** | 8767 | - | http://localhost:8767 (API) |
-| **OpenMemory MCP** | 8765 | 8765 | http://localhost:8765 (API + WebUI) |
 
 *Speaker Recognition WebUI port is configurable via REACT_UI_PORT
 
@@ -149,7 +137,6 @@ See [ssl-certificates.md](ssl-certificates.md) for HTTPS/SSL setup details.
 Services use `host.docker.internal` for inter-container communication:
 - `http://127.0.0.1:8085` - Speaker Recognition
 - `http://host.docker.internal:8767` - Parakeet ASR
-- `http://host.docker.internal:8765` - OpenMemory MCP
 
 ## Node Agent (WebUI control + Tailnet advertising)
 
@@ -279,14 +266,14 @@ uv run --with-requirements setup-requirements.txt python services.py restart bac
 uv run --with-requirements setup-requirements.txt python services.py stop --all
 
 # Stop specific services
-uv run --with-requirements setup-requirements.txt python services.py stop asr-services openmemory-mcp
+uv run --with-requirements setup-requirements.txt python services.py stop asr-services speaker-recognition
 ```
 
 </details>
 
 **Important Notes:**
-- **Restart** restarts containers without rebuilding - use for configuration changes (.env updates)
-- **For code changes**, use `./stop.sh` then `./start.sh` to rebuild images
+- **Restart** recreates containers in place (`up --force-recreate`) without rebuilding the image — it re-reads `.env`/config and picks up **volume-mounted code** (e.g. the backend's `./src`), so it's enough for most config and code changes
+- **For dependency/Dockerfile changes** (anything baked into the image), use `./stop.sh` then `./start.sh` to rebuild images
 - Convenience scripts handle common operations; use direct commands for specific service selection
 
 ### Manual Service Management
@@ -301,9 +288,6 @@ cd extras/speaker-recognition && docker compose up --build -d
 
 # ASR Services (only if using offline transcription)
 cd extras/asr-services && docker compose up --build -d
-
-# OpenMemory MCP (only if using openmemory_mcp provider)
-cd extras/openmemory-mcp && docker compose up --build -d
 ```
 
 ## Configuration Files

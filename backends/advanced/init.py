@@ -279,8 +279,10 @@ class ChronicleSetup:
                 choice = "6"
             elif provider == "af-next":
                 choice = "7"
-            elif provider == "none":
+            elif provider == "granite":
                 choice = "8"
+            elif provider == "none":
+                choice = "9"
             else:
                 choice = "1"  # Default to Deepgram
         else:
@@ -319,6 +321,11 @@ class ChronicleSetup:
                 "NONCOMMERCIAL license)"
             )
 
+            granite_desc = (
+                "Offline (IBM Granite Speech - GPU recommended, LLM-backbone; "
+                "en/fr/de/es/pt)"
+            )
+
             choices = {
                 "1": "Deepgram (recommended - high quality, cloud-based)",
                 "2": parakeet_desc,
@@ -327,7 +334,8 @@ class ChronicleSetup:
                 "5": smallest_desc,
                 "6": gemma4_desc,
                 "7": af_next_desc,
-                "8": "None (skip transcription setup)",
+                "8": granite_desc,
+                "9": "None (skip transcription setup)",
             }
 
             choice = self.prompt_choice(
@@ -542,6 +550,47 @@ class ChronicleSetup:
             )
 
         elif choice == "8":
+            self.console.print(
+                "[blue][INFO][/blue] IBM Granite Speech selected "
+                "(LLM-backbone ASR; en/fr/de/es/pt)"
+            )
+            self.config["GRANITE_ASR_URL"] = self._asr_url_for("GRANITE_ASR_URL")
+
+            self.config_manager.update_config_defaults({"stt": "stt-granite"})
+
+            # Granite is an LLM-backbone ASR (capability "context_prompt"): it takes
+            # free-form context, NOT acoustic keyword boosting. Like Gemma 4 it would
+            # echo a wake-word boost list into the transcript, so the backend
+            # withholds that list and uses this context string instead.
+            existing_granite_context = (
+                self.config_manager.get_full_config()
+                .get("backend", {})
+                .get("asr", {})
+                .get("context", {})
+                .get("stt-granite", "")
+            )
+            self.console.print(
+                "[blue][INFO][/blue] Granite Speech takes free-form context (domain, "
+                "names, jargon) to disambiguate recognition. It informs transcription "
+                "but is never transcribed. Leave blank to skip."
+            )
+            granite_context = self.prompt_value(
+                "Granite ASR context (optional)", existing_granite_context
+            )
+            self.config_manager.update_backend_config(
+                {"asr": {"context": {"stt-granite": granite_context.strip()}}}
+            )
+
+            self.console.print(
+                "[green][SUCCESS][/green] Granite Speech configured in config.yml and .env"
+            )
+            self.console.print("[blue][INFO][/blue] Set defaults.stt: stt-granite")
+            self.console.print(
+                "[yellow][WARNING][/yellow] Remember to start Granite ASR: "
+                "cd ../../extras/asr-services && docker compose up granite-asr -d"
+            )
+
+        elif choice == "9":
             self.console.print("[blue][INFO][/blue] Skipping transcription setup")
 
     def setup_streaming_provider(self):
@@ -567,6 +616,7 @@ class ChronicleSetup:
             "smallest": "stt-smallest-stream",
             "qwen3-asr": "stt-qwen3-asr",
             "gemma4": "stt-gemma4-stream",
+            "nemotron": "stt-nemotron-stream",
         }
 
         stream_stt = provider_to_stt_stream.get(streaming_provider)
@@ -650,6 +700,16 @@ class ChronicleSetup:
                     "Gemma 4 ASR URL", "host.docker.internal:8767"
                 )
                 self.config["GEMMA4_ASR_URL"] = gemma4_url.replace(
+                    "http://", ""
+                ).rstrip("/")
+        elif streaming_provider == "nemotron":
+            # Nemotron serves batch + streaming from one container on 8772.
+            existing_url = read_env_value(".env", "NEMOTRON_ASR_STREAM_URL")
+            if not existing_url:
+                nemotron_url = self.prompt_value(
+                    "Nemotron ASR URL", "host.docker.internal:8772"
+                )
+                self.config["NEMOTRON_ASR_STREAM_URL"] = nemotron_url.replace(
                     "http://", ""
                 ).rstrip("/")
 
@@ -900,6 +960,19 @@ class ChronicleSetup:
             self.config_manager.update_config_defaults(
                 {"llm": "llamacpp-llm", "embedding": "llamacpp-embed"}
             )
+            # Re-sync the llamacpp-llm/-embed entries from defaults.yml. config.yml
+            # model entries override defaults *by name*, so a stale copy (e.g. one
+            # predating the LLM_BASE_URL templating) would shadow the default and
+            # silently ignore the endpoint chosen below. Re-syncing guarantees
+            # model_url follows LLM_BASE_URL (and restores the discovery_* keys).
+            synced = self.config_manager.sync_models_from_defaults(
+                ["llamacpp-llm", "llamacpp-embed"]
+            )
+            if synced:
+                self.console.print(
+                    "[blue][INFO][/blue] Re-synced model entries from defaults.yml: "
+                    f"{', '.join(synced)} (model_url now follows LLM_BASE_URL)"
+                )
             # Source of the llama.cpp endpoint (the llamacpp-llm entry reads LLM_BASE_URL):
             #   --llm-discover     → '' (backend discovers chronicle-llm on the Tailnet)
             #   --llm-base-url URL → pin a remote/own endpoint
@@ -1032,85 +1105,16 @@ class ChronicleSetup:
         )
 
     def setup_memory(self):
-        """Configure memory provider - updates config.yml"""
-        # Check if memory provider was provided via command line (from wizard.py)
-        if hasattr(self.args, "memory_provider") and self.args.memory_provider:
-            provider = self.args.memory_provider
-            self.console.print(
-                f"[green]✅[/green] Memory provider: {provider} (configured via wizard)"
-            )
-            choice = {"chronicle": "1", "openmemory_mcp": "2", "graphiti": "3"}.get(
-                provider, "1"
-            )
-        else:
-            # Standalone init.py run — read existing config as default
-            existing_choice = "1"
-            full_config = self.config_manager.get_full_config()
-            existing_provider = full_config.get("memory", {}).get(
-                "provider", "chronicle"
-            )
-            if existing_provider == "openmemory_mcp":
-                existing_choice = "2"
-            elif existing_provider == "graphiti":
-                existing_choice = "3"
+        """Configure memory provider - updates config.yml.
 
-            self.print_section("Memory Storage Configuration")
-
-            choices = {
-                "1": "Chronicle Native (FalkorDB graph + vault)",
-                "2": "OpenMemory MCP (cross-client compatible, external server)",
-                "3": "Graphiti (FalkorDB temporal knowledge graph)",
-            }
-
-            choice = self.prompt_choice(
-                "Choose your memory storage backend:", choices, existing_choice
-            )
-
-        if choice == "1":
-            self.console.print(
-                "[blue][INFO][/blue] Chronicle Native memory provider selected"
-            )
-
-            # Update config.yml (also updates .env automatically)
-            self.config_manager.update_memory_config({"provider": "chronicle"})
-            self.console.print(
-                "[green][SUCCESS][/green] Chronicle memory provider configured in config.yml and .env"
-            )
-
-        elif choice == "2":
-            self.console.print("[blue][INFO][/blue] OpenMemory MCP selected")
-
-            mcp_url = self.prompt_value(
-                "OpenMemory MCP server URL", "http://host.docker.internal:8765"
-            )
-            client_name = self.prompt_value("OpenMemory client name", "chronicle")
-            user_id = self.prompt_value("OpenMemory user ID", "openmemory")
-            timeout = self.prompt_value("OpenMemory timeout (seconds)", "30")
-
-            # Update config.yml with OpenMemory MCP settings (also updates .env automatically)
-            self.config_manager.update_memory_config(
-                {
-                    "provider": "openmemory_mcp",
-                    "openmemory_mcp": {
-                        "server_url": mcp_url,
-                        "client_name": client_name,
-                        "user_id": user_id,
-                        "timeout": int(timeout),
-                    },
-                }
-            )
-            self.console.print(
-                "[green][SUCCESS][/green] OpenMemory MCP configured in config.yml and .env"
-            )
-        elif choice == "3":
-            self.console.print("[blue][INFO][/blue] Graphiti memory provider selected")
-            self.config_manager.update_memory_config({"provider": "graphiti"})
-            self.console.print(
-                "[green][SUCCESS][/green] Graphiti memory provider configured in config.yml and .env"
-            )
-            self.console.print(
-                "[yellow][WARNING][/yellow] Remember to start OpenMemory: cd ../../extras/openmemory-mcp && docker compose up -d"
-            )
+        Chronicle's agentic Markdown vault is currently the only memory provider,
+        so there is no provider choice to make — we just ensure config.yml/.env
+        record it.
+        """
+        self.config_manager.update_memory_config({"provider": "chronicle"})
+        self.console.print(
+            "[green][SUCCESS][/green] Memory: Chronicle agentic vault (config.yml + .env)"
+        )
 
     def setup_optional_services(self):
         """Configure optional services"""
@@ -1185,93 +1189,6 @@ class ChronicleSetup:
             self.console.print(
                 f"[green][SUCCESS][/green] Tailscale auth key configured (Docker integration enabled)"
             )
-
-    def setup_falkordb(self):
-        """Configure FalkorDB connection (always required - used by Knowledge Graph)"""
-        self.config["FALKORDB_HOST"] = "falkordb"
-        self.config["FALKORDB_PORT"] = "6379"
-        self.console.print("[green][SUCCESS][/green] FalkorDB configured")
-
-    def setup_obsidian(self):
-        """Configure Obsidian integration (optional feature flag only - FalkorDB credentials handled by setup_falkordb)"""
-        has_enable = hasattr(self.args, "enable_obsidian") and self.args.enable_obsidian
-        has_disable = hasattr(self.args, "no_obsidian") and self.args.no_obsidian
-
-        if has_enable:
-            enable_obsidian = True
-            self.console.print(
-                f"[green]✅[/green] Obsidian: enabled (configured via wizard)"
-            )
-        elif has_disable:
-            enable_obsidian = False
-            self.console.print(
-                f"[blue][INFO][/blue] Obsidian: disabled (configured via wizard)"
-            )
-        else:
-            # Standalone init.py run — read existing config as default
-            full_config = self.config_manager.get_full_config()
-            existing_enabled = (
-                full_config.get("memory", {}).get("obsidian", {}).get("enabled", False)
-            )
-
-            self.console.print()
-            self.console.print("[bold cyan]Obsidian Integration (Optional)[/bold cyan]")
-            self.console.print(
-                "Enable graph-based knowledge management for Obsidian vault notes"
-            )
-            self.console.print()
-
-            try:
-                enable_obsidian = Confirm.ask(
-                    "Enable Obsidian integration?", default=existing_enabled
-                )
-            except EOFError:
-                self.console.print(
-                    f"Using default: {'Yes' if existing_enabled else 'No'}"
-                )
-                enable_obsidian = existing_enabled
-
-        if enable_obsidian:
-            self.config_manager.update_memory_config(
-                {
-                    "obsidian": {
-                        "enabled": True,
-                        "falkordb_host": "falkordb",
-                        "falkordb_port": 6379,
-                        "timeout": 30,
-                    }
-                }
-            )
-            self.console.print("[green][SUCCESS][/green] Obsidian integration enabled")
-        else:
-            self.config_manager.update_memory_config(
-                {
-                    "obsidian": {
-                        "enabled": False,
-                        "falkordb_host": "falkordb",
-                        "falkordb_port": 6379,
-                        "timeout": 30,
-                    }
-                }
-            )
-            self.console.print("[blue][INFO][/blue] Obsidian integration disabled")
-
-    def setup_knowledge_graph(self):
-        """Configure Knowledge Graph (FalkorDB-based entity/relationship extraction - always enabled)"""
-        self.config_manager.update_memory_config(
-            {
-                "knowledge_graph": {
-                    "enabled": True,
-                    "falkordb_host": "falkordb",
-                    "falkordb_port": 6379,
-                    "timeout": 30,
-                }
-            }
-        )
-        self.console.print("[green][SUCCESS][/green] Knowledge Graph enabled")
-        self.console.print(
-            "[blue][INFO][/blue] Entities and relationships will be extracted from conversations"
-        )
 
     def setup_langfuse(self):
         """Configure LangFuse observability and prompt management"""
@@ -1677,17 +1594,6 @@ class ChronicleSetup:
         memory_provider = config_yml.get("memory", {}).get("provider", "chronicle")
         self.console.print(f"✅ Memory Provider: {memory_provider} (config.yml)")
 
-        # Show Obsidian/FalkorDB status (read from config.yml)
-        obsidian_config = config_yml.get("memory", {}).get("obsidian", {})
-        if obsidian_config.get("enabled", False):
-            falkordb_host = obsidian_config.get("falkordb_host", "not set")
-            self.console.print(f"✅ Obsidian/FalkorDB: Enabled ({falkordb_host})")
-
-        # Show Knowledge Graph status (always enabled)
-        kg_config = config_yml.get("memory", {}).get("knowledge_graph", {})
-        falkordb_host = kg_config.get("falkordb_host", "falkordb")
-        self.console.print(f"✅ Knowledge Graph: Enabled ({falkordb_host})")
-
         # Auto-determine URLs based on HTTPS configuration
         if self.config.get("HTTPS_ENABLED") == "true":
             server_ip = self.config.get("SERVER_IP", "localhost")
@@ -1730,13 +1636,6 @@ class ChronicleSetup:
                 f"   [cyan]curl http://localhost:{backend_port}/health[/cyan]"
             )
 
-        if self.config.get("MEMORY_PROVIDER") == "openmemory_mcp":
-            self.console.print()
-            self.console.print("4. Start OpenMemory MCP:")
-            self.console.print(
-                "   [cyan]cd ../../extras/openmemory-mcp && docker compose up -d[/cyan]"
-            )
-
         if self.config.get("TRANSCRIPTION_PROVIDER") == "offline":
             self.console.print()
             self.console.print("5. Start Parakeet ASR:")
@@ -1771,9 +1670,6 @@ class ChronicleSetup:
             self.setup_fast_llm()
             self.setup_memory()
             self.setup_optional_services()
-            self.setup_falkordb()
-            self.setup_obsidian()
-            self.setup_knowledge_graph()
             self.setup_langfuse()
             self.setup_network()
             self.setup_https()
@@ -1881,11 +1777,6 @@ def main():
         help="Server IP/domain for SSL certificate (default: prompt user)",
     )
     parser.add_argument(
-        "--enable-obsidian",
-        action="store_true",
-        help="Enable Obsidian/FalkorDB integration (default: prompt user)",
-    )
-    parser.add_argument(
         "--ts-authkey",
         help="Tailscale auth key for Docker integration (default: prompt user)",
     )
@@ -1921,16 +1812,6 @@ def main():
         "--llm-provider",
         choices=["openai", "ollama", "llamacpp", "custom", "gemma4-unified", "none"],
         help="LLM provider for memory extraction (default: prompt user)",
-    )
-    parser.add_argument(
-        "--memory-provider",
-        choices=["chronicle", "openmemory_mcp", "graphiti"],
-        help="Memory storage backend (default: prompt user)",
-    )
-    parser.add_argument(
-        "--no-obsidian",
-        action="store_true",
-        help="Explicitly disable Obsidian integration (complementary to --enable-obsidian)",
     )
 
     args = parser.parse_args()

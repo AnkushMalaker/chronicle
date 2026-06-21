@@ -16,7 +16,7 @@ Usage:
     # For backend service
     config = ConfigManager(service_path="backends/advanced")
     provider = config.get_memory_provider()
-    config.set_memory_provider("openmemory_mcp")
+    config.set_memory_provider("chronicle")
 
     # Auto-detects paths from cwd
     config = ConfigManager()
@@ -27,7 +27,7 @@ import os
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from dotenv import set_key as dotenv_set_key
 from ruamel.yaml import YAML
@@ -83,7 +83,6 @@ class ConfigManager:
         known_services = [
             "backends/advanced",
             "extras/speaker-recognition",
-            "extras/openmemory-mcp",
             "extras/asr-services",
         ]
 
@@ -215,7 +214,7 @@ class ConfigManager:
         Get current memory provider from config.yml.
 
         Returns:
-            Memory provider name (chronicle or openmemory_mcp)
+            Memory provider name (chronicle)
         """
         config = self._load_config_yml()
         provider = config.get("memory", {}).get("provider", "chronicle").lower()
@@ -235,7 +234,7 @@ class ConfigManager:
         2. .env: MEMORY_PROVIDER variable (backward compatibility, if service_path set)
 
         Args:
-            provider: Memory provider name (chronicle or openmemory_mcp)
+            provider: Memory provider name (chronicle)
 
         Returns:
             Dict with status and details of the update
@@ -243,9 +242,9 @@ class ConfigManager:
         Raises:
             ValueError: If provider is invalid
         """
-        # Validate provider
+        # Validate provider. Chronicle (agentic vault) is currently the only provider.
         provider = provider.lower().strip()
-        valid_providers = ["chronicle", "openmemory_mcp"]
+        valid_providers = ["chronicle"]
 
         if provider not in valid_providers:
             raise ValueError(
@@ -391,6 +390,44 @@ class ConfigManager:
         else:
             config["models"].append(model_def)
         self._save_config_yml(config)
+
+    def _load_defaults_yml(self) -> Dict[str, Any]:
+        """Load the shipped defaults.yml (read-only model/template definitions)."""
+        defaults_path = self.config_yml_path.parent / "defaults.yml"
+        if not defaults_path.exists():
+            logger.warning(f"defaults.yml not found at {defaults_path}")
+            return {}
+        with open(defaults_path, "r") as f:
+            return _yaml.load(f) or {}
+
+    def sync_models_from_defaults(self, names: List[str]) -> List[str]:
+        """Overwrite the named model entries in config.yml with their canonical
+        definitions from defaults.yml.
+
+        config.yml model entries override defaults.yml *by name* (see the backend
+        config_loader merge), so a stale full copy of e.g. ``llamacpp-llm`` in
+        config.yml silently shadows the templated default — pinning a hardcoded
+        ``model_url`` that ignores ``LLM_BASE_URL`` and dropping the discovery
+        keys. Re-syncing restores the env-var reference (and discovery_* keys) so
+        the wizard's endpoint choice actually takes effect.
+
+        Returns the list of model names that were synced.
+        """
+        defaults = self._load_defaults_yml()
+        default_models = {
+            m.get("name"): m
+            for m in (defaults.get("models", []) or [])
+            if isinstance(m, dict) and m.get("name")
+        }
+        synced: List[str] = []
+        for name in names:
+            model_def = default_models.get(name)
+            if model_def is None:
+                logger.warning(f"Model '{name}' not found in defaults.yml; cannot sync")
+                continue
+            self.add_or_update_model(model_def)
+            synced.append(name)
+        return synced
 
     def get_full_config(self) -> Dict[str, Any]:
         """

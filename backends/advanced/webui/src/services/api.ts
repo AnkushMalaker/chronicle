@@ -459,6 +459,68 @@ export const systemApi = {
   getObservabilityConfig: () => api.get('/api/observability'),
 }
 
+// ---- System events (admin "System Errors" page) ---------------------------
+
+export interface SystemEvent {
+  id: string
+  severity: 'info' | 'warning' | 'error' | 'critical'
+  category: string
+  source: string
+  title: string
+  detail: string | null
+  traceback: string | null
+  user_id: string | null
+  client_id: string | null
+  conversation_id: string | null
+  count: number
+  acked: boolean
+  metadata: Record<string, unknown>
+  created_at: string | null
+  last_seen_at: string | null
+}
+
+export interface SystemEventsList {
+  events: SystemEvent[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface SystemEventsSummary {
+  window_hours: number
+  total: number
+  unacked: number
+  by_severity: Record<string, number>
+  by_category: Record<string, number>
+  by_source: Record<string, number>
+}
+
+export interface SystemEventsFilter {
+  severity?: string
+  category?: string
+  source?: string
+  client_id?: string
+  user_id?: string
+  acked?: boolean
+  since_hours?: number
+  limit?: number
+  offset?: number
+}
+
+export const systemEventsApi = {
+  list: (params: SystemEventsFilter = {}) =>
+    api.get<SystemEventsList>('/api/admin/system-events', { params }),
+  summary: (windowHours = 24) =>
+    api.get<SystemEventsSummary>('/api/admin/system-events/summary', {
+      params: { window_hours: windowHours },
+    }),
+  ack: (id: string) => api.post(`/api/admin/system-events/${id}/ack`),
+  clear: (ackedOnly = false) =>
+    api.post('/api/admin/system-events/clear', null, {
+      params: { acked_only: ackedOnly },
+    }),
+}
+
 export const queueApi = {
   // Consolidated dashboard endpoint - replaces individual getJobs, getStats, getStreamingStatus calls
   getDashboard: (expandedSessions: string[] = []) => api.get('/api/queue/dashboard', {
@@ -521,24 +583,6 @@ export const uploadApi = {
     }),
 }
 
-export const obsidianApi = {
-  uploadZip: (file: File, onProgress?: (progress: number) => void) => {
-    const form = new FormData()
-    form.append('file', file)
-    return api.post('/api/obsidian/upload_zip', form, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-      onUploadProgress: (e) => {
-        if (onProgress && e.total) {
-          onProgress(Math.round((e.loaded * 100) / e.total))
-        }
-      },
-      timeout: 300000,
-    })
-  },
-  start: (jobId: string) => api.post('/api/obsidian/start', { job_id: jobId }),
-  status: (jobId: string) => api.get('/api/obsidian/status', { params: { job_id: jobId } }),
-  cancel: (jobId: string) => api.post('/api/obsidian/cancel', { job_id: jobId }),
-}
 
 
 export const chatApi = {
@@ -561,8 +605,10 @@ export const chatApi = {
   // Health check
   getHealth: () => api.get('/api/chat/health'),
 
-  // Streaming chat — OpenAI-compatible completions endpoint
-  sendMessage: (message: string, sessionId?: string, includeObsidianMemory?: boolean, memoryLimit?: number, memoryMode?: string) => {
+  // Streaming chat — OpenAI-compatible completions endpoint.
+  // Memory is always agentic: the backend's chat agent calls the search_memories
+  // tool (which runs the agentic vault search) when a question needs context.
+  sendMessage: (message: string, sessionId?: string, memoryLimit?: number) => {
     const requestBody: Record<string, unknown> = {
       messages: [{ role: 'user', content: message }],
       stream: true,
@@ -570,14 +616,8 @@ export const chatApi = {
     if (sessionId) {
       requestBody.session_id = sessionId
     }
-    if (includeObsidianMemory) {
-      requestBody.include_obsidian_memory = includeObsidianMemory
-    }
     if (memoryLimit !== undefined) {
       requestBody.memory_limit = memoryLimit
-    }
-    if (memoryMode) {
-      requestBody.memory_mode = memoryMode
     }
 
     return fetch(`${BACKEND_URL}/api/chat/completions`, {
@@ -885,56 +925,6 @@ export const dataAuditApi = {
 
   // Delete an export (zip + metadata) from the server
   deleteExport: (exportId: string) => api.delete(`/api/data-audit/exports/${exportId}`),
-}
-
-export const knowledgeGraphApi = {
-  // Entity operations
-  getEntities: (entityType?: string, limit: number = 100) =>
-    api.get('/api/knowledge-graph/entities', {
-      params: {
-        ...(entityType && { entity_type: entityType }),
-        limit
-      }
-    }),
-
-  getEntity: (entityId: string) =>
-    api.get(`/api/knowledge-graph/entities/${entityId}`),
-
-  getEntityRelationships: (entityId: string) =>
-    api.get(`/api/knowledge-graph/entities/${entityId}/relationships`),
-
-  updateEntity: (entityId: string, data: { name?: string; details?: string; icon?: string }) =>
-    api.patch(`/api/knowledge-graph/entities/${entityId}`, data),
-
-  deleteEntity: (entityId: string) =>
-    api.delete(`/api/knowledge-graph/entities/${entityId}`),
-
-  // Search
-  searchEntities: (query: string, limit: number = 20) =>
-    api.get('/api/knowledge-graph/search', {
-      params: { query, limit }
-    }),
-
-  // Conversation doc browsing
-  getConversationDocs: (person?: string, limit: number = 50) =>
-    api.get('/api/knowledge-graph/conversations', {
-      params: {
-        ...(person && { person }),
-        limit
-      }
-    }),
-
-  getPeople: () =>
-    api.get('/api/knowledge-graph/people'),
-
-  // Timeline
-  getTimeline: (start: string, end: string, limit: number = 100) =>
-    api.get('/api/knowledge-graph/timeline', {
-      params: { start, end, limit }
-    }),
-
-  // Health check
-  getHealth: () => api.get('/api/knowledge-graph/health'),
 }
 
 // Wake-word data-collection (the "Hermes" training flywheel). Proxied through

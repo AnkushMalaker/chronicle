@@ -228,6 +228,10 @@ def _provider_info(service_name: str) -> dict | None:
                     if service_name == "asr-services"
                     else key
                 ),
+                # Whether this provider runs a local container. Switching to/from a
+                # local provider is "heavy" (start/stop, possible model download);
+                # the UI uses this to decide whether to gate the change behind Apply.
+                "local": bool(provider_map.get(key)),
             }
             for key in provider_map
         ],
@@ -237,7 +241,7 @@ def _provider_info(service_name: str) -> dict | None:
         # (cloud providers leave STREAMING_ASR_PROVIDER empty), not just the env var.
         info["streaming_current"] = services.active_streaming_asr_provider()
         info["streaming_available"] = [
-            {"key": key, "label": opt["label"]}
+            {"key": key, "label": opt["label"], "local": bool(opt["service"])}
             for key, opt in services.STREAMING_ASR_PROVIDER_OPTIONS.items()
         ]
     return info
@@ -670,7 +674,25 @@ def set_provider(name: str, body: ProviderBody):
 
     set_key(str(env_path), env_key, env_value, quote_mode="never")
 
-    was_running = services.check_service_health(name)[0] != "stopped"
+    # Does the NEW selection run a local container? Drives both whether we start a
+    # container below and the config.yml enabled flag. For asr-services this is a
+    # property of *either* lane, read fresh from the .env we just wrote; every tts
+    # provider runs a local container.
+    if name == "asr-services":
+        needs_container = services.asr_needs_local_container()
+    else:
+        needs_container = bool(services._TTS_PROVIDER_TO_SERVICE.get(body.provider))
+
+    # Keep config.yml's enabled set in step with the provider choice: the System
+    # page only shows/controls enabled services and ./start.sh only starts them, so
+    # switching to a cloud (container-less) provider must disable the service and
+    # switching to a local one must (re-)enable it — otherwise the dropdown that
+    # made the switch disappears and the lifecycle drifts from the running state.
+    if name == "asr-services" and services.set_service_enabled(name, needs_container):
+        logger.info(
+            "asr-services enabled=%s in config.yml after provider switch",
+            needs_container,
+        )
 
     def fn(op):
         if skip_compose:
@@ -680,7 +702,10 @@ def set_provider(name: str, body: ProviderBody):
         # before the new one binds.
         op["phase"] = "Stopping current service…"
         ok = services.run_compose_command(name, "down")
-        if not (ok and was_running):
+        # Cloud-only selection has no container to start — down is enough. A local
+        # provider is (re)started whether or not it was running before, since
+        # switching *to* a provider means you want it active.
+        if not ok or not needs_container:
             return ok
         op["phase"] = f"Starting {body.provider}…"
         return services.run_compose_command(name, "up", build=body.build)

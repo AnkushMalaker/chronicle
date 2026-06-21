@@ -53,7 +53,6 @@ DESCRIPTION="${2:-}"
 # registry-image-name = what gets pushed to DockerHub
 IMAGES=(
     "chronicle-backend:chronicle-backend"
-    "chronicle-webui:chronicle-webui"
     "chronicle-speaker:chronicle-speaker"
     "chronicle-speaker-strixhalo:chronicle-speaker-strixhalo"
     "chronicle-speaker-webui:chronicle-speaker-webui"

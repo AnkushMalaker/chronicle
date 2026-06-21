@@ -9,7 +9,7 @@ Features:
 - Conversation-filtered audio export (only conversations with transcripts)
 - Comprehensive backup manifest with checksums
 - Per-user vault backup (conversation_docs + memory_md tarred into vault.tar.gz)
-- MongoDB, FalkorDB, Redis, and vault cleanup (Syncthing markers preserved)
+- MongoDB, Redis, and vault cleanup (Syncthing markers preserved)
 """
 
 import argparse
@@ -33,7 +33,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 try:
     import redis
     from beanie import init_beanie
-    from falkordb import FalkorDB
     from motor.motor_asyncio import AsyncIOMotorClient
     from rich.console import Console
     from rich.panel import Panel
@@ -137,9 +136,6 @@ class Stats:
         self.chat_sessions = 0
         self.chat_messages = 0
         self.annotations = 0
-        self.falkordb_nodes = 0
-        self.falkordb_relationships = 0
-        self.falkordb_promises = 0
         self.redis_jobs = 0
         self.legacy_wav = 0
         self.vault_files = 0
@@ -150,7 +146,6 @@ class Stats:
 async def gather_stats(
     mongo_db: Any,
     redis_conn: Any,
-    falkordb_graph: Any = None,
     langfuse_client: Any = None,
 ) -> Stats:
     """Gather current system statistics."""
@@ -167,20 +162,6 @@ async def gather_stats(
     s.chat_messages = await mongo_db["chat_messages"].count_documents({})
     s.annotations = await Annotation.find_all().count()
     s.users = await User.find_all().count()
-
-    # FalkorDB
-    if falkordb_graph:
-        try:
-            result = falkordb_graph.ro_query("MATCH (n) RETURN count(n) AS c")
-            s.falkordb_nodes = result.result_set[0][0] if result.result_set else 0
-            result = falkordb_graph.ro_query("MATCH ()-[r]->() RETURN count(r) AS c")
-            s.falkordb_relationships = (
-                result.result_set[0][0] if result.result_set else 0
-            )
-            result = falkordb_graph.ro_query("MATCH (p:Promise) RETURN count(p) AS c")
-            s.falkordb_promises = result.result_set[0][0] if result.result_set else 0
-        except Exception:
-            pass
 
     # Redis
     try:
@@ -255,8 +236,6 @@ def render_stats_table(stats: Stats, title: str = "Current State") -> Table:
     row("Chat Messages", str(stats.chat_messages), "dim")
     row("Annotations", str(stats.annotations), "green" if stats.annotations else "dim")
     table.add_section()
-    row("FalkorDB Nodes", str(stats.falkordb_nodes), "dim")
-    row("FalkorDB Relationships", str(stats.falkordb_relationships), "dim")
     row(
         "LangFuse Prompts",
         str(stats.langfuse_prompts),
@@ -351,7 +330,6 @@ class BackupManager:
         backup_dir: str,
         export_audio: bool,
         mongo_db: Any,
-        falkordb_graph: Any = None,
         langfuse_client: Any = None,
         skip_existing_audio: bool = False,
     ):
@@ -359,7 +337,6 @@ class BackupManager:
         self.export_audio = export_audio
         self.skip_existing_audio = skip_existing_audio
         self.mongo_db = mongo_db
-        self.falkordb_graph = falkordb_graph
         self.langfuse_client = langfuse_client
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.backup_path = self.backup_dir / f"backup_{self.timestamp}"
@@ -391,9 +368,6 @@ class BackupManager:
 
             if self.export_audio:
                 steps.append(("audio_wav", self._export_audio_wav))
-
-            if self.falkordb_graph:
-                steps.append(("falkordb_graph", self._export_falkordb))
 
             if self.langfuse_client:
                 steps.append(("langfuse_prompts", self._export_langfuse_prompts))
@@ -672,47 +646,6 @@ class BackupManager:
             conv_dir.rmdir()
         return False
 
-    def _export_falkordb(self, result: BackupResult) -> Path:
-        path = self.backup_path / "falkordb_graph.json"
-        try:
-            nodes_data = []
-            node_result = self.falkordb_graph.ro_query(
-                "MATCH (n) RETURN n, labels(n) AS labels, ID(n) AS nid"
-            )
-            for row in node_result.result_set:
-                node = dict(row[0].properties) if hasattr(row[0], "properties") else {}
-                node["_labels"] = row[1]
-                node["_id"] = row[2]
-                nodes_data.append(node)
-
-            rels_data = []
-            rel_result = self.falkordb_graph.ro_query(
-                "MATCH (a)-[r]->(b) RETURN ID(a) AS src, type(r) AS rel_type, "
-                "properties(r) AS props, ID(b) AS dst"
-            )
-            for row in rel_result.result_set:
-                rels_data.append(
-                    {
-                        "source": row[0],
-                        "type": row[1],
-                        "properties": row[2] if row[2] else {},
-                        "target": row[3],
-                    }
-                )
-
-            with open(path, "w") as f:
-                json.dump(
-                    {"nodes": nodes_data, "relationships": rels_data},
-                    f,
-                    indent=2,
-                    default=str,
-                )
-            result.record("falkordb_graph", path, True)
-        except Exception as e:
-            result.record("falkordb_graph", None, False, str(e))
-
-        return path
-
     def _export_langfuse_prompts(self, result: BackupResult) -> Path:
         """Export all LangFuse prompts (production versions) including admin edits."""
         path = self.backup_path / "langfuse_prompts.json"
@@ -768,21 +701,17 @@ class CleanupManager:
         redis_conn: Any,
         include_wav: bool,
         delete_users: bool,
-        falkordb_graph: Any = None,
     ):
         self.mongo_db = mongo_db
         self.redis_conn = redis_conn
         self.include_wav = include_wav
         self.delete_users = delete_users
-        self.falkordb_graph = falkordb_graph
 
     async def run(self, stats: Stats) -> bool:
         """Perform cleanup with progress display."""
         steps = [
             ("MongoDB collections", self._cleanup_mongodb),
         ]
-        if self.falkordb_graph:
-            steps.append(("FalkorDB graph", self._cleanup_falkordb))
         steps.append(("Redis queues", self._cleanup_redis))
         steps.append(("Vault markdown", self._cleanup_vault))
         if self.include_wav:
@@ -820,12 +749,6 @@ class CleanupManager:
         await Annotation.find_all().delete()
         if self.delete_users:
             await User.find_all().delete()
-
-    def _cleanup_falkordb(self, stats: Stats):
-        try:
-            self.falkordb_graph.query("MATCH (n) DETACH DELETE n")
-        except Exception as e:
-            logger.warning(f"FalkorDB cleanup failed: {e}")
 
     def _cleanup_redis(self, stats: Stats):
         for qname in ("transcription", "memory", "audio", "default"):
@@ -874,7 +797,7 @@ class CleanupManager:
 
 
 async def connect_services():
-    """Initialize all service connections. Returns (mongo_db, redis_conn, falkordb_graph, langfuse_client)."""
+    """Initialize all service connections. Returns (mongo_db, redis_conn, langfuse_client)."""
     # MongoDB
     mongodb_uri = os.getenv("MONGODB_URI", "mongodb://mongo:27017")
     mongodb_database = os.getenv("MONGODB_DATABASE", "chronicle")
@@ -895,18 +818,6 @@ async def connect_services():
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
     redis_conn = redis.from_url(redis_url)
 
-    # FalkorDB
-    falkordb_graph = None
-    falkordb_host = os.getenv("FALKORDB_HOST")
-    if falkordb_host:
-        try:
-            falkordb_port = int(os.getenv("FALKORDB_PORT", "6379"))
-            db = FalkorDB(host=falkordb_host, port=falkordb_port)
-            falkordb_graph = db.select_graph("chronicle")
-            falkordb_graph.ro_query("RETURN 1")
-        except Exception:
-            falkordb_graph = None
-
     # LangFuse
     langfuse_client = None
     langfuse_host = os.getenv("LANGFUSE_HOST")
@@ -920,7 +831,7 @@ async def connect_services():
         except Exception:
             langfuse_client = None
 
-    return mongo_db, redis_conn, falkordb_graph, langfuse_client
+    return mongo_db, redis_conn, langfuse_client
 
 
 # ---------------------------------------------------------------------------
@@ -971,9 +882,6 @@ def print_dry_run(stats: Stats, args):
         table.add_row("Chat Sessions", str(stats.chat_sessions))
         table.add_row("Chat Messages", str(stats.chat_messages))
         table.add_row("Annotations", str(stats.annotations))
-        if stats.falkordb_nodes:
-            table.add_row("FalkorDB Nodes", str(stats.falkordb_nodes))
-            table.add_row("FalkorDB Relationships", str(stats.falkordb_relationships))
         table.add_row("Redis Jobs", str(stats.redis_jobs))
         table.add_row("Vault Files", str(stats.vault_files))
         if args.include_wav:
@@ -1026,10 +934,6 @@ def print_confirmation(stats: Stats, args) -> bool:
             f"  {stats.chat_messages} chat messages",
             f"  {stats.annotations} annotations",
         ]
-        if stats.falkordb_nodes:
-            items.append(
-                f"  {stats.falkordb_nodes} FalkorDB nodes + {stats.falkordb_relationships} relationships"
-            )
         items.append(f"  {stats.redis_jobs} Redis jobs")
         items.append(
             f"  {stats.vault_files} vault files (deletions sync to paired Obsidian vaults)"
@@ -1120,13 +1024,11 @@ Examples:
 
     # Connect
     with console.status("[bold cyan]Connecting to services...", spinner="dots"):
-        mongo_db, redis_conn, falkordb_graph, langfuse_client = await connect_services()
+        mongo_db, redis_conn, langfuse_client = await connect_services()
 
     # Gather stats
     with console.status("[bold cyan]Gathering statistics...", spinner="dots"):
-        stats = await gather_stats(
-            mongo_db, redis_conn, falkordb_graph, langfuse_client
-        )
+        stats = await gather_stats(mongo_db, redis_conn, langfuse_client)
 
     console.print()
     console.print(render_stats_table(stats, "Current Backend State"))
@@ -1151,7 +1053,6 @@ Examples:
             args.backup_dir,
             args.export_audio,
             mongo_db,
-            falkordb_graph,
             langfuse_client,
             skip_existing_audio=args.skip_existing_audio,
         )
@@ -1203,7 +1104,6 @@ Examples:
         redis_conn,
         args.include_wav,
         args.delete_users,
-        falkordb_graph,
     )
     success = await cleanup_mgr.run(stats)
 
@@ -1218,9 +1118,7 @@ Examples:
     # Verify
     console.print()
     with console.status("[bold cyan]Verifying cleanup...", spinner="dots"):
-        final_stats = await gather_stats(
-            mongo_db, redis_conn, falkordb_graph, langfuse_client
-        )
+        final_stats = await gather_stats(mongo_db, redis_conn, langfuse_client)
 
     console.print(render_stats_table(final_stats, "After Cleanup"))
 
@@ -1229,8 +1127,6 @@ Examples:
     if do_backup:
         msg += f"\n[green]Backup saved to:[/green] {backup_mgr.backup_path}"
     console.print(Panel(msg, border_style="green"))
-
-    # FalkorDB graph objects don't need explicit close
 
 
 if __name__ == "__main__":

@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { AlertCircle, CheckCircle, Circle, Play, RefreshCw, RotateCcw, Server, Square, Wrench, XCircle } from 'lucide-react'
+import { AlertCircle, Check, CheckCircle, Circle, Play, RefreshCw, RotateCcw, Server, Square, Wrench, XCircle } from 'lucide-react'
 import { systemApi } from '../services/api'
 import { useExternalServices, ExternalService, ServiceOperation } from '../hooks/useSystem'
+
+type Lane = 'batch' | 'streaming'
 
 const ACTION_LABELS: Record<string, string> = {
   start: 'Starting',
@@ -38,9 +40,13 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
   const [lastFailedOp, setLastFailedOp] = useState<ServiceOperation | null>(null)
   const [buildImages, setBuildImages] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Staged provider selections (keyed by node:service:lane). A change is held here
+  // until the user clicks Apply — a switch can be heavy (start/stop a container,
+  // sometimes a model download), so we don't fire it on every dropdown change.
+  const [pending, setPending] = useState<Record<string, string>>({})
 
   const busy = activeOp?.status === 'running'
-  const { data, isLoading } = useExternalServices(isAdmin, busy)
+  const { data, isLoading, isFetching } = useExternalServices(isAdmin, busy)
 
   // Adopt an operation already running on the agent (e.g. started in another tab)
   useEffect(() => {
@@ -108,7 +114,101 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
     }
   }
 
-  if (!isAdmin || isLoading) return null
+  // ── Staged provider selection (apply on demand, not on select) ──────────────
+  const provKey = (service: ExternalService, lane: Lane) =>
+    `${service.node ?? 'local'}:${service.name}:${lane}`
+
+  const laneCurrent = (service: ExternalService, lane: Lane) =>
+    (lane === 'streaming' ? service.provider?.streaming_current : service.provider?.current) ?? ''
+
+  const laneOptions = (service: ExternalService, lane: Lane) =>
+    (lane === 'streaming' ? service.provider?.streaming_available : service.provider?.available) ?? []
+
+  const stagedValue = (service: ExternalService, lane: Lane) =>
+    pending[provKey(service, lane)] ?? laneCurrent(service, lane)
+
+  const hasPending = (service: ExternalService, lane: Lane) => {
+    const v = pending[provKey(service, lane)]
+    return v != null && v !== laneCurrent(service, lane)
+  }
+
+  // Heavy = a local container is started/stopped (and may need a model download).
+  // Only a move between two cloud providers is config-only.
+  const pendingIsHeavy = (service: ExternalService, lane: Lane) => {
+    const opts = laneOptions(service, lane)
+    const next = opts.find(o => o.key === pending[provKey(service, lane)])
+    const cur = opts.find(o => o.key === laneCurrent(service, lane))
+    return Boolean(next?.local) || Boolean(cur?.local)
+  }
+
+  const stageProvider = (service: ExternalService, lane: Lane, value: string) =>
+    setPending(p => ({ ...p, [provKey(service, lane)]: value }))
+
+  const cancelPending = (service: ExternalService, lane: Lane) =>
+    setPending(p => {
+      const next = { ...p }
+      delete next[provKey(service, lane)]
+      return next
+    })
+
+  const applyProvider = async (service: ExternalService, lane: Lane) => {
+    const provider = pending[provKey(service, lane)]
+    if (provider == null) return
+    await switchProvider(service, provider, lane)
+    cancelPending(service, lane)
+  }
+
+  // Apply / discard controls shown inline once a lane has a pending change.
+  const renderApply = (service: ExternalService, lane: Lane) => {
+    if (!hasPending(service, lane)) return null
+    const heavy = pendingIsHeavy(service, lane)
+    return (
+      <span className="flex items-center gap-1.5">
+        <button
+          onClick={() => applyProvider(service, lane)}
+          disabled={busy}
+          className="flex items-center gap-1 px-2 py-1 text-xs bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50"
+          title={heavy
+            ? 'Apply: stops the current container and starts the new provider — model load/download can take minutes'
+            : 'Apply: config change only — no container restart'}
+        >
+          <Check className="h-3 w-3" />
+          <span>Apply</span>
+        </button>
+        <span className={`text-[10px] whitespace-nowrap ${heavy ? 'text-amber-600 dark:text-amber-400' : 'text-green-600 dark:text-green-400'}`}>
+          {heavy ? 'restarts service' : 'config only'}
+        </span>
+        <button
+          onClick={() => cancelPending(service, lane)}
+          disabled={busy}
+          className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 disabled:opacity-50"
+          title="Discard pending change"
+        >
+          <XCircle className="h-3.5 w-3.5" />
+        </button>
+      </span>
+    )
+  }
+
+  if (!isAdmin) return null
+
+  // Initial load — show a skeleton card so it's clear status is being fetched
+  // (the node-agent / cluster discovery can take a few seconds), rather than a
+  // blank space where the section will appear.
+  if (isLoading) {
+    return (
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center">
+          <Wrench className="h-5 w-5 mr-2 text-blue-600" />
+          External Services
+        </h3>
+        <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+          <RefreshCw className="h-4 w-4 text-blue-500 animate-spin" />
+          <span>Loading services…</span>
+        </div>
+      </div>
+    )
+  }
 
   if (!data?.available) {
     if (data?.reason === 'unreachable') {
@@ -130,11 +230,17 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
     return null
   }
 
-  // Group enabled services by node. With only the local node this is a single flat
+  // Show enabled services, plus provider-switchable ones (ASR/TTS) even when
+  // disabled: the provider dropdown is the only way to switch to a local provider
+  // (which re-enables the service), so hiding a disabled service would strand it on
+  // whatever cloud provider is selected with no UI path to change it.
+  const visibleServices = (data.services ?? []).filter(
+    s => s.enabled || (s.provider != null && s.provider.available.length > 0)
+  )
+  // Group services by node. With only the local node this is a single flat
   // group (no header, unchanged look); in a cluster, each node gets its own header.
-  const enabledServices = (data.services ?? []).filter(s => s.enabled)
   const byNode = new Map<string, ExternalService[]>()
-  for (const s of enabledServices) {
+  for (const s of visibleServices) {
     const key = s.node ?? 'local'
     const list = byNode.get(key) ?? []
     list.push(s)
@@ -147,7 +253,7 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
     if (ar !== br) return ar - br
     return (a[0]?.node ?? '').localeCompare(b[0]?.node ?? '')
   })
-  const showNodeHeaders = serviceGroups.length > 1 || enabledServices.some(s => s.remote)
+  const showNodeHeaders = serviceGroups.length > 1 || visibleServices.some(s => s.remote)
 
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
@@ -155,6 +261,14 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
         <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 flex items-center">
           <Wrench className="h-5 w-5 mr-2 text-blue-600" />
           External Services
+          {/* Background poll in flight (e.g. waiting for a 'starting' service to
+              come up, or the periodic refetch) — subtle hint that status is live. */}
+          {isFetching && (
+            <span className="ml-2 flex items-center gap-1 text-xs font-normal text-gray-400 dark:text-gray-500">
+              <RefreshCw className="h-3 w-3 animate-spin" />
+              refreshing…
+            </span>
+          )}
         </h3>
         <label className="flex items-center space-x-2 text-sm text-gray-600 dark:text-gray-400 cursor-pointer">
           <input
@@ -258,39 +372,48 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
                       <label className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
                         {service.provider.streaming_available?.length ? <span className="w-14 shrink-0">Batch</span> : null}
                         <select
-                          value={service.provider.current}
-                          onChange={e => switchProvider(service, e.target.value, 'batch')}
+                          value={stagedValue(service, 'batch')}
+                          onChange={e => stageProvider(service, 'batch', e.target.value)}
                           disabled={busy}
                           className="text-sm px-2 py-1.5 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 disabled:opacity-50"
-                          title="Active batch (file/full-audio) provider — changing switches and restarts the service"
+                          title="Active batch (file/full-audio) provider — choose, then click Apply to switch"
                         >
                           {!service.provider.current && <option value="">(no provider set)</option>}
                           {service.provider.available.map(p => (
                             <option key={p.key} value={p.key}>{p.label}</option>
                           ))}
                         </select>
+                        {renderApply(service, 'batch')}
                       </label>
                       {service.provider.streaming_available && service.provider.streaming_available.length > 0 && (
                         <label className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
                           <span className="w-14 shrink-0">Streaming</span>
                           <select
-                            value={service.provider.streaming_current ?? ''}
-                            onChange={e => switchProvider(service, e.target.value, 'streaming')}
+                            value={stagedValue(service, 'streaming')}
+                            onChange={e => stageProvider(service, 'streaming', e.target.value)}
                             disabled={busy}
                             className="text-sm px-2 py-1.5 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 disabled:opacity-50"
-                            title="Active streaming (live transcription) provider — changing switches and restarts the service"
+                            title="Active streaming (live transcription) provider — choose, then click Apply to switch"
                           >
                             {!service.provider.streaming_current && <option value="">(no provider set)</option>}
                             {service.provider.streaming_available.map(p => (
                               <option key={p.key} value={p.key}>{p.label}</option>
                             ))}
                           </select>
+                          {renderApply(service, 'streaming')}
                         </label>
                       )}
                     </div>
                   )}
 
-                  {stopped ? (
+                  {!service.enabled ? (
+                    // Disabled in config.yml — start/stop/restart are rejected by the
+                    // agent ("run the wizard first"). Selecting a local provider above
+                    // re-enables it, so guide the user there instead of dead buttons.
+                    <span className="text-xs text-gray-500 dark:text-gray-400 italic">
+                      not in startup set — pick a local provider to enable
+                    </span>
+                  ) : stopped ? (
                     <button
                       onClick={() => runAction(service, 'start')}
                       disabled={busy}

@@ -37,12 +37,7 @@ export default function Chat() {
   const [memoryContext, setMemoryContext] = useState<MemoryContext | null>(null)
   const [showMemoryPanel, setShowMemoryPanel] = useState(false)
   const [extractionMessage, setExtractionMessage] = useState('')
-  const [includeObsidian, setIncludeObsidian] = useState(false)
   const [memoryLimit, setMemoryLimit] = useState(5)
-  // Default to 'tool' (Auto): the chat agent calls the memory search tool only when a
-  // question needs it. In vault mode that tool runs the agentic vault search, so we don't
-  // want to fire it on every message the way 'always' does.
-  const [memoryMode, setMemoryMode] = useState<'always' | 'tool' | 'off'>('tool')
 
   // Query for messages of current session
   const { data: queryMessages } = useChatMessages(currentSessionId)
@@ -163,7 +158,7 @@ export default function Chat() {
       setLocalMessages(prev => [...(prev ?? []), userMessage])
 
       // Send message and handle streaming response
-      const response = await chatApi.sendMessage(messageText, sessionId!, includeObsidian, memoryLimit, memoryMode)
+      const response = await chatApi.sendMessage(messageText, sessionId!, memoryLimit)
 
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`)
@@ -486,41 +481,13 @@ export default function Chat() {
 
               <div className="mt-2 flex items-center justify-between">
                 <div className="flex items-center space-x-4">
-                  <div className="flex items-center">
-                    <input
-                      type="checkbox"
-                      id="includeObsidian"
-                      checked={includeObsidian}
-                      onChange={(e) => setIncludeObsidian(e.target.checked)}
-                      className="h-4 w-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
-                    />
-                    <label htmlFor="includeObsidian" className="ml-2 text-sm text-gray-700 dark:text-gray-300 cursor-pointer select-none">
-                      Include Obsidian Memory
-                    </label>
-                  </div>
-
-                  <button
-                    onClick={() => setMemoryMode(prev => prev === 'always' ? 'tool' : prev === 'tool' ? 'off' : 'always')}
-                    className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
-                      memoryMode === 'off'
-                        ? 'bg-gray-200 text-gray-500 dark:bg-gray-600 dark:text-gray-400'
-                        : memoryMode === 'tool'
-                          ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300'
-                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-400 dark:hover:bg-gray-600'
-                    }`}
-                    title={memoryMode === 'off'
-                      ? 'Off: no memory search'
-                      : memoryMode === 'tool'
-                        ? 'Auto: LLM decides when to search memories'
-                        : 'Always: memories are always fetched upfront'}
+                  <span
+                    className="flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300"
+                    title="The assistant searches your memory vault automatically when a question needs personal context."
                   >
-                    {memoryMode === 'off'
-                      ? <Brain className="h-3.5 w-3.5 opacity-50" />
-                      : memoryMode === 'tool'
-                        ? <Wrench className="h-3.5 w-3.5" />
-                        : <Brain className="h-3.5 w-3.5" />}
-                    <span>Memory: {memoryMode === 'off' ? 'Off' : memoryMode === 'tool' ? 'Auto' : 'Always'}</span>
-                  </button>
+                    <Wrench className="h-3.5 w-3.5" />
+                    <span>Agentic memory</span>
+                  </span>
                 </div>
 
                 <div className="flex items-center space-x-2">

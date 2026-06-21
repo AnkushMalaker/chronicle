@@ -71,7 +71,7 @@ Memory extraction and storage configuration:
 
 ```yaml
 memory:
-  provider: chronicle  # chronicle or openmemory_mcp
+  provider: chronicle  # agentic Markdown vault (the only provider)
   timeout_seconds: 1200
   extraction:
     enabled: true

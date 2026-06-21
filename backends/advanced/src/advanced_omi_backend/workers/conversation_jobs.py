@@ -183,37 +183,16 @@ async def handle_end_of_conversation(
             logger.info(f"🧹 Cleared transcription completion flag: {completion_key}")
 
             from advanced_omi_backend.controllers.queue_controller import (
-                JOB_RESULT_TTL,
-                redis_conn,
-                transcription_queue,
-            )
-            from advanced_omi_backend.workers.transcription_jobs import (
-                stream_speech_detection_job,
+                enqueue_speech_detection,
             )
 
-            # Enqueue speech detection job for next conversation (audio persistence keeps running)
-            speech_job = transcription_queue.enqueue(
-                stream_speech_detection_job,
-                session_id,
-                user_id,
-                client_id,
-                job_timeout=86400,  # 24 hours to match max_runtime in stream_speech_detection_job
-                result_ttl=JOB_RESULT_TTL,
-                job_id=f"speech-detect_{session_id}_{conversation_count}",
-                description=f"Listening for speech (conversation #{conversation_count + 1})",
-                meta={"client_id": client_id, "session_level": True},
+            # Enqueue speech detection for the next conversation (audio persistence
+            # keeps running). Single-flight: when several conversation-end handlers
+            # fire together for the same session (the old duplicate-job storm), only
+            # one detector is created instead of one per handler.
+            enqueue_speech_detection(
+                session_id, user_id, client_id, reason="conversation_end"
             )
-
-            # Store job ID for cleanup (keyed by client_id for WebSocket cleanup)
-            try:
-                redis_conn.set(
-                    f"speech_detection_job:{client_id}", speech_job.id, ex=86400
-                )  # 24 hours
-                logger.info(f"📌 Stored speech detection job ID for client {client_id}")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to store job ID for {client_id}: {e}")
-
-            logger.info(f"✅ Enqueued speech detection job {speech_job.id}")
         else:
             # Session ending (finalizing/finished): set a backstop TTL so the hash
             # self-cleans if the disconnect path didn't already remove it.
@@ -494,12 +473,16 @@ async def _initialize_conversation(
                 f"⚠️ Conversation {existing_conversation_id} not found in database!"
             )
 
-        # Verify it's a placeholder conversation (always_persist=True, processing_status='pending_transcription')
+        # Verify it's a fresh placeholder to reuse: always_persist, still active
+        # (in-flight), and with no transcript yet. The "no transcript" check is the
+        # precise condition — a placeholder that already has a transcript is a real
+        # conversation, not a reusable slot.
         if (
             conversation
             and getattr(conversation, "always_persist", False)
             and getattr(conversation, "processing_status", None)
-            == "pending_transcription"
+            == Conversation.ConversationStatus.ACTIVE.value
+            and not conversation.has_meaningful_transcript
         ):
             logger.info(
                 f"🔄 Reusing placeholder conversation {conversation.conversation_id} for session {session_id}"
@@ -1297,9 +1280,11 @@ async def _save_streaming_transcript(
     # Update placeholder conversation if it exists
     if (
         getattr(conversation, "always_persist", False)
-        and getattr(conversation, "processing_status", None) == "pending_transcription"
+        and getattr(conversation, "processing_status", None)
+        == Conversation.ConversationStatus.ACTIVE.value
     ):
-        # Keep placeholder status - will be updated by title_summary_job
+        # Status stays active; the finalizer reconciles it to completed once the
+        # post-conversation chain reaches its terminal job.
         logger.info(
             f"📝 Placeholder conversation {conversation_id} has transcript, "
             f"waiting for title/summary generation"
@@ -1760,33 +1745,27 @@ async def generate_title_summary_job(
             f"✅ Generated detailed summary: {len(conversation.detailed_summary)} chars"
         )
 
-        # Update processing status for placeholder/reprocessing conversations
-        if getattr(conversation, "processing_status", None) in [
-            "pending_transcription",
-            "reprocessing",
-        ]:
-            conversation.processing_status = "completed"
-            logger.info(
-                f"✅ Updated placeholder conversation {conversation_id} "
-                f"processing_status to 'completed'"
-            )
+        # Status is owned by the finalizer (dispatch_conversation_complete_event_job),
+        # not stamped here. A transcript exists, so it will reconcile to "completed".
 
     except Exception as gen_error:
         logger.error(f"❌ Title/summary generation failed: {gen_error}")
 
-        # Mark placeholder/reprocessing conversation as failed
-        if getattr(conversation, "processing_status", None) in [
-            "pending_transcription",
-            "reprocessing",
-        ]:
-            conversation.title = "Audio Recording (Transcription Failed)"
-            conversation.summary = f"Title/summary generation failed: {str(gen_error)}"
-            conversation.processing_status = "transcription_failed"
-            await conversation.save()
-            logger.warning(
-                f"⚠️ Marked placeholder conversation {conversation_id} "
-                f"as transcription_failed (title/summary generation error). Audio is still saved."
-            )
+        # A title/summary failure is NOT a transcription failure — the transcript
+        # exists and is usable. Do not downgrade the status (the old code mislabeled
+        # this as transcription_failed). Record the soft failure stage for visibility
+        # and leave the terminal status to the finalizer (which will mark completed).
+        conversation.failure_stage = "summarization"
+        if not conversation.title or conversation.title in (
+            "Recording...",
+            "Reprocessing...",
+        ):
+            conversation.title = "Audio Recording"
+        await conversation.save()
+        logger.warning(
+            f"⚠️ Title/summary generation failed for {conversation_id}; transcript is "
+            f"intact, leaving status to finalizer (failure_stage=summarization)."
+        )
 
         return {
             "success": False,
@@ -1881,22 +1860,39 @@ async def dispatch_conversation_complete_event_job(
         logger.error(f"Conversation {conversation_id} not found")
         return {"success": False, "error": "Conversation not found"}
 
-    # Save end_reason and completed_at to database if not already set
-    # This ensures end_reason is persisted before plugins receive conversation.complete event
+    # This is the terminal job of the post-conversation chain, so it OWNS the
+    # conversation's final state: persist end_reason/completed_at and reconcile
+    # processing_status from facts (transcript present => completed; none =>
+    # failed). Intermediate jobs no longer stamp the status, which is what kept
+    # recovered conversations stuck at "failed". end_reason is persisted before
+    # plugins receive the conversation.complete event.
+    needs_save = False
     if end_reason and conversation.end_reason is None:
         try:
             conversation.end_reason = Conversation.EndReason(end_reason)
         except ValueError:
             logger.warning(f"⚠️ Invalid end_reason '{end_reason}', using UNKNOWN")
             conversation.end_reason = Conversation.EndReason.UNKNOWN
+        needs_save = True
 
-        if conversation.completed_at is None:
-            conversation.completed_at = datetime.now(timezone.utc)
+    if conversation.completed_at is None:
+        conversation.completed_at = datetime.now(timezone.utc)
+        needs_save = True
 
-        await conversation.save()
+    if conversation.apply_status(settled=True):
         logger.info(
-            f"💾 Saved end_reason={conversation.end_reason} to conversation {conversation_id[:12]} in event dispatch job"
+            f"🏁 Finalized conversation {conversation_id[:12]} "
+            f"status={conversation.processing_status}"
+            + (
+                f" failure_stage={conversation.failure_stage}"
+                if conversation.failure_stage
+                else ""
+            )
         )
+        needs_save = True
+
+    if needs_save:
+        await conversation.save()
 
     # Get user email for event data
     from advanced_omi_backend.models.user import User

@@ -27,10 +27,7 @@ class LLMProvider(Enum):
 class MemoryProvider(Enum):
     """Supported memory service providers."""
 
-    CHRONICLE = "chronicle"  # Default — FalkorDB hybrid search + vault
-    OPENMEMORY_MCP = "openmemory_mcp"  # OpenMemory MCP backend
-    GRAPHITI = "graphiti"  # Graphiti temporal graph backend
-    ROLLING_SUMMARY = "rolling_summary"  # Mongo-only rolling summary + user profile
+    CHRONICLE = "chronicle"  # Agentic Markdown vault (the only provider)
 
 
 @dataclass
@@ -41,7 +38,6 @@ class MemoryConfig:
     llm_provider: LLMProvider = LLMProvider.OPENAI
     llm_config: Dict[str, Any] = None
     embedder_config: Dict[str, Any] = None
-    openmemory_config: Dict[str, Any] = None  # Configuration for OpenMemory MCP
     extraction_prompt: str = None
     extraction_enabled: bool = True
     timeout_seconds: int = 1200
@@ -69,21 +65,6 @@ def load_config_yml() -> Dict[str, Any]:
 
     with open(config_path, "r") as f:
         return yaml.safe_load(f) or {}
-
-
-def create_openmemory_config(
-    server_url: str = "http://localhost:8765",
-    client_name: str = "chronicle",
-    user_id: str = "default",
-    timeout: int = 30,
-) -> Dict[str, Any]:
-    """Create OpenMemory MCP configuration."""
-    return {
-        "server_url": server_url,
-        "client_name": client_name,
-        "user_id": user_id,
-        "timeout": timeout,
-    }
 
 
 def create_openai_config(
@@ -126,29 +107,8 @@ def build_memory_config_from_env() -> MemoryConfig:
 
         memory_provider_enum = MemoryProvider(memory_provider)
 
-        # For OpenMemory MCP, configuration is much simpler
-        if memory_provider_enum == MemoryProvider.OPENMEMORY_MCP:
-            mcp = mem_settings.get("openmemory_mcp") or {}
-            openmemory_config = create_openmemory_config(
-                server_url=mcp.get("server_url", "http://localhost:8765"),
-                client_name=mcp.get("client_name", "chronicle"),
-                user_id=mcp.get("user_id", "default"),
-                timeout=int(mcp.get("timeout", 30)),
-            )
-
-            memory_logger.info(
-                f"🔧 Memory config: Provider=OpenMemory MCP, URL={openmemory_config['server_url']}"
-            )
-
-            return MemoryConfig(
-                memory_provider=memory_provider_enum,
-                openmemory_config=openmemory_config,
-                timeout_seconds=int(mem_settings.get("timeout_seconds", 1200)),
-            )
-
-        # Chronicle and Graphiti both use registry-driven OpenAI-compatible
-        # LLM + embedding configuration. Chronicle consumes it directly;
-        # Graphiti receives it through its own client adapters.
+        # Chronicle uses registry-driven OpenAI-compatible LLM configuration
+        # (the memory agent calls the LLM via the operations registry).
         llm_config = None
         llm_provider_enum = LLMProvider.OPENAI  # OpenAI-compatible API family
         if not reg:

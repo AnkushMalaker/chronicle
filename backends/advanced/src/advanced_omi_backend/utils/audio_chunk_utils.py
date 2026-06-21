@@ -215,10 +215,13 @@ async def retrieve_audio_chunks(
         >>> # Get chunks 5-14 (10 chunks starting at index 5)
         >>> chunks = await retrieve_audio_chunks("550e8400-e29b-41d4...", start_index=5, limit=10)
     """
-    # Build query
+    # Build query. Exclude soft-deleted chunks: a soft-delete (conversation
+    # delete, or the de-duplication repair for overlapping reconnect cycles)
+    # must not resurface in reconstructed audio.
     query = AudioChunkDocument.find(
         AudioChunkDocument.conversation_id == conversation_id,
         AudioChunkDocument.chunk_index >= start_index,
+        AudioChunkDocument.deleted == False,  # noqa: E712 (Beanie needs ==)
     )
 
     # Apply limit if specified
@@ -234,6 +237,73 @@ async def retrieve_audio_chunks(
     )
 
     return chunks
+
+
+def audio_cache_duration_matches(cached_seconds: float, current_seconds: float) -> bool:
+    """Whether a cache built for ``cached_seconds`` still matches the conversation's
+    current audio duration (within a small tolerance for partial final chunks).
+
+    Caches derived from the audio-chunk set (waveform, vad_analysis) become stale
+    when the chunk set changes in place (e.g. the reconnect-duplicate dedup). The
+    serving paths use this to validate the cache against the source of truth
+    (``Conversation.audio_total_duration``) and regenerate/ignore it when stale.
+    """
+    tolerance = max(2.0, 0.02 * max(cached_seconds, current_seconds))
+    return abs((cached_seconds or 0.0) - (current_seconds or 0.0)) <= tolerance
+
+
+async def invalidate_conversation_audio_caches(conversation_id: str) -> dict:
+    """Drop caches derived from a conversation's audio chunks (waveform + the
+    vad_analysis summary) so they regenerate from the current chunk set.
+
+    Call this whenever a conversation's chunk set changes IN PLACE (same
+    conversation_id) — e.g. a re-chunk/trim or a manual dedup repair. Split/merge
+    move chunks to fresh conversation_ids, so children regenerate naturally and
+    don't need this. Lazy regeneration happens on next read.
+    """
+    from advanced_omi_backend.models.conversation import Conversation
+    from advanced_omi_backend.models.waveform import WaveformData
+
+    waveforms_deleted = (
+        await WaveformData.find(
+            WaveformData.conversation_id == conversation_id
+        ).delete()
+    ).deleted_count
+
+    vad_cleared = False
+    conv = await Conversation.find_one(Conversation.conversation_id == conversation_id)
+    if conv is not None and conv.vad_analysis is not None:
+        conv.vad_analysis = None
+        await conv.save()
+        vad_cleared = True
+
+    return {"waveforms_deleted": waveforms_deleted, "vad_cleared": vad_cleared}
+
+
+async def get_resume_position(conversation_id: str) -> tuple[int, float]:
+    """Next (chunk_index, start_time) for appending audio to a conversation.
+
+    Returns (0, 0.0) when the conversation has no audio yet. When it already has
+    chunks — e.g. a WebSocket reconnect re-attaches a persistence cycle to an
+    ``always_persist`` placeholder a previous cycle already wrote to — resume from
+    the end so new chunks APPEND with a continuous chunk_index/timeline instead of
+    restarting at 0. Restarting at 0 produced overlapping duplicate chunks under
+    one conversation_id, which corrupts reconstruction (chunks are read sorted by
+    chunk_index, so duplicates interleave) and silently truncates playback. The
+    ``conversation.audio_chunks_count`` ``max()`` guard only masked the count; this
+    fixes the underlying data.
+    """
+    last = (
+        await AudioChunkDocument.find(
+            AudioChunkDocument.conversation_id == conversation_id,
+            AudioChunkDocument.deleted == False,  # noqa: E712 (Beanie needs ==)
+        )
+        .sort("-chunk_index")
+        .first_or_none()
+    )
+    if last is None:
+        return 0, 0.0
+    return last.chunk_index + 1, last.end_time
 
 
 async def concatenate_chunks_to_pcm(

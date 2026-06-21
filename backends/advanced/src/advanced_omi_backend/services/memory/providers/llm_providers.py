@@ -228,24 +228,6 @@ class OpenAIProvider(LLMProviderBase):
                     current_date=datetime.now().strftime("%Y-%m-%d"),
                 )
 
-            # Inject basic memory for contextual extraction
-            if user_id:
-                try:
-                    from advanced_omi_backend.services.knowledge_graph.kb import (
-                        KnowledgeBaseManager,
-                    )
-
-                    basic_memory = KnowledgeBaseManager().get_basic_memory(user_id)
-                    if basic_memory:
-                        system_prompt += (
-                            "\n\n# User Knowledge Base (use for context when extracting facts):\n"
-                            + basic_memory
-                        )
-                except Exception as e:
-                    memory_logger.warning(
-                        f"Failed to load basic memory for extraction: {e}"
-                    )
-
             # Semantic chunking: split dialogue into turns, then group by topic
             async def _embed_for_chunking(texts: List[str]) -> List[List[float]]:
                 return await generate_openai_embeddings(

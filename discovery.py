@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 CHRONICLE_BACKEND = "chronicle-backend"
 CHRONICLE_SPEAKER = "chronicle-speaker"
 CHRONICLE_ASR = "chronicle-asr"
-CHRONICLE_OPENMEMORY = "chronicle-openmemory"
 CHRONICLE_LLM = "chronicle-llm"
 CHRONICLE_TTS = "chronicle-tts"
 CHRONICLE_RELAY = "chronicle-relay"

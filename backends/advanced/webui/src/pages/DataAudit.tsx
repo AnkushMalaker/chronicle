@@ -22,6 +22,11 @@ type ArchiveReason = 'near_silent' | 'bad_speaker' | 'manual_cleanup'
 const FILTERS_STORAGE_KEY = 'data_audit_filters_v2'
 const ARCHIVED_VIEW_STORAGE_KEY = 'data_audit_archived_view'
 const SELECTION_STORAGE_KEY = 'data_audit_selection'
+// Persist the in-flight analyze job id so navigating away (e.g. into a
+// conversation and back) re-attaches to the running job's progress instead of
+// losing it. Backend exposes live progress via GET /queue/jobs/{id}/status for
+// the life of the RQ job record.
+const ANALYZE_JOB_STORAGE_KEY = 'data_audit_analyze_job'
 
 function loadSelection(): Set<string> {
   try {
@@ -146,6 +151,44 @@ export default function DataAudit() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [archivedOnly])
 
+  // Poll a (possibly already-running) analyze job to completion, driving the
+  // progress message. Shared by a fresh Analyze click and by re-attachment on
+  // mount. Clears the stored job id once terminal.
+  const attachToAnalyzeJob = useCallback(
+    async (jobId: string) => {
+      setAnalyzing(true)
+      setError(null)
+      try {
+        const status = await pollJob(jobId, (s, progress) =>
+          setMessage(
+            progress?.message
+              ? `Analyzing audio… ${progress.message}`
+              : progress?.total != null
+                ? `Analyzing audio… ${progress.done ?? 0}/${progress.total}`
+                : `Analyzing audio… (${s})`
+          )
+        )
+        setAnalyzing(false)
+        try {
+          sessionStorage.removeItem(ANALYZE_JOB_STORAGE_KEY)
+        } catch {
+          // ignore storage availability errors
+        }
+        setMessage(status === 'finished' ? 'Analysis complete' : 'Analysis failed')
+        if (status === 'finished') loadConversations()
+      } catch (e: any) {
+        setAnalyzing(false)
+        try {
+          sessionStorage.removeItem(ANALYZE_JOB_STORAGE_KEY)
+        } catch {
+          // ignore storage availability errors
+        }
+        setError(e?.response?.data?.error || 'Analysis failed')
+      }
+    },
+    [pollJob, loadConversations]
+  )
+
   const runAnalysis = async () => {
     setAnalyzing(true)
     setError(null)
@@ -158,23 +201,33 @@ export default function DataAudit() {
         setMessage('Analysis started')
         return
       }
-      const status = await pollJob(jobId, (s, progress) =>
-        setMessage(
-          progress?.message
-            ? `Analyzing audio… ${progress.message}`
-            : progress?.total != null
-              ? `Analyzing audio… ${progress.done ?? 0}/${progress.total}`
-              : `Analyzing audio… (${s})`
-        )
-      )
-      setAnalyzing(false)
-      setMessage(status === 'finished' ? 'Analysis complete' : 'Analysis failed')
-      if (status === 'finished') loadConversations()
+      try {
+        sessionStorage.setItem(ANALYZE_JOB_STORAGE_KEY, jobId)
+      } catch {
+        // ignore storage availability errors
+      }
+      await attachToAnalyzeJob(jobId)
     } catch (e: any) {
       setAnalyzing(false)
       setError(e?.response?.data?.error || 'Failed to start analysis')
     }
   }
+
+  // On mount, re-attach to an analyze job started before navigating away so its
+  // progress keeps showing instead of silently running in the background.
+  useEffect(() => {
+    let storedJob: string | null = null
+    try {
+      storedJob = sessionStorage.getItem(ANALYZE_JOB_STORAGE_KEY)
+    } catch {
+      // ignore storage availability errors
+    }
+    if (storedJob) {
+      setMessage('Reattaching to running analysis…')
+      attachToAnalyzeJob(storedJob)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const toggleSelect = (id: string) => {
     setSelected((prev) => {

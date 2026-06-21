@@ -308,6 +308,11 @@ class SpeakerRecognitionSetup:
             self.config["REACT_UI_HTTPS"] = "false"
             self.config["REACT_UI_PORT"] = "5175"
 
+            # The Vite dev server enforces server.allowedHosts; Caddy preserves the
+            # client Host header (the Tailscale name/domain), so it must be allowlisted
+            # or Vite returns 403 "This host is not allowed" (mirrors advanced backend).
+            self.config["VITE_ALLOWED_HOSTS"] = f"localhost 127.0.0.1 {server_ip}"
+
             # Decide how the TLS cert is managed (same logic the wizard uses).
             cert_mode = decide_cert_mode(server_ip)
 

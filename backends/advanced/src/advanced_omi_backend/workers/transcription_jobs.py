@@ -809,7 +809,11 @@ async def create_audio_only_conversation(
         Conversation.always_persist == True,
         In(
             Conversation.processing_status,
-            ["pending_transcription", "transcription_failed"],
+            # active = in-flight placeholder, failed = prior failure to retry/attach
+            [
+                Conversation.ConversationStatus.ACTIVE.value,
+                Conversation.ConversationStatus.FAILED.value,
+            ],
         ),
     )
 
@@ -818,8 +822,10 @@ async def create_audio_only_conversation(
             f"✅ Found always_persist placeholder conversation {placeholder_conversation.conversation_id[:12]} "
             f"for session {session_id[:12]}, reusing for batch transcription"
         )
-        # Update status to show batch transcription is starting
-        placeholder_conversation.processing_status = "batch_transcription"
+        # In-flight; the finalizer/reconciler owns the terminal status.
+        placeholder_conversation.processing_status = (
+            Conversation.ConversationStatus.ACTIVE.value
+        )
         placeholder_conversation.title = "Audio Recording (Batch Transcription...)"
         placeholder_conversation.summary = (
             "Processing audio with offline transcription..."
@@ -843,7 +849,7 @@ async def create_audio_only_conversation(
         client_id=client_id,
         title="Audio Recording (Batch Transcription...)",
         summary="Processing audio with offline transcription...",
-        processing_status="batch_transcription",
+        processing_status=Conversation.ConversationStatus.ACTIVE.value,
         always_persist=False,  # Mark as False since this is fallback
         created_at=datetime.now(timezone.utc),
     )
@@ -899,7 +905,11 @@ async def transcription_fallback_check_job(
             Conversation.always_persist == True,
             In(
                 Conversation.processing_status,
-                ["pending_transcription", "transcription_failed"],
+                # active = in-flight placeholder, failed = prior failure to retry/attach
+                [
+                    Conversation.ConversationStatus.ACTIVE.value,
+                    Conversation.ConversationStatus.FAILED.value,
+                ],
             ),
         )
 
@@ -952,6 +962,11 @@ async def transcription_fallback_check_job(
             f"(session {session_id[:12]}). Session ended without usable audio. "
             f"Skipping batch fallback."
         )
+        # Terminal dead-end: no audio and no transcript will ever exist. This is the
+        # one place no post-conversation chain (and thus no finalizer) runs, so settle
+        # the status here.
+        if conversation.apply_status(settled=True):
+            await conversation.save()
         return {
             "status": "skipped",
             "reason": "no_audio",
@@ -1416,6 +1431,51 @@ async def stream_speech_detection_job(
             f"   Runtime: {time.time() - start_time:.1f}s"
         )
 
+    # Guard: never fail a conversation that is still being recorded.
+    #
+    # If we reached this exit while the session is still ACTIVE (e.g. the
+    # no-activity watchdog or a transcription-error break fired mid-session, or a
+    # duplicate/stale detector lost the race), the always_persist placeholder
+    # found below may be the *currently-recording* conversation. Marking it
+    # transcription_failed here — and batch-transcribing only the partial audio
+    # captured so far — orphans the rest of the audio that is still streaming in.
+    # This was the root cause of conversations being marked failed ~2 minutes in
+    # while 10+ more minutes of audio kept arriving.
+    #
+    # Instead, leave the placeholder untouched and re-arm a single listener
+    # (single-flight). When the session genuinely closes, the listener exits via
+    # the session-closed path (status FINALIZING/FINISHED) and the failure +
+    # full-audio batch fallback below run correctly on the complete recording.
+    #
+    # Off-mode (expects_live_results=False) is excluded: it has no live worker, so
+    # zero results is normal and its window-rotation logic below must still run.
+    if expects_live_results and not max_runtime_reached:
+        session_status = await store.get_status(session_id)
+        if session_status == SessionStatus.ACTIVE:
+            logger.warning(
+                f"⚠️ Speech detection for {session_id[:12]} exited while session "
+                f"still ACTIVE (reason: {reason}). Not failing the live placeholder; "
+                f"re-arming listener and deferring to session-close handling."
+            )
+            from advanced_omi_backend.controllers.queue_controller import (
+                enqueue_speech_detection,
+            )
+
+            # Brief backoff so a persistent provider error can't spin a tight
+            # re-arm loop; single-flight keeps this to one listener regardless.
+            await asyncio.sleep(5)
+            enqueue_speech_detection(
+                session_id, user_id, client_id, reason="active_rearm"
+            )
+            return {
+                "session_id": session_id,
+                "user_id": user_id,
+                "client_id": client_id,
+                "status": "rearmed_session_active",
+                "reason": reason,
+                "runtime_seconds": time.time() - start_time,
+            }
+
     # Check if this is an always_persist conversation that needs to be marked as failed
     # NOTE: We check MongoDB directly because the conversation:current Redis key might have been
     # deleted by the audio persistence job cleanup (which runs in parallel).
@@ -1428,23 +1488,19 @@ async def stream_speech_detection_job(
     conversation = await Conversation.find_one(
         Conversation.client_id == session_id,
         Conversation.always_persist == True,
-        Conversation.processing_status == "pending_transcription",
+        Conversation.processing_status == Conversation.ConversationStatus.ACTIVE.value,
     )
 
     if conversation:
+        # Do NOT mark failed here: the batch fallback enqueued below may still
+        # recover a transcript. Stamping "failed" pre-emptively is exactly the bug
+        # that left recovered conversations stuck. The status is owned by the
+        # finalizer (post-conv chain) and the fallback's no-audio dead-end; both
+        # call apply_status(), so a real failure still settles to "failed".
         logger.info(
-            f"🔴 Found always_persist placeholder conversation {conversation.conversation_id} for failed session {session_id[:12]}"
-        )
-
-        # Update conversation with failure status
-        conversation.processing_status = "transcription_failed"
-        conversation.title = "Audio Recording (Transcription Failed)"
-        conversation.summary = f"Transcription failed: {reason}"
-
-        await conversation.save()
-
-        logger.warning(
-            f"🔴 Marked conversation {conversation.conversation_id} as transcription_failed"
+            f"🔎 Found always_persist placeholder {conversation.conversation_id} for "
+            f"session {session_id[:12]} with no live transcript; deferring status to "
+            f"batch fallback (reason so far: {reason})"
         )
     else:
         logger.info(
@@ -1498,7 +1554,12 @@ async def stream_speech_detection_job(
         conversation_id=conversation_id,
         timeout_seconds=config_timeout,
         job_timeout=config_timeout + 120,  # 2 min overhead for fallback check
-        job_id=f"fallback_check_{session_id}",
+        # Key the job per-conversation, not per-session. A shared
+        # fallback_check_{session_id} id meant that when several conversations in
+        # one session ended close together, RQ kept only one and silently dropped
+        # the rest — so most failed placeholders never got a batch-transcription
+        # fallback. Per-conversation ids let every conversation get its own.
+        job_id=f"fallback_check_{conversation_id or session_id}",
         depends_on=fallback_depends_on,
         description=f"Transcription fallback check for {session_id[:8]} (no speech)",
         meta={"session_id": session_id, "client_id": client_id, "no_speech": True},
@@ -1525,7 +1586,9 @@ async def stream_speech_detection_job(
     if max_runtime_reached and not expects_live_results:
         status = await store.get_status(session_id)
         if status == SessionStatus.ACTIVE:
-            from advanced_omi_backend.controllers.queue_controller import redis_conn
+            from advanced_omi_backend.controllers.queue_controller import (
+                enqueue_speech_detection,
+            )
 
             next_count = await store.increment_conversation_count(session_id)
 
@@ -1535,22 +1598,19 @@ async def stream_speech_detection_job(
             # closed and the next window stay separate conversations.
             await redis_client.delete(f"conversation:current:{session_id}")
 
-            next_job = transcription_queue.enqueue(
-                stream_speech_detection_job,
+            # replaces_current=True: this job IS the tracked live detector and is
+            # deliberately handing off to its successor, so skip the single-flight
+            # liveness check (which would otherwise see this still-running job).
+            rotated_job_id = enqueue_speech_detection(
                 session_id,
                 user_id,
                 client_id,
-                job_timeout=86400,
-                result_ttl=JOB_RESULT_TTL,
-                job_id=f"speech-detect_{session_id}_{next_count}",
-                description=f"Listening (off-mode window #{next_count + 1})",
-                meta={"client_id": client_id, "session_level": True},
+                reason=f"offmode_rotation_window_{next_count + 1}",
+                replaces_current=True,
             )
-            rotated_job_id = next_job.id
-            redis_conn.set(f"speech_detection_job:{client_id}", next_job.id, ex=86400)
             logger.info(
                 f"🔄 off-mode: hit {max_runtime}s cap — rotated placeholder and "
-                f"re-enqueued speech detection {next_job.id} for active session "
+                f"re-enqueued speech detection {rotated_job_id} for active session "
                 f"{session_id[:12]} (window #{next_count + 1})"
             )
         else:

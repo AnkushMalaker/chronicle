@@ -100,6 +100,21 @@ PROVIDERS = {
         "service": "nemo-asr",
         "capabilities": ["timestamps", "word_timestamps", "chunked_processing"],
     },
+    "nemotron": {
+        "name": "Nemotron 3.5",
+        "description": "NVIDIA Nemotron 3.5 cache-aware streaming ASR (NeMo, ~100ms, batch + streaming)",
+        "models": {
+            "nvidia/nemotron-3.5-asr-streaming-0.6b": "Nemotron 3.5 Streaming 0.6B (Default)",
+        },
+        "default_model": "nvidia/nemotron-3.5-asr-streaming-0.6b",
+        "service": "nemotron-stream-asr",
+        "capabilities": [
+            "word_timestamps",
+            "segments",
+            "streaming",
+            "multilingual",
+        ],
+    },
     "nemo-strixhalo": {
         "name": "NeMo (Strix Halo)",
         "description": "NVIDIA NeMo ASR for AMD Strix Halo (gfx1151 / Ryzen AI Max) with ROCm",
@@ -122,6 +137,18 @@ PROVIDERS = {
         "default_model": "google/gemma-4-E2B-it",
         "service": "gemma4-asr",
         "capabilities": ["timestamps", "diarization"],
+    },
+    "granite": {
+        "name": "Granite Speech",
+        "description": "IBM Granite Speech (LLM-backbone, batch; en/fr/de/es/pt)",
+        "models": {
+            "ibm-granite/granite-speech-4.1-2b-plus": "Granite Speech 4.1 2B-plus (default, ~2B, bf16)",
+            "ibm-granite/granite-speech-4.1-2b": "Granite Speech 4.1 2B",
+            "ibm-granite/granite-speech-3.3-8b": "Granite Speech 3.3 8B (English/French)",
+        },
+        "default_model": "ibm-granite/granite-speech-4.1-2b-plus",
+        "service": "granite-asr",
+        "capabilities": ["context_prompt"],
     },
     "af-next": {
         "name": "Audio Flamingo Next",
@@ -274,6 +301,11 @@ class ASRServicesSetup:
         )
         table.add_row("transformers", "HuggingFace models", "Hindi, custom models")
         table.add_row(
+            "granite",
+            "IBM Granite Speech (LLM-backbone)",
+            "en/fr/de/es/pt, batch",
+        )
+        table.add_row(
             "faster-whisper",
             "Fast Whisper (CTranslate2)",
             "Lightweight, fast inference",
@@ -289,6 +321,8 @@ class ASRServicesSetup:
             "5": "nemo - NVIDIA NeMo Parakeet (streaming + batch, word timestamps)",
             "6": "transformers - HuggingFace models (Hindi, custom)",
             "7": "faster-whisper - Fast Whisper (lightweight, fast inference)",
+            "8": "granite - IBM Granite Speech (LLM-backbone, en/fr/de/es/pt, batch)",
+            "9": "nemotron - NVIDIA Nemotron 3.5 (true cache-aware streaming ~100ms + batch)",
         }
 
         choice = self.prompt_choice("Choose ASR provider:", provider_choices, "1")
@@ -300,6 +334,8 @@ class ASRServicesSetup:
             "5": "nemo",
             "6": "transformers",
             "7": "faster-whisper",
+            "8": "granite",
+            "9": "nemotron",
         }
         return choice_to_provider[choice]
 
@@ -562,11 +598,14 @@ class ASRServicesSetup:
             "qwen3-asr": "stt-qwen3-asr",
             "gemma4": "stt-gemma4",
             "af-next": "stt-af-next",
+            "granite": "stt-granite",
+            "nemotron": "stt-nemotron-batch",
         }
 
         # Providers that also have a streaming model
         provider_to_stream_model = {
             "qwen3-asr": "stt-qwen3-asr-stream",
+            "nemotron": "stt-nemotron-stream",
         }
 
         stt_model = provider_to_stt_model.get(provider)
@@ -723,7 +762,7 @@ class ASRServicesSetup:
             model = self.select_model(provider)
 
             # Configure CUDA version (only for providers that need local CUDA builds)
-            if provider in ["nemo", "transformers"]:
+            if provider in ["nemo", "nemotron", "transformers", "granite"]:
                 self.setup_cuda_version()
 
             # Provider-specific configuration
@@ -775,6 +814,8 @@ def main():
             "qwen3-asr",
             "gemma4",
             "af-next",
+            "granite",
+            "nemotron",
         ],
         help="ASR provider to use",
     )

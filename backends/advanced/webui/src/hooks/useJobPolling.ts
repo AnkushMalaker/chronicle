@@ -32,8 +32,16 @@ export function useJobPolling(intervalMs: number = 2000) {
             } else if (onStatus) {
               onStatus(status, res.data.batch_progress)
             }
-          } catch {
-            // keep polling; transient errors are tolerated
+          } catch (e: any) {
+            // A 404 means the job record is gone (expired/never existed) —
+            // terminal, so re-attach to a stale stored job id doesn't poll
+            // forever. Other (transient) errors are tolerated and we keep
+            // polling.
+            if (e?.response?.status === 404) {
+              if (pollRef.current) clearInterval(pollRef.current)
+              pollRef.current = null
+              resolve('failed')
+            }
           }
         }, intervalMs)
       }),

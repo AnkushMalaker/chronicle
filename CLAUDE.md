@@ -20,7 +20,7 @@ Chronicle includes an **interactive setup wizard** for easy configuration. The w
 - Authentication setup (admin account, JWT secrets)
 - Transcription provider configuration (Deepgram or offline ASR)
 - LLM provider setup (OpenAI or Ollama)
-- Memory provider selection (Chronicle Native with FalkorDB or OpenMemory MCP)
+- Memory configuration (agentic Markdown vault — Chronicle's single memory provider)
 - Network configuration and HTTPS setup
 - Optional services (speaker recognition, Parakeet ASR)
 
@@ -47,7 +47,7 @@ The initialization system uses a **root orchestrator pattern**:
 - **`wizard.py`**: Root setup orchestrator for service selection and delegation
 - **`backends/advanced/init.py`**: Backend configuration wizard
 - **`extras/speaker-recognition/init.py`**: Speaker recognition setup
-- **Service setup scripts**: Individual setup for ASR services and OpenMemory MCP
+- **Service setup scripts**: Individual setup for ASR services
 
 Key features:
 - Interactive prompts with validation
@@ -129,7 +129,7 @@ make logs SERVICE=<name>  # View specific service logs
 #### Test Environment
 
 Test services use isolated ports and database:
-- **Ports:** Backend (8001), MongoDB (27018), Redis (6380), FalkorDB (6380 internal)
+- **Ports:** Backend (8001), MongoDB (27018), Redis (6380)
 - **Database:** `test_db` (separate from production)
 - **Credentials:** `test-admin@example.com` / `test-admin-password-123`
 
@@ -180,10 +180,10 @@ docker compose up kokoro-tts -d --build       # Kokoro-82M (<~1GB VRAM GPU/CPU, 
 - **Job Tracker**: Tracks pipeline jobs with stage events (audio → transcription → memory) and completion status
 - **Task Management**: BackgroundTaskManager tracks all async tasks to prevent orphaned processes
 - **Unified Transcription**: Deepgram transcription with fallback to offline ASR services
-- **Memory System**: Pluggable providers (Chronicle native or OpenMemory MCP)
+- **Memory System**: Single agentic Markdown vault — a tool-calling memory agent records conversations and surgically edits Obsidian-style People/Topic/Category notes; a read-only retrieval agent drives ripgrep over the vault to answer queries
 - **Authentication**: Email-based login with MongoDB ObjectId user system
 - **Client Management**: Auto-generated client IDs as `{user_id_suffix}-{device_name}`, centralized ClientManager
-- **Data Storage**: MongoDB (`audio_chunks` collection for conversations), graph+vector storage (FalkorDB for Chronicle native, Qdrant for OpenMemory MCP)
+- **Data Storage**: MongoDB (conversations, `audio_chunks`, chat, annotations), disk WAV files, and the Markdown vault (`data/conversation_docs/<user_id>/`) as the memory source of truth
 - **Web Interface**: React-based web dashboard with authentication and real-time monitoring
 
 ### Service Dependencies
@@ -191,9 +191,8 @@ docker compose up kokoro-tts -d --build       # Kokoro-82M (<~1GB VRAM GPU/CPU, 
 Required:
   - MongoDB: User data and conversations
   - Redis: Job queues (RQ workers) and session state
-  - FalkorDB: Graph + vector storage for memory search and knowledge graph
   - FastAPI Backend: Core audio processing
-  - LLM Service: Memory extraction and action items (OpenAI or Ollama)
+  - LLM Service: Memory agent (vault read/write) and action items (OpenAI or Ollama)
 
 Recommended:
   - Transcription: Deepgram or offline ASR services
@@ -202,7 +201,6 @@ Optional:
   - Parakeet ASR: Offline transcription service
   - Speaker Recognition: Voice identification service
   - Caddy: HTTPS reverse proxy (auto-configured when HTTPS enabled)
-  - OpenMemory MCP: For cross-client memory compatibility
 ```
 
 ## Data Flow Architecture
@@ -213,8 +211,8 @@ Optional:
 4. **Speech-Driven Conversation Creation**: User-facing conversations only created when speech is detected
 5. **Dual Storage System**: Audio sessions always stored in `audio_chunks`, conversations created in `conversations` collection only with speech
 6. **Versioned Processing**: Transcript and memory versions tracked with active version pointers
-7. **Memory Processing**: Pluggable providers (Chronicle native with individual facts or OpenMemory MCP delegation)
-8. **Memory Storage**: FalkorDB (Chronicle native: ConvDoc/ConvChunk/ConvEntity with hybrid vector+BM25 search) or OpenMemory server (MCP provider)
+7. **Memory Processing**: A tool-calling memory agent records each conversation and surgically edits People/Topic/Category notes in the Markdown vault
+8. **Memory Storage**: Obsidian-style Markdown vault at `data/conversation_docs/<user_id>/` — the single source of truth, searched by a read-only retrieval agent via ripgrep
 9. **Audio Optimization**: Speech segment extraction removes silence automatically
 10. **Task Tracking**: BackgroundTaskManager ensures proper cleanup of all async operations
 
@@ -263,53 +261,31 @@ DEEPGRAM_API_KEY=your-deepgram-key-here
 # Optional: TRANSCRIPTION_PROVIDER=deepgram
 
 # Memory Provider
-MEMORY_PROVIDER=chronicle  # or openmemory_mcp
+MEMORY_PROVIDER=chronicle  # agentic Markdown vault (only valid value)
 
 # Database
 MONGODB_URI=mongodb://mongo:27017
 # Database name: chronicle
-FALKORDB_HOST=falkordb
-FALKORDB_PORT=6379
 
 # Network Configuration
 HOST_IP=localhost
 BACKEND_PUBLIC_PORT=8000
-WEBUI_PORT=3010  # Production port (5173 is Vite dev server only)
-CORS_ORIGINS=http://localhost:3010,http://localhost:8000
+WEBUI_PORT=5173  # Vite dev server (the only webui; fronted by Caddy for HTTPS)
+CORS_ORIGINS=http://localhost:5173,http://localhost:8000
 ```
 
 ### Memory Provider Configuration
 
-Chronicle supports two pluggable memory backends:
+Chronicle has a single memory provider, `chronicle`: an **agentic Markdown vault**. The vault (Obsidian-style notes at `data/conversation_docs/<user_id>/`) is the single source of truth. A tool-calling memory agent records each conversation and surgically edits People/Topic/Category notes; a read-only retrieval agent drives ripgrep over the vault to synthesize answers. There is no provider choice to configure — only an LLM for the agents to use.
 
-#### Chronicle Memory Provider (Default)
 ```bash
-# Use Chronicle memory provider (default)
+# Memory provider (only valid value)
 MEMORY_PROVIDER=chronicle
 
-# LLM Configuration for memory extraction
+# LLM Configuration for the memory agent
 LLM_PROVIDER=openai
 OPENAI_API_KEY=your-openai-key-here
 OPENAI_MODEL=gpt-4o-mini
-
-# Graph + vector storage
-FALKORDB_HOST=falkordb
-FALKORDB_PORT=6379
-```
-
-#### OpenMemory MCP Provider
-```bash
-# Use OpenMemory MCP provider
-MEMORY_PROVIDER=openmemory_mcp
-
-# OpenMemory MCP Server Configuration
-OPENMEMORY_MCP_URL=http://host.docker.internal:8765
-OPENMEMORY_CLIENT_NAME=chronicle
-OPENMEMORY_USER_ID=openmemory
-OPENMEMORY_TIMEOUT=30
-
-# OpenAI key for OpenMemory server
-OPENAI_API_KEY=your-openai-key-here
 ```
 
 ### Transcription Provider Configuration
@@ -366,7 +342,7 @@ SPEAKER_SERVICE_URL=http://speaker-recognition:8085
 - **GET /readiness**: Service dependency validation
 - **WS /ws**: Audio streaming endpoint with codec parameter (Wyoming protocol, supports pcm and opus codecs)
 - **GET /api/conversations**: User's conversations with transcripts
-- **GET /api/memories/search**: Semantic memory search with relevance scoring
+- **GET /api/memories/search**: Agentic vault search (retrieval agent over the Markdown vault)
 - **POST /auth/jwt/login**: Email-based login (returns JWT token)
 
 ### Authentication Flow
@@ -569,14 +545,14 @@ tailscale ip -4
 **Service Examples:**
 - GPU machine: LLM inference, ASR, speaker recognition
 - Backend machine: FastAPI, WebUI, databases
-- Database machine: MongoDB, FalkorDB (optional separation)
+- Database machine: MongoDB (optional separation)
 
 ## Development Notes
 
 ### Package Management
 - **Backend**: Uses `uv` for Python dependency management (faster than pip)
 - **Mobile**: Uses `npm` with React Native and Expo
-- **Docker**: Primary deployment method with docker-compose
+- **Containers**: The service lifecycle (`services.py`/`status.py`/service-manager) supports **both Docker and Podman**, selected via `container_engine: docker|podman` in `config/config.yml` (or the `CONTAINER_ENGINE`/`COMPOSE_CMD` env vars). The repo's compose files run unmodified under either engine. For Podman it drives `podman-compose` and needs CDI for GPU. See **[@Docs/podman.md](Docs/podman.md)** for rootless/GPU setup and migration notes.
 
 ### Testing Strategy
 - **Makefile-Based**: All test operations through simple `make` commands (`make test`, `make start`, `make stop`)
@@ -664,9 +640,12 @@ Check backends/advanced/Docs for up to date information on advanced backend.
 All docker projects have .dockerignore following the exclude pattern. That means files need to be included for them to be visible to docker.
 The uv package manager is used for all python projects. Wherever you'd call `python3 main.py` you'd call `uv run python main.py`
 
+**Container Engine (Docker or Podman):**
+- The project supports **both Docker and Podman**. The active engine is set by `container_engine` in `config/config.yml` (default `docker`); prefer the lifecycle scripts (`./start.sh`/`./stop.sh`/`./restart.sh`) which route through the selected engine. For one-off manual commands under Podman use `podman-compose` (not `docker compose`). See **[@Docs/podman.md](Docs/podman.md)**.
+
 **Docker Build Guidelines:**
-- Use `docker compose build` without `--no-cache` by default for faster builds
+- Use `docker compose build` (or `podman-compose build`) without `--no-cache` by default for faster builds
 - Only use `--no-cache` when explicitly needed (e.g., if cached layers are causing issues or when troubleshooting build problems)
-- Docker's build cache is efficient and saves significant time during development
+- The build cache is efficient and saves significant time during development
 
 - Remember that whenever there's a python command, you should use uv run python3 instead

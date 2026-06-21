@@ -14,6 +14,7 @@ from advanced_omi_backend.controllers import conversation_controller
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.users import User
 from advanced_omi_backend.utils.audio_chunk_utils import (
+    audio_cache_duration_matches,
     get_trimmed_opus_for_time_range,
     reconstruct_audio_segment,
 )
@@ -233,7 +234,24 @@ async def get_conversation_waveform(
         WaveformData.conversation_id == conversation_id
     )
 
-    # If waveform exists, return cached version
+    # Return the cache only if it still matches the conversation's current audio.
+    # A waveform is derived from the chunk set; if the chunks changed in place
+    # (e.g. the reconnect-duplicate dedup) the cached duration no longer matches
+    # audio_total_duration — drop the stale doc and regenerate from current chunks.
+    if waveform and not audio_cache_duration_matches(
+        waveform.duration_seconds, conversation.audio_total_duration or 0.0
+    ):
+        logger.info(
+            f"Stale waveform for {conversation_id[:12]} "
+            f"({waveform.duration_seconds:.0f}s cached vs "
+            f"{conversation.audio_total_duration or 0:.0f}s actual); regenerating"
+        )
+        await WaveformData.find(
+            WaveformData.conversation_id == conversation_id
+        ).delete()
+        waveform = None
+
+    # If a fresh waveform exists, return cached version
     if waveform:
         logger.info(
             f"Returning cached waveform for conversation {conversation_id[:12]}"

@@ -57,6 +57,7 @@ models:
     model_type: llm
     model_provider: llamacpp
     api_family: openai
+    thinking: true  # gemma/qwen-class thinking model — controls thinking via chat template
     model_name: glm-4.7-flash
     # Empty LLM_BASE_URL → resolve a tailnet-advertised chronicle-llm live (with /v1
     # appended); else the host-local default. An explicit URL always wins.
@@ -184,6 +185,31 @@ models:
             words: words
             segments: segments
 
+  - name: stt-nemotron-batch
+    description: Nemotron 3.5 ASR (batch lane of the same NeMo service that streams)
+    model_type: stt
+    model_provider: nemo
+    api_family: http
+    # Nemotron serves batch + streaming from one container on 8772 (not 8767).
+    model_url: http://${oc.env:NEMOTRON_ASR_STREAM_URL,host.docker.internal:8772}
+    api_key: ''
+    capabilities:
+      - word_timestamps
+      - segments
+      - keyword_boosting
+    operations:
+      stt_transcribe:
+        method: POST
+        path: /transcribe
+        content_type: multipart/form-data
+        timeout: 600
+        response:
+          type: json
+          extract:
+            text: text
+            words: words
+            segments: segments
+
   - name: stt-gemma4
     description: Google Gemma 4 E2B-it (batch, LLM-backbone, MTP)
     model_type: stt
@@ -199,6 +225,38 @@ models:
     # multi-speaker audio to one speaker; see gemma4/service.py get_capabilities.)
     capabilities:
       - context_prompt
+    asr_context: ''
+    operations:
+      stt_transcribe:
+        method: POST
+        path: /transcribe
+        content_type: multipart/form-data
+        response:
+          type: json
+          extract:
+            text: text
+            words: words
+            segments: segments
+
+  - name: stt-granite
+    description: IBM Granite Speech 4.1 (batch, LLM-backbone; en/fr/de/es/pt)
+    model_type: stt
+    model_provider: granite
+    api_family: http
+    model_url: ${oc.env:GRANITE_ASR_URL,''}
+    discovery_service: chronicle-asr
+    discovery_default: http://host.docker.internal:8767
+    api_key: ''
+    # context_prompt: Granite is an LLM-backbone ASR and consumes context as prompt
+    # text, so it is given the user-authored asr_context only — NOT the plugin
+    # wake-word boost list, which it would echo into the transcript.
+    # diarization + segments: Granite emits speaker-attributed segments with real
+    # model timestamps (two-pass: timestamps + speaker attribution), so the backend
+    # uses these for speaker turns and skips pyannote (GRANITE_DIARIZE=0 to disable).
+    capabilities:
+      - context_prompt
+      - diarization
+      - segments
     asr_context: ''
     operations:
       stt_transcribe:
@@ -396,6 +454,28 @@ models:
           words: words
           segments: segments
 
+  - name: stt-nemotron-stream
+    description: Nemotron 3.5 cache-aware streaming ASR (NeMo, ~100ms latency)
+    model_type: stt_stream
+    model_provider: nemotron
+    api_family: websocket
+    model_url: ws://${oc.env:NEMOTRON_ASR_STREAM_URL,host.docker.internal:8772}/stream
+    api_key: ''
+    capabilities:
+      - multilingual
+    operations:
+      query: {}
+      end:
+        message:
+          type: CloseStream
+      expect:
+        interim_type: interim
+        final_type: final
+        extract:
+          text: text
+          words: words
+          segments: segments
+
   - name: stt-gemma4-stream
     description: Google Gemma 4 E2B-it (streaming-ish, bounded rolling window + MTP)
     model_type: stt_stream
@@ -455,7 +535,7 @@ models:
 # Memory Configuration
 # ===========================
 memory:
-  # Supported providers: chronicle, openmemory_mcp, graphiti
+  # Chronicle's agentic Markdown vault is the only memory provider.
   provider: chronicle
   timeout_seconds: 1200
   extraction:
@@ -464,25 +544,6 @@ memory:
       Extract important information from this conversation and return a JSON object with an array named "facts".
       Include personal preferences, plans, names, dates, locations, numbers, and key details.
       Keep items concise and useful.
-
-  # OpenMemory MCP provider settings (used when provider: openmemory_mcp)
-  openmemory_mcp:
-    server_url: http://localhost:8765
-    client_name: chronicle
-    user_id: default
-    timeout: 30
-
-  # Graphiti provider settings:
-  # Graphiti uses the default LLM/embedding models plus FALKORDB_HOST/FALKORDB_PORT.
-  # Install the local fork manually for development:
-  #   cd backends/advanced && uv pip install -e ../../untracked/graphiti[falkordb]
-
-  # Obsidian FalkorDB provider settings (legacy)
-  obsidian:
-    enabled: false
-    falkordb_host: falkordb
-    falkordb_port: 6379
-    timeout: 30
 
 # ===========================
 # Speaker Recognition

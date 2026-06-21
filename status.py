@@ -23,7 +23,6 @@ console = Console()
 HEALTH_ENDPOINTS = {
     "backend": "http://localhost:8000/health",
     "speaker-recognition": "http://localhost:8085/health",
-    "openmemory-mcp": "http://localhost:8765/docs",  # No health endpoint, check docs
 }
 
 
@@ -364,7 +363,6 @@ def show_detailed_status():
                         "memory_service",
                         "speech_to_text",
                         "speaker_recognition",
-                        "openmemory_mcp",
                     ]
                     for svc_name in optional_services:
                         if svc_name in services:

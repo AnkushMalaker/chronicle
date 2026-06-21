@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from rq import Queue, Worker
+from rq.exceptions import NoSuchJobError
 from rq.job import Job, JobStatus
 from rq.registry import DeferredJobRegistry, ScheduledJobRegistry
 
@@ -377,6 +378,116 @@ def all_jobs_complete_for_client(client_id: str) -> bool:
     return True
 
 
+# Job statuses that mean a speech-detection job is still live, so re-enqueuing
+# would create a duplicate detector for the same session.
+_LIVE_JOB_STATUSES = {"queued", "started", "deferred", "scheduled"}
+
+
+def _speech_detection_job_is_live(job_id: str) -> bool:
+    """True if the given speech-detection job exists and hasn't terminated."""
+    try:
+        job = Job.fetch(job_id, connection=redis_conn)
+        return job.get_status(refresh=True) in _LIVE_JOB_STATUSES
+    except NoSuchJobError:
+        return False
+    except Exception:
+        return False
+
+
+def enqueue_speech_detection(
+    session_id: str,
+    user_id: str,
+    client_id: str,
+    *,
+    reason: str = "restart",
+    replaces_current: bool = False,
+) -> Optional[str]:
+    """Single-flight enqueue of the per-session speech-detection job.
+
+    At most ONE speech-detection job may be live per session. Re-enqueuing while
+    one is already listening (a WebSocket reconnect, or several conversation-end
+    handlers firing at once) previously spawned a swarm of duplicate detectors
+    that raced to mark the actively-recording placeholder conversation as
+    ``transcription_failed``. This guards every restart path against that.
+
+    The current live job (if any) is tracked in ``speech_detection_job:{session_id}``;
+    a short Redis mutex collapses a simultaneous burst of callers into one winner.
+
+    Args:
+        replaces_current: set by the off-mode rotation path, where the caller IS
+            the current tracked job and is deliberately handing off to a successor
+            (so the liveness check would otherwise see itself and skip).
+
+    Returns the live or newly-enqueued job id, or None if it could not enqueue.
+    """
+    from advanced_omi_backend.workers.transcription_jobs import (
+        stream_speech_detection_job,
+    )
+
+    job_key = f"speech_detection_job:{session_id}"
+    lock_key = f"speech_detection_enqueue_lock:{session_id}"
+
+    def _tracked_id() -> Optional[str]:
+        val = redis_conn.get(job_key)
+        if isinstance(val, bytes):
+            return val.decode()
+        if isinstance(val, str):
+            return val
+        return None
+
+    if not replaces_current:
+        existing_id = _tracked_id()
+        if existing_id and _speech_detection_job_is_live(existing_id):
+            logger.info(
+                f"⏭️ Speech detection already live for session {session_id[:12]} "
+                f"({existing_id}) — skipping duplicate enqueue (reason={reason})"
+            )
+            return existing_id
+
+    # Collapse a concurrent-enqueue burst (several end handlers firing together)
+    # into a single winner. The loser skips; the winner records the new job in
+    # job_key so any later caller sees it live and also skips.
+    if not redis_conn.set(lock_key, "1", nx=True, ex=15):
+        logger.info(
+            f"⏭️ Concurrent speech-detection enqueue in progress for session "
+            f"{session_id[:12]} — skipping (reason={reason})"
+        )
+        return _tracked_id()
+    try:
+        if not replaces_current:
+            # Re-check liveness under the mutex (another caller may have just enqueued).
+            existing_id = _tracked_id()
+            if existing_id and _speech_detection_job_is_live(existing_id):
+                logger.info(
+                    f"⏭️ Speech detection became live for session {session_id[:12]} "
+                    f"while acquiring lock — skipping (reason={reason})"
+                )
+                return existing_id
+
+        speech_job = transcription_queue.enqueue(
+            stream_speech_detection_job,
+            session_id,
+            user_id,
+            client_id,
+            job_timeout=86400,  # 24 hours for all-day sessions
+            ttl=None,  # No pre-run expiry (job can wait indefinitely in queue)
+            result_ttl=JOB_RESULT_TTL,  # Cleanup AFTER completion
+            failure_ttl=86400,  # Cleanup failed jobs after 24h
+            job_id=f"speech-detect_{session_id}_{uuid.uuid4().hex[:8]}",
+            description="Listening for speech...",
+            meta={"client_id": client_id, "session_level": True},
+        )
+        # Track the live job for both single-flight and WebSocket cleanup.
+        redis_conn.set(job_key, speech_job.id, ex=86400)
+        logger.info(
+            f"📥 RQ: Enqueued speech detection job {speech_job.id} for session "
+            f"{session_id[:12]} (reason={reason})"
+        )
+        return speech_job.id
+    finally:
+        redis_conn.delete(lock_key)
+
+
 def start_streaming_jobs(
     session_id: str, user_id: str, client_id: str
 ) -> Dict[str, str]:
@@ -401,9 +512,6 @@ def start_streaming_jobs(
     """
     from advanced_omi_backend.config import get_misc_settings
     from advanced_omi_backend.workers.audio_jobs import audio_streaming_persistence_job
-    from advanced_omi_backend.workers.transcription_jobs import (
-        stream_speech_detection_job,
-    )
 
     # Read always_persist from global config NOW (backend process has fresh config)
     misc_settings = get_misc_settings()
@@ -423,38 +531,12 @@ def start_streaming_jobs(
         )
         always_persist = True
 
-    # Enqueue speech detection job
-    speech_job = transcription_queue.enqueue(
-        stream_speech_detection_job,
-        session_id,
-        user_id,
-        client_id,
-        job_timeout=86400,  # 24 hours for all-day sessions
-        ttl=None,  # No pre-run expiry (job can wait indefinitely in queue)
-        result_ttl=JOB_RESULT_TTL,  # Cleanup AFTER completion
-        failure_ttl=86400,  # Cleanup failed jobs after 24h
-        job_id=f"speech-detect_{session_id}",
-        description=f"Listening for speech...",
-        meta={"client_id": client_id, "session_level": True},
+    # Enqueue speech detection job (single-flight: skips if one is already live
+    # for this session, e.g. on a WebSocket reconnect mid-session).
+    speech_job_id = (
+        enqueue_speech_detection(session_id, user_id, client_id, reason="session_start")
+        or ""
     )
-    # Log job enqueue with TTL information for debugging
-    actual_ttl = redis_conn.ttl(f"rq:job:{speech_job.id}")
-    logger.info(f"📥 RQ: Enqueued speech detection job {speech_job.id}")
-    logger.info(
-        f"🔍 Job enqueue details: ID={speech_job.id}, "
-        f"job_timeout={speech_job.timeout}, result_ttl={speech_job.result_ttl}, "
-        f"failure_ttl={speech_job.failure_ttl}, redis_key_ttl={actual_ttl}, "
-        f"queue_length={transcription_queue.count}, client_id={client_id}"
-    )
-
-    # Store job ID for cleanup (keyed by client_id for easy WebSocket cleanup)
-    try:
-        redis_conn.set(
-            f"speech_detection_job:{client_id}", speech_job.id, ex=86400
-        )  # 24 hour TTL
-        logger.info(f"📌 Stored speech detection job ID for client {client_id}")
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to store job ID for {client_id}: {e}")
 
     # Enqueue audio persistence job on dedicated audio queue
     # NOTE: This job handles file rotation for multiple conversations automatically
@@ -497,7 +579,57 @@ def start_streaming_jobs(
         },
     )
 
-    return {"speech_detection": speech_job.id, "audio_persistence": audio_job.id}
+    return {"speech_detection": speech_job_id, "audio_persistence": audio_job.id}
+
+
+def _clear_post_conversation_chain(conversation_id: str) -> list:
+    """Delete any existing post-conversation chain jobs for a conversation.
+
+    The post-conversation jobs (speaker → memory → title/summary → event) use
+    deterministic job_ids keyed on the conversation. When the chain is
+    re-triggered (e.g. a transcript reprocess) while a previous chain is still
+    ``deferred``, re-enqueuing the same job_id with a *new* ``depends_on`` makes
+    RQ **accumulate** dependencies on the existing deferred job rather than
+    replacing it. If one upstream dependency then finishes and is evicted from
+    Redis before the others resolve, RQ never promotes the dependents and the
+    whole chain stays ``deferred`` forever (orphaned).
+
+    Deleting the stale chain first guarantees each re-enqueue starts fresh with
+    a single, correct dependency. Jobs that are currently ``started`` are left
+    alone so we never yank work out from under a running worker.
+
+    Returns the list of job_ids that were actually deleted (for logging).
+    """
+    suffix = conversation_id[:12]
+    job_ids = [
+        f"speaker_{suffix}",
+        f"memory_{suffix}",
+        f"title_summary_{suffix}",
+        f"event_complete_{suffix}",
+    ]
+    cleared = []
+    for job_id in job_ids:
+        try:
+            job = Job.fetch(job_id, connection=redis_conn)
+        except NoSuchJobError:
+            continue
+        if get_job_status_from_rq(job) == JobStatus.STARTED.value:
+            logger.warning(
+                f"⚠️  Not clearing post-conversation job {job_id} for "
+                f"{conversation_id[:8]}: currently running"
+            )
+            continue
+        try:
+            job.delete(remove_from_queue=True)
+            cleared.append(job_id)
+        except Exception as e:
+            logger.error(f"Failed to delete stale chain job {job_id}: {e}")
+    if cleared:
+        logger.info(
+            f"🧹 Cleared {len(cleared)} stale post-conversation job(s) for "
+            f"{conversation_id[:8]}: {cleared}"
+        )
+    return cleared
 
 
 def start_post_conversation_jobs(
@@ -542,6 +674,11 @@ def start_post_conversation_jobs(
     )
     from advanced_omi_backend.workers.memory_jobs import process_memory_job
     from advanced_omi_backend.workers.speaker_jobs import recognise_speakers_job
+
+    # Re-triggering the chain (e.g. transcript reprocess) must not stack new
+    # dependencies onto a previously-deferred chain — that orphans it forever.
+    # Clear any stale chain jobs first so each enqueue below starts fresh.
+    _clear_post_conversation_chain(conversation_id)
 
     version_id = transcript_version_id or str(uuid.uuid4())
 

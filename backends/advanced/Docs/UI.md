@@ -40,27 +40,21 @@ The Chronicle web dashboard provides a comprehensive interface for managing conv
 - Advanced filtering and search capabilities
 
 ### 2. Memories Tab
-**Purpose**: Browse and search extracted conversation memories with advanced filtering
+**Purpose**: Browse and search the agentic Markdown vault (Obsidian-style notes that are the single source of truth for memories)
 
 **Core Search Features**:
-- **Text Search**: Traditional keyword-based memory filtering
-- **Semantic Search Button**: AI-powered contextual memory search with relevance scoring
-- **Dual-layer Filtering**: Combine semantic results with text search for precise filtering
-- **Relevance Threshold Slider**: 0-100% threshold to filter semantic results by confidence
-- **Active Filter Indicators**: Visual feedback showing active semantic filters with clear buttons
-- **Memory Count Display**: Shows "X of Y memories" with total count from native providers
+- **Text Search**: Keyword-based filtering of vault notes
+- **Vault Search Button**: AI-powered search that runs a read-only retrieval agent (ripgrep over the vault) and returns a synthesized answer plus cited note paths
+- **Memory Count Display**: Shows the notes/memories surfaced from the vault
 
 **Advanced Features**:
-- **Live Filtering**: Real-time results as threshold slider moves
-- **Reset Functionality**: Clear all filters and return to full memory list
-- Memory categorization and tagging
-- Temporal filtering and sorting
-- Memory source tracking (which conversation)
+- **Reset Functionality**: Clear filters and return to the full memory list
+- Memory source tracking (which conversation / note)
 - Export capabilities
 
 **UI Improvements**:
-- **Search Input Enhancement**: Semantic search button integrated into search field
-- **Visual Feedback**: Loading states, relevance scores, and filter status indicators
+- **Search Input Enhancement**: Vault search button integrated into search field
+- **Visual Feedback**: Loading states and cited note paths
 - **Responsive Design**: Works across desktop and mobile devices
 
 **Admin Features**:
@@ -117,7 +111,6 @@ The Chronicle web dashboard provides a comprehensive interface for managing conv
 - **Queue Statistics**: Processing queue metrics, backlogs, and throughput
 - **Service Health**: Real-time health checks for all dependencies:
   - MongoDB connectivity and response times
-  - FalkorDB graph and memory search status
   - Ollama/OpenAI API availability and model status
   - ASR service connectivity and transcription status
 - **Recovery Metrics**: Automatic recovery attempts and success rates
@@ -238,7 +231,7 @@ ADMIN_PASSWORD=your-admin-password
 
 #### API Errors
 - Check backend logs for detailed error information
-- Verify all required services are running (MongoDB, FalkorDB, etc.)
+- Verify all required services are running (MongoDB, Redis, etc.)
 - Test API endpoints directly with curl for debugging
 
 ### Debug Steps

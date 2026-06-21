@@ -60,6 +60,7 @@ conflicts = [
     { group = "qwen3-asr-full" },
     { group = "gemma4" },
     { group = "af-next" },
+    { group = "granite" },
     { group = "parakeet" },
   ],
   [
@@ -161,6 +162,19 @@ af-next = [
     "soundfile>=0.12",
 ]
 
+# IBM Granite Speech (Granite LLM backbone + conformer speech encoder + LoRA).
+# Granite Speech 4.1 requires transformers>=5.8; the built-in LoRA adapter is
+# applied via peft at load time.
+granite = [
+    "transformers>=5.8.0,<6.0.0",
+    "accelerate>=0.30.0",
+    "peft>=0.17.0",
+    "librosa>=0.10.0",
+    "soundfile>=0.12",
+    "torch>=2.3",
+    "torchaudio>=2.3",
+]
+
 qwen3-asr = [
     "httpx>=0.28.1",
     "websockets>=13.0",
@@ -199,4 +213,4 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["common", "providers", "providers.faster_whisper", "providers.transformers", "providers.nemo", "providers.vibevoice", "providers.qwen3_asr", "providers.gemma4", "providers.af_next"]
+packages = ["common", "providers", "providers.faster_whisper", "providers.transformers", "providers.nemo", "providers.vibevoice", "providers.qwen3_asr", "providers.gemma4", "providers.af_next", "providers.granite"]

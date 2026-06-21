@@ -13,6 +13,7 @@ import time
 from typing import Any, Awaitable, Callable, Dict, List, NamedTuple, Optional
 
 from advanced_omi_backend.redis_factory import create_sync_redis
+from advanced_omi_backend.services.observability import record_event_sync
 
 from .base import BasePlugin, PluginContext, PluginResult
 from .events import PluginEvent
@@ -215,6 +216,14 @@ class PluginRouter:
             health = self.plugin_health[plugin_id]
             health.status = PluginHealth.FAILED
             health.error = error
+        record_event_sync(
+            severity="error",
+            category="plugin",
+            source=plugin_id,
+            title=f"Plugin '{plugin_id}' failed to initialize",
+            detail=error,
+            metadata={"plugin_id": plugin_id},
+        )
 
     def get_health_summary(self) -> Dict[str, Any]:
         """Get health summary for all registered plugins."""

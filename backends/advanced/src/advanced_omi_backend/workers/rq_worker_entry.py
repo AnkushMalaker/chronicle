@@ -18,6 +18,17 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+# Catch-all: record every ERROR/CRITICAL log in this worker as a system event
+# (enqueue-only; the FastAPI-process drain persists it).
+try:
+    from advanced_omi_backend.services.observability.log_handler import (
+        install_system_event_log_handler,
+    )
+
+    install_system_event_log_handler()
+except Exception:  # noqa: BLE001 — never block worker startup on observability
+    pass
+
 
 def main():
     """Start RQ worker with proper logging configuration."""

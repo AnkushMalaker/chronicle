@@ -47,8 +47,6 @@ if REGISTRY:
 else:
     _llm_def = _embed_def = None
 
-FALKORDB_HOST = os.getenv("FALKORDB_HOST", "falkordb")
-
 
 @router.get("/auth/health")
 async def auth_health_check():
@@ -115,7 +113,6 @@ async def health_check():
         "services": {},
         "config": {
             "mongodb_uri": MONGODB_URI,
-            "falkordb_host": FALKORDB_HOST,
             "transcription_service": (
                 f"Speech to Text ({transcription_provider.name})"
                 if transcription_provider
@@ -154,7 +151,6 @@ async def health_check():
     memory_provider = (mem_settings.get("provider") or "chronicle").lower()
 
     speaker_service_url = os.getenv("SPEAKER_SERVICE_URL")
-    openmemory_mcp_url = os.getenv("OPENMEMORY_MCP_URL")
     wakeword_service_url = os.getenv("WAKEWORD_SERVICE_URL")
 
     # Check MongoDB (critical service)
@@ -290,56 +286,29 @@ async def health_check():
         }
         overall_healthy = False
 
-    # Check memory service (provider-dependent)
-    if memory_provider in ("chronicle", "graphiti"):
-        provider_label = "Graphiti" if memory_provider == "graphiti" else "Chronicle"
-        try:
-            # Test in-process memory service connection with timeout
-            test_success = await asyncio.wait_for(
-                memory_service.test_connection(), timeout=8.0
-            )
-            if test_success:
-                health_status["services"]["memory_service"] = {
-                    "status": f"✅ {provider_label} Memory Connected",
-                    "healthy": True,
-                    "provider": memory_provider,
-                    "critical": False,
-                }
-            else:
-                health_status["services"]["memory_service"] = {
-                    "status": f"⚠️ {provider_label} Memory Test Failed",
-                    "healthy": False,
-                    "provider": memory_provider,
-                    "critical": False,
-                }
-                overall_healthy = False
-        except asyncio.TimeoutError:
+    # Check memory service (Chronicle agentic vault)
+    try:
+        test_success = await asyncio.wait_for(
+            memory_service.test_connection(), timeout=8.0
+        )
+        if test_success:
             health_status["services"]["memory_service"] = {
-                "status": f"⚠️ {provider_label} Memory Timeout (8s) - Check FalkorDB",
+                "status": "✅ Chronicle Memory Connected",
+                "healthy": True,
+                "provider": memory_provider,
+                "critical": False,
+            }
+        else:
+            health_status["services"]["memory_service"] = {
+                "status": "⚠️ Chronicle Memory Test Failed",
                 "healthy": False,
                 "provider": memory_provider,
                 "critical": False,
             }
             overall_healthy = False
-        except Exception as e:
-            health_status["services"]["memory_service"] = {
-                "status": f"⚠️ {provider_label} Memory Failed: {str(e)}",
-                "healthy": False,
-                "provider": memory_provider,
-                "critical": False,
-            }
-            overall_healthy = False
-    elif memory_provider == "openmemory_mcp":
-        # OpenMemory MCP check is handled separately above
+    except Exception as e:
         health_status["services"]["memory_service"] = {
-            "status": "✅ Using OpenMemory MCP",
-            "healthy": True,
-            "provider": "openmemory_mcp",
-            "critical": False,
-        }
-    else:
-        health_status["services"]["memory_service"] = {
-            "status": f"❌ Unknown memory provider: {memory_provider}",
+            "status": f"⚠️ Chronicle Memory Failed: {str(e)}",
             "healthy": False,
             "provider": memory_provider,
             "critical": False,
@@ -447,51 +416,6 @@ async def health_check():
                 "status": f"⚠️ Connection Failed: {str(e)}",
                 "healthy": False,
                 "url": speaker_service_url,
-                "critical": False,
-            }
-            overall_healthy = False
-
-    # Check OpenMemory MCP service (if configured)
-    if memory_provider == "openmemory_mcp" and openmemory_mcp_url:
-        try:
-            # Make a health check request to the OpenMemory MCP service
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{openmemory_mcp_url}/api/v1/apps/",
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as response:
-                    if response.status == 200:
-                        health_status["services"]["openmemory_mcp"] = {
-                            "status": "✅ Connected",
-                            "healthy": True,
-                            "url": openmemory_mcp_url,
-                            "provider": "openmemory_mcp",
-                            "critical": False,
-                        }
-                    else:
-                        health_status["services"]["openmemory_mcp"] = {
-                            "status": f"⚠️ Unhealthy: HTTP {response.status}",
-                            "healthy": False,
-                            "url": openmemory_mcp_url,
-                            "provider": "openmemory_mcp",
-                            "critical": False,
-                        }
-                        overall_healthy = False
-        except asyncio.TimeoutError:
-            health_status["services"]["openmemory_mcp"] = {
-                "status": "⚠️ Connection Timeout (5s)",
-                "healthy": False,
-                "url": openmemory_mcp_url,
-                "provider": "openmemory_mcp",
-                "critical": False,
-            }
-            overall_healthy = False
-        except Exception as e:
-            health_status["services"]["openmemory_mcp"] = {
-                "status": f"⚠️ Connection Failed: {str(e)}",
-                "healthy": False,
-                "url": openmemory_mcp_url,
-                "provider": "openmemory_mcp",
                 "critical": False,
             }
             overall_healthy = False

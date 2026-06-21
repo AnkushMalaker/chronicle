@@ -1,24 +1,14 @@
 """Memory service provider implementations.
 
-This package contains all memory service provider implementations:
-- chronicle: Chronicle native implementation with LLM + FalkorDB hybrid search
-- openmemory_mcp: OpenMemory MCP backend integration
-- graphiti: Graphiti temporal graph backend
-- llm_providers: LLM provider implementations (OpenAI, Ollama)
-- mcp_client: MCP client utilities
+This package contains the memory service provider implementations:
+- chronicle: Chronicle native implementation (agentic Markdown vault)
+- llm_providers: LLM provider implementations (OpenAI-compatible)
 """
 
 from .chronicle import MemoryService as ChronicleMemoryService
-from .graphiti import GraphitiMemoryService
 from .llm_providers import OpenAIProvider
-from .mcp_client import MCPClient, MCPError
-from .openmemory_mcp import OpenMemoryMCPService
 
 __all__ = [
     "ChronicleMemoryService",
-    "GraphitiMemoryService",
-    "OpenMemoryMCPService",
     "OpenAIProvider",
-    "MCPClient",
-    "MCPError",
 ]

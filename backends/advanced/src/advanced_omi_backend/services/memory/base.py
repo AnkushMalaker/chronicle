@@ -76,7 +76,7 @@ class MemoryServiceBase(ABC):
     @property
     @abstractmethod
     def provider_identifier(self) -> str:
-        """Return the provider identifier (e.g., 'chronicle', 'openmemory_mcp')."""
+        """Return the provider identifier (e.g., 'chronicle')."""
         ...
 
     @abstractmethod

@@ -3,8 +3,7 @@
 Provides read/write access to per-user conversation document markdown files.
 Layout: ``{base_dir}/{user_id}/{conversation_id}.md``
 
-Same pattern as ``services/knowledge_graph/kb.py``: mtime-cache,
-path-traversal guard, pure file I/O.
+Pure file I/O with an mtime-cache and a path-traversal guard.
 """
 
 import logging

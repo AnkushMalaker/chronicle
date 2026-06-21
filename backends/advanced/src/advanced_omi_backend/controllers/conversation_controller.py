@@ -155,6 +155,7 @@ async def get_conversation(conversation_id: str, user: User):
                 conversation.deleted_at.isoformat() if conversation.deleted_at else None
             ),
             "processing_status": conversation.processing_status,
+            "failure_stage": conversation.failure_stage,
             "always_persist": conversation.always_persist,
             "end_reason": (
                 conversation.end_reason.value if conversation.end_reason else None
@@ -231,6 +232,7 @@ def _conversation_to_list_dict(conv: Conversation) -> dict:
         "audio_archived": conv.audio_archived,
         "archive_reason": conv.archive_reason,
         "processing_status": conv.processing_status,
+        "failure_stage": conv.failure_stage,
         "always_persist": conv.always_persist,
         "title": conv.title,
         "summary": conv.summary,
@@ -247,8 +249,8 @@ def _conversation_to_list_dict(conv: Conversation) -> dict:
 def _raw_doc_to_list_dict(doc: dict) -> dict:
     """Convert a raw pymongo document (projected) to a list-view dict.
 
-    Computes segment_count, memory_count etc. from the lightweight projected
-    version arrays without loading full transcript/word data.
+    Computes segment_count and the active version number from the lightweight
+    projected version arrays without loading full transcript/word data.
     """
     active_tv = doc.get("active_transcript_version")
 
@@ -286,6 +288,7 @@ def _raw_doc_to_list_dict(doc: dict) -> dict:
         "audio_archived": doc.get("audio_archived", False),
         "archive_reason": doc.get("archive_reason"),
         "processing_status": doc.get("processing_status"),
+        "failure_stage": doc.get("failure_stage"),
         "always_persist": doc.get("always_persist", False),
         "title": doc.get("title"),
         "summary": doc.get("summary"),
@@ -314,6 +317,7 @@ _LIST_PROJECTION = {
     "audio_archived": 1,
     "archive_reason": 1,
     "processing_status": 1,
+    "failure_stage": 1,
     "always_persist": 1,
     "title": 1,
     "summary": 1,
@@ -362,13 +366,13 @@ async def get_conversations(
             conditions.append({"deleted": False})
 
         if include_unprocessed:
-            # Orphan type 1: always_persist stuck in pending/failed (not deleted)
+            # Orphan type 1: always_persist that ended up failed (not deleted).
+            # "active" = still in-flight (don't flag); stale-active crashes are
+            # reconciled to "failed" by the reconciler, so they show up here too.
             conditions.append(
                 {
                     "always_persist": True,
-                    "processing_status": {
-                        "$in": ["pending_transcription", "transcription_failed"]
-                    },
+                    "processing_status": Conversation.ConversationStatus.FAILED.value,
                     "deleted": False,
                 }
             )
@@ -414,7 +418,7 @@ async def get_conversations(
                 is_orphan_type1 = (
                     doc.get("always_persist")
                     and doc.get("processing_status")
-                    in ("pending_transcription", "transcription_failed")
+                    == Conversation.ConversationStatus.FAILED.value
                     and not doc.get("deleted")
                 )
                 is_orphan_type2 = (
@@ -717,6 +721,7 @@ async def archive_conversation_audio_doc(
     conversation.archive_reason = reason
     conversation.audio_chunks_count = 0
     conversation.audio_compression_ratio = None
+    conversation.vad_analysis = None  # derived from chunks that no longer exist
     conversation.deleted = True
     conversation.deletion_reason = "audio_archived"
     conversation.deleted_at = archived_at
@@ -850,7 +855,7 @@ async def restore_conversation(conversation_id: str, user: User) -> JSONResponse
 async def _restore_if_deleted_and_prepare(
     conversation: Conversation,
     conversation_id: str,
-    processing_status: str | None = "reprocessing",
+    processing_status: str | None = Conversation.ConversationStatus.ACTIVE.value,
 ) -> None:
     """Restore soft-deleted conversation/chunks and optionally set processing_status."""
     changed = False
@@ -1102,8 +1107,10 @@ async def reprocess_orphan(conversation_id: str, user: User):
             conversation.deletion_reason = None
             conversation.deleted_at = None
 
-        # Set processing status and update title
-        conversation.processing_status = "reprocessing"
+        # Back to in-flight; the finalizer reconciles the terminal status when the
+        # reprocess chain completes.
+        conversation.processing_status = Conversation.ConversationStatus.ACTIVE.value
+        conversation.failure_stage = None
         conversation.title = "Reprocessing..."
         conversation.summary = None
         conversation.detailed_summary = None

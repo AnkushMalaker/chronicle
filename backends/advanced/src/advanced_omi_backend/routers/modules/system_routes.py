@@ -169,6 +169,21 @@ async def get_speaker_service_status(current_user: User = Depends(current_superu
 # LLM Operations Configuration Endpoints
 
 
+@router.post("/admin/conversations/reconcile-status")
+async def reconcile_conversation_status(
+    dry_run: bool = Body(False, embed=True),
+    current_user: User = Depends(current_superuser),
+):
+    """Recompute conversation processing_status from facts (transcript present =>
+    completed; none, once settled => failed). Self-heals drift left by crashed or
+    timed-out jobs. Pass dry_run=true to preview without writing. Admin only."""
+    from advanced_omi_backend.services.status_reconciler import (
+        reconcile_conversation_statuses,
+    )
+
+    return await reconcile_conversation_statuses(dry_run=dry_run)
+
+
 @router.get("/admin/llm-operations")
 async def get_llm_operations(current_user: User = Depends(current_superuser)):
     """Get LLM operation configurations. Admin only."""
@@ -235,52 +250,6 @@ async def reload_memory_config(current_user: User = Depends(current_superuser)):
 async def delete_all_user_memories(current_user: User = Depends(current_active_user)):
     """Delete all memories for the current user."""
     return await system_controller.delete_all_user_memories(current_user)
-
-
-# Chat Configuration Management Endpoints
-
-
-@router.get("/admin/chat/config", response_class=Response)
-async def get_chat_config(current_user: User = Depends(current_superuser)):
-    """Get chat configuration as YAML. Admin only."""
-    try:
-        yaml_content = await system_controller.get_chat_config_yaml()
-        return Response(content=yaml_content, media_type="text/plain")
-    except Exception as e:
-        logger.error(f"Failed to get chat config: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/admin/chat/config")
-async def save_chat_config(
-    request: Request, current_user: User = Depends(current_superuser)
-):
-    """Save chat configuration from YAML. Admin only."""
-    try:
-        yaml_content = await request.body()
-        yaml_str = yaml_content.decode("utf-8")
-        result = await system_controller.save_chat_config_yaml(yaml_str)
-        return JSONResponse(content=result)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to save chat config: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/admin/chat/config/validate")
-async def validate_chat_config(
-    request: Request, current_user: User = Depends(current_superuser)
-):
-    """Validate chat configuration YAML. Admin only."""
-    try:
-        yaml_content = await request.body()
-        yaml_str = yaml_content.decode("utf-8")
-        result = await system_controller.validate_chat_config_yaml(yaml_str)
-        return JSONResponse(content=result)
-    except Exception as e:
-        logger.error(f"Failed to validate chat config: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # Plugin Configuration Management Endpoints

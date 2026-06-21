@@ -25,8 +25,6 @@ services:
     environment:
       # Override with test-specific settings
       - MONGODB_URI=mongodb://mongo-test:27017/test_db
-      - FALKORDB_HOST=falkordb-test
-      - FALKORDB_PORT=6379
       - REDIS_URL=redis://redis-test:6379/0
       - DEBUG_DIR=/app/debug  # Fixed: match plugin database mount path
       # Test configuration file
@@ -44,8 +42,6 @@ services:
       - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
       # Memory provider configuration
       - MEMORY_PROVIDER=${MEMORY_PROVIDER:-chronicle}
-      - OPENMEMORY_MCP_URL=${OPENMEMORY_MCP_URL:-http://host.docker.internal:8765}
-      - OPENMEMORY_USER_ID=${OPENMEMORY_USER_ID:-openmemory}
       # Speaker recognition controlled by config.yml (disabled in test config for CI performance)
       - SPEAKER_SERVICE_URL=http://speaker-service-test:8085
       - CORS_ORIGINS=http://localhost:3001,http://localhost:8001,https://localhost:3001,https://localhost:8001
@@ -66,8 +62,6 @@ services:
       - LANGFUSE_PUBLIC_KEY=pk-lf-test-public-key
       - LANGFUSE_SECRET_KEY=sk-lf-test-secret-key
     depends_on:
-      falkordb-test:
-        condition: service_healthy
       mongo-test:
         condition: service_healthy
       redis-test:
@@ -99,19 +93,6 @@ services:
         condition: service_healthy
       redis-test:
         condition: service_started
-
-  falkordb-test:
-    image: falkordb/falkordb:latest
-    ports:
-      - "6382:6379"
-    volumes:
-      - ./data/test_falkordb_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
 
   mongo-test:
     image: mongo:8.0.14
@@ -365,8 +346,6 @@ services:
     environment:
       # Same environment as backend
       - MONGODB_URI=mongodb://mongo-test:27017/test_db
-      - FALKORDB_HOST=falkordb-test
-      - FALKORDB_PORT=6379
       - REDIS_URL=redis://redis-test:6379/0
       - DEBUG_DIR=/app/debug  # Fixed: match plugin database mount path
       # Test configuration file
@@ -380,8 +359,6 @@ services:
       - TRANSCRIPTION_PROVIDER=${TRANSCRIPTION_PROVIDER:-deepgram}
       - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
       - MEMORY_PROVIDER=${MEMORY_PROVIDER:-chronicle}
-      - OPENMEMORY_MCP_URL=${OPENMEMORY_MCP_URL:-http://host.docker.internal:8765}
-      - OPENMEMORY_USER_ID=${OPENMEMORY_USER_ID:-openmemory}
       # Speaker recognition controlled by config.yml (disabled in test config for CI performance)
       - SPEAKER_SERVICE_URL=http://speaker-service-test:8085
       # Set inactivity timeout for tests (20 seconds of audio time)

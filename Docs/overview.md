@@ -10,14 +10,14 @@ The goal is a personal AI that gets better the more you use it: the more context
 - **Multimodal**: Audio is the primary input today, but the architecture supports images, visual context, and other data sources.
 - **Memories from everything**: Events produce memories. A conversation yields facts about people, plans, and preferences. A photo yields location, context, and associations.
 - **Self-hosted**: Runs on your hardware, your data stays with you.
-- **Hackable**: Designed to be forked, modified, and extended. Pluggable providers for transcription, LLM, memory storage, and analysis.
+- **Hackable**: Designed to be forked, modified, and extended. Pluggable providers for transcription, LLM, and analysis; memories live in an agentic Markdown vault.
 
 ## How It Works
 
 ```
 Audio/Images/Data  →  Ingestion  →  Processing  →  Memories
                                                       ↓
-                                                 Vector Store
+                                               Markdown Vault
                                                       ↓
                                               Retrieval & Search
 ```
@@ -28,14 +28,14 @@ Audio/Images/Data  →  Ingestion  →  Processing  →  Memories
 2. **Transcription**: Deepgram (cloud) or Parakeet (local) converts speech to text
 3. **Speaker Recognition**: Optional identification of who said what (pyannote)
 4. **Memory Extraction**: LLM extracts facts, preferences, and context from transcripts
-5. **Storage**: Memories indexed in FalkorDB (graph + vector + BM25 hybrid search)
+5. **Storage**: Memories recorded as notes in an agentic Markdown vault (Obsidian-style, at `data/conversation_docs/<user_id>/`)
 
 ### Image Pipeline (In Development)
 
 1. **Import**: Zip upload, or sync from external services (e.g., Immich)
 2. **Analysis**: Extract EXIF metadata, captions, detected objects
 3. **Memory Extraction**: Same LLM pipeline, different source type
-4. **Storage**: Same vector store, queryable alongside conversation memories
+4. **Storage**: Same Markdown vault, queryable alongside conversation memories
 
 ## Architecture
 
@@ -51,14 +51,14 @@ Audio/Images/Data  →  Ingestion  →  Processing  →  Memories
 │  └──────────────┘    └──────┬───────┘               │
 │                             │                        │
 │  ┌──────────────┐    ┌──────▼───────┐  ┌──────────┐ │
-│  │ Web UI       │    │   Workers    │  │ FalkorDB │ │
-│  │ (React)      │    │  (RQ/Redis)  │  │ (Graph + │ │
-│  │              │    │              │  │  Vector) │ │
+│  │ Web UI       │    │   Workers    │  │ Markdown │ │
+│  │ (React)      │    │  (RQ/Redis)  │  │  Vault   │ │
+│  │              │    │              │  │ (memory) │ │
 │  └──────────────┘    └──────────────┘  └──────────┘ │
 │                                                       │
 │  Transcription:  Deepgram (cloud) or Parakeet (local) │
 │  LLM:           OpenAI (cloud) or Ollama (local)      │
-│  Optional:      Speaker Recognition, OpenMemory MCP   │
+│  Optional:      Speaker Recognition                   │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -72,7 +72,6 @@ Audio/Images/Data  →  Ingestion  →  Processing  →  Memories
 | **Speaker Recognition** | `extras/speaker-recognition/` | Voice identification service |
 | **ASR Services** | `extras/asr-services/` | Local speech-to-text (Parakeet) |
 | **TTS Services** | `extras/tts/` | Text-to-speech (TADA, Fish Speech, KittenTTS) |
-| **OpenMemory MCP** | `extras/openmemory-mcp/` | Cross-client memory compatibility |
 | **HAVPE Relay** | `extras/havpe-relay/` | ESP32 audio bridge |
 | **Vault Sync** | `extras/vault-sync/` | macOS menu bar app — syncs your conversation_docs vault to Obsidian via Syncthing |
 
@@ -82,7 +81,7 @@ Chronicle is designed around swappable providers:
 
 - **Transcription**: Deepgram API or local Parakeet ASR
 - **LLM**: OpenAI or local Ollama
-- **Memory Storage**: Chronicle native (FalkorDB) or OpenMemory MCP
+- **Memory Storage**: agentic Markdown vault (the single source of truth)
 - **Speaker Recognition**: pyannote-based service (optional)
 - **Text-to-Speech**: TADA, Fish Speech (GPU), or KittenTTS (CPU) — optional
 
@@ -99,7 +98,6 @@ chronicle/
 │   ├── speaker-recognition/ # Voice identification
 │   ├── asr-services/        # Local ASR (Parakeet)
 │   ├── tts/                 # Text-to-speech (TADA, Fish Speech, KittenTTS)
-│   ├── openmemory-mcp/      # External memory server
 │   ├── havpe-relay/         # ESP32 audio bridge
 │   └── vault-sync/          # macOS menu bar app: vault ⇄ Obsidian via Syncthing
 ├── config/                  # Central configuration

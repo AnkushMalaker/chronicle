@@ -104,6 +104,16 @@ class ModelDef(BaseModel):
     model_output: Optional[str] = Field(
         default=None, description="Output format: json, text, vector, etc."
     )
+    thinking: bool = Field(
+        default=False,
+        description=(
+            "Local thinking/reasoning model whose extended thinking is toggled via the "
+            "chat template (chat_template_kwargs.enable_thinking), NOT the OpenAI "
+            "top-level `reasoning_effort` (which llama.cpp silently ignores). When set, "
+            "an operation's reasoning_effort is translated to enable_thinking for this "
+            "model (e.g. gemma/qwen served by llama.cpp)."
+        ),
+    )
     embedding_dimensions: Optional[int] = Field(
         default=None, ge=1, description="Embedding vector dimensions"
     )
@@ -251,7 +261,7 @@ class ResolvedLLMOperation(BaseModel):
     temperature: float
     max_tokens: Optional[int] = None
     response_format: Optional[Dict[str, Any]] = None  # {"type": "json_object"} or None
-    reasoning_effort: Optional[str] = None  # forwarded only for reasoning-class models
+    reasoning_effort: Optional[str] = None  # OpenAI reasoning models OR thinking models
 
     @property
     def model_name(self) -> str:
@@ -268,26 +278,46 @@ class ResolvedLLMOperation(BaseModel):
     def to_api_params(self) -> Dict[str, Any]:
         """Returns kwargs for client.chat.completions.create().
 
-        Works for OpenAI, Ollama, Groq — all OpenAI-compatible. For
-        reasoning-class models (gpt-5*, o1/o3/o4), `temperature` is omitted
-        and `max_tokens` is renamed to `max_completion_tokens`, matching
-        OpenAI's stricter API surface for those models.
+        Works for OpenAI, Ollama, Groq — all OpenAI-compatible. For OpenAI
+        reasoning-class models (gpt-5*, o1/o3/o4), `temperature` is omitted,
+        `max_tokens` is renamed to `max_completion_tokens`, and `reasoning_effort`
+        is forwarded as a top-level param — matching OpenAI's stricter API surface.
+
+        Local *thinking* models (``model_def.thinking``, e.g. gemma/qwen served by
+        llama.cpp) silently IGNORE the OpenAI top-level `reasoning_effort`, so an
+        operation's reasoning_effort is instead translated to the chat-template switch
+        the server actually honors (``chat_template_kwargs.enable_thinking``), sent via
+        the OpenAI SDK's ``extra_body``. Extended thinking is bounded server-side by
+        llama.cpp's ``--reasoning-budget``.
         """
         from advanced_omi_backend.openai_factory import is_reasoning_model
 
         model_name = self.model_def.model_name
-        reasoning = is_reasoning_model(model_name)
+        openai_reasoning = is_reasoning_model(model_name)
 
         params: Dict[str, Any] = {"model": model_name}
-        if not reasoning:
+        if not openai_reasoning:
             params["temperature"] = self.temperature
         if self.max_tokens is not None:
-            key = "max_completion_tokens" if reasoning else "max_tokens"
+            key = "max_completion_tokens" if openai_reasoning else "max_tokens"
             params[key] = self.max_tokens
         if self.response_format is not None:
             params["response_format"] = self.response_format
-        if reasoning and self.reasoning_effort:
-            params["reasoning_effort"] = self.reasoning_effort
+
+        if self.reasoning_effort:
+            if openai_reasoning:
+                params["reasoning_effort"] = self.reasoning_effort
+            elif self.model_def.thinking:
+                # "none"/"minimal"/"off"/"0" → thinking off; any other level → on.
+                enable = self.reasoning_effort.strip().lower() not in (
+                    "none",
+                    "minimal",
+                    "off",
+                    "0",
+                )
+                params["extra_body"] = {
+                    "chat_template_kwargs": {"enable_thinking": enable}
+                }
         return params
 
     def get_client(self, is_async: bool = False):
@@ -327,10 +357,6 @@ class AppModels(BaseModel):
     )
     speaker_recognition: Dict[str, Any] = Field(
         default_factory=dict, description="Speaker recognition service configuration"
-    )
-    chat: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Chat service configuration including system prompt",
     )
     llm_operations: Dict[str, LLMOperationConfig] = Field(
         default_factory=dict,
@@ -519,7 +545,6 @@ def load_models_config(force_reload: bool = False) -> Optional[AppModels]:
     model_list = raw.get("models", []) or []
     memory_settings = raw.get("memory", {}) or {}
     speaker_recognition_cfg = raw.get("speaker_recognition", {}) or {}
-    chat_settings = raw.get("chat", {}) or {}
     llm_ops_raw = raw.get("llm_operations", {}) or {}
 
     # Parse and validate models using Pydantic
@@ -548,7 +573,6 @@ def load_models_config(force_reload: bool = False) -> Optional[AppModels]:
         models=models,
         memory=memory_settings,
         speaker_recognition=speaker_recognition_cfg,
-        chat=chat_settings,
         llm_operations=llm_operations,
     )
     return _REGISTRY

@@ -112,6 +112,13 @@ export function useSSE(): SSEStatus {
         queryClient.invalidateQueries({ queryKey: ['queue'] })
         break
 
+      // A new system error/health event — refresh the System Errors page list and
+      // the nav unacked-error badge.
+      case 'system.error':
+        queryClient.invalidateQueries({ queryKey: ['system-events'] })
+        queryClient.invalidateQueries({ queryKey: ['system-events-summary'] })
+        break
+
       case 'connected':
         retriesRef.current = 0
         setStatus('connected')

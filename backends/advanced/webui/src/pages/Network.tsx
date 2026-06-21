@@ -50,7 +50,6 @@ const SERVICE_DISPLAY: Record<string, { label: string; description: string }> = 
   'chronicle-backend': { label: 'Chronicle Backend', description: 'Core API and audio processing' },
   'chronicle-speaker': { label: 'Speaker Recognition', description: 'Voice identification service' },
   'chronicle-asr': { label: 'ASR Service', description: 'Offline speech-to-text' },
-  'chronicle-openmemory': { label: 'OpenMemory MCP', description: 'Cross-client memory server' },
   'chronicle-llm': { label: 'Local LLM', description: 'Local LLM via llama.cpp' },
   'chronicle-tts': { label: 'Text-to-Speech', description: 'TTS synthesis service' },
   'chronicle-relay': { label: 'HAVPE Relay', description: 'ESP32 audio bridge' },

@@ -17,11 +17,11 @@ import time
 from pathlib import Path
 
 import yaml
+from config_manager import ConfigManager
 from dotenv import dotenv_values, set_key
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
-
 from setup_utils import ensure_tailscale_cert, read_env_value
 
 console = Console()
@@ -205,15 +205,6 @@ SERVICES = {
             ("asr", "ASR_PORT", "8767", "/health"),
         ],
     },
-    "openmemory-mcp": {
-        "path": "extras/openmemory-mcp",
-        "compose_file": "docker-compose.yml",
-        "description": "OpenMemory MCP Server",
-        "ports": ["8765"],
-        "health_endpoints": [
-            ("openmemory", None, "8765", "/docs"),
-        ],
-    },
     "llm-services": {
         "path": "extras/llm-services",
         "compose_file": "docker-compose.yml",
@@ -249,7 +240,6 @@ _DISCOVERY_NAMES = {
     "backend": "chronicle-backend",
     "speaker-recognition": "chronicle-speaker",
     "asr-services": "chronicle-asr",
-    "openmemory-mcp": "chronicle-openmemory",
     "llm-services": "chronicle-llm",
     "wakeword-service": "chronicle-wakeword-service",
     "tts": "chronicle-tts",
@@ -270,6 +260,8 @@ _ASR_PROVIDER_LABELS = {
     "parakeet": "Parakeet ASR",
     "qwen3-asr": "Qwen3 ASR",
     "gemma4": "Gemma 4 ASR",
+    "af-next": "Audio Flamingo Next ASR",
+    "granite": "Granite Speech ASR",
     "nemotron": "Nemotron ASR (batch + streaming)",
 }
 
@@ -292,6 +284,8 @@ ASR_PROVIDER_TO_SERVICE = {
     "parakeet": "parakeet-asr",
     "qwen3-asr": "qwen3-asr-wrapper",
     "gemma4": "gemma4-asr",
+    "af-next": "af-next-asr",
+    "granite": "granite-asr",
     # Nemotron serves BOTH batch (HTTP /transcribe) and streaming (ws /stream) from
     # one container on 8772, so the batch lane reuses the streaming service.
     "nemotron": "nemotron-stream-asr",
@@ -354,6 +348,43 @@ def active_streaming_asr_provider() -> str:
         if opt["model"] == model:
             return key
     return ""
+
+
+def asr_needs_local_container(env_values: dict | None = None) -> bool:
+    """Whether the asr-services compose has any local container to run.
+
+    True when either lane selects a provider that runs a local container — the
+    batch lane (ASR_PROVIDER → ASR_PROVIDER_TO_SERVICE) or the streaming lane
+    (STREAMING_ASR_PROVIDER → STREAMING_ASR_PROVIDER_TO_SERVICE). Cloud-only
+    selections (smallest/deepgram) need no container, so asr-services can stay
+    disabled in config.yml. Reads extras/asr-services/.env unless ``env_values``
+    is supplied.
+    """
+    if env_values is None:
+        env_file = Path(__file__).parent / SERVICES["asr-services"]["path"] / ".env"
+        env_values = dotenv_values(env_file) if env_file.exists() else {}
+    asr_provider = (env_values.get("ASR_PROVIDER") or "").strip("'\"")
+    streaming_provider = (env_values.get("STREAMING_ASR_PROVIDER") or "").strip("'\"")
+    return bool(ASR_PROVIDER_TO_SERVICE.get(asr_provider)) or bool(
+        STREAMING_ASR_PROVIDER_TO_SERVICE.get(streaming_provider)
+    )
+
+
+def set_service_enabled(name: str, enabled: bool) -> bool:
+    """Flip one service's enabled flag in config.yml (``services:`` section).
+
+    Preserves comments (ConfigManager uses ruamel). Returns True if the value
+    actually changed. Used by the node agent so a provider switch keeps the
+    lifecycle/UI enabled set consistent with the chosen provider (a cloud ASR
+    provider needs no container, a local one does).
+    """
+    cm = ConfigManager()
+    enabled_map = cm.get_enabled_services()
+    if bool(enabled_map.get(name)) == bool(enabled):
+        return False
+    enabled_map[name] = bool(enabled)
+    cm.set_enabled_services(enabled_map)
+    return True
 
 
 def _asr_health_port(env_values: dict, default_port) -> str:
@@ -560,22 +591,22 @@ def check_service_health(service_name):
 
 # Profile-gated services in the backend compose. `https` (caddy) is auto-enabled
 # from the Caddyfile; the rest are opt-in via the backend BACKEND_PROFILES env var.
-_BACKEND_ALL_PROFILES = ("https", "prod", "annotation", "vault-sync", "tailscale")
+_BACKEND_ALL_PROFILES = ("https", "annotation", "vault-sync", "tailscale")
 
 
 def _backend_profile_flags(service_path, command):
     """Return ``--profile`` flags for the backend compose.
 
-    On ``down``/``status``/``restart`` we enable ALL profiles so the command covers
-    every profile-gated service (caddy, webui-prod, annotation-cron,
-    vault-syncthing, tailscale) — otherwise ``docker compose down`` silently leaves
+    On ``down``/``status`` we enable ALL profiles so the command covers
+    every profile-gated service (caddy, annotation-cron, vault-syncthing,
+    tailscale) — otherwise ``docker compose down`` silently leaves
     inactive-profile containers running (the stale-container bug).
 
     On ``up`` we only enable what's actually wanted: ``https`` when a Caddyfile is
     present (auto), plus any profiles listed in the backend's ``BACKEND_PROFILES``
-    env var (comma-separated, e.g. ``prod,annotation,vault-sync``).
+    env var (comma-separated, e.g. ``annotation,vault-sync``).
     """
-    if command in ("down", "status", "restart"):
+    if command in ("down", "status"):
         profiles = list(_BACKEND_ALL_PROFILES)
     else:  # up
         profiles = []
@@ -743,14 +774,14 @@ def run_compose_command(service_name, command, build=False, force_recreate=False
             console.print(f"[red]❌ Error building {service_name}: {e}[/red]")
             return False
 
-    # Step 2: Run the actual command (up/down/restart/status)
+    # Step 2: Run the actual command (up/down/status)
     up_flags = ["up", "-d", "--remove-orphans"]
     if force_recreate:
         up_flags.append("--force-recreate")
 
     cmd = compose_base()
 
-    # Add profiles for backend service (down/status/restart cover ALL profiles so no
+    # Add profiles for backend service (down/status cover ALL profiles so no
     # profile-gated container is left orphaned; up only enables wanted profiles).
     if service_name == "backend":
         cmd.extend(_backend_profile_flags(service_path, command))
@@ -815,7 +846,7 @@ def run_compose_command(service_name, command, build=False, force_recreate=False
                 cmd.extend(["down"])
 
     # Handle asr-services - start only the configured provider(s)
-    elif service_name == "asr-services" and command in ["up", "down", "restart"]:
+    elif service_name == "asr-services" and command in ["up", "down"]:
         env_file = service_path / ".env"
         asr_service_name = None
         streaming_asr_service_name = None
@@ -858,19 +889,9 @@ def run_compose_command(service_name, command, build=False, force_recreate=False
             cmd.extend(up_flags + services_to_start)
         elif command == "down":
             cmd.extend(["down"])
-        elif command == "restart":
-            if asr_service_name:
-                services_to_restart = [asr_service_name]
-                if asr_provider == "qwen3-asr":
-                    services_to_restart.append("qwen3-asr-bridge")
-                if streaming_asr_service_name:
-                    services_to_restart.append(streaming_asr_service_name)
-                cmd.extend(["restart"] + services_to_restart)
-            else:
-                cmd.extend(["restart"])
 
     # Handle tts - start only the configured provider (one runs at a time, port 8770)
-    elif service_name == "tts" and command in ["up", "down", "restart"]:
+    elif service_name == "tts" and command in ["up", "down"]:
         env_file = service_path / ".env"
         tts_service_name = None
         if env_file.exists():
@@ -892,8 +913,6 @@ def run_compose_command(service_name, command, build=False, force_recreate=False
         elif command == "down":
             # Plain down removes every tts container regardless of provider.
             cmd.extend(["down"])
-        elif command == "restart":
-            cmd.extend(["restart"] + ([tts_service_name] if tts_service_name else []))
 
     else:
         # Standard compose commands for other services
@@ -901,8 +920,6 @@ def run_compose_command(service_name, command, build=False, force_recreate=False
             cmd.extend(up_flags)
         elif command == "down":
             cmd.extend(["down"])
-        elif command == "restart":
-            cmd.extend(["restart"])
         elif command == "status":
             cmd.extend(["ps"])
 
@@ -1386,12 +1403,26 @@ def _service_manager_exec():
 #
 # `claude remote-control` runs a persistent server that accepts multiple sessions
 # you spawn from the Claude mobile app / claude.ai/code. It is an interactive TUI,
-# so it needs a pty — we run it inside a detached tmux session (also lets you
-# `tmux attach -t chronicle-rc` at the desktop). Persistence is via a systemd user
-# unit (tmux oneshot) so it survives reboot, with a WebUI start/stop toggle.
+# so it needs a pty — we run it inside a detached tmux session on a dedicated
+# socket (attach at the desktop with `tmux -L chronicle-rc attach -t
+# chronicle-rc`). Persistence is via a systemd user
+# unit that runs a supervisor wrapper (Type=simple, Restart=always) so it both
+# survives reboot and auto-restarts if the server dies, with a WebUI start/stop
+# toggle.
 
 _CLAUDE_RC_UNIT = "chronicle-remote-control"
 _CLAUDE_RC_SESSION = os.environ.get("CLAUDE_RC_SESSION", "chronicle-rc")
+# Run on a DEDICATED tmux socket, never the user's default one. The tmux server
+# spawns inside the systemd unit's cgroup, so a stop/restart (KillMode=control-
+# group) tears down that whole server. On the shared default socket that would
+# also kill the user's own working sessions; on a private socket it only affects
+# remote-control. Attach with `tmux -L chronicle-rc attach -t chronicle-rc`.
+_CLAUDE_RC_SOCKET = os.environ.get("CLAUDE_RC_SOCKET", "chronicle-rc")
+
+
+def _rc_tmux_base() -> list[str]:
+    """tmux argv prefix pinned to the remote-control's private socket."""
+    return [shutil.which("tmux") or "tmux", "-L", _CLAUDE_RC_SOCKET]
 
 
 def _claude_rc_dir() -> Path:
@@ -1422,7 +1453,7 @@ def _tmux_session_running(session: str) -> bool:
         return False
     return (
         subprocess.run(
-            ["tmux", "has-session", "-t", session],
+            [*_rc_tmux_base(), "has-session", "-t", session],
             capture_output=True,
             text=True,
         ).returncode
@@ -1469,7 +1500,16 @@ def _start_remote_control_tmux() -> bool:
     # the session ends, so `has-session` faithfully reflects whether it is alive.
     cmd = " ".join(shlex.quote(part) for part in _claude_rc_command())
     result = subprocess.run(
-        ["tmux", "new-session", "-d", "-s", _CLAUDE_RC_SESSION, "-c", str(rc_dir), cmd],
+        [
+            *_rc_tmux_base(),
+            "new-session",
+            "-d",
+            "-s",
+            _CLAUDE_RC_SESSION,
+            "-c",
+            str(rc_dir),
+            cmd,
+        ],
         capture_output=True,
         text=True,
     )
@@ -1493,7 +1533,7 @@ def _stop_remote_control_tmux() -> bool:
         console.print("[dim]📱 Claude remote-control already stopped[/dim]")
         return True
     subprocess.run(
-        ["tmux", "kill-session", "-t", _CLAUDE_RC_SESSION],
+        [*_rc_tmux_base(), "kill-session", "-t", _CLAUDE_RC_SESSION],
         capture_output=True,
         text=True,
     )
@@ -1520,11 +1560,49 @@ def stop_remote_control() -> bool:
     return _stop_remote_control_tmux()
 
 
-def _write_remote_control_unit() -> Path:
-    """Write the chronicle-remote-control systemd user unit (tmux oneshot)."""
+def _write_remote_control_supervisor() -> Path:
+    """Write the supervisor wrapper the systemd unit runs as its main process.
+
+    The wrapper starts the detached tmux session (which gives the TUI its pty)
+    and then *blocks* polling ``has-session``, so it stays alive exactly as long
+    as the ``claude remote-control`` process does. When that process dies the
+    session ends, the wrapper exits, and ``Restart=always`` brings it back. A
+    plain ``tmux new-session -d`` could not be supervised this way: it returns 0
+    immediately, so systemd lost track of the real process and never restarted
+    it when it died.
+    """
     tmux = shutil.which("tmux") or "/usr/bin/tmux"
     rc_dir = _claude_rc_dir()
-    cmd = " ".join(shlex.quote(part) for part in _claude_rc_command())
+    cmd_line = shlex.join(_claude_rc_command())
+    _SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
+    script_path = _SYSTEMD_USER_DIR / f"{_CLAUDE_RC_UNIT}.sh"
+    # `tmux -L <socket>`: a PRIVATE server, so killing this unit's cgroup never
+    # touches the user's default-socket sessions.
+    script_path.write_text(
+        f"""#!/bin/sh
+# Auto-generated by services.py (_write_remote_control_supervisor). Do not edit.
+set -u
+SESSION={shlex.quote(_CLAUDE_RC_SESSION)}
+# tmux pinned to a dedicated socket (-L) so this never disturbs other tmux servers.
+TMUX="{shlex.quote(tmux)} -L {shlex.quote(_CLAUDE_RC_SOCKET)}"
+# Clear any stale session of this name, then start fresh.
+$TMUX kill-session -t "$SESSION" 2>/dev/null || true
+$TMUX new-session -d -s "$SESSION" -c {shlex.quote(str(rc_dir))} {cmd_line} || exit 1
+# Block while the remote-control TUI is alive; exit (-> systemd Restart) once it dies.
+while $TMUX has-session -t "$SESSION" 2>/dev/null; do
+    sleep 5
+done
+"""
+    )
+    script_path.chmod(0o755)
+    return script_path
+
+
+def _write_remote_control_unit() -> Path:
+    """Write the chronicle-remote-control systemd user unit (supervised tmux)."""
+    tmux = shutil.which("tmux") or "/usr/bin/tmux"
+    rc_dir = _claude_rc_dir()
+    script_path = _write_remote_control_supervisor()
     uv_dir = str(Path(shutil.which("uv") or "uv").parent)
     unit_path_env = ":".join(
         [
@@ -1540,19 +1618,23 @@ def _write_remote_control_unit() -> Path:
     )
     _SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
     unit_path = _SYSTEMD_USER_DIR / f"{_CLAUDE_RC_UNIT}.service"
-    # Type=oneshot + RemainAfterExit: ExecStart spawns the detached tmux session and
-    # returns; ExecStop tears it down. tmux supplies the pty the TUI needs.
+    # Type=simple: the supervisor wrapper is the tracked main process and lives as
+    # long as the tmux session does, so Restart=always genuinely restarts the
+    # remote-control server whenever it dies (crash, network drop, claude update).
+    # StartLimitIntervalSec=0 disables the start-rate cap so it never gives up.
     unit_path.write_text(
         f"""[Unit]
 Description=Chronicle Claude remote-control session (control Claude Code from your phone)
+StartLimitIntervalSec=0
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=simple
 WorkingDirectory={rc_dir}
 Environment=PATH={unit_path_env}
-ExecStart={tmux} new-session -d -s {_CLAUDE_RC_SESSION} -c {rc_dir} {shlex.quote(cmd)}
-ExecStop={tmux} kill-session -t {_CLAUDE_RC_SESSION}
+ExecStart=/bin/sh {script_path}
+ExecStop={tmux} -L {_CLAUDE_RC_SOCKET} kill-session -t {_CLAUDE_RC_SESSION}
+Restart=always
+RestartSec=10
 
 [Install]
 WantedBy=default.target
@@ -1719,7 +1801,8 @@ def restart_services(services, recreate=False):
         )
     else:
         console.print(
-            "[dim]Quick restart (use --recreate to fix bind mount issues)[/dim]\n"
+            "[dim]Recreating containers in place (picks up .env/config + mounted code; "
+            "use --recreate for a full down+up)[/dim]\n"
         )
 
     success_count = 0
@@ -1748,8 +1831,13 @@ def restart_services(services, recreate=False):
             else:
                 console.print(f"[red]❌ Failed to start {service_name}[/red]")
         else:
-            # Quick restart: docker compose restart
-            if run_compose_command(service_name, "restart"):
+            # Recreate containers in place. NOT `compose restart`: that doesn't re-read
+            # .env/config, and podman-compose's `restart` is flaky — it silently leaves
+            # some containers (e.g. a slow-to-SIGTERM backend) untouched. `up
+            # --force-recreate` reliably recreates every container in the project and
+            # picks up env/config + volume-mounted code changes. The service-manager
+            # agent already restarts via down+up for the same reason.
+            if run_compose_command(service_name, "up", force_recreate=True):
                 console.print(f"[green]✅ {service_name} restarted[/green]")
                 success_count += 1
             else:
@@ -1827,7 +1915,7 @@ def main():
     start_parser.add_argument(
         "services",
         nargs="*",
-        help="Services to start: backend, speaker-recognition, asr-services, openmemory-mcp (or use --all)",
+        help="Services to start: backend, speaker-recognition, asr-services (or use --all)",
     )
     start_parser.add_argument(
         "--all", action="store_true", help="Start all configured services"
@@ -1851,7 +1939,7 @@ def main():
     stop_parser.add_argument(
         "services",
         nargs="*",
-        help="Services to stop: backend, speaker-recognition, asr-services, openmemory-mcp (or use --all)",
+        help="Services to stop: backend, speaker-recognition, asr-services (or use --all)",
     )
     stop_parser.add_argument("--all", action="store_true", help="Stop all services")
 
@@ -1860,7 +1948,7 @@ def main():
     restart_parser.add_argument(
         "services",
         nargs="*",
-        help="Services to restart: backend, speaker-recognition, asr-services, openmemory-mcp (or use --all)",
+        help="Services to restart: backend, speaker-recognition, asr-services (or use --all)",
     )
     restart_parser.add_argument(
         "--all", action="store_true", help="Restart all services"

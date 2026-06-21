@@ -7,10 +7,7 @@
 # 3. Browser will warn about self-signed cert - accept it
 # 4. Microphone access will now work via HTTPS
 #
-# NOTE: If using Caddy, update docker-compose.yml webui build args:
-#   VITE_BACKEND_URL: "" (empty for same-origin through Caddy)
-#
-# For production, replace 'localhost' with your domain name and Caddy
+# For a real domain, replace 'localhost' with your domain name and Caddy
 # will automatically obtain Let's Encrypt certificates.
 
 localhost TAILSCALE_IP {
@@ -63,47 +60,3 @@ localhost TAILSCALE_IP {
         reverse_proxy webui-dev:5173
     }
 }
-
-# Production configuration (uncomment and modify for your domain)
-# yourdomain.com {
-#     # Caddy automatically obtains Let's Encrypt certificates
-#
-#     # WebSocket endpoints
-#     handle /ws* {
-#         reverse_proxy chronicle-backend:8000
-#     }
-#
-#     # API endpoints
-#     handle /api/* {
-#         reverse_proxy chronicle-backend:8000
-#     }
-#
-#     # Auth endpoints
-#     handle /auth/* {
-#         reverse_proxy chronicle-backend:8000
-#     }
-#
-#     # Health checks
-#     handle /health {
-#         reverse_proxy chronicle-backend:8000
-#     }
-#
-#     handle /readiness {
-#         reverse_proxy chronicle-backend:8000
-#     }
-#
-#     # Users endpoints
-#     handle /users/* {
-#         reverse_proxy chronicle-backend:8000
-#     }
-#
-#     # Audio files
-#     handle /audio/* {
-#         reverse_proxy chronicle-backend:8000
-#     }
-#
-#     # Everything else - webui
-#     handle {
-#         reverse_proxy webui:80
-#     }
-# }
