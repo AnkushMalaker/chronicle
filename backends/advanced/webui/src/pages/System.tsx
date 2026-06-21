@@ -53,6 +53,21 @@ export default function System() {
   const [copied, setCopied] = useState(false)
   const backendUrl = getBackendHttpUrl()
 
+  // QR payload is a JSON bundle the mobile app parses (it also still accepts a
+  // bare URL for backwards compatibility). serviceManagerUrl is the backend host
+  // on :8775 so the app can auto-discover the agent. The SM token is NOT included
+  // — it's a server-side secret and is not exposed to the browser.
+  const qrPayload = (() => {
+    try {
+      const u = new URL(backendUrl)
+      // The service-manager agent serves plain HTTP on the tailnet (no TLS).
+      const serviceManagerUrl = `http://${u.hostname}:8775`
+      return JSON.stringify({ backendUrl, serviceManagerUrl })
+    } catch {
+      return backendUrl
+    }
+  })()
+
   const handleCopyUrl = async () => {
     try {
       await navigator.clipboard.writeText(backendUrl)
@@ -764,7 +779,7 @@ export default function System() {
         <div className="flex flex-col items-center space-y-4">
           <div className="p-4 bg-white rounded-xl shadow-sm border border-gray-200 dark:border-gray-600">
             <QRCodeSVG
-              value={backendUrl}
+              value={qrPayload}
               size={200}
               level="M"
               fgColor={isDark ? '#1f2937' : '#111827'}

@@ -9,12 +9,12 @@ import {
 } from 'react-native';
 import { CameraView, useCameraPermissions, scanFromURLAsync } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
-import { isValidBackendUrl } from '../utils/urlConversion';
+import { parseScannedConfig, ScannedBackendConfig } from '../utils/urlConversion';
 import { useTheme, ThemeColors } from '../theme';
 
 interface QRScannerProps {
   visible: boolean;
-  onScanned: (url: string) => void;
+  onScanned: (config: ScannedBackendConfig) => void;
   onClose: () => void;
 }
 
@@ -34,8 +34,9 @@ export const QRScanner: React.FC<QRScannerProps> = ({ visible, onScanned, onClos
     if (scanned) return;
     setScanned(true);
 
-    if (isValidBackendUrl(data)) {
-      onScanned(data);
+    const config = parseScannedConfig(data);
+    if (config) {
+      onScanned(config);
       onClose();
     } else {
       Alert.alert(

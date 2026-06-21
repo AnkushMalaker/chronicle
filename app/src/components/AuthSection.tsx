@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, ActivityIndicator } from 'react-native';
-import { saveAuthEmail, saveAuthPassword, saveJwtToken, getAuthEmail, getAuthPassword, clearAuthData } from '../utils/storage';
+import { getAuthEmail, getAuthPassword } from '../utils/storage';
+import { login, logout, forgetAccount } from '../services/auth';
 import { useTheme, ThemeColors } from '../theme';
 
 interface AuthSectionProps {
@@ -44,30 +45,8 @@ export const AuthSection: React.FC<AuthSectionProps> = ({
 
     setIsLoggingIn(true);
     try {
-      const baseUrl = backendUrl.replace('ws://', 'http://').replace('wss://', 'https://').split('/ws')[0];
-      const loginUrl = `${baseUrl}/auth/jwt/login`;
-      const formData = new URLSearchParams();
-      formData.append('username', email.trim());
-      formData.append('password', password.trim());
-
-      const response = await fetch(loginUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: formData.toString(),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Login failed: ${response.status} ${response.statusText} - ${errorText}`);
-      }
-
-      const authData = await response.json();
-      const jwtToken = authData.access_token;
-      if (!jwtToken) throw new Error('No access token received from server');
-
-      await saveAuthEmail(email.trim());
-      await saveAuthPassword(password.trim());
-      await saveJwtToken(jwtToken);
+      // login() persists email + password (SecureStore) + token centrally.
+      const jwtToken = await login(email.trim(), password.trim(), backendUrl);
       onAuthStatusChange(true, email.trim(), jwtToken);
     } catch (error) {
       Alert.alert('Login Failed', error instanceof Error ? error.message : 'An unknown error occurred during login.');
@@ -76,15 +55,40 @@ export const AuthSection: React.FC<AuthSectionProps> = ({
     }
   };
 
+  // Log out: clear the token only. Email + password are kept (in state and in
+  // storage) so re-login is one tap and silent refresh keeps working.
   const handleLogout = async () => {
     try {
-      await clearAuthData();
-      setEmail('');
-      setPassword('');
-      onAuthStatusChange(false, null, null);
+      await logout();
+      onAuthStatusChange(false, email || null, null);
     } catch (error) {
-      Alert.alert('Logout Error', 'Failed to clear authentication data.');
+      Alert.alert('Logout Error', 'Failed to log out.');
     }
+  };
+
+  // Forget account: wipe email + password + token entirely.
+  const handleForgetAccount = () => {
+    Alert.alert(
+      'Forget Account',
+      'This clears your saved email and password from this device. You will need to enter them again to log in.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Forget',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await forgetAccount();
+              setEmail('');
+              setPassword('');
+              onAuthStatusChange(false, null, null);
+            } catch (error) {
+              Alert.alert('Error', 'Failed to clear account data.');
+            }
+          },
+        },
+      ]
+    );
   };
 
   if (isAuthenticated && currentUserEmail) {
@@ -101,6 +105,9 @@ export const AuthSection: React.FC<AuthSectionProps> = ({
             <Text style={s.buttonText}>Logout</Text>
           </TouchableOpacity>
         </View>
+        <TouchableOpacity onPress={handleForgetAccount} disabled={isLoggingIn}>
+          <Text style={s.forgetText}>Forget account</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -240,6 +247,13 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     fontWeight: '500',
     flex: 1,
     marginRight: 10,
+  },
+  forgetText: {
+    fontSize: 12,
+    color: colors.textTertiary,
+    marginTop: 12,
+    textAlign: 'center',
+    textDecorationLine: 'underline',
   },
 });
 

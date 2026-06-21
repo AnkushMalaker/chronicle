@@ -1718,6 +1718,8 @@ async def handle_pcm_websocket(
 
                     elif header["type"] == "ping":
                         application_logger.debug(f"🏓 Received ping from {client_id}")
+                        # Reply so the client can detect a half-open (zombie) socket.
+                        await ws.send_json({"type": "pong"})
                         continue
 
                     elif header["type"] == "button-event":
@@ -1773,6 +1775,8 @@ async def handle_pcm_websocket(
                                     application_logger.debug(
                                         f"🏓 Received ping during streaming from {client_id}"
                                     )
+                                    # Reply so the client can detect a half-open (zombie) socket.
+                                    await ws.send_json({"type": "pong"})
                                     continue
                                 elif control_header.get("type") == "audio-start":
                                     application_logger.info(

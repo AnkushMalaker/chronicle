@@ -27,6 +27,7 @@
     "expo-linking": "~55.0.13",
     "expo-modules-core": "~55.0.22",
     "expo-router": "~55.0.12",
+    "expo-secure-store": "~55.0.14",
     "expo-status-bar": "~55.0.5",
     "expo-updates": "~55.0.20",
     "friend-lite-react-native": "^1.0.2",

@@ -30,6 +30,7 @@ import BackendStatus from '@/components/BackendStatus';
 import PhoneAudioButton from '@/components/PhoneAudioButton';
 import PhoneAudioMicPicker from '@/components/PhoneAudioMicPicker';
 import SystemAdminControls from '@/components/SystemAdminControls';
+import NetworkOverview from '@/components/NetworkOverview';
 
 export default function App() {
   const { colors } = useTheme();
@@ -279,6 +280,7 @@ export default function App() {
               <BackendStatus backendUrl={settings.webSocketUrl} onBackendUrlChange={settings.handleSetAndSaveWebSocketUrl} jwtToken={settings.jwtToken} />
               <AuthSection backendUrl={settings.webSocketUrl} isAuthenticated={settings.isAuthenticated} currentUserEmail={settings.currentUserEmail} onAuthStatusChange={settings.handleAuthStatusChange} />
               <SystemAdminControls backendUrl={settings.webSocketUrl} jwtToken={settings.jwtToken} />
+              <NetworkOverview backendUrl={settings.webSocketUrl} />
 
               <Text style={s.sectionLabel}>Audio Deck</Text>
               <PhoneAudioButton

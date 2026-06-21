@@ -209,18 +209,32 @@ async def receive_handler(websocket, logger) -> None:
         logger.error("Receive handler error: %s", e, exc_info=True)
 
 
+# Reconnect backoff tuning for the backend WebSocket. Mirrors the BLE-side
+# backoff in menu_app.py: capped exponential backoff, reset to the initial
+# value once a connection has stayed healthy for MIN_HEALTHY_DURATION.
+_BACKOFF_INITIAL = 1.0
+_BACKOFF_FACTOR = 2.0
+_BACKOFF_MAX = 30.0
+_MIN_HEALTHY_DURATION = 30.0
+
+
 async def stream_to_backend(
     stream: AsyncGenerator[bytes, None],
     device_name: str = "wearable",
 ) -> None:
-    """Stream raw Opus audio to backend using Wyoming protocol with JWT authentication."""
-    token = await get_jwt_token(ADMIN_EMAIL, ADMIN_PASSWORD)
-    if not token:
-        logger.error("Failed to get JWT token, cannot stream audio")
-        return
+    """Stream raw Opus audio to backend using Wyoming protocol with JWT authentication.
 
-    uri_with_token = f"{websocket_uri}&token={token}&device_name={quote(device_name)}"
+    Persistent-retry semantics: a transient backend-WebSocket drop never ends the
+    session. On a WS/connection error we re-fetch the JWT (mid-session refresh) and
+    re-dial with capped exponential backoff, continuing to consume the same audio
+    generator. The session only ends when the generator is exhausted (the caller's
+    queue_to_stream yields None at true session end), which breaks the reconnect loop.
 
+    Audio produced during a reconnect gap is dropped: the generator only yields live
+    chunks pulled from the queue, so chunks pulled while no WS is connected are simply
+    sent on the next successful dial or lost — matching the pre-existing outage
+    behavior (no buffering across outages).
+    """
     ssl_context = None
     if USE_HTTPS:
         ssl_context = ssl.create_default_context()
@@ -230,66 +244,125 @@ async def stream_to_backend(
 
     global _active_websocket
 
-    logger.info("Connecting to WebSocket: %s", websocket_uri)
-    async with websockets.connect(
-        uri_with_token,
-        ssl=ssl_context,
-        ping_interval=20,
-        ping_timeout=120,
-        close_timeout=10,
-    ) as websocket:
-        _active_websocket = websocket
+    backoff = _BACKOFF_INITIAL
+    session_ended = False
+    chunk_count = 0
 
-        ready_msg = await websocket.recv()
-        logger.info("Backend ready: %s", ready_msg)
+    while not session_ended:
+        # Re-fetch the JWT on every (re)dial. This is the mid-session refresh:
+        # a long session can outlive the 1h token lifetime, so each reconnect
+        # picks up a fresh token without cycling the BLE session.
+        token = await get_jwt_token(ADMIN_EMAIL, ADMIN_PASSWORD)
+        if not token:
+            logger.error(
+                "Failed to get JWT token; retrying in %.0fs", backoff
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * _BACKOFF_FACTOR, _BACKOFF_MAX)
+            continue
 
-        receive_task = asyncio.create_task(receive_handler(websocket, logger))
+        uri_with_token = (
+            f"{websocket_uri}&token={token}&device_name={quote(device_name)}"
+        )
 
+        connected_at = None
         try:
-            audio_start = {
-                "type": "audio-start",
-                "data": {
-                    "rate": 16000,
-                    "width": 2,
-                    "channels": 1,
-                    "mode": "streaming",
-                },
-                "payload_length": None,
-            }
-            await websocket.send(json.dumps(audio_start) + "\n")
-            logger.info("Sent audio-start event")
+            logger.info("Connecting to WebSocket: %s", websocket_uri)
+            async with websockets.connect(
+                uri_with_token,
+                ssl=ssl_context,
+                ping_interval=20,
+                ping_timeout=120,
+                close_timeout=10,
+            ) as websocket:
+                connected_at = asyncio.get_running_loop().time()
+                _active_websocket = websocket
 
-            chunk_count = 0
-            async for opus_data in stream:
-                chunk_count += 1
+                ready_msg = await websocket.recv()
+                logger.info("Backend ready: %s", ready_msg)
 
-                audio_chunk_header = {
-                    "type": "audio-chunk",
-                    "data": {
-                        "rate": 16000,
-                        "width": 2,
-                        "channels": 1,
-                    },
-                    "payload_length": len(opus_data),
-                }
-                await websocket.send(json.dumps(audio_chunk_header) + "\n")
-                await websocket.send(opus_data)
+                receive_task = asyncio.create_task(
+                    receive_handler(websocket, logger)
+                )
 
-                if chunk_count % 100 == 0:
-                    logger.info("Sent %d chunks", chunk_count)
+                try:
+                    audio_start = {
+                        "type": "audio-start",
+                        "data": {
+                            "rate": 16000,
+                            "width": 2,
+                            "channels": 1,
+                            "mode": "streaming",
+                        },
+                        "payload_length": None,
+                    }
+                    await websocket.send(json.dumps(audio_start) + "\n")
+                    logger.info("Sent audio-start event")
 
-            audio_stop = {
-                "type": "audio-stop",
-                "data": {},
-                "payload_length": None,
-            }
-            await websocket.send(json.dumps(audio_stop) + "\n")
-            logger.info("Sent audio-stop event. Total chunks: %d", chunk_count)
+                    # Reset backoff once we've been streaming long enough to call
+                    # this connection healthy (mirrors MIN_HEALTHY_DURATION).
+                    async for opus_data in stream:
+                        chunk_count += 1
 
-        finally:
+                        if (
+                            backoff != _BACKOFF_INITIAL
+                            and connected_at is not None
+                            and asyncio.get_running_loop().time() - connected_at
+                            >= _MIN_HEALTHY_DURATION
+                        ):
+                            backoff = _BACKOFF_INITIAL
+
+                        audio_chunk_header = {
+                            "type": "audio-chunk",
+                            "data": {
+                                "rate": 16000,
+                                "width": 2,
+                                "channels": 1,
+                            },
+                            "payload_length": len(opus_data),
+                        }
+                        await websocket.send(json.dumps(audio_chunk_header) + "\n")
+                        await websocket.send(opus_data)
+
+                        if chunk_count % 100 == 0:
+                            logger.info("Sent %d chunks", chunk_count)
+
+                    # Generator exhausted (queue_to_stream yielded None) → true
+                    # session end. Send audio-stop and break the reconnect loop.
+                    session_ended = True
+                    audio_stop = {
+                        "type": "audio-stop",
+                        "data": {},
+                        "payload_length": None,
+                    }
+                    await websocket.send(json.dumps(audio_stop) + "\n")
+                    logger.info(
+                        "Sent audio-stop event. Total chunks: %d", chunk_count
+                    )
+
+                finally:
+                    _active_websocket = None
+                    receive_task.cancel()
+                    try:
+                        await receive_task
+                    except asyncio.CancelledError:
+                        logger.info("Receive task cancelled successfully")
+
+        except (websockets.exceptions.WebSocketException, OSError) as e:
+            # Transient WS/connection drop while audio is still flowing → reconnect
+            # without ending the BLE session. Re-dial with capped backoff.
             _active_websocket = None
-            receive_task.cancel()
-            try:
-                await receive_task
-            except asyncio.CancelledError:
-                logger.info("Receive task cancelled successfully")
+            if session_ended:
+                break
+            healthy = (
+                connected_at is not None
+                and asyncio.get_running_loop().time() - connected_at
+                >= _MIN_HEALTHY_DURATION
+            )
+            if healthy:
+                backoff = _BACKOFF_INITIAL
+            logger.warning(
+                "Backend WS dropped (%s); reconnecting in %.0fs", e, backoff
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * _BACKOFF_FACTOR, _BACKOFF_MAX)

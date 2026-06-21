@@ -243,6 +243,11 @@ async def connect_and_stream(
                 await file_sink.write(chunk)
 
     async def backend_stream_wrapper() -> None:
+        # queue_to_stream yields live Opus chunks; a None sentinel signals true
+        # session end (e.g. BLE teardown enqueues None). stream_to_backend now
+        # owns reconnect/backoff and mid-session JWT refresh internally, so a
+        # transient backend-WS drop no longer surfaces here — it only returns on
+        # true session end. This wrapper stays as a last-resort error guard.
         async def queue_to_stream():
             while True:
                 raw_opus = await backend_queue.get()
@@ -334,8 +339,10 @@ async def connect_and_stream(
 
                 # Re-raise if a worker failed (not just disconnect)
                 for task in done:
-                    if task is not disconnect_task and task.exception():
-                        raise task.exception()
+                    if task is not disconnect_task:
+                        exc = task.exception()
+                        if exc is not None:
+                            raise exc
         except Exception as e:
             logger.error("Error during device session: %s", e, exc_info=True)
         finally:
@@ -584,6 +591,15 @@ async def run(target_mac: str | None = None) -> None:
     scan_interval = config.get("scan_interval", 10)
     backend_enabled = check_config()
 
+    # Exponential backoff for repeated connect failures (parity with menu_app's
+    # _scan_loop). A connection that stays up past MIN_HEALTHY_DURATION resets the
+    # backoff; quick failures grow it up to BACKOFF_MAX so we don't hammer a
+    # flapping device.
+    BACKOFF_INITIAL = float(scan_interval)
+    BACKOFF_MAX = 300.0
+    MIN_HEALTHY_DURATION = 30.0
+    backoff = 0.0  # 0 = no backoff active
+
     logger.info("Local wearable client started — scanning for devices...")
 
     while True:
@@ -617,12 +633,30 @@ async def run(target_mac: str | None = None) -> None:
                 device["mac"],
                 device["type"],
             )
+            connected_at = asyncio.get_running_loop().time()
             await connect_and_stream(device, backend_enabled=backend_enabled)
-            logger.info("Device disconnected, resuming scan...")
+            elapsed = asyncio.get_running_loop().time() - connected_at
+            if elapsed >= MIN_HEALTHY_DURATION:
+                # Healthy session — reset backoff.
+                backoff = 0.0
+                logger.info("Device disconnected, resuming scan...")
+            else:
+                # Quick failure — grow backoff.
+                backoff = (
+                    BACKOFF_INITIAL
+                    if backoff == 0.0
+                    else min(backoff * 2, BACKOFF_MAX)
+                )
+                logger.info(
+                    "Session lasted %.1fs (< %.0fs), backoff %.0fs before next scan",
+                    elapsed,
+                    MIN_HEALTHY_DURATION,
+                    backoff,
+                )
         else:
             logger.debug("No devices found, retrying in %ds...", scan_interval)
 
-        await asyncio.sleep(scan_interval)
+        await asyncio.sleep(max(scan_interval, backoff))
 
 
 async def scan_and_print() -> None:

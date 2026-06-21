@@ -118,7 +118,8 @@
       ],
       "expo-image-picker",
       "./plugins/with-ats",
-      "expo-asset"
+      "expo-asset",
+      "expo-secure-store"
     ],
     "owner": "cupbearer5517",
     "extra": {

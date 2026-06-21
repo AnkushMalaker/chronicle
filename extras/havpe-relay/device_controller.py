@@ -41,7 +41,9 @@ class DeviceController:
                 port=port,
                 password="",
             )
-            await self._client.connect(login=True)
+            # on_stop fires when the API connection drops; flip _connected so the
+            # session's keepalive task notices and re-runs connect() (3D).
+            await self._client.connect(login=True, on_stop=self._on_api_disconnect)
 
             device_info = await self._client.device_info()
             logger.info(
@@ -113,6 +115,17 @@ class DeviceController:
             )
             self._connected = False
             return False
+
+    async def _on_api_disconnect(self, expected_disconnect: bool) -> None:
+        """aioesphomeapi on_stop callback: the API connection dropped.
+
+        Mark ourselves disconnected so the session's keepalive task re-runs the
+        full connect()/discovery. We don't reconnect here to avoid racing an
+        intentional disconnect() during teardown.
+        """
+        self._connected = False
+        if not expected_disconnect:
+            logger.warning("ESPHome API connection lost — will attempt reconnect")
 
     def _on_state_change(self, state) -> None:
         """Sync callback from aioesphomeapi. Enqueues button/dial events."""

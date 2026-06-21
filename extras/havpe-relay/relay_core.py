@@ -147,15 +147,21 @@ async def forward_tcp_to_ws(
         payload_length = header.get("payload_length", 0)
         payload: bytes | None = None
 
+        # Read the payload from the device first (device-side failure → end
+        # session), then forward header+payload to the WS. A WS-send failure
+        # (websockets.ConnectionClosed) is NOT caught here: it propagates so the
+        # caller can reconnect the backend WS without ending the device session.
         try:
-            async with ws_lock:
-                await ws.send(line_str)
-                if payload_length > 0:
-                    payload = await reader.readexactly(payload_length)
-                    await ws.send(payload)
+            if payload_length > 0:
+                payload = await reader.readexactly(payload_length)
         except asyncio.IncompleteReadError:
             logger.info("TCP→WS: device disconnected mid-payload — ending")
             break
+
+        async with ws_lock:
+            await ws.send(line_str)
+            if payload is not None:
+                await ws.send(payload)
 
         msg_type = header.get("type", "")
 
@@ -251,6 +257,33 @@ async def forward_esphome_events(
         logger.info("ESPHome→WS: %s %s", event_type, event)
 
 
+async def _maintain_esphome_api(
+    device: DeviceController,
+    device_ip: str,
+    *,
+    interval: float = 15.0,
+) -> None:
+    """Keep the ESPHome API connection alive for the life of a device session.
+
+    aioesphomeapi's ReconnectLogic only re-establishes the raw client; it does
+    not re-run our entity discovery + state subscription, so instead we poll and
+    re-run the full DeviceController.connect() whenever the API is down. This lets
+    button/dial/LED/speaker recover mid-session if the initial connect timed out
+    or the API later drops, without ever touching the audio path (which runs over
+    a separate TCP socket). Cancelled at session teardown.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        if device.connected:
+            continue
+        try:
+            ok = await asyncio.wait_for(device.connect(device_ip), timeout=5.0)
+        except asyncio.TimeoutError:
+            ok = False
+        if ok:
+            logger.info("ESPHome API (re)connected at %s mid-session", device_ip)
+
+
 async def run_device_session(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
@@ -289,86 +322,162 @@ async def run_device_session(
         writer.close()
         return
 
-    backend_uri = (
-        f"{config.backend_ws_url}/ws?codec=pcm&token={token}"
-        f"&device_name={config.device_name}"
-    )
-
     device = DeviceController()
     tasks: list[asyncio.Task] = []
 
+    # ESPHome API connect happens once and is kept alive across backend-WS
+    # reconnects (3D handles its own mid-session reconnect). device_ip is the TCP
+    # peer; esphome_ip may be overridden via config.
+    esphome_ip = config.esphome_device_ip or device_ip
     try:
-        async with websockets.connect(backend_uri, max_size=_WS_MAX_SIZE) as ws:
-            logger.info("Backend WS connected, starting bidirectional bridge")
+        api_ok = await asyncio.wait_for(device.connect(esphome_ip), timeout=5.0)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "ESPHome API connect to %s timed out (5s) — audio-only mode",
+            esphome_ip,
+        )
+        api_ok = False
+    if api_ok:
+        logger.info(
+            "ESPHome API connected at %s — button/dial/LED/speaker enabled",
+            esphome_ip,
+        )
+    else:
+        logger.info("ESPHome API unavailable at %s — audio-only mode", esphome_ip)
 
-            esphome_ip = config.esphome_device_ip or device_ip
-            try:
-                api_ok = await asyncio.wait_for(device.connect(esphome_ip), timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "ESPHome API connect to %s timed out (5s) — audio-only mode",
-                    esphome_ip,
-                )
-                api_ok = False
-            if api_ok:
-                logger.info(
-                    "ESPHome API connected at %s — button/dial/LED/speaker enabled",
-                    esphome_ip,
-                )
-            else:
-                logger.info(
-                    "ESPHome API unavailable at %s — audio-only mode", esphome_ip
-                )
+    # Optional periodic re-connect of the ESPHome API so button/dial/LED/speaker
+    # recover mid-session if the initial connect failed or drops (3D).
+    api_reconnect_task = asyncio.create_task(
+        _maintain_esphome_api(device, esphome_ip), name="esphome-api-keepalive"
+    )
 
-            ws_lock = asyncio.Lock()
-            tasks = [
-                asyncio.create_task(
-                    forward_tcp_to_ws(
-                        reader,
-                        ws,
-                        ws_lock,
-                        on_audio_chunk=on_audio_chunk,
-                        on_audio_event=on_audio_event,
-                        idle_timeout=config.device_idle_timeout,
-                    ),
-                    name="tcp→ws",
-                ),
-                asyncio.create_task(
-                    handle_backend_messages(ws, device),
-                    name="ws→device",
-                ),
-            ]
-            if api_ok:
-                tasks.append(
-                    asyncio.create_task(
-                        forward_esphome_events(device, ws, ws_lock),
-                        name="esphome→ws",
-                    )
-                )
+    # Backend-WS reconnect backoff. A WS blip must NOT end the device session:
+    # we keep reader/writer (and the ESPHome API) alive and re-dial the backend
+    # with capped exponential backoff, re-fetching the JWT each time. The loop
+    # ends only on true device disconnect (reader EOF / IncompleteReadError) or
+    # idle timeout — both surface as forward_tcp_to_ws returning normally.
+    _BACKOFF_INITIAL = 1.0
+    _BACKOFF_FACTOR = 2.0
+    _BACKOFF_MAX = 30.0
+    _MIN_HEALTHY_DURATION = 30.0
+    backoff = _BACKOFF_INITIAL
+    session_ended = False
 
-            done, pending = await asyncio.wait(
-                tasks, return_when=asyncio.FIRST_COMPLETED
+    try:
+        while not session_ended:
+            # Re-fetch the JWT on each re-dial (mid-session refresh for long
+            # sessions that can outlive the token lifetime).
+            token = await get_jwt_token(
+                config.auth_username, config.auth_password, config.backend_url
+            )
+            if not token:
+                logger.error("Auth failed on reconnect; retrying in %.0fs", backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * _BACKOFF_FACTOR, _BACKOFF_MAX)
+                continue
+
+            backend_uri = (
+                f"{config.backend_ws_url}/ws?codec=pcm&token={token}"
+                f"&device_name={config.device_name}"
             )
 
-            for t in done:
-                if t.exception():
-                    logger.error("Task %s failed: %s", t.get_name(), t.exception())
-                else:
-                    logger.info("Task %s finished", t.get_name())
+            connected_at = None
+            tasks = []
+            try:
+                async with websockets.connect(
+                    backend_uri, max_size=_WS_MAX_SIZE
+                ) as ws:
+                    connected_at = asyncio.get_running_loop().time()
+                    logger.info(
+                        "Backend WS connected, starting bidirectional bridge"
+                    )
 
-            for t in pending:
-                t.cancel()
+                    ws_lock = asyncio.Lock()
+                    tasks = [
+                        asyncio.create_task(
+                            forward_tcp_to_ws(
+                                reader,
+                                ws,
+                                ws_lock,
+                                on_audio_chunk=on_audio_chunk,
+                                on_audio_event=on_audio_event,
+                                idle_timeout=config.device_idle_timeout,
+                            ),
+                            name="tcp→ws",
+                        ),
+                        asyncio.create_task(
+                            handle_backend_messages(ws, device),
+                            name="ws→device",
+                        ),
+                    ]
+                    if device.connected:
+                        tasks.append(
+                            asyncio.create_task(
+                                forward_esphome_events(device, ws, ws_lock),
+                                name="esphome→ws",
+                            )
+                        )
+
+                    tcp_task = tasks[0]
+                    done, pending = await asyncio.wait(
+                        tasks, return_when=asyncio.FIRST_COMPLETED
+                    )
+
+                    for t in pending:
+                        t.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+
+                    # forward_tcp_to_ws finishing normally = device EOF / idle
+                    # timeout = true session end. Any task raising (e.g. WS
+                    # ConnectionClosed) = transient drop → reconnect.
+                    drop_exc: BaseException | None = None
+                    for t in done:
+                        exc = t.exception()
+                        if exc is not None:
+                            drop_exc = exc
+                            logger.warning(
+                                "Task %s ended with %s", t.get_name(), exc
+                            )
+                        else:
+                            logger.info("Task %s finished", t.get_name())
+
+                    if tcp_task in done and tcp_task.exception() is None:
+                        session_ended = True
+                        break
+
+                    if drop_exc is not None and not isinstance(
+                        drop_exc, websockets.WebSocketException
+                    ):
+                        # Unexpected error (not a WS drop) — surface it.
+                        raise drop_exc
+
+            except (websockets.WebSocketException, OSError) as e:
+                # Backend WS connect/stream failed — reconnect, keep device alive.
+                logger.warning(
+                    "Backend WS dropped (%s); reconnecting in %.0fs", e, backoff
+                )
+
+            # Reset backoff if the connection stayed healthy long enough.
+            if (
+                connected_at is not None
+                and asyncio.get_running_loop().time() - connected_at
+                >= _MIN_HEALTHY_DURATION
+            ):
+                backoff = _BACKOFF_INITIAL
+
+            if not session_ended:
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * _BACKOFF_FACTOR, _BACKOFF_MAX)
 
     except asyncio.IncompleteReadError:
         logger.info("Device disconnected (incomplete read)")
-    except websockets.ConnectionClosed as e:
-        logger.info("Backend WS closed: %s", e)
     except Exception as e:
         logger.error("Session error: %s", e)
     finally:
+        api_reconnect_task.cancel()
         for t in tasks:
             t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(api_reconnect_task, *tasks, return_exceptions=True)
         await device.disconnect()
         writer.close()
         if on_session_end:
