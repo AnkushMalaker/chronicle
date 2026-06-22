@@ -213,7 +213,7 @@ async def subscribe_to_device_downlink(websocket: WebSocket, client_id: str) -> 
                         # RAM-limited devices can't take a big base64 WAV frame;
                         # transcode + stream it as small Opus packets instead.
                         streamed = await stream_play_audio_as_opus(
-                            websocket, payload.get("data") or {}
+                            websocket, payload.get("data") or {}, client_id
                         )
                         if not streamed:
                             await websocket.send_json(payload)  # fallback
