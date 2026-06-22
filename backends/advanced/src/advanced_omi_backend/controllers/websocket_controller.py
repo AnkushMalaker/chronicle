@@ -28,6 +28,10 @@ from advanced_omi_backend.constants import (
     OMI_SAMPLE_WIDTH,
 )
 from advanced_omi_backend.redis_factory import create_async_redis
+from advanced_omi_backend.services.device_audio import (
+    is_opus_streaming_client,
+    stream_play_audio_as_opus,
+)
 from advanced_omi_backend.services.audio_stream.producer import (
     get_audio_stream_producer,
 )
@@ -174,12 +178,16 @@ async def subscribe_to_device_downlink(websocket: WebSocket, client_id: str) -> 
     channel = f"device:downlink:{client_id}"
     redis_client = None
     pubsub = None
+    opus_stream = is_opus_streaming_client(client_id)
 
     try:
         redis_client = create_async_redis(decode_responses=True)
         pubsub = redis_client.pubsub()
         await pubsub.subscribe(channel)
-        logger.info(f"🔊 Subscribed to device downlink channel: {channel}")
+        logger.info(
+            f"🔊 Subscribed to device downlink channel: {channel}"
+            f"{' (opus streaming)' if opus_stream else ''}"
+        )
 
         while True:
             try:
@@ -201,7 +209,16 @@ async def subscribe_to_device_downlink(websocket: WebSocket, client_id: str) -> 
                     continue
 
                 try:
-                    await websocket.send_json(payload)
+                    if opus_stream and msg_type == "play-audio":
+                        # RAM-limited devices can't take a big base64 WAV frame;
+                        # transcode + stream it as small Opus packets instead.
+                        streamed = await stream_play_audio_as_opus(
+                            websocket, payload.get("data") or {}
+                        )
+                        if not streamed:
+                            await websocket.send_json(payload)  # fallback
+                    else:
+                        await websocket.send_json(payload)
                     data = payload.get("data")
                     # Summarize so large fields (e.g. base64 TTS audio) don't flood logs.
                     summary = (
