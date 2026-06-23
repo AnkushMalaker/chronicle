@@ -10,7 +10,7 @@ import { useTheme, ThemeColors } from '@/theme';
 import { useBluetoothManager } from '@/hooks/useBluetoothManager';
 import { useDeviceScanning } from '@/hooks/useDeviceScanning';
 import { useDeviceConnection } from '@/hooks/useDeviceConnection';
-import { useAppSettings } from '@/hooks/useAppSettings';
+import { useSharedAppSettings } from '@/contexts/AppSettingsContext';
 import { useAutoReconnect } from '@/hooks/useAutoReconnect';
 import { useAudioStreamingOrchestrator } from '@/hooks/useAudioStreamingOrchestrator';
 import { useAudioListener } from '@/hooks/useAudioListener';
@@ -25,12 +25,23 @@ import BluetoothStatusBanner from '@/components/BluetoothStatusBanner';
 import ScanControls from '@/components/ScanControls';
 import DeviceListItem from '@/components/DeviceListItem';
 import DeviceDetails from '@/components/DeviceDetails';
-import AuthSection from '@/components/AuthSection';
-import BackendStatus from '@/components/BackendStatus';
 import PhoneAudioButton from '@/components/PhoneAudioButton';
 import PhoneAudioMicPicker from '@/components/PhoneAudioMicPicker';
-import SystemAdminControls from '@/components/SystemAdminControls';
-import NetworkOverview from '@/components/NetworkOverview';
+
+// True once the app is pointed at a real backend (not empty and not the
+// localhost placeholder a fresh install ships with). Mirrors the
+// "not configured" logic in BackendStatus.
+function isBackendConfigured(url: string | undefined): boolean {
+  const trimmed = (url || '').trim();
+  if (!trimmed) return false;
+  try {
+    const base = trimmed.replace('ws://', 'http://').replace('wss://', 'https://').split('/ws')[0];
+    const host = new URL(base).hostname;
+    return host !== 'localhost' && host !== '127.0.0.1' && host !== '::1';
+  } catch {
+    return true;
+  }
+}
 
 export default function App() {
   const { colors } = useTheme();
@@ -43,7 +54,7 @@ export default function App() {
   const { bleManager, bluetoothState, permissionGranted, requestBluetoothPermission, isPermissionsLoading } = useBluetoothManager();
 
   // Settings (must be before audioStreamer so the token refresh callback can reference it)
-  const settings = useAppSettings();
+  const settings = useSharedAppSettings();
 
   // Audio
   const audioStreamer = useAudioStreamer({
@@ -184,7 +195,10 @@ export default function App() {
   }, [scannedDevices, showOnlyOmi]);
 
   const bluetoothReady = bluetoothState === BluetoothState.PoweredOn && permissionGranted;
-  const backendConfigured = !!settings.webSocketUrl?.trim();
+  // A fresh install points at localhost (the phone itself), which can never be a
+  // real backend — treat that (and empty) as "not paired yet" so the setup card
+  // and health pill reflect reality.
+  const backendConfigured = isBackendConfigured(settings.webSocketUrl);
   const isOperational = bluetoothReady && backendConfigured;
   const healthLabel = isOperational ? 'System Operational' : 'Action Needed';
   const healthTone = isOperational ? colors.success : colors.warning;
@@ -211,22 +225,6 @@ export default function App() {
     );
   }
 
-  if (autoReconnect.isAttemptingAutoReconnect) {
-    return (
-      <SafeAreaView style={s.container}>
-        <View style={s.centeredMessageContainer}>
-          <ActivityIndicator size="large" color={colors.primary} />
-          <Text style={s.centeredMessageText}>
-            Reconnecting to {autoReconnect.lastKnownDeviceId?.substring(0, 10)}...
-          </Text>
-          <TouchableOpacity style={[s.button, { backgroundColor: colors.danger, marginTop: 20 }]} onPress={autoReconnect.handleCancelAutoReconnect}>
-            <Text style={s.buttonText}>Cancel</Text>
-          </TouchableOpacity>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
   return (
     <SafeAreaView style={s.container}>
       <View style={s.pulseBackground} />
@@ -238,11 +236,18 @@ export default function App() {
                 <Text style={s.title}>Chronicle</Text>
                 <Text style={s.versionText}>v{Constants.expoConfig?.version ?? ''}</Text>
               </View>
-              <Link href="/diagnostics" asChild>
-                <TouchableOpacity style={s.diagButton}>
-                  <Text style={s.diagButtonText}>Diagnostics</Text>
-                </TouchableOpacity>
-              </Link>
+              <View style={s.headerActions}>
+                <Link href="/diagnostics" asChild>
+                  <TouchableOpacity style={s.diagButton}>
+                    <Text style={s.diagButtonText}>Diagnostics</Text>
+                  </TouchableOpacity>
+                </Link>
+                <Link href="/settings" asChild>
+                  <TouchableOpacity style={s.gearButton} accessibilityLabel="Settings">
+                    <Text style={s.gearButtonText}>⚙</Text>
+                  </TouchableOpacity>
+                </Link>
+              </View>
             </View>
 
             <View style={[s.healthPill, { borderColor: healthTone }]}>
@@ -278,11 +283,21 @@ export default function App() {
 
           {activeTab === 'backend' && (
             <>
-              <Text style={s.sectionLabel}>System</Text>
-              <BackendStatus backendUrl={settings.webSocketUrl} onBackendUrlChange={settings.handleSetAndSaveWebSocketUrl} jwtToken={settings.jwtToken} />
-              <AuthSection backendUrl={settings.webSocketUrl} isAuthenticated={settings.isAuthenticated} currentUserEmail={settings.currentUserEmail} onAuthStatusChange={settings.handleAuthStatusChange} />
-              <SystemAdminControls backendUrl={settings.webSocketUrl} jwtToken={settings.jwtToken} />
-              <NetworkOverview backendUrl={settings.webSocketUrl} />
+              {(!backendConfigured || !settings.isAuthenticated) && (
+                <Link href="/settings" asChild>
+                  <TouchableOpacity style={s.setupCard}>
+                    <Text style={s.setupTitle}>
+                      {!backendConfigured ? 'Connect to your backend' : 'Sign in to your backend'}
+                    </Text>
+                    <Text style={s.setupSubtitle}>
+                      {!backendConfigured
+                        ? 'Scan the QR code from your Chronicle dashboard to pair this app.'
+                        : 'Log in to access advanced backend features.'}
+                    </Text>
+                    <Text style={s.setupCta}>Open Settings ⚙</Text>
+                  </TouchableOpacity>
+                </Link>
+              )}
 
               <Text style={s.sectionLabel}>Audio Deck</Text>
               <PhoneAudioButton
@@ -314,11 +329,13 @@ export default function App() {
               <BluetoothStatusBanner bluetoothState={bluetoothState} isPermissionsLoading={isPermissionsLoading} permissionGranted={permissionGranted} onRequestPermission={requestBluetoothPermission} />
               <ScanControls scanning={scanning} onScanPress={startScan} onStopScanPress={stopDeviceScanAction} canScan={canScan} />
 
-          {autoReconnect.isRetryingConnection && (
+          {(autoReconnect.isAttemptingAutoReconnect || autoReconnect.isRetryingConnection) && (
             <View style={s.retryBanner}>
               <ActivityIndicator size="small" color={colors.warning} />
               <Text style={s.retryBannerText}>
-                Reconnecting in {autoReconnect.retryBackoffSeconds}s... (attempt {autoReconnect.connectionRetryCount})
+                {autoReconnect.isRetryingConnection
+                  ? `Reconnecting in ${autoReconnect.retryBackoffSeconds}s... (attempt ${autoReconnect.connectionRetryCount})`
+                  : `Reconnecting to ${autoReconnect.lastKnownDeviceId?.substring(0, 10) ?? 'device'}...`}
               </Text>
               <TouchableOpacity
                 style={[s.button, { backgroundColor: colors.danger, paddingVertical: 6, paddingHorizontal: 10 }]}
@@ -501,6 +518,11 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     color: colors.textTertiary,
     marginLeft: 8,
   },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   diagButton: {
     paddingVertical: 6,
     paddingHorizontal: 12,
@@ -513,6 +535,45 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     fontSize: 12,
     color: colors.primary,
     fontWeight: '700',
+  },
+  gearButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    backgroundColor: colors.inputBackground,
+    borderWidth: 1,
+    borderColor: colors.inputBorder,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  gearButtonText: {
+    fontSize: 16,
+    color: colors.primary,
+    fontWeight: '700',
+  },
+  setupCard: {
+    marginBottom: 20,
+    padding: 16,
+    borderRadius: 12,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.primary,
+  },
+  setupTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  setupSubtitle: {
+    marginTop: 6,
+    fontSize: 13,
+    color: colors.textSecondary,
+  },
+  setupCta: {
+    marginTop: 12,
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.primary,
   },
   healthPill: {
     alignSelf: 'flex-start',
