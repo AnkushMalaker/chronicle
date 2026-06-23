@@ -803,6 +803,11 @@ function SpeakerConfiguration({ user }: { user: any }) {
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState('')
+  // Wake-word speaker gate: only let a wake word fire for selected speakers.
+  const [gateEnabled, setGateEnabled] = useState(false)
+  const [gateSpeakers, setGateSpeakers] = useState<any[]>([])
+  const [gateSaving, setGateSaving] = useState(false)
+  const [gateMessage, setGateMessage] = useState('')
 
   useEffect(() => {
     loadSpeakerData()
@@ -811,10 +816,11 @@ function SpeakerConfiguration({ user }: { user: any }) {
   const loadSpeakerData = async () => {
     setLoading(true)
     try {
-      const [configResponse, speakersResponse, statusResponse] = await Promise.allSettled([
+      const [configResponse, speakersResponse, statusResponse, gateResponse] = await Promise.allSettled([
         speakerApi.getSpeakerConfiguration(),
         speakerApi.getEnrolledSpeakers(),
-        user?.is_superuser ? speakerApi.getSpeakerServiceStatus() : Promise.resolve({ data: null })
+        user?.is_superuser ? speakerApi.getSpeakerServiceStatus() : Promise.resolve({ data: null }),
+        speakerApi.getWakewordSpeakerGate()
       ])
 
       if (configResponse.status === 'fulfilled') {
@@ -827,6 +833,11 @@ function SpeakerConfiguration({ user }: { user: any }) {
 
       if (statusResponse.status === 'fulfilled' && statusResponse.value.data) {
         setSpeakerServiceStatus(statusResponse.value.data)
+      }
+
+      if (gateResponse.status === 'fulfilled') {
+        setGateEnabled(!!gateResponse.value.data.enabled)
+        setGateSpeakers(gateResponse.value.data.speakers || [])
       }
 
     } catch (error) {
@@ -870,6 +881,34 @@ function SpeakerConfiguration({ user }: { user: any }) {
   const resetConfiguration = () => {
     setPrimarySpeakers([])
     setMessage('Configuration reset. Click Save to apply changes.')
+  }
+
+  const toggleGateSpeaker = (speaker: any) => {
+    const isSelected = gateSpeakers.some(gs => gs.speaker_id === speaker.id)
+    if (isSelected) {
+      setGateSpeakers(prev => prev.filter(gs => gs.speaker_id !== speaker.id))
+    } else {
+      setGateSpeakers(prev => [...prev, { speaker_id: speaker.id, name: speaker.name }])
+    }
+  }
+
+  const saveWakewordGate = async () => {
+    setGateSaving(true)
+    setGateMessage('')
+    try {
+      await speakerApi.updateWakewordSpeakerGate(gateEnabled, gateSpeakers)
+      setGateMessage(
+        gateEnabled
+          ? `Saved! Wake word will only fire for ${gateSpeakers.length} selected speaker(s).`
+          : 'Saved! Wake word speaker gate disabled.'
+      )
+      setTimeout(() => setGateMessage(''), 3000)
+    } catch (error: any) {
+      console.error('Error saving wake-word speaker gate:', error)
+      setGateMessage(`Failed to save: ${error.response?.data?.error || error.message}`)
+    } finally {
+      setGateSaving(false)
+    }
   }
 
   // Don't show the section if speaker service is explicitly disabled or unavailable
@@ -999,6 +1038,90 @@ function SpeakerConfiguration({ user }: { user: any }) {
             >
               {saving ? 'Saving...' : 'Save Configuration'}
             </button>
+          </div>
+
+          {/* Wake Word Speaker Gate */}
+          <div className="pt-6 mt-2 border-t border-gray-200 dark:border-gray-600 space-y-4">
+            <div>
+              <h4 className="text-base font-semibold text-gray-900 dark:text-gray-100">
+                Wake word access
+              </h4>
+              <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
+                When on, a wake word only triggers a command if one of the selected
+                people is recognized in what was said. Others saying the wake word are
+                ignored. If the speaker service is unavailable, the wake word still fires.
+              </p>
+            </div>
+
+            {/* Enable toggle */}
+            <label className="flex items-center cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={gateEnabled}
+                onChange={(e) => setGateEnabled(e.target.checked)}
+                className="h-4 w-4 text-blue-600 rounded border-gray-300"
+              />
+              <span className="ml-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+                Only fire for selected people
+              </span>
+            </label>
+
+            {/* Speaker allowlist (only when gating) */}
+            {gateEnabled && (
+              <>
+                {gateSpeakers.length === 0 && (
+                  <div className="flex items-start p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-md">
+                    <AlertCircle className="h-5 w-5 text-yellow-400 mr-2 flex-shrink-0" />
+                    <p className="text-sm text-yellow-700 dark:text-yellow-400">
+                      No one selected yet — the gate stays inert (all commands fire) until you pick at least one person.
+                    </p>
+                  </div>
+                )}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-h-60 overflow-y-auto">
+                  {enrolledSpeakers.map((speaker) => {
+                    const isSelected = gateSpeakers.some(gs => gs.speaker_id === speaker.id)
+                    return (
+                      <div
+                        key={speaker.id}
+                        className={`p-3 border rounded-lg cursor-pointer transition-colors ${
+                          isSelected
+                            ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20 text-blue-900 dark:text-blue-300'
+                            : 'border-gray-200 dark:border-gray-600 bg-gray-50 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:border-gray-300 dark:hover:border-gray-500'
+                        }`}
+                        onClick={() => toggleGateSpeaker(speaker)}
+                      >
+                        <div className="flex items-center">
+                          <div className={`w-4 h-4 mr-3 rounded border-2 flex items-center justify-center ${
+                            isSelected ? 'border-blue-500 bg-blue-500' : 'border-gray-300 dark:border-gray-500'
+                          }`}>
+                            {isSelected && <CheckCircle className="h-3 w-3 text-white" />}
+                          </div>
+                          <div className="font-medium">{speaker.name}</div>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </>
+            )}
+
+            {/* Save */}
+            <div className="flex items-center justify-between pt-2">
+              <div className="flex-1">
+                {gateMessage && (
+                  <p className={`text-sm ${gateMessage.includes('Failed') ? 'text-red-600' : 'text-green-600'}`}>
+                    {gateMessage}
+                  </p>
+                )}
+              </div>
+              <button
+                onClick={saveWakewordGate}
+                disabled={gateSaving}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {gateSaving ? 'Saving...' : 'Save Wake Word Access'}
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -9,6 +9,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 
 from advanced_omi_backend.auth import current_superuser
 from advanced_omi_backend.controllers import system_events_controller
@@ -17,6 +18,10 @@ from advanced_omi_backend.models.user import User
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/system-events", tags=["system-events"])
+
+
+class AckSelectedRequest(BaseModel):
+    event_ids: list[str]
 
 
 @router.get("")
@@ -64,6 +69,36 @@ async def ack_system_event(
 ):
     """Acknowledge a single event. Admin only."""
     return await system_events_controller.ack_system_event(event_id)
+
+
+@router.post("/ack-selected")
+async def ack_selected_system_events(
+    body: AckSelectedRequest,
+    current_user: User = Depends(current_superuser),
+):
+    """Acknowledge a specific set of events by id. Admin only."""
+    return await system_events_controller.ack_system_events_by_ids(body.event_ids)
+
+
+@router.post("/ack-all")
+async def ack_all_system_events(
+    severity: Optional[str] = None,
+    category: Optional[str] = None,
+    source: Optional[str] = None,
+    client_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    since_hours: Optional[float] = None,
+    current_user: User = Depends(current_superuser),
+):
+    """Acknowledge all unacked events matching the given filters. Admin only."""
+    return await system_events_controller.ack_system_events(
+        severity=severity,
+        category=category,
+        source=source,
+        client_id=client_id,
+        user_id=user_id,
+        since_hours=since_hours,
+    )
 
 
 @router.post("/clear")

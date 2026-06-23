@@ -29,10 +29,10 @@ logger = logging.getLogger(__name__)
 # Must match the device-side decoder (Audio.cpp: SPK_RATE).
 OPUS_RATE = 24000
 OPUS_CHANNELS = 1
-FRAME_MS = 60                                   # 60 ms = valid Opus frame at 24 kHz
-FRAME_SAMPLES = OPUS_RATE * FRAME_MS // 1000    # 1440 samples / frame
-PREROLL_FRAMES = 4                              # send a small burst before pacing
-_PACE_S = (FRAME_MS / 1000.0) * 0.95            # send slightly ahead of real time
+FRAME_MS = 60  # 60 ms = valid Opus frame at 24 kHz
+FRAME_SAMPLES = OPUS_RATE * FRAME_MS // 1000  # 1440 samples / frame
+PREROLL_FRAMES = 4  # send a small burst before pacing
+_PACE_S = (FRAME_MS / 1000.0) * 0.95  # send slightly ahead of real time
 
 
 # Newest-wins playback: at most one Opus clip streams to a given device at a time.
@@ -88,7 +88,9 @@ async def _send_opus_stream(websocket, packets: list[bytes]) -> None:
         for i, pkt in enumerate(packets):
             await websocket.send_bytes(pkt)
             if i >= PREROLL_FRAMES:
-                await asyncio.sleep(_PACE_S)  # pace ~real time so the device ring stays small
+                await asyncio.sleep(
+                    _PACE_S
+                )  # pace ~real time so the device ring stays small
         await websocket.send_json({"type": "speak-end", "data": {}})
     except asyncio.CancelledError:
         # Superseded — stop mid-stream. The newer clip's speak-start flushes the device.
@@ -146,3 +148,30 @@ async def stream_play_audio_as_opus(websocket, data: dict, client_id: str) -> bo
 
     task.add_done_callback(_cleanup)
     return True
+
+
+async def stop_play_audio(websocket, client_id: str) -> None:
+    """Hard-stop playback on a device (barge-in): cancel the in-flight Opus stream
+    and tell the device to flush.
+
+    Cancelling the server-side stream task is essential: the device sets its
+    "playing" flag on every Opus packet it decodes, so signalling the firmware
+    alone would not stop playback — the next paced packet would resume it. We
+    cancel + await the stream task first (no more packets), then send ``speak-stop``
+    so the device drops its buffered tail and powers the amp down. Best-effort:
+    a dead socket / no active clip is a no-op.
+    """
+    prev = _active_streams.pop(client_id, None)
+    if prev and not prev.done():
+        prev.cancel()
+        try:
+            await prev
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001 - prev may fail sending to a dead socket
+            pass
+    try:
+        await websocket.send_json({"type": "speak-stop", "data": {}})
+        logger.info(f"⏹ Sent speak-stop to {client_id}")
+    except Exception as e:  # noqa: BLE001 - device may be gone; nothing to stop
+        logger.debug(f"speak-stop to {client_id} failed (device likely gone): {e}")

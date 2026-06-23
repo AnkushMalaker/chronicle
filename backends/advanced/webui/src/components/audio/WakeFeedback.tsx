@@ -8,10 +8,10 @@ import { useWakeFeedback } from '../../hooks/useWakeFeedback'
  * Hermes reply once they come back from the backend.
  */
 export default function WakeFeedback() {
-  const { phase, lastCommand, lastReply } = useWakeFeedback()
+  const { phase, lastCommand, lastReply, lastBlocked } = useWakeFeedback()
 
-  // Nothing happening and no recent command — stay out of the way.
-  if (phase === 'idle' && !lastCommand) return null
+  // Nothing happening and no recent command/block — stay out of the way.
+  if (phase === 'idle' && !lastCommand && !lastBlocked) return null
 
   return (
     <div className="mt-4 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3 space-y-2">
@@ -64,6 +64,11 @@ export default function WakeFeedback() {
           <span className="text-gray-500 dark:text-gray-400">Hermes: </span>
           <span className="text-gray-700 dark:text-gray-300">{lastReply}</span>
         </div>
+      )}
+
+      {/* Speaker gate rejection */}
+      {lastBlocked && (
+        <div className="text-sm text-amber-600 dark:text-amber-400">{lastBlocked}</div>
       )}
     </div>
   )

@@ -32,6 +32,12 @@ logger = logging.getLogger("memory_service.agent")
 
 MAX_TOOL_ROUNDS = 16
 MAX_SEARCH_ROUNDS = 6
+# Bail out after this many consecutive rounds that raised a tool error but landed no
+# new note edit. That pattern is the model retrying a failing edit (e.g. a stale
+# edit_note anchor) and is almost never productive — aborting saves the rest of the
+# MAX_TOOL_ROUNDS budget (each round is a full LLM call). Belt-and-suspenders: with
+# memory jobs serialised on one worker, the concurrent-write cause can no longer occur.
+MAX_STALLED_ROUNDS = 3
 
 SEARCH_SYSTEM_PROMPT = """\
 You are a retrieval agent over a personal Obsidian-style markdown VAULT. Given a user's
@@ -172,6 +178,9 @@ class MemoryAgentResult:
     truncated: bool = (
         False  # loop ended on a truncated/empty LLM response, not a deliberate finish
     )
+    stalled: bool = (
+        False  # loop aborted after repeated no-progress error rounds (stuck retrying)
+    )
 
 
 async def _get_prompt(prompt_id: str, default: str, vault_summary: str = "") -> str:
@@ -235,6 +244,7 @@ class MemoryAgent:
         tool_calls = 0
         errors: List[str] = []
         truncation_retried = False
+        stalled_rounds = 0  # consecutive rounds that erred but landed no new edit
 
         for round_idx in range(MAX_TOOL_ROUNDS):
             response = await async_chat_with_tools(
@@ -295,6 +305,8 @@ class MemoryAgent:
                 )
 
             messages.append(msg.model_dump())
+            touched_before = len(self.tools.touched)
+            errors_before = len(errors)
             for tc in msg.tool_calls:
                 tool_calls += 1
                 name = tc.function.name
@@ -314,6 +326,36 @@ class MemoryAgent:
                 messages.append(
                     {"role": "tool", "tool_call_id": tc.id, "content": result}
                 )
+
+            # No-progress guard: a round that raised a tool error but edited no note is
+            # the model retrying a failing edit. Count consecutive such rounds and bail
+            # before exhausting the round budget on a doomed retry loop. A round that
+            # landed any edit (touched grew) resets the counter.
+            made_edit = len(self.tools.touched) > touched_before
+            had_error = len(errors) > errors_before
+            if had_error and not made_edit:
+                stalled_rounds += 1
+                if stalled_rounds >= MAX_STALLED_ROUNDS:
+                    logger.warning(
+                        "memory agent stalled for conv=%s: %d consecutive no-progress "
+                        "error rounds (rounds=%d, tools=%d, touched=%d) — aborting",
+                        conversation_id,
+                        stalled_rounds,
+                        round_idx + 1,
+                        tool_calls,
+                        len(self.tools.touched),
+                    )
+                    return MemoryAgentResult(
+                        conversation_id=conversation_id,
+                        rounds=round_idx + 1,
+                        touched=sorted(self.tools.touched),
+                        summary="(stopped: stalled retrying a failing edit)",
+                        tool_calls=tool_calls,
+                        errors=errors,
+                        stalled=True,
+                    )
+            else:
+                stalled_rounds = 0
 
         logger.warning(
             "memory agent hit MAX_TOOL_ROUNDS for conv=%s (touched=%d)",

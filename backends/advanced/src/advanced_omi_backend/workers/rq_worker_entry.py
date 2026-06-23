@@ -55,8 +55,18 @@ def main():
     # Create Redis connection
     redis_conn = create_sync_redis()
 
-    # Create and start worker
-    worker = Worker(queue_names, connection=redis_conn, log_job_description=True)
+    # Create and start worker.
+    # maintenance_interval (default 600s) is how often the worker reaps abandoned jobs
+    # (worker-died) from StartedJobRegistry → fires their on_failure callback + retries
+    # / promotes dependents. Lowered to 120s so the event-driven recovery of a killed
+    # job kicks in within ~2 min instead of ~10 (any process viewing the Jobs page also
+    # triggers a reap immediately).
+    worker = Worker(
+        queue_names,
+        connection=redis_conn,
+        log_job_description=True,
+        maintenance_interval=120,
+    )
 
     logger.info("✅ RQ worker ready")
 

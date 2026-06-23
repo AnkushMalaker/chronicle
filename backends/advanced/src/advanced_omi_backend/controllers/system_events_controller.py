@@ -145,6 +145,60 @@ async def ack_system_event(event_id: str) -> dict[str, Any]:
     return {"success": True, "id": event_id}
 
 
+async def ack_system_events_by_ids(event_ids: list[str]) -> dict[str, Any]:
+    """Acknowledge a specific set of events by id (skips any already acked)."""
+    from advanced_omi_backend.models.system_event import SystemEvent
+
+    oids = []
+    for eid in event_ids:
+        try:
+            oids.append(PydanticObjectId(eid))
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"Invalid event id: {eid}")
+    if not oids:
+        return {"success": True, "acked": 0}
+
+    result = await SystemEvent.find(
+        {"_id": {"$in": oids}, "acked": False},
+    ).update({"$set": {"acked": True}})
+    return {"success": True, "acked": getattr(result, "modified_count", None)}
+
+
+async def ack_system_events(
+    *,
+    severity: Optional[str] = None,
+    category: Optional[str] = None,
+    source: Optional[str] = None,
+    client_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    since_hours: Optional[float] = None,
+) -> dict[str, Any]:
+    """Acknowledge all currently-unacked events matching the given filters.
+
+    Filters mirror :func:`list_system_events` so the UI can acknowledge exactly the
+    set the operator is currently looking at. Always scoped to ``acked == False``.
+    """
+    from advanced_omi_backend.models.system_event import SystemEvent
+
+    conditions = [SystemEvent.acked == False]  # noqa: E712
+    if severity:
+        conditions.append(SystemEvent.severity == severity)
+    if category:
+        conditions.append(SystemEvent.category == category)
+    if source:
+        conditions.append(SystemEvent.source == source)
+    if client_id:
+        conditions.append(SystemEvent.client_id == client_id)
+    if user_id:
+        conditions.append(SystemEvent.user_id == user_id)
+    if since_hours:
+        since = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+        conditions.append(SystemEvent.created_at >= since)
+
+    result = await SystemEvent.find(*conditions).update({"$set": {"acked": True}})
+    return {"success": True, "acked": getattr(result, "modified_count", None)}
+
+
 async def clear_system_events(*, acked_only: bool = False) -> dict[str, Any]:
     from advanced_omi_backend.models.system_event import SystemEvent
 

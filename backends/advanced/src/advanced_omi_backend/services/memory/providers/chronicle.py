@@ -94,11 +94,15 @@ class MemoryService(MemoryServiceBase):
         existing_before = self._vault_note_set(user_root)
         agent = MemoryAgent(user_root)
         result = await agent.run(transcript, source_id)
-        if result.truncated and not result.touched:
+        if (result.truncated or result.stalled) and not result.touched:
+            reason = (
+                "truncated LLM response" if result.truncated else "stalled retry loop"
+            )
             memory_logger.error(
-                "❌ add_memory(agent) %s: aborted on truncated LLM response after "
-                "%d rounds (%d tool calls) — nothing recorded (%.2fs)",
+                "❌ add_memory(agent) %s: aborted on %s after %d rounds (%d tool "
+                "calls) — nothing recorded (%.2fs)",
                 source_id,
+                reason,
                 result.rounds,
                 result.tool_calls,
                 time.perf_counter() - t0,

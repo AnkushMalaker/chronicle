@@ -19,6 +19,7 @@ from typing import Any, Dict, List
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
     memory_queue,
+    post_conv_enqueue_kwargs,
 )
 from advanced_omi_backend.models.job import JobPriority, async_job
 from advanced_omi_backend.observability.otel_setup import (
@@ -559,18 +560,24 @@ def enqueue_memory_processing(
         JobPriority.LOW: 900,  # 15 minutes
     }
 
+    # job_id uses [:12] to match the deterministic id the post-conversation chain and
+    # _clear_post_conversation_chain use — so a standalone re-enqueue collides with
+    # (replaces) the chain's memory job rather than creating an orphan twin.
     job = memory_queue.enqueue(
         process_memory_job,
         conversation_id,  # Only argument needed - job fetches conversation data internally
         job_timeout=timeout_mapping.get(priority, 1800),
         result_ttl=JOB_RESULT_TTL,
-        job_id=f"memory_{conversation_id[:8]}",
+        job_id=f"memory_{conversation_id[:12]}",
         description=f"Process memory for conversation {conversation_id[:8]}",
-        meta={
-            "conversation_id": conversation_id,
-            "cause": cause.value,
-            "strategy": strategy.value,
-        },
+        **post_conv_enqueue_kwargs(
+            "memory",
+            {
+                "conversation_id": conversation_id,
+                "cause": cause.value,
+                "strategy": strategy.value,
+            },
+        ),
     )
 
     logger.info(

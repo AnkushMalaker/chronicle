@@ -70,8 +70,8 @@ export default function ConversationVersionHeader({ conversationId, versionInfo,
   // Show multiple version info with reprocess option and version selector
   return (
     <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-3 mb-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center space-x-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-4">
           <div className="text-sm text-gray-700">
             <span className="font-medium">{versionInfo.transcript_count}</span> transcript versions
             {error && <div className="text-red-600 text-xs mt-1">{error}</div>}

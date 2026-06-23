@@ -1051,6 +1051,53 @@ async def transcription_fallback_check_job(
     }
 
 
+async def _transcription_failure_context(
+    store: "SessionStore",
+    aggregator: "TranscriptionResultsAggregator",
+    session_id: str,
+    client_id: str,
+) -> str:
+    """Gather actionable diagnostics for a transcription-failure system event.
+
+    The bare failure logs (e.g. "no transcription activity") are symptoms; the real
+    cause usually lives in the streaming consumer's ``transcription_error`` flag (the
+    provider exception), or — when the provider connected but produced nothing — in
+    the configured provider name and chunk count. Returning all of it as a multi-line
+    block means the System Errors page row carries the cause, not just the symptom.
+    """
+    lines: list[str] = []
+
+    # The real upstream exception, if the streaming consumer recorded one.
+    try:
+        upstream = await store.get_transcription_error(session_id)
+    except Exception:  # noqa: BLE001 — diagnostics must never raise
+        upstream = None
+    if upstream:
+        lines.append(f"   Provider error: {upstream}")
+
+    # Which streaming provider was configured (so it's clear what to check).
+    try:
+        from advanced_omi_backend.model_registry import get_models_registry
+
+        registry = get_models_registry()
+        stream_model = registry.get_default("stt_stream") if registry else None
+        provider_name = stream_model.name if stream_model else "none configured"
+    except Exception:  # noqa: BLE001
+        provider_name = "unknown"
+    lines.append(f"   Streaming provider: {provider_name}")
+
+    # Whether any audio was actually transcribed.
+    try:
+        combined = await aggregator.get_combined_results(session_id)
+        chunk_count = combined.get("chunk_count", 0)
+    except Exception:  # noqa: BLE001
+        chunk_count = "unknown"
+    lines.append(f"   Transcribed chunks: {chunk_count}")
+
+    lines.append(f"   session={session_id} client={client_id}")
+    return "\n".join(lines)
+
+
 @async_job(redis=True, beanie=True)
 async def stream_speech_detection_job(
     session_id: str, user_id: str, client_id: str, *, redis_client=None
@@ -1145,9 +1192,13 @@ async def stream_speech_detection_job(
         if expects_live_results and elapsed > 60 and not session_closed_at:
             watchdog_combined = await aggregator.get_combined_results(session_id)
             if not watchdog_combined.get("chunk_count", 0):
+                diag = await _transcription_failure_context(
+                    store, aggregator, session_id, client_id
+                )
                 logger.error(
                     f"❌ No transcription activity after {elapsed:.0f}s — "
-                    f"check provider config (API key, connectivity, consumer running)"
+                    f"check provider config (API key, connectivity, consumer running)\n"
+                    f"{diag}"
                 )
                 break
 
@@ -1212,11 +1263,14 @@ async def stream_speech_detection_job(
                     and not combined.get("chunk_count", 0)
                 ):
                     # 5+ seconds with no transcription activity at all - likely API key issue
-                    logger.error(
-                        f"❌ No transcription activity after {grace_elapsed:.1f}s - possible API key or connectivity issue"
+                    diag = await _transcription_failure_context(
+                        store, aggregator, session_id, client_id
                     )
                     logger.error(
-                        f"❌ Session failed - check transcription service configuration"
+                        f"❌ Session failed - check transcription service configuration\n"
+                        f"   No transcription activity after {grace_elapsed:.1f}s "
+                        f"(possible API key or connectivity issue)\n"
+                        f"{diag}"
                     )
                     break
 
@@ -1419,10 +1473,14 @@ async def stream_speech_detection_job(
 
     # Distinguish between transcription failures (error) vs legitimate no speech (info)
     if reason == "No transcription received":
+        diag = await _transcription_failure_context(
+            store, aggregator, session_id, client_id
+        )
         logger.error(
             f"❌ Session failed - transcription service did not respond\n"
             f"   Reason: {reason}\n"
-            f"   Runtime: {time.time() - start_time:.1f}s"
+            f"   Runtime: {time.time() - start_time:.1f}s\n"
+            f"{diag}"
         )
     else:
         logger.info(

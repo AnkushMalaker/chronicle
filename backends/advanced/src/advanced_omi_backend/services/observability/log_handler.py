@@ -71,12 +71,17 @@ class SystemEventLogHandler(logging.Handler):
                 except Exception:
                     tb = None
 
+            # Keep the full message in `detail` whenever it would be lost in the
+            # row's (single-line, truncated) title — i.e. when it's long or
+            # multi-line — so the expanded view shows the complete, formatted text.
+            detail = message if (len(message) > 200 or "\n" in message) else None
+
             record_event_sync(
                 severity=severity,
                 category=_category_for(name),
                 source=name,
                 title=message[:200],
-                detail=message if len(message) > 200 else None,
+                detail=detail,
                 traceback=tb,
                 metadata={
                     "level": record.levelname,

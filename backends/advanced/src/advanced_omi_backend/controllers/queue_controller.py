@@ -14,9 +14,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from rq import Queue, Worker
+from rq import Queue, Retry, Worker
 from rq.exceptions import NoSuchJobError
-from rq.job import Job, JobStatus
+from rq.job import Dependency, Job, JobStatus
 from rq.registry import DeferredJobRegistry, ScheduledJobRegistry
 
 from advanced_omi_backend.config_loader import get_service_config
@@ -28,6 +28,56 @@ logger = logging.getLogger(__name__)
 
 # Shared sync Redis connection for RQ (decode_responses=False, as RQ requires).
 redis_conn = create_sync_redis()
+
+
+def _as_allow_failure_dependency(depends_on):
+    """Wrap a job (or list of jobs) in a ``Dependency`` with ``allow_failure=True``.
+
+    A plain ``depends_on`` leaves a dependent ``deferred`` forever when an upstream
+    job ends up FAILED (e.g. abandoned + retries exhausted). ``allow_failure=True``
+    makes RQ *promote* the dependent on upstream failure instead — so the chain
+    always drains to the finalizer, which reconciles the real status. Returns
+    ``None`` for an empty/all-None input (enqueue with no dependency).
+    """
+    if depends_on is None:
+        return None
+    if isinstance(depends_on, Dependency):
+        return depends_on
+    jobs = list(depends_on) if isinstance(depends_on, (list, tuple)) else [depends_on]
+    jobs = [j for j in jobs if j is not None]
+    if not jobs:
+        return None
+    return Dependency(jobs=jobs, allow_failure=True)
+
+
+def post_conv_enqueue_kwargs(stage: str, meta: dict, depends_on=None) -> dict:
+    """Shared enqueue kwargs for every post-conversation chain job.
+
+    Centralises the three things each chain job needs so the three enqueue sites
+    (this module, conversation_controller reprocess, enqueue_memory_processing)
+    can't drift:
+
+    - ``retry``: bounded immediate re-enqueue, so a transient crash / worker death
+      doesn't permanently strand the job (``interval=0`` needs no rq-scheduler).
+    - ``on_failure``: emits a visible ``system_event`` + diagnostic breadcrumb when
+      the job fails or is abandoned (instead of failing silently).
+    - ``meta.failure_stage``: tells that callback which stage this job is.
+    - ``depends_on`` wrapped with ``allow_failure=True`` (see helper above).
+    """
+    # Lazy import: job_callbacks lives in the `workers` package, whose __init__
+    # imports back from this module — importing it at module top would create a
+    # circular import. By call time (enqueue) all modules are fully loaded.
+    from advanced_omi_backend.workers.job_callbacks import on_chain_job_failure
+
+    kwargs: dict = {
+        "retry": Retry(max=2, interval=0),
+        "on_failure": on_chain_job_failure,
+        "meta": {**meta, "failure_stage": stage},
+    }
+    dep = _as_allow_failure_dependency(depends_on)
+    if dep is not None:
+        kwargs["depends_on"] = dep
+    return kwargs
 
 
 def get_job_status_from_rq(job: Job) -> str:
@@ -717,10 +767,11 @@ def start_post_conversation_jobs(
             version_id,
             job_timeout=1200,  # 20 minutes
             result_ttl=JOB_RESULT_TTL,
-            depends_on=speaker_dependency,
             job_id=speaker_job_id,
             description=f"Speaker recognition for conversation {conversation_id[:8]}",
-            meta=job_meta,
+            **post_conv_enqueue_kwargs(
+                "speaker", job_meta, depends_on=speaker_dependency
+            ),
         )
         speaker_dependency = speaker_job  # Chain for next jobs
         if depends_on_job:
@@ -762,10 +813,12 @@ def start_post_conversation_jobs(
             conversation_id,
             job_timeout=900,  # 15 minutes
             result_ttl=JOB_RESULT_TTL,
-            depends_on=speaker_dependency,  # Either speaker_job or upstream dependency
             job_id=memory_job_id,
             description=f"Memory extraction for conversation {conversation_id[:8]}",
-            meta=memory_meta,
+            # Either speaker_job or upstream dependency
+            **post_conv_enqueue_kwargs(
+                "memory", memory_meta, depends_on=speaker_dependency
+            ),
         )
         if speaker_job:
             logger.info(
@@ -798,10 +851,11 @@ def start_post_conversation_jobs(
         conversation_id,
         job_timeout=300,  # 5 minutes
         result_ttl=JOB_RESULT_TTL,
-        depends_on=title_dependency,
         job_id=title_job_id,
         description=f"Generate title and summary for conversation {conversation_id[:8]}",
-        meta=job_meta,
+        **post_conv_enqueue_kwargs(
+            "title_summary", job_meta, depends_on=title_dependency
+        ),
     )
     if memory_job:
         logger.info(
@@ -844,12 +898,13 @@ def start_post_conversation_jobs(
         end_reason,  # Use the end_reason parameter (defaults to 'file_upload' for backward compatibility)
         job_timeout=120,  # 2 minutes
         result_ttl=JOB_RESULT_TTL,
-        depends_on=(
-            event_dependencies if event_dependencies else None
-        ),  # Wait for jobs that were enqueued
         job_id=event_job_id,
         description=f"Dispatch conversation complete event ({end_reason}) for {conversation_id[:8]}",
-        meta=job_meta,
+        # Wait for whichever upstream jobs were enqueued; allow_failure so this
+        # finalizer still runs (and reconciles status) even if one failed.
+        **post_conv_enqueue_kwargs(
+            "event_complete", job_meta, depends_on=event_dependencies or None
+        ),
     )
 
     # Log event dispatch dependencies

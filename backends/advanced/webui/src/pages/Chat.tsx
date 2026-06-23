@@ -38,6 +38,8 @@ export default function Chat() {
   const [showMemoryPanel, setShowMemoryPanel] = useState(false)
   const [extractionMessage, setExtractionMessage] = useState('')
   const [memoryLimit, setMemoryLimit] = useState(5)
+  // Sessions sidebar is a slide-over on mobile (static from md up)
+  const [showSessions, setShowSessions] = useState(false)
 
   // Query for messages of current session
   const { data: queryMessages } = useChatMessages(currentSessionId)
@@ -250,9 +252,19 @@ export default function Chat() {
   }
 
   return (
-    <div className="flex h-full max-h-screen bg-gray-50 dark:bg-gray-900">
-      {/* Sidebar */}
-      <div className="w-80 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 flex flex-col max-h-screen">
+    <div className="flex h-full max-h-screen bg-gray-50 dark:bg-gray-900 relative">
+      {/* Backdrop for the mobile sessions slide-over */}
+      {showSessions && (
+        <div
+          className="md:hidden fixed inset-0 bg-black/50 z-30"
+          onClick={() => setShowSessions(false)}
+          aria-hidden="true"
+        />
+      )}
+      {/* Sidebar — slide-over on mobile, static from md up */}
+      <div className={`${
+        showSessions ? 'flex' : 'hidden'
+      } md:flex fixed md:static inset-y-0 left-0 z-40 w-80 max-w-[85%] bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 flex-col max-h-screen`}>
         {/* Header */}
         <div className="p-4 border-b border-gray-200 dark:border-gray-700">
           <div className="flex items-center justify-between mb-4">
@@ -295,7 +307,7 @@ export default function Chat() {
                       ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-900 dark:text-blue-100'
                       : 'hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300'
                   }`}
-                  onClick={() => setCurrentSessionId(session.session_id)}
+                  onClick={() => { setCurrentSessionId(session.session_id); setShowSessions(false) }}
                 >
                   <div className="flex items-center justify-between">
                     <div className="flex-1 min-w-0">
@@ -328,10 +340,20 @@ export default function Chat() {
           <>
             {/* Chat Header */}
             <div className="p-4 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
-              <div className="flex items-center justify-between">
-                <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-                  {currentSession.title}
-                </h2>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  {/* Open sessions list on mobile */}
+                  <button
+                    onClick={() => setShowSessions(true)}
+                    className="md:hidden p-2 -ml-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 flex-shrink-0"
+                    aria-label="Show chat sessions"
+                  >
+                    <MessageCircle className="h-5 w-5" />
+                  </button>
+                  <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 truncate">
+                    {currentSession.title}
+                  </h2>
+                </div>
                 <div className="flex items-center space-x-2">
                   {/* Remember from Chat Button */}
                   <button
@@ -531,7 +553,7 @@ export default function Chat() {
 
       {/* Memory Panel (if enabled and has context) */}
       {showMemoryPanel && memoryContext && memoryContext.memory_count > 0 && (
-        <div className="w-80 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 p-4">
+        <div className="w-full max-w-[85%] sm:max-w-none sm:w-80 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 p-4 absolute sm:static inset-y-0 right-0 z-40 sm:z-auto overflow-y-auto">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 flex items-center space-x-2">
               <Brain className="h-5 w-5 text-blue-600" />

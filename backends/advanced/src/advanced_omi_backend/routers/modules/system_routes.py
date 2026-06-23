@@ -33,6 +33,17 @@ class MemoryConfigRequest(BaseModel):
     config_yaml: str
 
 
+class WakewordSpeakerGateRequest(BaseModel):
+    """Request model for the wake-word speaker gate configuration.
+
+    ``speakers`` are the allowed enrolled speakers ({speaker_id, name}); the gate
+    only fires for these when ``enabled``.
+    """
+
+    enabled: bool
+    speakers: list[dict] = []
+
+
 @router.get("/system/network")
 async def get_network_discovery(
     request: Request, current_user: User = Depends(current_superuser)
@@ -151,6 +162,25 @@ async def update_speaker_configuration(
     """Update current user's primary speakers configuration."""
     return await system_controller.update_speaker_configuration(
         current_user, primary_speakers
+    )
+
+
+@router.get("/wakeword-speaker-gate")
+async def get_wakeword_speaker_gate(
+    current_user: User = Depends(current_active_user),
+):
+    """Get current user's wake-word speaker gate configuration."""
+    return await system_controller.get_wakeword_speaker_gate(current_user)
+
+
+@router.post("/wakeword-speaker-gate")
+async def update_wakeword_speaker_gate(
+    payload: WakewordSpeakerGateRequest,
+    current_user: User = Depends(current_active_user),
+):
+    """Update current user's wake-word speaker gate configuration."""
+    return await system_controller.update_wakeword_speaker_gate(
+        current_user, payload.enabled, payload.speakers
     )
 
 

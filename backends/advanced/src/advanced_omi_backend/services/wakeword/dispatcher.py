@@ -21,6 +21,7 @@ from redis import exceptions as redis_exceptions
 
 from advanced_omi_backend.config import get_wakeword_command_source
 from advanced_omi_backend.heartbeat import beat
+from advanced_omi_backend.models.user import get_user_by_id
 from advanced_omi_backend.plugins.router import (
     PluginRouter,
     extract_command_around_keyword,
@@ -34,6 +35,7 @@ from advanced_omi_backend.services.wakeword.executor import (
     get_current_conversation_id,
     publish_sse,
 )
+from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 
 logger = logging.getLogger(__name__)
 
@@ -93,10 +95,21 @@ class WakeWordDispatcher:
         self.plugin_router = plugin_router
         self.consumer_name = "wakeword-dispatch-worker"
         self.running = False
+        # Lazily-built speaker-recognition client, used only by the per-user
+        # speaker gate (see _check_speaker_gate). Reused across detections.
+        self._speaker_client: SpeakerRecognitionClient | None = None
+        # In-flight per-detection handlers. Each detection is processed in its own
+        # background task so a slow plugin (the Hermes agent can take tens of
+        # seconds) never blocks the loop from reading + dispatching the NEXT wake
+        # command (e.g. a quick Home Assistant command). Tracked so they aren't GC'd
+        # and can be cancelled on shutdown.
+        self._tasks: set[asyncio.Task] = set()
 
     async def stop(self) -> None:
-        """Signal the dispatcher loop to stop."""
+        """Signal the dispatcher loop to stop and cancel in-flight handlers."""
         self.running = False
+        for task in list(self._tasks):
+            task.cancel()
 
     async def _setup_group(self) -> None:
         try:
@@ -140,17 +153,29 @@ class WakeWordDispatcher:
                         if isinstance(message_id, bytes)
                         else message_id
                     )
-                    try:
-                        await self._handle_message(fields)
-                    except Exception as e:  # noqa: BLE001 - never let one bad msg stall
-                        logger.error(
-                            f"Failed to dispatch wake-word detection {msg_id}: {e}",
-                            exc_info=True,
-                        )
-                    finally:
-                        await self.redis_client.xack(
-                            DETECTIONS_STREAM, GROUP_NAME, msg_id
-                        )
+                    # Process each detection concurrently in its own task: a command
+                    # already sent to a slow plugin (Hermes) runs in the background
+                    # while we keep listening, so the next command isn't blocked.
+                    task = asyncio.create_task(
+                        self._handle_message_safe(fields, msg_id)
+                    )
+                    self._tasks.add(task)
+                    task.add_done_callback(self._tasks.discard)
+                    # ACK immediately: dispatch is fire-and-forget (the old serial
+                    # path also ACKed unconditionally, so delivery is unchanged).
+                    await self.redis_client.xack(DETECTIONS_STREAM, GROUP_NAME, msg_id)
+
+    async def _handle_message_safe(self, fields: dict, msg_id: str) -> None:
+        """Run _handle_message, swallowing errors (nothing awaits this task)."""
+        try:
+            await self._handle_message(fields)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 - never let one bad detection crash
+            logger.error(
+                f"Failed to dispatch wake-word detection {msg_id}: {e}",
+                exc_info=True,
+            )
 
     async def _handle_message(self, fields: dict) -> None:
         raw = fields.get(b"event") or fields.get("event")
@@ -184,6 +209,38 @@ class WakeWordDispatcher:
         # diarizing ASR (e.g. VibeVoice) hallucinates phantom commands on near-
         # silent audio, which would then be acted on as a real command.
         has_speech = bool(payload.get("has_speech", True))
+        client_id = payload.get("client_id", session_id)
+
+        # Speaker presence gate (per-user allowlist). When the user has enabled the
+        # gate, an acoustic wake word only dispatches a command if one of their
+        # selected enrolled speakers is recognized in the captured turn. Run BEFORE
+        # ASR so a blocked command also skips transcription. Fail-open on a
+        # speaker-service error so an outage never bricks the wake word.
+        gate = await self._check_speaker_gate(
+            user_id=user_id,
+            audio_b64=audio_b64,
+            has_speech=has_speech,
+            sample_rate=sample_rate,
+        )
+        if not gate["allowed"]:
+            logger.info(
+                f"🚫 wake-word command for '{session_id}' blocked by speaker gate "
+                f"(reason={gate['reason']}, identified={gate.get('identified')})"
+            )
+            await publish_sse(
+                self.redis_client,
+                user_id,
+                "wake.blocked",
+                {
+                    "client_id": client_id,
+                    "session_id": session_id,
+                    "reason": gate["reason"],
+                    "wakeword": payload.get("wakeword"),
+                    "identified": gate.get("identified"),
+                },
+            )
+            return
+
         command = ""
         # Pre-dispatch stage durations, threaded into the executor's latency line:
         # the captured command-audio length (the wakeword-service arm→end-of-turn
@@ -227,7 +284,6 @@ class WakeWordDispatcher:
         conversation_id = await get_current_conversation_id(
             self.redis_client, session_id
         )
-        client_id = payload.get("client_id", session_id)
 
         # Funnel through the shared executor so the acoustic wake path and the
         # streaming follow-up path dispatch, reply, emit SSE, and arm the
@@ -250,6 +306,90 @@ class WakeWordDispatcher:
             capture_secs=capture_secs,
             asr_ms=asr_ms,
         )
+
+    async def _check_speaker_gate(
+        self,
+        *,
+        user_id: str,
+        audio_b64: str,
+        has_speech: bool,
+        sample_rate: int,
+    ) -> dict:
+        """Decide whether this captured turn may dispatch, per the user's gate.
+
+        Returns ``{"allowed": bool, "reason": str, "identified": str | None}``.
+        When the user has not enabled the gate (or selected no speakers) it is
+        inert and always allows. Otherwise the captured turn is run through the
+        speaker-recognition ``/identify`` endpoint and allowed only if the
+        identified speaker is in the user's allowlist. A near-silent capture can't
+        be verified (blocked); a speaker-service error fails OPEN (allowed).
+        """
+        try:
+            user = await get_user_by_id(user_id)
+        except Exception as e:  # noqa: BLE001 - never block dispatch on a lookup blip
+            logger.warning(f"speaker gate: user lookup failed for {user_id}: {e}")
+            return {"allowed": True, "reason": "user_lookup_failed", "identified": None}
+
+        if user is None or not getattr(user, "wakeword_gate_enabled", False):
+            return {"allowed": True, "reason": "gate_off", "identified": None}
+
+        allowed = user.wakeword_allowed_speakers or []
+        if not allowed:
+            # Enabled but nobody selected — treat as misconfigured and stay inert
+            # rather than silently blocking every command.
+            logger.warning(
+                f"speaker gate enabled for user {user_id} but no speakers selected "
+                f"— allowing (gate inert)"
+            )
+            return {
+                "allowed": True,
+                "reason": "no_speakers_selected",
+                "identified": None,
+            }
+
+        if not audio_b64 or not has_speech:
+            # Nothing to verify against — a near-silent / empty arm can't be
+            # attributed to an allowed speaker, so the gate blocks it.
+            return {
+                "allowed": False,
+                "reason": "unverifiable_silence",
+                "identified": None,
+            }
+
+        allowed_ids = {str(s.get("speaker_id")) for s in allowed if s.get("speaker_id")}
+        allowed_names = {
+            str(s.get("name")).strip().lower() for s in allowed if s.get("name")
+        }
+
+        if self._speaker_client is None:
+            self._speaker_client = SpeakerRecognitionClient()
+        if not self._speaker_client.enabled:
+            # No speaker service configured — fail open so the gate never bricks
+            # the wake word on a misconfigured deployment.
+            logger.warning("speaker gate: speaker service not configured — allowing")
+            return {
+                "allowed": True,
+                "reason": "service_unavailable",
+                "identified": None,
+            }
+
+        wav = _pcm_to_wav(base64.b64decode(audio_b64), sample_rate)
+        result = await self._speaker_client.identify_segment(wav, user_id=user_id)
+
+        if result.get("status") == "error":
+            logger.warning("speaker gate: /identify errored — allowing (fail-open)")
+            return {"allowed": True, "reason": "service_error", "identified": None}
+
+        identified_id = str(result.get("speaker_id") or "")
+        identified_name = str(result.get("speaker_name") or "").strip().lower()
+        is_allowed = bool(result.get("found")) and (
+            identified_id in allowed_ids or identified_name in allowed_names
+        )
+        return {
+            "allowed": is_allowed,
+            "reason": "speaker_recognized" if is_allowed else "speaker_not_allowed",
+            "identified": result.get("speaker_name"),
+        }
 
     async def _resolve_command(
         self,

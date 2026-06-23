@@ -473,7 +473,7 @@ When creating plugins, generate complete plugin.py code based on the user's desc
   - **hourly_recap**: button events + email sending
   - **email_summarizer**: conversation.complete events
   - **homeassistant**: wake word condition + cross-plugin calls
-  - **test_button_actions**: button action routing
+  - **button_control**: button press → action routing (stop playback, close/star conversation)
 
 ## Rules
 - Describe proposed changes before applying; the system handles user confirmation

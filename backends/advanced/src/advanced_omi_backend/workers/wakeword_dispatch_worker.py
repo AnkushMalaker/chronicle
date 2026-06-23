@@ -16,13 +16,20 @@ it as its own worker keeps the acoustic path alive in every live-segmentation mo
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 
+from beanie import init_beanie
+from motor.motor_asyncio import AsyncIOMotorClient
+
 from advanced_omi_backend.client_manager import initialize_redis_for_client_manager
+from advanced_omi_backend.models.user import User
 from advanced_omi_backend.redis_factory import REDIS_URL, create_async_redis
 from advanced_omi_backend.services.plugin_service import init_plugin_router
 from advanced_omi_backend.services.wakeword import WakeWordDispatcher
+
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://mongo:27017")
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -52,6 +59,16 @@ async def main():
         initialize_redis_for_client_manager()
     except Exception as e:
         logger.error(f"Failed to connect to Redis: {e}", exc_info=True)
+        sys.exit(1)
+
+    # MongoDB (Beanie) for the per-user wake-word speaker gate, which reads the
+    # User document. This worker is otherwise Redis-only.
+    try:
+        mongo_client = AsyncIOMotorClient(MONGODB_URI)
+        await init_beanie(database=mongo_client.chronicle, document_models=[User])
+        logger.info("✅ Database (Beanie) initialized for speaker gate")
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}", exc_info=True)
         sys.exit(1)
 
     # Initialize the plugin router so wake_word.detected reaches the plugins.

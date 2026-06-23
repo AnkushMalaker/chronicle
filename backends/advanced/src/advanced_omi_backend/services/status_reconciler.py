@@ -2,20 +2,26 @@
 
 ``Conversation.processing_status`` is a denormalized field derived from facts
 (does an active transcript exist?). The terminal finalizer job owns it during
-normal processing, but jobs crash, get killed on timeout, or leave dependents
-deferred forever — any of which can leave the field out of sync with reality.
+normal processing.
+
+Steady-state recovery is event-driven: the post-conversation chain uses RQ
+``Retry`` + ``Dependency(allow_failure=True)`` + an ``on_failure`` callback, so a
+crashed/abandoned job is retried, its dependents are still promoted (the finalizer
+always runs and reconciles status), and the failure surfaces as a system event.
+No periodic poll is needed.
 
 This reconciler recomputes the status from facts via ``Conversation.apply_status``
-and is both:
+and remains as a *backstop*:
 
-- a one-off migration / admin action (``reconcile_conversation_statuses``), and
-- a periodic in-process self-heal (``run_status_reconciler``),
+- a one-shot sweep on app startup (heals drift left before this version, or by a
+  failure callback that itself died), and
+- an on-demand admin action (``reconcile_conversation_statuses`` via the admin
+  endpoint).
 
-so drift can never persist. It is the same philosophy as the audio-chunk repair:
-trust the source of truth, recompute the cached field.
+It is the same philosophy as the audio-chunk repair: trust the source of truth,
+recompute the cached field.
 """
 
-import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -26,7 +32,6 @@ logger = logging.getLogger(__name__)
 # A conversation older than this with no terminal marker is treated as "settled"
 # (no more jobs will run), so "no transcript" resolves to FAILED rather than ACTIVE.
 STALE_AFTER_HOURS = float(os.getenv("STATUS_RECONCILE_STALE_HOURS", "6"))
-RECONCILE_INTERVAL_SECS = int(os.getenv("STATUS_RECONCILE_INTERVAL_SECS", "1800"))
 
 
 async def reconcile_conversation_statuses(
@@ -89,20 +94,3 @@ async def reconcile_conversation_statuses(
         "dry_run": dry_run,
         "details": changes[:100],
     }
-
-
-async def run_status_reconciler() -> None:
-    """Periodic in-process self-heal. Cancelled on app shutdown."""
-    logger.info(
-        f"🩺 Status reconciler started (every {RECONCILE_INTERVAL_SECS}s; "
-        f"stale-after {STALE_AFTER_HOURS:.0f}h)"
-    )
-    while True:
-        try:
-            await asyncio.sleep(RECONCILE_INTERVAL_SECS)
-            await reconcile_conversation_statuses()
-        except asyncio.CancelledError:
-            logger.info("🩺 Status reconciler stopped")
-            raise
-        except Exception as e:
-            logger.error(f"Status reconciler pass failed: {e}", exc_info=True)

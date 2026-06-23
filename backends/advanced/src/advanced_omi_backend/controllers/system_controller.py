@@ -882,6 +882,61 @@ async def update_speaker_configuration(user: User, primary_speakers: list[dict])
         raise e
 
 
+async def get_wakeword_speaker_gate(user: User):
+    """Get current user's wake-word speaker gate configuration."""
+    try:
+        return {
+            "enabled": user.wakeword_gate_enabled,
+            "speakers": user.wakeword_allowed_speakers,
+            "user_id": user.user_id,
+            "status": "success",
+        }
+    except Exception:
+        logger.exception(
+            f"Error getting wake-word speaker gate for user {user.user_id}"
+        )
+        raise
+
+
+async def update_wakeword_speaker_gate(user: User, enabled: bool, speakers: list[dict]):
+    """Update current user's wake-word speaker gate configuration.
+
+    When ``enabled`` and at least one speaker is selected, an acoustic wake word
+    only dispatches a command if one of these speakers is recognized in the
+    captured turn (see the wake-word dispatcher's speaker gate).
+    """
+    try:
+        # Keep only the fields we rely on for matching, mirroring primary_speakers.
+        for speaker in speakers:
+            if not isinstance(speaker, dict):
+                raise ValueError("Each speaker must be a dictionary")
+            if "speaker_id" not in speaker or "name" not in speaker:
+                raise ValueError("Each speaker needs 'speaker_id' and 'name'")
+
+        cleaned = [{"speaker_id": s["speaker_id"], "name": s["name"]} for s in speakers]
+        user.wakeword_gate_enabled = bool(enabled)
+        user.wakeword_allowed_speakers = cleaned
+        await user.save()
+
+        logger.info(
+            f"Updated wake-word speaker gate for user {user.user_id}: "
+            f"enabled={enabled}, speakers={len(cleaned)}"
+        )
+
+        return {
+            "message": "Wake-word speaker gate updated successfully",
+            "enabled": user.wakeword_gate_enabled,
+            "speakers": cleaned,
+            "count": len(cleaned),
+            "status": "success",
+        }
+    except Exception:
+        logger.exception(
+            f"Error updating wake-word speaker gate for user {user.user_id}"
+        )
+        raise
+
+
 async def get_enrolled_speakers(user: User):
     """Get enrolled speakers from speaker recognition service."""
     try:

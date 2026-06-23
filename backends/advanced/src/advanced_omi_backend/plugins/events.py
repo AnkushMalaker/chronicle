@@ -76,11 +76,12 @@ BUTTON_STATE_TO_EVENT: Dict[ButtonState, PluginEvent] = {
 
 
 class ButtonActionType(str, Enum):
-    """Types of actions a button press can trigger (from test_button_actions plugin config)."""
+    """Types of actions a button press can trigger (see the button_control plugin)."""
 
     CLOSE_CONVERSATION = "close_conversation"
     STAR_CONVERSATION = "star_conversation"
     CALL_PLUGIN = "call_plugin"
+    STOP_PLAYBACK = "stop_playback"
 
 
 class ConversationCloseReason(str, Enum):

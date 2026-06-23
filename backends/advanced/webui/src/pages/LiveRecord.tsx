@@ -12,16 +12,16 @@ export default function LiveRecord() {
   return (
     <div>
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-6">
         <div className="flex items-center space-x-2">
-          <Radio className="h-6 w-6 text-blue-600" />
+          <Radio className="h-6 w-6 text-blue-600 flex-shrink-0" />
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
             Live Audio Recording
           </h1>
         </div>
 
         {/* Mode Toggle */}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => recording.setMode('streaming')}
             disabled={recording.isRecording}
@@ -56,7 +56,7 @@ export default function LiveRecord() {
       </div>
 
       {/* Audio Source Toggle */}
-      <div className="mb-4 flex items-center gap-3">
+      <div className="mb-4 flex flex-wrap items-center gap-3">
         <div className={`inline-flex rounded-lg border border-gray-300 dark:border-gray-600 bg-gray-100 dark:bg-gray-800 p-0.5 ${recording.isRecording ? 'opacity-50 pointer-events-none' : ''}`}>
           <button
             onClick={() => recording.setAudioSource('mic')}

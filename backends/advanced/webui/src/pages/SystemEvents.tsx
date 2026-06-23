@@ -41,14 +41,21 @@ function formatTime(iso: string | null): string {
 
 // ---- One event row ---------------------------------------------------------
 
-function EventRow({ event, onAck }: { event: SystemEvent; onAck: (id: string) => void }) {
+function EventRow({
+  event, onAck, selected, onToggleSelect,
+}: {
+  event: SystemEvent
+  onAck: (id: string) => void
+  selected: boolean
+  onToggleSelect: (id: string) => void
+}) {
   const [open, setOpen] = useState(false)
   const sev = SEVERITY_STYLE[event.severity] ?? SEVERITY_STYLE.info
   const SevIcon = sev.Icon
   const expandable = !!(event.detail || event.traceback || Object.keys(event.metadata || {}).length)
 
   return (
-    <div className={`rounded-lg border overflow-hidden ${event.acked ? 'border-gray-200 opacity-60 dark:border-gray-700' : 'border-gray-200 dark:border-gray-700'}`}>
+    <div className={`rounded-lg border overflow-hidden ${event.acked ? 'border-gray-200 opacity-60 dark:border-gray-700' : selected ? 'border-green-400 dark:border-green-600' : 'border-gray-200 dark:border-gray-700'}`}>
       <button
         type="button"
         onClick={() => expandable && setOpen(o => !o)}
@@ -56,6 +63,17 @@ function EventRow({ event, onAck }: { event: SystemEvent; onAck: (id: string) =>
           expandable ? 'hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer' : 'cursor-default'
         }`}
       >
+        {!event.acked && (
+          <input
+            type="checkbox"
+            checked={selected}
+            onClick={e => e.stopPropagation()}
+            onChange={() => onToggleSelect(event.id)}
+            className="flex-shrink-0 rounded"
+            title="Select for bulk acknowledge"
+          />
+        )}
+
         <span className="flex-shrink-0 w-4 text-gray-400">
           {expandable ? (open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />) : null}
         </span>
@@ -192,6 +210,7 @@ export default function SystemEvents() {
   const [showAcked, setShowAcked] = useState(false)
   const [windowHours, setWindowHours] = useState(24)
   const [limit, setLimit] = useState(200)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
 
   const filter: SystemEventsFilter = {
     ...(severity ? { severity } : {}),
@@ -218,20 +237,56 @@ export default function SystemEvents() {
 
   const events = data?.events ?? []
   const sources = Object.keys(summary?.by_source ?? {})
+  const unackedVisibleIds = events.filter(e => !e.acked).map(e => e.id)
+  const allVisibleSelected = unackedVisibleIds.length > 0 && unackedVisibleIds.every(id => selected.has(id))
+
+  const refresh = () => {
+    queryClient.invalidateQueries({ queryKey: ['system-events'] })
+    queryClient.invalidateQueries({ queryKey: ['system-events-summary'] })
+  }
 
   const onAck = (id: string) => {
-    systemEventsApi.ack(id).then(() => {
-      queryClient.invalidateQueries({ queryKey: ['system-events'] })
-      queryClient.invalidateQueries({ queryKey: ['system-events-summary'] })
+    systemEventsApi.ack(id).then(refresh)
+  }
+
+  const toggleSelect = (id: string) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
     })
+  }
+
+  const toggleSelectAllVisible = () => {
+    setSelected(prev => {
+      if (unackedVisibleIds.every(id => prev.has(id))) {
+        const next = new Set(prev)
+        unackedVisibleIds.forEach(id => next.delete(id))
+        return next
+      }
+      return new Set([...prev, ...unackedVisibleIds])
+    })
+  }
+
+  const onAckSelected = () => {
+    const ids = [...selected]
+    if (ids.length === 0) return
+    systemEventsApi.ackSelected(ids).then(() => {
+      setSelected(new Set())
+      refresh()
+    })
+  }
+
+  const onAckAll = () => {
+    if (!window.confirm('Acknowledge all unacknowledged events matching the current filters?')) return
+    const { acked: _acked, limit: _limit, offset: _offset, ...ackParams } = filter
+    systemEventsApi.ackAll(ackParams).then(refresh)
   }
 
   const onClearAcked = () => {
     if (!window.confirm('Delete all acknowledged events?')) return
-    systemEventsApi.clear(true).then(() => {
-      queryClient.invalidateQueries({ queryKey: ['system-events'] })
-      queryClient.invalidateQueries({ queryKey: ['system-events-summary'] })
-    })
+    systemEventsApi.clear(true).then(refresh)
   }
 
   return (
@@ -242,6 +297,25 @@ export default function SystemEvents() {
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">System Errors</h1>
         </div>
         <div className="flex items-center gap-2">
+          {selected.size > 0 && (
+            <button
+              onClick={onAckSelected}
+              className="flex items-center gap-2 rounded-md bg-green-600 px-3 py-2 text-sm font-medium text-white hover:bg-green-700"
+              title="Acknowledge the selected events"
+            >
+              <Check className="h-4 w-4" />
+              Acknowledge selected ({selected.size})
+            </button>
+          )}
+          <button
+            onClick={onAckAll}
+            disabled={(summary?.unacked ?? 0) === 0}
+            className="flex items-center gap-2 rounded-md bg-green-50 px-3 py-2 text-sm font-medium text-green-700 hover:bg-green-100 disabled:opacity-50 disabled:hover:bg-green-50 dark:bg-green-900/30 dark:text-green-300 dark:hover:bg-green-900/50"
+            title="Acknowledge all unacknowledged events matching the current filters"
+          >
+            <Check className="h-4 w-4" />
+            Acknowledge all
+          </button>
           <button
             onClick={onClearAcked}
             className="flex items-center gap-2 rounded-md bg-gray-100 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
@@ -312,6 +386,17 @@ export default function SystemEvents() {
           <input type="checkbox" checked={showAcked} onChange={e => setShowAcked(e.target.checked)} className="rounded" />
           Show acknowledged
         </label>
+
+        <label className="flex items-center gap-1.5 text-sm text-gray-600 dark:text-gray-300" title="Select all unacknowledged events shown below">
+          <input
+            type="checkbox"
+            checked={allVisibleSelected}
+            disabled={unackedVisibleIds.length === 0}
+            onChange={toggleSelectAllVisible}
+            className="rounded"
+          />
+          Select all visible
+        </label>
       </div>
 
       {/* List */}
@@ -325,7 +410,15 @@ export default function SystemEvents() {
         </div>
       ) : (
         <div className="space-y-2">
-          {events.map(ev => <EventRow key={ev.id} event={ev} onAck={onAck} />)}
+          {events.map(ev => (
+            <EventRow
+              key={ev.id}
+              event={ev}
+              onAck={onAck}
+              selected={selected.has(ev.id)}
+              onToggleSelect={toggleSelect}
+            />
+          ))}
           {data && data.total > events.length && (
             <div className="pt-2 text-center text-xs text-gray-400 dark:text-gray-500">
               Showing {events.length} of {data.total}. Narrow filters or raise the limit to see more.

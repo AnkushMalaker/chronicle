@@ -28,16 +28,17 @@ from advanced_omi_backend.constants import (
     OMI_SAMPLE_WIDTH,
 )
 from advanced_omi_backend.redis_factory import create_async_redis
-from advanced_omi_backend.services.device_audio import (
-    is_opus_streaming_client,
-    stream_play_audio_as_opus,
-)
 from advanced_omi_backend.services.audio_stream.producer import (
     get_audio_stream_producer,
 )
 from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
     SessionStore,
+)
+from advanced_omi_backend.services.device_audio import (
+    is_opus_streaming_client,
+    stop_play_audio,
+    stream_play_audio_as_opus,
 )
 from advanced_omi_backend.services.observability import record_event_sync
 from advanced_omi_backend.services.sse_publisher import publish_sse_event
@@ -209,7 +210,16 @@ async def subscribe_to_device_downlink(websocket: WebSocket, client_id: str) -> 
                     continue
 
                 try:
-                    if opus_stream and msg_type == "play-audio":
+                    if msg_type == "stop-audio":
+                        # Barge-in: stop whatever TTS is playing on the device. For
+                        # Opus clients this cancels the in-flight stream + flushes the
+                        # device; for others there's nothing streaming to cancel, so
+                        # just forward the control frame best-effort.
+                        if opus_stream:
+                            await stop_play_audio(websocket, client_id)
+                        else:
+                            await websocket.send_json(payload)
+                    elif opus_stream and msg_type == "play-audio":
                         # RAM-limited devices can't take a big base64 WAV frame;
                         # transcode + stream it as small Opus packets instead.
                         streamed = await stream_play_audio_as_opus(

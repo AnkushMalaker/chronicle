@@ -378,17 +378,24 @@ async def lifespan(app: FastAPI):
         app.state.system_event_drain_task = None
         app.state.health_poller_task = None
 
-    # Self-heal: periodically reconcile conversation processing_status from facts so
-    # a crashed/timed-out job can't leave a conversation stuck (e.g. recovered but
-    # still showing "failed"). Belt-and-suspenders to the terminal finalizer.
+    # One-shot startup reconcile: recompute processing_status from facts once, so any
+    # drift left before this version (or by a failure callback that itself died) is
+    # healed at boot. Steady-state recovery is now event-driven — the post-conversation
+    # chain uses Retry + Dependency(allow_failure=True) + an on_failure callback, so a
+    # crashed/abandoned job recovers and surfaces a system event on its own without a
+    # periodic poll. This boot sweep + the admin endpoint
+    # (/api/admin/conversations/reconcile-status) are the remaining backstops. Run as a
+    # background task so the (full-collection) scan doesn't block startup.
     try:
         from advanced_omi_backend.services.status_reconciler import (
-            run_status_reconciler,
+            reconcile_conversation_statuses,
         )
 
-        app.state.status_reconciler_task = asyncio.create_task(run_status_reconciler())
+        app.state.status_reconciler_task = asyncio.create_task(
+            reconcile_conversation_statuses()
+        )
     except Exception as e:
-        application_logger.warning(f"Status reconciler not started: {e}")
+        application_logger.warning(f"Startup status reconcile not started: {e}")
         app.state.status_reconciler_task = None
 
     total_startup = time.monotonic() - startup_start

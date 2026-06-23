@@ -129,7 +129,13 @@ def build_worker_definitions() -> List[WorkerDefinition]:
     """
     workers = []
 
-    # 6x RQ Workers - Multi-queue workers (transcription, memory, default)
+    # 6x RQ Workers - Multi-queue workers (transcription, default).
+    # The `memory` queue is deliberately NOT served here — it is handled by a single
+    # dedicated worker below. Memory extraction runs the vault memory-agent, which
+    # surgically edits shared Obsidian notes; two runs at once livelock on stale
+    # optimistic-edit anchors (a run's read is invalidated by another run's write
+    # between tool-call rounds). Serving `memory` on six workers let six runs race;
+    # one dedicated worker serialises them so concurrent vault writes can't happen.
     for i in range(1, 7):
         workers.append(
             WorkerDefinition(
@@ -139,14 +145,35 @@ def build_worker_definitions() -> List[WorkerDefinition]:
                     "-m",
                     "advanced_omi_backend.workers.rq_worker_entry",
                     "transcription",
-                    "memory",
                     "default",
                 ],
                 worker_type=WorkerType.RQ_WORKER,
-                queues=["transcription", "memory", "default"],
+                queues=["transcription", "default"],
                 restart_on_failure=True,
             )
         )
+
+    # 1x dedicated Memory Worker - serves ONLY the `memory` queue. One RQ worker runs
+    # one job at a time, so this serialises ALL memory jobs globally → at most one
+    # memory-agent run touches the vault at any moment, eliminating the concurrent-write
+    # livelock. The title/summary job still `depends_on` its memory job, so FIFO-serial
+    # memory keeps the post-conversation chain intact (title reads freshly-written
+    # memories). Global (not per-user) serialisation is intentional: this is a
+    # single/family deployment, so two users' memory jobs overlapping is a non-issue.
+    workers.append(
+        WorkerDefinition(
+            name="rq-memory-worker",
+            command=[
+                "python",
+                "-m",
+                "advanced_omi_backend.workers.rq_worker_entry",
+                "memory",
+            ],
+            worker_type=WorkerType.RQ_WORKER,
+            queues=["memory"],
+            restart_on_failure=True,
+        )
+    )
 
     # Audio Persistence Workers - Single-queue workers (audio queue)
     # Multiple workers allow concurrent audio persistence for multiple sessions

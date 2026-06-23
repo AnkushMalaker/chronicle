@@ -78,6 +78,7 @@ export function useSSE(): SSEStatus {
       case 'wake.armed':
       case 'wake.end_of_turn':
       case 'wake.command':
+      case 'wake.blocked':
       case 'wake.followup': {
         const d = data as {
           client_id?: string
@@ -87,6 +88,7 @@ export function useSSE(): SSEStatus {
           command?: string
           reply?: string
           window_secs?: number
+          identified?: string | null
         }
         const myClientId = getActiveWakeClientId()
         if (!myClientId || d.client_id !== myClientId) break
@@ -97,6 +99,8 @@ export function useSSE(): SSEStatus {
           emitWakeEvent({ type: 'end_of_turn', reason: d.reason, duration: d.duration })
         } else if (eventType === 'wake.command') {
           emitWakeEvent({ type: 'command', command: d.command, reply: d.reply })
+        } else if (eventType === 'wake.blocked') {
+          emitWakeEvent({ type: 'blocked', reason: d.reason, identified: d.identified })
         } else {
           emitWakeEvent({ type: 'followup', window_secs: d.window_secs })
         }

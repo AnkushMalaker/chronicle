@@ -515,6 +515,10 @@ export const systemEventsApi = {
       params: { window_hours: windowHours },
     }),
   ack: (id: string) => api.post(`/api/admin/system-events/${id}/ack`),
+  ackSelected: (eventIds: string[]) =>
+    api.post('/api/admin/system-events/ack-selected', { event_ids: eventIds }),
+  ackAll: (params: Omit<SystemEventsFilter, 'acked' | 'limit' | 'offset'> = {}) =>
+    api.post('/api/admin/system-events/ack-all', null, { params }),
   clear: (ackedOnly = false) =>
     api.post('/api/admin/system-events/clear', null, {
       params: { acked_only: ackedOnly },
@@ -644,6 +648,15 @@ export const speakerApi = {
 
   // Check speaker service status (admin only)
   getSpeakerServiceStatus: () => api.get('/api/speaker-service-status'),
+
+  // Get current user's wake-word speaker gate (only fire for selected speakers)
+  getWakewordSpeakerGate: () => api.get('/api/wakeword-speaker-gate'),
+
+  // Update the wake-word speaker gate
+  updateWakewordSpeakerGate: (
+    enabled: boolean,
+    speakers: Array<{ speaker_id: string; name: string }>
+  ) => api.post('/api/wakeword-speaker-gate', { enabled, speakers }),
 }
 
 export interface AuditConversation {

@@ -1041,14 +1041,14 @@ export default function Conversations() {
     <div>
       {/* Header with Search */}
       <div className="flex flex-col gap-4 mb-6">
-        <div className="flex justify-between items-center">
+        <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center">
           <div className="flex items-center space-x-2">
-            <MessageSquare className="h-6 w-6 text-blue-600" />
+            <MessageSquare className="h-6 w-6 text-blue-600 flex-shrink-0" />
             <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
               Conversations
             </h1>
           </div>
-          <div className="flex items-center space-x-4">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-4">
             <button
               onClick={() => { setStarredOnly(!starredOnly); setPage(0) }}
               className={`flex items-center space-x-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
@@ -1081,8 +1081,8 @@ export default function Conversations() {
         </div>
 
         {/* Search Bar */}
-        <div className="flex items-center gap-2">
-          <div className="relative flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative flex-1 min-w-[180px]">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
             <input
               type="text"
@@ -1226,8 +1226,8 @@ export default function Conversations() {
                 />
 
               {/* Conversation Header */}
-              <div className="flex justify-between items-start mb-4">
-                <div className="flex flex-col space-y-2">
+              <div className="flex justify-between items-start mb-4 gap-2">
+                <div className="flex flex-col space-y-2 min-w-0">
                   {/* Conversation Title - Editable */}
                   {editingTitle === conversation.conversation_id ? (
                     <div className="flex items-center space-x-2">
@@ -1302,14 +1302,14 @@ export default function Conversations() {
                   )}
 
                   {/* Metadata */}
-                  <div className="flex items-center space-x-4">
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
                     <div className="flex items-center space-x-2 text-sm text-gray-600 dark:text-gray-400">
-                      <Calendar className="h-4 w-4" />
+                      <Calendar className="h-4 w-4 flex-shrink-0" />
                       <span>{formatDate(conversation.created_at || '')}</span>
                     </div>
-                    <div className="flex items-center space-x-2 text-sm text-gray-600 dark:text-gray-400">
-                      <User className="h-4 w-4" />
-                      <span>{conversation.client_id}</span>
+                    <div className="flex items-center space-x-2 text-sm text-gray-600 dark:text-gray-400 min-w-0">
+                      <User className="h-4 w-4 flex-shrink-0" />
+                      <span className="truncate">{conversation.client_id}</span>
                     </div>
                     {(() => {
                       const dur = conversation.duration_seconds || conversation.audio_total_duration

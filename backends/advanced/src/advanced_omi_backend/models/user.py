@@ -29,6 +29,8 @@ class UserRead(BaseUser[PydanticObjectId]):
     notification_email: Optional[EmailStr] = None
     registered_clients: dict[str, dict] = Field(default_factory=dict)
     primary_speakers: list[dict] = Field(default_factory=list)
+    wakeword_gate_enabled: bool = False
+    wakeword_allowed_speakers: list[dict] = Field(default_factory=list)
 
 
 class UserUpdate(BaseUserUpdate):
@@ -79,6 +81,12 @@ class User(BeanieBaseUser, Document):
     registered_clients: dict[str, dict] = Field(default_factory=dict)
     # Speaker processing filter configuration
     primary_speakers: list[dict] = Field(default_factory=list)
+    # Wake-word speaker gate: when enabled, an acoustic wake word only dispatches a
+    # command if one of ``wakeword_allowed_speakers`` is recognized in the captured
+    # turn (enforced by the wake-word dispatcher via the speaker-recognition
+    # service). Each allowed speaker is {speaker_id, name}. Empty list = inert.
+    wakeword_gate_enabled: bool = False
+    wakeword_allowed_speakers: list[dict] = Field(default_factory=list)
 
     class Settings:
         name = "users"  # Collection name in MongoDB - standardized from "fastapi_users"

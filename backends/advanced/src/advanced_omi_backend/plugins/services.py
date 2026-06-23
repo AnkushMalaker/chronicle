@@ -5,6 +5,7 @@ Plugins use this interface (via context.services) to interact with the core syst
 (e.g., close a conversation) or with other plugins (e.g., call Home Assistant to toggle lights).
 """
 
+import json
 import logging
 from typing import TYPE_CHECKING, Optional
 
@@ -114,6 +115,30 @@ class PluginServices:
         result = await toggle_star(conversation_id, user)
         # toggle_star returns a dict on success, JSONResponse on error
         return isinstance(result, dict) and "starred" in result
+
+    async def stop_playback(self, client_id: str) -> bool:
+        """Stop any TTS currently playing on a device (barge-in).
+
+        Publishes a ``stop-audio`` control frame to the device's downlink channel.
+        The WebSocket handler that owns the device connection picks it up and, for
+        Opus-streaming clients, cancels the in-flight stream and tells the device to
+        flush (see ``device_audio.stop_play_audio``). Decoupled via Redis so this
+        works from any process (the button handler runs in the backend, but wake
+        handlers run in the workers).
+
+        Args:
+            client_id: The device/client whose playback should stop.
+
+        Returns:
+            True if the stop request was published.
+        """
+        if not client_id:
+            logger.warning("stop_playback called with no client_id")
+            return False
+        message = json.dumps({"type": "stop-audio", "data": {}})
+        await self._async_redis.publish(f"device:downlink:{client_id}", message)
+        logger.info(f"⏹ Requested stop-audio for {client_id}")
+        return True
 
     async def call_plugin(
         self,

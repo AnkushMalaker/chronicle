@@ -20,6 +20,7 @@ from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
     default_queue,
     memory_queue,
+    post_conv_enqueue_kwargs,
     start_post_conversation_jobs,
     transcription_queue,
 )
@@ -973,12 +974,15 @@ def _enqueue_speaker_reprocessing_chain(
         result_ttl=JOB_RESULT_TTL,
         job_id=f"reprocess_speaker_{conversation_id[:12]}",
         description=f"Re-diarize speakers for {conversation_id[:8]}",
-        meta={
-            "conversation_id": conversation_id,
-            "version_id": version_id,
-            "source_version_id": source_version_id,
-            "trigger": "reprocess",
-        },
+        **post_conv_enqueue_kwargs(
+            "speaker",
+            {
+                "conversation_id": conversation_id,
+                "version_id": version_id,
+                "source_version_id": source_version_id,
+                "trigger": "reprocess",
+            },
+        ),
     )
     logger.info(
         f"Enqueued speaker reprocessing job {speaker_job.id} for version {version_id}"
@@ -987,16 +991,19 @@ def _enqueue_speaker_reprocessing_chain(
     memory_job = memory_queue.enqueue(
         process_memory_job,
         conversation_id,
-        depends_on=speaker_job,
         job_timeout=1800,
         result_ttl=JOB_RESULT_TTL,
         job_id=f"memory_{conversation_id[:12]}",
         description=f"Extract memories for {conversation_id[:8]}",
-        meta={
-            "conversation_id": conversation_id,
-            "cause": MemoryCause.SPEAKER_REPROCESS.value,
-            "strategy": UpdateStrategy.SPEAKER_DIFF.value,
-        },
+        **post_conv_enqueue_kwargs(
+            "memory",
+            {
+                "conversation_id": conversation_id,
+                "cause": MemoryCause.SPEAKER_REPROCESS.value,
+                "strategy": UpdateStrategy.SPEAKER_DIFF.value,
+            },
+            depends_on=speaker_job,
+        ),
     )
     logger.info(
         f"Chained memory job {memory_job.id} after speaker job {speaker_job.id}"
@@ -1007,10 +1014,13 @@ def _enqueue_speaker_reprocessing_chain(
         conversation_id,
         job_timeout=300,
         result_ttl=JOB_RESULT_TTL,
-        depends_on=memory_job,
         job_id=f"title_summary_{conversation_id[:12]}",
         description=f"Regenerate title/summary for {conversation_id[:8]}",
-        meta={"conversation_id": conversation_id},
+        **post_conv_enqueue_kwargs(
+            "title_summary",
+            {"conversation_id": conversation_id},
+            depends_on=memory_job,
+        ),
     )
     logger.info(
         f"Chained title/summary job {title_summary_job.id} after memory job {memory_job.id}"

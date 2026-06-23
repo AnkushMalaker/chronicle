@@ -645,9 +645,9 @@ const Queue: React.FC = () => {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center">
         <div className="flex items-center space-x-3">
-          <Layers className="w-6 h-6 text-blue-600" />
+          <Layers className="w-6 h-6 text-blue-600 flex-shrink-0" />
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Queue & Events</h1>
             <p className="text-xs text-gray-500">
@@ -655,7 +655,7 @@ const Queue: React.FC = () => {
             </p>
           </div>
         </div>
-        <div className="flex items-center space-x-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => setShowFlushModal(true)}
             className="flex items-center space-x-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
@@ -752,9 +752,9 @@ const Queue: React.FC = () => {
       {/* Streaming Status */}
       {streamingStatus && (
         <div className="bg-white rounded-lg border overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+          <div className="px-4 sm:px-6 py-4 border-b border-gray-200 flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center">
             <h3 className="text-lg font-medium">Audio Streaming & Conversations</h3>
-            <div className="flex items-center space-x-2">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={cleanupOldSessions}
                 className="flex items-center space-x-2 px-4 py-2 bg-orange-600 text-white rounded-md hover:bg-orange-700 transition-colors text-sm"
