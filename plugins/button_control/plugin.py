@@ -1,10 +1,16 @@
 """
-Test Button Actions plugin — maps device button events to configurable actions.
+Button Configuration plugin — maps device button events to configurable actions.
 
-Single press: close conversation (triggers post-processing pipeline)
-Double press: cross-plugin call (e.g., toggle study lights via Home Assistant)
+Each button event (single / double press) is mapped, in config.yml, to one typed
+action:
 
-Actions are configured in config.yml with typed enums for safety.
+  - stop_playback      : stop the TTS currently playing on the device (barge-in)
+  - close_conversation : end the current conversation (triggers post-processing)
+  - star_conversation  : star/unstar the current conversation
+  - call_plugin        : dispatch an action to another plugin (e.g. Home Assistant)
+
+Actions are validated against the ``ButtonActionType`` enum so a typo in config
+fails loudly instead of silently doing nothing.
 """
 
 import logging
@@ -20,13 +26,16 @@ from advanced_omi_backend.plugins.events import (
 logger = logging.getLogger(__name__)
 
 
-class TestButtonActionsPlugin(BasePlugin):
+class ButtonControlPlugin(BasePlugin):
     """Maps button press events to configurable system actions."""
 
     SUPPORTED_ACCESS_LEVELS: List[str] = ["button"]
 
-    name = "Test Button Actions"
-    description = "Map OMI device button presses to actions (close conversation, toggle lights, etc.)"
+    name = "Button Configuration"
+    description = (
+        "Map device button presses to actions (stop playback, close/star "
+        "conversation, call another plugin)."
+    )
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
@@ -34,20 +43,17 @@ class TestButtonActionsPlugin(BasePlugin):
 
     async def initialize(self):
         if not self.enabled:
-            logger.info(
-                "Test Button Actions plugin is disabled, skipping initialization"
-            )
+            logger.info("Button Configuration plugin is disabled, skipping init")
             return
         logger.info(
-            f"Test Button Actions plugin initialized with actions: "
-            f"{list(self.actions.keys())}"
+            f"Button Configuration plugin initialized with actions: "
+            f"{ {k: v.get('type') for k, v in self.actions.items()} }"
         )
 
     async def on_button_event(self, context: PluginContext) -> Optional[PluginResult]:
-        """Handle button events by dispatching configured actions."""
+        """Handle a button event by dispatching its configured action."""
         event = context.event
 
-        # Map plugin event to action config key
         if event == PluginEvent.BUTTON_SINGLE_PRESS:
             action_key = "single_press"
         elif event == PluginEvent.BUTTON_DOUBLE_PRESS:
@@ -64,24 +70,43 @@ class TestButtonActionsPlugin(BasePlugin):
         try:
             action_type = ButtonActionType(action_config.get("type", ""))
         except ValueError:
-            logger.warning(f"Unknown action type: {action_config.get('type')}")
+            logger.warning(f"Unknown button action type: {action_config.get('type')}")
             return PluginResult(
                 success=False,
                 message=f"Unknown action type: {action_config.get('type')}",
             )
 
+        if action_type == ButtonActionType.STOP_PLAYBACK:
+            return await self._handle_stop_playback(context)
         if action_type == ButtonActionType.CLOSE_CONVERSATION:
-            return await self._handle_close_conversation(context, action_config)
-        elif action_type == ButtonActionType.STAR_CONVERSATION:
-            return await self._handle_star_conversation(context, action_config)
-        elif action_type == ButtonActionType.CALL_PLUGIN:
+            return await self._handle_close_conversation(context)
+        if action_type == ButtonActionType.STAR_CONVERSATION:
+            return await self._handle_star_conversation(context)
+        if action_type == ButtonActionType.CALL_PLUGIN:
             return await self._handle_call_plugin(context, action_config)
 
         return None
 
-    async def _handle_close_conversation(
-        self, context: PluginContext, action_config: dict
-    ) -> PluginResult:
+    async def _handle_stop_playback(self, context: PluginContext) -> PluginResult:
+        """Stop the TTS currently playing on the device that sent the button event."""
+        if not context.services:
+            logger.error("PluginServices not available in context")
+            return PluginResult(success=False, message="Services not available")
+
+        client_id = context.data.get("client_id")
+        if not client_id:
+            logger.warning("No client_id in button event data, cannot stop playback")
+            return PluginResult(success=False, message="No device for this event")
+
+        await context.services.stop_playback(client_id)
+        logger.info(f"Button press stopped playback on {client_id}")
+        return PluginResult(
+            success=True,
+            message="Playback stopped by button press",
+            should_continue=False,
+        )
+
+    async def _handle_close_conversation(self, context: PluginContext) -> PluginResult:
         """Close the current conversation via PluginServices."""
         if not context.services:
             logger.error("PluginServices not available in context")
@@ -89,9 +114,7 @@ class TestButtonActionsPlugin(BasePlugin):
 
         session_id = context.data.get("session_id")
         if not session_id:
-            logger.warning(
-                "No session_id in button event data, cannot close conversation"
-            )
+            logger.warning("No session_id in button event data, cannot close")
             return PluginResult(success=False, message="No active session")
 
         success = await context.services.close_conversation(
@@ -100,23 +123,16 @@ class TestButtonActionsPlugin(BasePlugin):
         )
 
         if success:
-            logger.info(
-                f"Button press closed conversation for session {session_id[:12]}"
-            )
+            logger.info(f"Button press closed conversation for {session_id[:12]}")
             return PluginResult(
                 success=True,
                 message="Conversation closed by button press",
                 should_continue=False,
             )
-        else:
-            logger.warning(
-                f"Failed to close conversation for session {session_id[:12]}"
-            )
-            return PluginResult(success=False, message="Failed to close conversation")
+        logger.warning(f"Failed to close conversation for {session_id[:12]}")
+        return PluginResult(success=False, message="Failed to close conversation")
 
-    async def _handle_star_conversation(
-        self, context: PluginContext, action_config: dict
-    ) -> PluginResult:
+    async def _handle_star_conversation(self, context: PluginContext) -> PluginResult:
         """Star/unstar the current conversation via PluginServices."""
         if not context.services:
             logger.error("PluginServices not available in context")
@@ -124,29 +140,23 @@ class TestButtonActionsPlugin(BasePlugin):
 
         session_id = context.data.get("session_id")
         if not session_id:
-            logger.warning(
-                "No session_id in button event data, cannot star conversation"
-            )
+            logger.warning("No session_id in button event data, cannot star")
             return PluginResult(success=False, message="No active session")
 
         success = await context.services.star_conversation(session_id=session_id)
 
         if success:
-            logger.info(f"Button press toggled star for session {session_id[:12]}")
+            logger.info(f"Button press toggled star for {session_id[:12]}")
             return PluginResult(
-                success=True,
-                message="Conversation star toggled by button press",
+                success=True, message="Conversation star toggled by button press"
             )
-        else:
-            logger.warning(f"Failed to toggle star for session {session_id[:12]}")
-            return PluginResult(
-                success=False, message="Failed to toggle conversation star"
-            )
+        logger.warning(f"Failed to toggle star for {session_id[:12]}")
+        return PluginResult(success=False, message="Failed to toggle conversation star")
 
     async def _handle_call_plugin(
         self, context: PluginContext, action_config: dict
     ) -> PluginResult:
-        """Dispatch action to another plugin via PluginServices."""
+        """Dispatch an action to another plugin via PluginServices."""
         if not context.services:
             logger.error("PluginServices not available in context")
             return PluginResult(success=False, message="Services not available")
@@ -172,7 +182,6 @@ class TestButtonActionsPlugin(BasePlugin):
 
         if result:
             return result
-
         return PluginResult(
             success=False, message=f"No response from plugin '{plugin_id}'"
         )

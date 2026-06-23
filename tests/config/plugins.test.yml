@@ -13,7 +13,7 @@ plugins:
       type: always  # Capture all events without filtering
     db_path: /app/debug/test_plugin_events.db
 
-  test_button_actions:
+  button_control:
     enabled: true
     events:
       - button.single_press
