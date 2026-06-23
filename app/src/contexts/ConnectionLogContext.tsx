@@ -26,7 +26,15 @@ export type ConnectionEventType =
   | 'health_ping'
   | 'reconnect_attempt'
   | 'reconnect_backoff'
-  | 'bt_state_change';
+  | 'bt_state_change'
+  // WebSocket (audio streaming) lifecycle — distinct from the BLE events above
+  | 'ws_connecting'
+  | 'ws_open'
+  | 'ws_close'
+  | 'ws_error'
+  | 'ws_reconnect'
+  | 'ws_reauth'
+  | 'net_change';
 
 const MAX_EVENTS = 200;
 let eventCounter = 0;

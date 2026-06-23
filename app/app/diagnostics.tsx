@@ -20,6 +20,13 @@ const EVENT_BADGE_COLORS: Record<ConnectionEventType, string> = {
   reconnect_attempt: '#FF9500',
   reconnect_backoff: '#FF9500',
   bt_state_change: '#5856D6',
+  ws_connecting: '#FF9500',
+  ws_open: '#34C759',
+  ws_close: '#FF3B30',
+  ws_error: '#FF3B30',
+  ws_reconnect: '#FF9500',
+  ws_reauth: '#AF52DE',
+  net_change: '#5856D6',
 };
 
 function formatTime(date: Date): string {
