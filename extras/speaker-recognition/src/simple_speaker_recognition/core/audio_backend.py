@@ -322,15 +322,30 @@ class AudioBackend:
             pooled = 0.0
             for s in chosen:
                 wave = self.load_wave(chunk_path, s["start"], s["end"])
-                emb = await loop.run_in_executor(None, self.embed, wave)
-                embeddings.append(np.asarray(emb).reshape(-1))
+                emb = np.asarray(
+                    await loop.run_in_executor(None, self.embed, wave)
+                ).reshape(-1)
+                # Silent/degenerate segments embed to a zero vector, which self.embed
+                # normalizes to NaN (0/0). Drop those — a NaN centroid would crash the
+                # downstream clustering (sklearn rejects NaN).
+                if np.all(np.isfinite(emb)) and np.linalg.norm(emb) > 0:
+                    embeddings.append(emb)
                 pooled += s["end"] - s["start"]
                 if pooled >= max_pool_duration:
                     break
 
+            if not embeddings:
+                logger.warning(
+                    f"No finite embedding for local speaker {label} "
+                    f"(silent/degenerate segments); skipping reconciliation for it"
+                )
+                continue
+
             centroid = np.mean(np.stack(embeddings), axis=0)
-            centroid = centroid / (np.linalg.norm(centroid) + 1e-9)
-            centroids[label] = centroid
+            norm = np.linalg.norm(centroid)
+            if not np.isfinite(norm) or norm == 0:
+                continue
+            centroids[label] = centroid / norm
         return centroids
 
     def _reconcile_chunk_speakers(
@@ -360,6 +375,10 @@ class AudioBackend:
 
         matrix = np.stack([centroids[t] for t in tags])  # (M, D), unit-norm
         distance = 1.0 - (matrix @ matrix.T)  # cosine distance in [0, 2]
+        # Safety net: any non-finite distance (degenerate centroid that slipped
+        # through) becomes "maximally far" so it never merges, rather than crashing
+        # sklearn's clustering, which rejects NaN.
+        distance = np.nan_to_num(distance, nan=2.0, posinf=2.0, neginf=0.0)
         np.clip(distance, 0.0, 2.0, out=distance)
         np.fill_diagonal(distance, 0.0)
 
