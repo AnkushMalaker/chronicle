@@ -697,6 +697,16 @@ backend:
     min_duration_off: 1.5
     min_speakers: 2
     max_speakers: 6
+    # Cross-chunk speaker reconciliation (links per-chunk centroids into global
+    # speakers when long audio is chunked). Minimum cosine similarity to merge two
+    # chunk-local speaker centroids — lower merges more aggressively. max_speakers
+    # also caps the resulting global speaker count.
+    reconciliation_threshold: 0.4
+    # Open-set identification: a diarized speaker is only named if the best gallery
+    # match beats the runner-up by at least this cosine margin (else "unknown").
+    identify_margin: 0.1
+    # Prevent one enrolled speaker from being assigned to two diarized speakers.
+    exclusive: true
 
   # Cleanup settings for soft-deleted conversations
   cleanup:

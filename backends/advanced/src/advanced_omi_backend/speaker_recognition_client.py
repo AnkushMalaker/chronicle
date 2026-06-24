@@ -225,6 +225,18 @@ class SpeakerRecognitionClient:
                 if config.get("max_speakers"):
                     form_data.add_field("max_speakers", str(config.get("max_speakers")))
 
+                # Cross-chunk reconciliation + open-set identification knobs
+                form_data.add_field(
+                    "reconciliation_threshold",
+                    str(config.get("reconciliation_threshold", 0.4)),
+                )
+                form_data.add_field(
+                    "identify_margin", str(config.get("identify_margin", 0.1))
+                )
+                form_data.add_field(
+                    "exclusive", str(config.get("exclusive", True)).lower()
+                )
+
                 # Use /v1/diarize-identify-match endpoint for backend integration
                 endpoint = "/v1/diarize-identify-match"
 

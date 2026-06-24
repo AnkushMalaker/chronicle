@@ -402,6 +402,11 @@ async def diarize_identify_match(
         default=1.5,
         description="Minimum silence duration (seconds) before treating it as a segment boundary",
     ),
+    reconciliation_threshold: float = Form(
+        default=0.4,
+        description="Minimum cosine similarity to merge two chunk-local speaker "
+        "centroids into one global speaker during cross-chunk reconciliation",
+    ),
     identify_margin: float = Form(
         default=0.1,
         description="Minimum cosine gap between the best and runner-up enrolled speaker "
@@ -583,6 +588,7 @@ async def diarize_identify_match(
             min_duration_off=min_duration_off,
             max_duration=max_diarize_duration,
             chunk_overlap=diarize_chunk_overlap,
+            reconciliation_threshold=reconciliation_threshold,
         )
 
         # Apply minimum duration filter

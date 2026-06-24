@@ -121,7 +121,7 @@ class AudioBackend:
         min_duration_off: float = 1.5,
         max_duration: float = 60.0,
         chunk_overlap: float = 5.0,
-        reconciliation_threshold: float = 0.5,
+        reconciliation_threshold: float = 0.4,
     ) -> List[Dict]:
         """
         Async wrapper for diarization with automatic chunking for large files.
