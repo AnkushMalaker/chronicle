@@ -11,9 +11,13 @@ from typing import Any, Dict
 
 from advanced_omi_backend.auth import generate_jwt_for_user
 from advanced_omi_backend.config import get_diarization_settings, get_misc_settings
+from advanced_omi_backend.constants import UNKNOWN_SPEAKER_PREFIX
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import async_job
 from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggregator
+from advanced_omi_backend.services.forced_alignment import (
+    synthesize_words_via_alignment,
+)
 from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 from advanced_omi_backend.users import get_user_by_id
 from advanced_omi_backend.utils.job_utils import update_job_meta
@@ -301,6 +305,31 @@ async def recognise_speakers_job(
             "processing_time_seconds": 0,
         }
 
+    # If the provider gave segment text but no word timestamps (e.g. VibeVoice),
+    # synthesize word timings via forced alignment so we can run the full pyannote
+    # re-diarization path (Path A) instead of per-segment identification on the
+    # provider's segments. This unifies word-less conversations onto the better path.
+    if (
+        not actual_words
+        and not use_provider_diarization
+        and transcript_version.segments
+    ):
+        speech_for_align = [
+            {"start": s.start, "end": s.end, "text": s.text}
+            for s in transcript_version.segments
+            if getattr(s, "segment_type", "speech") == "speech"
+            and (s.text or "").strip()
+        ]
+        total_dur = max((s.end for s in transcript_version.segments), default=0.0)
+        if speech_for_align and total_dur > 0:
+            logger.info(
+                f"🔤 No word timestamps; forced-aligning {len(speech_for_align)} "
+                f"segments to recover word timing for re-diarization"
+            )
+            actual_words = await synthesize_words_via_alignment(
+                conversation_id, speech_for_align, total_dur
+            )
+
     # Check if we can run pyannote diarization
     # Pyannote requires word timestamps to align speaker segments with text
     can_run_pyannote = bool(actual_words) and not use_provider_diarization
@@ -492,7 +521,9 @@ async def recognise_speakers_job(
             if not identified_as:
                 label = seg.get("speaker", "Unknown")
                 if label not in unknown_label_map:
-                    unknown_label_map[label] = f"Unknown Speaker {unknown_counter}"
+                    unknown_label_map[label] = (
+                        f"{UNKNOWN_SPEAKER_PREFIX} {unknown_counter}"
+                    )
                     unknown_counter += 1
 
         if unknown_label_map:
@@ -521,7 +552,7 @@ async def recognise_speakers_job(
                 continue
 
             speaker_name = seg.get("identified_as") or unknown_label_map.get(
-                seg.get("speaker", "Unknown"), "Unknown Speaker"
+                seg.get("speaker", "Unknown"), UNKNOWN_SPEAKER_PREFIX
             )
 
             # Extract words from speaker service response (already matched to this segment)

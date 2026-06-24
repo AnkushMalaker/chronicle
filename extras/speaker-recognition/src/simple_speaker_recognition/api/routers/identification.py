@@ -402,6 +402,16 @@ async def diarize_identify_match(
         default=1.5,
         description="Minimum silence duration (seconds) before treating it as a segment boundary",
     ),
+    identify_margin: float = Form(
+        default=0.1,
+        description="Minimum cosine gap between the best and runner-up enrolled speaker "
+        "for a cluster to be confidently identified (open-set ambiguity guard)",
+    ),
+    exclusive: bool = Form(
+        default=True,
+        description="Prevent one enrolled speaker from being assigned to two different "
+        "diarized speakers in the same conversation",
+    ),
     db: UnifiedSpeakerDB = Depends(get_db),
 ):
     """
@@ -586,60 +596,107 @@ async def diarize_identify_match(
                     f"Filtered out {original_count - len(diarization_segments)} segments shorter than {min_duration}s"
                 )
 
-        # Step 2: Identify speakers for each segment
+        # Step 2: Identify speakers — ONE decision per diarized speaker, not per
+        # segment. We pool a single centroid embedding per (globally-reconciled)
+        # speaker label and identify that against the gallery. This is far more robust
+        # than per-segment argmax: short noisy segments no longer flip identities or
+        # each spawn their own "Unknown Speaker N". (cluster-then-identify)
+        label_assignment: Dict[str, Dict] = {}
+        if user_id:
+            # Pool one centroid per diarized speaker from its longest segments.
+            label_centroids = await audio_backend._embed_local_speakers(
+                tmp_path, diarization_segments
+            )
+
+            # Identify each cluster, collecting ranked candidates for margin/exclusive.
+            cluster_candidates: Dict[str, List[Dict]] = {}
+            for label, centroid in label_centroids.items():
+                _, _, _, ranked = await db.identify_with_candidates(
+                    centroid, user_id=user_id
+                )
+                cluster_candidates[label] = ranked
+
+            # Greedy assignment: most-confident cluster first. Apply open-set
+            # threshold, a best-vs-runner-up margin, and (optionally) exclusivity so
+            # one enrolled person can't claim two diarized speakers.
+            taken_speaker_ids: set = set()
+            for label in sorted(
+                cluster_candidates,
+                key=lambda lbl: (
+                    cluster_candidates[lbl][0]["similarity"]
+                    if cluster_candidates[lbl]
+                    else -1.0
+                ),
+                reverse=True,
+            ):
+                ranked = cluster_candidates[label]
+                available = [
+                    c
+                    for c in ranked
+                    if c["similarity"] >= similarity_threshold
+                    and (not exclusive or c["id"] not in taken_speaker_ids)
+                ]
+                if not available:
+                    continue
+                chosen = available[0]
+                runner_up = available[1]["similarity"] if len(available) > 1 else 0.0
+                if (
+                    chosen["similarity"] - runner_up < identify_margin
+                    and len(available) > 1
+                ):
+                    # Two enrolled speakers are too close to call for this cluster.
+                    log.info(
+                        f"Cluster {label}: ambiguous "
+                        f"({chosen['name']}={chosen['similarity']:.3f} vs "
+                        f"runner-up={runner_up:.3f}, margin<{identify_margin}) -> unknown"
+                    )
+                    continue
+                label_assignment[label] = {
+                    "name": chosen["name"],
+                    "id": chosen["id"],
+                    "confidence": chosen["similarity"],
+                }
+                if exclusive:
+                    taken_speaker_ids.add(chosen["id"])
+                log.info(
+                    f"Cluster {label} -> {chosen['name']} "
+                    f"(confidence {chosen['similarity']:.3f})"
+                )
+
+        # Step 3: Build per-segment output, applying each cluster's single decision and
+        # matching transcript words to segments by word-midpoint overlap.
         enhanced_segments = []
         for segment in diarization_segments:
             speaker_label = segment["speaker"]
             start_time = segment["start"]
             end_time = segment["end"]
 
-            # Extract audio for this segment using correct method
-            segment_audio = audio_backend.load_wave(tmp_path, start_time, end_time)
-
-            # Check if we can identify this speaker
-            speaker_info = None
-            confidence = 0.0
-            found = False
-            if user_id:
-                # Generate embedding for this segment
-                emb = await audio_backend.async_embed(segment_audio)
-
-                # Identify speaker using the database
-                found, speaker_info, confidence = await db.identify(
-                    emb, user_id=user_id
-                )
-
-            # Step 3: Match transcript words to this segment
             segment_words = []
             for word in words:
                 word_start = word.get("start", 0.0)
                 word_end = word.get("end", 0.0)
                 word_mid = (word_start + word_end) / 2
-
-                # Word belongs to this segment if its midpoint is within range
                 if start_time <= word_mid <= end_time:
                     segment_words.append(word)  # Keep full word object with timestamps
 
-            # Create segment with matched text
             segment_text = " ".join(w.get("word", "") for w in segment_words).strip()
 
-            if speaker_info and confidence >= similarity_threshold:
-                # Identified speaker
+            assignment = label_assignment.get(speaker_label)
+            if assignment:
                 enhanced_segments.append(
                     {
                         "text": segment_text,
                         "start": round(start_time, 3),
                         "end": round(end_time, 3),
                         "speaker": speaker_label,
-                        "identified_as": speaker_info["name"],
-                        "speaker_id": speaker_info["id"],
-                        "confidence": round(float(confidence), 3),
+                        "identified_as": assignment["name"],
+                        "speaker_id": assignment["id"],
+                        "confidence": round(float(assignment["confidence"]), 3),
                         "status": "identified",
                         "words": segment_words,  # Include word-level timestamps
                     }
                 )
             else:
-                # Unknown speaker
                 enhanced_segments.append(
                     {
                         "text": segment_text,
@@ -648,9 +705,7 @@ async def diarize_identify_match(
                         "speaker": speaker_label,
                         "identified_as": None,
                         "speaker_id": None,
-                        "confidence": (
-                            round(float(confidence), 3) if confidence else 0.0
-                        ),
+                        "confidence": 0.0,
                         "status": "unknown",
                         "words": segment_words,  # Include word-level timestamps
                     }

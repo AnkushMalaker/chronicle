@@ -240,12 +240,16 @@ class UnifiedSpeakerDB:
             finally:
                 db.close()
 
-    async def identify(
+    async def _rank_candidates(
         self, embedding: np.ndarray, user_id: Optional[int] = None
-    ) -> Tuple[bool, Optional[Dict], float]:
-        """Identify speaker from embedding using FAISS search."""
+    ) -> List[Dict]:
+        """Return gallery candidates for an embedding, sorted by descending similarity.
+
+        Each candidate is {id, name, user_id, similarity, distance}. Empty list if the
+        index is empty or nothing matches the user filter.
+        """
         if self.index.ntotal == 0:
-            return False, None, 0.0
+            return []
 
         # Normalize query embedding
         query_emb = _normalize(embedding.astype(np.float32))
@@ -254,20 +258,12 @@ class UnifiedSpeakerDB:
         k = min(10, self.index.ntotal)  # Search top-k candidates
         similarities, indices = self.index.search(query_emb.reshape(1, -1), k)
 
-        best_similarity = -1.0
-        best_speaker = None
-
         db = get_db_session()
         try:
-            # Collect all candidates for detailed logging
-            all_candidates = []
-
-            # Check each candidate from FAISS search
+            all_candidates: List[Dict] = []
             for idx, similarity in zip(indices[0], similarities[0]):
                 if idx == -1:  # FAISS returns -1 for invalid indices
                     continue
-
-                # Map FAISS index to speaker
                 if idx not in self.faiss_to_speaker:
                     continue
 
@@ -277,10 +273,9 @@ class UnifiedSpeakerDB:
                 if user_id is not None and candidate_user_id != user_id:
                     continue
 
-                # FAISS IndexFlatIP returns inner product for normalized vectors (cosine similarity)
+                # FAISS IndexFlatIP returns inner product for normalized vectors (cosine)
                 cosine_similarity = float(similarity)
 
-                # Get speaker details from database
                 speaker = (
                     db.query(Speaker)
                     .filter(
@@ -288,58 +283,76 @@ class UnifiedSpeakerDB:
                     )
                     .first()
                 )
-
                 if speaker:
-                    candidate_info = {
-                        "id": speaker.id,
-                        "name": speaker.name,
-                        "user_id": speaker.user_id,
-                        "similarity": cosine_similarity,
-                        "distance": 1.0
-                        - cosine_similarity,  # Convert similarity to distance
-                    }
-                    all_candidates.append(candidate_info)
-
-                    if cosine_similarity > best_similarity:
-                        best_similarity = cosine_similarity
-                        best_speaker = {
+                    all_candidates.append(
+                        {
                             "id": speaker.id,
                             "name": speaker.name,
                             "user_id": speaker.user_id,
+                            "similarity": cosine_similarity,
+                            "distance": 1.0 - cosine_similarity,
                         }
+                    )
 
-            # Log all candidate speakers with their distances
-            if all_candidates:
+            ranked = sorted(all_candidates, key=lambda c: c["similarity"], reverse=True)
+
+            if ranked:
                 log.info("Speaker identification candidates:")
-                for candidate in sorted(
-                    all_candidates, key=lambda x: x["similarity"], reverse=True
-                ):
+                for candidate in ranked:
                     log.info(
-                        f"  {candidate['name']} ({candidate['id']}): similarity={candidate['similarity']:.4f}, distance={candidate['distance']:.4f}"
+                        f"  {candidate['name']} ({candidate['id']}): "
+                        f"similarity={candidate['similarity']:.4f}, "
+                        f"distance={candidate['distance']:.4f}"
                     )
                 log.info(f"Threshold: {self.similarity_thr:.4f}")
             else:
                 log.info("No valid candidates found for identification")
 
-            # Check if best similarity meets threshold
-            if best_similarity >= self.similarity_thr and best_speaker is not None:
-                log.info(
-                    "Identified speaker: %s (similarity: %.4f)",
-                    best_speaker["name"],
-                    best_similarity,
-                )
-                return True, best_speaker, best_similarity
-            else:
-                log.info(
-                    "No speaker identified (best similarity: %.4f)", best_similarity
-                )
-                return False, None, best_similarity
-
+            return ranked
         except Exception as e:
             log.error("Error during identification: %s", e)
-            return False, None, 0.0
+            return []
         finally:
             db.close()
+
+    async def identify(
+        self, embedding: np.ndarray, user_id: Optional[int] = None
+    ) -> Tuple[bool, Optional[Dict], float]:
+        """Identify speaker from embedding using FAISS search (best match only)."""
+        found, speaker, similarity, _ = await self.identify_with_candidates(
+            embedding, user_id=user_id
+        )
+        return found, speaker, similarity
+
+    async def identify_with_candidates(
+        self, embedding: np.ndarray, user_id: Optional[int] = None
+    ) -> Tuple[bool, Optional[Dict], float, List[Dict]]:
+        """Like :meth:`identify` but also returns the ranked candidate list.
+
+        Lets callers apply an open-set margin (best vs. runner-up) and exclusive
+        assignment across multiple diarized speakers.
+        """
+        ranked = await self._rank_candidates(embedding, user_id=user_id)
+        if not ranked:
+            return False, None, 0.0, []
+
+        best = ranked[0]
+        best_similarity = best["similarity"]
+        if best_similarity >= self.similarity_thr:
+            best_speaker = {
+                "id": best["id"],
+                "name": best["name"],
+                "user_id": best["user_id"],
+            }
+            log.info(
+                "Identified speaker: %s (similarity: %.4f)",
+                best["name"],
+                best_similarity,
+            )
+            return True, best_speaker, best_similarity, ranked
+
+        log.info("No speaker identified (best similarity: %.4f)", best_similarity)
+        return False, None, best_similarity, ranked
 
     async def verify(
         self, speaker_id: str, embedding: np.ndarray, user_id: int

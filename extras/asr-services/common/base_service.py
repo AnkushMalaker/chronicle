@@ -203,6 +203,11 @@ def create_asr_app(service: BaseASRService) -> FastAPI:
     # so they bind to the running event loop. Shared by the streaming and single paths.
     gate = {}
 
+    # Lazily-loaded forced aligner (MMS_FA). Shared across /align requests; loaded on
+    # first use so providers that never align don't pay the model-load cost.
+    aligner_holder = {}
+    aligner_lock = asyncio.Lock()
+
     @app.on_event("startup")
     async def startup_event():
         """Initialize the transcriber on startup."""
@@ -355,6 +360,162 @@ def create_asr_app(service: BaseASRService) -> FastAPI:
             # Streaming path owns its own cleanup via the generator's finally block.
             # Only clean up here for the normal (non-streaming) path.
             if tmp_filename and not streaming_response:
+                try:
+                    os.unlink(tmp_filename)
+                except Exception as e:
+                    logger.warning(f"Failed to delete temp file {tmp_filename}: {e}")
+
+    @app.post("/align")
+    async def align(
+        file: UploadFile = File(...),
+        segments: str = Form(...),
+    ):
+        """Forced-align known segment text to audio, returning word-level timestamps.
+
+        For providers (e.g. VibeVoice) that emit segment-level timestamps + text but no
+        per-word timing. ``segments`` is a JSON array of {start, end, text}; each
+        segment's text is aligned within its own audio window (more accurate and avoids
+        CTC "targets too long" on long files), and word times are returned in absolute
+        conversation time. This lets downstream re-diarization re-attach transcript text
+        to fresh speaker boundaries.
+        """
+        import numpy as np
+        import torch
+        import torchaudio  # only torchaudio.functional.resample (no codec dependency)
+        from common.forced_align import ForcedAligner
+
+        try:
+            seg_list = json.loads(segments)
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid segments JSON: {e}")
+        if not isinstance(seg_list, list):
+            raise HTTPException(status_code=400, detail="segments must be a JSON array")
+
+        # Lazy-load the aligner once (double-checked under lock).
+        if "fa" not in aligner_holder:
+            async with aligner_lock:
+                if "fa" not in aligner_holder:
+                    fa = ForcedAligner()
+                    await asyncio.get_event_loop().run_in_executor(None, fa.load)
+                    aligner_holder["fa"] = fa
+        fa: ForcedAligner = aligner_holder["fa"]
+
+        tmp_filename = None
+        try:
+            audio_content = await file.read()
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+                tmp_file.write(audio_content)
+                tmp_filename = tmp_file.name
+
+            # Read WAV via stdlib `wave` (NOT torchaudio.load — newer torchaudio routes
+            # load() through torchcodec, which isn't installed). Audio arrives as 16 kHz
+            # mono PCM16 WAV from the backend's reconstruct_audio_segment.
+            with wave.open(tmp_filename, "rb") as wf:
+                sr = wf.getframerate()
+                n_channels = wf.getnchannels()
+                sampwidth = wf.getsampwidth()
+                raw = wf.readframes(wf.getnframes())
+            if sampwidth != 2:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Expected 16-bit PCM WAV, got sample width {sampwidth}",
+                )
+            audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            if n_channels > 1:  # downmix to mono
+                audio = audio.reshape(-1, n_channels).mean(axis=1)
+            wav = torch.from_numpy(audio).unsqueeze(0)  # (1, N)
+            if sr != fa.sample_rate:
+                wav = torchaudio.functional.resample(wav, sr, fa.sample_rate)
+            sr = fa.sample_rate
+            total_dur = wav.size(1) / sr
+
+            def _fill_none(times, seg_start, seg_end):
+                """Offset window-relative times to absolute and interpolate gaps
+                (words that didn't tokenize, e.g. digits/punctuation)."""
+                n = len(times)
+                res = [None] * n
+                for i, t in enumerate(times):
+                    if t is not None:
+                        res[i] = (t[0] + seg_start, t[1] + seg_start)
+                last_end = seg_start
+                i = 0
+                while i < n:
+                    if res[i] is not None:
+                        last_end = res[i][1]
+                        i += 1
+                        continue
+                    j = i
+                    while j < n and res[j] is None:
+                        j += 1
+                    next_start = res[j][0] if j < n else seg_end
+                    span = max(0.0, next_start - last_end)
+                    step = span / (j - i) if j > i else 0.0
+                    for k in range(i, j):
+                        res[k] = (
+                            last_end + step * (k - i),
+                            last_end + step * (k - i + 1),
+                        )
+                    last_end = next_start
+                    i = j
+                return res
+
+            def _do_align():
+                out_words = []
+                aligned_segs = 0
+                for seg in seg_list:
+                    text = (seg.get("text") or "").strip()
+                    if not text:
+                        continue
+                    s = max(0.0, float(seg.get("start", 0.0)))
+                    e = min(total_dur, float(seg.get("end", s)))
+                    if e <= s:
+                        continue
+                    toks = text.split()
+                    if not toks:
+                        continue
+                    a, b = int(s * sr), int(e * sr)
+                    window = wav[:, a:b]
+                    if window.size(1) < int(0.05 * sr):  # < 50ms, too short to align
+                        continue
+                    times = fa.align(window, toks)
+                    abs_times = _fill_none(times, s, e)
+                    for tok, tm in zip(toks, abs_times):
+                        out_words.append(
+                            {
+                                "word": tok,
+                                "start": round(float(tm[0]), 3),
+                                "end": round(float(tm[1]), 3),
+                                "confidence": None,
+                            }
+                        )
+                    aligned_segs += 1
+                return out_words, aligned_segs
+
+            # Serialize on the GPU's normal lane so alignment doesn't dogpile inference.
+            async with gate["normal"]:
+                words, aligned_segs = await asyncio.get_event_loop().run_in_executor(
+                    None, _do_align
+                )
+
+            logger.info(
+                f"Forced alignment: {len(words)} words across {aligned_segs}"
+                f"/{len(seg_list)} segments ({total_dur:.1f}s audio)"
+            )
+            return JSONResponse(
+                content={
+                    "words": words,
+                    "duration": round(total_dur, 3),
+                    "aligned_segments": aligned_segs,
+                    "total_segments": len(seg_list),
+                }
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception(f"Forced alignment failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Alignment failed: {e}")
+        finally:
+            if tmp_filename:
                 try:
                     os.unlink(tmp_filename)
                 except Exception as e:
