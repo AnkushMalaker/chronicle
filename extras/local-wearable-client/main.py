@@ -128,7 +128,7 @@ async def scan_all_devices(config: dict) -> list[dict]:
             )
         elif auto_discover and d.name:
             lower = d.name.casefold()
-            if "omi" in lower or "neo" in lower or "friend" in lower:
+            if "omi" in lower or "neo" in lower or "friend" in lower or "elato" in lower:
                 devices.append(
                     {
                         "mac": d.address,
@@ -683,7 +683,7 @@ async def scan_and_print() -> None:
             )
         elif auto_discover and d.name:
             lower = d.name.casefold()
-            if "omi" in lower or "neo" in lower or "friend" in lower:
+            if "omi" in lower or "neo" in lower or "friend" in lower or "elato" in lower:
                 devices.append(
                     {
                         "mac": d.address,

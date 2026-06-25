@@ -523,7 +523,7 @@ class BLEManager:
             # Auto-discover recognized names
             if auto_discover and d.name:
                 lower = d.name.casefold()
-                if "omi" in lower or "neo" in lower or "friend" in lower:
+                if "omi" in lower or "neo" in lower or "friend" in lower or "elato" in lower:
                     devices.append(
                         {
                             "mac": d.address,

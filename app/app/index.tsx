@@ -190,7 +190,7 @@ export default function App() {
     if (!showOnlyOmi) return scannedDevices;
     return scannedDevices.filter(d => {
       const name = d.name?.toLowerCase() || '';
-      return name.includes('omi') || name.includes('friend') || name.includes('neo');
+      return name.includes('omi') || name.includes('friend') || name.includes('neo') || name.includes('elato');
     });
   }, [scannedDevices, showOnlyOmi]);
 
@@ -357,7 +357,7 @@ export default function App() {
               <View style={s.sectionHeaderWithFilter}>
                 <Text style={s.sectionTitle}>Found Devices</Text>
                 <View style={s.filterContainer}>
-                  <Text style={s.filterText}>Show only OMI/Friend/Neo</Text>
+                  <Text style={s.filterText}>Show only OMI/Friend/Neo/Elato</Text>
                   <Switch
                     trackColor={{ false: colors.disabled, true: colors.primary }}
                     thumbColor={showOnlyOmi ? colors.warning : colors.card}
@@ -378,7 +378,7 @@ export default function App() {
               ) : (
                 <View style={s.noDevicesContainer}>
                   <Text style={s.noDevicesText}>
-                    {showOnlyOmi ? `No OMI/Friend/Neo devices found. ${scannedDevices.length} other device(s) hidden by filter.` : 'No devices found.'}
+                    {showOnlyOmi ? `No OMI/Friend/Neo/Elato devices found. ${scannedDevices.length} other device(s) hidden by filter.` : 'No devices found.'}
                   </Text>
                 </View>
               )}
