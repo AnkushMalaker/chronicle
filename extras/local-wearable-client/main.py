@@ -255,8 +255,13 @@ async def connect_and_stream(
                     break
                 yield raw_opus
 
+        # Forward the backend's Opus speaker downlink to the device over BLE when the
+        # device has a speaker characteristic (Elato). OMI/Neo have no speaker, so None.
+        speaker = conn if isinstance(conn, OmiConnection) else None
         try:
-            await stream_to_backend(queue_to_stream(), device_name=device_name)
+            await stream_to_backend(
+                queue_to_stream(), device_name=device_name, speaker=speaker
+            )
         except Exception as e:
             logger.error("Backend streaming error: %s", e, exc_info=True)
 

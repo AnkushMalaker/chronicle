@@ -160,19 +160,44 @@ async def get_jwt_token(username: str, password: str) -> Optional[str]:
         return None
 
 
-async def receive_handler(websocket, logger) -> None:
+async def receive_handler(websocket, logger, speaker=None) -> None:
     """Background task to receive messages from backend.
 
     Processes pongs (keepalive), interim transcripts, and other messages.
     Critical for WebSocket stability.
+
+    *speaker*: optional object exposing speaker_start/speaker_end/speaker_stop/
+    write_speaker_audio (an OmiConnection). When set, the backend's Opus speaker
+    downlink (speak-start text → binary Opus frames → speak-end, plus speak-stop
+    for barge-in) is forwarded to the device over BLE instead of the laptop.
     """
     try:
         while True:
             message = await websocket.recv()
+            # Binary frame = one Opus speaker packet (Elato downlink). Forward to BLE.
+            if isinstance(message, (bytes, bytearray)):
+                if speaker is not None:
+                    try:
+                        await speaker.write_speaker_audio(bytes(message))
+                    except Exception as e:
+                        logger.debug("speaker audio write failed: %s", e)
+                continue
             try:
                 data = json.loads(message)
                 msg_type = data.get("type", "unknown")
-                if msg_type == "interim_transcript":
+                if msg_type in ("speak-start", "speak-end", "speak-stop"):
+                    # Opus speaker downlink control (Elato). Forward to the device.
+                    if speaker is not None:
+                        try:
+                            if msg_type == "speak-start":
+                                await speaker.speaker_start()
+                            elif msg_type == "speak-end":
+                                await speaker.speaker_end()
+                            else:
+                                await speaker.speaker_stop()
+                        except Exception as e:
+                            logger.debug("speaker control %s failed: %s", msg_type, e)
+                elif msg_type == "interim_transcript":
                     text = data.get("data", {}).get("text", "")[:50]
                     is_final = data.get("data", {}).get("is_final", False)
                     logger.debug(
@@ -221,6 +246,7 @@ _MIN_HEALTHY_DURATION = 30.0
 async def stream_to_backend(
     stream: AsyncGenerator[bytes, None],
     device_name: str = "wearable",
+    speaker=None,
 ) -> None:
     """Stream raw Opus audio to backend using Wyoming protocol with JWT authentication.
 
@@ -282,7 +308,7 @@ async def stream_to_backend(
                 logger.info("Backend ready: %s", ready_msg)
 
                 receive_task = asyncio.create_task(
-                    receive_handler(websocket, logger)
+                    receive_handler(websocket, logger, speaker=speaker)
                 )
 
                 try:

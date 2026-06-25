@@ -111,6 +111,12 @@ async def subscribe_to_interim_results(websocket: WebSocket, session_id: str) ->
                     try:
                         result_data = json.loads(message["data"])
 
+                        # Stop if the socket closed: a result can race the close, and
+                        # send_json after close raises the ASGI "websocket.send after
+                        # websocket.close" error. Guard instead of catching post-hoc.
+                        if websocket.client_state != WebSocketState.CONNECTED:
+                            break
+
                         # Forward to client WebSocket
                         await websocket.send_json(
                             {"type": "interim_transcript", "data": result_data}
@@ -210,6 +216,10 @@ async def subscribe_to_device_downlink(websocket: WebSocket, client_id: str) -> 
                     continue
 
                 try:
+                    # Skip if the device socket already closed (a downlink can race the
+                    # disconnect); sending after close raises the ASGI websocket.send error.
+                    if websocket.client_state != WebSocketState.CONNECTED:
+                        break
                     if msg_type == "stop-audio":
                         # Barge-in: stop whatever TTS is playing on the device. For
                         # Opus clients this cancels the in-flight stream + flushes the
