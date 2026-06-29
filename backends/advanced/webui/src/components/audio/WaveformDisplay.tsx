@@ -1,11 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { api } from '../../services/api';
-
-interface WaveformData {
-  samples: number[];
-  sample_rate: number;
-  duration_seconds: number;
-}
+import React, { useEffect, useRef } from 'react';
+import { useWaveformData } from './useWaveformData';
 
 // A transcript-segment band rendered on the waveform.
 // 'playing': segment audio is currently playing — strong highlight
@@ -36,31 +30,8 @@ export const WaveformDisplay: React.FC<WaveformDisplayProps> = ({
   segments,
   segmentMarkers,
 }) => {
-  const [waveformData, setWaveformData] = useState<WaveformData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const { data: waveformData, loading, error } = useWaveformData(conversationId);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  // Fetch waveform data on component mount
-  useEffect(() => {
-    const fetchWaveform = async () => {
-      setLoading(true);
-      setError(null);
-
-      try {
-        const response = await api.get(`/api/conversations/${conversationId}/waveform`);
-        setWaveformData(response.data);
-      } catch (err: any) {
-        const errorMsg = err?.response?.data?.detail || err?.message || 'Failed to load waveform';
-        console.error('Waveform fetch failed:', errorMsg);
-        setError(errorMsg);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchWaveform();
-  }, [conversationId]);
 
   // Draw waveform when data changes
   useEffect(() => {

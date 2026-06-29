@@ -22,6 +22,7 @@ class AnnotationType(str, Enum):
     DIARIZATION = "diarization"  # Speaker identification corrections
     TITLE = "title"  # Conversation title corrections
     INSERT = "insert"  # Insert new segment between existing segments
+    TIMING = "timing"  # Adjust an existing segment's start/end (waveform region edit)
     SPEECH_SUGGESTION_CORRECTION = "speech_suggestion_correction"  # User-refined model suggestion (training signal triple)
 
 
@@ -86,6 +87,12 @@ class Annotation(Document):
     insert_text: Optional[str] = None  # e.g., "[laughter]" or "wife laughed"
     insert_segment_type: Optional[str] = None  # "event", "note", or "speech"
     insert_speaker: Optional[str] = None  # Speaker label for "speech" type inserts
+    insert_start: Optional[float] = None  # Explicit span start (waveform-drawn region)
+    insert_end: Optional[float] = None  # Explicit span end; None → zero-duration marker
+
+    # For TIMING annotations (adjust an existing segment's span on the waveform):
+    new_start: Optional[float] = None
+    new_end: Optional[float] = None
 
     # Processed tracking (applies to ALL annotation types)
     processed: bool = Field(
@@ -204,6 +211,18 @@ class InsertAnnotationCreate(BaseModel):
     insert_text: str
     insert_segment_type: str  # "event", "note", or "speech"
     insert_speaker: Optional[str] = None  # Speaker label for "speech" type inserts
+    insert_start: Optional[float] = None  # Explicit span start (waveform-drawn region)
+    insert_end: Optional[float] = None  # Explicit span end; None → zero-duration marker
+
+
+class TimingAnnotationCreate(BaseModel):
+    """Adjust an existing segment's start/end times (waveform region edit)."""
+
+    conversation_id: str
+    segment_index: int
+    new_start: float
+    new_end: float
+    status: AnnotationStatus = AnnotationStatus.ACCEPTED
 
 
 class AnnotationUpdate(BaseModel):
@@ -236,6 +255,10 @@ class AnnotationResponse(BaseModel):
     insert_text: Optional[str] = None
     insert_segment_type: Optional[str] = None
     insert_speaker: Optional[str] = None
+    insert_start: Optional[float] = None
+    insert_end: Optional[float] = None
+    new_start: Optional[float] = None
+    new_end: Optional[float] = None
     processed: bool = False
     processed_at: Optional[datetime] = None
     processed_by: Optional[str] = None

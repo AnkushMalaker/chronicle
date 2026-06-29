@@ -1,10 +1,10 @@
-import { useState, useRef, useCallback, useMemo, useEffect } from 'react'
+import { useState, useRef, useMemo, useEffect } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft, Calendar, User, Trash2, RefreshCw, MoreVertical,
-  RotateCcw, Zap, Play, Pause, Download, Scissors,
-  Save, X, Pencil, Clock, Database, Layers, Star, BarChart3, Hash, Check
+  RotateCcw, Zap, Download, Scissors,
+  Save, X, Pencil, Clock, Database, Layers, Star, BarChart3, Hash, AudioLines
 } from 'lucide-react'
 import { annotationsApi, speakerApi, systemApi, BACKEND_URL } from '../services/api'
 import {
@@ -13,25 +13,12 @@ import {
 } from '../hooks/useConversations'
 import ConversationVersionHeader from '../components/ConversationVersionHeader'
 import MemoryAuditCard from '../components/MemoryAuditCard'
-import { PlayheadWaveform, PlayheadTimeLabel } from '../components/audio/PlayheadWaveform'
 import { useGaplessPlayer } from '../hooks/useGaplessPlayer'
 import { AUDIO_FORMAT } from '../utils/audioFormat'
-import SpeakerNameDropdown from '../components/SpeakerNameDropdown'
+import TranscriptEditor from '../components/transcript/TranscriptEditor'
+import { useWaveformZoomDisabled } from '../components/transcript/useWaveformZoom'
 import SplitConversationModal from '../components/dataAudit/SplitConversationModal'
 import { getStorageKey } from '../utils/storage'
-
-const SPEAKER_COLOR_PALETTE = [
-  'text-blue-600 dark:text-blue-400',
-  'text-green-600 dark:text-green-400',
-  'text-purple-600 dark:text-purple-400',
-  'text-orange-600 dark:text-orange-400',
-  'text-pink-600 dark:text-pink-400',
-  'text-indigo-600 dark:text-indigo-400',
-  'text-red-600 dark:text-red-400',
-  'text-yellow-600 dark:text-yellow-400',
-  'text-teal-600 dark:text-teal-400',
-  'text-cyan-600 dark:text-cyan-400',
-]
 
 interface Segment {
   text: string
@@ -96,6 +83,7 @@ export default function ConversationDetail() {
 
   // Dropdown menu state
   const [openDropdown, setOpenDropdown] = useState(false)
+  const [waveformZoomDisabled, setWaveformZoomDisabled] = useWaveformZoomDisabled()
 
   // Split modal state
   const [showSplitModal, setShowSplitModal] = useState(false)
@@ -129,16 +117,6 @@ export default function ConversationDetail() {
 
   // Audio playback is owned by the app-wide gapless scheduler (Web Audio).
   const player = useGaplessPlayer()
-  // Hover preview band on the waveform stays local (pure UI hover state).
-  const [hoverMarker, setHoverMarker] = useState<{ start: number; end: number } | null>(null)
-
-  // Play/pause a single transcript segment (toggles off if already playing it).
-  const handleSegmentPlayPause = (segmentIndex: number, segment: Segment) => {
-    if (!id) return
-    const segId = `${id}-${segmentIndex}`
-    if (player.playingSegmentId === segId) player.stop()
-    else player.playSegment(id, segId, segment.start, segment.end)
-  }
 
   // Detailed summary expand
   const [showDetailedSummary, setShowDetailedSummary] = useState(false)
@@ -151,17 +129,6 @@ export default function ConversationDetail() {
 
   // Diarization annotation state
   const [enrolledSpeakers, setEnrolledSpeakers] = useState<Array<{speaker_id: string, name: string}>>([])
-  const [diarizationAnnotations, setDiarizationAnnotations] = useState<any[]>([])
-
-  // Track recently selected speakers in this session (most recent first)
-  const [recentSpeakers, setRecentSpeakers] = useState<string[]>([])
-
-  // Transcript segment editing state
-  const [editingSegment, setEditingSegment] = useState<number | null>(null)
-  const [editedSegmentText, setEditedSegmentText] = useState('')
-  const [savingSegment, setSavingSegment] = useState(false)
-  const [segmentEditError, setSegmentEditError] = useState<string | null>(null)
-  const [transcriptAnnotations, setTranscriptAnnotations] = useState<any[]>([])
 
   // Load enrolled speakers on mount
   useEffect(() => {
@@ -170,94 +137,6 @@ export default function ConversationDetail() {
       .catch(() => {})
   }, [])
 
-  // Load annotations when conversation loads
-  useEffect(() => {
-    if (!id) return
-    annotationsApi.getDiarizationAnnotations(id)
-      .then(res => setDiarizationAnnotations(res.data))
-      .catch(() => {})
-    annotationsApi.getTranscriptAnnotations(id)
-      .then(res => setTranscriptAnnotations(res.data))
-      .catch(() => {})
-  }, [id, conversation])
-
-  // Pending annotation apply/clear state
-  const [applyingAnnotations, setApplyingAnnotations] = useState(false)
-  const [clearingAnnotations, setClearingAnnotations] = useState(false)
-
-  const pendingDiarAnnotations = useMemo(
-    () => diarizationAnnotations.filter(a => !a.processed),
-    [diarizationAnnotations]
-  )
-  const pendingTextAnnotations = useMemo(
-    () => transcriptAnnotations.filter(a => !a.processed),
-    [transcriptAnnotations]
-  )
-  const totalPendingAnnotations = pendingDiarAnnotations.length + pendingTextAnnotations.length
-
-  const reloadAnnotations = useCallback(async () => {
-    if (!id) return
-    const [diar, text] = await Promise.all([
-      annotationsApi.getDiarizationAnnotations(id),
-      annotationsApi.getTranscriptAnnotations(id),
-    ])
-    setDiarizationAnnotations(diar.data)
-    setTranscriptAnnotations(text.data)
-  }, [id])
-
-  const handleApplyAnnotations = async () => {
-    if (!id) return
-    try {
-      setApplyingAnnotations(true)
-      await annotationsApi.applyAllAnnotations(id)
-      await refetch()
-      await reloadAnnotations()
-    } catch (err: any) {
-      setActionError(`Error applying annotations: ${err.message || 'Unknown error'}`)
-    } finally {
-      setApplyingAnnotations(false)
-    }
-  }
-
-  const handleClearAnnotations = async () => {
-    if (!id) return
-    if (!confirm(`Discard ${totalPendingAnnotations} pending correction(s)?`)) return
-    try {
-      setClearingAnnotations(true)
-      await Promise.all(
-        [...pendingDiarAnnotations, ...pendingTextAnnotations].map(a =>
-          annotationsApi.deleteAnnotation(a.id)
-        )
-      )
-      await reloadAnnotations()
-    } catch (err: any) {
-      setActionError(`Error clearing annotations: ${err.message || 'Unknown error'}`)
-    } finally {
-      setClearingAnnotations(false)
-    }
-  }
-
-  const handleDeleteAnnotation = async (annotationId: string) => {
-    try {
-      await annotationsApi.deleteAnnotation(annotationId)
-      await reloadAnnotations()
-    } catch {
-      setActionError('Failed to revert annotation')
-    }
-  }
-
-  // Compute merged speaker list including annotation names
-  const allSpeakers = useMemo(() => {
-    const speakers = [...enrolledSpeakers]
-    const existingNames = new Set(speakers.map(s => s.name))
-    diarizationAnnotations.forEach(a => {
-      if (a.corrected_speaker && !existingNames.has(a.corrected_speaker)) {
-        speakers.push({ speaker_id: `annotation_${a.corrected_speaker}`, name: a.corrected_speaker })
-        existingNames.add(a.corrected_speaker)
-      }
-    })
-    return speakers
-  }, [enrolledSpeakers, diarizationAnnotations])
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -430,88 +309,6 @@ export default function ConversationDetail() {
     }
   }
 
-  // Speaker change handler
-  const handleSpeakerChange = async (segmentIndex: number, originalSpeaker: string, newSpeaker: string, segmentStartTime: number) => {
-    if (!id) return
-    try {
-      const existingAnnotation = diarizationAnnotations.find(
-        a => a.segment_index === segmentIndex && !a.processed
-      )
-      if (existingAnnotation) {
-        await annotationsApi.updateAnnotation(existingAnnotation.id, { corrected_speaker: newSpeaker })
-      } else {
-        await annotationsApi.createDiarizationAnnotation({
-          conversation_id: id,
-          segment_index: segmentIndex,
-          original_speaker: originalSpeaker,
-          corrected_speaker: newSpeaker,
-          segment_start_time: segmentStartTime,
-        })
-      }
-      setEnrolledSpeakers(prev => {
-        if (newSpeaker === 'Unknown Speaker') return prev
-        if (prev.some(s => s.name === newSpeaker)) return prev
-        return [...prev, { speaker_id: `temp_${Date.now()}_${newSpeaker}`, name: newSpeaker }]
-      })
-      // Track as recently used speaker (move to front)
-      setRecentSpeakers(prev => [newSpeaker, ...prev.filter(s => s !== newSpeaker)])
-      const res = await annotationsApi.getDiarizationAnnotations(id)
-      setDiarizationAnnotations(res.data)
-    } catch (err: any) {
-      setActionError('Failed to create speaker annotation')
-    }
-  }
-
-  // Segment editing handlers
-  const handleStartSegmentEdit = (segmentIndex: number, originalText: string) => {
-    setEditingSegment(segmentIndex)
-    setEditedSegmentText(originalText)
-    setSegmentEditError(null)
-  }
-
-  const handleSaveSegmentEdit = async (segmentIndex: number, originalText: string) => {
-    if (!id || !editedSegmentText.trim()) {
-      setSegmentEditError('Segment text cannot be empty')
-      return
-    }
-    if (editedSegmentText === originalText) {
-      setEditingSegment(null)
-      return
-    }
-    try {
-      setSavingSegment(true)
-      setSegmentEditError(null)
-      const existing = transcriptAnnotations.find(a => a.segment_index === segmentIndex && !a.processed)
-      if (existing) {
-        await annotationsApi.updateAnnotation(existing.id, { corrected_text: editedSegmentText })
-      } else {
-        await annotationsApi.createTranscriptAnnotation({
-          conversation_id: id,
-          segment_index: segmentIndex,
-          original_text: originalText,
-          corrected_text: editedSegmentText,
-        })
-      }
-      setEditingSegment(null)
-      setEditedSegmentText('')
-      const res = await annotationsApi.getTranscriptAnnotations(id)
-      setTranscriptAnnotations(res.data)
-    } catch (err: any) {
-      setSegmentEditError(err.response?.data?.detail || err.message || 'Failed to save')
-    } finally {
-      setSavingSegment(false)
-    }
-  }
-
-  const handleSegmentKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>, segmentIndex: number, originalText: string) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault()
-      handleSaveSegmentEdit(segmentIndex, originalText)
-    } else if (e.key === 'Escape') {
-      e.preventDefault()
-      setEditingSegment(null)
-    }
-  }
 
   // Stop playback when leaving the page.
   useEffect(() => {
@@ -521,19 +318,6 @@ export default function ConversationDetail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
 
-  // Build speaker color map
-  const speakerColorMap = useMemo(() => {
-    const map: { [key: string]: string } = {}
-    let colorIndex = 0
-    conversation?.segments?.forEach(segment => {
-      const speaker = segment.speaker || 'Unknown'
-      if (!map[speaker]) {
-        map[speaker] = SPEAKER_COLOR_PALETTE[colorIndex % SPEAKER_COLOR_PALETTE.length]
-        colorIndex++
-      }
-    })
-    return map
-  }, [conversation?.segments])
 
   if (loading) {
     return (
@@ -639,6 +423,14 @@ export default function ConversationDetail() {
               >
                 {reprocessingSpeakers ? <RefreshCw className="h-4 w-4 animate-spin" /> : <User className="h-4 w-4" />}
                 <span>Reprocess Speakers</span>
+              </button>
+              <button
+                onClick={() => setWaveformZoomDisabled(!waveformZoomDisabled)}
+                className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2"
+                title="When on, editing a segment auto-zooms the waveform so you can adjust its timing"
+              >
+                <AudioLines className="h-4 w-4" />
+                <span>{waveformZoomDisabled ? 'Enable waveform zoom' : 'Disable waveform zoom'}</span>
               </button>
               {conversation.audio_chunks_count && conversation.audio_chunks_count > 0 && (
                 <>
@@ -775,246 +567,35 @@ export default function ConversationDetail() {
             )}
           </div>
 
-          {/* Audio Player — chunk-based (no full WAV download) */}
-          {conversation.audio_chunks_count && conversation.audio_chunks_count > 0 && (
-            <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-6">
-              <h2 className="font-medium text-gray-900 dark:text-gray-100 mb-3">Audio</h2>
-
-              {conversation.conversation_id && conversation.audio_total_duration && (
-                <PlayheadWaveform
-                  cid={conversation.conversation_id}
-                  duration={conversation.audio_total_duration}
-                  onSeek={(t) => id && player.play(id, t, { totalDuration: conversation.audio_total_duration! })}
-                  height={80}
-                  segments={segments}
-                  segmentMarker={player.segmentMarker}
-                  hoverMarker={hoverMarker}
-                />
-              )}
-
-              {/* Play/pause + time display */}
-              <div className="flex items-center gap-3 mt-2">
-                <button
-                  onClick={() => id && conversation.audio_total_duration && player.togglePlay(id, conversation.audio_total_duration)}
-                  className="p-2 rounded-full bg-blue-600 hover:bg-blue-700 text-white transition-colors"
-                  title={id && player.isActive(id) && player.isPlaying ? 'Pause' : 'Play'}
-                >
-                  {id && player.isActive(id) && player.isPlaying
-                    ? <Pause className="w-4 h-4" />
-                    : <Play className="w-4 h-4" />}
-                </button>
-                <PlayheadTimeLabel
-                  cid={conversation.conversation_id!}
-                  total={conversation.audio_total_duration}
-                  className="text-sm text-gray-600 dark:text-gray-400 font-mono"
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Transcript */}
+          {/* Audio + transcript — one shared editor. The waveform doubles as the
+              timing editor (auto-zooms when you edit a segment). */}
           <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-6">
-            <h2 className="font-medium text-gray-900 dark:text-gray-100 mb-4">
-              Transcript
-              {isLive && (
-                <span className="inline-flex items-center gap-1.5 ml-2">
-                  <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
-                  <span className="text-xs text-red-600 dark:text-red-400 font-medium">LIVE</span>
-                </span>
-              )}
-              {segments.length > 0 && (
-                <span className="text-sm text-gray-500 dark:text-gray-400 ml-2">
-                  ({segments.length} segments)
-                </span>
-              )}
-            </h2>
-
-            {totalPendingAnnotations > 0 && (
-              <div className="flex items-center justify-between gap-3 mb-4 px-3 py-2 bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 rounded-lg">
-                <span className="text-sm text-orange-700 dark:text-orange-300">
-                  {totalPendingAnnotations} pending correction{totalPendingAnnotations === 1 ? '' : 's'}
-                  {' '}({pendingDiarAnnotations.length} speaker, {pendingTextAnnotations.length} text) — not yet applied to the transcript
-                </span>
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  <button
-                    onClick={handleApplyAnnotations}
-                    disabled={applyingAnnotations || clearingAnnotations}
-                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-white bg-blue-600 rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                    title="Create a new transcript version with these corrections and reprocess memory"
-                  >
-                    {applyingAnnotations ? (
-                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Check className="h-3.5 w-3.5" />
-                    )}
-                    Apply
-                  </button>
-                  <button
-                    onClick={handleClearAnnotations}
-                    disabled={applyingAnnotations || clearingAnnotations}
-                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
-                    title="Discard all pending corrections"
-                  >
-                    {clearingAnnotations ? (
-                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Trash2 className="h-3.5 w-3.5" />
-                    )}
-                    Clear
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {segments.length > 0 ? (
-              <div className="space-y-1">
-                {segments.map((segment, idx) => {
-                  const speaker = segment.speaker || 'Unknown'
-                  const speakerColor = speakerColorMap[speaker] || SPEAKER_COLOR_PALETTE[0]
-                  const isEvent = segment.segment_type === 'event'
-                  const isNote = segment.segment_type === 'note'
-                  const isEditing = editingSegment === idx
-                  const diarAnnotation = diarizationAnnotations.find(a => a.segment_index === idx && !a.processed)
-                  const hasTextAnnotation = transcriptAnnotations.some(a => a.segment_index === idx && !a.processed)
-
-                  if (isEvent || isNote) {
-                    return (
-                      <div
-                        key={idx}
-                        className={`group flex items-center gap-2 py-1 px-3 rounded ${
-                          isEvent
-                            ? 'bg-yellow-50 dark:bg-yellow-900/20 border-l-2 border-yellow-400'
-                            : 'bg-green-50 dark:bg-green-900/20 border-l-2 border-green-400'
-                        }`}
-                        onMouseEnter={isEvent ? () => setHoverMarker({ start: segment.start, end: segment.end }) : undefined}
-                        onMouseLeave={isEvent ? () => setHoverMarker(null) : undefined}
-                      >
-                        {isEvent && (
-                          <button
-                            onClick={() => handleSegmentPlayPause(idx, segment)}
-                            className="flex-shrink-0 p-0.5 rounded hover:bg-yellow-200 dark:hover:bg-yellow-800 opacity-0 group-hover:opacity-100 transition-opacity"
-                            title={`Play ${formatDuration(segment.end - segment.start)}s`}
-                          >
-                            {player.playingSegmentId === `${id}-${idx}` ? (
-                              <Pause className="h-3 w-3 text-yellow-600" />
-                            ) : (
-                              <Play className="h-3 w-3 text-yellow-600" />
-                            )}
-                          </button>
-                        )}
-                        <span className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mr-2">
-                          {isEvent ? 'event' : 'note'}
-                        </span>
-                        <span className="text-sm text-gray-700 dark:text-gray-300 italic">
-                          {segment.text}
-                        </span>
-                      </div>
-                    )
-                  }
-
-                  return (
-                    <div
-                      key={idx}
-                      className={`group flex items-start gap-2 py-1 rounded hover:bg-gray-50 dark:hover:bg-gray-700/50 ${
-                        hasTextAnnotation ? 'bg-yellow-50 dark:bg-yellow-900/10' : ''
-                      }`}
-                      onMouseEnter={() => setHoverMarker({ start: segment.start, end: segment.end })}
-                      onMouseLeave={() => setHoverMarker(null)}
-                    >
-                      {/* Play button */}
-                      <button
-                        onClick={() => handleSegmentPlayPause(idx, segment)}
-                        className="flex-shrink-0 mt-0.5 p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-600 opacity-0 group-hover:opacity-100 transition-opacity"
-                        title={`Play ${formatDuration(segment.end - segment.start)}s`}
-                      >
-                        {player.playingSegmentId === `${id}-${idx}` ? (
-                          <Pause className="h-3 w-3 text-blue-600" />
-                        ) : (
-                          <Play className="h-3 w-3 text-gray-500" />
-                        )}
-                      </button>
-
-                      {/* Speaker name — pending annotations show the corrected name */}
-                      <div className="flex-shrink-0 w-28 inline-flex items-start gap-1">
-                        {diarAnnotation && (
-                          <button
-                            onClick={() => handleDeleteAnnotation(diarAnnotation.id)}
-                            className="flex-shrink-0 mt-1 text-gray-400 hover:text-red-500 transition-colors"
-                            title={`Revert to "${diarAnnotation.original_speaker}"`}
-                          >
-                            <X className="w-3 h-3" />
-                          </button>
-                        )}
-                        <SpeakerNameDropdown
-                          currentSpeaker={diarAnnotation ? diarAnnotation.corrected_speaker : speaker}
-                          enrolledSpeakers={allSpeakers}
-                          onSpeakerChange={(newSpeaker) => handleSpeakerChange(idx, diarAnnotation ? diarAnnotation.original_speaker : speaker, newSpeaker, segment.start)}
-                          segmentIndex={idx}
-                          conversationId={conversation.conversation_id}
-                          annotated={!!diarAnnotation}
-                          speakerColor={speakerColor}
-                          recentSpeakers={recentSpeakers}
-                        />
-                      </div>
-
-                      {/* Segment text */}
-                      <div className="flex-1 min-w-0">
-                        {isEditing ? (
-                          <div className="space-y-1">
-                            <textarea
-                              value={editedSegmentText}
-                              onChange={(e) => setEditedSegmentText(e.target.value)}
-                              onKeyDown={(e) => handleSegmentKeyDown(e, idx, segment.text)}
-                              className="w-full px-2 py-1 text-sm border-2 border-blue-500 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white dark:bg-gray-900 text-gray-700 dark:text-gray-300 resize-y"
-                              autoFocus
-                              disabled={savingSegment}
-                              rows={2}
-                            />
-                            <div className="flex items-center gap-1">
-                              <button
-                                onClick={() => handleSaveSegmentEdit(idx, segment.text)}
-                                disabled={savingSegment}
-                                className="px-2 py-0.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
-                              >
-                                {savingSegment ? 'Saving...' : 'Save'}
-                              </button>
-                              <button
-                                onClick={() => setEditingSegment(null)}
-                                className="px-2 py-0.5 text-xs bg-gray-200 dark:bg-gray-600 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300"
-                              >
-                                Cancel
-                              </button>
-                              {segmentEditError && (
-                                <span className="text-xs text-red-500">{segmentEditError}</span>
-                              )}
-                            </div>
-                          </div>
-                        ) : (
-                          <p
-                            className="text-sm text-gray-700 dark:text-gray-300 cursor-pointer hover:bg-yellow-50 dark:hover:bg-yellow-900/10 rounded px-1 transition-colors"
-                            onClick={() => handleStartSegmentEdit(idx, segment.text)}
-                            title="Click to edit"
-                          >
-                            {segment.text}
-                          </p>
-                        )}
-                      </div>
-
-                      {/* Timestamp */}
-                      <span className="flex-shrink-0 text-xs text-gray-400 mt-0.5">
-                        {formatDuration(segment.start)}
-                      </span>
-                    </div>
-                  )
-                })}
-                <div ref={transcriptEndRef} />
-              </div>
-            ) : (
-              <p className="text-sm text-gray-500 dark:text-gray-400 italic">
-                {isLive ? 'Waiting for speech...' : 'No transcript segments available'}
-              </p>
-            )}
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-medium text-gray-900 dark:text-gray-100">
+                Transcript
+                {isLive && (
+                  <span className="inline-flex items-center gap-1.5 ml-2">
+                    <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+                    <span className="text-xs text-red-600 dark:text-red-400 font-medium">LIVE</span>
+                  </span>
+                )}
+                {segments.length > 0 && (
+                  <span className="text-sm text-gray-500 dark:text-gray-400 ml-2">({segments.length} segments)</span>
+                )}
+              </h2>
+            </div>
+            <TranscriptEditor
+              conversationId={conversation.conversation_id!}
+              segments={segments}
+              duration={conversation.audio_total_duration}
+              hasAudio={!!conversation.audio_chunks_count && conversation.audio_chunks_count > 0}
+              showWaveform
+              isLive={isLive}
+              enrolledSpeakers={enrolledSpeakers}
+              onChanged={refetch}
+            />
           </div>
+
         </div>
 
         {/* Right Column - Sidebar */}

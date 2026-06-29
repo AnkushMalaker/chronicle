@@ -256,12 +256,22 @@ def _raw_doc_to_list_dict(doc: dict) -> dict:
     """
     active_tv = doc.get("active_transcript_version")
 
-    # Compute segment_count from projected transcript_versions
+    # Compute segment_count + the unique speaker list from the active version's segments
+    # (segments are already projected for the count — deriving speakers here is free and
+    # lets the list show "who's in this conversation" at a glance without expanding).
     segment_count = 0
+    speakers: list[str] = []
     transcript_versions = doc.get("transcript_versions") or []
     for tv in transcript_versions:
         if tv.get("version_id") == active_tv:
-            segment_count = len(tv.get("segments", []))
+            segs = tv.get("segments", [])
+            segment_count = len(segs)
+            seen: set[str] = set()
+            for seg in segs:
+                sp = (seg.get("speaker") or "").strip()
+                if sp and sp not in seen:
+                    seen.add(sp)
+                    speakers.append(sp)
             break
 
     # Compute active version number (1-based)
@@ -297,6 +307,7 @@ def _raw_doc_to_list_dict(doc: dict) -> dict:
         "detailed_summary": doc.get("detailed_summary"),
         "active_transcript_version": active_tv,
         "segment_count": segment_count,
+        "speakers": speakers,
         "transcript_version_count": len(transcript_versions),
         "active_transcript_version_number": active_transcript_version_number,
         "starred": doc.get("starred", False),

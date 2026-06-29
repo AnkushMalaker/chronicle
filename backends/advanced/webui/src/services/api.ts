@@ -290,10 +290,23 @@ export const annotationsApi = {
     insert_text: string
     insert_segment_type: string
     insert_speaker?: string
+    insert_start?: number
+    insert_end?: number
   }) => api.post('/api/annotations/insert', data),
 
   getInsertAnnotations: (conversation_id: string) =>
     api.get(`/api/annotations/insert/${conversation_id}`),
+
+  // Timing annotations (waveform region move/resize of an existing segment)
+  createTimingAnnotation: (data: {
+    conversation_id: string
+    segment_index: number
+    new_start: number
+    new_end: number
+  }) => api.post('/api/annotations/timing', data),
+
+  getTimingAnnotations: (conversation_id: string) =>
+    api.get(`/api/annotations/timing/${conversation_id}`),
 }
 
 export const finetuningApi = {

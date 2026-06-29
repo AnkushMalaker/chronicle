@@ -27,6 +27,7 @@ from advanced_omi_backend.models.annotation import (
     DiarizationAnnotationCreate,
     InsertAnnotationCreate,
     MemoryAnnotationCreate,
+    TimingAnnotationCreate,
     TitleAnnotationCreate,
     TranscriptAnnotationCreate,
 )
@@ -602,6 +603,8 @@ async def create_insert_annotation(
             insert_text=annotation_data.insert_text,
             insert_segment_type=annotation_data.insert_segment_type,
             insert_speaker=annotation_data.insert_speaker,
+            insert_start=annotation_data.insert_start,
+            insert_end=annotation_data.insert_end,
             status=AnnotationStatus.PENDING,
             processed=False,
         )
@@ -794,6 +797,81 @@ async def create_diarization_annotation(
             status_code=500,
             detail=f"Failed to create diarization annotation: {str(e)}",
         )
+
+
+@router.post("/timing", response_model=AnnotationResponse)
+async def create_timing_annotation(
+    annotation_data: TimingAnnotationCreate,
+    current_user: User = Depends(current_active_user),
+):
+    """
+    Create a TIMING annotation that adjusts an existing segment's start/end.
+
+    Used by the waveform region editor (move/resize a segment's span). Not applied
+    immediately — staged as a pending correction and committed by ``/apply``, which
+    re-derives a new transcript version. Validates ownership, segment index and that
+    end > start.
+    """
+    try:
+        conversation = await Conversation.find_one(
+            Conversation.conversation_id == annotation_data.conversation_id,
+            Conversation.user_id == current_user.user_id,
+        )
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+        active_transcript = conversation.active_transcript
+        if not active_transcript or annotation_data.segment_index >= len(
+            active_transcript.segments
+        ):
+            raise HTTPException(status_code=400, detail="Invalid segment index")
+
+        if annotation_data.new_end <= annotation_data.new_start:
+            raise HTTPException(
+                status_code=400, detail="new_end must be greater than new_start"
+            )
+
+        annotation = Annotation(
+            annotation_type=AnnotationType.TIMING,
+            user_id=current_user.user_id,
+            conversation_id=annotation_data.conversation_id,
+            segment_index=annotation_data.segment_index,
+            new_start=annotation_data.new_start,
+            new_end=annotation_data.new_end,
+            status=annotation_data.status,
+            processed=False,
+        )
+        await annotation.save()
+        logger.info(
+            f"Created timing annotation {annotation.id} for conversation "
+            f"{annotation_data.conversation_id} segment {annotation_data.segment_index} "
+            f"→ [{annotation_data.new_start:.2f}, {annotation_data.new_end:.2f}]"
+        )
+
+        return AnnotationResponse.model_validate(annotation)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating timing annotation: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create timing annotation: {str(e)}",
+        )
+
+
+@router.get("/timing/{conversation_id}", response_model=List[AnnotationResponse])
+async def get_timing_annotations(
+    conversation_id: str,
+    current_user: User = Depends(current_active_user),
+):
+    """Get all TIMING annotations for a conversation."""
+    annotations = await Annotation.find(
+        Annotation.conversation_id == conversation_id,
+        Annotation.user_id == current_user.user_id,
+        Annotation.annotation_type == AnnotationType.TIMING,
+    ).to_list()
+    return [AnnotationResponse.model_validate(a) for a in annotations]
 
 
 @router.get("/diarization/{conversation_id}", response_model=List[AnnotationResponse])
@@ -1030,6 +1108,9 @@ async def apply_all_annotations(
         insert_annotations = [
             a for a in annotations if a.annotation_type == AnnotationType.INSERT
         ]
+        timing_annotations = [
+            a for a in annotations if a.annotation_type == AnnotationType.TIMING
+        ]
 
         # Single-flight: don't stack a new edit on top of an in-flight one (see
         # apply_diarization_annotations — same deterministic-job-id save race).
@@ -1079,6 +1160,16 @@ async def apply_all_annotations(
             if transcript_for_segment:
                 corrected_segment.text = transcript_for_segment[0].corrected_text
 
+            # Apply timing correction (most recent wins) — waveform region move/resize
+            timing_for_segment = sorted(
+                [a for a in timing_annotations if a.segment_index == segment_idx],
+                key=lambda a: a.updated_at,
+                reverse=True,
+            )
+            if timing_for_segment and timing_for_segment[0].new_end is not None:
+                corrected_segment.start = timing_for_segment[0].new_start
+                corrected_segment.end = timing_for_segment[0].new_end
+
             corrected_segments.append(corrected_segment)
 
         # Apply inserts from highest index to lowest (stable indexing)
@@ -1092,22 +1183,34 @@ async def apply_all_annotations(
                 idx = ins.insert_after_index  # -1 = before first
                 insert_pos = idx + 1  # Convert to list insertion position
 
-                # Calculate timing from surrounding segments
-                if insert_pos > 0 and insert_pos <= len(corrected_segments):
-                    boundary_time = corrected_segments[insert_pos - 1].end
-                elif insert_pos == 0 and corrected_segments:
-                    boundary_time = corrected_segments[0].start
+                # Timing: prefer an explicit waveform-drawn span; otherwise fall back to
+                # a zero-duration marker at the neighbouring boundary (legacy inserts).
+                if ins.insert_start is not None and ins.insert_end is not None:
+                    seg_start = ins.insert_start
+                    seg_end = ins.insert_end
                 else:
-                    boundary_time = 0.0
+                    if insert_pos > 0 and insert_pos <= len(corrected_segments):
+                        boundary_time = corrected_segments[insert_pos - 1].end
+                    elif insert_pos == 0 and corrected_segments:
+                        boundary_time = corrected_segments[0].start
+                    else:
+                        boundary_time = 0.0
+                    seg_start = boundary_time
+                    seg_end = boundary_time
 
                 new_segment = Conversation.SpeakerSegment(
-                    start=boundary_time,
-                    end=boundary_time,
+                    start=seg_start,
+                    end=seg_end,
                     text=ins.insert_text or "",
                     speaker=ins.insert_speaker or "",
                     segment_type=ins.insert_segment_type or "event",
                 )
                 corrected_segments.insert(insert_pos, new_segment)
+
+        # Re-order by start time so moved/inserted segments read in chronological order.
+        # Stable sort keeps the original list order for equal starts — important for the
+        # intentional same-time overlapping segments (two speakers at once).
+        corrected_segments.sort(key=lambda s: s.start)
 
         # Add new version — carry over provider_capabilities so downstream
         # processing knows the provider's diarization/word_timestamp support.
@@ -1128,6 +1231,7 @@ async def apply_all_annotations(
                 "diarization_count": len(diarization_annotations),
                 "transcript_count": len(transcript_annotations),
                 "insert_count": len(insert_annotations),
+                "timing_count": len(timing_annotations),
                 "provider_capabilities": source_capabilities,
             },
             set_as_active=True,
@@ -1140,7 +1244,8 @@ async def apply_all_annotations(
             f"Applied {len(annotations)} annotations "
             f"(diarization: {len(diarization_annotations)}, "
             f"transcript: {len(transcript_annotations)}, "
-            f"insert: {len(insert_annotations)})"
+            f"insert: {len(insert_annotations)}, "
+            f"timing: {len(timing_annotations)})"
         )
 
         # Mark all annotations as processed
@@ -1171,13 +1276,15 @@ async def apply_all_annotations(
             content={
                 "message": (
                     f"Applied {len(diarization_annotations)} diarization, "
-                    f"{len(transcript_annotations)} transcript, and "
-                    f"{len(insert_annotations)} insert annotations"
+                    f"{len(transcript_annotations)} transcript, "
+                    f"{len(insert_annotations)} insert, and "
+                    f"{len(timing_annotations)} timing annotations"
                 ),
                 "version_id": new_version_id,
                 "diarization_count": len(diarization_annotations),
                 "transcript_count": len(transcript_annotations),
                 "insert_count": len(insert_annotations),
+                "timing_count": len(timing_annotations),
                 "status": "success",
             }
         )
