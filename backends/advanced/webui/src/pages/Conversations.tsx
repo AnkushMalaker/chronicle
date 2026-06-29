@@ -845,7 +845,35 @@ export default function Conversations() {
                       <User className="h-4 w-4 flex-shrink-0" />
                       <span className="truncate">{conversation.client_id}</span>
                     </div>
-                    {(() => {
+                    {/* Play pill inline (doubles as the duration readout) when there's audio;
+                        otherwise a static duration. */}
+                    {(conversation.audio_chunks_count && conversation.audio_chunks_count > 0) ? (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          player.togglePlay(conversation.conversation_id!, conversation.audio_total_duration || 0)
+                        }}
+                        className="inline-flex items-center gap-1.5 pl-1.5 pr-2.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
+                        title={player.isActive(conversation.conversation_id) && player.isPlaying ? 'Pause' : 'Play'}
+                      >
+                        {player.isActive(conversation.conversation_id) && player.isPlaying
+                          ? <Pause className="h-3.5 w-3.5 text-blue-600" />
+                          : <Play className="h-3.5 w-3.5 text-blue-600" />}
+                        {player.isActive(conversation.conversation_id) ? (
+                          <PlayheadTimeLabel
+                            cid={conversation.conversation_id}
+                            total={conversation.audio_total_duration}
+                            className="text-xs font-mono tabular-nums text-gray-600 dark:text-gray-300"
+                          />
+                        ) : (
+                          <span className="text-xs font-mono tabular-nums text-gray-600 dark:text-gray-300">
+                            {conversation.audio_total_duration
+                              ? `${Math.floor(conversation.audio_total_duration / 60)}:${Math.floor(conversation.audio_total_duration % 60).toString().padStart(2, '0')}`
+                              : 'Audio'}
+                          </span>
+                        )}
+                      </button>
+                    ) : (() => {
                       const dur = conversation.duration_seconds || conversation.audio_total_duration
                       return dur && dur > 0 ? (
                         <div className="flex items-center space-x-1 text-sm text-gray-600 dark:text-gray-400">
@@ -977,43 +1005,6 @@ export default function Conversations() {
                     </div>
                   )}
                 </div>
-                </div>
-              </div>
-
-              {/* Audio Player with Waveform — click waveform to play */}
-              <div className="mb-4">
-                <div className="space-y-2">
-                  {(conversation.audio_chunks_count && conversation.audio_chunks_count > 0) && (
-                    <>
-                      {/* Compact play pill (no default waveform — it appears, and zooms,
-                          only when the transcript is expanded, inside the shared editor). */}
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          player.togglePlay(conversation.conversation_id!, conversation.audio_total_duration || 0)
-                        }}
-                        className="inline-flex items-center gap-1.5 pl-1.5 pr-2.5 py-1 rounded-full bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
-                        title={player.isActive(conversation.conversation_id) && player.isPlaying ? 'Pause' : 'Play'}
-                      >
-                        {player.isActive(conversation.conversation_id) && player.isPlaying
-                          ? <Pause className="h-3.5 w-3.5 text-blue-600" />
-                          : <Play className="h-3.5 w-3.5 text-blue-600" />}
-                        {player.isActive(conversation.conversation_id) ? (
-                          <PlayheadTimeLabel
-                            cid={conversation.conversation_id}
-                            total={conversation.audio_total_duration}
-                            className="text-xs font-mono tabular-nums text-gray-600 dark:text-gray-300"
-                          />
-                        ) : (
-                          <span className="text-xs font-mono tabular-nums text-gray-600 dark:text-gray-300">
-                            {conversation.audio_total_duration
-                              ? `${Math.floor(conversation.audio_total_duration / 60)}:${Math.floor(conversation.audio_total_duration % 60).toString().padStart(2, '0')}`
-                              : 'Audio'}
-                          </span>
-                        )}
-                      </button>
-                    </>
-                  )}
                 </div>
               </div>
 
