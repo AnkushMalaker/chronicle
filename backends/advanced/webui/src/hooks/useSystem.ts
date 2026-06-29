@@ -87,6 +87,47 @@ export function useLLMOperations() {
   })
 }
 
+// ── Model registry (Chronicle model configuration) ──────────────────────────
+export type ModelType = 'llm' | 'embedding' | 'stt' | 'stt_stream' | 'tts'
+
+export interface ModelView {
+  name: string
+  model_type: ModelType
+  model_provider: string
+  model_name: string
+  model_url: string
+  api_family: string
+  api_key: string // masked ('••••••••') for inline secrets; ${oc.env:...} shown verbatim
+  api_key_is_set: boolean
+  api_key_is_ref: boolean
+  description: string | null
+  model_params: Record<string, any>
+  capabilities: string[]
+  embedding_dimensions: number | null
+  model_output: string | null
+  thinking: boolean
+  source: 'config' | 'default'
+  is_default: boolean
+}
+
+export interface ModelsData {
+  defaults: Record<string, string | null>
+  models: Record<ModelType, ModelView[]>
+  status: string
+}
+
+export function useModels(isAdmin: boolean) {
+  return useQuery<ModelsData | null>({
+    queryKey: ['system', 'models'],
+    queryFn: async () => {
+      const response = await systemApi.getModels()
+      return response.data?.status === 'success' ? response.data : null
+    },
+    enabled: isAdmin,
+    staleTime: 5 * 60_000,
+  })
+}
+
 export interface ExternalServiceProvider {
   env_key: string
   current: string

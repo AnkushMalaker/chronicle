@@ -65,6 +65,17 @@ services:
     volumes:
       - ./models:/app/models
       - ./data:/app/data
+      # Dev: bind-mount the service source over the image's baked-in copy so code
+      # edits apply on a plain restart (services.py does `up --force-recreate`) with
+      # NO image rebuild. Mirrors the `COPY *.py ./` in the Dockerfile; read-only
+      # since the service never writes its own source. Drop these for an immutable
+      # production image (then a code change requires a rebuild).
+      - ./app.py:/app/app.py:ro
+      - ./consumer.py:/app/consumer.py:ro
+      - ./detector.py:/app/detector.py:ro
+      - ./samples.py:/app/samples.py:ro
+      - ./verifier.py:/app/verifier.py:ro
+      - ./hubert_detector.py:/app/hubert_detector.py:ro
     restart: unless-stopped
     # The "hermes" word runs the HuBERT .pt model on GPU. docker compose v2 honors
     # this reservation for `docker compose up` (no swarm needed).

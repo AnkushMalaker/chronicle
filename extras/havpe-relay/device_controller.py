@@ -188,6 +188,53 @@ class DeviceController:
         except Exception as e:
             logger.warning("LED command failed: %s", e)
 
+    async def set_led_effect(
+        self,
+        effect: str,
+        r: float = 0.0,
+        g: float = 0.0,
+        b: float = 0.0,
+        brightness: float = 0.4,
+        duration: float = 5.0,
+    ) -> None:
+        """Activate a named addressable LED effect on the ring.
+
+        ``effect`` is one of the firmware effect names (e.g. "Listening For
+        Command", "Thinking", "Replying", "Error"); the rgb values set the base
+        colour the effect tints with. ``effect="None"`` stops any running effect.
+        ``duration`` arms the firmware's status-LED override hold so the ring
+        reverts to the connectivity colour afterwards. No-op if not connected.
+        """
+        key = self._entity_keys.get("_light")
+        if not self._connected or not self._client or key is None:
+            logger.debug("set_led_effect skipped: not connected or no light entity")
+            return
+
+        try:
+            # Set hold duration first (processed before the light command on device)
+            dur_key = self._entity_keys.get("_led_hold_duration")
+            if dur_key is not None:
+                self._client.number_command(key=dur_key, state=duration)
+
+            self._client.light_command(
+                key=key,
+                state=True,
+                rgb=(r, g, b),
+                brightness=brightness,
+                effect=effect,
+            )
+            logger.info(
+                "LED effect: %s rgb=(%.1f, %.1f, %.1f) br=%.1f dur=%.1fs",
+                effect,
+                r,
+                g,
+                b,
+                brightness,
+                duration,
+            )
+        except Exception as e:
+            logger.warning("LED effect command failed: %s", e)
+
     async def play_audio(self, url: str, announcement: bool = True) -> None:
         """Play audio URL via media_player. No-op if not connected."""
         key = self._entity_keys.get("_media_player")

@@ -23,6 +23,10 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from advanced_omi_backend.auth import current_active_user, current_superuser
+from advanced_omi_backend.redis_factory import create_async_redis
+from advanced_omi_backend.services.plugin_service import get_plugin_router
+from advanced_omi_backend.services.wakeword.executor import open_followup_window
+from advanced_omi_backend.services.wakeword.followup import handle_dial_followup
 from advanced_omi_backend.users import User
 
 logger = logging.getLogger(__name__)
@@ -137,7 +141,9 @@ async def _get_service_state(name: str) -> dict[str, Any] | None:
     return None
 
 
-async def _service_action(name: str, action: Literal["start", "stop"]) -> dict[str, Any]:
+async def _service_action(
+    name: str, action: Literal["start", "stop"]
+) -> dict[str, Any]:
     if not _service_manager_ready():
         raise HTTPException(
             status_code=503,
@@ -191,6 +197,52 @@ class VerifierEnabledRequest(BaseModel):
 class DisabledRequest(BaseModel):
     wakeword: str
     disabled: bool  # True -> fully off for this word; False -> enabled
+
+
+class DialSimRequest(BaseModel):
+    direction: Literal["CW", "CCW"]
+    # Optional: open/refresh the follow-up window with this as the "last command"
+    # before applying the dial, so you can test the whole mapping without speaking
+    # a wake command first (e.g. "make the study lights warmer").
+    seed_command: str | None = None
+    # Session to act on. Defaults to a per-user simulation session that persists
+    # across calls (the dial re-opens the window on each success).
+    session_id: str | None = None
+
+
+@router.post("/simulate-dial")
+async def simulate_dial(
+    req: DialSimRequest, current_user: User = Depends(current_superuser)
+):
+    """Simulate a rotary-dial detent during a follow-up window (no device needed).
+
+    Mirrors what the HAVPE dial does live: with a follow-up window open, CW/CCW maps
+    to a contextual light adjustment (warmer/cooler or brighter/dimmer, inheriting
+    the room from the last command) and runs it through the real Home Assistant
+    path. Pass ``seed_command`` (e.g. "make the study lights warmer") to open the
+    window first so one call exercises the whole mapping end-to-end on real lights.
+    """
+    session_id = req.session_id or f"sim-dial-{current_user.user_id}"
+    router_obj = get_plugin_router()
+    if router_obj is None:
+        raise HTTPException(status_code=503, detail="Plugin router not ready")
+
+    redis_client = create_async_redis(decode_responses=True)
+    try:
+        if req.seed_command:
+            await open_followup_window(redis_client, session_id, req.seed_command)
+        result = await handle_dial_followup(
+            redis_client,
+            router_obj,
+            user_id=current_user.user_id,
+            session_id=session_id,
+            client_id=f"sim-{_suffix(current_user)}",
+            direction=req.direction,
+        )
+    finally:
+        await redis_client.aclose()
+
+    return {"session_id": session_id, "direction": req.direction, **result}
 
 
 @router.get("/mode")

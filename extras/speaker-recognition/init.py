@@ -27,6 +27,7 @@ from setup_utils import (
     detect_cuda_version,
     mask_value,
     read_env_value,
+    resolve_ingest_config,
     tailscale_socket_path,
 )
 
@@ -530,6 +531,22 @@ class SpeakerRecognitionSetup:
             self.setup_compute_mode()
             self.setup_deepgram()
             self.setup_https()
+
+            # Cross-service error routing: push this service's ERROR/CRITICAL logs to
+            # the backend's System Errors page. Sourced from the backend .env on the
+            # same machine; opt-in, so only wired when a backend token is found
+            # locally. Source stays auto-derived (speaker-recognition), so
+            # CHRONICLE_SERVICE_NAME is intentionally not set.
+            ingest_url, ingest_token = resolve_ingest_config(
+                ["../../backends/advanced/.env", "../../.env"]
+            )
+            if ingest_url and ingest_token:
+                self.config["CHRONICLE_INGEST_URL"] = ingest_url
+                self.config["CHRONICLE_INGEST_TOKEN"] = ingest_token
+                self.console.print(
+                    "[blue][INFO][/blue] Cross-service error reporting → backend "
+                    "System Errors page enabled"
+                )
 
             # Generate files
             self.print_header("Configuration Complete!")

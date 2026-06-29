@@ -96,6 +96,14 @@ class Annotation(Document):
         None  # What processed it (manual, cron, apply, training, etc.)
     )
 
+    # Fine-tuning failure tracking (diarization annotations sent to speaker training)
+    # When training an annotation fails (corrupt segment times, missing audio,
+    # speaker-service error) it is NOT silently dropped: the attempt count and last
+    # error are recorded so the Fine-tuning page can surface the stuck annotation and
+    # let an admin retry or discard it (instead of it re-failing on every run).
+    training_attempts: int = 0  # Number of failed training attempts (0 = never failed)
+    training_error: Optional[str] = None  # Reason for the last training failure
+
     # Timestamps (Python 3.12+ compatible)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -231,6 +239,8 @@ class AnnotationResponse(BaseModel):
     processed: bool = False
     processed_at: Optional[datetime] = None
     processed_by: Optional[str] = None
+    training_attempts: int = 0
+    training_error: Optional[str] = None
     status: AnnotationStatus
     source: AnnotationSource
     created_at: datetime

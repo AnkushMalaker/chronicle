@@ -4,9 +4,11 @@ A central, append-only store of operational and application failures across the
 backend and its services: captured backend exceptions (every ``ERROR``/``CRITICAL``
 log via :mod:`advanced_omi_backend.services.observability.log_handler`), semantic
 failures tapped at high-value sites (WebSocket error-disconnects, streaming-ASR
-terminal failures, failed/soft-failed jobs, plugin init failures), and
+terminal failures, failed/soft-failed jobs, plugin init failures),
 service-health transitions (a sidecar entering/leaving a crash loop) detected by
-the health poller.
+the health poller, and errors pushed by sidecar services themselves over the
+token-gated ``POST /api/admin/system-events/ingest`` endpoint (recorded with a
+``service:<name>`` source).
 
 It backs the admin-only "System Errors" page. Entries auto-expire after
 ``RETENTION_DAYS`` via a MongoDB TTL index on ``created_at`` — this is a rolling

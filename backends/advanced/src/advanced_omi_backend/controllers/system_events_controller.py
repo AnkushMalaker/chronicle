@@ -35,6 +35,62 @@ def _system_event_to_dict(doc) -> dict[str, Any]:
     }
 
 
+# Bounds for externally-submitted event fields, so a misbehaving service can't
+# push a multi-megabyte traceback into the ledger. (source/title are additionally
+# clamped by the recorder's _build to 200/500 chars.)
+_MAX_DETAIL = 4000
+_MAX_TRACEBACK = 20000
+_VALID_SEVERITIES = ("info", "warning", "error", "critical")
+
+
+async def ingest_external_event(
+    *,
+    severity: str,
+    category: Optional[str],
+    source: str,
+    title: str,
+    detail: Optional[str],
+    traceback: Optional[str],
+    client_id: Optional[str],
+    conversation_id: Optional[str],
+    metadata: Optional[dict],
+) -> dict[str, Any]:
+    """Record an event submitted over HTTP by another service (token-gated route).
+
+    Treats the payload as untrusted input: severity is constrained to the known
+    set, free-text fields are size-clamped, and the source is namespaced with a
+    ``service:`` prefix so a remote service can't masquerade as a backend logger.
+    """
+    from advanced_omi_backend.services.observability.system_events import record_event
+
+    severity = severity if severity in _VALID_SEVERITIES else "error"
+    # External submissions are, by definition, service-originated unless they say
+    # otherwise; default the category accordingly.
+    category = (category or "service")[:50]
+    # Namespace the source so it's unambiguous in the feed and can't collide with
+    # an internal logger name. The shared token authenticates "a trusted node",
+    # not a specific identity, so we don't trust the raw name beyond labelling.
+    source = f"service:{(source or 'unknown').strip()[:180]}"
+    title = (title or "(no title)").strip()
+    if detail and len(detail) > _MAX_DETAIL:
+        detail = detail[:_MAX_DETAIL] + "… (truncated)"
+    if traceback and len(traceback) > _MAX_TRACEBACK:
+        traceback = traceback[:_MAX_TRACEBACK] + "\n… (truncated)"
+
+    await record_event(
+        severity=severity,
+        category=category,
+        source=source,
+        title=title,
+        detail=detail,
+        traceback=traceback,
+        client_id=client_id,
+        conversation_id=conversation_id,
+        metadata=metadata or {},
+    )
+    return {"status": "recorded"}
+
+
 async def list_system_events(
     *,
     severity: Optional[str] = None,

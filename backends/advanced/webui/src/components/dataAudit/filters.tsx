@@ -7,7 +7,16 @@
  * (if server-side) one query param in the backend list endpoint.
  */
 import { ComponentType, useState } from 'react'
-import { CalendarRange, Clock, LucideIcon, Mic, Search, Users } from 'lucide-react'
+import {
+  Ban,
+  CalendarRange,
+  CheckCheck,
+  Clock,
+  LucideIcon,
+  Mic,
+  Search,
+  Users,
+} from 'lucide-react'
 import { formatDuration } from './format'
 
 export type SpeakerFilterState = 'include' | 'exclude'
@@ -31,7 +40,12 @@ export interface FilterDef<V = any> {
   chipLabel: (v: V) => string
   /** Query params merged into dataAuditApi.getConversations. */
   toParams: (v: V) => Record<string, unknown>
-  Editor: ComponentType<EditorProps<V>>
+  /**
+   * Single-click toggle filter (a boolean): no popover/editor — picking it from
+   * the menu turns it on, clicking the active chip turns it off. Omit `Editor`.
+   */
+  toggle?: boolean
+  Editor?: ComponentType<EditorProps<V>>
 }
 
 const inputCls =
@@ -358,11 +372,43 @@ const dateFilter: FilterDef<DateValue> = {
   ),
 }
 
+// ---------------------------------------------------------------------------
+// Hide failed (processing_status == 'failed')
+// ---------------------------------------------------------------------------
+
+const hideFailedFilter: FilterDef<boolean> = {
+  key: 'hideFailed',
+  label: 'Hide failed',
+  icon: Ban,
+  defaultValue: false,
+  isActive: (v) => v === true,
+  chipLabel: () => 'Hiding failed',
+  toParams: (v) => (v ? { hide_failed: true } : {}),
+  toggle: true,
+}
+
+// ---------------------------------------------------------------------------
+// Hide reviewed (no unidentified speech segments left to triage)
+// ---------------------------------------------------------------------------
+
+const hideReviewedFilter: FilterDef<boolean> = {
+  key: 'hideReviewed',
+  label: 'Needs review',
+  icon: CheckCheck,
+  defaultValue: false,
+  isActive: (v) => v === true,
+  chipLabel: () => 'Needs review only',
+  toParams: (v) => (v ? { hide_reviewed: true } : {}),
+  toggle: true,
+}
+
 export const AUDIT_FILTERS: FilterDef[] = [
   speechFilter,
   durationFilter,
   speakersFilter,
   dateFilter,
+  hideFailedFilter,
+  hideReviewedFilter,
 ]
 
 export function defaultFilterValues(): Record<string, unknown> {

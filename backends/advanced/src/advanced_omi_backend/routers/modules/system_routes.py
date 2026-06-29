@@ -237,6 +237,44 @@ async def test_llm_model(
     return await system_controller.test_llm_model(model_name)
 
 
+# Model Registry Management Endpoints
+
+
+@router.get("/admin/models")
+async def get_models(current_user: User = Depends(current_superuser)):
+    """List all registry models grouped by type + active defaults. Admin only."""
+    return await system_controller.get_models()
+
+
+@router.post("/admin/defaults")
+async def set_active_defaults(
+    defaults: dict, current_user: User = Depends(current_superuser)
+):
+    """Repoint active-model defaults (llm/stt/stt_stream/...). Admin only."""
+    return await system_controller.set_active_defaults(defaults)
+
+
+@router.post("/admin/models")
+async def upsert_model(model: dict, current_user: User = Depends(current_superuser)):
+    """Add or update a model definition (incl. api key/url). Admin only."""
+    return await system_controller.upsert_model(model)
+
+
+@router.delete("/admin/models/{name}")
+async def delete_model(name: str, current_user: User = Depends(current_superuser)):
+    """Delete a config.yml model (not if it's an active default). Admin only."""
+    return await system_controller.delete_model(name)
+
+
+@router.post("/admin/models/test")
+async def test_model(
+    model_name: Optional[str] = Body(None, embed=True),
+    current_user: User = Depends(current_superuser),
+):
+    """Connectivity test for a registry model (llm/embedding). Admin only."""
+    return await system_controller.test_model(model_name)
+
+
 # Memory Configuration Management Endpoints Removed - Project uses config.yml exclusively
 @router.get("/admin/memory/config/raw")
 async def get_memory_config_raw(current_user: User = Depends(current_superuser)):

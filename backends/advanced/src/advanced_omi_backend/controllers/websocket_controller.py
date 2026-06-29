@@ -1320,6 +1320,47 @@ async def _handle_button_event(
         )
 
 
+async def _handle_dial_event(
+    client_state,
+    direction: str,
+    user_id: str,
+    client_id: str,
+) -> None:
+    """Handle a rotary-dial event (CW/CCW) from the device.
+
+    During an open wake follow-up window, a detent is a *physical* follow-up that
+    nudges the just-controlled lights (warmer/cooler or brighter/dimmer). Outside a
+    window it's a no-op here — the device may still use the dial locally (e.g. for
+    volume). Best-effort: never breaks the audio loop.
+    """
+    from advanced_omi_backend.redis_factory import create_async_redis
+    from advanced_omi_backend.services.plugin_service import get_plugin_router
+    from advanced_omi_backend.services.wakeword.followup import handle_dial_followup
+
+    session_id = client_state.stream_session_id
+    router = get_plugin_router()
+    if not router or not session_id:
+        return
+
+    redis_client = create_async_redis(decode_responses=True)
+    try:
+        result = await handle_dial_followup(
+            redis_client,
+            router,
+            user_id=user_id,
+            session_id=session_id,
+            client_id=client_id,
+            direction=direction,
+        )
+        application_logger.info(
+            f"🎛️ Dial event from {client_id}: {direction} (session={session_id}) -> {result}"
+        )
+    except Exception as e:  # noqa: BLE001 - dial feedback must never break the loop
+        application_logger.warning(f"Dial event handling failed for {client_id}: {e}")
+    finally:
+        await redis_client.aclose()
+
+
 async def _create_batch_conversation_and_enqueue(
     client_state,
     user_id: str,
@@ -1690,11 +1731,30 @@ async def handle_omi_websocket(
                 packet_count = 0
                 total_bytes = 0
 
+            elif header["type"] == "ping":
+                # App-level heartbeat. The mobile client (useAudioStreamer) pings every
+                # 25s and closes the socket as a half-open "zombie" if it gets no pong
+                # within 2 heartbeats (~50s). The OMI/opus path previously had no pong
+                # reply (only the PCM handler did), so opus clients dropped + reconnected
+                # every ~50s — churning the streaming-transcription provider connection
+                # and stranding real speech as "transcription service did not respond".
+                application_logger.debug(
+                    f"🏓 Received ping from OMI client {client_id}"
+                )
+                await ws.send_json({"type": "pong"})
+
             elif header["type"] == "button-event":
                 button_data = header.get("data", {})
                 button_state = button_data.get("state", "unknown")
                 await _handle_button_event(
                     client_state, button_state, user.user_id, client_id
+                )
+
+            elif header["type"] == "dial-event":
+                dial_data = header.get("data", {})
+                direction = dial_data.get("direction", "")
+                await _handle_dial_event(
+                    client_state, direction, user.user_id, client_id
                 )
 
             else:
@@ -1778,6 +1838,14 @@ async def handle_pcm_websocket(
                         button_state = button_data.get("state", "unknown")
                         await _handle_button_event(
                             client_state, button_state, user.user_id, client_id
+                        )
+                        continue
+
+                    elif header["type"] == "dial-event":
+                        dial_data = header.get("data", {})
+                        direction = dial_data.get("direction", "")
+                        await _handle_dial_event(
+                            client_state, direction, user.user_id, client_id
                         )
                         continue
 
@@ -1885,6 +1953,16 @@ async def handle_pcm_websocket(
                                         client_id,
                                     )
                                     continue
+                                elif control_header.get("type") == "dial-event":
+                                    dial_data = control_header.get("data", {})
+                                    direction = dial_data.get("direction", "")
+                                    await _handle_dial_event(
+                                        client_state,
+                                        direction,
+                                        user.user_id,
+                                        client_id,
+                                    )
+                                    continue
                                 else:
                                     application_logger.warning(
                                         f"Unknown control message during streaming: {control_header.get('type')}"
@@ -1926,11 +2004,28 @@ async def handle_pcm_websocket(
                             )
                             continue
 
+                    except WebSocketDisconnect as disconnect:
+                        # Expected: clean close, or an idle/zombie socket reaped by
+                        # receive_with_idle_timeout. Not an error — exit so `finally`
+                        # runs the normal cleanup. (WebSocketDisconnect subclasses
+                        # Exception, so it must be caught before the generic handler.)
+                        application_logger.info(
+                            f"🔌 WebSocket disconnect during audio streaming for "
+                            f"{client_id}. Code: {disconnect.code}, Reason: {disconnect.reason}"
+                        )
+                        break
                     except Exception as streaming_error:
                         application_logger.error(
-                            f"Error in audio streaming mode: {streaming_error}"
+                            f"Error in audio streaming mode for {client_id}: "
+                            f"{type(streaming_error).__name__}: {streaming_error}",
+                            exc_info=True,
                         )
-                        if "disconnect" in str(streaming_error).lower():
+                        error_text = f"{type(streaming_error).__name__} {streaming_error}".lower()
+                        if (
+                            "disconnect" in error_text
+                            or "closed" in error_text
+                            or "receive" in error_text
+                        ):
                             break
                         continue
 

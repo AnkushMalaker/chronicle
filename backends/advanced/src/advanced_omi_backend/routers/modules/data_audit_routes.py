@@ -152,6 +152,14 @@ async def list_conversations(
         False,
         description="List archived metadata stubs instead of active conversations",
     ),
+    hide_failed: bool = Query(
+        False,
+        description="Exclude conversations the pipeline marked processing_status='failed'",
+    ),
+    hide_reviewed: bool = Query(
+        False,
+        description="Exclude conversations with nothing left to review (no unidentified speech segments)",
+    ),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     current_user: User = Depends(current_active_user),
@@ -173,6 +181,8 @@ async def list_conversations(
         include_speakers=_csv(include_speakers),
         exclude_speakers=_csv(exclude_speakers),
         archived_only=archived_only,
+        hide_failed=hide_failed,
+        hide_reviewed=hide_reviewed,
         limit=limit,
         offset=offset,
     )
@@ -229,6 +239,57 @@ async def speech_regions(
     return await data_audit_controller.get_speech_regions(
         current_user, conversation_id, speakers=speaker_list
     )
+
+
+@router.get("/conversations/{conversation_id}/segments")
+async def list_segments(
+    conversation_id: str,
+    current_user: User = Depends(current_active_user),
+):
+    """Active-version transcript segments (with speaker-recognition confidence)
+    for the speaker-triage panel."""
+    return await data_audit_controller.get_segments(current_user, conversation_id)
+
+
+class IdentifySegmentRequest(BaseModel):
+    start: float = Field(..., ge=0.0, description="Segment start time in seconds")
+    end: float = Field(..., gt=0.0, description="Segment end time in seconds")
+
+
+@router.post("/conversations/{conversation_id}/segments/identify")
+async def identify_segment(
+    conversation_id: str,
+    body: IdentifySegmentRequest,
+    current_user: User = Depends(current_active_user),
+):
+    """Live speaker suggestion for one segment: returns the closest enrolled
+    speaker + cosine for the clip (even below the match threshold)."""
+    return await data_audit_controller.identify_segment_clip(
+        current_user, conversation_id, body.start, body.end
+    )
+
+
+@router.get("/speakers/confidence")
+async def speakers_confidence(current_user: User = Depends(current_active_user)):
+    """Per-speaker identification-confidence stats across the corpus: distribution
+    histogram, marginal-match fraction, per-speaker baselines (mean/median/
+    %marginal), threshold survival counts, and a data-driven recommended
+    similarity threshold. Computed from stored confidence — no re-embedding."""
+    return await data_audit_controller.speaker_confidence_overview(current_user)
+
+
+@router.get("/triage/pending")
+async def triage_pending(current_user: User = Depends(current_active_user)):
+    """Count of unapplied speaker-triage decisions and conversations they span."""
+    return await data_audit_controller.get_triage_pending(current_user)
+
+
+@router.post("/triage/apply")
+async def apply_triage(current_user: User = Depends(current_active_user)):
+    """Bulk-apply all pending speaker-triage decisions across every conversation:
+    new transcript versions with corrected labels, voiceprint enrollment, and
+    chained memory reprocessing (noise decisions skip enrollment)."""
+    return await data_audit_controller.apply_triage(current_user)
 
 
 @router.post("/conversations/{conversation_id}/split")

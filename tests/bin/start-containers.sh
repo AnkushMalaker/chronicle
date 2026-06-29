@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "$0")/_engine.sh"
 # tests/bin/start-containers.sh
 # Start test containers with health checks
 
@@ -42,7 +43,7 @@ fi
 
 # Start containers
 echo "🐳 Starting Docker containers..."
-docker compose -f docker-compose-test.yml up -d
+$COMPOSE -f docker-compose-test.yml up -d
 
 # Wait for services to be healthy
 echo "⏳ Waiting for services to be healthy..."
@@ -87,9 +88,15 @@ echo "🔍 Checking container stability (waiting 5s)..."
 sleep 5
 
 RESTART_ISSUES=""
-for CONTAINER_ID in $(docker compose -f docker-compose-test.yml ps -q); do
-    NAME=$(docker inspect --format '{{.Name}}' "$CONTAINER_ID" | sed 's/^\///')
-    RESTART_COUNT=$(docker inspect --format '{{.RestartCount}}' "$CONTAINER_ID")
+# `$COMPOSE ps -q` is docker-compatible under docker; under podman-compose it may not
+# emit clean IDs, so this supplementary loop must never abort startup (the curl
+# health/readiness checks above are the real gate). Tolerate query failures.
+for CONTAINER_ID in $($COMPOSE -f docker-compose-test.yml ps -q 2>/dev/null || true); do
+    NAME=$($ENGINE inspect --format '{{.Name}}' "$CONTAINER_ID" 2>/dev/null | sed 's/^\///')
+    RESTART_COUNT=$($ENGINE inspect --format '{{.RestartCount}}' "$CONTAINER_ID" 2>/dev/null)
+    case "$RESTART_COUNT" in
+        ''|*[!0-9]*) continue ;;  # non-numeric / unavailable → skip
+    esac
     if [ "$RESTART_COUNT" -gt 0 ]; then
         RESTART_ISSUES="${RESTART_ISSUES}   ⚠️  ${NAME} has restarted ${RESTART_COUNT} times\n"
     fi
@@ -100,7 +107,7 @@ if [ -n "$RESTART_ISSUES" ]; then
     echo "❌ Container stability check FAILED - restart loops detected:"
     echo ""
     echo -e "$RESTART_ISSUES"
-    echo "   Check logs: docker compose -f docker-compose-test.yml logs <service>"
+    echo "   Check logs: $COMPOSE -f docker-compose-test.yml logs <service>"
     echo "   Common causes: missing env vars, import errors, dependency crashes"
     exit 1
 fi

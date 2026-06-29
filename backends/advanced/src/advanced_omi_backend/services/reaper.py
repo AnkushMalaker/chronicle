@@ -1,18 +1,21 @@
-"""Background reaper that backstops connection-lifecycle cleanup.
+"""Background reaper: a single periodic loop that backstops several cleanups.
 
-The WebSocket idle read-timeout (see `receive_with_idle_timeout` in
-websocket_controller) is the primary mechanism that reaps a dead peer: when a
-client stops sending, its handler raises WebSocketDisconnect and the `finally`
-runs full cleanup. This reaper is the belt-and-suspenders backstop for the cases
-that mechanism can't reach on its own:
+Each sweep here is a *belt-and-suspenders* backstop for a primary mechanism that
+should already have done the work — the reaper only catches what slipped through:
 
-1. A `ClientState` whose handler is wedged and never tripped the idle timeout —
-   reaped by `last_activity` age so the Network page can never show an immortal
-   "connected" zombie.
-2. Per-client Redis audio streams left behind when cleanup never ran — expired so
-   their consumer groups get released.
+1. **Stale clients** — a ``ClientState`` whose handler wedged and never tripped
+   the WebSocket idle read-timeout, reaped by ``last_activity`` age so the Network
+   page can't show an immortal "connected" zombie.
+2. **Orphaned audio streams** — per-client ``audio:stream:{client_id}`` keys left
+   behind when connection cleanup never ran, expired so their consumer groups are
+   released.
+3. **Orphaned deferred jobs** — RQ chain jobs stuck ``deferred`` forever because a
+   dependency was hard-deleted (no completion/failure event ever fires to promote
+   them, and ``Dependency(allow_failure=True)`` only covers a dependency that
+   *fails*, not one that *vanishes*). See :mod:`advanced_omi_backend.services.job_reaper`.
 
-It runs as a fire-and-forget asyncio task started in the app lifespan.
+It runs as a fire-and-forget asyncio task started in the app lifespan. All sweeps
+share one coarse interval — this is the cold path, not the hot path.
 """
 
 import asyncio
@@ -88,10 +91,25 @@ async def _reap_orphaned_streams() -> int:
     return expired
 
 
-async def run_stream_reaper() -> None:
+async def _reap_orphaned_deferred_jobs() -> int:
+    """Delete deferred RQ jobs whose dependency chain can never promote them."""
+    # job_reaper uses synchronous RQ/Redis calls — run them off the event loop.
+    from advanced_omi_backend.services.job_reaper import reap_orphaned_deferred_jobs
+
+    result = await asyncio.to_thread(reap_orphaned_deferred_jobs)
+    reaped = result.get("deleted", 0)
+    for d in result.get("details", []):
+        logger.warning(
+            f"🧟 Reaped orphaned deferred job {d['job_id']} "
+            f"(conv={d['conversation_id']}; {d['reason']})"
+        )
+    return reaped
+
+
+async def run_reaper() -> None:
     """Periodic backstop sweep. Cancelled on app shutdown."""
     logger.info(
-        f"🧹 Stream reaper started (every {REAP_INTERVAL_SECS}s; stale-client age "
+        f"🧹 Reaper started (every {REAP_INTERVAL_SECS}s; stale-client age "
         f"{STALE_CLIENT_AGE_SECS:.0f}s)"
     )
     while True:
@@ -99,13 +117,15 @@ async def run_stream_reaper() -> None:
             await asyncio.sleep(REAP_INTERVAL_SECS)
             clients = await _reap_stale_clients()
             streams = await _reap_orphaned_streams()
-            if clients or streams:
+            jobs = await _reap_orphaned_deferred_jobs()
+            if clients or streams or jobs:
                 logger.info(
                     f"🧹 Reaper pass: reaped {clients} stale client(s), "
-                    f"expired {streams} orphaned stream(s)"
+                    f"expired {streams} orphaned stream(s), "
+                    f"reaped {jobs} orphaned deferred job(s)"
                 )
         except asyncio.CancelledError:
-            logger.info("🧹 Stream reaper stopped")
+            logger.info("🧹 Reaper stopped")
             raise
         except Exception as e:
-            logger.error(f"Stream reaper pass failed: {e}", exc_info=True)
+            logger.error(f"Reaper pass failed: {e}", exc_info=True)

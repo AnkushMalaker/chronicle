@@ -106,3 +106,57 @@ def verify_chunks_exist(conversation_id, min_chunks=1):
         )
 
     return True
+
+
+def _active_transcript_chars(conv):
+    """Length of the active transcript version's text (handles list schema)."""
+    active = conv.get("active_transcript_version")
+    for version in conv.get("transcript_versions") or []:
+        if version.get("version_id") == active:
+            return len(version.get("transcript") or version.get("text") or "")
+    return 0
+
+
+def find_client_conversations(client_id, include_deleted=True):
+    """All conversations for a client (optionally including soft-deleted ones).
+
+    Returns a flat list of dicts with the fields the reconnect/silence e2e asserts
+    on: conversation_id, deleted, deletion_reason, end_reason, audio_chunks_count,
+    audio_total_duration, and transcript_chars (active version text length). The API
+    hides soft-deleted conversations, so these are read straight from Mongo.
+    """
+    client = MongoClient(get_mongodb_uri())
+    db = client[get_db_name()]
+    try:
+        query = {"client_id": client_id}
+        if not include_deleted:
+            query["deleted"] = {"$ne": True}
+        out = []
+        for conv in db.conversations.find(query):
+            out.append(
+                {
+                    "conversation_id": conv.get("conversation_id"),
+                    "deleted": bool(conv.get("deleted")),
+                    "deletion_reason": conv.get("deletion_reason") or "",
+                    "end_reason": conv.get("end_reason") or "",
+                    "always_persist": bool(conv.get("always_persist")),
+                    "audio_chunks_count": conv.get("audio_chunks_count"),
+                    "audio_total_duration": conv.get("audio_total_duration"),
+                    "transcript_chars": _active_transcript_chars(conv),
+                }
+            )
+        return out
+    finally:
+        client.close()
+
+
+def count_orphaned_transcripts(client_id):
+    """Conversations soft-deleted as audio_chunks_not_ready that still carry a
+    transcript — the exact data-loss the reconnect fix prevents. Should be 0."""
+    return sum(
+        1
+        for c in find_client_conversations(client_id, include_deleted=True)
+        if c["deleted"]
+        and c["deletion_reason"] == "audio_chunks_not_ready"
+        and c["transcript_chars"] > 0
+    )

@@ -433,8 +433,8 @@ def all_jobs_complete_for_client(client_id: str) -> bool:
 _LIVE_JOB_STATUSES = {"queued", "started", "deferred", "scheduled"}
 
 
-def _speech_detection_job_is_live(job_id: str) -> bool:
-    """True if the given speech-detection job exists and hasn't terminated."""
+def _job_is_live(job_id: str) -> bool:
+    """True if the given job exists in Redis and hasn't terminated."""
     try:
         job = Job.fetch(job_id, connection=redis_conn)
         return job.get_status(refresh=True) in _LIVE_JOB_STATUSES
@@ -442,6 +442,80 @@ def _speech_detection_job_is_live(job_id: str) -> bool:
         return False
     except Exception:
         return False
+
+
+def _speech_detection_job_is_live(job_id: str) -> bool:
+    """True if the given speech-detection job exists and hasn't terminated."""
+    return _job_is_live(job_id)
+
+
+def enqueue_audio_persistence(
+    session_id: str,
+    user_id: str,
+    client_id: str,
+    *,
+    always_persist: bool,
+) -> str:
+    """Single-flight enqueue of the per-session audio-persistence job.
+
+    The persistence job is SESSION-scoped — one consumer for the whole
+    ``audio:stream:{client_id}``, surviving WebSocket reconnects. A reconnect
+    re-runs ``start_streaming_jobs``; if a persistence job is already live we must
+    NOT enqueue a second one. Two persistence jobs share the same Redis consumer
+    name (``persistence-{session_id[:8]}``), so each new stream message is
+    delivered to only one of them — the audio gets split between the jobs, and the
+    speech-detected conversations created after the reconnect find no chunks under
+    their id and get deleted as ``audio_chunks_not_ready`` while their transcripts
+    are stranded on a different conversation.
+
+    The job id is deterministic per session, so liveness is checked by fetching it
+    directly; a short Redis mutex collapses a simultaneous reconnect burst into one
+    winner. Returns the live or newly-enqueued job id.
+    """
+    from advanced_omi_backend.workers.audio_jobs import audio_streaming_persistence_job
+
+    job_id = f"audio-persist_{session_id}"
+    lock_key = f"audio_persistence_enqueue_lock:{session_id}"
+
+    if _job_is_live(job_id):
+        logger.info(
+            f"⏭️ Audio persistence already live for session {session_id[:12]} "
+            f"({job_id}) — skipping duplicate enqueue (reconnect)"
+        )
+        return job_id
+
+    if not redis_conn.set(lock_key, "1", nx=True, ex=15):
+        logger.info(
+            f"⏭️ Concurrent audio-persistence enqueue in progress for session "
+            f"{session_id[:12]} — skipping"
+        )
+        return job_id
+    try:
+        # Re-check liveness under the mutex (another caller may have just enqueued).
+        if _job_is_live(job_id):
+            return job_id
+
+        audio_job = audio_queue.enqueue(
+            audio_streaming_persistence_job,
+            session_id,
+            user_id,
+            client_id,
+            always_persist,
+            job_timeout=86400,  # 24 hours for all-day sessions
+            ttl=None,  # No pre-run expiry (job can wait indefinitely in queue)
+            result_ttl=JOB_RESULT_TTL,  # Cleanup AFTER completion
+            failure_ttl=86400,  # Cleanup failed jobs after 24h
+            job_id=job_id,
+            description=f"Audio persistence for session {session_id}",
+            meta={"client_id": client_id, "session_level": True},
+        )
+        logger.info(
+            f"📥 RQ: Enqueued audio persistence job {audio_job.id} on audio queue "
+            f"(session {session_id[:12]})"
+        )
+        return audio_job.id
+    finally:
+        redis_conn.delete(lock_key)
 
 
 def enqueue_speech_detection(
@@ -588,34 +662,12 @@ def start_streaming_jobs(
         or ""
     )
 
-    # Enqueue audio persistence job on dedicated audio queue
-    # NOTE: This job handles file rotation for multiple conversations automatically
-    # Runs for entire session, not tied to individual conversations
-    audio_job = audio_queue.enqueue(
-        audio_streaming_persistence_job,
-        session_id,
-        user_id,
-        client_id,
-        always_persist,
-        job_timeout=86400,  # 24 hours for all-day sessions
-        ttl=None,  # No pre-run expiry (job can wait indefinitely in queue)
-        result_ttl=JOB_RESULT_TTL,  # Cleanup AFTER completion
-        failure_ttl=86400,  # Cleanup failed jobs after 24h
-        job_id=f"audio-persist_{session_id}",
-        description=f"Audio persistence for session {session_id}",
-        meta={
-            "client_id": client_id,
-            "session_level": True,
-        },  # Mark as session-level job
-    )
-    # Log job enqueue with TTL information for debugging
-    actual_ttl = redis_conn.ttl(f"rq:job:{audio_job.id}")
-    logger.info(f"📥 RQ: Enqueued audio persistence job {audio_job.id} on audio queue")
-    logger.info(
-        f"🔍 Job enqueue details: ID={audio_job.id}, "
-        f"job_timeout={audio_job.timeout}, result_ttl={audio_job.result_ttl}, "
-        f"failure_ttl={audio_job.failure_ttl}, redis_key_ttl={actual_ttl}, "
-        f"queue_length={audio_queue.count}, client_id={client_id}"
+    # Enqueue audio persistence job on dedicated audio queue (single-flight: a
+    # reconnect mid-session reuses the live job instead of starting a second
+    # consumer that would split the audio stream). This job handles file rotation
+    # for multiple conversations and runs for the entire session.
+    audio_job_id = enqueue_audio_persistence(
+        session_id, user_id, client_id, always_persist=always_persist
     )
 
     # Notify frontend that streaming jobs are queued
@@ -629,7 +681,7 @@ def start_streaming_jobs(
         },
     )
 
-    return {"speech_detection": speech_job_id, "audio_persistence": audio_job.id}
+    return {"speech_detection": speech_job_id, "audio_persistence": audio_job_id}
 
 
 def _clear_post_conversation_chain(conversation_id: str) -> list:
@@ -680,6 +732,48 @@ def _clear_post_conversation_chain(conversation_id: str) -> list:
             f"{conversation_id[:8]}: {cleared}"
         )
     return cleared
+
+
+# Statuses that mean a job is still occupying the chain (not yet terminal).
+_IN_FLIGHT_JOB_STATUSES = frozenset(
+    {
+        JobStatus.QUEUED.value,
+        JobStatus.STARTED.value,
+        JobStatus.DEFERRED.value,
+        JobStatus.SCHEDULED.value,
+    }
+)
+
+
+def conversation_edit_chain_in_flight(conversation_id: str) -> Optional[str]:
+    """Return an in-flight edit-chain job_id for this conversation, else None.
+
+    Several endpoints edit a conversation by creating a new transcript version and
+    enqueuing follow-up work under deterministic job_ids keyed on the conversation:
+
+    - ``reprocess_speakers`` → reprocess_speaker → memory → title_summary
+    - annotation apply (``/diarization/{id}/apply``, ``/{id}/apply``) → memory
+
+    Firing any of these again while a previous one is still running spawns overlapping
+    work that races on the conversation's full-document ``save()`` — a stale writer can
+    clobber a newer version's segments/metadata (e.g. lost speaker labels, an orphaned
+    stale ``active`` version). Callers use this as a single-flight guard: if an edit
+    chain is already live, don't create a new transcript version or enqueue more work.
+    """
+    suffix = conversation_id[:12]
+    job_ids = [
+        f"reprocess_speaker_{suffix}",
+        f"memory_{suffix}",
+        f"title_summary_{suffix}",
+    ]
+    for job_id in job_ids:
+        try:
+            job = Job.fetch(job_id, connection=redis_conn)
+        except NoSuchJobError:
+            continue
+        if get_job_status_from_rq(job) in _IN_FLIGHT_JOB_STATUSES:
+            return job_id
+    return None
 
 
 def start_post_conversation_jobs(

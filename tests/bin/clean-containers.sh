@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "$0")/_engine.sh"
 # tests/bin/clean-containers.sh
 # ALWAYS saves logs before removing containers
 
@@ -18,7 +19,7 @@ echo ""
 # Now safe to remove
 echo "🗑️  Step 2/2: Removing containers and volumes..."
 cd "$BACKEND_DIR"
-docker compose -f docker-compose-test.yml down -v
+$COMPOSE -f docker-compose-test.yml down -v
 
 echo ""
 echo "✅ Cleanup complete!"

@@ -1207,8 +1207,13 @@ async def wait_for_audio_chunks(
 
         await asyncio.sleep(0.5)  # Check every 500ms
 
-    logger.error(
-        f"❌ Audio chunks not found after {max_wait_seconds}s "
-        f"(conversation: {conversation_id[:12]})"
+    # Log at WARNING (not ERROR): this generic util doesn't know *why* the session
+    # ended. A benign client disconnect (device walked out of range — no audio ever
+    # persisted) and a genuine persistence failure both land here. The caller knows
+    # the end reason and emits the severity-appropriate line, so emitting ERROR here
+    # would raise a spurious system event for every dead-zone reconnect.
+    logger.warning(
+        f"⏱️ Audio chunks not found after {max_wait_seconds}s "
+        f"(conversation: {conversation_id[:12]}) — caller decides how to handle"
     )
     return False

@@ -10,12 +10,15 @@ archives (hard-deletes) audio, and splits/merges conversations.
 import json
 import logging
 import shutil
+import statistics
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi.responses import FileResponse, JSONResponse
 
+from advanced_omi_backend.config import get_diarization_settings
+from advanced_omi_backend.constants import NOISE_LABEL
 from advanced_omi_backend.controllers.conversation_controller import (
     archive_conversation_audio,
 )
@@ -27,6 +30,7 @@ from advanced_omi_backend.controllers.queue_controller import (
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation, create_conversation
 from advanced_omi_backend.services.memory import get_memory_service
+from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 from advanced_omi_backend.users import User
 from advanced_omi_backend.utils.annotation_export import (
     EXPORTS_DIR,
@@ -36,7 +40,10 @@ from advanced_omi_backend.utils.annotation_export import (
     new_export_id,
     validate_export_id,
 )
-from advanced_omi_backend.utils.audio_chunk_utils import audio_cache_duration_matches
+from advanced_omi_backend.utils.audio_chunk_utils import (
+    audio_cache_duration_matches,
+    reconstruct_audio_segment,
+)
 from advanced_omi_backend.utils.transcript_slicing import (
     build_transcript_text,
     shift_segments,
@@ -79,31 +86,103 @@ _SCAN_PROJECTION = {
     "audio_archived": 1,
     "audio_archived_at": 1,
     "archive_reason": 1,
+    "processing_status": 1,
+    "failure_stage": 1,
     "vad_analysis": 1,
     "derived_from": 1,
     "active_transcript_version": 1,
     "transcript_versions.version_id": 1,
     "transcript_versions.segments.speaker": 1,
     "transcript_versions.segments.identified_as": 1,
+    "transcript_versions.segments.confidence": 1,
+    "transcript_versions.segments.segment_type": 1,
 }
 
 
+def _audit_segments(doc: dict) -> list:
+    """Segments to audit for this conversation.
+
+    Prefers the active transcript version's segments. Falls back to the version
+    with the most identified segments when the active pointer is missing or
+    points at an empty version — a known reprocess failure mode leaves a
+    dangling ``active_transcript_version`` (a UUID absent from the versions
+    dict), which would otherwise hide a conversation's segments entirely.
+    """
+    active = doc.get("active_transcript_version")
+    best: list = []
+    best_score = -1
+    for tv in doc.get("transcript_versions") or []:
+        segs = tv.get("segments") or []
+        if tv.get("version_id") == active and segs:
+            return segs
+        ident = sum(1 for s in segs if s.get("identified_as"))
+        score = ident * 100000 + len(segs)
+        if score > best_score:
+            best_score = score
+            best = segs
+    return best
+
+
 def _speakers_for_doc(doc: dict) -> List[str]:
-    """Distinct speaker labels from the active transcript version's segments.
+    """Distinct speaker labels from the audited transcript version's segments.
 
     Prefers ``identified_as`` (recognized name) over the raw ``speaker`` label.
     """
-    active = doc.get("active_transcript_version")
     speakers: set = set()
-    for tv in doc.get("transcript_versions") or []:
-        if tv.get("version_id") != active:
-            continue
-        for seg in tv.get("segments") or []:
-            label = seg.get("identified_as") or seg.get("speaker")
-            if label:
-                speakers.add(label)
-        break
+    for seg in _audit_segments(doc):
+        label = seg.get("identified_as") or seg.get("speaker")
+        if label:
+            speakers.add(label)
     return sorted(speakers)
+
+
+def _unknown_speech_count(doc: dict) -> int:
+    """Speech segments in the audited version not matched to an enrolled speaker.
+
+    The reliable "needs triage" signal: a speech segment with no ``identified_as``
+    is either an unenrolled person or background noise. Drives the table's
+    "N to review" hint so you can see which files still need triage.
+    """
+    count = 0
+    for seg in _audit_segments(doc):
+        if (seg.get("segment_type") or "speech") != "speech":
+            continue
+        if not seg.get("identified_as"):
+            count += 1
+    return count
+
+
+def _marginal_identified_count(doc: dict, threshold: float, margin: float) -> int:
+    """Speech segments identified as an enrolled speaker but at a confidence
+    below ``threshold + margin`` — weak matches that likely shouldn't carry a
+    name (e.g. background noise force-labeled as the nearest speaker). This is
+    the cheap, stored-data review signal: confidence is already on each segment,
+    so no audio re-embedding is needed.
+    """
+    cutoff = threshold + margin
+    count = 0
+    for seg in _audit_segments(doc):
+        if (seg.get("segment_type") or "speech") != "speech":
+            continue
+        if not seg.get("identified_as"):
+            continue
+        conf = seg.get("confidence")
+        if conf is not None and conf < cutoff:
+            count += 1
+    return count
+
+
+def _vad_stale(va: Optional[dict], duration: float) -> bool:
+    """True if a cached ``vad_analysis`` no longer describes the conversation's
+    current audio. The analysis is derived from the chunk set; if the chunks
+    changed in place its implied duration (frame_count * frame_hop) drifts from
+    ``audio_total_duration`` and the speech metrics are stale — the Analyze
+    button should re-run it. Returns False when there is no cached analysis
+    (that's "unanalyzed", surfaced separately)."""
+    if not va:
+        return False
+    cached = (va.get("frame_count") or 0) * (va.get("frame_hop_ms") or 0) / 1000.0
+    return not audio_cache_duration_matches(cached, duration)
 
 
 async def list_for_audit(
@@ -118,6 +197,8 @@ async def list_for_audit(
     include_speakers: Optional[List[str]] = None,
     exclude_speakers: Optional[List[str]] = None,
     archived_only: bool = False,
+    hide_failed: bool = False,
+    hide_reviewed: bool = False,
     limit: int = 100,
     offset: int = 0,
 ):
@@ -141,6 +222,17 @@ async def list_for_audit(
             base["audio_archived"] = {"$ne": True}
             base["deleted"] = {"$ne": True}
             base["audio_chunks_count"] = {"$gt": 0}
+            # Exclude conversations flagged with corrupt audio metadata — they're
+            # surfaced on the System Errors page instead (a None match also covers
+            # the field being absent on normal conversations).
+            base["audio_integrity_error"] = None
+            # Opt-in: drop conversations the pipeline marked failed (keeps null
+            # legacy status and in-progress 'active' rows visible — the latter
+            # are chipped as 'Processing…' so a stuck one is still apparent).
+            if hide_failed:
+                base["processing_status"] = {
+                    "$ne": Conversation.ConversationStatus.FAILED.value
+                }
 
         # Date range goes into the Mongo query (not the Python predicate) so
         # it narrows the MAX_SCAN working set instead of competing with it.
@@ -161,6 +253,14 @@ async def list_for_audit(
         raw_docs = await cursor.to_list(length=MAX_SCAN)
         scan_capped = len(raw_docs) >= MAX_SCAN
 
+        # Match threshold the pipeline used + a small comfort margin: an
+        # identification within this band of the cutoff is a weak/suspect match
+        # (the "low-confidence" review signal), computed from stored confidence.
+        similarity_threshold = float(
+            get_diarization_settings().get("similarity_threshold", 0.5)
+        )
+        marginal_margin = 0.05
+
         include_set = set(include_speakers or [])
         exclude_set = set(exclude_speakers or [])
         matched: List[dict] = []
@@ -174,6 +274,7 @@ async def list_for_audit(
             va = doc.get("vad_analysis")
             doc_speakers = _speakers_for_doc(doc)
             available_speakers.update(doc_speakers)
+            unknown_count = _unknown_speech_count(doc)
 
             speech_fraction = None
             if va:
@@ -202,6 +303,10 @@ async def list_for_audit(
                     continue
                 if exclude_set and exclude_set.intersection(doc_speakers):
                     continue
+                # Opt-in: drop conversations with nothing left to triage (every
+                # speech segment already has an identified_as).
+                if hide_reviewed and unknown_count == 0:
+                    continue
 
             created_at = doc.get("created_at")
             archived_at = doc.get("audio_archived_at")
@@ -214,6 +319,12 @@ async def list_for_audit(
                     "created_at": created_at.isoformat() if created_at else None,
                     "duration_seconds": duration,
                     "speakers": doc_speakers,
+                    "unknown_speech_segments": unknown_count,
+                    "marginal_identified_segments": _marginal_identified_count(
+                        doc, similarity_threshold, marginal_margin
+                    ),
+                    "processing_status": doc.get("processing_status"),
+                    "failure_stage": doc.get("failure_stage"),
                     "analyzed": va is not None,
                     "speech_fraction": (
                         round(speech_fraction, 4)
@@ -239,14 +350,32 @@ async def list_for_audit(
         # is scoped to the requesting user, so the count matches even for
         # superusers viewing everyone's rows). Lets the UI disable the button
         # when there is nothing left to analyze.
-        unanalyzed_count = await collection.count_documents(
+        # Conversations the Analyze button should process: those with no VAD
+        # analysis OR whose cached analysis went stale (audio changed in place
+        # since it was computed). Staleness needs the frame-count/duration
+        # comparison, so count it in Python over the projected set rather than a
+        # Mongo predicate. Folding stale into this count means a stale cache
+        # surfaces as a non-zero Analyze count and the existing button re-runs
+        # it — no separate UI affordance for what is a rare contingency.
+        analyze_docs = await collection.find(
             {
                 "user_id": str(user.user_id),
                 "audio_archived": {"$ne": True},
                 "deleted": {"$ne": True},
                 "audio_chunks_count": {"$gt": 0},
-                "vad_analysis": None,
-            }
+                "audio_integrity_error": None,
+            },
+            {
+                "vad_analysis.frame_count": 1,
+                "vad_analysis.frame_hop_ms": 1,
+                "audio_total_duration": 1,
+            },
+        ).to_list(length=MAX_SCAN)
+        unanalyzed_count = sum(
+            1
+            for d in analyze_docs
+            if d.get("vad_analysis") is None
+            or _vad_stale(d.get("vad_analysis"), d.get("audio_total_duration") or 0.0)
         )
 
         return {
@@ -256,6 +385,8 @@ async def list_for_audit(
             "offset": offset,
             "scan_capped": scan_capped,
             "speech_threshold": speech_threshold,
+            "similarity_threshold": similarity_threshold,
+            "marginal_margin": marginal_margin,
             "unanalyzed_count": unanalyzed_count,
             "speakers": sorted(available_speakers),
         }
@@ -264,6 +395,147 @@ async def list_for_audit(
         logger.exception(f"Error listing conversations for cleaning: {e}")
         return JSONResponse(
             status_code=500, content={"error": "Error listing conversations"}
+        )
+
+
+def _recommend_threshold(values: List[float]) -> Optional[float]:
+    """Otsu-style split: the cutoff in [0.36, 0.60] maximizing between-class
+    variance of the confidence distribution. With the bimodal noise/real
+    structure this lands in the valley between the two humps — a data-driven
+    similarity-threshold suggestion. Needs enough points to be meaningful.
+    """
+    if len(values) < 30:
+        return None
+    best_t: Optional[float] = None
+    best_var = -1.0
+    t = 0.36
+    while t <= 0.60001:
+        below = [v for v in values if v < t]
+        above = [v for v in values if v >= t]
+        if below and above:
+            wb = len(below) / len(values)
+            wa = len(above) / len(values)
+            var = wb * wa * (statistics.mean(above) - statistics.mean(below)) ** 2
+            if var > best_var:
+                best_var = var
+                best_t = round(t, 2)
+        t += 0.01
+    return best_t
+
+
+async def speaker_confidence_overview(user: User):
+    """Per-speaker identification-confidence statistics across the corpus.
+
+    Reads stored per-segment confidence (no audio re-embedding) and reports the
+    global distribution histogram, the marginal-match fraction, per-speaker
+    baselines (mean/median/min/max + %marginal + survival at the live
+    threshold), survival counts at candidate thresholds, and a data-driven
+    recommended threshold. This is the strategic view: it surfaces which
+    enrolled speakers are "noise magnets" (matches clustered at the floor) and
+    what threshold cleanly separates real matches from noise.
+    """
+    try:
+        threshold = float(get_diarization_settings().get("similarity_threshold", 0.5))
+        margin = 0.05
+
+        base: dict = {"deleted": {"$ne": True}}
+        if not user.is_superuser:
+            base["user_id"] = str(user.user_id)
+
+        collection = Conversation.get_pymongo_collection()
+        cursor = collection.find(base, _SCAN_PROJECTION).limit(MAX_SCAN)
+        docs = await cursor.to_list(length=MAX_SCAN)
+
+        per_speaker: Dict[str, List[float]] = {}
+        per_speaker_convs: Dict[str, set] = {}
+        all_conf: List[float] = []
+        convs_with_ids = 0
+
+        for doc in docs:
+            cid = doc.get("conversation_id")
+            had = False
+            for seg in _audit_segments(doc):
+                if (seg.get("segment_type") or "speech") != "speech":
+                    continue
+                name = seg.get("identified_as")
+                conf = seg.get("confidence")
+                if not name or conf is None:
+                    continue
+                had = True
+                all_conf.append(conf)
+                per_speaker.setdefault(name, []).append(conf)
+                per_speaker_convs.setdefault(name, set()).add(cid)
+            if had:
+                convs_with_ids += 1
+
+        cutoff = threshold + margin
+        # Histogram: 0.30..1.00 in 0.05 bins (14 bins).
+        bin_width = 0.05
+        hist_start = 0.30
+        n_bins = 14
+        counts = [0] * n_bins
+        for v in all_conf:
+            idx = int((v - hist_start) / bin_width)
+            idx = max(0, min(n_bins - 1, idx))
+            counts[idx] += 1
+
+        total = len(all_conf)
+        marginal = sum(1 for v in all_conf if v < cutoff)
+        survival = [
+            {
+                "threshold": t,
+                "keep": sum(1 for v in all_conf if v >= t),
+                "drop": sum(1 for v in all_conf if v < t),
+            }
+            for t in (0.40, 0.45, 0.50, 0.55)
+        ]
+
+        speakers = []
+        for name, vals in per_speaker.items():
+            vals_sorted = sorted(vals)
+            n = len(vals_sorted)
+            speakers.append(
+                {
+                    "name": name,
+                    "nseg": n,
+                    "nconv": len(per_speaker_convs[name]),
+                    "mean": round(statistics.mean(vals_sorted), 3),
+                    "median": round(statistics.median(vals_sorted), 3),
+                    "min": round(vals_sorted[0], 3),
+                    "max": round(vals_sorted[-1], 3),
+                    "marginal_pct": round(
+                        100.0 * sum(1 for v in vals_sorted if v < cutoff) / n, 1
+                    ),
+                    "keep_pct": round(
+                        100.0 * sum(1 for v in vals_sorted if v >= threshold) / n, 1
+                    ),
+                }
+            )
+        speakers.sort(key=lambda s: (-s["marginal_pct"], -s["nseg"]))
+
+        return {
+            "threshold": threshold,
+            "margin": margin,
+            "total_identified": total,
+            "conversations_with_ids": convs_with_ids,
+            "conversations_scanned": len(docs),
+            "scan_capped": len(docs) >= MAX_SCAN,
+            "marginal_count": marginal,
+            "marginal_fraction": round(marginal / total, 4) if total else 0.0,
+            "histogram": {
+                "start": hist_start,
+                "bin_width": bin_width,
+                "counts": counts,
+            },
+            "survival": survival,
+            "recommended_threshold": _recommend_threshold(all_conf),
+            "speakers": speakers,
+        }
+    except Exception as e:
+        logger.exception(f"Error computing speaker confidence overview: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Error computing speaker confidence overview"},
         )
 
 
@@ -438,7 +710,12 @@ async def get_silence_gaps(
             status_code=409, content={"error": "Conversation has no audio chunks"}
         )
 
-    needs_analysis = any((c.get("vad") or {}).get("max_score") is None for c in chunks)
+    # Only "needs analysis" when *no* chunk is scored. detect_silence_gaps
+    # already treats individual unscored chunks as speech (so it never suggests a
+    # split through unscored audio), which keeps a partially-scored conversation
+    # — e.g. one with leftover unscored chunks from the reconnect-duplicate bug —
+    # usable for splitting instead of falsely blocked.
+    needs_analysis = all((c.get("vad") or {}).get("max_score") is None for c in chunks)
     duration = float(chunks[-1]["end_time"])
 
     gaps = (
@@ -516,14 +793,24 @@ async def get_speech_regions(
             {"start_time": 1, "end_time": 1, "vad.scores": 1, "vad.frame_hop_ms": 1},
         ).sort("chunk_index", 1)
 
+        # Derive regions from the chunks that have scores; chunks missing them
+        # contribute no speech intervals (treated as non-speech for speech-only
+        # playback — full-audio mode still plays everything). Only report
+        # needs_analysis when *no* chunk is scored, i.e. the conversation was
+        # genuinely never analyzed. A partially-scored conversation — e.g. one
+        # damaged by the reconnect-duplicate bug, where some overlapping chunks
+        # never got scored — still gets a usable speech preview instead of
+        # falsely reading as "needs analysis" while its cached summary says it is
+        # analyzed (which is the contradiction the audit listing would show).
         raw_intervals: List[List[float]] = []
-        needs_analysis = False
+        scored_any = False
         last_end = 0.0
         async for chunk in cursor:
             vad = chunk.get("vad")
+            last_end = max(last_end, float(chunk["end_time"]))
             if not vad or vad.get("scores") is None:
-                needs_analysis = True
-                break
+                continue
+            scored_any = True
             raw_intervals.extend(
                 frame_speech_intervals(
                     vad["scores"],
@@ -531,9 +818,8 @@ async def get_speech_regions(
                     float(chunk["start_time"]),
                 )
             )
-            last_end = float(chunk["end_time"])
 
-        if needs_analysis:
+        if not scored_any:
             return {
                 "analyzed": False,
                 "needs_analysis": True,
@@ -565,6 +851,173 @@ async def get_speech_regions(
         "speech_seconds": round(speech_seconds, 2),
         "speakers": sorted(wanted),
         "regions": [{"start": start, "end": end} for start, end in regions],
+    }
+
+
+async def get_segments(user: User, conversation_id: str):
+    """Active-version transcript segments for the speaker-triage panel.
+
+    Returns every segment (the frontend filters to speech / needs-review) with
+    the speaker-recognition fields the panel needs — including ``confidence``,
+    which the listing projection strips. ``index`` is the position in the active
+    version's segment list (so it matches the ``segment_index`` an annotation
+    stores), and ``segment_start_time`` is sent so the frontend records the
+    drift-stable time key on each annotation it creates.
+    """
+    conversation = await Conversation.find_one(
+        Conversation.conversation_id == conversation_id
+    )
+    if not conversation:
+        return JSONResponse(
+            status_code=404, content={"error": "Conversation not found"}
+        )
+    if not user.is_superuser and conversation.user_id != str(user.user_id):
+        return JSONResponse(status_code=403, content={"error": "Access forbidden"})
+
+    version = _active_transcript_version(conversation)
+    segments = []
+    for index, seg in enumerate(version.segments if version else []):
+        segments.append(
+            {
+                "index": index,
+                "start": round(seg.start, 3),
+                "end": round(seg.end, 3),
+                "segment_start_time": seg.start,
+                "text": seg.text,
+                "speaker": seg.speaker,
+                "identified_as": seg.identified_as,
+                "confidence": seg.confidence,
+                "segment_type": seg.segment_type,
+            }
+        )
+
+    return {
+        "conversation_id": conversation_id,
+        "duration_seconds": round(conversation.audio_total_duration or 0.0, 2),
+        "audio_available": bool(
+            conversation.audio_chunks_count and not conversation.audio_archived
+        ),
+        "segments": segments,
+    }
+
+
+async def identify_segment_clip(
+    user: User, conversation_id: str, start: float, end: float
+):
+    """Live speaker suggestion for one segment.
+
+    Reconstructs the segment's audio and asks the speaker service for its
+    closest enrolled match. The service returns the best name + cosine even
+    below the match threshold, which is the only real signal available on an
+    unknown segment (stored confidence is 0.0 there).
+    """
+    _conversation, error = await _load_operable_conversation(user, conversation_id)
+    if error:
+        return error
+    if end <= start:
+        return JSONResponse(
+            status_code=400, content={"error": "end must be greater than start"}
+        )
+
+    speaker_client = SpeakerRecognitionClient()
+    if not speaker_client.enabled:
+        return JSONResponse(
+            status_code=503, content={"error": "Speaker recognition is not enabled"}
+        )
+
+    try:
+        wav_bytes = await reconstruct_audio_segment(conversation_id, start, end)
+    except Exception as e:
+        logger.warning(f"Segment audio reconstruction failed for identify: {e}")
+        return JSONResponse(
+            status_code=409, content={"error": "Could not reconstruct segment audio"}
+        )
+
+    # Pass a near-zero threshold so the service always returns the *closest*
+    # enrolled speaker + its true cosine, even for a below-threshold (unknown)
+    # segment — that name+score is the whole point of a triage suggestion. The
+    # caller surfaces the cosine (color-coded) so a weak match reads as weak;
+    # `found` reflects whether it would clear the real operating threshold.
+    suggest = await speaker_client.identify_segment(
+        wav_bytes, user_id="1", similarity_threshold=0.0
+    )
+    confidence = suggest.get("confidence")
+    threshold = get_diarization_settings().get("similarity_threshold", 0.5)
+    return {
+        "found": confidence is not None and confidence >= threshold,
+        "speaker_id": suggest.get("speaker_id"),
+        "speaker_name": suggest.get("speaker_name"),
+        "confidence": confidence,
+        "threshold": threshold,
+        "status": suggest.get("status"),
+    }
+
+
+async def get_triage_pending(user: User):
+    """Count of unapplied speaker-triage decisions (pending diarization
+    annotations) and how many conversations they span — drives the toolbar's
+    'Apply all' control."""
+    from advanced_omi_backend.models.annotation import Annotation, AnnotationType
+
+    base = {
+        "annotation_type": AnnotationType.DIARIZATION,
+        "processed": False,
+    }
+    if not user.is_superuser:
+        base["user_id"] = user.user_id
+    pending = await Annotation.find(base).to_list()
+    conversation_ids = {a.conversation_id for a in pending if a.conversation_id}
+    return {
+        "pending_count": len(pending),
+        "conversation_count": len(conversation_ids),
+    }
+
+
+async def apply_triage(user: User):
+    """Bulk-apply all pending speaker-triage decisions across every conversation.
+
+    Each triage decision was persisted as a diarization annotation. This applies them
+    (new transcript version + chained memory reprocess) in one pass over every
+    conversation the user triaged. It does NOT enroll voiceprints — that's a deliberate
+    action reserved for the finetuning / Enrollment pages. Noise decisions ride along:
+    apply reclassifies them to non-speech.
+    """
+    from advanced_omi_backend.models.annotation import Annotation, AnnotationType
+    from advanced_omi_backend.routers.modules.annotation_routes import (
+        apply_diarization_annotations,
+    )
+
+    base = {
+        "annotation_type": AnnotationType.DIARIZATION,
+        "processed": False,
+    }
+    if not user.is_superuser:
+        base["user_id"] = user.user_id
+    pending = await Annotation.find(base).to_list()
+
+    conversation_ids = sorted({a.conversation_id for a in pending if a.conversation_id})
+    if not conversation_ids:
+        return {"applied_count": 0, "conversation_count": 0, "enrolled": None}
+
+    applied_count = 0
+    apply_errors: List[str] = []
+    for cid in conversation_ids:
+        try:
+            await apply_diarization_annotations(cid, current_user=user)
+            applied_count += 1
+        except Exception as e:
+            logger.warning(f"Triage apply failed for {cid[:8]}: {e}")
+            apply_errors.append(cid)
+
+    # NOTE: triage only ANNOTATES (fixes the conversation transcript + memory). It does
+    # NOT enroll/train voiceprints — voiceprint training is a deliberate action done only
+    # from the finetuning page and the speaker-recognition Enrollment page, so noisy
+    # conversational corrections (e.g. a one-word "yeah") never drift someone's voiceprint.
+    return {
+        "applied_count": applied_count,
+        "conversation_count": len(conversation_ids),
+        "apply_errors": apply_errors,
+        "enrolled": None,
     }
 
 

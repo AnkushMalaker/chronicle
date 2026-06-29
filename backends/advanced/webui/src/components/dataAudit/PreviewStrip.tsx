@@ -1,23 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AlertTriangle, Loader2, Pause, Play, X } from 'lucide-react'
-import { BACKEND_URL, SpeechRegion, dataAuditApi } from '../../services/api'
-import { getStorageKey } from '../../utils/storage'
+import { SpeechRegion, dataAuditApi } from '../../services/api'
+import { useGaplessPlayer, usePlayheadTime } from '../../hooks/useGaplessPlayer'
+import type { Range } from '../../lib/gaplessPlayer'
 import { formatClock, formatDuration } from './format'
 
 const PLAYBACK_RATES = [1, 1.5, 2]
 
-// Full-audio mode plays contiguous windows of this length. The stored opus is
-// one independent ogg stream per 10s chunk — browsers cannot seek a chained
-// concatenation of those (they see only the first stream), so BOTH modes play
-// exact time-clipped WAV windows from the chunks endpoint instead.
-const FULL_WINDOW_SECONDS = 60
+// The timeline always fits its container width (never scrolls horizontally), but
+// to keep it readable it caps density at this many seconds per row. Longer
+// recordings wrap onto additional rows instead of compressing into one. Tune
+// this single number to trade rows-of-height against horizontal detail.
+const MAX_SECONDS_PER_ROW = 1200
 
 type PlayMode = 'speech' | 'full'
-
-interface Segment {
-  start: number
-  end: number
-}
 
 // Mode is a sticky preference shared by every strip in the session.
 const MODE_STORAGE_KEY = 'data_audit_preview_mode'
@@ -42,14 +38,15 @@ interface Props {
 }
 
 /**
- * Speech-aware audio preview. One playlist engine drives two modes:
- * "Speech only" plays the VAD speech regions and skips the silence between
- * them; "Full audio" plays contiguous windows covering the whole recording.
- * Every segment is an exact time-clipped WAV, so seeking and the playhead
- * are sample-accurate in both modes.
+ * Speech-aware audio preview. Two modes share one program fed to the app-wide
+ * gapless scheduler: "Speech only" plays the VAD speech regions and skips the
+ * silence between them (seamless gapless concatenation of the regions); "Full
+ * audio" plays the whole recording as a single range. The scheduler decodes 10 s
+ * windows on the browser audio thread and schedules them back-to-back, so seeking
+ * is sample-accurate and boundaries are inaudible in both modes.
  *
- * With a speaker selected, speech regions are the overlap of VAD speech and
- * that speaker's transcript segments — playback skips everyone else.
+ * With a speaker selected, speech regions are the overlap of VAD speech and that
+ * speaker's transcript segments — playback skips everyone else.
  */
 export default function PreviewStrip({
   conversationId,
@@ -67,17 +64,19 @@ export default function PreviewStrip({
   const [error, setError] = useState<string | null>(null)
 
   const [mode, setMode] = useState<PlayMode>(() => loadMode())
-  const [playing, setPlaying] = useState(false)
-  const [buffering, setBuffering] = useState(false)
-  const [absTime, setAbsTime] = useState<number | null>(null)
   const [rate, setRate] = useState(1)
   // '' = all speakers; otherwise regions = VAD speech ∩ this speaker's segments.
   const [speakerFilter, setSpeakerFilter] = useState('')
 
-  const audioRef = useRef<HTMLAudioElement | null>(null)
-  const prefetchRef = useRef<{ index: number; audio: HTMLAudioElement } | null>(null)
-  const playlistRef = useRef<Segment[]>([])
-  const regionsRef = useRef<Segment[]>([])
+  // Playback is owned by the app-wide gapless scheduler.
+  const player = useGaplessPlayer()
+  const isActive = player.isActive(conversationId)
+  const playing = isActive && player.isPlaying
+  const buffering = isActive && player.buffering
+  const absTime = usePlayheadTime(conversationId) ?? null
+
+  // Latest values for the regions-load effect (which only depends on cid/filter).
+  const regionsRef = useRef<Range[]>([])
   const durationRef = useRef(durationSeconds)
   const rateRef = useRef(1)
   const modeRef = useRef<PlayMode>(mode)
@@ -85,97 +84,13 @@ export default function PreviewStrip({
   const resumeAtRef = useRef<number | null>(null)
   const autoPlayedRef = useRef(false)
 
-  const token = () => localStorage.getItem(getStorageKey('token')) || ''
-
-  const segmentUrl = useCallback(
-    (start: number, end: number) =>
-      `${BACKEND_URL}/api/audio/chunks/${conversationId}` +
-      `?start_time=${start.toFixed(2)}&end_time=${end.toFixed(2)}&format=wav&token=${token()}`,
-    [conversationId]
-  )
-
-  const buildPlaylist = useCallback((forMode: PlayMode): Segment[] => {
+  // Build the scheduler program for a mode: the speech regions, or the whole
+  // recording as a single range (the scheduler windows it internally).
+  const buildProgram = useCallback((forMode: PlayMode): Range[] => {
     if (forMode === 'speech') return regionsRef.current
     const total = durationRef.current
-    if (total <= 0) return []
-    const windows: Segment[] = []
-    for (let t = 0; t < total; t += FULL_WINDOW_SECONDS) {
-      windows.push({ start: t, end: Math.min(t + FULL_WINDOW_SECONDS, total) })
-    }
-    return windows
+    return total > 0 ? [{ start: 0, end: total }] : []
   }, [])
-
-  const stop = useCallback(() => {
-    audioRef.current?.pause()
-    audioRef.current = null
-    prefetchRef.current = null
-    setPlaying(false)
-    setBuffering(false)
-  }, [])
-
-  // --- Playlist engine: exact-clipped WAV per segment, chained + prefetched ---
-  const playSegment = useCallback(
-    (index: number, startWithin: number = 0) => {
-      const segment = playlistRef.current[index]
-      if (!segment) {
-        // Ran off the end of the playlist: reset so play starts over.
-        stop()
-        setAbsTime(null)
-        return
-      }
-      audioRef.current?.pause()
-
-      const startAbs = segment.start + startWithin
-      let audio: HTMLAudioElement
-      if (startWithin === 0 && prefetchRef.current?.index === index) {
-        audio = prefetchRef.current.audio
-      } else {
-        audio = new Audio(segmentUrl(startAbs, segment.end))
-      }
-      prefetchRef.current = null
-      audioRef.current = audio
-      audio.playbackRate = rateRef.current
-      setBuffering(true)
-      setAbsTime(startAbs)
-
-      audio.addEventListener('playing', () => {
-        setBuffering(false)
-        setPlaying(true)
-        // Prefetch the next segment for a gapless jump.
-        const next = playlistRef.current[index + 1]
-        if (next && prefetchRef.current?.index !== index + 1) {
-          const pre = new Audio(segmentUrl(next.start, next.end))
-          pre.preload = 'auto'
-          prefetchRef.current = { index: index + 1, audio: pre }
-        }
-      })
-      audio.addEventListener('timeupdate', () => {
-        setAbsTime(startAbs + audio.currentTime)
-      })
-      audio.addEventListener('ended', () => playSegment(index + 1))
-      audio.addEventListener('error', () => {
-        setError('Playback failed')
-        stop()
-      })
-      audio.play().catch(() => stop())
-    },
-    [segmentUrl, stop]
-  )
-
-  const startAt = useCallback(
-    (time: number) => {
-      // Land inside the segment containing the time, or snap forward to the
-      // next one (in speech mode, time can fall inside a silence gap).
-      const index = playlistRef.current.findIndex((s) => s.end > time)
-      if (index === -1) {
-        stop()
-        return
-      }
-      const segment = playlistRef.current[index]
-      playSegment(index, Math.max(0, time - segment.start))
-    },
-    [playSegment, stop]
-  )
 
   // Load regions on mount and whenever the speaker filter changes.
   useEffect(() => {
@@ -198,14 +113,14 @@ export default function PreviewStrip({
           modeRef.current === 'speech' && res.data.regions.length === 0 && !speakerFilter
             ? 'full'
             : modeRef.current
-        playlistRef.current = buildPlaylist(effectiveMode)
+        const program = buildProgram(effectiveMode)
         const resumeAt = resumeAtRef.current
         resumeAtRef.current = null
-        if (resumeAt !== null && playlistRef.current.length > 0) {
-          startAt(resumeAt)
-        } else if (autoPlay && !autoPlayedRef.current && playlistRef.current.length > 0) {
+        if (resumeAt !== null && program.length > 0) {
+          player.playProgram(conversationId, program, { rate: rateRef.current, fromAudioTime: resumeAt })
+        } else if (autoPlay && !autoPlayedRef.current && program.length > 0) {
           autoPlayedRef.current = true
-          playSegment(0)
+          player.playProgram(conversationId, program, { rate: rateRef.current })
         }
       })
       .catch((e) => {
@@ -217,55 +132,65 @@ export default function PreviewStrip({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId, speakerFilter])
 
-  // Stop audio on unmount.
-  useEffect(() => stop, [stop])
+  // Stop playback on unmount (only if this strip owns it).
+  useEffect(() => {
+    return () => {
+      if (player.isActive(conversationId)) player.stop()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationId])
 
   const canPlaySpeech = (regions?.length || 0) > 0
   const playDisabled =
     regions === null || (mode === 'speech' ? !canPlaySpeech : duration <= 0)
 
   const togglePlay = () => {
-    if (audioRef.current && !audioRef.current.paused) {
-      audioRef.current.pause()
-      setPlaying(false)
-      return
+    if (player.isActive(conversationId)) {
+      if (player.isPlaying) {
+        player.pause()
+        return
+      }
+      if (player.isPaused) {
+        player.resume()
+        return
+      }
     }
-    if (audioRef.current && audioRef.current.paused && !audioRef.current.ended) {
-      audioRef.current.play().then(() => setPlaying(true)).catch(() => stop())
-      return
-    }
-    if (playlistRef.current.length > 0) playSegment(0)
+    const program = buildProgram(modeRef.current)
+    if (program.length > 0) player.playProgram(conversationId, program, { rate: rateRef.current })
   }
 
   const toggleMode = () => {
     const next: PlayMode = mode === 'speech' ? 'full' : 'speech'
     const position = absTime
     const wasPlaying = playing || buffering
-    stop()
     setMode(next)
     modeRef.current = next
-    playlistRef.current = buildPlaylist(next)
     try {
       sessionStorage.setItem(MODE_STORAGE_KEY, next)
     } catch {
       // ignore storage quota/availability errors
     }
     // Continue from the same position in the other mode.
-    if (wasPlaying && position !== null) startAt(position)
+    const program = buildProgram(next)
+    if (wasPlaying && position !== null && program.length > 0) {
+      player.playProgram(conversationId, program, { rate: rateRef.current, fromAudioTime: position })
+    } else if (player.isActive(conversationId)) {
+      player.stop()
+    }
   }
 
   const changeSpeaker = (value: string) => {
     const position = absTime
     const wasPlaying = playing || buffering
-    stop()
-    // Picking a speaker implies speech-only playback (the filter has no
-    // effect on full-audio windows). Not persisted — it's a side effect,
-    // not the user's sticky mode preference.
+    // Picking a speaker implies speech-only playback (the filter has no effect on
+    // full-audio). Not persisted — it's a side effect, not the sticky preference.
     if (value && modeRef.current !== 'speech') {
       setMode('speech')
       modeRef.current = 'speech'
     }
-    if (wasPlaying && position !== null) resumeAtRef.current = position
+    // Carry the position across the refetch; the load effect resumes there.
+    resumeAtRef.current = wasPlaying && position !== null ? position : null
+    if (player.isActive(conversationId)) player.stop()
     setSpeakerFilter(value)
   }
 
@@ -273,17 +198,43 @@ export default function PreviewStrip({
     const next = PLAYBACK_RATES[(PLAYBACK_RATES.indexOf(rate) + 1) % PLAYBACK_RATES.length]
     setRate(next)
     rateRef.current = next
-    if (audioRef.current) audioRef.current.playbackRate = next
+    player.setRate(next)
   }
 
-  const seekTo = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (duration <= 0 || playlistRef.current.length === 0) return
+  // Split the recording into equal-length rows, each capped at MAX_SECONDS_PER_ROW
+  // so density stays readable. Short recordings stay a single fit-to-width row.
+  const rowCount = duration > 0 ? Math.max(1, Math.ceil(duration / MAX_SECONDS_PER_ROW)) : 1
+  const rowSpan = duration > 0 ? duration / rowCount : 0
+
+  // Seek by clicking a row: map the click x within this row back to absolute time.
+  const seekRow = (e: React.MouseEvent<HTMLDivElement>, rowStart: number) => {
+    if (duration <= 0) return
     const rect = e.currentTarget.getBoundingClientRect()
-    const time = ((e.clientX - rect.left) / rect.width) * duration
-    startAt(time)
+    const time = Math.min(duration, Math.max(0, rowStart + ((e.clientX - rect.left) / rect.width) * rowSpan))
+    if (player.isActive(conversationId)) {
+      player.seek(time)
+    } else {
+      const program = buildProgram(modeRef.current)
+      if (program.length > 0) {
+        player.playProgram(conversationId, program, { rate: rateRef.current, fromAudioTime: time })
+      }
+    }
   }
 
-  const pct = (t: number) => `${Math.min(100, Math.max(0, (t / duration) * 100))}%`
+  // Position a point within a row as a CSS percentage.
+  const pointPct = (t: number, rowStart: number) =>
+    `${Math.min(100, Math.max(0, ((t - rowStart) / rowSpan) * 100))}%`
+
+  // Clip an absolute [start,end] interval to a row; null if it doesn't intersect.
+  const clipToRow = (start: number, end: number, rowStart: number) => {
+    const a = Math.max(start, rowStart)
+    const b = Math.min(end, rowStart + rowSpan)
+    if (b <= a) return null
+    return {
+      left: `${((a - rowStart) / rowSpan) * 100}%`,
+      width: `${((b - a) / rowSpan) * 100}%`,
+    }
+  }
 
   return (
     <div className="space-y-2 rounded-lg bg-gray-50 dark:bg-gray-900/40 border border-gray-200 dark:border-gray-700 p-3">
@@ -377,47 +328,66 @@ export default function PreviewStrip({
 
       {error && <div className="text-xs text-red-600 dark:text-red-400">{error}</div>}
 
-      {/* Timeline: speech blocks, overlays (gaps), markers (split points), playhead */}
-      <div
-        onClick={seekTo}
-        className="relative h-4 rounded bg-gray-200 dark:bg-gray-700 cursor-pointer overflow-hidden"
-        title={
-          mode === 'speech'
-            ? 'Click to play from here (snaps forward to speech)'
-            : 'Click to play from here'
-        }
-      >
-        {(overlays || []).map((o, i) => (
-          <div
-            key={`o${i}`}
-            className="absolute inset-y-0 bg-amber-200/70 dark:bg-amber-700/40"
-            style={{ left: pct(o.start), width: pct(o.end - o.start) }}
-          />
-        ))}
-        {(regions || []).map((r, i) => (
-          <div
-            key={`r${i}`}
-            className={`absolute inset-y-0 rounded-sm ${
-              speakerFilter
-                ? 'bg-violet-500/80 dark:bg-violet-400/80'
-                : 'bg-blue-500/80 dark:bg-blue-400/80'
-            }`}
-            style={{ left: pct(r.start), width: `max(2px, ${pct(r.end - r.start)})` }}
-          />
-        ))}
-        {(markers || []).map((m, i) => (
-          <div
-            key={`m${i}`}
-            className="absolute inset-y-0 w-0.5 bg-red-500"
-            style={{ left: pct(m) }}
-          />
-        ))}
-        {absTime !== null && (
-          <div
-            className="absolute inset-y-0 w-0.5 bg-gray-900 dark:bg-white"
-            style={{ left: pct(absTime) }}
-          />
-        )}
+      {/* Timeline: speech blocks, overlays (gaps), markers (split points), playhead.
+          Wraps onto multiple fit-to-width rows for long audio — never scrolls
+          horizontally. Each row covers an equal slice of the recording. */}
+      <div className="space-y-1">
+        {Array.from({ length: rowCount }, (_, row) => {
+          const rowStart = row * rowSpan
+          const rowEnd = rowStart + rowSpan
+          return (
+            <div
+              key={`row${row}`}
+              onClick={(e) => seekRow(e, rowStart)}
+              className="relative h-4 rounded bg-gray-200 dark:bg-gray-700 cursor-pointer overflow-hidden"
+              title={
+                mode === 'speech'
+                  ? 'Click to play from here (snaps forward to speech)'
+                  : 'Click to play from here'
+              }
+            >
+              {(overlays || []).map((o, i) => {
+                const c = clipToRow(o.start, o.end, rowStart)
+                return c ? (
+                  <div
+                    key={`o${i}`}
+                    className="absolute inset-y-0 bg-amber-200/70 dark:bg-amber-700/40"
+                    style={c}
+                  />
+                ) : null
+              })}
+              {(regions || []).map((r, i) => {
+                const c = clipToRow(r.start, r.end, rowStart)
+                return c ? (
+                  <div
+                    key={`r${i}`}
+                    className={`absolute inset-y-0 rounded-sm ${
+                      speakerFilter
+                        ? 'bg-violet-500/80 dark:bg-violet-400/80'
+                        : 'bg-blue-500/80 dark:bg-blue-400/80'
+                    }`}
+                    style={{ left: c.left, width: `max(2px, ${c.width})` }}
+                  />
+                ) : null
+              })}
+              {(markers || []).map((m, i) =>
+                m >= rowStart && m < rowEnd ? (
+                  <div
+                    key={`m${i}`}
+                    className="absolute inset-y-0 w-0.5 bg-red-500"
+                    style={{ left: pointPct(m, rowStart) }}
+                  />
+                ) : null
+              )}
+              {absTime !== null && absTime >= rowStart && absTime < rowEnd && (
+                <div
+                  className="absolute inset-y-0 w-0.5 bg-gray-900 dark:bg-white"
+                  style={{ left: pointPct(absTime, rowStart) }}
+                />
+              )}
+            </div>
+          )
+        })}
       </div>
     </div>
   )

@@ -1,8 +1,11 @@
 import { useState, useEffect } from 'react'
-import { Settings as SettingsIcon, CheckCircle, AlertCircle, RefreshCw, Volume2, Sliders, Mic, Users, Cpu, Play, Loader2, X, Check, UserCircle } from 'lucide-react'
+import { useQueryClient } from '@tanstack/react-query'
+import { Settings as SettingsIcon, CheckCircle, AlertCircle, RefreshCw, Volume2, Sliders, Mic, Users, Cpu, Play, Loader2, X, Check, UserCircle, Database, Plus, Trash2, Pencil } from 'lucide-react'
 import { systemApi, speakerApi, authApi } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
-import { useDiarizationSettings, useLLMOperations, useMiscSettings } from '../hooks/useSystem'
+import { useDiarizationSettings, useLLMOperations, useMiscSettings, useModels, ModelView, ModelType } from '../hooks/useSystem'
+import ExternalServices from '../components/ExternalServices'
+import AsrContextSettings from '../components/AsrContextSettings'
 
 interface DiarizationSettings {
   diarization_source: 'provider' | 'pyannote'
@@ -583,6 +586,22 @@ export default function Settings() {
             onSaved={refetchLLMOps}
           />
         )}
+
+        {/* Active Models — repoint which registry model each role uses */}
+        <ActiveModelsCard isAdmin={isAdmin} />
+
+        {/* ASR recognition hints (keyword boosting vs LLM context prompt) */}
+        <div className="lg:col-span-2">
+          <AsrContextSettings isAdmin={isAdmin} />
+        </div>
+
+        {/* ASR / TTS Providers (host service-manager agent) — switch the running service + its model */}
+        <div className="lg:col-span-2">
+          <ExternalServices isAdmin={isAdmin} mode="providers" />
+        </div>
+
+        {/* Model Registry — add/edit/delete model definitions and API keys */}
+        <ModelRegistryCard isAdmin={isAdmin} />
       </div>
     </div>
   )
@@ -911,6 +930,7 @@ function SpeakerConfiguration({ user }: { user: any }) {
     }
   }
 
+  // ↓ SpeakerConfiguration body continues below; new model-config cards live at file end.
   // Don't show the section if speaker service is explicitly disabled or unavailable
   const shouldShowSection = speakerServiceStatus !== null || enrolledSpeakers.length > 0 || loading
 
@@ -1125,6 +1145,483 @@ function SpeakerConfiguration({ user }: { user: any }) {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Active Models — repoint which registry model each role (llm/stt/...) uses.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ACTIVE_MODEL_ROLES: { key: string; type: ModelType; label: string; hint: string }[] = [
+  { key: 'llm', type: 'llm', label: 'LLM', hint: 'Memory, summaries, chat' },
+  { key: 'fast_llm', type: 'llm', label: 'Fast LLM', hint: 'Lightweight / quick tasks' },
+  { key: 'embedding', type: 'embedding', label: 'Embedding', hint: 'Vector search' },
+  { key: 'stt', type: 'stt', label: 'Batch STT', hint: 'File / full-audio transcription' },
+  { key: 'stt_stream', type: 'stt_stream', label: 'Streaming STT', hint: 'Live transcription' },
+  { key: 'tts', type: 'tts', label: 'TTS', hint: 'Text-to-speech' },
+]
+
+function ActiveModelsCard({ isAdmin }: { isAdmin: boolean }) {
+  const queryClient = useQueryClient()
+  const { data } = useModels(isAdmin)
+  const [selected, setSelected] = useState<Record<string, string>>({})
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState('')
+
+  useEffect(() => {
+    if (data?.defaults) {
+      const next: Record<string, string> = {}
+      for (const r of ACTIVE_MODEL_ROLES) next[r.key] = data.defaults[r.key] ?? ''
+      setSelected(next)
+    }
+  }, [data])
+
+  if (!isAdmin || !data) return null
+
+  const dirty = ACTIVE_MODEL_ROLES.some(
+    r => (selected[r.key] ?? '') !== (data.defaults[r.key] ?? '')
+  )
+
+  const handleSave = async () => {
+    const updates: Record<string, string> = {}
+    for (const r of ACTIVE_MODEL_ROLES) {
+      const v = selected[r.key]
+      if (v && v !== (data.defaults[r.key] ?? '')) updates[r.key] = v
+    }
+    if (Object.keys(updates).length === 0) return
+    try {
+      setSaving(true)
+      setMessage('')
+      const res = await systemApi.setActiveDefaults(updates)
+      if (res.data.status === 'success') {
+        setMessage('Saved — restart workers (System page) so in-flight jobs pick up the change')
+        queryClient.invalidateQueries({ queryKey: ['system'] })
+        setTimeout(() => setMessage(''), 6000)
+      } else {
+        setMessage(res.data.message || 'Failed to save')
+      }
+    } catch (err: any) {
+      setMessage('Error: ' + (err.response?.data?.detail || err.message))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+      <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2 flex items-center">
+        <Cpu className="h-5 w-5 mr-2 text-blue-600" />
+        Active Models
+      </h3>
+      <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
+        The model each role uses. Cloud and local models both appear here. Switching STT
+        repoints the default only — to start/stop the local ASR container use ASR / TTS
+        Providers below.
+      </p>
+      <div className="space-y-3">
+        {ACTIVE_MODEL_ROLES.map(r => {
+          const opts = data.models[r.type] || []
+          return (
+            <div key={r.key} className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-gray-700 dark:text-gray-300">{r.label}</div>
+                <div className="text-xs text-gray-500 dark:text-gray-400">{r.hint}</div>
+              </div>
+              <select
+                value={selected[r.key] ?? ''}
+                onChange={e => setSelected(p => ({ ...p, [r.key]: e.target.value }))}
+                className="w-56 shrink-0 px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+              >
+                {!data.defaults[r.key] && <option value="">(not set)</option>}
+                {opts.length === 0 && <option value="">(none available)</option>}
+                {opts.map(m => (
+                  <option key={m.name} value={m.name}>
+                    {m.name} — {m.model_provider}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )
+        })}
+      </div>
+      {message && (
+        <div className={`mt-4 p-2 rounded-md text-sm ${
+          message.startsWith('Error') || message.includes('Failed')
+            ? 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300'
+            : 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300'
+        }`}>
+          {message}
+        </div>
+      )}
+      <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-600">
+        <button
+          onClick={handleSave}
+          disabled={saving || !dirty}
+          className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {saving ? 'Saving...' : 'Save Active Models'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Model Registry — add / edit / delete model definitions (incl. API keys/URLs).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const MODEL_TYPE_LABELS: Record<ModelType, string> = {
+  llm: 'LLM',
+  embedding: 'Embedding',
+  stt: 'Batch STT',
+  stt_stream: 'Streaming STT',
+  tts: 'TTS',
+}
+const MODEL_TYPE_ORDER: ModelType[] = ['llm', 'embedding', 'stt', 'stt_stream', 'tts']
+const API_KEY_MASK = '••••••••'
+
+interface ModelForm {
+  name: string
+  model_type: ModelType
+  model_provider: string
+  api_family: string
+  model_name: string
+  model_url: string
+  api_key: string
+  description: string
+  capabilities: string
+  embedding_dimensions: string
+  model_params: string
+}
+
+function emptyModelForm(): ModelForm {
+  return {
+    name: '', model_type: 'llm', model_provider: 'openai', api_family: 'openai',
+    model_name: '', model_url: '', api_key: '', description: '',
+    capabilities: '', embedding_dimensions: '', model_params: '',
+  }
+}
+
+function modelToForm(m: ModelView): ModelForm {
+  return {
+    name: m.name,
+    model_type: m.model_type,
+    model_provider: m.model_provider,
+    api_family: m.api_family || 'openai',
+    model_name: m.model_name,
+    model_url: m.model_url,
+    api_key: m.api_key || '',
+    description: m.description || '',
+    capabilities: (m.capabilities || []).join(', '),
+    embedding_dimensions: m.embedding_dimensions != null ? String(m.embedding_dimensions) : '',
+    model_params: m.model_params && Object.keys(m.model_params).length
+      ? JSON.stringify(m.model_params, null, 2)
+      : '',
+  }
+}
+
+function ModelRegistryCard({ isAdmin }: { isAdmin: boolean }) {
+  const queryClient = useQueryClient()
+  const { data } = useModels(isAdmin)
+  const [form, setForm] = useState<ModelForm | null>(null)
+  const [isNew, setIsNew] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [tests, setTests] = useState<Record<string, { loading: boolean; success?: boolean; latency?: number; error?: string }>>({})
+
+  if (!isAdmin || !data) return null
+
+  const openAdd = () => { setForm(emptyModelForm()); setIsNew(true); setError('') }
+  const openEdit = (m: ModelView) => { setForm(modelToForm(m)); setIsNew(false); setError('') }
+
+  const handleDelete = async (m: ModelView) => {
+    if (!window.confirm(`Delete model '${m.name}'? This cannot be undone.`)) return
+    try {
+      await systemApi.deleteModel(m.name)
+      queryClient.invalidateQueries({ queryKey: ['system'] })
+    } catch (err: any) {
+      alert(err.response?.data?.detail || err.message)
+    }
+  }
+
+  const handleTest = async (m: ModelView) => {
+    setTests(prev => ({ ...prev, [m.name]: { loading: true } }))
+    try {
+      const res = await systemApi.testModel(m.name)
+      const d = res.data
+      setTests(prev => ({ ...prev, [m.name]: { loading: false, success: d.success, latency: d.latency_ms, error: d.error } }))
+    } catch (err: any) {
+      setTests(prev => ({ ...prev, [m.name]: { loading: false, success: false, error: err.message } }))
+    }
+  }
+
+  const handleSubmit = async () => {
+    if (!form) return
+    if (!form.name.trim()) { setError('Name is required'); return }
+    const payload: Record<string, any> = {
+      name: form.name.trim(),
+      model_type: form.model_type,
+      model_provider: form.model_provider.trim() || 'unknown',
+      api_family: form.api_family.trim() || 'openai',
+      model_name: form.model_name.trim(),
+      model_url: form.model_url.trim(),
+      description: form.description.trim() || null,
+    }
+    // api_key: '' clears it; the mask sentinel is preserved by the backend.
+    payload.api_key = form.api_key
+    if (form.capabilities.trim()) {
+      payload.capabilities = form.capabilities.split(',').map(s => s.trim()).filter(Boolean)
+    }
+    if (form.embedding_dimensions.trim()) {
+      const dim = parseInt(form.embedding_dimensions)
+      if (!Number.isNaN(dim)) payload.embedding_dimensions = dim
+    }
+    if (form.model_params.trim()) {
+      try {
+        payload.model_params = JSON.parse(form.model_params)
+      } catch {
+        setError('Model params must be valid JSON')
+        return
+      }
+    }
+    try {
+      setSaving(true)
+      setError('')
+      await systemApi.upsertModel(payload)
+      queryClient.invalidateQueries({ queryKey: ['system'] })
+      setForm(null)
+    } catch (err: any) {
+      setError(err.response?.data?.detail || err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const keyState = (m: ModelView) =>
+    !m.api_key_is_set ? '—' : m.api_key_is_ref ? 'Set (env)' : 'Set (inline)'
+
+  return (
+    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 lg:col-span-2">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 flex items-center">
+          <Database className="h-5 w-5 mr-2 text-blue-600" />
+          Model Registry
+        </h3>
+        <button
+          onClick={openAdd}
+          className="flex items-center gap-1 px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+        >
+          <Plus className="h-4 w-4" />
+          <span>Add Model</span>
+        </button>
+      </div>
+      <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
+        Provider/model definitions. Built-in templates (defaults.yml) are read-only; models
+        defined here can be edited or deleted. Store shared secrets as <code className="px-1 bg-gray-100 dark:bg-gray-700 rounded">{'${oc.env:VAR}'}</code> references.
+      </p>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-gray-200 dark:border-gray-600 text-left text-gray-700 dark:text-gray-300">
+              <th className="py-2 pr-3 font-medium">Name</th>
+              <th className="py-2 px-3 font-medium">Provider</th>
+              <th className="py-2 px-3 font-medium">Model</th>
+              <th className="py-2 px-3 font-medium">API key</th>
+              <th className="py-2 px-3 font-medium">Source</th>
+              <th className="py-2 pl-3 font-medium text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {MODEL_TYPE_ORDER.flatMap(type => {
+              const rows = data.models[type] || []
+              if (rows.length === 0) return []
+              return [
+                <tr key={`hdr-${type}`} className="bg-gray-50 dark:bg-gray-700/40">
+                  <td colSpan={6} className="py-1.5 px-3 text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                    {MODEL_TYPE_LABELS[type]}
+                  </td>
+                </tr>,
+                ...rows.map(m => {
+                  const test = tests[m.name]
+                  const isBuiltin = m.source === 'default'
+                  return (
+                    <tr key={m.name} className="border-b border-gray-100 dark:border-gray-700">
+                      <td className="py-2 pr-3">
+                        <span className="font-medium text-gray-900 dark:text-gray-100">{m.name}</span>
+                        {m.is_default && (
+                          <span className="ml-2 px-1.5 py-0.5 text-[10px] rounded bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300">default</span>
+                        )}
+                      </td>
+                      <td className="py-2 px-3 text-gray-600 dark:text-gray-400">{m.model_provider}</td>
+                      <td className="py-2 px-3 text-gray-600 dark:text-gray-400 truncate max-w-[180px]" title={m.model_url || m.model_name}>{m.model_name}</td>
+                      <td className="py-2 px-3 text-gray-600 dark:text-gray-400">{keyState(m)}</td>
+                      <td className="py-2 px-3">
+                        <span className={`px-1.5 py-0.5 text-[10px] rounded ${isBuiltin ? 'bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-300' : 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'}`}>
+                          {isBuiltin ? 'built-in' : 'config'}
+                        </span>
+                      </td>
+                      <td className="py-2 pl-3">
+                        <div className="flex items-center justify-end gap-1">
+                          {(m.model_type === 'llm' || m.model_type === 'embedding') && (
+                            <button
+                              onClick={() => handleTest(m)}
+                              disabled={test?.loading}
+                              className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
+                              title={test?.error || 'Test connection'}
+                            >
+                              {test?.loading ? <Loader2 className="h-3 w-3 animate-spin" />
+                                : test?.success === true ? <Check className="h-3 w-3 text-green-500" />
+                                : test?.success === false ? <X className="h-3 w-3 text-red-500" />
+                                : <Play className="h-3 w-3" />}
+                              {test?.latency ? `${test.latency}ms` : 'Test'}
+                            </button>
+                          )}
+                          <button
+                            onClick={() => openEdit(m)}
+                            className="p-1.5 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700"
+                            title="Edit model"
+                          >
+                            <Pencil className="h-3.5 w-3.5 text-gray-600 dark:text-gray-300" />
+                          </button>
+                          <button
+                            onClick={() => handleDelete(m)}
+                            disabled={m.is_default || isBuiltin}
+                            className="p-1.5 rounded border border-gray-300 dark:border-gray-600 hover:bg-red-50 dark:hover:bg-red-900/30 disabled:opacity-30 disabled:cursor-not-allowed"
+                            title={m.is_default ? 'Active default — repoint first' : isBuiltin ? 'Built-in template (defaults.yml)' : 'Delete model'}
+                          >
+                            <Trash2 className="h-3.5 w-3.5 text-red-600" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                }),
+              ]
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {form && (
+        <ModelEditModal
+          form={form}
+          setForm={setForm}
+          isNew={isNew}
+          saving={saving}
+          error={error}
+          onCancel={() => setForm(null)}
+          onSubmit={handleSubmit}
+        />
+      )}
+    </div>
+  )
+}
+
+function ModelEditModal({
+  form, setForm, isNew, saving, error, onCancel, onSubmit,
+}: {
+  form: ModelForm
+  setForm: (f: ModelForm) => void
+  isNew: boolean
+  saving: boolean
+  error: string
+  onCancel: () => void
+  onSubmit: () => void
+}) {
+  const set = (field: keyof ModelForm, value: string) => setForm({ ...form, [field]: value } as ModelForm)
+  const input = 'w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500'
+  const label = 'block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1'
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onCancel}>
+      <div
+        className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 w-full max-w-lg max-h-[90vh] overflow-y-auto p-6"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+            {isNew ? 'Add Model' : `Edit ${form.name}`}
+          </h3>
+          <button onClick={onCancel} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className={label}>Name {isNew && <span className="text-red-500">*</span>}</label>
+            <input className={input} value={form.name} onChange={e => set('name', e.target.value)} disabled={!isNew} placeholder="e.g. openai-llm" />
+          </div>
+          <div>
+            <label className={label}>Type</label>
+            <select className={input} value={form.model_type} onChange={e => set('model_type', e.target.value)} disabled={!isNew}>
+              {MODEL_TYPE_ORDER.map(t => <option key={t} value={t}>{MODEL_TYPE_LABELS[t]}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className={label}>Provider</label>
+            <input className={input} value={form.model_provider} onChange={e => set('model_provider', e.target.value)} placeholder="openai, ollama, deepgram…" />
+          </div>
+          <div>
+            <label className={label}>API family</label>
+            <input className={input} value={form.api_family} onChange={e => set('api_family', e.target.value)} placeholder="openai, http, websocket" />
+          </div>
+          <div>
+            <label className={label}>Model name</label>
+            <input className={input} value={form.model_name} onChange={e => set('model_name', e.target.value)} placeholder="provider-specific id" />
+          </div>
+          <div>
+            <label className={label}>Embedding dims</label>
+            <input className={input} value={form.embedding_dimensions} onChange={e => set('embedding_dimensions', e.target.value)} placeholder="e.g. 1536" />
+          </div>
+          <div className="col-span-2">
+            <label className={label}>Base URL</label>
+            <input className={input} value={form.model_url} onChange={e => set('model_url', e.target.value)} placeholder="https://api.openai.com/v1 (blank = Tailnet discovery)" />
+          </div>
+          <div className="col-span-2">
+            <label className={label}>API key</label>
+            <input
+              className={input}
+              type={form.api_key === API_KEY_MASK ? 'text' : 'password'}
+              value={form.api_key}
+              onChange={e => set('api_key', e.target.value)}
+              placeholder="inline key or ${oc.env:OPENAI_API_KEY}"
+            />
+            <p className="text-[10px] text-gray-400 mt-1">
+              Leave the dots ({API_KEY_MASK}) to keep the stored secret. Clear to remove. Prefer <code>{'${oc.env:VAR}'}</code> for shared keys.
+            </p>
+          </div>
+          <div className="col-span-2">
+            <label className={label}>Capabilities (comma-separated)</label>
+            <input className={input} value={form.capabilities} onChange={e => set('capabilities', e.target.value)} placeholder="word_timestamps, segments, keyword_boosting…" />
+          </div>
+          <div className="col-span-2">
+            <label className={label}>Description</label>
+            <input className={input} value={form.description} onChange={e => set('description', e.target.value)} />
+          </div>
+          <div className="col-span-2">
+            <label className={label}>Model params (JSON)</label>
+            <textarea className={`${input} font-mono text-xs`} rows={3} value={form.model_params} onChange={e => set('model_params', e.target.value)} placeholder='{"temperature": 0.2, "max_tokens": 2000}' />
+          </div>
+        </div>
+
+        {error && (
+          <div className="mt-3 p-2 rounded-md text-sm bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300">
+            {error}
+          </div>
+        )}
+
+        <div className="mt-4 flex justify-end gap-2">
+          <button onClick={onCancel} className="px-4 py-2 text-sm rounded-md border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
+            Cancel
+          </button>
+          <button onClick={onSubmit} disabled={saving} className="px-4 py-2 text-sm rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
+            {saving ? 'Saving…' : 'Save Model'}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

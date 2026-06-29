@@ -2,8 +2,9 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ArrowDown, ArrowUp, ArrowUpDown, Play, Scissors, X } from 'lucide-react'
 import { AuditConversation } from '../../services/api'
-import { formatDate, formatDuration } from './format'
+import { formatDate, formatDuration, processingStatusChip } from './format'
 import PreviewStrip from './PreviewStrip'
+import SegmentTriage from './SegmentTriage'
 
 type SortKey = 'title' | 'created_at' | 'duration_seconds' | 'speech_fraction' | 'archive_reason'
 type SortDir = 'asc' | 'desc'
@@ -59,6 +60,10 @@ interface Props {
   onSelectMany: (ids: string[], value: boolean) => void
   onToggleSelectAll: () => void
   onSplit: (row: AuditConversation) => void
+  // Bump when a triage decision is made/undone so the toolbar's count refreshes.
+  onTriageChanged?: () => void
+  // Stored confidence below this counts as a weak match (folded into triage review).
+  marginalThreshold?: number
 }
 
 export default function AuditTable({
@@ -70,6 +75,8 @@ export default function AuditTable({
   onSelectMany,
   onToggleSelectAll,
   onSplit,
+  onTriageChanged,
+  marginalThreshold,
 }: Props) {
   const allSelected = rows.length > 0 && selected.size === rows.length
   // Sort survives navigating to a conversation detail page and back.
@@ -250,6 +257,14 @@ export default function AuditTable({
                           {r.derived_operation}
                         </span>
                       )}
+                      {(() => {
+                        const chip = processingStatusChip(r.processing_status, r.failure_stage)
+                        return chip ? (
+                          <span className={`px-1.5 py-0.5 rounded ${chip.className}`}>
+                            {chip.label}
+                          </span>
+                        ) : null
+                      })()}
                     </div>
                   </div>
                 </div>
@@ -273,6 +288,22 @@ export default function AuditTable({
                           {s}
                         </span>
                       ))}
+                      {r.unknown_speech_segments > 0 && (
+                        <span
+                          className="px-1.5 py-0.5 rounded text-xs bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                          title="Speech segments not matched to an enrolled speaker — open the preview to triage them"
+                        >
+                          {r.unknown_speech_segments} to review
+                        </span>
+                      )}
+                      {r.marginal_identified_segments > 0 && (
+                        <span
+                          className="px-1.5 py-0.5 rounded text-xs bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300"
+                          title="Identified as an enrolled speaker but at low confidence (near the match threshold) — likely wrong (e.g. noise labeled as the nearest speaker). Open the preview to review."
+                        >
+                          {r.marginal_identified_segments} low-confidence
+                        </span>
+                      )}
                     </div>
                   </td>
                   <td className="px-3 py-2">
@@ -305,6 +336,11 @@ export default function AuditTable({
                     onClose={() => setPreviewId(null)}
                     autoPlay
                     speakers={r.speakers}
+                  />
+                  <SegmentTriage
+                    conversationId={r.conversation_id}
+                    onDecisionsChanged={onTriageChanged}
+                    marginalThreshold={marginalThreshold}
                   />
                 </td>
               </tr>

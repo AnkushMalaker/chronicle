@@ -9,7 +9,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
-from advanced_omi_backend.auth import current_active_user
+from advanced_omi_backend.auth import current_active_user, current_superuser
 from advanced_omi_backend.controllers import conversation_controller
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.users import User
@@ -79,6 +79,21 @@ async def search_conversations(
     return await conversation_controller.search_conversations(
         q, current_user, limit, offset
     )
+
+
+@router.get("/drift")
+async def identify_drift(current_user: User = Depends(current_superuser)):
+    """Identify drift conversations — whose speaker labels would change under the current gallery.
+
+    Re-identifies each conversation's stored per-cluster centroids against the live
+    voiceprints (no GPU). Use after cleaning enrollment to decide what to reprocess.
+    Declared before ``/{conversation_id}`` so the static path isn't captured as an id.
+    """
+    from advanced_omi_backend.controllers.drift_controller import (
+        find_drift_conversations,
+    )
+
+    return await find_drift_conversations()
 
 
 @router.get("/{conversation_id}")

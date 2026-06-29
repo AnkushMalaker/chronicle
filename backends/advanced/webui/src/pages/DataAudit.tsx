@@ -10,6 +10,8 @@ import {
 } from '../components/dataAudit/filters'
 import AuditToolbar from '../components/dataAudit/AuditToolbar'
 import AuditTable from '../components/dataAudit/AuditTable'
+import SpeakerConfidencePanel from '../components/dataAudit/SpeakerConfidencePanel'
+import DriftPanel from '../components/dataAudit/DriftPanel'
 import SplitConversationModal from '../components/dataAudit/SplitConversationModal'
 import MergePreviewModal from '../components/dataAudit/MergePreviewModal'
 import ExportModal from '../components/dataAudit/ExportModal'
@@ -75,6 +77,9 @@ export default function DataAudit() {
   const [rows, setRows] = useState<AuditConversation[]>([])
   const [total, setTotal] = useState(0)
   const [scanCapped, setScanCapped] = useState(false)
+  // similarity_threshold + margin: a stored confidence below this is a weak
+  // ("low-confidence") match the triage panel folds into its review bucket.
+  const [marginalThreshold, setMarginalThreshold] = useState<number | undefined>(undefined)
   // null until the first listing response tells us how many conversations
   // still lack cached VAD analysis (0 disables the Analyze button).
   const [unanalyzedCount, setUnanalyzedCount] = useState<number | null>(null)
@@ -87,10 +92,17 @@ export default function DataAudit() {
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
+  // Speaker triage: pending decisions across all conversations + apply state.
+  const [triagePending, setTriagePending] = useState({ pending_count: 0, conversation_count: 0 })
+  const [applyingTriage, setApplyingTriage] = useState(false)
+
   // Modals
   const [splitTarget, setSplitTarget] = useState<AuditConversation | null>(null)
   const [mergeTargets, setMergeTargets] = useState<AuditConversation[] | null>(null)
   const [exportOpen, setExportOpen] = useState(false)
+  // Delete-audio confirmation: holds the reason chosen for the pending archive
+  // (null when the dialog is closed). Pre-seeded with the filter-inferred reason.
+  const [archiveReason, setArchiveReason] = useState<ArchiveReason | null>(null)
 
   const { pollJob } = useJobPolling()
 
@@ -112,6 +124,9 @@ export default function DataAudit() {
       setRows(res.data.conversations)
       setTotal(res.data.total)
       setScanCapped(res.data.scan_capped)
+      if (res.data.similarity_threshold != null) {
+        setMarginalThreshold(res.data.similarity_threshold + (res.data.marginal_margin ?? 0))
+      }
       setUnanalyzedCount(res.data.unanalyzed_count)
       // Speaker filter options come from the same scan, so the list only
       // contains speakers actually present in the current view.
@@ -252,26 +267,25 @@ export default function DataAudit() {
     else setSelected(new Set(rows.map((r) => r.conversation_id)))
   }
 
-  const archiveSelected = async () => {
+  // Open the delete-audio confirmation, defaulting the reason to whatever the
+  // current filters imply (the user can still override it in the dialog).
+  const archiveSelected = () => {
     if (selected.size === 0) return
     const speakerRules = (filters.speakers || {}) as Record<string, SpeakerFilterState>
     const speech = (filters.speech || {}) as { max?: number }
     const hasExcludedSpeakers = Object.values(speakerRules).some((v) => v === 'exclude')
-    const reason: ArchiveReason = hasExcludedSpeakers
+    const inferred: ArchiveReason = hasExcludedSpeakers
       ? 'bad_speaker'
       : (speech.max ?? 100) < 100
         ? 'near_silent'
         : 'manual_cleanup'
+    setArchiveReason(inferred)
+  }
 
-    const ok = window.confirm(
-      `Permanently delete the AUDIO for ${selected.size} conversation(s)?\n\n` +
-        `Reason: ${REASON_LABELS[reason]}\n\n` +
-        `The audio bytes will be deleted to reclaim storage. A metadata stub ` +
-        `(date, duration, reason) is kept so you know something was recorded. ` +
-        `This cannot be undone.`
-    )
-    if (!ok) return
-
+  const confirmArchive = async () => {
+    if (selected.size === 0 || archiveReason === null) return
+    const reason = archiveReason
+    setArchiveReason(null)
     setArchiving(true)
     setError(null)
     try {
@@ -282,6 +296,40 @@ export default function DataAudit() {
       setError(e?.response?.data?.error || 'Failed to archive')
     } finally {
       setArchiving(false)
+    }
+  }
+
+  const refreshTriagePending = useCallback(async () => {
+    try {
+      const res = await dataAuditApi.getTriagePending()
+      setTriagePending(res.data)
+    } catch {
+      // best-effort count; ignore
+    }
+  }, [])
+
+  // Load the pending-decision count on mount.
+  useEffect(() => {
+    refreshTriagePending()
+  }, [refreshTriagePending])
+
+  const applyTriage = async () => {
+    setApplyingTriage(true)
+    setError(null)
+    try {
+      const res = await dataAuditApi.applyTriage()
+      const { applied_count, conversation_count } = res.data
+      setMessage(
+        `Applied speaker triage to ${applied_count}/${conversation_count} conversation(s); ` +
+          `transcripts relabeled and memory reprocessing queued. ` +
+          `Voiceprints are unchanged — enroll deliberately from the Finetuning page.`
+      )
+      await refreshTriagePending()
+      await loadConversations()
+    } catch (e: any) {
+      setError(e?.response?.data?.error || 'Failed to apply triage')
+    } finally {
+      setApplyingTriage(false)
     }
   }
 
@@ -350,6 +398,12 @@ export default function DataAudit() {
             setFilters(next)
             loadConversations(next)
           }}
+          onToggleFilter={(key, value) => {
+            // Set + refetch synchronously so the single click takes effect now.
+            const next = { ...filters, [key]: value }
+            setFilters(next)
+            loadConversations(next)
+          }}
           onApply={() => loadConversations()}
           ctx={{ speakers }}
           loading={loading}
@@ -375,6 +429,12 @@ export default function DataAudit() {
         </div>
       )}
 
+      {/* Speaker confidence overview (per-speaker baselines + noise magnets) */}
+      {!archivedOnly && <SpeakerConfidencePanel />}
+
+      {/* Drift: conversations whose speaker labels would change under the current gallery */}
+      {!archivedOnly && <DriftPanel />}
+
       {/* Toolbar */}
       {!archivedOnly && (
         <AuditToolbar
@@ -384,6 +444,10 @@ export default function DataAudit() {
           unanalyzedCount={unanalyzedCount}
           analyzing={analyzing}
           archiving={archiving}
+          triagePendingCount={triagePending.pending_count}
+          triageConversationCount={triagePending.conversation_count}
+          applyingTriage={applyingTriage}
+          onApplyTriage={applyTriage}
           onAnalyze={runAnalysis}
           onMerge={() => setMergeTargets(selectedRows)}
           onArchive={archiveSelected}
@@ -401,6 +465,8 @@ export default function DataAudit() {
         onSelectMany={selectMany}
         onToggleSelectAll={toggleSelectAll}
         onSplit={(row) => setSplitTarget(row)}
+        onTriageChanged={refreshTriagePending}
+        marginalThreshold={marginalThreshold}
       />
 
       {!archivedOnly && (
@@ -427,6 +493,57 @@ export default function DataAudit() {
       )}
       {exportOpen && (
         <ExportModal selected={selectedRows} onClose={() => setExportOpen(false)} />
+      )}
+      {archiveReason !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-md rounded-xl bg-white dark:bg-gray-800 shadow-xl p-5 space-y-4">
+            <div className="flex items-start space-x-2">
+              <AlertTriangle className="h-5 w-5 text-red-500 mt-0.5 flex-shrink-0" />
+              <div>
+                <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
+                  Permanently delete audio for {selected.size} conversation(s)?
+                </h3>
+                <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                  The audio bytes will be deleted to reclaim storage. A metadata stub
+                  (date, duration, reason) is kept so you know something was recorded.
+                  This cannot be undone.
+                </p>
+              </div>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                Reason
+              </label>
+              <select
+                value={archiveReason}
+                onChange={(e) => setArchiveReason(e.target.value as ArchiveReason)}
+                className="w-full px-2 py-1.5 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-sm text-gray-900 dark:text-gray-100"
+              >
+                {(Object.keys(REASON_LABELS) as ArchiveReason[]).map((r) => (
+                  <option key={r} value={r}>
+                    {REASON_LABELS[r]}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex justify-end space-x-2 pt-1">
+              <button
+                onClick={() => setArchiveReason(null)}
+                disabled={archiving}
+                className="px-4 py-2 rounded-lg text-sm font-medium border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmArchive}
+                disabled={archiving}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Delete audio
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

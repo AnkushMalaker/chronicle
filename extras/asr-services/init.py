@@ -24,7 +24,7 @@ from rich.text import Text
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from config_manager import ConfigManager
 from setup_utils import detect_cuda_version as _detect_cuda_version
-from setup_utils import read_env_value
+from setup_utils import read_env_value, resolve_ingest_config
 
 # Provider and model definitions
 PROVIDERS = {
@@ -446,8 +446,13 @@ class ASRServicesSetup:
                     self.config["LANGUAGE"] = lang
 
         elif provider == "vibevoice":
-            # VibeVoice uses transformers backend with specific optimizations
-            self.config["TORCH_DTYPE"] = "float16"
+            # VibeVoice uses transformers backend with specific optimizations.
+            # bf16, NOT fp16: VibeVoice's long autoregressive decode overflows in
+            # fp16 (max ~65504) → Inf/NaN → repetition/template-leak collapse on hard
+            # far-field audio (A/B verified: fp16 dropped a 270s window, bf16 clean
+            # + 2.4x faster). Dedicated var so it never inherits a global
+            # TORCH_DTYPE=float16 (which whisper/transformers providers do want).
+            self.config["VIBEVOICE_TORCH_DTYPE"] = "bfloat16"
             self.config["DEVICE"] = "cuda"
             self.config["USE_FLASH_ATTENTION"] = "true"
             self.console.print(
@@ -485,8 +490,9 @@ class ASRServicesSetup:
                 self.config["FINETUNE_ENABLED"] = "false"
 
         elif provider == "vibevoice-strixhalo":
-            # Strix Halo uses ROCm; sdpa attention, bfloat16 for gfx1151
-            self.config["TORCH_DTYPE"] = "bfloat16"
+            # Strix Halo uses ROCm; sdpa attention, bfloat16 for gfx1151.
+            # Dedicated var (both vibevoice compose blocks read VIBEVOICE_TORCH_DTYPE).
+            self.config["VIBEVOICE_TORCH_DTYPE"] = "bfloat16"
             self.config["DEVICE"] = "cuda"
             self.config["VIBEVOICE_ATTN_IMPL"] = "sdpa"
             self.config["PYTORCH_CUDA_VERSION"] = "strixhalo"
@@ -773,6 +779,23 @@ class ASRServicesSetup:
             hf_token = self.resolve_hf_token()
             if hf_token:
                 self.config["HF_TOKEN"] = hf_token
+
+            # Cross-service error routing: push this service's ERROR/CRITICAL logs to
+            # the backend's System Errors page. Sourced from the backend .env on the
+            # same machine; opt-in, so only wired when a backend token is found
+            # locally (a remote service node leaves these unset → reporter no-ops).
+            # CHRONICLE_SERVICE_NAME is intentionally NOT set so the source stays
+            # auto-derived per running provider (asr-<provider>) across switches.
+            ingest_url, ingest_token = resolve_ingest_config(
+                ["../../backends/advanced/.env", "../../.env"]
+            )
+            if ingest_url and ingest_token:
+                self.config["CHRONICLE_INGEST_URL"] = ingest_url
+                self.config["CHRONICLE_INGEST_TOKEN"] = ingest_token
+                self.console.print(
+                    "[blue][INFO][/blue] Cross-service error reporting → backend "
+                    "System Errors page enabled"
+                )
 
             # Generate files
             self.print_header("Configuration Complete!")

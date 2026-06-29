@@ -1,4 +1,4 @@
-import { CheckCircle2, GitMerge, Loader2, PackageOpen, Trash2, VolumeX } from 'lucide-react'
+import { CheckCircle2, GitMerge, Loader2, PackageOpen, Trash2, UserCheck, VolumeX } from 'lucide-react'
 
 interface Props {
   total: number
@@ -8,6 +8,11 @@ interface Props {
   unanalyzedCount: number | null
   analyzing: boolean
   archiving: boolean
+  // Pending speaker-triage decisions and how many conversations they span.
+  triagePendingCount: number
+  triageConversationCount: number
+  applyingTriage: boolean
+  onApplyTriage: () => void
   onAnalyze: () => void
   onMerge: () => void
   onArchive: () => void
@@ -21,6 +26,10 @@ export default function AuditToolbar({
   unanalyzedCount,
   analyzing,
   archiving,
+  triagePendingCount,
+  triageConversationCount,
+  applyingTriage,
+  onApplyTriage,
   onAnalyze,
   onMerge,
   onArchive,
@@ -28,11 +37,30 @@ export default function AuditToolbar({
 }: Props) {
   const nothingToAnalyze = unanalyzedCount === 0 && !analyzing
   return (
-    <div className="flex items-center justify-between">
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       <div className="text-sm text-gray-500 dark:text-gray-400">
         {total} match{total === 1 ? '' : 'es'} · {selectedCount} selected
       </div>
-      <div className="flex items-center space-x-2">
+      <div className="flex flex-wrap items-center gap-2">
+        {triagePendingCount > 0 && (
+          <button
+            onClick={onApplyTriage}
+            disabled={applyingTriage}
+            className="flex items-center space-x-2 px-4 py-2 rounded-lg text-sm font-medium bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            title="Apply all speaker-triage decisions: relabel transcripts, enroll voiceprints, reprocess memory"
+          >
+            {applyingTriage ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <UserCheck className="h-4 w-4" />
+            )}
+            <span>
+              {applyingTriage
+                ? 'Applying…'
+                : `Apply triage (${triagePendingCount} across ${triageConversationCount})`}
+            </span>
+          </button>
+        )}
         <button
           onClick={onAnalyze}
           disabled={analyzing || nothingToAnalyze}

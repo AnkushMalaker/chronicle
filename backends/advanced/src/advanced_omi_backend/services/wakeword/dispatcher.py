@@ -34,6 +34,7 @@ from advanced_omi_backend.services.wakeword.executor import (
     execute_voice_command,
     get_current_conversation_id,
     publish_sse,
+    set_device_led,
 )
 from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 
@@ -238,6 +239,10 @@ class WakeWordDispatcher:
                     "wakeword": payload.get("wakeword"),
                     "identified": gate.get("identified"),
                 },
+            )
+            # Brief red "Error" ring so a blocked wake word reads as rejected.
+            await set_device_led(
+                self.redis_client, client_id, effect="Error", duration=3.0
             )
             return
 

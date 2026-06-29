@@ -207,6 +207,13 @@ class Conversation(Document):
         None,
         description="Cached VAD speech-probability summary computed from audio chunks",
     )
+    audio_integrity_error: Optional[str] = Field(
+        None,
+        description="Set when the conversation's audio is internally inconsistent "
+        "(e.g. reconnect-duplication: stored duration/chunk-count disagree with the "
+        "actual chunks). Such conversations are excluded from the data-audit list and "
+        "surfaced on the System Errors page instead of being repeatedly re-analyzed.",
+    )
 
     # Split/merge lineage (data-audit feature)
     derived_from: Optional["Conversation.DerivedFrom"] = Field(

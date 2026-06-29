@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "$0")/_engine.sh"
 # tests/bin/logs-containers.sh
 # View logs for specific service
 
@@ -27,4 +28,4 @@ echo "📜 Viewing logs for: $SERVICE"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-docker compose -f docker-compose-test.yml logs --tail=100 -f "$SERVICE"
+$COMPOSE -f docker-compose-test.yml logs --tail=100 -f "$SERVICE"

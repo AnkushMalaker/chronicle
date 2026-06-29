@@ -34,7 +34,20 @@ function HealthBadge({ service }: { service: ExternalService }) {
   }
 }
 
-export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
+// 'lifecycle' (System page) shows health + start/stop/restart buttons.
+// 'providers' (Settings page) shows the batch/streaming ASR/TTS provider dropdowns.
+// Both share the /admin/services data + operation polling; only the right-hand
+// controls differ. The two are never mounted at the same time.
+type ExternalServicesMode = 'lifecycle' | 'providers'
+
+export default function ExternalServices({
+  isAdmin,
+  mode = 'lifecycle',
+}: {
+  isAdmin: boolean
+  mode?: ExternalServicesMode
+}) {
+  const title = mode === 'providers' ? 'ASR / TTS Providers' : 'External Services'
   const queryClient = useQueryClient()
   const [activeOp, setActiveOp] = useState<ServiceOperation | null>(null)
   const [lastFailedOp, setLastFailedOp] = useState<ServiceOperation | null>(null)
@@ -200,7 +213,7 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
       <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
         <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center">
           <Wrench className="h-5 w-5 mr-2 text-blue-600" />
-          External Services
+          {title}
         </h3>
         <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
           <RefreshCw className="h-4 w-4 text-blue-500 animate-spin" />
@@ -216,7 +229,7 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
         <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
           <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2 flex items-center">
             <Wrench className="h-5 w-5 mr-2 text-blue-600" />
-            External Services
+            {title}
           </h3>
           <p className="text-sm text-gray-500 dark:text-gray-400">
             Service manager agent is not reachable. Start it on the host with{' '}
@@ -230,12 +243,15 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
     return null
   }
 
-  // Show enabled services, plus provider-switchable ones (ASR/TTS) even when
-  // disabled: the provider dropdown is the only way to switch to a local provider
-  // (which re-enables the service), so hiding a disabled service would strand it on
-  // whatever cloud provider is selected with no UI path to change it.
-  const visibleServices = (data.services ?? []).filter(
-    s => s.enabled || (s.provider != null && s.provider.available.length > 0)
+  // 'providers' mode lists every service that exposes provider switching (ASR/TTS),
+  // even when disabled — the dropdown is the only way to switch to a local provider
+  // (which re-enables it), so hiding a disabled service would strand it on whatever
+  // cloud provider is selected with no UI path to change it.
+  // 'lifecycle' mode lists enabled services (those that have start/stop/restart).
+  const visibleServices = (data.services ?? []).filter(s =>
+    mode === 'providers'
+      ? s.provider != null && s.provider.available.length > 0
+      : s.enabled
   )
   // Group services by node. With only the local node this is a single flat
   // group (no header, unchanged look); in a cluster, each node gets its own header.
@@ -260,7 +276,7 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 flex items-center">
           <Wrench className="h-5 w-5 mr-2 text-blue-600" />
-          External Services
+          {title}
           {/* Background poll in flight (e.g. waiting for a 'starting' service to
               come up, or the periodic refetch) — subtle hint that status is live. */}
           {isFetching && (
@@ -367,7 +383,7 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
                 </div>
 
                 <div className="flex items-center space-x-2">
-                  {service.provider && service.provider.available.length > 0 && (
+                  {mode === 'providers' && service.provider && service.provider.available.length > 0 && (
                     <div className="flex flex-col gap-1">
                       <label className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
                         {service.provider.streaming_available?.length ? <span className="w-14 shrink-0">Batch</span> : null}
@@ -406,13 +422,15 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
                     </div>
                   )}
 
-                  {!service.enabled ? (
-                    // Disabled in config.yml — start/stop/restart are rejected by the
-                    // agent ("run the wizard first"). Selecting a local provider above
-                    // re-enables it, so guide the user there instead of dead buttons.
-                    <span className="text-xs text-gray-500 dark:text-gray-400 italic">
-                      not in startup set — pick a local provider to enable
-                    </span>
+                  {mode === 'providers' ? (
+                    // Provider-config surface: no lifecycle buttons here. When a
+                    // service is disabled in config.yml, selecting a local provider
+                    // above re-enables it — guide the user there.
+                    !service.enabled ? (
+                      <span className="text-xs text-gray-500 dark:text-gray-400 italic">
+                        not in startup set — pick a local provider to enable
+                      </span>
+                    ) : null
                   ) : stopped ? (
                     <button
                       onClick={() => runAction(service, 'start')}
@@ -461,8 +479,9 @@ export default function ExternalServices({ isAdmin }: { isAdmin: boolean }) {
       </div>
 
       <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-        Managed by the host service-manager agent. Provider changes stop the old container before
-        starting the new one; GPU models may take a few minutes to load after start.
+        {mode === 'providers'
+          ? 'Provider changes stop the old container before starting the new one; GPU models may take a few minutes to load after start. This switches the running service and its model together — use Settings → Active Models to repoint a role at a model without a container.'
+          : 'Managed by the host service-manager agent. Start/stop/restart the container stack here.'}
       </p>
     </div>
   )

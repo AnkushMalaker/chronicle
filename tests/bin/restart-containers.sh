@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "$0")/_engine.sh"
 # tests/bin/restart-containers.sh
 # Restart test containers without rebuilding
 
@@ -10,7 +11,7 @@ BACKEND_DIR="$SCRIPT_DIR/../../backends/advanced"
 cd "$BACKEND_DIR"
 
 echo "🔄 Restarting test containers..."
-docker compose -f docker-compose-test.yml restart
+$COMPOSE -f docker-compose-test.yml restart
 
 echo "⏳ Waiting for services to be ready..."
 sleep 5

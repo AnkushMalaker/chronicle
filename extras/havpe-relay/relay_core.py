@@ -221,15 +221,32 @@ async def handle_backend_messages(ws, device: DeviceController) -> None:
             b = float(data.get("b", 0))
             brightness = float(data.get("brightness", 0.3))
             duration = float(data.get("duration", 5.0))
-            logger.info(
-                "Backend→device: led-control rgb=(%.1f,%.1f,%.1f) br=%.1f dur=%.1fs",
-                r,
-                g,
-                b,
-                brightness,
-                duration,
-            )
-            await device.set_led(r, g, b, brightness, duration=duration)
+            effect = data.get("effect")
+            if effect:
+                # Animated feedback (e.g. wake-event "Listening"/"Thinking" ring).
+                logger.info(
+                    "Backend→device: led-control effect=%s rgb=(%.1f,%.1f,%.1f) "
+                    "br=%.1f dur=%.1fs",
+                    effect,
+                    r,
+                    g,
+                    b,
+                    brightness,
+                    duration,
+                )
+                await device.set_led_effect(
+                    effect, r, g, b, brightness, duration=duration
+                )
+            else:
+                logger.info(
+                    "Backend→device: led-control rgb=(%.1f,%.1f,%.1f) br=%.1f dur=%.1fs",
+                    r,
+                    g,
+                    b,
+                    brightness,
+                    duration,
+                )
+                await device.set_led(r, g, b, brightness, duration=duration)
 
         else:
             logger.debug("Backend→relay (ignored): %s", msg_type or str(raw)[:80])
@@ -384,13 +401,9 @@ async def run_device_session(
             connected_at = None
             tasks = []
             try:
-                async with websockets.connect(
-                    backend_uri, max_size=_WS_MAX_SIZE
-                ) as ws:
+                async with websockets.connect(backend_uri, max_size=_WS_MAX_SIZE) as ws:
                     connected_at = asyncio.get_running_loop().time()
-                    logger.info(
-                        "Backend WS connected, starting bidirectional bridge"
-                    )
+                    logger.info("Backend WS connected, starting bidirectional bridge")
 
                     ws_lock = asyncio.Lock()
                     tasks = [
@@ -435,9 +448,7 @@ async def run_device_session(
                         exc = t.exception()
                         if exc is not None:
                             drop_exc = exc
-                            logger.warning(
-                                "Task %s ended with %s", t.get_name(), exc
-                            )
+                            logger.warning("Task %s ended with %s", t.get_name(), exc)
                         else:
                             logger.info("Task %s finished", t.get_name())
 

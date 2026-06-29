@@ -536,5 +536,20 @@ async def mark_conversation_deleted(conversation_id: str, deletion_reason: str) 
         conversation.deleted = True
         conversation.deletion_reason = deletion_reason
         conversation.deleted_at = datetime.now(timezone.utc)
+        # These are no-transcript dead-ends (no meaningful speech / audio never
+        # arrived). Settle the status from facts so the conversation doesn't stay
+        # stuck at "active": the finalizer that normally owns the status is skipped
+        # or stranded on this path, and the status reconciler ignores deleted rows.
+        conversation.apply_status(settled=True)
+        # Clear any in-flight placeholder title left by the reprocess/recording entry
+        # points (e.g. "Reprocessing...", "Audio Recording (...)") — these convs never
+        # get a real LLM title since title_summary doesn't run without a transcript.
+        title = conversation.title or ""
+        if "Audio Recording (" in title or title in (
+            "Reprocessing...",
+            "Recording...",
+            "Transcribing...",
+        ):
+            conversation.title = None
         await conversation.save()
         logger.info(f"✅ Marked conversation {conversation_id} as deleted")

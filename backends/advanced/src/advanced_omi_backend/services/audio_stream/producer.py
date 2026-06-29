@@ -83,6 +83,32 @@ class AudioStreamProducer:
         # Client-specific stream naming (one stream per client for isolation)
         stream_name = f"audio:stream:{client_id}"
 
+        # session_id is stable across reconnects (it equals client_id), so a new
+        # WebSocket connection reuses the same Redis namespace as the previous one.
+        # Clear connection-scoped keys that live OUTSIDE the session hash so the new
+        # connection starts a clean transcription attempt:
+        #
+        #   transcription:complete  — set (5-min TTL) when the prior provider stream
+        #     closed (graceful worker shutdown, stream-idle zombie exit, or end of a
+        #     prior conversation). The streaming consumer's discovery loop SKIPS any
+        #     stream whose completion flag exists, so a stale flag silently starves
+        #     the reconnected session of streaming transcription — and the only code
+        #     that clears it (open_conversation_job) never runs without results.
+        #     Deleting it here breaks that deadlock.
+        #
+        #   transcription:results   — the prior connection's final-result stream.
+        #     Left in place, the speech-detection aggregator reads PRE-reconnect text
+        #     and can "detect speech" from stale content or interleave two timelines.
+        try:
+            await self.redis_client.delete(
+                f"transcription:complete:{session_id}",
+                f"transcription:results:{session_id}",
+            )
+        except Exception as e:  # noqa: BLE001 — never block session init on cleanup
+            logger.warning(
+                f"⚠️ Could not clear stale transcription keys for {session_id}: {e}"
+            )
+
         # The session hash is the SINGLE SOURCE OF TRUTH for session state; the
         # SessionStore owns its schema. No TTL — sessions live until explicitly
         # cleaned up (TTLs destroy state mid-session, causing zombie jobs).

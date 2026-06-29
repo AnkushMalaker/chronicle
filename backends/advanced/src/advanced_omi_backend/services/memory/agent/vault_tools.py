@@ -31,6 +31,7 @@ from typing import Any, Dict, Iterator, List
 from ..vault_lock import VaultLockTimeout, vault_note_lock
 from ..vault_scaffold import write_category
 from .edit_engine import Edit, EditError, apply_edits
+from .section_edit import SectionEditError, apply_section_edit
 
 logger = logging.getLogger("memory_service.agent.tools")
 
@@ -277,6 +278,33 @@ class VaultTools:
             self.touched.add(self._resolve_ci(_safe_relpath(path)))
         return f"Edited {path} ({len(edits)} replacement(s))."
 
+    def edit_section(
+        self, path: str, target: str, text: str, operation: str = "append"
+    ) -> str:
+        """Structurally targeted edit: append/prepend/replace under a ``## Heading`` or
+        ``^block-ref`` — without needing the section's current text as an anchor.
+
+        Unlike ``edit_note`` (which matches a literal ``old_text`` slice and so fails
+        when a concurrent writer has changed that slice), this targets the note's
+        structure, so the common "append a new fact under ## About" survives concurrent
+        edits that don't restructure the note.
+        """
+        with self._locked():
+            fp = self._abs(path)
+            if not fp.exists():
+                raise VaultToolError(
+                    f"Could not edit '{path}': file not found. Use write_note to create it."
+                )
+            content = fp.read_text(encoding="utf-8")
+            try:
+                new_content = apply_section_edit(content, target, text, operation)
+            except SectionEditError as e:
+                raise VaultToolError(str(e))
+            _assert_no_new_section_dupes(path, content, new_content)
+            fp.write_text(new_content, encoding="utf-8")
+            self.touched.add(self._resolve_ci(_safe_relpath(path)))
+        return f"Edited {path} ({operation} under '{target}')."
+
     def write_note(self, path: str, content: str, overwrite: bool = False) -> str:
         with self._locked():
             rel = self._resolve_ci(_safe_relpath(path))
@@ -405,6 +433,13 @@ class VaultTools:
             return self.read_note(args["path"])
         if name == "edit_note":
             return self.edit_note(args["path"], args["edits"])
+        if name == "edit_section":
+            return self.edit_section(
+                args["path"],
+                args["target"],
+                args["text"],
+                args.get("operation", "append"),
+            )
         if name == "write_note":
             return self.write_note(
                 args["path"], args["content"], args.get("overwrite", False)
@@ -492,9 +527,11 @@ _EDIT_TOOL = {
     "type": "function",
     "function": {
         "name": "edit_note",
-        "description": "Apply exact string replacements to an existing note. Each edit's "
-        "old_text must match the current file EXACTLY (whitespace included) and be "
-        "UNIQUE — include surrounding context. Edit frontmatter as text here. Multiple "
+        "description": "Surgical mid-line / frontmatter edits via exact string "
+        "replacement. Each edit's old_text must match the current file EXACTLY "
+        "(whitespace included) and be UNIQUE — include surrounding context. Use this for "
+        "frontmatter and for fixing text in place. To ADD a fact under a section, prefer "
+        "`edit_section` (it needs no anchor and survives concurrent edits). Multiple "
         "edits are matched against the original.",
         "parameters": {
             "type": "object",
@@ -513,6 +550,43 @@ _EDIT_TOOL = {
                 },
             },
             "required": ["path", "edits"],
+        },
+    },
+}
+
+_EDIT_SECTION_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "edit_section",
+        "description": (
+            "Add content to an existing note by TARGETING its structure instead of "
+            "pasting an exact anchor. Prefer this over edit_note for the common case of "
+            "appending a new fact under a section — it does NOT require the section's "
+            "current text, so it survives concurrent edits by other conversations.\n"
+            "- `target`: a heading by its text (e.g. 'About', 'Mentions', 'Summary') or a "
+            "block reference (e.g. '^fact-1'). Matched case-insensitively; must be unique.\n"
+            "- `operation`: 'append' (default — add after the section's existing lines), "
+            "'prepend' (add right under the heading), or 'replace' (replace the section "
+            "body).\n"
+            "- `text`: the line(s) to insert, e.g. '- Prefers async standups' or a dated "
+            "'- 2026-06-27 — mentioned the Verizon migration'. Do NOT include the heading "
+            "itself. Use edit_note for frontmatter and for surgical mid-line changes."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "target": {
+                    "type": "string",
+                    "description": "Heading text (no '#') or '^block-ref' to target.",
+                },
+                "text": {"type": "string", "description": "Line(s) to insert."},
+                "operation": {
+                    "type": "string",
+                    "enum": ["append", "prepend", "replace"],
+                },
+            },
+            "required": ["path", "target", "text"],
         },
     },
 }
@@ -589,6 +663,7 @@ VAULT_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     _GLOB_TOOL,
     _READ_TOOL,
     _EDIT_TOOL,
+    _EDIT_SECTION_TOOL,
     _WRITE_TOOL,
     _RENAME_TOOL,
     _CREATE_CATEGORY_TOOL,

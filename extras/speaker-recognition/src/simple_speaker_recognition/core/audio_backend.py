@@ -41,7 +41,19 @@ class AudioBackend:
         )
         self.loader = Audio(sample_rate=16_000, mono="downmix")
 
+    # wespeaker's fbank front-end uses a 25 ms window (400 samples @ 16 kHz). A waveform
+    # shorter than one window makes torchaudio.compliance.kaldi.fbank assert
+    # ("choose a window size 400 that is [2, N]") and 500s the whole diarize/identify
+    # request — and long multi-speaker recordings routinely yield sub-window diarization
+    # fragments. Pad such clips up to one window so embedding degrades gracefully instead
+    # of crashing; callers already drop the resulting low-energy/degenerate embeddings.
+    MIN_EMBED_SAMPLES = 400
+
     def embed(self, wave: torch.Tensor) -> np.ndarray:  # (1, T)
+        if wave.shape[-1] < self.MIN_EMBED_SAMPLES:
+            wave = torch.nn.functional.pad(
+                wave, (0, self.MIN_EMBED_SAMPLES - wave.shape[-1])
+            )
         with torch.inference_mode():
             emb = self.embedder(wave.to(self.device))
         if isinstance(emb, torch.Tensor):

@@ -13,6 +13,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from advanced_omi_backend.auth import current_active_user
+from advanced_omi_backend.constants import NOISE_LABEL
+from advanced_omi_backend.controllers.queue_controller import (
+    conversation_edit_chain_in_flight,
+)
 from advanced_omi_backend.models.annotation import (
     Annotation,
     AnnotationResponse,
@@ -33,6 +37,21 @@ from advanced_omi_backend.users import User
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/annotations", tags=["annotations"])
+
+
+def _apply_diarization_label(segment, corrected_speaker: str) -> None:
+    """Apply a diarization correction to a copied segment in place.
+
+    The reserved NOISE_LABEL means "this is background/noise, not a person":
+    relabel it, drop any prior identification, and reclassify it to a non-speech
+    (event) segment so it falls out of speech∩speaker overlap and speech-only
+    playback. Any other label is a normal speaker correction.
+    """
+    segment.speaker = corrected_speaker
+    if corrected_speaker == NOISE_LABEL:
+        segment.identified_as = None
+        segment.confidence = None
+        segment.segment_type = Conversation.SegmentType.EVENT.value
 
 
 @router.get("/suggestions")
@@ -839,6 +858,20 @@ async def apply_diarization_annotations(
                 }
             )
 
+        # Single-flight: don't stack a new edit on top of an in-flight one. Apply
+        # creates a new transcript version and enqueues memory under deterministic
+        # job_ids; overlapping with another apply/reprocess races on the
+        # conversation's full-document save() and can clobber it.
+        in_flight = conversation_edit_chain_in_flight(conversation_id)
+        if in_flight:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "This conversation is still processing a previous edit. Try again in a moment.",
+                    "in_flight_job_id": in_flight,
+                },
+            )
+
         # Get active transcript version
         active_transcript = conversation.active_transcript
         if not active_transcript:
@@ -865,7 +898,9 @@ async def apply_diarization_annotations(
             if annotation_for_segment:
                 # Apply correction
                 corrected_segment = segment.model_copy()
-                corrected_segment.speaker = annotation_for_segment.corrected_speaker
+                _apply_diarization_label(
+                    corrected_segment, annotation_for_segment.corrected_speaker
+                )
                 corrected_segments.append(corrected_segment)
             else:
                 # No correction, keep original
@@ -996,6 +1031,18 @@ async def apply_all_annotations(
             a for a in annotations if a.annotation_type == AnnotationType.INSERT
         ]
 
+        # Single-flight: don't stack a new edit on top of an in-flight one (see
+        # apply_diarization_annotations — same deterministic-job-id save race).
+        in_flight = conversation_edit_chain_in_flight(conversation_id)
+        if in_flight:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "This conversation is still processing a previous edit. Try again in a moment.",
+                    "in_flight_job_id": in_flight,
+                },
+            )
+
         # Get active transcript
         active_transcript = conversation.active_transcript
         if not active_transcript:
@@ -1019,7 +1066,9 @@ async def apply_all_annotations(
                 reverse=True,
             )
             if diar_for_segment:
-                corrected_segment.speaker = diar_for_segment[0].corrected_speaker
+                _apply_diarization_label(
+                    corrected_segment, diar_for_segment[0].corrected_speaker
+                )
 
             # Apply transcript correction (most recent wins)
             transcript_for_segment = sorted(

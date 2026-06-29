@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "$0")/_engine.sh"
 # tests/bin/rebuild-containers.sh
 # Rebuild test container images (does not start containers)
 
@@ -16,7 +17,7 @@ echo ""
 
 # Build images
 echo "🏗️  Building images..."
-docker compose -f docker-compose-test.yml build
+$COMPOSE -f docker-compose-test.yml build
 
 echo "✅ Test container images rebuilt successfully"
 echo "   Run 'make start' to start the containers"

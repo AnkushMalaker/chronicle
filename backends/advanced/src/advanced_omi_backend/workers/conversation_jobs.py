@@ -54,6 +54,257 @@ from advanced_omi_backend.utils.job_utils import update_job_meta
 logger = logging.getLogger(__name__)
 
 
+def leading_silence_trim_index(
+    chunks: list[dict],
+    speech_start_time: float,
+    min_trim_seconds: float,
+) -> int | None:
+    """Chunk index where a conversation's real content begins, or None to skip trimming.
+
+    With always_persist on, the session placeholder records audio from session start,
+    so a long pause before the user speaks lands as leading silence. At finalize we
+    split that silence off into a soft-deleted remnant. This returns the chunk_index of
+    the first chunk that should belong to the trimmed (visible) conversation — the chunk
+    containing ``speech_start_time``.
+
+    Returns None when there is nothing worth trimming: when the leading silence is
+    shorter than ``min_trim_seconds`` (don't churn over a few seconds of pre-roll) or
+    when speech already starts in the first chunk.
+
+    Args:
+        chunks: chunk timeline, dicts with ``chunk_index``/``start_time``/``end_time``,
+            sorted by chunk_index.
+        speech_start_time: time (conversation timeline, seconds) of the first speech.
+        min_trim_seconds: only trim when ``speech_start_time`` is at least this large.
+    """
+    if speech_start_time < min_trim_seconds:
+        return None
+    for chunk in chunks:
+        if chunk["start_time"] <= speech_start_time < chunk["end_time"]:
+            boundary = int(chunk["chunk_index"])
+            return boundary if boundary > 0 else None
+    return None
+
+
+async def trim_leading_silence(
+    conversation_id: str,
+    speech_start_time: float,
+    *,
+    min_trim_seconds: float = 30.0,
+) -> bool:
+    """Split leading silence off a conversation into a soft-deleted remnant.
+
+    With always_persist on, the session placeholder records audio from session start,
+    so a long pause before speech becomes leading silence on the conversation. This
+    moves the pre-speech chunks onto a NEW soft-deleted remnant (the audio is kept in
+    Mongo, just hidden) and re-bases the remaining chunks in place so the visible
+    conversation begins at the first speech. The conversation_id is unchanged, so the
+    post-conversation chain keyed to it is unaffected.
+
+    Returns True if a trim happened, False if there was nothing worth trimming.
+
+    Mirrors the crash-safe ordering of data_audit's split (create remnant first, move
+    chunks, mutate the conversation last) and reuses the same chunk-reassignment shape.
+    """
+    from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
+    from advanced_omi_backend.models.conversation import (
+        Conversation,
+        create_conversation,
+    )
+
+    chunks = [
+        {
+            "chunk_index": c.chunk_index,
+            "start_time": c.start_time,
+            "end_time": c.end_time,
+            "duration": c.duration,
+        }
+        for c in await AudioChunkDocument.find(
+            AudioChunkDocument.conversation_id == conversation_id,
+            AudioChunkDocument.deleted == False,  # noqa: E712 — Beanie needs ==
+        )
+        .sort("+chunk_index")
+        .to_list()
+    ]
+    if not chunks:
+        return False
+
+    boundary = leading_silence_trim_index(chunks, speech_start_time, min_trim_seconds)
+    if boundary is None:
+        return False
+
+    chunk_by_index = {int(c["chunk_index"]): c for c in chunks}
+    t0 = float(chunk_by_index[boundary]["start_time"])
+    now = datetime.now(timezone.utc)
+
+    conversation = await Conversation.find_one(
+        Conversation.conversation_id == conversation_id
+    )
+    if conversation is None or conversation.deleted:
+        return False
+
+    # 1) Soft-deleted remnant that will hold the leading-silence chunks.
+    remnant = create_conversation(
+        user_id=conversation.user_id,
+        client_id=conversation.client_id,
+        title="Leading silence",
+    )
+    remnant.deleted = True
+    remnant.deletion_reason = "leading_silence"
+    remnant.deleted_at = now
+    remnant.derived_from = Conversation.DerivedFrom(
+        operation="leading_silence_trim",
+        source_conversation_ids=[conversation_id],
+        time_range=[0.0, t0],
+        performed_at=now,
+        performed_by="system",
+    )
+    remnant.audio_chunks_count = boundary
+    remnant.audio_total_duration = round(
+        float(chunk_by_index[boundary - 1]["end_time"]), 2
+    )
+    await remnant.insert()
+
+    collection = AudioChunkDocument.get_pymongo_collection()
+    # 2) Move the leading-silence chunks (0..boundary-1) onto the remnant, re-indexed
+    #    from 0 (their times already start at 0, so no time shift needed).
+    await collection.update_many(
+        {"conversation_id": conversation_id, "chunk_index": {"$lt": boundary}},
+        {"$set": {"conversation_id": remnant.conversation_id}},
+    )
+    # 3) Re-base the surviving chunks in place: chunk_index -= boundary, times -= t0.
+    await collection.update_many(
+        {"conversation_id": conversation_id, "chunk_index": {"$gte": boundary}},
+        [
+            {
+                "$set": {
+                    "chunk_index": {"$subtract": ["$chunk_index", boundary]},
+                    "start_time": {"$subtract": ["$start_time", t0]},
+                    "end_time": {"$subtract": ["$end_time", t0]},
+                }
+            }
+        ],
+    )
+
+    # 4) Mutate the conversation last (visible content now starts at the first speech).
+    surviving = len(chunks) - boundary
+    conversation.audio_chunks_count = surviving
+    conversation.audio_total_duration = round(float(chunks[-1]["end_time"]) - t0, 2)
+    await conversation.save()
+
+    logger.info(
+        f"✂️ Trimmed {boundary} leading-silence chunks ({t0:.0f}s) off conversation "
+        f"{conversation_id[:12]} → soft-deleted remnant {remnant.conversation_id[:12]} "
+        f"(audio kept in Mongo)"
+    )
+    return True
+
+
+async def _wait_for_chunk_count_stable(
+    conversation_id: str,
+    *,
+    settle_seconds: float = 1.5,
+    timeout_seconds: float = 10.0,
+) -> None:
+    """Block until a conversation's audio-chunk count stops growing.
+
+    The leading-silence trim re-indexes the surviving chunks, so it must run only
+    after the persistence consumer has drained — otherwise a late-arriving chunk
+    (written with its pre-trim index) would corrupt the sequence. By finalize the
+    persistence side has rotated away, but this closes the brief flush-race.
+    """
+    from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
+
+    deadline = time.time() + timeout_seconds
+    last = None
+    stable_start = time.time()
+    while time.time() < deadline:
+        count = await AudioChunkDocument.find(
+            AudioChunkDocument.conversation_id == conversation_id,
+            AudioChunkDocument.deleted == False,  # noqa: E712 — Beanie needs ==
+        ).count()
+        if count != last:
+            last = count
+            stable_start = time.time()
+        elif time.time() - stable_start >= settle_seconds:
+            return
+        await asyncio.sleep(0.5)
+
+
+async def maybe_trim_leading_silence(
+    conversation_id: str, *, min_trim_seconds: float = 30.0
+) -> bool:
+    """Trim leading silence off a finalized conversation, best-effort.
+
+    With always_persist on, the session placeholder records audio from session start,
+    so a long pause before the user speaks lands as leading silence on the conversation.
+    This locates where speech actually begins, waits for the audio-chunk count to settle,
+    and splits the silence off onto a soft-deleted remnant (audio kept in Mongo) so the
+    visible conversation begins at the first speech.
+
+    Speech start is derived from VAD over the audio itself (``analyze_conversation_audio``)
+    rather than from transcript word timings: the streaming transcript times words
+    relative to the speech onset (word[0].start == 0.0), so it cannot locate where speech
+    sits in the session timeline — only the batch path produces absolute times. VAD is the
+    one signal that is correct for both finalization paths, and it populates the per-chunk
+    ``vad`` field as a side benefit.
+
+    This is the single entry point shared by BOTH finalization paths — the streaming
+    ``open_conversation_job`` and the batch ``transcription_fallback_check_job`` — since
+    a conversation can be finalized by either (whichever detects the transcript). It
+    never raises: trimming is a cosmetic optimization and must not block finalize.
+
+    Returns True if a trim happened, False otherwise.
+    """
+    from advanced_omi_backend.models.conversation import Conversation
+    from advanced_omi_backend.utils.vad_analysis import analyze_conversation_audio
+
+    try:
+        conversation = await Conversation.find_one(
+            Conversation.conversation_id == conversation_id
+        )
+        if conversation is None or not getattr(conversation, "always_persist", False):
+            # Only always_persist placeholders accumulate leading silence; a
+            # speech-driven conversation begins at the speech by construction.
+            return False
+
+        # Cheap guard: a conversation shorter than the trim threshold cannot have
+        # min_trim_seconds of leading silence — skip the VAD decode entirely.
+        total_duration = float(
+            getattr(conversation, "audio_total_duration", 0.0) or 0.0
+        )
+        if total_duration < min_trim_seconds:
+            return False
+
+        await _wait_for_chunk_count_stable(conversation_id)
+
+        # VAD over the audio gives absolute speech regions in the session timeline.
+        analysis = await analyze_conversation_audio(conversation_id)
+        regions = analysis.get("speech_regions") or []
+        if not regions:
+            return False
+        speech_start = float(regions[0][0])
+
+        return await trim_leading_silence(
+            conversation_id, speech_start, min_trim_seconds=min_trim_seconds
+        )
+    except Exception as e:  # noqa: BLE001 — trimming must never block finalize
+        logger.warning(f"Leading-silence trim skipped for {conversation_id[:12]}: {e}")
+        return False
+
+
+def should_discard_unbacked_conversation(has_meaningful_transcript: bool) -> bool:
+    """Decide whether a conversation with no persisted audio should be discarded.
+
+    A conversation whose audio chunks never landed (e.g. a mid-session reconnect
+    routed the audio to the session's always_persist placeholder under a different
+    conversation_id) is discarded ONLY if it carries no meaningful transcript.
+    Losing a real transcript is worse than keeping an audio-less conversation, so a
+    transcript-bearing conversation is salvaged, not deleted.
+    """
+    return not has_meaningful_transcript
+
+
 async def handle_end_of_conversation(
     session_id: str,
     conversation_id: str,
@@ -1558,10 +1809,61 @@ async def open_conversation_job(
         )
 
         if not chunks_ready:
-            await mark_conversation_deleted(
-                conversation_id=conversation_id,
-                deletion_reason="audio_chunks_not_ready",
+            # The audio chunks never landed under this conversation_id. This is
+            # usually a mid-session reconnect that routed the audio to the session's
+            # always_persist placeholder under a different id. Decide salvage-vs-discard
+            # by whether a real transcript exists: losing a real transcript is worse
+            # than keeping an audio-less conversation.
+            from advanced_omi_backend.models.conversation import Conversation
+
+            salvage_conv = await Conversation.find_one(
+                Conversation.conversation_id == conversation_id
             )
+            has_transcript = bool(
+                salvage_conv and salvage_conv.has_meaningful_transcript
+            )
+
+            if should_discard_unbacked_conversation(has_transcript):
+                # Genuinely empty (no transcript, no audio). A websocket_disconnect is a
+                # benign network drop (warning, not an error-level system event); a clean
+                # end with nothing captured is more unexpected (error).
+                if state.end_reason == "websocket_disconnect":
+                    logger.warning(
+                        f"⚠️ No audio and no transcript for conversation "
+                        f"{conversation_id[:12]} (client disconnect) — discarding as "
+                        f"audio_chunks_not_ready (likely a network drop, not a fault)"
+                    )
+                else:
+                    logger.error(
+                        f"❌ Audio chunks not found after 30s for conversation "
+                        f"{conversation_id[:12]} (end_reason={state.end_reason}) — "
+                        f"discarding as audio_chunks_not_ready"
+                    )
+                await mark_conversation_deleted(
+                    conversation_id=conversation_id,
+                    deletion_reason="audio_chunks_not_ready",
+                )
+            else:
+                # Salvage: persist the streaming transcript so it survives as a proper
+                # version, and KEEP the conversation. Skip the audio-dependent
+                # post-conversation chain (batch re-transcribe would raise without audio).
+                logger.warning(
+                    f"🛟 No audio persisted for conversation {conversation_id[:12]} but it "
+                    f"has a real transcript — keeping it (audio likely routed to the "
+                    f"session placeholder on reconnect) instead of discarding"
+                )
+                try:
+                    await _save_streaming_transcript(
+                        session_id=session_id,
+                        conversation_id=conversation_id,
+                        aggregator=aggregator,
+                    )
+                except Exception as e:  # noqa: BLE001 — salvage must not raise
+                    logger.warning(
+                        f"Could not persist streaming transcript for salvaged "
+                        f"conversation {conversation_id[:12]}: {e}"
+                    )
+
             end_of_conversation_handled = True
             return await handle_end_of_conversation(
                 session_id=session_id,
@@ -1585,6 +1887,10 @@ async def open_conversation_job(
             conversation_id=conversation_id,
             aggregator=aggregator,
         )
+
+        # Phase 6b: Trim leading silence off the (always_persist) conversation. Shared
+        # with the batch-fallback finalization path — see maybe_trim_leading_silence.
+        await maybe_trim_leading_silence(conversation_id)
 
         # Phase 7: Enqueue post-processing pipeline
         await _enqueue_post_processing(

@@ -18,6 +18,7 @@ from advanced_omi_backend.client_manager import (
 from advanced_omi_backend.config_loader import get_service_config
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
+    conversation_edit_chain_in_flight,
     default_queue,
     memory_queue,
     post_conv_enqueue_kwargs,
@@ -970,6 +971,9 @@ def _enqueue_speaker_reprocessing_chain(
         recognise_speakers_job,
         conversation_id,
         version_id,
+        "",  # transcript_text: read from source version
+        None,  # words: read from source version
+        source_version_id,  # create-on-success: read from this version, create version_id
         job_timeout=1200,
         result_ttl=JOB_RESULT_TTL,
         job_id=f"reprocess_speaker_{conversation_id[:12]}",
@@ -1287,7 +1291,36 @@ async def reprocess_speakers(
         if error:
             return error
 
-        await _restore_if_deleted_and_prepare(conversation_model, conversation_id)
+        # Re-diarization operates on an existing transcript (text is copied to the
+        # new version), so the conversation stays "completed" throughout. Don't flip
+        # it to "active": the speaker-reprocess chain (speaker->memory->title_summary)
+        # has no finalizer, so an "active" flip would never settle back. Restore from
+        # soft-delete but keep the fact-derived status, then settle it explicitly.
+        await _restore_if_deleted_and_prepare(
+            conversation_model, conversation_id, processing_status=None
+        )
+        if conversation_model.apply_status(settled=True):
+            await conversation_model.save()
+
+        # Single-flight: reject if a reprocess chain is already running for this
+        # conversation. Overlapping chains (e.g. rapid repeat clicks) race on the
+        # conversation's full-document save() and a stale chain can clobber the newer
+        # speaker write — leaving an orphan version with empty speaker metadata and
+        # unchanged labels. Bail before creating a new version so we don't pile up
+        # dead versions either.
+        in_flight = conversation_edit_chain_in_flight(conversation_id)
+        if in_flight:
+            logger.info(
+                f"Reprocess already in flight for {conversation_id[:8]} "
+                f"(job {in_flight}); skipping duplicate request"
+            )
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "Speaker reprocessing is already in progress for this conversation.",
+                    "in_flight_job_id": in_flight,
+                },
+            )
 
         # 2-3. Resolve source transcript version ID and find version object
         error, source_version_id, source_version = _resolve_transcript_version(
@@ -1340,51 +1373,14 @@ async def reprocess_speakers(
                 },
             )
 
-        # 6. Create NEW transcript version (copy text/words, segments for provider-diarized)
+        # 6. Pre-allocate the new version id but DON'T create it yet. The speaker job
+        #    reads from the source version and creates this version only once it has a
+        #    usable result — mirroring transcript reprocess (transcribe_full_audio_job).
+        #    A failed/empty reprocess therefore leaves NO new version behind and surfaces
+        #    an error, instead of a degraded no-op version with unchanged labels.
         new_version_id = str(uuid.uuid4())
 
-        # For provider-diarized transcripts, copy segments so the speaker job can
-        # identify speakers per-segment. For word-based transcripts, leave segments
-        # empty so pyannote can re-diarize.
-        new_metadata = {
-            "reprocessing_type": "speaker_diarization",
-            "source_version_id": source_version_id,
-            "trigger": "manual_reprocess",
-            "provider_capabilities": provider_capabilities,
-        }
-        use_segments = provider_has_diarization or not has_words
-        if use_segments:
-            new_segments = source_version.segments  # COPY provider segments
-            if not has_words and not provider_has_diarization:
-                new_metadata["segments_only"] = True
-        else:
-            new_segments = []  # Empty - will be populated by speaker job
-
-        new_version = conversation_model.add_transcript_version(
-            version_id=new_version_id,
-            transcript=source_version.transcript,  # COPY transcript text
-            words=source_version.words,  # COPY word timings
-            segments=new_segments,
-            provider=source_version.provider,
-            model=source_version.model,
-            processing_time_seconds=None,  # Will be updated by job
-            metadata=new_metadata,
-            set_as_active=True,  # Set new version as active
-        )
-
-        # Carry over diarization_source so speaker job knows to use segment identification
-        if provider_has_diarization or (not has_words and has_segments):
-            new_version.diarization_source = "provider"
-
-        # Save conversation with new version
-        await conversation_model.save()
-
-        logger.info(
-            f"Created new transcript version {new_version_id} from source {source_version_id} "
-            f"for conversation {conversation_id}"
-        )
-
-        # 7-8. Enqueue speaker → memory → title/summary chain
+        # 7-8. Enqueue speaker → memory → title/summary chain (create-on-success).
         job_ids = _enqueue_speaker_reprocessing_chain(
             conversation_id,
             new_version_id,

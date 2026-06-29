@@ -19,6 +19,25 @@ Get Audio Chunks For Conversation
     RETURN    ${chunks}
 
 
+Get Client Conversations Including Deleted
+    [Documentation]    All conversations for a client (incl. soft-deleted) with
+    ...                deletion_reason / audio fields / transcript char count. The API
+    ...                hides soft-deleted conversations, so this reads from Mongo.
+    [Arguments]    ${client_id}
+
+    ${conversations}=    Find Client Conversations    ${client_id}
+    RETURN    ${conversations}
+
+
+Get Orphaned Transcript Count
+    [Documentation]    Count conversations soft-deleted as audio_chunks_not_ready that
+    ...                still carry a transcript (the data-loss the reconnect fix prevents).
+    [Arguments]    ${client_id}
+
+    ${count}=    Count Orphaned Transcripts    ${client_id}
+    RETURN    ${count}
+
+
 Verify Audio Chunks Exist
     [Documentation]    Verify that audio chunks exist in MongoDB for a conversation
     [Arguments]    ${conversation_id}    ${min_chunks}=1

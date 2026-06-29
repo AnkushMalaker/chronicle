@@ -28,6 +28,14 @@ services:
       - SPEAKER_SERVICE_HOST=${SPEAKER_SERVICE_HOST:-0.0.0.0}
       - SPEAKER_SERVICE_PORT=${SPEAKER_SERVICE_PORT:-8085}
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+      # Cross-service error reporting → backend "System Errors" page (opt-in).
+      - CHRONICLE_INGEST_URL=${CHRONICLE_INGEST_URL:-}
+      - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
+      - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
+    # So CHRONICLE_INGEST_URL=http://host.docker.internal:8000/... resolves to the
+    # backend host on Linux/Podman.
+    extra_hosts:
+      - host.docker.internal:host-gateway
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8085/health"]

@@ -13,19 +13,12 @@ import {
 } from '../hooks/useConversations'
 import ConversationVersionHeader from '../components/ConversationVersionHeader'
 import MemoryAuditCard from '../components/MemoryAuditCard'
-import { WaveformDisplay } from '../components/audio/WaveformDisplay'
+import { PlayheadWaveform, PlayheadTimeLabel } from '../components/audio/PlayheadWaveform'
+import { useGaplessPlayer } from '../hooks/useGaplessPlayer'
+import { AUDIO_FORMAT } from '../utils/audioFormat'
 import SpeakerNameDropdown from '../components/SpeakerNameDropdown'
 import SplitConversationModal from '../components/dataAudit/SplitConversationModal'
 import { getStorageKey } from '../utils/storage'
-
-// Detect browser opus/ogg playback support once at module load
-const SUPPORTS_OPUS = (() => {
-  try {
-    const a = document.createElement('audio')
-    return a.canPlayType('audio/ogg; codecs=opus') !== ''
-  } catch { return false }
-})()
-const AUDIO_FORMAT = SUPPORTS_OPUS ? 'opus' : 'wav'
 
 const SPEAKER_COLOR_PALETTE = [
   'text-blue-600 dark:text-blue-400',
@@ -134,23 +127,18 @@ export default function ConversationDetail() {
     }
   }
 
-  // Audio playback state — chunk-based (10s windows loaded on demand)
-  const CHUNK_WINDOW = 10 // seconds per audio chunk window
-  const [playingSegment, setPlayingSegment] = useState<string | null>(null)
-  const [audioCurrentTime, setAudioCurrentTime] = useState<number>(0)
-  const audioRefs = useRef<{ [key: string]: HTMLAudioElement }>({})
-  // Exactly one audio element may play (and drive the waveform cursor) at a time.
-  // `activeAudioRef` is the single source of truth for "who owns playback" — checked by
-  // identity in every timeupdate/ended/async-start so stale elements can never move the
-  // cursor or keep playing. `playSeqRef` supersedes in-flight loads when a newer play starts.
-  const activeAudioRef = useRef<HTMLAudioElement | null>(null)
-  const playSeqRef = useRef(0)
-  const [activeAudioKey, setActiveAudioKey] = useState<string | null>(null)
-  const [isAudioPaused, setIsAudioPaused] = useState(false)
-  const handleSeekRef = useRef<(time: number, totalDuration?: number) => void>(() => {})
-  // Transcript segment markers on the waveform: playing/last-played band + hover preview band
-  const [segmentMarker, setSegmentMarker] = useState<{ start: number; end: number; playing: boolean } | null>(null)
+  // Audio playback is owned by the app-wide gapless scheduler (Web Audio).
+  const player = useGaplessPlayer()
+  // Hover preview band on the waveform stays local (pure UI hover state).
   const [hoverMarker, setHoverMarker] = useState<{ start: number; end: number } | null>(null)
+
+  // Play/pause a single transcript segment (toggles off if already playing it).
+  const handleSegmentPlayPause = (segmentIndex: number, segment: Segment) => {
+    if (!id) return
+    const segId = `${id}-${segmentIndex}`
+    if (player.playingSegmentId === segId) player.stop()
+    else player.playSegment(id, segId, segment.start, segment.end)
+  }
 
   // Detailed summary expand
   const [showDetailedSummary, setShowDetailedSummary] = useState(false)
@@ -299,175 +287,6 @@ export default function ConversationDetail() {
     const mins = Math.floor(seconds / 60)
     const secs = Math.floor(seconds % 60)
     return `${mins}:${secs.toString().padStart(2, '0')}`
-  }
-
-  // Stop whatever is currently playing. The ref always points at the truly-active element
-  // (never stale React state), so this reliably silences the previous source before a new
-  // one starts — preventing two elements from playing and fighting over the cursor.
-  const stopActiveAudio = useCallback(() => {
-    if (activeAudioRef.current) {
-      activeAudioRef.current.pause()
-      activeAudioRef.current = null
-    }
-  }, [])
-
-  // Chunk-based seek handler: loads a 10s audio window on demand via waveform click
-  const handleSeek = useCallback((time: number, totalDuration?: number) => {
-    if (!id) return
-    const windowStart = Math.floor(time / CHUNK_WINDOW) * CHUNK_WINDOW
-    const cacheKey = `${id}_${windowStart}`
-
-    // This call supersedes any earlier in-flight load; stop current audio immediately.
-    const seq = ++playSeqRef.current
-    stopActiveAudio()
-    if (playingSegment) {
-      setPlayingSegment(null)
-      setSegmentMarker(prev => (prev ? { ...prev, playing: false } : prev))
-    }
-
-    // If time exceeds total duration, stop playback
-    const dur = totalDuration ?? conversation?.audio_total_duration
-    if (dur !== undefined && time >= dur) {
-      setActiveAudioKey(null)
-      setIsAudioPaused(false)
-      return
-    }
-
-    // Helper to play an audio element at the right offset. Claims ownership via activeAudioRef.
-    const playAt = (audio: HTMLAudioElement, absoluteTime: number) => {
-      if (playSeqRef.current !== seq) return // superseded by a newer click
-      const localTime = absoluteTime - windowStart
-      activeAudioRef.current = audio
-      const startPlaying = () => {
-        if (activeAudioRef.current !== audio) return // no longer the active element
-        audio.currentTime = Math.max(0, localTime)
-        audio.play().catch(err => console.warn('Playback failed:', err))
-      }
-      if (audio.readyState >= 2) {
-        startPlaying()
-      } else {
-        audio.addEventListener('canplay', startPlaying, { once: true })
-      }
-      setActiveAudioKey(cacheKey)
-      setIsAudioPaused(false)
-    }
-
-    // Check cache first
-    if (audioRefs.current[cacheKey]) {
-      playAt(audioRefs.current[cacheKey], time)
-      return
-    }
-
-    // Fetch audio chunk via authenticated API
-    const token = localStorage.getItem(getStorageKey('token')) || ''
-    fetch(`${BACKEND_URL}/api/conversations/${id}/audio-segments?start=${windowStart}&duration=${CHUNK_WINDOW}&format=${AUDIO_FORMAT}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-      .then(r => {
-        if (!r.ok) throw new Error(`Audio fetch failed: ${r.status}`)
-        return r.blob()
-      })
-      .then(blob => {
-        if (playSeqRef.current !== seq) return // a newer click won while we were loading
-        const blobUrl = URL.createObjectURL(blob)
-        const audio = new Audio(blobUrl)
-
-        // Track playback position — only the active element may move the cursor
-        audio.addEventListener('timeupdate', () => {
-          if (activeAudioRef.current !== audio) return
-          setAudioCurrentTime(windowStart + audio.currentTime)
-        })
-
-        // Auto-load next window on end for seamless playback
-        audio.addEventListener('ended', () => {
-          if (activeAudioRef.current !== audio) return
-          const nextStart = windowStart + CHUNK_WINDOW
-          handleSeekRef.current(nextStart, dur)
-        })
-
-        // Cache it
-        audioRefs.current[cacheKey] = audio
-        playAt(audio, time)
-      })
-      .catch(err => console.warn('Failed to load audio chunk:', err))
-  }, [id, playingSegment, conversation?.audio_total_duration, stopActiveAudio])
-
-  // Keep ref in sync
-  handleSeekRef.current = handleSeek
-
-  // Toggle play/pause for the conversation's active audio
-  const handleTogglePlayback = useCallback(() => {
-    if (!id) return
-    if (activeAudioKey && activeAudioKey.startsWith(id + '_')) {
-      const audio = audioRefs.current[activeAudioKey]
-      if (audio) {
-        if (audio.paused) {
-          // Resume — reclaim cursor ownership for this element
-          activeAudioRef.current = audio
-          audio.play().catch(err => console.warn('Resume failed:', err))
-          setIsAudioPaused(false)
-        } else {
-          audio.pause()
-          setIsAudioPaused(true)
-        }
-        return
-      }
-    }
-    // No active audio — start from beginning
-    handleSeek(0, conversation?.audio_total_duration)
-  }, [id, activeAudioKey, handleSeek, conversation?.audio_total_duration])
-
-  // Segment play/pause
-  const handleSegmentPlayPause = (segmentIndex: number, segment: Segment) => {
-    if (!id) return
-    const segmentId = `${id}-${segmentIndex}`
-
-    if (playingSegment === segmentId) {
-      stopActiveAudio()
-      setPlayingSegment(null)
-      // Keep the band as a faint anchor so the segment stays locatable on the waveform
-      setSegmentMarker(prev => (prev ? { ...prev, playing: false } : prev))
-      return
-    }
-
-    // This call supersedes any earlier in-flight load; stop current audio immediately.
-    const seq = ++playSeqRef.current
-    stopActiveAudio()
-    setActiveAudioKey(null)
-    setIsAudioPaused(false)
-
-    let audio = audioRefs.current[segmentId]
-    if (!audio || audio.error) {
-      const token = localStorage.getItem(getStorageKey('token')) || ''
-      const audioUrl = `${BACKEND_URL}/api/audio/chunks/${id}?start_time=${segment.start}&end_time=${segment.end}&format=${AUDIO_FORMAT}&token=${token}`
-      audio = new Audio(audioUrl)
-      audioRefs.current[segmentId] = audio
-      // Sync the waveform playhead: segment clips start at 0, so map back to absolute time.
-      // Only the active element may move the cursor.
-      audio.addEventListener('timeupdate', () => {
-        if (activeAudioRef.current !== audio) return
-        setAudioCurrentTime(segment.start + audio.currentTime)
-      })
-      audio.addEventListener('ended', () => {
-        if (activeAudioRef.current !== audio) return
-        setPlayingSegment(null)
-        setSegmentMarker(prev => (prev ? { ...prev, playing: false } : prev))
-      })
-    }
-
-    if (playSeqRef.current !== seq) return // superseded before we could start
-    activeAudioRef.current = audio
-
-    audio.play().then(() => {
-      // Ownership may have moved elsewhere while play() was pending
-      if (activeAudioRef.current !== audio) {
-        audio.pause()
-        return
-      }
-      setPlayingSegment(segmentId)
-      setSegmentMarker({ start: segment.start, end: segment.end, playing: true })
-      setAudioCurrentTime(segment.start + audio.currentTime)
-    }).catch(() => setPlayingSegment(null))
   }
 
   // Action handlers
@@ -694,13 +513,13 @@ export default function ConversationDetail() {
     }
   }
 
-  // Cleanup audio on unmount
+  // Stop playback when leaving the page.
   useEffect(() => {
     return () => {
-      Object.values(audioRefs.current).forEach(audio => audio.pause())
-      activeAudioRef.current = null
+      if (id && player.isActive(id)) player.stop()
     }
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id])
 
   // Build speaker color map
   const speakerColorMap = useMemo(() => {
@@ -962,37 +781,33 @@ export default function ConversationDetail() {
               <h2 className="font-medium text-gray-900 dark:text-gray-100 mb-3">Audio</h2>
 
               {conversation.conversation_id && conversation.audio_total_duration && (
-                <WaveformDisplay
-                  conversationId={conversation.conversation_id}
+                <PlayheadWaveform
+                  cid={conversation.conversation_id}
                   duration={conversation.audio_total_duration}
-                  currentTime={audioCurrentTime}
-                  onSeek={handleSeek}
+                  onSeek={(t) => id && player.play(id, t, { totalDuration: conversation.audio_total_duration! })}
                   height={80}
                   segments={segments}
-                  segmentMarkers={[
-                    ...(segmentMarker
-                      ? [{ start: segmentMarker.start, end: segmentMarker.end, kind: segmentMarker.playing ? ('playing' as const) : ('anchor' as const) }]
-                      : []),
-                    ...(hoverMarker ? [{ start: hoverMarker.start, end: hoverMarker.end, kind: 'hover' as const }] : []),
-                  ]}
+                  segmentMarker={player.segmentMarker}
+                  hoverMarker={hoverMarker}
                 />
               )}
 
               {/* Play/pause + time display */}
               <div className="flex items-center gap-3 mt-2">
                 <button
-                  onClick={handleTogglePlayback}
+                  onClick={() => id && conversation.audio_total_duration && player.togglePlay(id, conversation.audio_total_duration)}
                   className="p-2 rounded-full bg-blue-600 hover:bg-blue-700 text-white transition-colors"
-                  title={activeAudioKey && !isAudioPaused ? 'Pause' : 'Play'}
+                  title={id && player.isActive(id) && player.isPlaying ? 'Pause' : 'Play'}
                 >
-                  {activeAudioKey && !isAudioPaused
+                  {id && player.isActive(id) && player.isPlaying
                     ? <Pause className="w-4 h-4" />
                     : <Play className="w-4 h-4" />}
                 </button>
-                <span className="text-sm text-gray-600 dark:text-gray-400 font-mono">
-                  {formatDuration(audioCurrentTime)}
-                  {conversation.audio_total_duration ? ` / ${formatDuration(conversation.audio_total_duration)}` : ''}
-                </span>
+                <PlayheadTimeLabel
+                  cid={conversation.conversation_id!}
+                  total={conversation.audio_total_duration}
+                  className="text-sm text-gray-600 dark:text-gray-400 font-mono"
+                />
               </div>
             </div>
           )}
@@ -1080,7 +895,7 @@ export default function ConversationDetail() {
                             className="flex-shrink-0 p-0.5 rounded hover:bg-yellow-200 dark:hover:bg-yellow-800 opacity-0 group-hover:opacity-100 transition-opacity"
                             title={`Play ${formatDuration(segment.end - segment.start)}s`}
                           >
-                            {playingSegment === `${id}-${idx}` ? (
+                            {player.playingSegmentId === `${id}-${idx}` ? (
                               <Pause className="h-3 w-3 text-yellow-600" />
                             ) : (
                               <Play className="h-3 w-3 text-yellow-600" />
@@ -1112,7 +927,7 @@ export default function ConversationDetail() {
                         className="flex-shrink-0 mt-0.5 p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-600 opacity-0 group-hover:opacity-100 transition-opacity"
                         title={`Play ${formatDuration(segment.end - segment.start)}s`}
                       >
-                        {playingSegment === `${id}-${idx}` ? (
+                        {player.playingSegmentId === `${id}-${idx}` ? (
                           <Pause className="h-3 w-3 text-blue-600" />
                         ) : (
                           <Play className="h-3 w-3 text-gray-500" />

@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle, AlertOctagon, Info, RefreshCw, ChevronRight, ChevronDown,
-  Check, ExternalLink, ShieldAlert, type LucideIcon,
+  Check, ExternalLink, ShieldAlert, Copy, type LucideIcon,
 } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import { useSystemEvents, useSystemEventsSummary } from '../hooks/useSystemEvents'
@@ -59,7 +59,7 @@ function EventRow({
       <button
         type="button"
         onClick={() => expandable && setOpen(o => !o)}
-        className={`flex w-full items-center gap-3 px-3 py-2.5 text-left ${
+        className={`flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5 text-left ${
           expandable ? 'hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer' : 'cursor-default'
         }`}
       >
@@ -211,6 +211,7 @@ export default function SystemEvents() {
   const [windowHours, setWindowHours] = useState(24)
   const [limit, setLimit] = useState(200)
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [copied, setCopied] = useState(false)
 
   const filter: SystemEventsFilter = {
     ...(severity ? { severity } : {}),
@@ -278,6 +279,29 @@ export default function SystemEvents() {
     })
   }
 
+  const formatEvent = (e: SystemEvent): string => {
+    const ts = e.last_seen_at || e.created_at || ''
+    const lines = [
+      `[${e.severity.toUpperCase()}] ${e.title}${e.count > 1 ? ` (×${e.count})` : ''}`,
+      `category: ${e.category} | source: ${e.source}${ts ? ` | ${ts}` : ''}`,
+    ]
+    if (e.client_id) lines.push(`client_id: ${e.client_id}`)
+    if (e.conversation_id) lines.push(`conversation_id: ${e.conversation_id}`)
+    if (e.detail) lines.push('', e.detail)
+    if (e.traceback) lines.push('', e.traceback)
+    return lines.join('\n')
+  }
+
+  const onCopySelected = () => {
+    const chosen = events.filter(e => selected.has(e.id))
+    if (chosen.length === 0) return
+    const text = chosen.map(formatEvent).join('\n\n' + '─'.repeat(60) + '\n\n')
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
   const onAckAll = () => {
     if (!window.confirm('Acknowledge all unacknowledged events matching the current filters?')) return
     const { acked: _acked, limit: _limit, offset: _offset, ...ackParams } = filter
@@ -291,21 +315,31 @@ export default function SystemEvents() {
 
   return (
     <div>
-      <div className="mb-6 flex items-center justify-between">
+      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center space-x-2">
-          <AlertTriangle className="h-6 w-6 text-red-600" />
+          <AlertTriangle className="h-6 w-6 text-red-600 flex-shrink-0" />
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">System Errors</h1>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {selected.size > 0 && (
-            <button
-              onClick={onAckSelected}
-              className="flex items-center gap-2 rounded-md bg-green-600 px-3 py-2 text-sm font-medium text-white hover:bg-green-700"
-              title="Acknowledge the selected events"
-            >
-              <Check className="h-4 w-4" />
-              Acknowledge selected ({selected.size})
-            </button>
+            <>
+              <button
+                onClick={onCopySelected}
+                className="flex items-center gap-2 rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700"
+                title="Copy the selected events to the clipboard"
+              >
+                {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                {copied ? 'Copied!' : `Copy errors (${selected.size})`}
+              </button>
+              <button
+                onClick={onAckSelected}
+                className="flex items-center gap-2 rounded-md bg-green-600 px-3 py-2 text-sm font-medium text-white hover:bg-green-700"
+                title="Acknowledge the selected events"
+              >
+                <Check className="h-4 w-4" />
+                Acknowledge selected ({selected.size})
+              </button>
+            </>
           )}
           <button
             onClick={onAckAll}
@@ -351,17 +385,17 @@ export default function SystemEvents() {
 
       {/* Controls */}
       <div className="mb-4 flex flex-wrap items-center gap-3">
-        <select value={severity} onChange={e => setSeverity(e.target.value)} className="rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200">
+        <select value={severity} onChange={e => setSeverity(e.target.value)} className="min-w-0 max-w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200">
           <option value="">All severities</option>
           {SEVERITIES.map(s => <option key={s} value={s}>{s}</option>)}
         </select>
 
-        <select value={category} onChange={e => setCategory(e.target.value)} className="rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200">
+        <select value={category} onChange={e => setCategory(e.target.value)} className="min-w-0 max-w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200">
           <option value="">All categories</option>
           {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
         </select>
 
-        <select value={source} onChange={e => setSource(e.target.value)} className="rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200">
+        <select value={source} onChange={e => setSource(e.target.value)} className="min-w-0 max-w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200">
           <option value="">All sources</option>
           {sources.map(s => <option key={s} value={s}>{s}</option>)}
         </select>
@@ -374,11 +408,11 @@ export default function SystemEvents() {
           className="w-40 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
         />
 
-        <select value={windowHours} onChange={e => setWindowHours(Number(e.target.value))} className="rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200">
+        <select value={windowHours} onChange={e => setWindowHours(Number(e.target.value))} className="min-w-0 max-w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200">
           {WINDOWS.map(w => <option key={w.value} value={w.value}>{w.label}</option>)}
         </select>
 
-        <select value={limit} onChange={e => setLimit(Number(e.target.value))} className="rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200">
+        <select value={limit} onChange={e => setLimit(Number(e.target.value))} className="min-w-0 max-w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200">
           {[50, 100, 200, 500].map(n => <option key={n} value={n}>Last {n}</option>)}
         </select>
 

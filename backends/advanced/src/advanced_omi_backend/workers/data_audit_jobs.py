@@ -31,6 +31,7 @@ from advanced_omi_backend.llm_client import async_generate
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import async_job
+from advanced_omi_backend.services.observability.system_events import record_event_sync
 from advanced_omi_backend.users import User
 from advanced_omi_backend.utils.annotation_export import (
     MANIFEST_NAME,
@@ -40,7 +41,10 @@ from advanced_omi_backend.utils.annotation_export import (
     build_clip_record,
     export_dir,
 )
-from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segment
+from advanced_omi_backend.utils.audio_chunk_utils import (
+    audio_cache_duration_matches,
+    reconstruct_audio_segment,
+)
 from advanced_omi_backend.utils.sensitivity_screening import (
     DEFAULT_SENSITIVITY_POLICY,
     build_screening_prompt,
@@ -84,6 +88,41 @@ async def _analyze_and_store(
         result["analyzed_at"] = datetime.now(timezone.utc)
         va = Conversation.VadAnalysis(**result)
         conv.vad_analysis = va
+        # The fresh VAD reflects the actual chunk set. If its implied duration
+        # disagrees with the stored audio_total_duration, the conversation's
+        # audio metadata is internally inconsistent (reconnect-duplication: a
+        # bad recording). Flag it once and surface it on the System Errors page;
+        # the data-audit list then excludes it so it stops perpetually showing
+        # as "needs analysis" (re-analysis can't reconcile corrupt metadata).
+        va_dur = (va.frame_count or 0) * (va.frame_hop_ms or 0) / 1000.0
+        stored_dur = conv.audio_total_duration or 0.0
+        if (
+            not audio_cache_duration_matches(va_dur, stored_dur)
+            and not conv.audio_integrity_error
+        ):
+            reason = (
+                f"audio duration drift: stored {stored_dur:.0f}s / "
+                f"{conv.audio_chunks_count} chunks vs {va_dur:.0f}s from actual audio"
+            )
+            conv.audio_integrity_error = reason
+            record_event_sync(
+                severity="error",
+                category="data_integrity",
+                source="analyze_audio_batch_job",
+                title=f"Corrupt audio metadata: {conv.conversation_id[:8]} (duration drift)",
+                detail=reason,
+                conversation_id=conv.conversation_id,
+                client_id=conv.client_id,
+                user_id=conv.user_id,
+                metadata={
+                    "stored_duration_s": round(stored_dur, 1),
+                    "stored_chunks": conv.audio_chunks_count,
+                    "vad_duration_s": round(va_dur, 1),
+                },
+            )
+            logger.warning(
+                f"Flagged corrupt audio metadata for {conv.conversation_id[:12]}: {reason}"
+            )
         await conv.save()
         return va
     except Exception as e:
@@ -120,6 +159,9 @@ async def analyze_audio_batch_job(
                 "deleted": {"$ne": True},
                 "audio_archived": {"$ne": True},
                 "audio_chunks_count": {"$gt": 0},
+                # Skip conversations already flagged as corrupt (surfaced on the
+                # System Errors page); an explicit conversation_ids list overrides.
+                "audio_integrity_error": None,
             }
         )
 
@@ -132,7 +174,15 @@ async def analyze_audio_batch_job(
     def _needs_analysis(conv: Conversation) -> bool:
         if conv.audio_archived or not conv.audio_chunks_count:
             return False
-        return force or conv.vad_analysis is None
+        if force or conv.vad_analysis is None:
+            return True
+        # Re-analyze a cached summary that no longer matches the current audio
+        # (chunk set changed in place since it was computed).
+        va = conv.vad_analysis
+        cached = (va.frame_count or 0) * (va.frame_hop_ms or 0) / 1000.0
+        return not audio_cache_duration_matches(
+            cached, conv.audio_total_duration or 0.0
+        )
 
     pending = [c for c in conversations if _needs_analysis(c)]
     skipped = len(conversations) - len(pending)

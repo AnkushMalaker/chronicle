@@ -350,15 +350,16 @@ async def lifespan(app: FastAPI):
         application_logger.warning(f"Syncthing memory-audit listener not started: {e}")
         app.state.syncthing_audit_task = None
 
-    # Backstop reaper: force-cleans stale clients (zombie "connected" devices) and
-    # orphaned audio streams the primary idle-timeout path may have missed.
+    # Backstop reaper: one periodic loop that force-cleans stale clients (zombie
+    # "connected" devices), orphaned audio streams the idle-timeout path missed, and
+    # orphaned deferred RQ jobs whose dependency was deleted (never promotable).
     try:
-        from advanced_omi_backend.services.stream_reaper import run_stream_reaper
+        from advanced_omi_backend.services.reaper import run_reaper
 
-        app.state.stream_reaper_task = asyncio.create_task(run_stream_reaper())
+        app.state.reaper_task = asyncio.create_task(run_reaper())
     except Exception as e:
-        application_logger.warning(f"Stream reaper not started: {e}")
-        app.state.stream_reaper_task = None
+        application_logger.warning(f"Reaper not started: {e}")
+        app.state.reaper_task = None
 
     # Observability: drain the system-event ingest list (filled by RQ workers and the
     # catch-all log handler) into Mongo + SSE, and poll service health to record
@@ -431,14 +432,14 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             application_logger.error(f"Error stopping memory-audit listener: {e}")
 
-        # Stop the stream reaper
+        # Stop the backstop reaper
         try:
-            reaper_task = getattr(app.state, "stream_reaper_task", None)
+            reaper_task = getattr(app.state, "reaper_task", None)
             if reaper_task is not None:
                 reaper_task.cancel()
-                application_logger.info("Stream reaper stopped")
+                application_logger.info("Reaper stopped")
         except Exception as e:
-            application_logger.error(f"Error stopping stream reaper: {e}")
+            application_logger.error(f"Error stopping reaper: {e}")
 
         # Stop the observability tasks (event drain + health poller)
         for _attr, _label in (

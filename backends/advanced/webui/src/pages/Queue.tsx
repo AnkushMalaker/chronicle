@@ -602,7 +602,9 @@ const Queue: React.FC = () => {
     const end = job.completed_at || job.ended_at
       ? new Date((job.completed_at || job.ended_at)!).getTime()
       : (job.status === 'started' ? Date.now() : start); // Don't show increasing time for failed jobs
-    const durationMs = end - start;
+    // RQ's started_at/ended_at can be sub-millisecond out of order for near-instant
+    // jobs, yielding a tiny negative; clamp so we never render e.g. "-27ms".
+    const durationMs = Math.max(0, end - start);
 
     if (durationMs < 1000) return `${durationMs}ms`;
     if (durationMs < 60000) return `${(durationMs / 1000).toFixed(1)}s`;
@@ -1170,7 +1172,7 @@ const Queue: React.FC = () => {
                                         job,
                                         startTime,
                                         endTime,
-                                        duration: (endTime - startTime) / 1000,
+                                        duration: Math.max(0, endTime - startTime) / 1000,
                                         name: getJobDisplayName(job.job_type),
                                         icon: getJobIcon(job.job_type)
                                       };
@@ -1702,7 +1704,7 @@ const Queue: React.FC = () => {
                                           job,
                                           startTime,
                                           endTime,
-                                          duration: (endTime - startTime) / 1000,
+                                          duration: Math.max(0, endTime - startTime) / 1000,
                                           name: getJobDisplayName(job.job_type),
                                           icon: getJobIcon(job.job_type)
                                         };

@@ -111,6 +111,10 @@ class VibeVoiceTranscriber:
 
         self.max_new_tokens = int(os.getenv("MAX_NEW_TOKENS", "8192"))
         self.repetition_penalty = float(os.getenv("REPETITION_PENALTY", "1.1"))
+        # n-gram blocking guard against decoder runaway/template-leak collapse on hard
+        # far-field audio. 0 = off (default; preserves prod behavior). 3-4 bounds loops
+        # without hurting normal repeated words ("no no no").
+        self.no_repeat_ngram_size = int(os.getenv("NO_REPEAT_NGRAM_SIZE", "0"))
 
         # Quantization config: "4bit", "8bit", or none ("" / "none" / "off" -> full precision).
         # Default is none: 4-bit NF4 causes repetition collapse on hard audio (see compose note).
@@ -346,6 +350,7 @@ class VibeVoiceTranscriber:
         self,
         audio_file_path: str,
         context_info: Optional[str] = None,
+        window_label: str = "",
     ) -> TranscriptionResult:
         """
         Transcribe a single audio file (or batch window).
@@ -353,6 +358,8 @@ class VibeVoiceTranscriber:
         Args:
             audio_file_path: Path to audio file
             context_info: Optional hot words / context string passed as prompt.
+            window_label: Human-readable span (e.g. "240-480s") used in degradation
+                logs so the System Errors page can pinpoint the offending audio.
 
         Returns:
             TranscriptionResult with text, segments (with speakers), and speaker list
@@ -408,13 +415,15 @@ class VibeVoiceTranscriber:
         logger.info("Generating transcription...")
         torch.manual_seed(42)
         torch.cuda.manual_seed_all(42)
+        gen_kwargs = {
+            "max_new_tokens": self.max_new_tokens,
+            "do_sample": False,
+            "repetition_penalty": self.repetition_penalty,
+        }
+        if self.no_repeat_ngram_size > 0:
+            gen_kwargs["no_repeat_ngram_size"] = self.no_repeat_ngram_size
         with torch.no_grad():
-            output_ids = self.model.generate(
-                **inputs,
-                max_new_tokens=self.max_new_tokens,
-                do_sample=False,
-                repetition_penalty=self.repetition_penalty,
-            )
+            output_ids = self.model.generate(**inputs, **gen_kwargs)
 
         # Decode: skip input tokens, parse structured output
         generated_ids = output_ids[:, inputs["input_ids"].shape[1] :]
@@ -423,28 +432,25 @@ class VibeVoiceTranscriber:
                 generated_ids, return_format="parsed"
             )[0]
         except (json.JSONDecodeError, IndexError, ValueError) as e:
-            # Model output was truncated at max_new_tokens — fall back to raw text
-            logger.warning(f"Structured decode failed ({e}), falling back to raw text")
-            raw_text = (
-                self.processor.decode(generated_ids, return_format="raw")[0]
-                if hasattr(self.processor, "decode")
-                else ""
+            # Structured decode failed: the window's JSON overflowed max_new_tokens
+            # (decoder degeneration → unterminated array) so the raw output is a
+            # template-leaked `<|im_start|> [{"Start":...` blob, NOT spoken text.
+            # Publishing it poisons the whole conversation, so DROP this window
+            # instead of leaking the template. With overlapping windows the
+            # neighbours cover most of the span; an empty window stitches as a gap.
+            logger.error(
+                f"VibeVoice decoder degeneration: structured decode failed ({e}) "
+                f"on window [{window_label or 'single'}]; dropping window as "
+                f"unintelligible (JSON overflow / template leak). Audio span lost."
             )
             audio_array, sr = load_audio_file(
                 audio_file_path, target_rate=STANDARD_SAMPLE_RATE
             )
             duration = len(audio_array) / sr
             return TranscriptionResult(
-                text=raw_text if isinstance(raw_text, str) else str(raw_text),
+                text="",
                 words=[],
-                segments=[
-                    Segment(
-                        text=raw_text if isinstance(raw_text, str) else str(raw_text),
-                        start=0.0,
-                        end=duration,
-                        speaker=None,
-                    )
-                ],
+                segments=[],
                 speakers=None,
                 language=None,
                 duration=duration,
@@ -452,7 +458,7 @@ class VibeVoiceTranscriber:
 
         logger.info(f"Parsed {len(parsed_segments)} segments")
 
-        return self._map_to_result(parsed_segments)
+        return self._map_to_result(parsed_segments, window_label=window_label)
 
     def _transcribe_batched_with_progress(
         self,
@@ -489,7 +495,11 @@ class VibeVoiceTranscriber:
 
                 # No inter-window context to avoid repetition loops.
                 # The 30s audio overlap + midpoint stitching handles continuity.
-                result = self._transcribe_single(temp_path, context_info=hotwords)
+                result = self._transcribe_single(
+                    temp_path,
+                    context_info=hotwords,
+                    window_label=f"{start_time:.0f}-{end_time:.0f}s",
+                )
                 batch_results.append((result, start_time, end_time))
                 logger.info(
                     f"Batch {i + 1} done: {len(result.segments)} segments, "
@@ -512,7 +522,40 @@ class VibeVoiceTranscriber:
         """Return True if this audio is long enough to use batched transcription with progress."""
         return audio_duration > self.batch_threshold
 
-    def _map_to_result(self, parsed_segments: list[dict]) -> TranscriptionResult:
+    @staticmethod
+    def _collapse_loops(text: str, keep: int = 2) -> tuple[str, int]:
+        """Collapse contiguous repetitions of the same token to at most ``keep`` copies.
+
+        Decoder degeneration on hard far-field audio produces runs like
+        "yeah yeah yeah ... (x100)" inside a single segment. Comparison is
+        case/punctuation-insensitive; original tokens are preserved. Natural
+        doubles ("no no") survive (keep=2); only pathological 3+ runs collapse.
+
+        Returns (collapsed_text, longest_run) so the caller can report degeneration.
+        """
+        if not text:
+            return text, 0
+        tokens = text.split()
+        out: list[str] = []
+        longest = 0
+        i = 0
+        while i < len(tokens):
+            key = tokens[i].lower().strip(".,!?;:")
+            j = i
+            while j < len(tokens) and tokens[j].lower().strip(".,!?;:") == key:
+                j += 1
+            longest = max(longest, j - i)
+            out.extend(tokens[i : i + min(j - i, keep)])
+            i = j
+        return " ".join(out), longest
+
+    # A contiguous run of the same token at/above this length is decoder
+    # degeneration worth surfacing on the System Errors page (vs natural emphasis).
+    _LOOP_REPORT_RUN = 8
+
+    def _map_to_result(
+        self, parsed_segments: list[dict], window_label: str = ""
+    ) -> TranscriptionResult:
         """
         Map native transformers parsed output to TranscriptionResult.
 
@@ -525,9 +568,27 @@ class VibeVoiceTranscriber:
         segments = []
         speakers_map: dict[str, tuple[float, float]] = {}
         text_parts = []
+        # Degradation counters → surfaced as System Errors after the loop.
+        nondict_skipped = 0
+        loops_collapsed = 0
+        worst_run = 0
 
         for seg_data in parsed_segments:
-            text = seg_data.get("Content", "").strip()
+            if not isinstance(seg_data, dict):
+                # Partial parse can leave a stray non-dict element; skip it
+                # rather than crash on .get().
+                nondict_skipped += 1
+                continue
+            # A degenerate window can still parse but contain a contiguous
+            # repetition loop in one Content field (e.g. "yeah" x100). Collapse
+            # such runs losslessly post-decode — the right tool for VibeVoice,
+            # since no_repeat_ngram/repetition_penalty corrupt its structured JSON.
+            text, longest_run = self._collapse_loops(
+                seg_data.get("Content", "").strip()
+            )
+            if longest_run >= self._LOOP_REPORT_RUN:
+                loops_collapsed += 1
+                worst_run = max(worst_run, longest_run)
             start = float(seg_data.get("Start", 0.0))
             end = float(seg_data.get("End", 0.0))
             speaker_raw = seg_data.get("Speaker")
@@ -558,6 +619,24 @@ class VibeVoiceTranscriber:
                         min(prev_start, start),
                         max(prev_end, end),
                     )
+
+        # Surface decoder degeneration on the System Errors page. These are
+        # logged at ERROR so the cross-service reporter (root-logger handler in
+        # create_asr_app) ships them to the backend ingest endpoint. They are
+        # recovered-from (not fatal), but indicate the model struggled on this
+        # audio so they must be visible, not buried in container logs.
+        span = window_label or "single"
+        if loops_collapsed:
+            logger.error(
+                f"VibeVoice decoder degeneration: collapsed {loops_collapsed} "
+                f"repetition loop(s) (longest run {worst_run} tokens) on window "
+                f"[{span}]. Output recovered via post-decode loop collapse."
+            )
+        if nondict_skipped:
+            logger.error(
+                f"VibeVoice malformed output: skipped {nondict_skipped} non-dict "
+                f"segment element(s) from a partial JSON parse on window [{span}]."
+            )
 
         # Build speaker list
         speakers = [

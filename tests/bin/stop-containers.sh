@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "$0")/_engine.sh"
 # tests/bin/stop-containers.sh
 # Stop test containers (preserves volumes)
 
@@ -10,7 +11,7 @@ BACKEND_DIR="$SCRIPT_DIR/../../backends/advanced"
 cd "$BACKEND_DIR"
 
 echo "🛑 Stopping test containers..."
-docker compose -f docker-compose-test.yml stop
+$COMPOSE -f docker-compose-test.yml stop
 
 echo "✅ Test containers stopped (volumes preserved)"
 echo "   Use 'make start' to restart"

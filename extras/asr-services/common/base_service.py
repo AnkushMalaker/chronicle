@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 from common.response_models import HealthResponse, InfoResponse, TranscriptionResult
+from common.system_event_reporter import install_system_event_reporter
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -194,6 +195,11 @@ def create_asr_app(service: BaseASRService) -> FastAPI:
         version="1.0.0",
         description=f"ASR service using {service.provider_name} provider",
     )
+
+    # Forward this service's ERROR/CRITICAL logs to the backend's system-event
+    # ledger so failures here surface on the admin "System Errors" page. No-op
+    # unless CHRONICLE_INGEST_URL/CHRONICLE_INGEST_TOKEN are configured.
+    install_system_event_reporter(source=f"asr-{service.provider_name}")
 
     # GPU concurrency gates: limit how many transcriptions run at once so a burst of
     # requests queues at the GPU instead of dogpiling it (which OOMs/wedges a single-GPU

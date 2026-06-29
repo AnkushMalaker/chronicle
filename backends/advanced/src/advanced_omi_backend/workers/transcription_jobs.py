@@ -168,6 +168,13 @@ async def apply_speaker_recognition(
 
 BATCH_CHUNK_SECONDS = 3600  # Never send more than 1h to ASR at once
 
+# No-activity watchdog: only treat "zero transcription results" as a provider failure
+# when audio is actually flowing in. A connected-but-quiet device (common right after a
+# conversation ends and speech detection re-arms) produces no audio chunks, so zero
+# results is expected, not a fault. If the last audio chunk arrived more than this many
+# seconds ago the inflow is considered idle and the watchdog stays its hand.
+AUDIO_INFLOW_IDLE_SECONDS = 30
+
 
 def _build_wav(
     pcm_data: bytes, sample_rate: int, channels: int, sample_width: int
@@ -462,11 +469,16 @@ async def process_transcription_result(
         if current_job:
             from advanced_omi_backend.controllers.queue_controller import redis_conn
 
+            # Include event_complete: it depends on memory/title_summary, and
+            # cancelling those (enqueue_dependents=False) would otherwise strand the
+            # finalizer in the deferred registry forever. mark_conversation_deleted
+            # already settled the status, so the finalizer is redundant here.
             job_patterns = [
                 f"crop_{conversation_id[:12]}",
                 f"speaker_{conversation_id[:12]}",
                 f"memory_{conversation_id[:12]}",
                 f"title_summary_{conversation_id[:12]}",
+                f"event_complete_{conversation_id[:12]}",
             ]
             cancelled_jobs = []
             for job_id in job_patterns:
@@ -1028,6 +1040,17 @@ async def transcription_fallback_check_job(
             "reason": processing_result.get("reason"),
         }
 
+    # Trim leading silence before post-processing. This is the batch-fallback
+    # finalization path (no streaming speech was detected mid-session, so
+    # open_conversation_job's Phase 6b never ran); the same trim must happen here so an
+    # always_persist conversation that recorded a long pause before speech still gets
+    # the silence split off. Best-effort — never blocks the chain.
+    from advanced_omi_backend.workers.conversation_jobs import (
+        maybe_trim_leading_silence,
+    )
+
+    await maybe_trim_leading_silence(conv_id)
+
     # Enqueue post-conversation jobs
     post_jobs = start_post_conversation_jobs(
         conversation_id=conv_id,
@@ -1096,6 +1119,25 @@ async def _transcription_failure_context(
 
     lines.append(f"   session={session_id} client={client_id}")
     return "\n".join(lines)
+
+
+async def _session_ended_by_disconnect(store: "SessionStore", session_id: str) -> bool:
+    """True when a zero-transcription session ended because the client dropped its
+    WebSocket (e.g. the device walked out of network range) rather than because the
+    transcription provider failed.
+
+    A provider exception recorded on the session always wins — that is a genuine
+    service fault regardless of how the socket closed. Only a clean
+    ``websocket_disconnect`` with no recorded provider error is treated as benign, so
+    it is logged at WARNING (not ERROR) and never raises a system-error event — a user
+    walking through a dead zone shouldn't fill the System Errors page.
+    """
+    try:
+        if await store.get_transcription_error(session_id):
+            return False
+        return (await store.get_completion_reason(session_id)) == "websocket_disconnect"
+    except Exception:  # noqa: BLE001 — diagnostics must never raise
+        return False
 
 
 @async_job(redis=True, beanie=True)
@@ -1192,15 +1234,28 @@ async def stream_speech_detection_job(
         if expects_live_results and elapsed > 60 and not session_closed_at:
             watchdog_combined = await aggregator.get_combined_results(session_id)
             if not watchdog_combined.get("chunk_count", 0):
-                diag = await _transcription_failure_context(
-                    store, aggregator, session_id, client_id
+                # Only a real provider fault when audio is flowing in but the streaming
+                # consumer produces nothing. A connected-but-quiet device (e.g. speech
+                # detection just re-armed after a conversation ended and the user hasn't
+                # spoken again) sends no audio, so zero results is expected — firing here
+                # mislabels idle as "transcription service did not respond". When idle,
+                # fall through and keep listening until audio resumes or the session
+                # closes (the grace-period / disconnect handling below then applies).
+                last_chunk_at = await store.get_last_chunk_at(session_id)
+                audio_idle = (
+                    last_chunk_at is None
+                    or (time.time() - last_chunk_at) > AUDIO_INFLOW_IDLE_SECONDS
                 )
-                logger.error(
-                    f"❌ No transcription activity after {elapsed:.0f}s — "
-                    f"check provider config (API key, connectivity, consumer running)\n"
-                    f"{diag}"
-                )
-                break
+                if not audio_idle:
+                    diag = await _transcription_failure_context(
+                        store, aggregator, session_id, client_id
+                    )
+                    logger.error(
+                        f"❌ No transcription activity after {elapsed:.0f}s — "
+                        f"check provider config (API key, connectivity, consumer running)\n"
+                        f"{diag}"
+                    )
+                    break
 
         # Check if session has closed
         session_closed = await store.get_status(session_id) in (
@@ -1266,12 +1321,19 @@ async def stream_speech_detection_job(
                     diag = await _transcription_failure_context(
                         store, aggregator, session_id, client_id
                     )
-                    logger.error(
-                        f"❌ Session failed - check transcription service configuration\n"
-                        f"   No transcription activity after {grace_elapsed:.1f}s "
-                        f"(possible API key or connectivity issue)\n"
-                        f"{diag}"
-                    )
+                    if await _session_ended_by_disconnect(store, session_id):
+                        logger.warning(
+                            f"⚠️ Session ended by client disconnect before any "
+                            f"transcription (after {grace_elapsed:.1f}s) — likely a "
+                            f"network drop, not a service fault\n{diag}"
+                        )
+                    else:
+                        logger.error(
+                            f"❌ Session failed - check transcription service configuration\n"
+                            f"   No transcription activity after {grace_elapsed:.1f}s "
+                            f"(possible API key or connectivity issue)\n"
+                            f"{diag}"
+                        )
                     break
 
             await asyncio.sleep(2)
@@ -1476,12 +1538,19 @@ async def stream_speech_detection_job(
         diag = await _transcription_failure_context(
             store, aggregator, session_id, client_id
         )
-        logger.error(
-            f"❌ Session failed - transcription service did not respond\n"
-            f"   Reason: {reason}\n"
-            f"   Runtime: {time.time() - start_time:.1f}s\n"
-            f"{diag}"
-        )
+        if await _session_ended_by_disconnect(store, session_id):
+            logger.warning(
+                f"⚠️ Session ended by client disconnect with no transcription "
+                f"(runtime {time.time() - start_time:.1f}s) — likely a network drop, "
+                f"not a service fault\n{diag}"
+            )
+        else:
+            logger.error(
+                f"❌ Session failed - transcription service did not respond\n"
+                f"   Reason: {reason}\n"
+                f"   Runtime: {time.time() - start_time:.1f}s\n"
+                f"{diag}"
+            )
     else:
         logger.info(
             f"✅ Session ended, deferring to batch transcription\n"

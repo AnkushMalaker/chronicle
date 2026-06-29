@@ -1312,6 +1312,73 @@ class SpeakerRecognitionClient:
             logger.error(f"🎤 ❌ Error appending to speaker: {e}")
             return {"error": "unknown_error", "message": str(e)}
 
+    async def reidentify_clusters(
+        self,
+        clusters: Dict[str, list],
+        user_id: int = 1,
+        similarity_threshold: Optional[float] = None,
+    ) -> Dict:
+        """Re-identify stored per-cluster centroids against the CURRENT gallery.
+
+        Pure vector math on the speaker service (no audio, no GPU). Used by the reprocess-
+        impact finder to see what a conversation's speaker labels would be now.
+        Returns ``{"assignments": {label: {name, id, confidence}}}``.
+        """
+        if not self.enabled:
+            return {"error": "speaker_recognition_disabled", "assignments": {}}
+        payload: Dict = {"clusters": clusters, "user_id": user_id}
+        if similarity_threshold is not None:
+            payload["similarity_threshold"] = similarity_threshold
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.service_url}/v1/reidentify-clusters",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status != 200:
+                        return {
+                            "error": "reidentify_failed",
+                            "status": response.status,
+                            "assignments": {},
+                        }
+                    return await response.json()
+        except Exception as e:
+            return {"error": "connection_failed", "message": str(e), "assignments": {}}
+
+    async def embed_clusters(self, audio_bytes: bytes, segments: List[dict]) -> Dict:
+        """Pool one centroid per diarized speaker for an EXISTING segmentation.
+
+        Sends conversation audio + its stored segment boundaries to the speaker service
+        (no re-diarization). Used by the one-time backlog backfill.
+        Returns ``{"clusters": {label: centroid}}``.
+        """
+        if not self.enabled:
+            return {"error": "speaker_recognition_disabled", "clusters": {}}
+        try:
+            form_data = aiohttp.FormData()
+            form_data.add_field(
+                "file", audio_bytes, filename="conv.wav", content_type="audio/wav"
+            )
+            form_data.add_field("segments_data", json.dumps(segments))
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.service_url}/v1/embed-clusters",
+                    data=form_data,
+                    timeout=aiohttp.ClientTimeout(total=300),
+                ) as response:
+                    if response.status != 200:
+                        text = await response.text()
+                        return {
+                            "error": "embed_failed",
+                            "status": response.status,
+                            "message": text,
+                            "clusters": {},
+                        }
+                    return await response.json()
+        except Exception as e:
+            return {"error": "connection_failed", "message": str(e), "clusters": {}}
+
     async def check_if_enrolled_speaker_present(
         self,
         redis_client,

@@ -217,3 +217,96 @@ async def maybe_handle_followup(
         source="followup",
     )
     return True
+
+
+# ─────────────────────────── Dial (physical) follow-ups ───────────────────────
+#
+# A rotary detent during an open follow-up window is a *physical* follow-up: it
+# carries no words, so we synthesize the adjustment word from the dial direction
+# and the axis the last command was about, then run it through the same path as a
+# spoken "warmer"/"dimmer". CW = "more", CCW = "less".
+
+# Direction -> adjustment word, per axis.
+_DIAL_WORDS = {
+    "color_temp": {"CW": "warmer", "CCW": "cooler"},
+    "brightness": {"CW": "brighter", "CCW": "dimmer"},
+}
+
+# Words in the last command that mean "the dial should adjust colour temperature".
+# Anything else about lights defaults to brightness (the intuitive dial action,
+# and what "turn on"/"brighten study lights" implies).
+_COLOR_TEMP_HINTS = (
+    "warm",
+    "cool",
+    "colour temp",
+    "color temp",
+    "temperature",
+    "white",
+)
+
+
+def _followup_axis(last_command_norm: str) -> str:
+    """Pick the axis the dial controls (color_temp | brightness) from last command."""
+    if any(h in last_command_norm for h in _COLOR_TEMP_HINTS):
+        return "color_temp"
+    return "brightness"
+
+
+async def handle_dial_followup(
+    redis_client: redis.Redis,
+    plugin_router: PluginRouter,
+    *,
+    user_id: str,
+    session_id: str,
+    client_id: str,
+    direction: str,
+) -> dict:
+    """Map a dial detent to a contextual light adjustment during the follow-up window.
+
+    Only acts while a follow-up window is open AND the last command was about
+    lights. Returns a small status dict (handled/resolved/axis/reason) so the
+    simulation endpoint can surface what happened; the live WS handler just logs.
+    """
+    direction = (direction or "").strip().upper()
+    if direction not in ("CW", "CCW"):
+        return {"handled": False, "reason": f"unknown direction {direction!r}"}
+
+    ctx = await get_followup_ctx(redis_client, session_id)
+    if not ctx:
+        # No open window — the dial means nothing to the assistant right now.
+        return {"handled": False, "reason": "no follow-up window open"}
+
+    last_command = ctx.get("command", "")
+    last_norm = _normalize(last_command)
+    # Lights only, for now. (A future axis could carry the target/axis explicitly
+    # in the follow-up context so non-light devices are dial-adjustable too.)
+    if "light" not in last_norm:
+        logger.info(
+            "Dial follow-up ignored: last command not about lights (%r)", last_command
+        )
+        return {"handled": False, "reason": "last command not about lights"}
+
+    axis = _followup_axis(last_norm)
+    word = _DIAL_WORDS[axis][direction]
+    area = next((a for a in _AREA_WORDS if a in last_norm), None)
+    resolved = f"make the {area} lights {word}" if area else f"make the lights {word}"
+
+    logger.info(
+        "Dial %s -> %r (axis=%s, prev=%r)", direction, resolved, axis, last_command
+    )
+    conversation_id = await get_current_conversation_id(redis_client, session_id)
+    # quiet=True: no spoken "warmer" per detent and no backend LED effect (the
+    # lights changing is the feedback; the device shows its own local dial ring).
+    # source="followup" re-opens the window on success, so consecutive turns work.
+    await execute_voice_command(
+        redis_client,
+        plugin_router,
+        user_id=user_id,
+        session_id=session_id,
+        client_id=client_id,
+        command=resolved,
+        conversation_id=conversation_id,
+        source="followup",
+        quiet=True,
+    )
+    return {"handled": True, "resolved": resolved, "axis": axis, "reason": "ok"}

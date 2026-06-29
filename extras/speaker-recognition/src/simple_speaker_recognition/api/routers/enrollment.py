@@ -2,6 +2,7 @@
 
 import json
 import logging
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -15,8 +16,9 @@ from simple_speaker_recognition.api.core.utils import (
 )
 from simple_speaker_recognition.core.unified_speaker_db import UnifiedSpeakerDB
 from simple_speaker_recognition.database import get_db_session
-from simple_speaker_recognition.database.models import Speaker
+from simple_speaker_recognition.database.models import Speaker, SpeakerAudioSegment
 from simple_speaker_recognition.utils.audio_processing import get_audio_info
+from sqlalchemy import func
 
 # These will be imported from the main service.py when we integrate
 # from ..service import get_db, audio_backend, auth
@@ -48,9 +50,14 @@ def get_auth():
 
 
 def check_duplicate_speaker_name(
-    user_id: int, speaker_name: str, exclude_speaker_id: str = None
+    user_id: int, speaker_name: str, exclude_speaker_id: Optional[str] = None
 ) -> bool:
     """Check if a speaker name already exists for the given user.
+
+    Case-insensitive and whitespace-trimmed, so "Roshan", "roshan", and "roshan "
+    all collide — preventing duplicate same-name speakers (which show up as repeated
+    entries in the annotate dropdown). A DB-level unique index on (user_id, lower(name))
+    is the race-proof backstop; this gives a friendly error before that fires.
 
     Args:
         user_id: User ID to check within
@@ -62,8 +69,10 @@ def check_duplicate_speaker_name(
     """
     db_session = get_db_session()
     try:
+        normalized = (speaker_name or "").strip().lower()
         query = db_session.query(Speaker).filter(
-            Speaker.user_id == user_id, Speaker.name == speaker_name
+            Speaker.user_id == user_id,
+            func.lower(func.trim(Speaker.name)) == normalized,
         )
 
         if exclude_speaker_id:
@@ -72,6 +81,50 @@ def check_duplicate_speaker_name(
         existing_speaker = query.first()
         return existing_speaker is not None
 
+    finally:
+        db_session.close()
+
+
+def save_segment_record(
+    speaker_id: str,
+    saved_path: Path,
+    duration: float,
+    embedding: np.ndarray,
+    start: float = 0.0,
+    end: Optional[float] = None,
+    original_file_path: Optional[str] = None,
+) -> None:
+    """Persist one enrolled clip's embedding as a SpeakerAudioSegment.
+
+    These per-clip rows power the enrollment-health audit (and a future multi-vector
+    gallery). Historically only a single averaged centroid per speaker was stored, so
+    contaminated/mislabeled individual clips were invisible. Best-effort: a failure here
+    never blocks enrollment itself.
+    """
+    auth = get_auth()
+    base = auth.enrollment_audio_dir.resolve()
+    try:
+        rel_path = str(Path(saved_path).resolve().relative_to(base))
+    except ValueError:
+        rel_path = str(saved_path)
+
+    db_session = get_db_session()
+    try:
+        db_session.add(
+            SpeakerAudioSegment(
+                speaker_id=speaker_id,
+                audio_file_path=rel_path,
+                original_file_path=original_file_path,
+                start_time=start or 0.0,
+                end_time=end if end is not None else (duration or 0.0),
+                duration_seconds=duration or 0.0,
+                embedding=json.dumps(np.asarray(embedding).reshape(-1).tolist()),
+            )
+        )
+        db_session.commit()
+    except Exception as e:
+        db_session.rollback()
+        log.warning("Failed to persist segment embedding for %s: %s", speaker_id, e)
     finally:
         db_session.close()
 
@@ -100,11 +153,14 @@ def save_enrollment_audio(
     speaker_audio_dir = auth.enrollment_audio_dir / str(user_id) / speaker_id
     speaker_audio_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate unique filename with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Generate a genuinely-unique filename. A second-resolution timestamp + a constant
+    # caller-supplied stem (callers pass "segment.wav") collided whenever two clips were
+    # enrolled in the same second, silently OVERWRITING earlier audio. Add microseconds
+    # and a short random suffix so same-second / same-name clips never clash.
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     safe_filename = Path(filename).stem.replace(" ", "_").replace("/", "_")
     extension = Path(filename).suffix or ".wav"
-    unique_filename = f"{timestamp}_{enrollment_type}_{safe_filename}{extension}"
+    unique_filename = f"{timestamp}_{enrollment_type}_{safe_filename}_{uuid.uuid4().hex[:8]}{extension}"
 
     # Save audio file
     audio_path = speaker_audio_dir / unique_filename
@@ -245,6 +301,16 @@ async def enroll_upload(
         else:
             log.info(f"Successfully enrolled new speaker: {speaker_id}")
 
+        save_segment_record(
+            speaker_id,
+            saved_path,
+            duration,
+            emb[0],
+            start=start or 0.0,
+            end=end,
+            original_file_path=file.filename,
+        )
+
         return {
             "updated": updated,
             "speaker_id": speaker_id,
@@ -287,6 +353,7 @@ async def enroll_batch(
     temp_paths = []
     total_duration = 0.0
     saved_audio_files = []
+    segment_records: List[tuple] = []
 
     try:
         # Process each audio file
@@ -334,6 +401,7 @@ async def enroll_batch(
                     "batch_index": i + 1,
                 }
                 saved_audio_files.append(audio_file_info)
+                segment_records.append((saved_path, duration, emb[0], file.filename))
 
                 log.info(
                     f"Successfully embedded and saved file {i+1}, duration: {duration:.2f}s"
@@ -372,6 +440,10 @@ async def enroll_batch(
             log.info(f"Successfully updated existing speaker: {speaker_id}")
         else:
             log.info(f"Successfully enrolled new speaker: {speaker_id}")
+
+        # Persist per-clip embeddings now that the speaker row exists (FK).
+        for sp, du, ev, orig in segment_records:
+            save_segment_record(speaker_id, sp, du, ev, original_file_path=orig)
 
         return {
             "updated": updated,
@@ -445,6 +517,7 @@ async def enroll_append(
     temp_paths = []
     new_total_duration = 0.0
     saved_audio_files = []
+    segment_records: List[tuple] = []
 
     try:
         # Process each new audio file
@@ -493,6 +566,7 @@ async def enroll_append(
                     "append_operation": True,
                 }
                 saved_audio_files.append(audio_file_info)
+                segment_records.append((saved_path, duration, emb[0], file.filename))
 
                 log.info(
                     f"Successfully embedded and saved new file {i+1}, duration: {duration:.2f}s"
@@ -507,28 +581,21 @@ async def enroll_append(
         # Update manifest with appended files
         save_enrollment_manifest(user_id, speaker_id, saved_audio_files)
 
-        # Compute average of new embeddings
-        log.info(f"Computing average embedding from {len(embeddings)} new segments")
-        new_embeddings_array = np.array(embeddings)
-        new_average_embedding = np.mean(new_embeddings_array, axis=0)
-
-        # Compute weighted average: (old_embedding * old_count + new_embedding * new_count) / (old_count + new_count)
         new_count = len(embeddings)
         total_count = existing_count + new_count
 
+        # Weighted average: (old*old_count + new*new_count) / total → updated voiceprint.
+        new_average_embedding = np.mean(np.array(embeddings), axis=0)
         weighted_embedding = (
             existing_embedding * existing_count + new_average_embedding * new_count
         ) / total_count
-
-        # Normalize the weighted embedding
         weighted_embedding = weighted_embedding / np.linalg.norm(weighted_embedding)
-
         log.info(
-            f"Weighted average embedding computed from {existing_count} + {new_count} = {total_count} samples"
+            f"Weighted average embedding from {existing_count} + {new_count} = "
+            f"{total_count} samples"
         )
 
-        # Update speaker in database
-        updated = await db.add_speaker(
+        await db.add_speaker(
             speaker_id,
             existing_speaker.name,
             weighted_embedding,
@@ -539,14 +606,16 @@ async def enroll_append(
 
         log.info(f"Successfully appended to speaker: {speaker_id}")
 
+        # Persist each appended clip's embedding for the enrollment-health audit.
+        for sp, du, ev, orig in segment_records:
+            save_segment_record(speaker_id, sp, du, ev, original_file_path=orig)
+
         return {
             "updated": True,
             "speaker_id": speaker_id,
             "previous_samples": existing_count,
             "new_samples": new_count,
             "total_samples": total_count,
-            "previous_duration": round(existing_duration, 2),
-            "new_duration": round(new_total_duration, 2),
             "total_duration": round(existing_duration + new_total_duration, 2),
             "audio_saved": True,
             "saved_files": len(saved_audio_files),

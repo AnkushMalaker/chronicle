@@ -32,6 +32,7 @@ services:
       # Import API keys from environment
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SMALLEST_API_KEY=${SMALLEST_API_KEY}
       - GROQ_API_KEY=${GROQ_API_KEY}
       # Authentication (test-specific)
       - AUTH_SECRET_KEY=test-jwt-signing-key-for-integration-tests
@@ -66,8 +67,9 @@ services:
         condition: service_healthy
       redis-test:
         condition: service_started
-      langfuse-web-test:
-        condition: service_healthy
+      # langfuse-web-test removed from the gate: langfuse is optional observability and
+      # the backend degrades gracefully without it. Requiring it pulled in the whole
+      # langfuse stack (postgres/clickhouse/minio) — unnecessary for the e2e and heavy.
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/readiness"]
       interval: 10s
@@ -76,6 +78,9 @@ services:
       start_period: 60s
 
   webui-test:
+    # Gated behind a profile: the static webui Dockerfile was removed (webui is now
+    # dev-mode only) and the API/e2e tests don't need a UI. Nothing depends on it.
+    profiles: ["webui"]
     build:
       context: ./webui
       dockerfile: Dockerfile
@@ -352,6 +357,7 @@ services:
       - CONFIG_FILE=${TEST_CONFIG_FILE:-/app/test-configs/deepgram-openai.yml}
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SMALLEST_API_KEY=${SMALLEST_API_KEY}
       - GROQ_API_KEY=${GROQ_API_KEY}
       - AUTH_SECRET_KEY=test-jwt-signing-key-for-integration-tests
       - ADMIN_PASSWORD=test-admin-password-123
@@ -384,8 +390,8 @@ services:
         condition: service_healthy
       redis-test:
         condition: service_started
-      falkordb-test:
-        condition: service_healthy
+      # falkordb-test removed: it's no longer defined (FalkorDB was dropped when memory
+      # moved to the Markdown vault); this was a stale depends_on that blocks startup.
 
   # caddy:
   #   image: caddy:2-alpine

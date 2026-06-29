@@ -6,6 +6,8 @@ interface Props {
   filters: Record<string, unknown>
   onChangeFilter: (key: string, value: unknown) => void
   onResetFilter: (key: string) => void
+  /** Set a toggle filter and refetch synchronously (single-click on/off). */
+  onToggleFilter: (key: string, value: unknown) => void
   /** Called when an edit is committed (popover closed / chip removed). */
   onApply: () => void
   ctx: FilterContext
@@ -22,6 +24,7 @@ export default function AuditFilterBar({
   filters,
   onChangeFilter,
   onResetFilter,
+  onToggleFilter,
   onApply,
   ctx,
   loading,
@@ -61,6 +64,22 @@ export default function AuditFilterBar({
       {active.map((def) => {
         const value = filters[def.key] ?? def.defaultValue
         const Icon = def.icon
+        // Toggle filters are a single-click chip: clicking it turns the filter
+        // off (active chips are always "on"). No popover, no separate X.
+        if (def.toggle) {
+          return (
+            <button
+              key={def.key}
+              onClick={() => onToggleFilter(def.key, def.defaultValue)}
+              className="flex items-center space-x-1.5 rounded-full border text-sm pl-3 pr-2.5 py-1.5 border-blue-400 bg-blue-50 text-blue-700 dark:bg-blue-900/40 dark:text-blue-200 dark:border-blue-600 transition-colors"
+              title={`Turn off ${def.label.toLowerCase()} filter`}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              <span>{def.chipLabel(value)}</span>
+              <X className="h-3.5 w-3.5 opacity-70" />
+            </button>
+          )
+        }
         return (
           <div key={def.key} className="relative">
             <div
@@ -92,7 +111,7 @@ export default function AuditFilterBar({
                 <X className="h-3.5 w-3.5" />
               </button>
             </div>
-            {openKey === def.key && (
+            {openKey === def.key && def.Editor && (
               <div className="absolute z-20 mt-1 p-3 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-lg">
                 <def.Editor
                   value={value}
@@ -125,7 +144,15 @@ export default function AuditFilterBar({
                 return (
                   <button
                     key={def.key}
-                    onClick={() => setOpenKey(def.key)}
+                    onClick={() => {
+                      if (def.toggle) {
+                        // Single-click: activate and refetch, no popover.
+                        onToggleFilter(def.key, true)
+                        setOpenKey(null)
+                      } else {
+                        setOpenKey(def.key)
+                      }
+                    }}
                     className="flex items-center space-x-2 w-full px-3 py-1.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
                   >
                     <Icon className="h-3.5 w-3.5 text-gray-400" />

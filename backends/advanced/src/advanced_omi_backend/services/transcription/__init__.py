@@ -431,10 +431,40 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
             ) from e
         except httpx.HTTPStatusError as e:
             status = e.response.status_code
-            raise RuntimeError(
+            # For streaming requests the body isn't consumed yet, so read it
+            # to surface the actual error the transcription service reported.
+            body = ""
+            try:
+                if not e.response.is_closed:
+                    await e.response.aread()
+                body = e.response.text
+            except Exception as read_err:
+                body = f"<could not read response body: {read_err}>"
+            # Try to pull a cleaner message out of a JSON error payload.
+            detail = body.strip()
+            if detail:
+                try:
+                    payload = json.loads(detail)
+                    if isinstance(payload, dict):
+                        detail = str(
+                            payload.get("detail")
+                            or payload.get("error")
+                            or payload.get("message")
+                            or detail
+                        )
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            # Keep the surfaced body bounded so a giant traceback doesn't bloat logs.
+            if len(detail) > 2000:
+                detail = detail[:2000] + "… (truncated)"
+            hint = "Check your API key. " if status in (401, 403) else ""
+            msg = (
                 f"Transcription service '{self._name}' at {url} returned HTTP {status}. "
-                f"{'Check your API key.' if status in (401, 403) else ''}"
-            ) from e
+                f"{hint}"
+            )
+            if detail:
+                msg += f"Service error: {detail}"
+            raise RuntimeError(msg) from e
 
             # DEBUG: Log Deepgram response structure
             if "results" in data and "channels" in data.get("results", {}):

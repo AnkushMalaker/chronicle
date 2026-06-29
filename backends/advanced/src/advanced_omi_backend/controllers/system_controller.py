@@ -28,8 +28,14 @@ from advanced_omi_backend.config import (
 )
 from advanced_omi_backend.config import get_misc_settings as load_misc_settings
 from advanced_omi_backend.config import save_diarization_settings, save_misc_settings
-from advanced_omi_backend.config_loader import get_plugins_yml_path, save_config_section
+from advanced_omi_backend.config_loader import (
+    get_plugins_yml_path,
+    get_raw_models,
+    save_config_section,
+    save_models_list,
+)
 from advanced_omi_backend.model_registry import (
+    ModelDef,
     _find_config_path,
     get_models_registry,
     load_models_config,
@@ -1386,6 +1392,328 @@ async def test_llm_model(model_name: Optional[str]):
             "error": str(e),
             "status": "error",
         }
+
+
+# Model Registry Management Functions
+
+# Default-pointer keys exposed for editing → the model_type a chosen model must
+# have. ``llm`` and ``fast_llm`` both point at LLMs. ``live_segmentation`` is a
+# mode string (owned by misc-settings), not a model, so it's intentionally absent.
+_DEFAULT_KEY_TO_MODEL_TYPE = {
+    "llm": "llm",
+    "fast_llm": "llm",
+    "embedding": "embedding",
+    "stt": "stt",
+    "stt_stream": "stt_stream",
+    "tts": "tts",
+}
+
+# Model types editable from the registry UI (must be routable by the pipeline).
+_EDITABLE_MODEL_TYPES = ["llm", "embedding", "stt", "stt_stream", "tts"]
+
+# Sentinel sent to the browser instead of an inline secret, and recognised on the
+# way back in as "keep the stored value".
+_API_KEY_MASK = "••••••••"
+
+# Inline api_key values that aren't real secrets (placeholders) — shown verbatim.
+_NON_SECRET_API_KEYS = {"", "no-key", "dummy", "none", "null"}
+
+
+def _is_env_ref(value) -> bool:
+    """True if the value is an OmegaConf interpolation like ``${oc.env:VAR}``."""
+    return isinstance(value, str) and value.strip().startswith("${")
+
+
+def _mask_api_key(raw_value):
+    """Mask an inline secret for display; pass through refs/placeholders/None."""
+    if raw_value is None:
+        return ""
+    if _is_env_ref(raw_value):
+        return raw_value
+    if isinstance(raw_value, str) and raw_value.strip().lower() in _NON_SECRET_API_KEYS:
+        return raw_value
+    return _API_KEY_MASK
+
+
+def _model_view(model_def: ModelDef, raw_by_name: dict, default_names: set) -> dict:
+    """Build the UI-facing model dict, zipping registry (resolved/derived) with
+    raw config.yml (source + unmasked secret reference detection)."""
+    raw = raw_by_name.get(model_def.name)
+    raw_api_key = raw.get("api_key") if raw else model_def.api_key
+    return {
+        "name": model_def.name,
+        "model_type": model_def.model_type,
+        "model_provider": model_def.model_provider,
+        "model_name": model_def.model_name,
+        "model_url": model_def.model_url,
+        "api_family": model_def.api_family,
+        "api_key": _mask_api_key(raw_api_key),
+        "api_key_is_set": bool(raw_api_key)
+        and not (
+            isinstance(raw_api_key, str)
+            and raw_api_key.strip().lower() in _NON_SECRET_API_KEYS
+        ),
+        "api_key_is_ref": _is_env_ref(raw_api_key),
+        "description": model_def.description,
+        "model_params": dict(model_def.model_params or {}),
+        "capabilities": list(model_def.capabilities or []),
+        "embedding_dimensions": model_def.embedding_dimensions,
+        "model_output": model_def.model_output,
+        "thinking": model_def.thinking,
+        # 'config' = defined in config.yml (editable/deletable);
+        # 'default' = built-in template from defaults.yml (read-only baseline).
+        "source": "config" if model_def.name in raw_by_name else "default",
+        "is_default": model_def.name in default_names,
+    }
+
+
+async def get_models():
+    """Return all registry models grouped by type plus the active defaults.
+
+    Inline API keys are masked; ``${oc.env:...}`` references are shown verbatim so
+    the operator can see which env var backs a model without leaking the secret.
+    """
+    registry = get_models_registry()
+    if not registry:
+        raise RuntimeError("Model registry not loaded")
+
+    raw_by_name = {
+        m.get("name"): m
+        for m in get_raw_models()
+        if isinstance(m, dict) and m.get("name")
+    }
+    default_names = set(registry.defaults.values())
+
+    grouped = {t: [] for t in _EDITABLE_MODEL_TYPES}
+    for model_def in registry.models.values():
+        if model_def.model_type in grouped:
+            grouped[model_def.model_type].append(
+                _model_view(model_def, raw_by_name, default_names)
+            )
+    for t in grouped:
+        grouped[t].sort(key=lambda v: v["name"])
+
+    defaults = {
+        key: registry.defaults.get(key)
+        for key in (
+            "llm",
+            "fast_llm",
+            "embedding",
+            "stt",
+            "stt_stream",
+            "tts",
+            "live_segmentation",
+        )
+    }
+
+    return {"defaults": defaults, "models": grouped, "status": "success"}
+
+
+async def set_active_defaults(body: dict):
+    """Repoint one or more active-model defaults (llm/fast_llm/embedding/stt/
+    stt_stream/tts). Validates the target exists and its model_type matches the
+    key, then hot-reloads the registry and signals workers."""
+    registry = get_models_registry()
+    if not registry:
+        raise RuntimeError("Model registry not loaded")
+
+    updates: dict = {}
+    for key, model_name in (body or {}).items():
+        if key not in _DEFAULT_KEY_TO_MODEL_TYPE:
+            raise HTTPException(status_code=400, detail=f"Unknown default key '{key}'")
+        if not model_name:
+            continue
+        model_def = registry.get_by_name(model_name)
+        if not model_def:
+            raise HTTPException(
+                status_code=400, detail=f"Model '{model_name}' not found in registry"
+            )
+        expected = _DEFAULT_KEY_TO_MODEL_TYPE[key]
+        if model_def.model_type != expected:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Model '{model_name}' is a {model_def.model_type} model; "
+                    f"default '{key}' requires a {expected} model"
+                ),
+            )
+        updates[key] = model_name
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No valid defaults to update")
+
+    if not save_config_section("defaults", updates):
+        return {"status": "error", "message": "Failed to save defaults"}
+
+    load_models_config(force_reload=True)
+    from advanced_omi_backend.services.plugin_service import signal_worker_restart
+
+    signal_worker_restart()
+    logger.info("Updated active defaults: %s", updates)
+    return {
+        "status": "success",
+        "defaults": updates,
+        "requires_worker_restart": True,
+    }
+
+
+async def upsert_model(body: dict):
+    """Add or update a single model definition in config.yml.
+
+    Validates the def via the ModelDef schema. An incoming api_key equal to the
+    mask sentinel preserves the stored secret. Editing a default-only (defaults.yml)
+    model creates a config.yml override. Hot-reloads the registry afterwards.
+    """
+    if not isinstance(body, dict) or not body.get("name"):
+        raise HTTPException(status_code=400, detail="Model 'name' is required")
+
+    model_type = body.get("model_type")
+    if model_type not in _EDITABLE_MODEL_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"model_type must be one of {_EDITABLE_MODEL_TYPES}",
+        )
+
+    raw_models = get_raw_models()
+    existing = next((m for m in raw_models if m.get("name") == body["name"]), None)
+
+    # Preserve the stored secret when the form sends back the mask sentinel.
+    incoming_key = body.get("api_key")
+    if incoming_key == _API_KEY_MASK:
+        body["api_key"] = existing.get("api_key") if existing else None
+
+    # Validate shape via the single source of truth (raises on bad def).
+    try:
+        ModelDef(**body)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid model definition: {e}")
+
+    # Drop None/empty optional keys so we don't litter config.yml with nulls.
+    clean = {k: v for k, v in body.items() if v is not None}
+
+    new_models = []
+    replaced = False
+    for m in raw_models:
+        if m.get("name") == body["name"]:
+            new_models.append(clean)
+            replaced = True
+        else:
+            new_models.append(m)
+    if not replaced:
+        new_models.append(clean)
+
+    if not save_models_list(new_models):
+        return {"status": "error", "message": "Failed to save model"}
+
+    load_models_config(force_reload=True)
+    from advanced_omi_backend.services.plugin_service import signal_worker_restart
+
+    signal_worker_restart()
+    logger.info("%s model '%s'", "Updated" if replaced else "Added", body["name"])
+
+    registry = get_models_registry()
+    raw_by_name = {
+        m.get("name"): m
+        for m in get_raw_models()
+        if isinstance(m, dict) and m.get("name")
+    }
+    model_def = registry.get_by_name(body["name"]) if registry else None
+    view = (
+        _model_view(model_def, raw_by_name, set(registry.defaults.values()))
+        if model_def
+        else None
+    )
+    return {"status": "success", "model": view, "requires_worker_restart": True}
+
+
+async def delete_model(name: str):
+    """Delete a config.yml model. Refuses if it's an active default or a built-in
+    (defaults.yml-only) template."""
+    registry = get_models_registry()
+    if not registry:
+        raise RuntimeError("Model registry not loaded")
+
+    for key, default_name in registry.defaults.items():
+        if default_name == name:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Model '{name}' is the active '{key}'; repoint that default first",
+            )
+
+    raw_models = get_raw_models()
+    if not any(m.get("name") == name for m in raw_models):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Model '{name}' is a built-in template (defaults.yml) and cannot be deleted",
+        )
+
+    new_models = [m for m in raw_models if m.get("name") != name]
+    if not save_models_list(new_models):
+        return {"status": "error", "message": "Failed to delete model"}
+
+    load_models_config(force_reload=True)
+    from advanced_omi_backend.services.plugin_service import signal_worker_restart
+
+    signal_worker_restart()
+    logger.info("Deleted model '%s'", name)
+    return {"status": "success", "deleted": name}
+
+
+async def test_model(model_name: Optional[str]):
+    """Connectivity test for a registry model. LLMs do a trivial chat round-trip;
+    embedding models do a 1-token embeddings call; STT/TTS have no automated test."""
+    registry = get_models_registry()
+    if not registry:
+        raise RuntimeError("Model registry not loaded")
+
+    if not model_name:
+        return await test_llm_model(None)
+
+    model_def = registry.get_by_name(model_name)
+    if not model_def:
+        return {
+            "success": False,
+            "model_name": model_name,
+            "error": f"Model '{model_name}' not found",
+            "status": "error",
+        }
+
+    if model_def.model_type == "llm":
+        return await test_llm_model(model_name)
+
+    if model_def.model_type == "embedding":
+        try:
+            from advanced_omi_backend.openai_factory import create_openai_client
+
+            client = create_openai_client(
+                api_key=model_def.api_key or "",
+                base_url=model_def.resolved_url(),
+                is_async=True,
+            )
+            start = time.time()
+            await client.embeddings.create(model=model_def.model_name, input="ping")
+            latency_ms = int((time.time() - start) * 1000)
+            return {
+                "success": True,
+                "model_name": model_def.name,
+                "model_provider": model_def.model_provider,
+                "latency_ms": latency_ms,
+                "status": "success",
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "model_name": model_name,
+                "error": str(e),
+                "status": "error",
+            }
+
+    return {
+        "success": False,
+        "model_name": model_name,
+        "error": f"No automated test for {model_def.model_type} models",
+        "status": "unsupported",
+    }
 
 
 # Plugin Configuration Management Functions

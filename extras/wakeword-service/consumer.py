@@ -329,14 +329,19 @@ class WakeWordConsumer:
             # "Prime + say it" capture -> review queue (pending), same as a real
             # arm, so the user confirms wake / not-wake before it rolls into
             # training. Rescued false-negatives become positives once labeled.
-            self._save_sample(PENDING, event, event.audio)
+            # Off-loop: the disk write must not stall the per-client frame loop.
+            await asyncio.to_thread(self._save_sample, PENDING, event, event.audio)
             return
-        # Real acoustic arm: snapshot the trigger window for false-positive review,
-        # then forward the command turn to Hermes exactly as before.
-        self._save_sample(PENDING, event, event.trigger_audio)
-        # Collect-only (shadow) firing: the word is farming FP review data only —
-        # the trigger is saved above, but we do NOT dispatch a command to the plugin
-        # (no tone was played and no command turn was captured either).
+        # Real acoustic arm. Play the end-of-listening tone FIRST — it's a pure ack
+        # that needs only client_id, so it must never wait behind the disk write /
+        # user lookup / SSE / XADD below (a slow/near-full disk would otherwise make
+        # the tone lag). Collect-only (shadow) arms farm FP data silently: no tone,
+        # no command dispatch.
+        if not getattr(event, "collect_only", False):
+            await self._send_tone(event.client_id, "done")
+        # Snapshot the trigger window for false-positive review. Off-loop so the
+        # synchronous WAV/JSON writes don't block the frame loop.
+        await asyncio.to_thread(self._save_sample, PENDING, event, event.trigger_audio)
         if getattr(event, "collect_only", False):
             return
         await self._publish_detection(event)
@@ -417,8 +422,23 @@ class WakeWordConsumer:
                 "duration": round(event.eot_time - event.arm_time, 2),
             },
         )
-        # Play the "processing" tone on the device the moment the turn ends.
-        await self._send_tone(event.client_id, "done")
+        # Amber "Thinking" ring on LED-capable devices: capture is done, the backend
+        # is now batch-transcribing + dispatching. The executor refreshes this when
+        # dispatch actually starts; it reverts on its own if no command follows.
+        await self._publish_downlink(
+            event.client_id,
+            "led-control",
+            {
+                "effect": "Thinking",
+                "r": 1.0,
+                "g": 0.45,
+                "b": 0.0,
+                "brightness": 0.45,
+                "duration": 8.0,
+            },
+        )
+        # NOTE: the end-of-listening ("done") tone is played up front in
+        # _handle_event, before this bookkeeping, so it never lags under load.
         payload = {
             "client_id": event.client_id,
             "session_id": event.session_id,
@@ -447,6 +467,23 @@ class WakeWordConsumer:
         self, state: ClientWakeState, client_id: str, session_id: str
     ) -> None:
         """Push a UI pulse the instant the wake word arms (before capture/ASR)."""
+        # Listening tone FIRST — a pure ack needing only client_id, so it never waits
+        # behind the user lookup / SSE below (keeps the cue instant under load).
+        await self._send_tone(client_id, "armed")
+        # Cyan "Listening" ring on LED-capable devices (HAVPE). Like the tone it only
+        # needs client_id, so it stays snappy; non-LED clients ignore the frame.
+        await self._publish_downlink(
+            client_id,
+            "led-control",
+            {
+                "effect": "Listening For Command",
+                "r": 0.09,
+                "g": 0.73,
+                "b": 0.95,
+                "brightness": 0.45,
+                "duration": 12.0,
+            },
+        )
         user_id = await self._lookup_user_id(session_id)
         await self._publish_sse(
             user_id,
@@ -457,8 +494,6 @@ class WakeWordConsumer:
                 "score": round(getattr(state, "arm_score", 0.0), 4),
             },
         )
-        # Play the "listening" tone on the device the instant the wake word arms.
-        await self._send_tone(client_id, "armed")
         logger.info(f"🔔 wake.armed SSE for '{client_id}'")
 
     async def _send_tone(self, client_id: str, tone: str) -> None:

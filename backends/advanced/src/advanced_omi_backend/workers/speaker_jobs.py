@@ -25,6 +25,30 @@ from advanced_omi_backend.utils.job_utils import update_job_meta
 logger = logging.getLogger(__name__)
 
 
+class SpeakerServiceError(Exception):
+    """The speaker service was reached but failed to process the request.
+
+    Raised (rather than returned as ``{success: False}``) so the post-conversation
+    chain's failure machinery engages honestly: RQ marks the job FAILED instead of
+    "OK", ``Retry`` gets a shot at a transient blip, ``on_chain_job_failure`` records a
+    conversation-linked system event, and ``allow_failure`` dependencies still let the
+    rest of the pipeline (memory, title, events) run. Returning success here is what
+    made a hard HTTP 500 look "OK" all down the chain.
+    """
+
+
+class SpeakerReprocessFailed(SpeakerServiceError):
+    """A manual speaker-reprocess produced no usable result.
+
+    Subclasses :class:`SpeakerServiceError` so it propagates through the same failure
+    machinery (RQ-failed + conversation-linked system event). Raised in *create* mode —
+    where the new transcript version is only created once we have a usable result, the
+    way ``transcribe_full_audio_job`` does it. So a failed reprocess creates NO version,
+    leaves the conversation exactly as it was, and surfaces an error — instead of silently
+    leaving a new version with the old (unimproved) labels and reporting success.
+    """
+
+
 @async_job(redis=True, beanie=True)
 async def check_enrolled_speakers_job(
     session_id: str, user_id: str, client_id: str, *, redis_client=None
@@ -147,6 +171,7 @@ async def recognise_speakers_job(
     version_id: str,
     transcript_text: str = "",
     words: list | None = None,
+    source_version_id: str | None = None,
     *,
     redis_client=None,
 ) -> Dict[str, Any]:
@@ -158,14 +183,29 @@ async def recognise_speakers_job(
     2. If provider has word timestamps (e.g., Parakeet) → full pyannote diarization + identification
     3. If no word timestamps → cannot run diarization, keep existing segments
 
+    If pyannote re-diarization finds no speaker turns but the source already has
+    segments, it falls back to identifying those existing segments — so a diarization
+    miss still yields labels (identified names, or "Unknown Speaker 1..N").
+
     Speaker identification always runs if enrolled speakers exist, mapping
     generic labels ("Speaker 0") to enrolled speaker names ("Alice").
 
+    Two write modes:
+    - **In-place** (initial post-conversation chain): ``version_id`` refers to an
+      existing version this job refines in place.
+    - **Create-on-success** (manual reprocess, when ``source_version_id`` is given and
+      ``version_id`` does not exist yet): read from the source version and create
+      ``version_id`` ONLY once a usable result exists — the way
+      ``transcribe_full_audio_job`` does it. A failed/empty reprocess then creates no
+      version and raises, instead of leaving a degraded no-op version active.
+
     Args:
         conversation_id: Conversation ID
-        version_id: Transcript version ID to update
+        version_id: Transcript version ID to write (existing in-place, or to create)
         transcript_text: Transcript text from transcription job (optional, reads from DB if empty)
         words: Word-level timing data from transcription job (optional, reads from DB if empty)
+        source_version_id: When set (and version_id doesn't exist), read from this
+            version and create version_id on success (manual-reprocess create mode)
         redis_client: Redis client (injected by decorator)
 
     Returns:
@@ -189,26 +229,51 @@ async def recognise_speakers_job(
     # Get user_id from conversation
     user_id = conversation.user_id
 
-    # Resolve the transcript version to update. The handed-in version_id is the one
-    # the upstream transcription step produced and set active. When that step declined
-    # to create a new version (e.g. an empty/contentless batch re-transcription that
-    # kept the existing streaming transcript), version_id won't exist — so fall back to
-    # whatever transcript is currently active, which is exactly what upstream kept.
-    transcript_version = conversation.get_transcript_version(version_id)
-    if not transcript_version:
-        transcript_version = conversation.active_transcript
-        if transcript_version:
-            logger.warning(
-                f"Transcript version {version_id} not found; falling back to active "
-                f"version {transcript_version.version_id} (upstream likely kept the "
-                f"existing transcript)"
-            )
-            version_id = transcript_version.version_id
-        else:
+    # Resolve the SOURCE version (what we read from) and the write mode.
+    #
+    # In-place mode (initial post-conversation chain): version_id is an existing version
+    # this job refines in place; source == target.
+    #
+    # Create mode (manual reprocess): the controller pre-allocated version_id but did NOT
+    # create it (mirrors transcribe_full_audio_job). Read from source_version_id and only
+    # create version_id once we have a usable result — so a failed/empty reprocess creates
+    # no version and surfaces an error instead of leaving a degraded no-op version active.
+    target_version = conversation.get_transcript_version(version_id)
+    create_mode = target_version is None and source_version_id is not None
+    if create_mode:
+        source_version = conversation.get_transcript_version(source_version_id)
+        if not source_version:
             logger.error(
-                f"Transcript version {version_id} not found and no active version exists"
+                f"Source transcript version {source_version_id} not found for reprocess"
             )
-            return {"success": False, "error": "Transcript version not found"}
+            raise SpeakerReprocessFailed(
+                f"source transcript version {source_version_id} not found"
+            )
+        logger.info(
+            f"🎤 Create mode: reading source {source_version_id}, will create "
+            f"version {version_id} on success"
+        )
+    else:
+        source_version = target_version
+        if not source_version:
+            # Upstream declined to create the handed-in version (e.g. an empty batch
+            # re-transcription kept the existing transcript) — refine whatever is active.
+            source_version = conversation.active_transcript
+            if source_version:
+                logger.warning(
+                    f"Transcript version {version_id} not found; falling back to active "
+                    f"version {source_version.version_id} (upstream likely kept the "
+                    f"existing transcript)"
+                )
+                version_id = source_version.version_id
+            else:
+                logger.error(
+                    f"Transcript version {version_id} not found and no active version exists"
+                )
+                return {"success": False, "error": "Transcript version not found"}
+
+    # All reads below use the source version.
+    transcript_version = source_version
 
     # Check if speaker recognition is enabled
     speaker_client = SpeakerRecognitionClient()
@@ -438,8 +503,14 @@ async def recognise_speakers_job(
                 f"🎤 Speaker recognition service error: {error_type} - {error_message}"
             )
 
-            # Connection/timeout errors → skip gracefully (existing behavior)
+            # Connection/timeout errors → skip gracefully (existing behavior).
+            # Exception: in create mode (manual reprocess) we have nothing to write, so
+            # surface the failure instead of creating an empty/no-op version.
             if error_type in ("connection_failed", "timeout", "client_error"):
+                if create_mode:
+                    raise SpeakerReprocessFailed(
+                        f"speaker service unavailable ({error_type}): {error_message}"
+                    )
                 logger.warning(
                     f"⚠️ Speaker service unavailable ({error_type}), skipping speaker recognition. "
                     f"Downstream jobs (memory, title/summary, events) will proceed normally."
@@ -456,51 +527,68 @@ async def recognise_speakers_job(
                     "processing_time_seconds": time.time() - start_time,
                 }
 
-            # Validation errors → fail job, don't retry
-            elif error_type == "validation_error":
-                logger.error(f"❌ Speaker service validation error: {error_message}")
-                return {
-                    "success": False,
-                    "conversation_id": conversation_id,
-                    "version_id": version_id,
-                    "error": f"Validation error: {error_message}",
-                    "error_type": error_type,
-                    "retryable": False,  # Don't retry validation errors
-                    "processing_time_seconds": time.time() - start_time,
-                }
-
-            # Resource errors → fail job, can retry later
-            elif error_type == "resource_error":
-                logger.error(f"❌ Speaker service resource error: {error_message}")
-                return {
-                    "success": False,
-                    "conversation_id": conversation_id,
-                    "version_id": version_id,
-                    "error": f"Resource error: {error_message}",
-                    "error_type": error_type,
-                    "retryable": True,  # Can retry later when resources available
-                    "processing_time_seconds": time.time() - start_time,
-                }
-
-            # Unknown errors → fail job
+            # The service was reached but failed to process (HTTP 500 server_error,
+            # validation_error, resource_error, or anything unknown). RAISE so the
+            # failure is honest: RQ marks the job FAILED (not "OK"), Retry(max=2) gets a
+            # shot at a transient blip, on_chain_job_failure records a conversation-linked
+            # system event, and allow_failure deps still let memory/title/events run.
             else:
-                return {
-                    "success": False,
-                    "conversation_id": conversation_id,
-                    "version_id": version_id,
-                    "error": f"Speaker recognition failed: {error_type}",
-                    "error_details": error_message,
-                    "error_type": error_type,
-                    "processing_time_seconds": time.time() - start_time,
-                }
+                logger.error(
+                    f"❌ Speaker service {error_type}: {error_message} "
+                    f"(conversation {conversation_id})"
+                )
+                raise SpeakerServiceError(f"{error_type}: {error_message}")
 
-        # Service worked but found no segments (legitimate empty result)
+        # Pyannote re-diarization can occasionally find no speaker turns even on clearly
+        # audible speech (a segmentation miss — observed on short code-mixed phone audio).
+        # When that happens but the source already has segments (e.g. provider diarization
+        # we read), fall back to identifying those existing segments instead of giving up.
+        # The fallback result flows through the SAME unknown-label mapping below, so it
+        # yields identified names or "Unknown Speaker 1..N" — never a bare provider label.
+        if ran_pyannote_diarization and not (speaker_result or {}).get("segments"):
+            speech_segments = [
+                s
+                for s in transcript_version.segments
+                if getattr(s, "segment_type", "speech") == "speech"
+            ]
+            if speech_segments:
+                logger.warning(
+                    f"🎤 Re-diarization returned 0 segments; falling back to identifying "
+                    f"{len(speech_segments)} existing source segments"
+                )
+                segments_data = [
+                    {
+                        "start": s.start,
+                        "end": s.end,
+                        "text": s.text,
+                        "speaker": s.speaker,
+                    }
+                    for s in speech_segments
+                ]
+                speaker_result = await speaker_client.identify_provider_segments(
+                    conversation_id=conversation_id,
+                    segments=segments_data,
+                    user_id=user_id,
+                    per_segment=use_per_segment,
+                    min_segment_duration=0.5 if use_per_segment else 1.5,
+                )
+                # Segments now come from existing source labels, not fresh pyannote.
+                ran_pyannote_diarization = False
+
+        # Service worked but found no segments (legitimate empty result, and the fallback
+        # above — if any — also found nothing).
         if (
             not speaker_result
             or "segments" not in speaker_result
             or not speaker_result["segments"]
         ):
             logger.warning(f"🎤 Speaker recognition returned no segments")
+            if create_mode:
+                # Nothing usable to put in a new version — don't create one; surface it.
+                raise SpeakerReprocessFailed(
+                    "speaker reprocess produced no segments (diarization and "
+                    "segment-identification fallback both empty)"
+                )
             return {
                 "success": True,
                 "conversation_id": conversation_id,
@@ -611,19 +699,12 @@ async def recognise_speakers_job(
                 f"🎤 Re-inserted {len(non_speech_segments)} non-speech segments"
             )
 
-        # Update the transcript version
-        transcript_version.segments = updated_segments
-
         # Extract unique identified speakers for metadata
         identified_speakers = set()
         for seg in speaker_segments:
             identified_as = seg.get("identified_as")
             if identified_as and identified_as != "Unknown":
                 identified_speakers.add(identified_as)
-
-        # Update metadata
-        if not transcript_version.metadata:
-            transcript_version.metadata = {}
 
         sr_metadata = {
             "enabled": True,
@@ -637,11 +718,75 @@ async def recognise_speakers_job(
         }
         if speaker_result.get("partial_errors"):
             sr_metadata["partial_errors"] = speaker_result["partial_errors"]
-        transcript_version.metadata["speaker_recognition"] = sr_metadata
 
-        # Record which engine produced the speaker segments on this version
-        if ran_pyannote_diarization:
-            transcript_version.diarization_source = "pyannote"
+        # Which engine produced these segments: pyannote when it actually returned turns,
+        # otherwise carry the source's (we identified existing/provider segments).
+        diarization_source_value = (
+            "pyannote"
+            if ran_pyannote_diarization
+            else source_version.diarization_source
+        )
+
+        # Per-diarized-speaker pooled centroids used for identification, so a later
+        # "reprocess impact"/drift check can re-identify against the updated gallery with
+        # pure vector math (no GPU, no re-diarization). Only the cluster-then-identify
+        # (pyannote) path returns these; identify_provider_segments does not.
+        # Re-key from raw diar labels (SPEAKER_00) to the FINAL segment labels (name or
+        # "Unknown Speaker N") so each centroid maps 1:1 to its segments' `speaker`.
+        centroids_map = {}
+        raw_centroids = speaker_result.get("cluster_centroids") or {}
+        if raw_centroids:
+            diar_to_final = {}
+            for seg in speaker_segments:
+                diar = seg.get("speaker")
+                if diar is None:
+                    continue
+                diar_to_final[diar] = seg.get("identified_as") or unknown_label_map.get(
+                    diar, UNKNOWN_SPEAKER_PREFIX
+                )
+            centroids_map = {
+                diar_to_final.get(diar, diar): centroid
+                for diar, centroid in raw_centroids.items()
+            }
+
+        if create_mode:
+            # Build the new version only now that we have a usable result. Carry the
+            # source's text/words/provider; segments + speaker metadata are the new work.
+            new_metadata = {
+                "reprocessing_type": "speaker_diarization",
+                "source_version_id": source_version.version_id,
+                "trigger": "manual_reprocess",
+                "provider_capabilities": provider_capabilities,
+                "speaker_recognition": sr_metadata,
+            }
+            if centroids_map:
+                new_metadata["cluster_centroids"] = centroids_map
+            new_version = conversation.add_transcript_version(
+                version_id=version_id,
+                transcript=source_version.transcript,
+                words=source_version.words,
+                segments=updated_segments,
+                provider=source_version.provider,
+                model=source_version.model,
+                metadata=new_metadata,
+                set_as_active=True,
+            )
+            new_version.diarization_source = diarization_source_value
+            conversation.apply_status(settled=True)
+            logger.info(
+                f"🎤 Created reprocess version {version_id} from source "
+                f"{source_version.version_id} with {len(updated_segments)} segments"
+            )
+        else:
+            # In-place: refine the existing version.
+            transcript_version.segments = updated_segments
+            if not transcript_version.metadata:
+                transcript_version.metadata = {}
+            transcript_version.metadata["speaker_recognition"] = sr_metadata
+            if ran_pyannote_diarization:
+                transcript_version.diarization_source = "pyannote"
+            if centroids_map:
+                transcript_version.metadata["cluster_centroids"] = centroids_map
 
         await conversation.save()
 
@@ -670,6 +815,11 @@ async def recognise_speakers_job(
             timeout_occurred_at=time.time(),
         )
 
+        # In create mode no version was created — surface the failure rather than
+        # reporting a quiet success:False (which RQ treats as "OK", hiding it).
+        if create_mode:
+            raise SpeakerReprocessFailed("speaker reprocess timed out") from e
+
         return {
             "success": False,
             "conversation_id": conversation_id,
@@ -682,11 +832,22 @@ async def recognise_speakers_job(
             "processing_time_seconds": time.time() - start_time,
         }
 
+    except SpeakerServiceError:
+        # A genuine service failure — let it propagate so RQ fails the job and the
+        # chain's failure machinery (retry, conversation-linked system event,
+        # allow_failure deps) engages. Don't bury it as a success:False dict.
+        raise
+
     except Exception as speaker_error:
         logger.error(f"❌ Speaker recognition failed: {speaker_error}")
         import traceback
 
         logger.debug(traceback.format_exc())
+
+        # Create mode created no version — surface the failure so it isn't a silent
+        # no-op (RQ treats success:False as "OK"). In-place keeps the existing transcript.
+        if create_mode:
+            raise SpeakerReprocessFailed(str(speaker_error)) from speaker_error
 
         return {
             "success": False,

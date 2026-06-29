@@ -5,10 +5,12 @@ a superuser. Live updates are delivered separately over the SSE bus
 (``system.error`` events), so these are plain request/response.
 """
 
+import hmac
 import logging
+import os
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 from advanced_omi_backend.auth import current_superuser
@@ -20,8 +22,64 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/system-events", tags=["system-events"])
 
 
+def _ingest_token() -> str:
+    """Shared secret other services present to push events. Falls back to the
+    node-agent token so single/distributed setups that already have
+    SERVICE_MANAGER_TOKEN work without configuring a second secret."""
+    return (
+        os.getenv("SYSTEM_EVENT_INGEST_TOKEN")
+        or os.getenv("SERVICE_MANAGER_TOKEN")
+        or ""
+    )
+
+
+async def verify_ingest_token(authorization: str = Header(default="")) -> None:
+    """Bearer-token gate for the cross-service ingest endpoint. Unlike the rest of
+    this router (superuser-gated), services authenticate with a shared token, not a
+    user session."""
+    expected = _ingest_token()
+    if not expected:
+        # No token configured → endpoint is closed, not open.
+        raise HTTPException(
+            status_code=503,
+            detail="System-event ingest is not enabled (no SYSTEM_EVENT_INGEST_TOKEN / SERVICE_MANAGER_TOKEN).",
+        )
+    token = authorization.removeprefix("Bearer ").strip()
+    if not token or not hmac.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail="Invalid ingest token.")
+
+
 class AckSelectedRequest(BaseModel):
     event_ids: list[str]
+
+
+class IngestEventRequest(BaseModel):
+    severity: str = "error"
+    category: Optional[str] = None
+    source: str
+    title: str
+    detail: Optional[str] = None
+    traceback: Optional[str] = None
+    client_id: Optional[str] = None
+    conversation_id: Optional[str] = None
+    metadata: Optional[dict] = None
+
+
+@router.post("/ingest", dependencies=[Depends(verify_ingest_token)])
+async def ingest_system_event(body: IngestEventRequest):
+    """Record an event submitted by another Chronicle service (ASR, speaker-rec,
+    …). Token-gated, not user-gated, so services can report without a login."""
+    return await system_events_controller.ingest_external_event(
+        severity=body.severity,
+        category=body.category,
+        source=body.source,
+        title=body.title,
+        detail=body.detail,
+        traceback=body.traceback,
+        client_id=body.client_id,
+        conversation_id=body.conversation_id,
+        metadata=body.metadata,
+    )
 
 
 @router.get("")

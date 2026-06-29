@@ -31,6 +31,7 @@ win a frame early for an overlapping phrase — that only affects which review
 queue the trigger clip lands in, which a human reviews, not dispatch).
 """
 
+import asyncio
 import logging
 import os
 import time
@@ -417,16 +418,30 @@ class HermesDetector:
         # (and so a primed capture has a short lead-in before speech onset).
         self._push_preroll(state, audio)
 
+        # The wake/prime paths run synchronous ONNX inference, so hand them to a
+        # worker thread. ONNX Runtime releases the GIL during inference, so
+        # concurrent client streams score in parallel instead of serializing on the
+        # event loop. Safe to thread: each client has its own per-state interpreters
+        # (see new_client_state), and a client's process_frame is awaited
+        # sequentially, so no two threads ever touch one state's models at once.
+
         # "Prime + say it" data-collection mode takes precedence over arming.
         if state.priming:
-            return self._run_prime(state, client_id, session_id, audio)
+            return await asyncio.to_thread(
+                self._run_prime, state, client_id, session_id, audio
+            )
 
         if not state.armed:
             # _run_wake arms dispatch words (event comes later from capture) and
             # returns a shadow event immediately for collect-only words.
-            return self._run_wake(state, client_id, session_id, audio)
+            return await asyncio.to_thread(
+                self._run_wake, state, client_id, session_id, audio
+            )
 
-        # Armed: drive VAD + Smart Turn to capture the command turn.
+        # Armed: drive VAD + Smart Turn to capture the command turn. Left inline —
+        # it's async (awaits the Smart Turn model, which already yields), capture is
+        # a brief per-turn phase, and a to_thread per 32 ms VAD frame would cost more
+        # in handoff than it saves.
         return await self._run_capture(state, client_id, session_id, audio)
 
     def _push_preroll(self, state: ClientWakeState, audio: np.ndarray) -> None:

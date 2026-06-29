@@ -37,12 +37,26 @@ MEMORY_LOOKBACK_SECONDS = 86400
 # ---------------------------------------------------------------------------
 
 
+async def _record_failure(annotation, reason: str) -> None:
+    """Persist a training failure on an annotation so it can be surfaced/cleared.
+
+    Mirrors ``finetuning_routes._record_training_failure`` for the cron path: a
+    failed annotation records its attempt count + reason instead of being silently
+    re-tried forever, so the Fine-tuning page can show it and offer retry/discard.
+    """
+    annotation.training_attempts = (annotation.training_attempts or 0) + 1
+    annotation.training_error = reason
+    annotation.updated_at = datetime.now(timezone.utc)
+    await annotation.save()
+
+
 async def run_speaker_finetuning_job() -> dict:
     """Process applied diarization annotations and send to speaker recognition service.
 
     This mirrors the logic in ``finetuning_routes.process_annotations_for_training``
     but is invocable from the cron scheduler without an HTTP request.
     """
+    from advanced_omi_backend.constants import is_non_enrollable_speaker
     from advanced_omi_backend.models.annotation import Annotation, AnnotationType
     from advanced_omi_backend.models.conversation import Conversation
     from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
@@ -72,8 +86,23 @@ async def run_speaker_finetuning_job() -> dict:
     failed = 0
     cleaned = 0
 
+    skipped = 0
+
     for annotation in ready_for_training:
         try:
+            # Noise and placeholder "Unknown Speaker N" labels are not real people —
+            # never enroll them as voiceprints. Mark trained so they aren't retried.
+            if is_non_enrollable_speaker(annotation.corrected_speaker):
+                annotation.processed_by = (
+                    f"{annotation.processed_by},training"
+                    if annotation.processed_by
+                    else "training"
+                )
+                annotation.updated_at = datetime.now(timezone.utc)
+                await annotation.save()
+                skipped += 1
+                continue
+
             conversation = await Conversation.find_one(
                 Conversation.conversation_id == annotation.conversation_id
             )
@@ -105,6 +134,7 @@ async def run_speaker_finetuning_job() -> dict:
             )
             if not wav_bytes:
                 failed += 1
+                await _record_failure(annotation, "No audio for segment")
                 continue
 
             # Intentional: only single admin user (user_id=1) is supported currently
@@ -119,6 +149,9 @@ async def run_speaker_finetuning_job() -> dict:
                 )
                 if "error" in result:
                     failed += 1
+                    await _record_failure(
+                        annotation, f"Append failed: {result.get('error')}"
+                    )
                     continue
                 appended += 1
             else:
@@ -129,15 +162,19 @@ async def run_speaker_finetuning_job() -> dict:
                 )
                 if "error" in result:
                     failed += 1
+                    await _record_failure(
+                        annotation, f"Enroll failed: {result.get('error')}"
+                    )
                     continue
                 enrolled += 1
 
-            # Mark as trained
+            # Mark as trained (clear any prior failure record)
             annotation.processed_by = (
                 f"{annotation.processed_by},training"
                 if annotation.processed_by
                 else "training"
             )
+            annotation.training_error = None
             annotation.updated_at = datetime.now(timezone.utc)
             await annotation.save()
 
@@ -146,16 +183,24 @@ async def run_speaker_finetuning_job() -> dict:
                 f"Speaker finetuning: error processing annotation {annotation.id}: {e}"
             )
             failed += 1
+            try:
+                await _record_failure(annotation, f"Exception: {str(e)[:50]}")
+            except Exception:
+                logger.error(
+                    f"Speaker finetuning: failed to record failure for {annotation.id}"
+                )
 
     total = enrolled + appended
     logger.info(
         f"Speaker finetuning complete: {total} processed "
-        f"({enrolled} new, {appended} appended, {failed} failed, {cleaned} orphaned cleaned)"
+        f"({enrolled} new, {appended} appended, {failed} failed, "
+        f"{skipped} non-enrollable skipped, {cleaned} orphaned cleaned)"
     )
     return {
         "enrolled": enrolled,
         "appended": appended,
         "failed": failed,
+        "skipped": skipped,
         "cleaned": cleaned,
         "processed": total,
     }

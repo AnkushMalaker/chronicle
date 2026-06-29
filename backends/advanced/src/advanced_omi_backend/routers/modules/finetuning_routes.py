@@ -14,12 +14,54 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from advanced_omi_backend.auth import current_active_user
+from advanced_omi_backend.constants import is_non_enrollable_speaker
 from advanced_omi_backend.models.annotation import Annotation, AnnotationType
+from advanced_omi_backend.services.observability.system_events import record_event
 from advanced_omi_backend.users import User
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/finetuning", tags=["finetuning"])
+
+# Segments whose start is within this many seconds of the annotation's recorded
+# start are treated as the same segment when keying by time.
+_SEGMENT_START_TOLERANCE = 0.25
+
+
+def _resolve_annotated_segment(segments, segment_index, segment_start_time):
+    """Find the segment an annotation refers to.
+
+    Prefers matching by ``segment_start_time`` (stable across re-ordering) and
+    falls back to the stored index. Returns the segment or ``None`` if neither
+    locates a valid segment.
+    """
+    if segment_start_time is not None:
+        best = None
+        best_delta = _SEGMENT_START_TOLERANCE
+        for seg in segments:
+            delta = abs(seg.start - segment_start_time)
+            if delta <= best_delta:
+                best = seg
+                best_delta = delta
+        if best is not None:
+            return best
+    if segment_index is not None and 0 <= segment_index < len(segments):
+        return segments[segment_index]
+    return None
+
+
+async def _record_training_failure(annotation: Annotation, reason: str) -> None:
+    """Persist a training failure on the annotation so it can be surfaced/cleared.
+
+    Without this the annotation stays in the "applied, not trained" bucket and
+    re-fails on every run with no visible record — the Fine-tuning page appears
+    stuck. Recording the attempt + reason lets the UI show the failure and offer
+    retry/discard.
+    """
+    annotation.training_attempts = (annotation.training_attempts or 0) + 1
+    annotation.training_error = reason
+    annotation.updated_at = datetime.now(timezone.utc)
+    await annotation.save()
 
 
 @router.post("/process-annotations")
@@ -101,6 +143,19 @@ async def process_annotations_for_training(
 
         for annotation in ready_for_training:
             try:
+                # Noise and placeholder "Unknown Speaker N" labels are not real
+                # people — never enroll them as voiceprints. Mark trained so they
+                # aren't retried, then skip.
+                if is_non_enrollable_speaker(annotation.corrected_speaker):
+                    annotation.processed_by = (
+                        f"{annotation.processed_by},training"
+                        if annotation.processed_by
+                        else "training"
+                    )
+                    annotation.updated_at = datetime.now(timezone.utc)
+                    await annotation.save()
+                    continue
+
                 # 1. Get conversation and segment timing
                 conversation = await Conversation.find_one(
                     Conversation.conversation_id == annotation.conversation_id
@@ -108,22 +163,72 @@ async def process_annotations_for_training(
 
                 if not conversation or not conversation.active_transcript:
                     failed_count += 1
-                    errors.append(
-                        f"Conversation {annotation.conversation_id[:8]} not found"
-                    )
+                    reason = f"Conversation {annotation.conversation_id[:8]} not found"
+                    errors.append(reason)
+                    await _record_training_failure(annotation, reason)
                     continue
 
-                # Validate segment index
-                if annotation.segment_index >= len(
-                    conversation.active_transcript.segments
+                # Resolve the segment by start-time when recorded (robust to the
+                # segment list being re-ordered/filtered by a reprocess between
+                # annotation and apply); fall back to the stored index.
+                segment = _resolve_annotated_segment(
+                    conversation.active_transcript.segments,
+                    annotation.segment_index,
+                    annotation.segment_start_time,
+                )
+                if segment is None:
+                    failed_count += 1
+                    reason = f"Invalid segment index {annotation.segment_index}"
+                    errors.append(reason)
+                    await _record_training_failure(annotation, reason)
+                    continue
+
+                # Guard corrupt segment times (e.g. start > end, or start beyond
+                # the audio) — reconstruct_audio_segment would raise. Skip the
+                # voiceprint enrollment for this segment; the relabel already
+                # applied (apply doesn't touch audio). Surface it on the System
+                # Errors page as a data-integrity issue (the transcript itself is
+                # corrupt — usually fixable by reprocessing the conversation).
+                # NOTE: reconstruct_audio_segment clamps end_time to the audio
+                # duration but NOT start_time, so a segment starting beyond the audio
+                # (streaming-reconnect timeline inflation) yields end < start and
+                # raises — catch that here too, not just start > end.
+                audio_dur = conversation.audio_total_duration or 0.0
+                if not (segment.end > segment.start >= 0) or (
+                    audio_dur and segment.start >= audio_dur
                 ):
                     failed_count += 1
-                    errors.append(f"Invalid segment index {annotation.segment_index}")
+                    reason = (
+                        f"Segment {annotation.segment_index} has invalid times "
+                        f"({segment.start:.1f}s-{segment.end:.1f}s); skipped enrollment"
+                    )
+                    errors.append(reason)
+                    await _record_training_failure(annotation, reason)
+                    logger.warning(
+                        f"Skipping enrollment for {annotation.conversation_id[:8]} "
+                        f"segment {annotation.segment_index}: invalid times "
+                        f"{segment.start:.1f}-{segment.end:.1f}"
+                    )
+                    await record_event(
+                        severity="warning",
+                        category="data_integrity",
+                        source="speaker_triage_enroll",
+                        title="Transcript segment has invalid times",
+                        detail=(
+                            f"Segment {annotation.segment_index} of conversation "
+                            f"{annotation.conversation_id} has start={segment.start:.2f}s "
+                            f"end={segment.end:.2f}s (start must be < end and within the "
+                            f"audio). Voiceprint enrollment skipped; reprocess the "
+                            f"conversation's transcript to regenerate segment times."
+                        ),
+                        conversation_id=annotation.conversation_id,
+                        metadata={
+                            "segment_index": annotation.segment_index,
+                            "start": segment.start,
+                            "end": segment.end,
+                        },
+                    )
                     continue
-
-                segment = conversation.active_transcript.segments[
-                    annotation.segment_index
-                ]
 
                 # 2. Extract audio segment from MongoDB
                 logger.info(
@@ -140,7 +245,9 @@ async def process_annotations_for_training(
                 if not wav_bytes:
                     logger.warning(f"No audio data for annotation {annotation.id}")
                     failed_count += 1
-                    errors.append(f"No audio for segment {annotation.segment_index}")
+                    reason = f"No audio for segment {annotation.segment_index}"
+                    errors.append(reason)
+                    await _record_training_failure(annotation, reason)
                     continue
 
                 logger.info(f"Extracted {len(wav_bytes) / 1024:.1f} KB of audio")
@@ -163,7 +270,9 @@ async def process_annotations_for_training(
                     if "error" in result:
                         logger.error(f"Failed to append to speaker: {result}")
                         failed_count += 1
-                        errors.append(f"Append failed: {result.get('error')}")
+                        reason = f"Append failed: {result.get('error')}"
+                        errors.append(reason)
+                        await _record_training_failure(annotation, reason)
                         continue
 
                     appended_count += 1
@@ -184,7 +293,9 @@ async def process_annotations_for_training(
                     if "error" in result:
                         logger.error(f"Failed to enroll speaker: {result}")
                         failed_count += 1
-                        errors.append(f"Enroll failed: {result.get('error')}")
+                        reason = f"Enroll failed: {result.get('error')}"
+                        errors.append(reason)
+                        await _record_training_failure(annotation, reason)
                         continue
 
                     enrolled_count += 1
@@ -192,11 +303,12 @@ async def process_annotations_for_training(
                         f"✅ Successfully enrolled new speaker '{annotation.corrected_speaker}'"
                     )
 
-                # 4. Mark annotation as trained
+                # 4. Mark annotation as trained (clear any prior failure record)
                 if annotation.processed_by:
                     annotation.processed_by = f"{annotation.processed_by},training"
                 else:
                     annotation.processed_by = "training"
+                annotation.training_error = None
                 annotation.updated_at = datetime.now(timezone.utc)
                 await annotation.save()
 
@@ -205,7 +317,15 @@ async def process_annotations_for_training(
                     f"Error processing annotation {annotation.id}: {e}", exc_info=True
                 )
                 failed_count += 1
-                errors.append(f"Exception: {str(e)[:50]}")
+                reason = f"Exception: {str(e)[:50]}"
+                errors.append(reason)
+                try:
+                    await _record_training_failure(annotation, reason)
+                except Exception:
+                    logger.error(
+                        f"Failed to record training failure for {annotation.id}",
+                        exc_info=True,
+                    )
                 continue
 
         total_processed = enrolled_count + appended_count
@@ -288,6 +408,7 @@ async def get_finetuning_status(
 
         annotation_counts: dict[str, dict] = {}
         trained_diarization_list: list = []
+        failed_diarization_errors: list[str] = []
 
         # Collect all annotations to batch-check for orphans
         all_annotations_by_type: dict[AnnotationType, list] = {}
@@ -344,6 +465,9 @@ async def get_finetuning_status(
                 for a in processed
                 if not a.processed_by or "training" not in a.processed_by
             ]
+            # "Failed" = applied annotations that hit a training error and are still
+            # stuck (not yet trained). Surfaced so an admin can retry or discard them.
+            failed = [a for a in applied_not_trained if (a.training_attempts or 0) > 0]
 
             orphan_count = len(orphaned)
             total_orphaned += orphan_count
@@ -354,7 +478,15 @@ async def get_finetuning_status(
                 "applied": len(applied_not_trained),
                 "trained": len(trained),
                 "orphaned": orphan_count,
+                "failed": len(failed),
             }
+
+            if ann_type == AnnotationType.DIARIZATION and failed:
+                seen_errors: set[str] = set()
+                for a in failed:
+                    if a.training_error and a.training_error not in seen_errors:
+                        seen_errors.add(a.training_error)
+                        failed_diarization_errors.append(a.training_error)
 
             if ann_type == AnnotationType.DIARIZATION:
                 trained_diarization_list = trained
@@ -366,6 +498,7 @@ async def get_finetuning_status(
         pending_count = diarization.get("pending", 0)
         applied_count = diarization.get("applied", 0)
         trained_count = diarization.get("trained", 0)
+        failed_count = diarization.get("failed", 0)
 
         # Get last training run timestamp from diarization annotations
         last_training_run = None
@@ -413,6 +546,8 @@ async def get_finetuning_status(
                 "pending_annotation_count": pending_count,
                 "applied_annotation_count": applied_count,
                 "trained_annotation_count": trained_count,
+                "failed_annotation_count": failed_count,
+                "failed_annotation_errors": failed_diarization_errors[:10],
                 "last_training_run": last_training_run,
                 "cron_status": cron_status,
                 "annotation_counts": annotation_counts,
@@ -526,6 +661,87 @@ async def reattach_orphaned_annotations(
         raise HTTPException(status_code=403, detail="Admin access required")
 
     raise HTTPException(status_code=501, detail="Reattach functionality coming soon")
+
+
+# ---------------------------------------------------------------------------
+# Failed Annotation Management Endpoints
+# ---------------------------------------------------------------------------
+
+
+async def _find_failed_annotations(annotation_type: Optional[str]) -> list[Annotation]:
+    """Return applied-but-stuck annotations that have a recorded training failure.
+
+    These are ``processed=True`` and not yet trained, with ``training_attempts > 0``.
+    """
+    if annotation_type:
+        try:
+            ann_type = AnnotationType(annotation_type)
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail=f"Unknown annotation type: {annotation_type}"
+            )
+        candidates = await Annotation.find(
+            Annotation.annotation_type == ann_type,
+            Annotation.processed == True,
+        ).to_list()
+    else:
+        candidates = await Annotation.find(
+            Annotation.annotation_type == AnnotationType.DIARIZATION,
+            Annotation.processed == True,
+        ).to_list()
+
+    return [
+        a
+        for a in candidates
+        if (a.training_attempts or 0) > 0
+        and (not a.processed_by or "training" not in a.processed_by)
+    ]
+
+
+@router.post("/failed-annotations/retry")
+async def retry_failed_annotations(
+    current_user: User = Depends(current_active_user),
+    annotation_type: Optional[str] = Query(
+        None, description="Filter by annotation type (default: diarization)"
+    ),
+):
+    """Clear the recorded failure on stuck annotations so they can be retried.
+
+    Resets ``training_attempts``/``training_error`` (without deleting). The next
+    training run re-attempts them; if the underlying cause is fixed they will
+    succeed, otherwise they re-appear as failed.
+    """
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    failed = await _find_failed_annotations(annotation_type)
+    for a in failed:
+        a.training_attempts = 0
+        a.training_error = None
+        a.updated_at = datetime.now(timezone.utc)
+        await a.save()
+
+    logger.info(f"Reset {len(failed)} failed annotations for retry")
+    return JSONResponse(content={"reset_count": len(failed)})
+
+
+@router.delete("/failed-annotations")
+async def delete_failed_annotations(
+    current_user: User = Depends(current_active_user),
+    annotation_type: Optional[str] = Query(
+        None, description="Filter by annotation type (default: diarization)"
+    ),
+):
+    """Discard stuck annotations that keep failing to train (corrupt/unusable)."""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    failed = await _find_failed_annotations(annotation_type)
+    for a in failed:
+        await a.delete()
+
+    logger.info(f"Deleted {len(failed)} failed annotations")
+    return JSONResponse(content={"deleted_count": len(failed)})
 
 
 # ---------------------------------------------------------------------------

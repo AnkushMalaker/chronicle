@@ -43,6 +43,48 @@ def read_env_value(env_file_path: str, key: str) -> Optional[str]:
     return value if value else None
 
 
+def resolve_ingest_config(
+    search_paths: list,
+    host: str = "host.docker.internal",
+    default_port: str = "8000",
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve the cross-service System-Errors ingest URL + token for a sidecar.
+
+    Sidecar services (ASR, speaker-recognition) push their ERROR/CRITICAL logs to the
+    backend's ``POST /api/admin/system-events/ingest`` so failures surface on the admin
+    "System Errors" page instead of being buried in container logs. This sources the
+    backend address + auth token the same way other shared secrets are sourced: from
+    the backend .env (canonical hub on a main machine) or the repo-root .env (per-node
+    store), in the given order.
+
+    The token prefers a dedicated ``SYSTEM_EVENT_INGEST_TOKEN`` and falls back to
+    ``SERVICE_MANAGER_TOKEN`` (which the backend accepts as the ingest fallback).
+
+    Returns ``(ingest_url, ingest_token)``. Both are ``None`` when no backend config is
+    found locally (e.g. a remote service node with no backend .env) — the reporter is
+    opt-in and stays a no-op until both are set, so callers should only write non-None
+    values and leave the keys untouched otherwise.
+
+    Args:
+        search_paths: .env paths to search, in priority order.
+        host: Hostname the sidecar uses to reach the backend (default reaches the
+            host gateway from inside a container).
+        default_port: Backend HTTP port to use when ``BACKEND_PUBLIC_PORT`` is absent.
+
+    Example:
+        >>> url, token = resolve_ingest_config(["../../backends/advanced/.env", "../../.env"])
+    """
+    for path in search_paths:
+        token = read_env_value(path, "SYSTEM_EVENT_INGEST_TOKEN") or read_env_value(
+            path, "SERVICE_MANAGER_TOKEN"
+        )
+        if token:
+            port = read_env_value(path, "BACKEND_PUBLIC_PORT") or default_port
+            url = f"http://{host}:{port}/api/admin/system-events/ingest"
+            return url, token
+    return None, None
+
+
 def is_placeholder(value: str, *placeholder_variants: str) -> bool:
     """
     Check if a value is a placeholder.

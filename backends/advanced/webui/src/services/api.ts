@@ -146,6 +146,9 @@ export const conversationsApi = {
       }
     }),
 
+  // Conversations whose speaker labels would change under the current gallery (admin).
+  getDrift: () => api.get('/api/conversations/drift'),
+
   // Version management (transcript only — memory is no longer versioned)
   activateTranscriptVersion: (conversationId: string, versionId: string) => api.post(`/api/conversations/${conversationId}/activate-transcript/${versionId}`),
   getVersionHistory: (conversationId: string) => api.get(`/api/conversations/${conversationId}/versions`),
@@ -311,6 +314,16 @@ export const finetuningApi = {
   reattachOrphanedAnnotations: () =>
     api.post('/api/finetuning/orphaned-annotations/reattach'),
 
+  // Failed (stuck) annotation management
+  retryFailedAnnotations: (annotationType?: string) =>
+    api.post('/api/finetuning/failed-annotations/retry', null, {
+      params: annotationType ? { annotation_type: annotationType } : {}
+    }),
+  deleteFailedAnnotations: (annotationType?: string) =>
+    api.delete('/api/finetuning/failed-annotations', {
+      params: annotationType ? { annotation_type: annotationType } : {}
+    }),
+
   // Cron job management
   getCronJobs: () => api.get('/api/finetuning/cron-jobs'),
   updateCronJob: (jobId: string, data: { enabled?: boolean; schedule?: string }) =>
@@ -423,6 +436,16 @@ export const systemApi = {
     api.post('/api/admin/llm-operations', operations),
   testLLMModel: (modelName: string | null) =>
     api.post('/api/admin/llm-operations/test', { model_name: modelName }),
+
+  // Model registry + active defaults (Chronicle model configuration)
+  getModels: () => api.get('/api/admin/models'),
+  setActiveDefaults: (defaults: Record<string, string>) =>
+    api.post('/api/admin/defaults', defaults),
+  upsertModel: (model: Record<string, any>) => api.post('/api/admin/models', model),
+  deleteModel: (name: string) =>
+    api.delete(`/api/admin/models/${encodeURIComponent(name)}`),
+  testModel: (modelName: string | null) =>
+    api.post('/api/admin/models/test', { model_name: modelName }),
 
   // Network discovery
   getNetworkDiscovery: () => api.get('/api/system/network'),
@@ -666,12 +689,55 @@ export interface AuditConversation {
   created_at: string | null
   duration_seconds: number
   speakers: string[]
+  // Speech segments not matched to an enrolled speaker — the "needs triage" count.
+  unknown_speech_segments: number
+  // Speech segments identified as a speaker but at low confidence (within the
+  // margin of the match threshold) — likely-wrong labels to review.
+  marginal_identified_segments: number
+  // Pipeline processing status: 'active' | 'completed' | 'failed' | null (legacy).
+  processing_status: string | null
+  failure_stage: string | null
   analyzed: boolean
   speech_fraction: number | null
   derived_operation: 'split' | 'merge' | null
   audio_archived: boolean
   audio_archived_at: string | null
   archive_reason: string | null
+}
+
+export interface AuditSegment {
+  index: number
+  start: number
+  end: number
+  segment_start_time: number
+  text: string
+  speaker: string
+  identified_as: string | null
+  confidence: number | null
+  segment_type: string
+}
+
+export interface AuditSegmentsResponse {
+  conversation_id: string
+  duration_seconds: number
+  audio_available: boolean
+  segments: AuditSegment[]
+}
+
+export interface SegmentIdentifyResponse {
+  found: boolean
+  speaker_id: string | null
+  speaker_name: string | null
+  confidence: number | null
+  threshold?: number
+  status: string | null
+}
+
+export interface TriageApplyResponse {
+  applied_count: number
+  conversation_count: number
+  apply_errors?: string[]
+  enrolled: boolean | null
 }
 
 export interface AuditListResponse {
@@ -681,12 +747,45 @@ export interface AuditListResponse {
   offset: number
   scan_capped: boolean
   speech_threshold: number
+  // Live speaker-match threshold + comfort margin used to compute the
+  // per-conversation "low-confidence" review counts.
+  similarity_threshold: number
+  marginal_margin: number
   // Conversations the Analyze button would process (user's own live audio
   // without cached VAD analysis) — 0 means there is nothing to analyze.
   unanalyzed_count: number
   // Distinct speaker labels present in the scanned working set, so the
   // speaker filter offers only labels that exist in the current view.
   speakers: string[]
+}
+
+export interface SpeakerConfidenceRow {
+  name: string
+  nseg: number
+  nconv: number
+  mean: number
+  median: number
+  min: number
+  max: number
+  // % of this speaker's identifications below threshold+margin (noise-magnet signal).
+  marginal_pct: number
+  // % that would still clear the live threshold.
+  keep_pct: number
+}
+
+export interface SpeakerConfidenceOverview {
+  threshold: number
+  margin: number
+  total_identified: number
+  conversations_with_ids: number
+  conversations_scanned: number
+  scan_capped: boolean
+  marginal_count: number
+  marginal_fraction: number
+  histogram: { start: number; bin_width: number; counts: number[] }
+  survival: { threshold: number; keep: number; drop: number }[]
+  recommended_threshold: number | null
+  speakers: SpeakerConfidenceRow[]
 }
 
 // In-flight progress published by batch jobs via job.meta "batch_progress".
@@ -824,6 +923,11 @@ export const dataAuditApi = {
       force,
     }),
 
+  // Per-speaker identification-confidence overview (histogram, baselines,
+  // noise magnets, recommended threshold). Computed from stored confidence.
+  getSpeakerConfidence: () =>
+    api.get<SpeakerConfidenceOverview>('/api/data-audit/speakers/confidence'),
+
   // Poll an analysis job's status (includes in-flight batch progress)
   getJobStatus: (jobId: string) =>
     api.get<{ job_id: string; status: string; batch_progress?: BatchProgress }>(
@@ -882,6 +986,30 @@ export const dataAuditApi = {
       `/api/data-audit/conversations/${conversationId}/speech-regions`,
       { params: speakers?.length ? { speakers: speakers.join(',') } : undefined }
     ),
+
+  // Active-version transcript segments (with speaker-recognition confidence)
+  // for the speaker-triage panel.
+  getSegments: (conversationId: string) =>
+    api.get<AuditSegmentsResponse>(
+      `/api/data-audit/conversations/${conversationId}/segments`
+    ),
+
+  // Live speaker suggestion for one segment: closest enrolled speaker + cosine.
+  identifySegment: (conversationId: string, start: number, end: number) =>
+    api.post<SegmentIdentifyResponse>(
+      `/api/data-audit/conversations/${conversationId}/segments/identify`,
+      { start, end }
+    ),
+
+  // Count of unapplied triage decisions and conversations they span.
+  getTriagePending: () =>
+    api.get<{ pending_count: number; conversation_count: number }>(
+      '/api/data-audit/triage/pending'
+    ),
+
+  // Bulk-apply all pending speaker-triage decisions across every conversation.
+  applyTriage: () =>
+    api.post<TriageApplyResponse>('/api/data-audit/triage/apply'),
 
   // Split a conversation at the given time points (seconds)
   split: (conversationId: string, splitPoints: number[]) =>

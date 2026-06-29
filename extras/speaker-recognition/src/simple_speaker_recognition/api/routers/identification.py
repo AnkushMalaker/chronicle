@@ -17,6 +17,7 @@ from simple_speaker_recognition.api.core.utils import (
     validate_confidence,
 )
 from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
+from simple_speaker_recognition.core.cluster_identify import assign_clusters_to_speakers
 from simple_speaker_recognition.core.models import (
     DiarizeAndIdentifyRequest,
     IdentifyResponse,
@@ -608,65 +609,24 @@ async def diarize_identify_match(
         # than per-segment argmax: short noisy segments no longer flip identities or
         # each spawn their own "Unknown Speaker N". (cluster-then-identify)
         label_assignment: Dict[str, Dict] = {}
+        label_centroids: Dict[str, Any] = {}
         if user_id:
-            # Pool one centroid per diarized speaker from its longest segments.
+            # Pool one centroid per diarized speaker from its longest segments, then
+            # greedily assign each to an enrolled speaker (threshold + margin + exclusive).
             label_centroids = await audio_backend._embed_local_speakers(
                 tmp_path, diarization_segments
             )
-
-            # Identify each cluster, collecting ranked candidates for margin/exclusive.
-            cluster_candidates: Dict[str, List[Dict]] = {}
-            for label, centroid in label_centroids.items():
-                _, _, _, ranked = await db.identify_with_candidates(
-                    centroid, user_id=user_id
-                )
-                cluster_candidates[label] = ranked
-
-            # Greedy assignment: most-confident cluster first. Apply open-set
-            # threshold, a best-vs-runner-up margin, and (optionally) exclusivity so
-            # one enrolled person can't claim two diarized speakers.
-            taken_speaker_ids: set = set()
-            for label in sorted(
-                cluster_candidates,
-                key=lambda lbl: (
-                    cluster_candidates[lbl][0]["similarity"]
-                    if cluster_candidates[lbl]
-                    else -1.0
-                ),
-                reverse=True,
-            ):
-                ranked = cluster_candidates[label]
-                available = [
-                    c
-                    for c in ranked
-                    if c["similarity"] >= similarity_threshold
-                    and (not exclusive or c["id"] not in taken_speaker_ids)
-                ]
-                if not available:
-                    continue
-                chosen = available[0]
-                runner_up = available[1]["similarity"] if len(available) > 1 else 0.0
-                if (
-                    chosen["similarity"] - runner_up < identify_margin
-                    and len(available) > 1
-                ):
-                    # Two enrolled speakers are too close to call for this cluster.
-                    log.info(
-                        f"Cluster {label}: ambiguous "
-                        f"({chosen['name']}={chosen['similarity']:.3f} vs "
-                        f"runner-up={runner_up:.3f}, margin<{identify_margin}) -> unknown"
-                    )
-                    continue
-                label_assignment[label] = {
-                    "name": chosen["name"],
-                    "id": chosen["id"],
-                    "confidence": chosen["similarity"],
-                }
-                if exclusive:
-                    taken_speaker_ids.add(chosen["id"])
+            label_assignment = await assign_clusters_to_speakers(
+                db,
+                label_centroids,
+                user_id,
+                similarity_threshold,
+                identify_margin=identify_margin,
+                exclusive=exclusive,
+            )
+            for label, a in label_assignment.items():
                 log.info(
-                    f"Cluster {label} -> {chosen['name']} "
-                    f"(confidence {chosen['similarity']:.3f})"
+                    f"Cluster {label} -> {a['name']} (confidence {a['confidence']:.3f})"
                 )
 
         # Step 3: Build per-segment output, applying each cluster's single decision and
@@ -734,6 +694,13 @@ async def diarize_identify_match(
                 "similarity_threshold": similarity_threshold,
                 "processing_mode": "diarize_identify_match",
             },
+            # Per-diarized-speaker pooled centroids — stored by the backend so a future
+            # "reprocess impact" check can re-identify against the updated gallery without
+            # re-embedding (see /v1/reidentify-clusters).
+            "cluster_centroids": {
+                label: np.asarray(c, dtype=np.float32).tolist()
+                for label, c in label_centroids.items()
+            },
         }
 
         log.info(
@@ -744,6 +711,119 @@ async def diarize_identify_match(
 
     finally:
         # Clean up temporary file
+        tmp_path.unlink(missing_ok=True)
+
+
+class ReidentifyClustersRequest(BaseModel):
+    """Replay cluster→speaker assignment against the current gallery (no audio)."""
+
+    clusters: Dict[str, List[float]]
+    user_id: int
+    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD
+    identify_margin: float = 0.1
+    exclusive: bool = True
+
+
+@router.post("/v1/reidentify-clusters")
+async def reidentify_clusters(
+    req: ReidentifyClustersRequest, db: UnifiedSpeakerDB = Depends(get_db)
+):
+    """Re-identify stored per-cluster centroids against the CURRENT gallery.
+
+    Pure vector math (no GPU, no audio) — powers the "reprocess impact" check: feed a
+    past conversation's stored cluster centroids and get what the speaker labels would
+    be now, after voiceprint cleanup. Returns ``{label: {name, id, confidence}}`` for
+    clusters that resolve to an enrolled speaker.
+    """
+    centroids = {
+        label: np.asarray(vec, dtype=np.float32) for label, vec in req.clusters.items()
+    }
+    assignments = await assign_clusters_to_speakers(
+        db,
+        centroids,
+        req.user_id,
+        req.similarity_threshold,
+        identify_margin=req.identify_margin,
+        exclusive=req.exclusive,
+    )
+    return {"assignments": assignments}
+
+
+@router.post("/v1/embed-clusters")
+async def embed_clusters(
+    segments_data: str = Form(
+        ..., description='JSON list of {"speaker","start","end"} diarized segments'
+    ),
+    conversation_id: Optional[str] = Form(
+        None, description="Fetch audio from the backend for this conversation"
+    ),
+    backend_token: Optional[str] = Form(
+        None, description="JWT for backend audio fetch (required with conversation_id)"
+    ),
+    file: UploadFile = File(None, description="Or upload the audio directly"),
+):
+    """Pool one centroid per diarized speaker for an EXISTING segmentation.
+
+    Used by the one-time backlog backfill: it embeds a past conversation's clusters from
+    its already-stored segment boundaries (no re-diarization), so the stored centroids
+    match what production identification used. Returns ``{label: centroid}``.
+    """
+    audio_backend = get_audio_backend()
+    if not audio_backend:
+        raise HTTPException(503, "Audio backend not initialized")
+    if not conversation_id and not file:
+        raise HTTPException(
+            400, "Provide either conversation_id+backend_token or a file"
+        )
+    if conversation_id and not backend_token:
+        raise HTTPException(400, "backend_token required with conversation_id")
+
+    try:
+        raw_segments = json.loads(segments_data)
+    except json.JSONDecodeError as e:
+        raise HTTPException(400, f"Invalid segments_data JSON: {e}") from e
+
+    diar_segments = [
+        {
+            "speaker": s.get("speaker") or s.get("label"),
+            "start": float(s["start"]),
+            "end": float(s["end"]),
+        }
+        for s in raw_segments
+        if (s.get("speaker") or s.get("label")) is not None
+    ]
+    if not diar_segments:
+        raise HTTPException(400, "No usable segments (need speaker + start + end)")
+
+    if conversation_id:
+        from simple_speaker_recognition.api.service import auth as settings
+        from simple_speaker_recognition.core.backend_client import BackendClient
+
+        backend_client = BackendClient(settings.backend_api_url)
+        try:
+            total = max(s["end"] for s in diar_segments)
+            wav_bytes = await backend_client.get_audio_segment(
+                conversation_id, backend_token, start=0.0, duration=total
+            )
+        finally:
+            await backend_client.close()
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+            tmp_file.write(wav_bytes)
+            tmp_path = Path(tmp_file.name)
+    else:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+            tmp_file.write(await file.read())
+            tmp_path = Path(tmp_file.name)
+
+    try:
+        centroids = await audio_backend._embed_local_speakers(tmp_path, diar_segments)
+        return {
+            "clusters": {
+                label: np.asarray(c, dtype=np.float32).tolist()
+                for label, c in centroids.items()
+            }
+        }
+    finally:
         tmp_path.unlink(missing_ok=True)
 
 

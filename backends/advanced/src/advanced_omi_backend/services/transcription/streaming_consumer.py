@@ -278,6 +278,30 @@ class StreamingTranscriptionConsumer:
 
         return streams
 
+    async def _stream_has_fresh_entries(
+        self, stream_name: str, max_age_seconds: float = 10.0
+    ) -> bool:
+        """True if the stream's newest entry is younger than ``max_age_seconds``.
+
+        Used to distinguish a genuinely-finished stream from one a reconnecting
+        device has resumed writing to. A live producer emits a chunk every ~0.25s,
+        so a last entry within 10s means audio is actively flowing. Redis stream IDs
+        are ``<ms>-<seq>``, so the timestamp comes free from the entry id — no need
+        to decode the payload. Errors return False (treat as not-fresh → safe skip).
+        """
+        try:
+            entries = await self.redis_client.xrevrange(stream_name, count=1)
+            if not entries:
+                return False
+            entry_id = entries[0][0]
+            if isinstance(entry_id, bytes):
+                entry_id = entry_id.decode()
+            entry_ms = int(entry_id.split("-")[0])
+            return (time.time() * 1000 - entry_ms) < (max_age_seconds * 1000)
+        except Exception as e:  # noqa: BLE001 — best-effort liveness probe
+            logger.debug(f"Freshness check failed for {stream_name}: {e}")
+            return False
+
     async def setup_consumer_group(self, stream_name: str):
         """Create consumer group if it doesn't exist."""
         try:
@@ -1198,10 +1222,26 @@ class StreamingTranscriptionConsumer:
                     session_id = stream_name.replace("audio:stream:", "")
                     completion_key = f"transcription:complete:{session_id}"
                     if await self.redis_client.exists(completion_key):
-                        logger.debug(
-                            f"Stream {stream_name} already completed, skipping"
-                        )
-                        continue
+                        # session_id is stable across reconnects, so the flag may be
+                        # stale: a device reconnected onto the same stream after the
+                        # prior connection's provider stream closed. Producer.init_session
+                        # clears the flag on (re)connect, but a backend-only restart
+                        # leaves THIS worker's old process_stream task alive, and it can
+                        # set the flag (idle-timeout exit) AFTER init_session cleared it
+                        # — re-poisoning the resumed stream until the 5-min TTL.
+                        # Self-heal: if fresh audio is flowing into a "completed" stream,
+                        # the session resumed — drop the flag and re-attach.
+                        if await self._stream_has_fresh_entries(stream_name):
+                            logger.info(
+                                f"Stream {stream_name} marked complete but has fresh "
+                                f"audio — session resumed, clearing flag and re-attaching"
+                            )
+                            await self.redis_client.delete(completion_key)
+                        else:
+                            logger.debug(
+                                f"Stream {stream_name} already completed, skipping"
+                            )
+                            continue
 
                     # Setup consumer group (no manual lock needed)
                     await self.setup_consumer_group(stream_name)

@@ -156,6 +156,44 @@ async def play_tone_on_device(
         logger.debug(f"Failed to publish '{tone}' tone downlink for {client_id}: {e}")
 
 
+# LED ring feedback colours (0..1 RGB) the firmware tints its animation with.
+# "Error" is hardcoded red on-device, so its colour is irrelevant.
+_LED_LISTEN_COLOR = {"r": 0.09, "g": 0.73, "b": 0.95}  # cyan
+_LED_THINK_COLOR = {"r": 1.0, "g": 0.45, "b": 0.0}  # amber
+
+
+async def set_device_led(
+    redis_client: redis.Redis,
+    client_id: str,
+    *,
+    effect: str,
+    color: Optional[dict] = None,
+    brightness: float = 0.45,
+    duration: float = 10.0,
+) -> None:
+    """Drive an LED-capable device's ring to a named effect via its downlink.
+
+    Visual analogue of :func:`play_tone_on_device`: the ``led-control`` frame goes
+    to every client type, but only the HAVPE relay acts on it (other clients ignore
+    unknown downlink types). The firmware reverts to its connectivity colour after
+    ``duration`` seconds. Best-effort; never raises.
+    """
+    if not client_id:
+        return
+    data: dict[str, Any] = {
+        "effect": effect,
+        "brightness": brightness,
+        "duration": duration,
+    }
+    if color:
+        data.update(color)
+    msg = {"type": "led-control", "data": data}
+    try:
+        await redis_client.publish(f"device:downlink:{client_id}", json.dumps(msg))
+    except Exception as e:  # noqa: BLE001 - LED feedback is best-effort
+        logger.debug(f"Failed to publish led-control downlink for {client_id}: {e}")
+
+
 def _ctx_key(session_id: str) -> str:
     return f"followup:ctx:{session_id}"
 
@@ -306,6 +344,7 @@ async def execute_voice_command(
     reason: Optional[str] = None,
     capture_secs: Optional[float] = None,
     asr_ms: Optional[float] = None,
+    quiet: bool = False,
 ) -> str:
     """Dispatch a voice command, speak the reply, emit SSE, and manage the window.
 
@@ -363,6 +402,18 @@ async def execute_voice_command(
         f"🎙️ Executing voice command (source={source}, user={user_id}, "
         f"session={session_id}, command='{command[:50]}')"
     )
+    # "Thinking" ring while we dispatch — the agent path (e.g. Hermes) can take many
+    # seconds, so the wait should read as intentional. Refreshes the end-of-turn cue.
+    # Suppressed for quiet sources (e.g. the dial), whose feedback is the result
+    # itself (the lights changing) plus the device's own local dial animation.
+    if not quiet:
+        await set_device_led(
+            redis_client,
+            client_id,
+            effect="Thinking",
+            color=_LED_THINK_COLOR,
+            duration=15.0,
+        )
     try:
         _dispatch_start = time.perf_counter()
         results = await plugin_router.dispatch_event(
@@ -404,7 +455,7 @@ async def execute_voice_command(
             },
         )
 
-        if reply:
+        if reply and not quiet:
             await speak_on_device(redis_client, client_id, session_id, reply, timer)
 
         # Only arm follow-ups when the command actually did something.
@@ -423,6 +474,15 @@ async def execute_voice_command(
                     "command": command,
                 },
             )
+            # "Listening" ring for the open follow-up window (no wake word needed).
+            if not quiet:
+                await set_device_led(
+                    redis_client,
+                    client_id,
+                    effect="Listening For Command",
+                    color=_LED_LISTEN_COLOR,
+                    duration=float(FOLLOWUP_WINDOW_SECS),
+                )
 
         return reply
     finally:

@@ -7,7 +7,6 @@ import { useTheme } from '../contexts/ThemeContext'
 import { useSystemData, useRestartWorkers, useRestartBackend } from '../hooks/useSystem'
 import { systemApi } from '../services/api'
 import ExternalServices from '../components/ExternalServices'
-import AsrContextSettings from '../components/AsrContextSettings'
 import RemoteControl from '../components/RemoteControl'
 
 function getBackendHttpUrl(): string {
@@ -276,14 +275,14 @@ export default function System() {
       )}
 
       {/* Header */}
-      <div className="flex justify-between items-center mb-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center mb-6">
         <div className="flex items-center space-x-2">
-          <Activity className="h-6 w-6 text-blue-600" />
+          <Activity className="h-6 w-6 text-blue-600 flex-shrink-0" />
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
             System Status
           </h1>
         </div>
-        <div className="flex items-center space-x-4">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-4">
           {lastUpdated && (
             <span className="text-sm text-gray-600 dark:text-gray-400">
               Last updated: {lastUpdated.toLocaleTimeString()}
@@ -579,14 +578,10 @@ export default function System() {
         </div>
       )}
 
-      {/* External Services (host service-manager agent) */}
+      {/* External Services (host service-manager agent) — lifecycle only.
+          Provider config + ASR context now live on the Settings page. */}
       <div className="mb-6">
-        <ExternalServices isAdmin={isAdmin} />
-      </div>
-
-      {/* ASR recognition hints (keyword boosting vs LLM context prompt) */}
-      <div className="mb-6">
-        <AsrContextSettings isAdmin={isAdmin} />
+        <ExternalServices isAdmin={isAdmin} mode="lifecycle" />
       </div>
 
       {/* Claude remote-control session (spawn Claude Code sessions from the phone) */}

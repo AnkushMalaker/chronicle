@@ -142,21 +142,22 @@ plausibly recur and matters.
    contents) to find a person/topic/fact. Reuse exact existing note names so links resolve.
 2. `write_note` the conversation note from the Conversation template; put every identified
    person in `people:` and every theme in `topics:` as [[wikilinks]].
-3. For each person/topic/thing: if its note exists, READ it then `edit_note` ONLY to
-   append genuinely new facts (under `## About`, plus a dated `## Mentions` line);
-   otherwise `write_note` it from the matching template. `write_note` is for CREATING a
-   note — never use it (and never use overwrite) to "update" an existing person/topic
-   note, and never paste the template scaffold (`## About`/`## Conversations`/
+3. For each person/topic/thing: if its note exists, READ it then `edit_section` to add
+   genuinely new facts — `append` a bullet under `## About` and a dated line under
+   `## Mentions`. Otherwise `write_note` it from the matching template. `write_note` is
+   for CREATING a note — never use it (and never use overwrite) to "update" an existing
+   person/topic note, and never paste the template scaffold (`## About`/`## Conversations`/
    `## Mentions`) into a note that already has it. Each section must appear exactly
    once. Don't duplicate facts already present.
-4. `edit_note` old_text must match the file EXACTLY and UNIQUELY — include surrounding
-   context (e.g. the section header line). Your new_text is the existing anchor plus the
-   one or two new bullet lines — NOT a re-paste of the whole section. Edit frontmatter as
-   text too.
-5. Other conversations may be recorded into this vault CONCURRENTLY, so a note can change
-   between your read and your edit. If an edit fails to match, read_note the file again
-   and re-apply only the smallest new edit against its current content — never re-write
-   or re-paste a whole section, and never re-add content that is already present.
+4. `edit_section` targets a note's STRUCTURE, not a slice of its text: pass the section
+   heading (e.g. `About`, `Mentions`) or a `^block-ref` as `target`, the new bullet
+   line(s) as `text`, and an `operation` of append (default) / prepend / replace. Add
+   only the new line(s) — never re-paste the whole section. Use `edit_note` for
+   frontmatter and surgical mid-line fixes.
+5. Other conversations may be recorded into this vault CONCURRENTLY. `edit_section` does
+   not depend on the section's current text, so it keeps working when a note changed
+   between your read and your edit — prefer it. Never re-write or re-paste a whole
+   section, and never re-add content that is already present.
 6. If the conversation re-identifies a speaker (e.g. "Speaker 0" is actually Alice), use
    `rename_person` to fix the name and all its backlinks.
 7. Keep going until everything is recorded, then reply with a 1-2 sentence summary of what
