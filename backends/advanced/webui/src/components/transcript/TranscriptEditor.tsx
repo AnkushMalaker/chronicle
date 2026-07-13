@@ -80,6 +80,7 @@ export default function TranscriptEditor({
   const [text, setText] = useState<any[]>([])
   const [inserts, setInserts] = useState<any[]>([])
   const [timing, setTiming] = useState<any[]>([])
+  const [deletions, setDeletions] = useState<any[]>([])
 
   const [editingSegment, setEditingSegment] = useState<number | null>(null)
   const [editedText, setEditedText] = useState('')
@@ -87,6 +88,9 @@ export default function TranscriptEditor({
   const [segmentEditError, setSegmentEditError] = useState<string | null>(null)
 
   const [timingEditSegment, setTimingEditSegment] = useState<number | null>(null)
+  // Live region of the linked timing editor while editing a segment's text — null
+  // until the user actually drags (so an untouched waveform saves no timing change).
+  const [timingRegion, setTimingRegion] = useState<Region | null>(null)
   const [regionError, setRegionError] = useState<string | null>(null)
   const [insertOpen, setInsertOpen] = useState<number | null>(null) // afterIndex
 
@@ -101,16 +105,18 @@ export default function TranscriptEditor({
   const insertOnWaveform = showWaveform && hasAudio && !!duration
 
   const reload = useCallback(async () => {
-    const [d, t, i, tm] = await Promise.all([
+    const [d, t, i, tm, dl] = await Promise.all([
       annotationsApi.getDiarizationAnnotations(conversationId),
       annotationsApi.getTranscriptAnnotations(conversationId),
       annotationsApi.getInsertAnnotations(conversationId),
       annotationsApi.getTimingAnnotations(conversationId),
+      annotationsApi.getDeletionAnnotations(conversationId),
     ])
     setDiar(d.data)
     setText(t.data)
     setInserts(i.data)
     setTiming(tm.data)
+    setDeletions(dl.data)
   }, [conversationId])
 
   useEffect(() => {
@@ -121,7 +127,8 @@ export default function TranscriptEditor({
   const pendingText = useMemo(() => text.filter((a) => !a.processed), [text])
   const pendingInsert = useMemo(() => inserts.filter((a) => !a.processed), [inserts])
   const pendingTiming = useMemo(() => timing.filter((a) => !a.processed), [timing])
-  const totalPending = pendingDiar.length + pendingText.length + pendingInsert.length + pendingTiming.length
+  const pendingDeletion = useMemo(() => deletions.filter((a) => !a.processed), [deletions])
+  const totalPending = pendingDiar.length + pendingText.length + pendingInsert.length + pendingTiming.length + pendingDeletion.length
 
   const allSpeakers = useMemo(() => {
     const list = [...enrolledSpeakers]
@@ -157,6 +164,7 @@ export default function TranscriptEditor({
 
   useEffect(() => {
     if (editingSegment === null) setTimingEditSegment(null)
+    setTimingRegion(null) // fresh segment / closed = no pending drag
   }, [editingSegment])
 
   const noteRecent = (s: string) => setRecentSpeakers((p) => [s, ...p.filter((x) => x !== s)])
@@ -202,22 +210,35 @@ export default function TranscriptEditor({
       setSegmentEditError('Segment text cannot be empty')
       return
     }
-    if (editedText === original) {
+    // One Save commits BOTH the text edit and any timing drag from the linked
+    // waveform editor — so adjusting the span while editing text isn't silently lost.
+    const seg = segments[idx]
+    const textChanged = editedText !== original
+    const timingChanged =
+      !!timingRegion &&
+      (Math.abs(timingRegion.start - seg.start) > 0.02 || Math.abs(timingRegion.end - seg.end) > 0.02)
+
+    if (!textChanged && !timingChanged) {
       setEditingSegment(null)
       return
     }
     try {
       setSavingSegment(true)
       setSegmentEditError(null)
-      const existing = pendingText.find((a) => a.segment_index === idx)
-      if (existing) await annotationsApi.updateAnnotation(existing.id, { corrected_text: editedText })
-      else
-        await annotationsApi.createTranscriptAnnotation({
-          conversation_id: conversationId,
-          segment_index: idx,
-          original_text: original,
-          corrected_text: editedText,
-        })
+      if (textChanged) {
+        const existing = pendingText.find((a) => a.segment_index === idx)
+        if (existing) await annotationsApi.updateAnnotation(existing.id, { corrected_text: editedText })
+        else
+          await annotationsApi.createTranscriptAnnotation({
+            conversation_id: conversationId,
+            segment_index: idx,
+            original_text: original,
+            corrected_text: editedText,
+          })
+      }
+      if (timingChanged && timingRegion) {
+        await handleSaveTiming(idx, timingRegion)
+      }
       setEditingSegment(null)
       setEditedText('')
       await reload()
@@ -229,36 +250,18 @@ export default function TranscriptEditor({
   }
 
   const handleSaveTiming = async (idx: number, region: Region) => {
-    try {
-      setRegionError(null)
-      await annotationsApi.createTimingAnnotation({
-        conversation_id: conversationId,
-        segment_index: idx,
-        new_start: region.start,
-        new_end: region.end,
-      })
-      await reload()
-    } catch (err: any) {
-      setRegionError(err.response?.data?.detail || err.message || 'Failed to save timing')
-    }
-  }
-
-  const handleAddTwin = async (idx: number, segment: Segment, region: Region) => {
-    try {
-      setRegionError(null)
-      await annotationsApi.createInsertAnnotation({
-        conversation_id: conversationId,
-        insert_after_index: idx,
-        insert_text: segment.text || '',
-        insert_segment_type: 'speech',
-        insert_speaker: segment.speaker || '',
-        insert_start: region.start,
-        insert_end: region.end,
-      })
-      await reload()
-    } catch (err: any) {
-      setRegionError(err.response?.data?.detail || err.message || 'Failed to add segment')
-    }
+    // Upsert: one pending timing per segment (drop a prior pending one for this
+    // segment so re-dragging doesn't pile up duplicate annotations).
+    setRegionError(null)
+    const prior = pendingTiming.find((a) => a.segment_index === idx)
+    if (prior) await annotationsApi.deleteAnnotation(prior.id)
+    await annotationsApi.createTimingAnnotation({
+      conversation_id: conversationId,
+      segment_index: idx,
+      new_start: region.start,
+      new_end: region.end,
+    })
+    await reload()
   }
 
   const handlePlayRegion = (region: Region) =>
@@ -266,6 +269,18 @@ export default function TranscriptEditor({
 
   const handleDeleteAnnotation = async (annotationId: string) => {
     await annotationsApi.deleteAnnotation(annotationId)
+    await reload()
+  }
+
+  // Toggle a pending "delete this segment" mark. Clicking again undoes it.
+  const handleToggleDeleteSegment = async (idx: number) => {
+    const existing = pendingDeletion.find((a) => a.segment_index === idx)
+    if (existing) await annotationsApi.deleteAnnotation(existing.id)
+    else
+      await annotationsApi.createDeletionAnnotation({
+        conversation_id: conversationId,
+        segment_index: idx,
+      })
     await reload()
   }
 
@@ -292,7 +307,7 @@ export default function TranscriptEditor({
     try {
       setClearing(true)
       await Promise.all(
-        [...pendingDiar, ...pendingText, ...pendingInsert, ...pendingTiming].map((a) =>
+        [...pendingDiar, ...pendingText, ...pendingInsert, ...pendingTiming, ...pendingDeletion].map((a) =>
           annotationsApi.deleteAnnotation(a.id)
         )
       )
@@ -383,21 +398,32 @@ export default function TranscriptEditor({
 
   // ---- render ----
   const showAudio = showWaveform && hasAudio && conversationId && !!duration
+  // While actively editing timing / inserting, pin the waveform to the top of the
+  // viewport so it stays reachable when the segment you're editing is far down the
+  // transcript (no scrolling back up to the player).
+  const editorActive = timingEditSegment !== null || insertOpen !== null
 
   return (
     <div className="space-y-3">
       {/* Waveform — doubles as the timing editor while editing a segment */}
       {showAudio && (
-        <div>
+        <div
+          className={
+            editorActive
+              ? 'sticky top-0 z-20 bg-white dark:bg-gray-800 pt-2 pb-3 -mt-2 shadow-[0_6px_8px_-6px_rgba(0,0,0,0.25)] dark:shadow-[0_6px_8px_-6px_rgba(0,0,0,0.6)]'
+              : undefined
+          }
+        >
           {timingEditSegment !== null ? (
             <>
               <WaveformRegionEditor
+                key={`timing-${timingEditSegment}`}
                 conversationId={conversationId}
                 duration={duration!}
                 initialRegion={regionForSegment(timingEditSegment)}
-                onSaveTiming={(r) => handleSaveTiming(timingEditSegment, r)}
-                onAddSegment={(r) => handleAddTwin(timingEditSegment, segments[timingEditSegment], r)}
-                onCancel={() => setTimingEditSegment(null)}
+                commitMode="linked"
+                onChange={setTimingRegion}
+                onCancel={() => setEditingSegment(null)}
                 onPlay={handlePlayRegion}
                 height={96}
               />
@@ -474,7 +500,7 @@ export default function TranscriptEditor({
       {totalPending > 0 && (
         <div className="flex items-center justify-between gap-3 px-3 py-2 bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 rounded-lg">
           <span className="text-sm text-orange-700 dark:text-orange-300">
-            {totalPending} pending correction{totalPending === 1 ? '' : 's'} ({pendingDiar.length} speaker, {pendingText.length} text, {pendingInsert.length} insert, {pendingTiming.length} timing) — not yet applied
+            {totalPending} pending correction{totalPending === 1 ? '' : 's'} ({pendingDiar.length} speaker, {pendingText.length} text, {pendingInsert.length} insert, {pendingTiming.length} timing, {pendingDeletion.length} delete) — not yet applied
           </span>
           <div className="flex items-center gap-2 flex-shrink-0">
             <button
@@ -522,6 +548,7 @@ export default function TranscriptEditor({
             const diarA = pendingDiar.find((a) => a.segment_index === idx)
             const textA = pendingText.find((a) => a.segment_index === idx)
             const timingA = pendingTiming.find((a) => a.segment_index === idx)
+            const delA = pendingDeletion.find((a) => a.segment_index === idx)
             const displaySpeaker = diarA ? diarA.corrected_speaker : speaker
             const displayText = textA ? textA.corrected_text : segment.text
 
@@ -551,7 +578,9 @@ export default function TranscriptEditor({
             return (
               <div key={idx}>
                 <div
-                  className={`group flex items-start gap-2 py-1 rounded hover:bg-gray-50 dark:hover:bg-gray-700/50 ${textA ? 'bg-yellow-50 dark:bg-yellow-900/10' : ''}`}
+                  className={`group flex items-start gap-2 py-1 rounded hover:bg-gray-50 dark:hover:bg-gray-700/50 ${
+                    delA ? 'bg-red-50 dark:bg-red-900/10 opacity-60' : textA ? 'bg-yellow-50 dark:bg-yellow-900/10' : ''
+                  }`}
                   onMouseEnter={() => setHoverMarker({ start: segment.start, end: segment.end })}
                   onMouseLeave={() => setHoverMarker(null)}
                 >
@@ -617,7 +646,7 @@ export default function TranscriptEditor({
                       </div>
                     ) : (
                       <p
-                        className={`text-sm text-gray-700 dark:text-gray-300 px-1 rounded ${preview ? '' : 'cursor-pointer hover:bg-yellow-50 dark:hover:bg-yellow-900/10'}`}
+                        className={`text-sm text-gray-700 dark:text-gray-300 px-1 rounded ${delA ? 'line-through text-red-500 dark:text-red-400' : ''} ${preview ? '' : 'cursor-pointer hover:bg-yellow-50 dark:hover:bg-yellow-900/10'}`}
                         onClick={preview ? undefined : () => handleStartEdit(idx, segment.text)}
                         title={preview ? undefined : 'Click to edit'}
                       >
@@ -626,15 +655,26 @@ export default function TranscriptEditor({
                     )}
                   </div>
 
-                  {/* Insert after this segment */}
+                  {/* Insert after / delete this segment */}
                   {!preview && (
-                    <button
-                      onClick={() => (insertOpen === idx ? closeInsert() : openInsert(idx))}
-                      className="flex-shrink-0 mt-0.5 p-0.5 rounded hover:bg-purple-100 dark:hover:bg-purple-900/40 opacity-0 group-hover:opacity-100"
-                      title="Insert a new segment after this one"
-                    >
-                      <Plus className="h-3 w-3 text-gray-500" />
-                    </button>
+                    <>
+                      <button
+                        onClick={() => (insertOpen === idx ? closeInsert() : openInsert(idx))}
+                        className="flex-shrink-0 mt-0.5 p-0.5 rounded hover:bg-purple-100 dark:hover:bg-purple-900/40 opacity-0 group-hover:opacity-100"
+                        title="Insert a new segment after this one"
+                      >
+                        <Plus className="h-3 w-3 text-gray-500" />
+                      </button>
+                      <button
+                        onClick={() => handleToggleDeleteSegment(idx)}
+                        className={`flex-shrink-0 mt-0.5 p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/40 ${
+                          delA ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+                        }`}
+                        title={delA ? 'Undo delete (segment will be kept)' : 'Delete this segment'}
+                      >
+                        <Trash2 className={`h-3 w-3 ${delA ? 'text-red-500' : 'text-gray-500'}`} />
+                      </button>
+                    </>
                   )}
 
                   <span className="flex-shrink-0 text-xs text-gray-400 mt-0.5 tabular-nums">

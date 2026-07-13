@@ -81,7 +81,7 @@ export default function SpeakerNameDropdown({
       {/* Speaker name button */}
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className={`font-medium hover:underline cursor-pointer ${
+        className={`font-medium text-left hover:underline cursor-pointer ${
           annotated ? 'text-orange-600 dark:text-orange-400' : speakerColor
         }`}
         title={annotated ? 'This segment has a pending annotation' : 'Click to edit speaker'}

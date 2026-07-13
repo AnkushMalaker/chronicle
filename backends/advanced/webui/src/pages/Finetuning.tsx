@@ -3,6 +3,7 @@ import { Zap, RefreshCw, AlertCircle, AlertTriangle, CheckCircle, Clock, Play, T
 import cronstrue from 'cronstrue'
 import { finetuningApi } from '../services/api'
 import { useFinetuningStatus, useCronJobs, useToggleCronJob, useUpdateCronSchedule, useRunCronJob, useProcessAnnotations, useDeleteOrphanedAnnotations, useRetryFailedAnnotations, useDeleteFailedAnnotations } from '../hooks/useFinetuning'
+import EnrollmentCandidates from '../components/finetuning/EnrollmentCandidates'
 
 interface AnnotationTypeCounts {
   total: number
@@ -539,30 +540,43 @@ export default function Finetuning() {
         </div>
       )}
 
-      {/* Manual Training Trigger */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-        <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">Manual Speaker Training</h2>
-        <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-          Process applied diarization annotations and send them to the speaker recognition service for model fine-tuning.
-        </p>
-        <button
-          onClick={handleProcessAnnotations}
-          disabled={processAnnotations.isPending || (status?.applied_annotation_count || 0) === 0}
-          className="flex items-center space-x-2 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-        >
-          {processAnnotations.isPending ? (
-            <>
-              <RefreshCw className="h-5 w-5 animate-spin" />
-              <span>Processing...</span>
-            </>
-          ) : (
-            <>
-              <Zap className="h-5 w-5" />
-              <span>Process {status?.applied_annotation_count || 0} Diarization Annotations</span>
-            </>
-          )}
-        </button>
-      </div>
+      {/* Curated enrollment — the safe, quality-gated path (primary) */}
+      <EnrollmentCandidates />
+
+      {/* Legacy blast trigger — sends EVERY applied annotation with no gate. Kept
+          behind a disclosure because it mismatched audio↔label and enrolled
+          cross-talk/short scraps; use Curated Enrollment above instead. */}
+      <details className="mt-6 group">
+        <summary className="cursor-pointer text-sm text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 select-none">
+          Advanced: legacy bulk training (sends all applied annotations, no quality gate)
+        </summary>
+        <div className="mt-3 bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+          <div className="flex items-start space-x-2 mb-4">
+            <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" />
+            <p className="text-sm text-gray-600 dark:text-gray-400">
+              Processes <strong>every</strong> applied diarization annotation and enrolls it with no duration or
+              cross-talk gating — this can contaminate voiceprints with overlap/short audio. Prefer Curated Enrollment.
+            </p>
+          </div>
+          <button
+            onClick={handleProcessAnnotations}
+            disabled={processAnnotations.isPending || (status?.applied_annotation_count || 0) === 0}
+            className="flex items-center space-x-2 px-6 py-3 bg-gray-600 text-white rounded-lg hover:bg-gray-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+          >
+            {processAnnotations.isPending ? (
+              <>
+                <RefreshCw className="h-5 w-5 animate-spin" />
+                <span>Processing...</span>
+              </>
+            ) : (
+              <>
+                <Zap className="h-5 w-5" />
+                <span>Process {status?.applied_annotation_count || 0} Diarization Annotations</span>
+              </>
+            )}
+          </button>
+        </div>
+      </details>
     </div>
   )
 }

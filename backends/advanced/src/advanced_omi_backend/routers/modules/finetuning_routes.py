@@ -352,6 +352,335 @@ async def process_annotations_for_training(
         )
 
 
+# ---------------------------------------------------------------------------
+# Curated enrollment: build a quality-gated candidate set from the ACTIVE
+# transcript version (not annotation replay), let the user review/promote, then
+# enroll only the selected clips. This is the safe path that replaces the blunt
+# "process every applied annotation" enrollment which mismatched audio↔label and
+# enrolled cross-talk/short scraps.
+# ---------------------------------------------------------------------------
+
+# Minimum clip duration to allow into enrollment (drops short, low-information
+# scraps that blur a single centroid). User-chosen default.
+ENROLL_MIN_DURATION = 3.0
+# Default-select at most this many (longest) clips per speaker; the rest stay
+# available but unticked so the user can add them deliberately.
+ENROLL_DEFAULT_PER_SPEAKER = 5
+# Two clips whose start AND end match within this are treated as the same span.
+ENROLL_DEDUP_TOLERANCE = 0.20
+
+
+def _overlaps_other_person(segments, idx: int) -> bool:
+    """True if segment ``idx`` time-overlaps a DIFFERENT enrollable person's segment.
+
+    Cross-talk (two real speakers at once) is poison for single-speaker
+    enrollment, so it's excluded. Overlap with non-enrollable background
+    (``Unknown Speaker N`` / noise / TV) is ignored — a clean solo clip spoken
+    over background is still good enrollment audio.
+    """
+    a = segments[idx]
+    for j, b in enumerate(segments):
+        if j == idx:
+            continue
+        if is_non_enrollable_speaker(b.speaker) or b.speaker == a.speaker:
+            continue
+        if b.start < a.end and a.start < b.end:
+            return True
+    return False
+
+
+@router.get("/enrollment-candidates")
+async def get_enrollment_candidates(
+    current_user: User = Depends(current_active_user),
+    min_duration: float = Query(ENROLL_MIN_DURATION, ge=0.0, le=30.0),
+):
+    """Build a quality-gated, per-speaker list of enrollment candidate clips.
+
+    Source: the CURRENT active transcript version of every conversation that has
+    applied-but-untrained diarization annotations (i.e. conversations the user
+    labelled and hasn't enrolled yet). Each real-person segment becomes a
+    candidate; gates flag short / overlapping / invalid clips so the UI can
+    pre-tick only the clean ones. This is preview-only — nothing is enrolled.
+    """
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    annotations = await Annotation.find(
+        Annotation.annotation_type == AnnotationType.DIARIZATION,
+        Annotation.processed == True,
+    ).to_list()
+    untrained = [
+        a for a in annotations if not a.processed_by or "training" not in a.processed_by
+    ]
+    conv_ids = {a.conversation_id for a in untrained if a.conversation_id}
+    if not conv_ids:
+        return JSONResponse(
+            content={
+                "candidates": [],
+                "min_duration": min_duration,
+                "default_per_speaker": ENROLL_DEFAULT_PER_SPEAKER,
+                "conversation_count": 0,
+            }
+        )
+
+    conversations = await Conversation.find(
+        {"conversation_id": {"$in": list(conv_ids)}}
+    ).to_list()
+
+    # speaker -> list of candidate clip dicts
+    by_speaker: dict[str, list] = {}
+    for conv in conversations:
+        tr = conv.active_transcript
+        if not tr or not tr.segments:
+            continue
+        audio_dur = conv.audio_total_duration or 0.0
+        segs = tr.segments
+        for i, s in enumerate(segs):
+            if is_non_enrollable_speaker(s.speaker):
+                continue
+            dur = round(s.end - s.start, 2)
+            reasons = []
+            if not (s.end > s.start >= 0) or (audio_dur and s.start >= audio_dur):
+                reasons.append("invalid times")
+            if dur < min_duration:
+                reasons.append(f"short ({dur:.1f}s < {min_duration:.0f}s)")
+            if _overlaps_other_person(segs, i):
+                reasons.append("overlaps another speaker")
+            by_speaker.setdefault(s.speaker, []).append(
+                {
+                    "conversation_id": conv.conversation_id,
+                    "conversation_title": conv.title or "",
+                    "segment_index": i,
+                    "start": round(s.start, 2),
+                    "end": round(s.end, 2),
+                    "duration": dur,
+                    "text": (s.text or "")[:120],
+                    "gated_in": len(reasons) == 0,
+                    "reasons": reasons,
+                }
+            )
+
+    # Per speaker: default-select the longest N clean (gated_in) clips, after
+    # dropping duplicate spans. Everything is returned (the UI shows gated-out
+    # rows greyed so they can be re-added), only `default_selected` differs.
+    candidates = []
+    for speaker, clips in sorted(by_speaker.items()):
+        clean = [c for c in clips if c["gated_in"]]
+        # dedupe clean clips by near-identical (start,end)
+        deduped = []
+        for c in sorted(clean, key=lambda x: -x["duration"]):
+            if any(
+                abs(c["start"] - d["start"]) <= ENROLL_DEDUP_TOLERANCE
+                and abs(c["end"] - d["end"]) <= ENROLL_DEDUP_TOLERANCE
+                for d in deduped
+            ):
+                continue
+            deduped.append(c)
+        chosen = {
+            (c["conversation_id"], c["segment_index"])
+            for c in deduped[:ENROLL_DEFAULT_PER_SPEAKER]
+        }
+        for c in clips:
+            c["default_selected"] = (
+                c["conversation_id"],
+                c["segment_index"],
+            ) in chosen
+        clips.sort(key=lambda x: (not x["gated_in"], -x["duration"]))
+        candidates.append(
+            {
+                "speaker": speaker,
+                "clips": clips,
+                "selected_count": len(chosen),
+            }
+        )
+
+    return JSONResponse(
+        content={
+            "candidates": candidates,
+            "min_duration": min_duration,
+            "default_per_speaker": ENROLL_DEFAULT_PER_SPEAKER,
+            "conversation_count": len(conversations),
+        }
+    )
+
+
+class SelectedClip(BaseModel):
+    conversation_id: str
+    segment_index: int
+    start: float
+    end: float
+    speaker: str
+
+
+class EnrollSelectedRequest(BaseModel):
+    clips: list[SelectedClip]
+
+
+@router.post("/enroll-selected")
+async def enroll_selected_clips(
+    body: EnrollSelectedRequest,
+    current_user: User = Depends(current_active_user),
+):
+    """Enroll ONLY the explicitly selected clips, carved from the active version.
+
+    Unlike ``process-annotations`` this takes an explicit list of spans the user
+    promoted — no annotation replay, no start-time/index guessing. Each clip is
+    re-validated against the conversation's current active version (guards a
+    version change between review and submit), then enrolled/appended by speaker
+    name. Conversations we enrolled at least one clip from have their
+    applied-but-untrained diarization annotations marked trained (cleared from
+    the queue).
+    """
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    if not body.clips:
+        return JSONResponse(content={"message": "No clips selected", "enrolled": 0})
+
+    speaker_client = SpeakerRecognitionClient()
+    if not speaker_client.enabled:
+        return JSONResponse(
+            status_code=503,
+            content={"message": "Speaker recognition service not enabled"},
+        )
+
+    enrolled = 0
+    appended = 0
+    failed = 0
+    skipped = 0
+    errors: list[str] = []
+    touched_conv_ids: set[str] = set()
+
+    # Cache conversations to avoid refetching per clip
+    conv_cache = {}
+
+    for clip in body.clips:
+        try:
+            if is_non_enrollable_speaker(clip.speaker):
+                skipped += 1
+                continue
+
+            conv = conv_cache.get(clip.conversation_id)
+            if conv is None:
+                conv = await Conversation.find_one(
+                    Conversation.conversation_id == clip.conversation_id
+                )
+                conv_cache[clip.conversation_id] = conv
+            if not conv or not conv.active_transcript:
+                failed += 1
+                errors.append(f"{clip.conversation_id[:8]}: conversation not found")
+                continue
+
+            # Re-validate the span against the current active version (guards a
+            # version change between candidate-fetch and submit).
+            segs = conv.active_transcript.segments
+            seg = None
+            if 0 <= clip.segment_index < len(segs):
+                cand = segs[clip.segment_index]
+                if (
+                    abs(cand.start - clip.start) <= ENROLL_DEDUP_TOLERANCE
+                    and abs(cand.end - clip.end) <= ENROLL_DEDUP_TOLERANCE
+                    and cand.speaker == clip.speaker
+                ):
+                    seg = cand
+            if seg is None:
+                skipped += 1
+                errors.append(
+                    f"{clip.conversation_id[:8]} seg {clip.segment_index}: "
+                    f"segment changed since review; skipped"
+                )
+                continue
+
+            wav_bytes = await reconstruct_audio_segment(
+                conversation_id=clip.conversation_id,
+                start_time=seg.start,
+                end_time=seg.end,
+            )
+            if not wav_bytes:
+                failed += 1
+                errors.append(
+                    f"{clip.conversation_id[:8]} seg {clip.segment_index}: no audio"
+                )
+                continue
+
+            existing = await speaker_client.get_speaker_by_name(
+                speaker_name=clip.speaker, user_id=1
+            )
+            if existing:
+                result = await speaker_client.append_to_speaker(
+                    speaker_id=existing["id"], audio_data=wav_bytes
+                )
+                if "error" in result:
+                    failed += 1
+                    errors.append(
+                        f"{clip.speaker}: append failed ({result.get('error')})"
+                    )
+                    continue
+                appended += 1
+            else:
+                result = await speaker_client.enroll_new_speaker(
+                    speaker_name=clip.speaker, audio_data=wav_bytes, user_id=1
+                )
+                if "error" in result:
+                    failed += 1
+                    errors.append(
+                        f"{clip.speaker}: enroll failed ({result.get('error')})"
+                    )
+                    continue
+                enrolled += 1
+
+            touched_conv_ids.add(clip.conversation_id)
+
+        except Exception as e:
+            failed += 1
+            errors.append(
+                f"{clip.conversation_id[:8]} seg {clip.segment_index}: {str(e)[:50]}"
+            )
+            logger.error(
+                f"enroll_selected: error on {clip.conversation_id} seg {clip.segment_index}: {e}",
+                exc_info=True,
+            )
+
+    # Mark applied-but-untrained diarization annotations of enrolled conversations
+    # as trained so they leave the Finetuning queue.
+    marked = 0
+    if touched_conv_ids:
+        anns = await Annotation.find(
+            Annotation.annotation_type == AnnotationType.DIARIZATION,
+            Annotation.processed == True,
+            {"conversation_id": {"$in": list(touched_conv_ids)}},
+        ).to_list()
+        for a in anns:
+            if a.processed_by and "training" in a.processed_by:
+                continue
+            a.processed_by = (
+                f"{a.processed_by},training" if a.processed_by else "training"
+            )
+            a.training_error = None
+            a.updated_at = datetime.now(timezone.utc)
+            await a.save()
+            marked += 1
+
+    total = enrolled + appended
+    logger.info(
+        f"enroll_selected complete: {total} enrolled ({enrolled} new, {appended} appended), "
+        f"{failed} failed, {skipped} skipped, {marked} annotations marked trained"
+    )
+    return JSONResponse(
+        content={
+            "message": "Enrollment complete",
+            "enrolled_new": enrolled,
+            "appended": appended,
+            "total_enrolled": total,
+            "failed": failed,
+            "skipped": skipped,
+            "annotations_marked_trained": marked,
+            "errors": errors[:10],
+            "status": "success" if total > 0 else "partial_failure",
+        }
+    )
+
+
 @router.post("/export-asr-dataset")
 async def export_asr_dataset(
     current_user: User = Depends(current_active_user),

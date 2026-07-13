@@ -33,6 +33,13 @@ interface WaveformRegionEditorProps {
    */
   pickerMode?: boolean
   onChange?: (region: Region | null) => void
+  /**
+   * 'self' (default): the editor owns its commit (Save/Cancel/+New buttons).
+   * 'linked': the editor is driven by an external Save (e.g. the segment's text
+   * Save commits text + timing together) — it hides its own Save/Cancel/+New and
+   * only reports the region via `onChange`. Keeps Play / clear / restore.
+   */
+  commitMode?: 'self' | 'linked'
   height?: number
 }
 
@@ -70,8 +77,10 @@ export const WaveformRegionEditor: React.FC<WaveformRegionEditorProps> = ({
   onPlay,
   pickerMode = false,
   onChange,
+  commitMode = 'self',
   height = 96,
 }) => {
+  const ownCommit = !pickerMode && commitMode === 'self'
   const { data, loading, error } = useWaveformData(conversationId)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   // Live playback position (so the playhead moves while playing, even when zoomed in).
@@ -402,7 +411,7 @@ export const WaveformRegionEditor: React.FC<WaveformRegionEditorProps> = ({
               <RotateCcw className="h-3.5 w-3.5" />
             </button>
           ) : null}
-          {!pickerMode && onAddSegment && (
+          {ownCommit && onAddSegment && (
             <button
               onClick={() => region && onAddSegment(region)}
               disabled={!region}
@@ -412,7 +421,7 @@ export const WaveformRegionEditor: React.FC<WaveformRegionEditorProps> = ({
               <Plus className="h-3.5 w-3.5" /> {addLabel}
             </button>
           )}
-          {!pickerMode && onSaveTiming && (
+          {ownCommit && onSaveTiming && (
             <button
               onClick={() => region && onSaveTiming(region)}
               disabled={!region}
@@ -422,13 +431,18 @@ export const WaveformRegionEditor: React.FC<WaveformRegionEditorProps> = ({
               <Check className="h-3.5 w-3.5" /> Save
             </button>
           )}
-          {!pickerMode && (
+          {ownCommit && (
             <button
               onClick={onCancel}
               className="px-2 py-1 text-xs rounded bg-gray-200 dark:bg-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-300 dark:hover:bg-gray-500"
             >
               Cancel
             </button>
+          )}
+          {commitMode === 'linked' && (
+            <span className="text-xs text-emerald-600 dark:text-emerald-400">
+              Adjust the span — saved with the segment below
+            </span>
           )}
         </div>
       </div>

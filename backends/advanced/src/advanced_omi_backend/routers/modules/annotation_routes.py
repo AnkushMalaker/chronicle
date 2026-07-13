@@ -25,6 +25,7 @@ from advanced_omi_backend.models.annotation import (
     AnnotationStatus,
     AnnotationType,
     AnnotationUpdate,
+    DeletionAnnotationCreate,
     DiarizationAnnotationCreate,
     InsertAnnotationCreate,
     MemoryAnnotationCreate,
@@ -878,6 +879,72 @@ async def get_timing_annotations(
     return [AnnotationResponse.model_validate(a) for a in annotations]
 
 
+@router.post("/deletion", response_model=AnnotationResponse)
+async def create_deletion_annotation(
+    annotation_data: DeletionAnnotationCreate,
+    current_user: User = Depends(current_active_user),
+):
+    """
+    Create a DELETION annotation that removes an existing segment.
+
+    Staged as a pending correction (not applied immediately) and committed by
+    ``/apply``, which re-derives a new transcript version with the segment dropped.
+    Validates ownership and segment index.
+    """
+    try:
+        conversation = await Conversation.find_one(
+            Conversation.conversation_id == annotation_data.conversation_id,
+            Conversation.user_id == current_user.user_id,
+        )
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+        active_transcript = conversation.active_transcript
+        if not active_transcript or annotation_data.segment_index >= len(
+            active_transcript.segments
+        ):
+            raise HTTPException(status_code=400, detail="Invalid segment index")
+
+        annotation = Annotation(
+            annotation_type=AnnotationType.DELETION,
+            user_id=current_user.user_id,
+            conversation_id=annotation_data.conversation_id,
+            segment_index=annotation_data.segment_index,
+            status=annotation_data.status,
+            processed=False,
+        )
+        await annotation.save()
+        logger.info(
+            f"Created deletion annotation {annotation.id} for conversation "
+            f"{annotation_data.conversation_id} segment {annotation_data.segment_index}"
+        )
+
+        return AnnotationResponse.model_validate(annotation)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating deletion annotation: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create deletion annotation: {str(e)}",
+        )
+
+
+@router.get("/deletion/{conversation_id}", response_model=List[AnnotationResponse])
+async def get_deletion_annotations(
+    conversation_id: str,
+    current_user: User = Depends(current_active_user),
+):
+    """Get all DELETION annotations for a conversation."""
+    annotations = await Annotation.find(
+        Annotation.conversation_id == conversation_id,
+        Annotation.user_id == current_user.user_id,
+        Annotation.annotation_type == AnnotationType.DELETION,
+    ).to_list()
+    return [AnnotationResponse.model_validate(a) for a in annotations]
+
+
 @router.get("/diarization/{conversation_id}", response_model=List[AnnotationResponse])
 async def get_diarization_annotations(
     conversation_id: str,
@@ -1106,6 +1173,12 @@ async def apply_all_annotations(
         timing_annotations = [
             a for a in annotations if a.annotation_type == AnnotationType.TIMING
         ]
+        deletion_annotations = [
+            a for a in annotations if a.annotation_type == AnnotationType.DELETION
+        ]
+        deleted_indices = {
+            a.segment_index for a in deletion_annotations if a.segment_index is not None
+        }
 
         # Single-flight: don't stack a new edit on top of an in-flight one (see
         # apply_diarization_annotations — same deterministic-job-id save race).
@@ -1125,15 +1198,19 @@ async def apply_all_annotations(
             raise HTTPException(status_code=404, detail="No active transcript found")
 
         # Create new version with ALL corrections applied
-        import uuid
-
         new_version_id = str(uuid.uuid4())
         corrected_segments = []
+        # Segments marked for deletion are dropped AFTER inserts are positioned, so
+        # insert_after_index (which references original indices) stays valid. Track by
+        # object identity since indices shift once inserts are spliced in.
+        deleted_obj_ids: set[int] = set()
 
         # For diarization/transcript: if multiple annotations exist for same segment,
         # pick the most recently updated one
         for segment_idx, segment in enumerate(active_transcript.segments):
             corrected_segment = segment.model_copy()
+            if segment_idx in deleted_indices:
+                deleted_obj_ids.add(id(corrected_segment))
 
             # Apply diarization correction (most recent wins)
             diar_for_segment = sorted(
@@ -1202,6 +1279,13 @@ async def apply_all_annotations(
                 )
                 corrected_segments.insert(insert_pos, new_segment)
 
+        # Drop segments marked for deletion (now that inserts have been positioned
+        # against the original indices).
+        if deleted_obj_ids:
+            corrected_segments = [
+                s for s in corrected_segments if id(s) not in deleted_obj_ids
+            ]
+
         # Re-order by start time so moved/inserted segments read in chronological order.
         # Stable sort keeps the original list order for equal starts — important for the
         # intentional same-time overlapping segments (two speakers at once).
@@ -1227,6 +1311,7 @@ async def apply_all_annotations(
                 "transcript_count": len(transcript_annotations),
                 "insert_count": len(insert_annotations),
                 "timing_count": len(timing_annotations),
+                "deletion_count": len(deletion_annotations),
                 "provider_capabilities": source_capabilities,
             },
             set_as_active=True,
@@ -1240,7 +1325,8 @@ async def apply_all_annotations(
             f"(diarization: {len(diarization_annotations)}, "
             f"transcript: {len(transcript_annotations)}, "
             f"insert: {len(insert_annotations)}, "
-            f"timing: {len(timing_annotations)})"
+            f"timing: {len(timing_annotations)}, "
+            f"deletion: {len(deletion_annotations)})"
         )
 
         # Mark all annotations as processed
@@ -1265,14 +1351,16 @@ async def apply_all_annotations(
                 "message": (
                     f"Applied {len(diarization_annotations)} diarization, "
                     f"{len(transcript_annotations)} transcript, "
-                    f"{len(insert_annotations)} insert, and "
-                    f"{len(timing_annotations)} timing annotations"
+                    f"{len(insert_annotations)} insert, "
+                    f"{len(timing_annotations)} timing, and "
+                    f"{len(deletion_annotations)} deletion annotations"
                 ),
                 "version_id": new_version_id,
                 "diarization_count": len(diarization_annotations),
                 "transcript_count": len(transcript_annotations),
                 "insert_count": len(insert_annotations),
                 "timing_count": len(timing_annotations),
+                "deletion_count": len(deletion_annotations),
                 "status": "success",
             }
         )

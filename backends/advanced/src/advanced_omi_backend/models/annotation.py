@@ -23,6 +23,7 @@ class AnnotationType(str, Enum):
     TITLE = "title"  # Conversation title corrections
     INSERT = "insert"  # Insert new segment between existing segments
     TIMING = "timing"  # Adjust an existing segment's start/end (waveform region edit)
+    DELETION = "deletion"  # Remove an existing segment from the transcript
     SPEECH_SUGGESTION_CORRECTION = "speech_suggestion_correction"  # User-refined model suggestion (training signal triple)
 
 
@@ -222,6 +223,14 @@ class TimingAnnotationCreate(BaseModel):
     segment_index: int
     new_start: float
     new_end: float
+    status: AnnotationStatus = AnnotationStatus.ACCEPTED
+
+
+class DeletionAnnotationCreate(BaseModel):
+    """Remove an existing segment from the transcript (waveform/segment editor)."""
+
+    conversation_id: str
+    segment_index: int
     status: AnnotationStatus = AnnotationStatus.ACCEPTED
 
 

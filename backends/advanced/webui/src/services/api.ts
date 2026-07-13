@@ -307,6 +307,15 @@ export const annotationsApi = {
 
   getTimingAnnotations: (conversation_id: string) =>
     api.get(`/api/annotations/timing/${conversation_id}`),
+
+  // Deletion annotations (remove an existing segment)
+  createDeletionAnnotation: (data: {
+    conversation_id: string
+    segment_index: number
+  }) => api.post('/api/annotations/deletion', data),
+
+  getDeletionAnnotations: (conversation_id: string) =>
+    api.get(`/api/annotations/deletion/${conversation_id}`),
 }
 
 export const finetuningApi = {
@@ -318,6 +327,19 @@ export const finetuningApi = {
 
   // Get fine-tuning status
   getStatus: () => api.get('/api/finetuning/status'),
+
+  // Curated enrollment: quality-gated candidate clips + enroll only selected
+  getEnrollmentCandidates: (minDuration?: number) =>
+    api.get('/api/finetuning/enrollment-candidates', {
+      params: minDuration != null ? { min_duration: minDuration } : {},
+    }),
+  enrollSelectedClips: (clips: Array<{
+    conversation_id: string
+    segment_index: number
+    start: number
+    end: number
+    speaker: string
+  }>) => api.post('/api/finetuning/enroll-selected', { clips }),
 
   // Orphaned annotation management
   deleteOrphanedAnnotations: (annotationType?: string) =>
