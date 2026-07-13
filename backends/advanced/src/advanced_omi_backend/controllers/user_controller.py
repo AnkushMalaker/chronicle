@@ -2,7 +2,6 @@
 User controller for handling user-related business logic.
 """
 
-import asyncio
 import logging
 import traceback
 
@@ -11,8 +10,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
 from advanced_omi_backend.auth import ADMIN_EMAIL, UserManager, get_user_db
-from advanced_omi_backend.client_manager import get_user_clients_all
-from advanced_omi_backend.database import db, users_col
+from advanced_omi_backend.database import users_col
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.user import UserRead
 from advanced_omi_backend.services.memory import get_memory_service
@@ -184,9 +182,7 @@ async def delete_user(
             # Delete all memories for this user using the memory service
             try:
                 memory_service = get_memory_service()
-                memory_count = await asyncio.get_running_loop().run_in_executor(
-                    None, memory_service.delete_all_user_memories, user_id
-                )
+                memory_count = await memory_service.delete_all_user_memories(user_id)
                 deleted_data["memories_deleted"] = memory_count
             except Exception as mem_error:
                 logger.error(f"Error deleting memories for user {user_id}: {mem_error}")

@@ -8,18 +8,14 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any, Dict
 
 import aiohttp
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 
 from advanced_omi_backend.client_manager import get_client_manager
-from advanced_omi_backend.controllers.queue_controller import (
-    get_queue_health,
-    redis_conn,
-)
+from advanced_omi_backend.controllers.queue_controller import get_queue_health
 from advanced_omi_backend.llm_client import (
     async_health_check,
     async_health_check_fallback,
@@ -40,20 +36,6 @@ application_logger = logging.getLogger("audio_processing")
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://mongo:27017")
 mongo_client = AsyncIOMotorClient(MONGODB_URI)
 
-# Memory service
-memory_service = get_memory_service()
-
-# Transcription provider
-transcription_provider = get_transcription_provider()
-
-# Registry-driven configuration for display
-REGISTRY = get_models_registry()
-if REGISTRY:
-    _llm_def = REGISTRY.get_default("llm")
-    _embed_def = REGISTRY.get_default("embedding")
-else:
-    _llm_def = _embed_def = None
-
 
 @router.get("/auth/health")
 async def auth_health_check():
@@ -62,7 +44,13 @@ async def auth_health_check():
         # Test database connectivity
         await mongo_client.admin.command("ping")
 
-        # Test memory service if available
+        # Test memory service if available (creation itself can fail when the
+        # LLM defaults are unconfigured, so it counts as unavailable, not a 500)
+        try:
+            memory_service = get_memory_service()
+        except Exception as e:
+            logger.warning(f"Memory service unavailable: {e}")
+            memory_service = None
         if memory_service:
             try:
                 await asyncio.wait_for(memory_service.test_connection(), timeout=2.0)
@@ -101,6 +89,8 @@ async def health_check():
     _llm_model = None
     _llm_base_url = None
     _stt_name = None
+    registry = None
+    transcription_provider = get_transcription_provider()
 
     try:
         registry = get_models_registry()
@@ -131,8 +121,8 @@ async def health_check():
                 else "Not configured"
             ),
             "transcription_provider": (
-                REGISTRY.get_default("stt").name
-                if REGISTRY and REGISTRY.get_default("stt")
+                registry.get_default("stt").name
+                if registry and registry.get_default("stt")
                 else "not configured"
             ),
             "provider_type": (
@@ -154,7 +144,7 @@ async def health_check():
 
     # Get configuration once at the start
     # Memory provider (registry-based)
-    mem_settings = REGISTRY.memory if REGISTRY else {}
+    mem_settings = registry.memory if registry else {}
     memory_provider = (mem_settings.get("provider") or "chronicle").lower()
 
     speaker_service_url = os.getenv("SPEAKER_SERVICE_URL")
@@ -314,8 +304,11 @@ async def health_check():
         }
         overall_healthy = False
 
-    # Check memory service (Chronicle agentic vault)
+    # Check memory service (Chronicle agentic vault). Created here rather than at
+    # module load — creation raises when LLM defaults are unconfigured, and an
+    # import-time failure would take down every route in this package.
     try:
+        memory_service = get_memory_service()
         test_success = await asyncio.wait_for(
             memory_service.test_connection(), timeout=8.0
         )

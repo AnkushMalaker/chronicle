@@ -13,12 +13,11 @@ import shutil
 import statistics
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from fastapi.responses import FileResponse, JSONResponse
 
 from advanced_omi_backend.config import get_diarization_settings
-from advanced_omi_backend.constants import NOISE_LABEL
 from advanced_omi_backend.controllers.conversation_controller import (
     archive_conversation_audio,
 )
@@ -981,9 +980,9 @@ async def apply_triage(user: User):
     action reserved for the finetuning / Enrollment pages. Noise decisions ride along:
     apply reclassifies them to non-speech.
     """
-    # Lazy import: the routers.modules package has import-time side effects
-    # (health_routes instantiates the memory service at module load), so importing
-    # this router at module top would pull that in during controller import.
+    # Lazy import: circular dependency — the routers.modules package __init__
+    # imports data_audit_routes, which imports back into this controller, so a
+    # top-level import here would re-enter this module mid-import.
     from advanced_omi_backend.routers.modules.annotation_routes import (
         apply_diarization_annotations,
     )
