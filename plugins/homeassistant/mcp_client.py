@@ -42,7 +42,13 @@ class HAMCPClient:
         self.mcp_url = f"{self.base_url}/api/mcp"
         self.token = token
         self.timeout = timeout
-        self.client = httpx.AsyncClient(timeout=timeout)
+        # Cap the connect phase at 5s: HA is on the local network, so a healthy
+        # connect is near-instant. This keeps startup probes and background
+        # recovery retries snappy when the HA server is off, while long reads
+        # (Assist pipeline) still get the full timeout.
+        self.client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout, connect=min(5.0, timeout))
+        )
         self._request_id = 0
 
     async def close(self):

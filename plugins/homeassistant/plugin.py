@@ -14,7 +14,12 @@ from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.llm_client import get_llm_client
 from advanced_omi_backend.openai_factory import model_supports_temperature
-from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
+from advanced_omi_backend.plugins.base import (
+    BasePlugin,
+    PluginConnectivityError,
+    PluginContext,
+    PluginResult,
+)
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 
@@ -91,7 +96,10 @@ class HomeAssistantPlugin(BasePlugin):
         Connects to Home Assistant MCP server and discovers available tools.
 
         Raises:
-            MCPError: If connection or discovery fails
+            ValueError: If required configuration is missing (not retried)
+            PluginConnectivityError: If HA is unreachable — the plugin system
+                marks the plugin degraded and retries in the background (HA
+                runs on a server that may be off when Chronicle boots)
         """
         if not self.enabled:
             logger.info("Home Assistant plugin is disabled, skipping initialization")
@@ -101,6 +109,13 @@ class HomeAssistantPlugin(BasePlugin):
             raise ValueError("Home Assistant token is required")
 
         logger.info(f"Initializing Home Assistant plugin (URL: {self.ha_url})")
+
+        # Re-init (background recovery) replaces the client; close the old one
+        if self.mcp_client:
+            try:
+                await self.mcp_client.close()
+            except Exception:  # noqa: BLE001 — old client may already be dead
+                pass
 
         # Create MCP client (used for REST API calls, not MCP protocol)
         self.mcp_client = HAMCPClient(
@@ -115,7 +130,12 @@ class HomeAssistantPlugin(BasePlugin):
                 raise ValueError(f"Unexpected template result: {test_result}")
             logger.info("Home Assistant API connection successful")
         except Exception as e:
-            raise MCPError(f"Failed to connect to Home Assistant API: {e}")
+            # Transient by design: the handlers degrade gracefully while HA is
+            # down (mcp_client stays usable once HA returns), so signal
+            # "retry later" instead of a hard init failure.
+            raise PluginConnectivityError(
+                f"Home Assistant unreachable at {self.ha_url}: {e}"
+            ) from e
 
         # Warm the HA Assist pipeline so the first real command isn't slow.
         # (The intent-router microservice warms its own model on startup.)

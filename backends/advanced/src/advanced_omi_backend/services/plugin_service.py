@@ -4,6 +4,7 @@ This module provides singleton access to the plugin router, allowing
 worker jobs to trigger plugins without accessing FastAPI app state directly.
 """
 
+import asyncio
 import importlib
 import inspect
 import logging
@@ -19,11 +20,17 @@ from dotenv import dotenv_values
 from dotenv import set_key as dotenv_set_key
 
 from advanced_omi_backend.config_loader import get_plugins_yml_path
-from advanced_omi_backend.plugins import BasePlugin, PluginRouter
+from advanced_omi_backend.plugins import (
+    BasePlugin,
+    PluginConnectivityError,
+    PluginRouter,
+)
 from advanced_omi_backend.plugins.events import PluginEvent
+from advanced_omi_backend.plugins.router import PluginHealth
 from advanced_omi_backend.plugins.services import PluginServices
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 from advanced_omi_backend.redis_factory import create_sync_redis
+from advanced_omi_backend.services.observability import record_event_sync
 
 logger = logging.getLogger(__name__)
 
@@ -779,6 +786,167 @@ def init_plugin_router() -> Optional[PluginRouter]:
     return _plugin_router
 
 
+async def initialize_plugins(router: PluginRouter) -> Dict[str, List]:
+    """Initialize all enabled plugins on a router, recording health per plugin.
+
+    Shared by every process that hosts a plugin router (FastAPI app, streaming
+    worker, wakeword worker, RQ workers, hot-reload). Failure handling:
+
+    - PluginConnectivityError -> DEGRADED: the plugin's external dependency is
+      unreachable (e.g. Home Assistant on a powered-off server). Logged as a
+      single-line warning, and run_plugin_recovery() retries it with backoff.
+    - Any other exception -> FAILED: real config/setup error, logged with
+      traceback.
+
+    Returns:
+        Summary dict: {"initialized": [ids], "degraded": [ids],
+        "failed": [{"plugin_id", "error"}]}
+    """
+    summary: Dict[str, List] = {"initialized": [], "degraded": [], "failed": []}
+    for plugin_id, plugin in router.plugins.items():
+        if not plugin.enabled:
+            continue
+        try:
+            await plugin.initialize()
+            router.mark_plugin_initialized(plugin_id)
+            summary["initialized"].append(plugin_id)
+            logger.info(f"Plugin '{plugin_id}' initialized")
+        except PluginConnectivityError as e:
+            router.mark_plugin_degraded(plugin_id, str(e))
+            summary["degraded"].append(plugin_id)
+            logger.warning(
+                f"Plugin '{plugin_id}' degraded — dependency unreachable, "
+                f"will retry in background: {e}"
+            )
+        except Exception as e:
+            router.mark_plugin_failed(plugin_id, str(e))
+            summary["failed"].append({"plugin_id": plugin_id, "error": str(e)})
+            logger.error(
+                f"Failed to initialize plugin '{plugin_id}': {e}", exc_info=True
+            )
+    return summary
+
+
+async def run_plugin_recovery(
+    router: PluginRouter,
+    *,
+    initial_delay: float = 30.0,
+    max_delay: float = 600.0,
+    tick: float = 15.0,
+    health_interval: float = 300.0,
+) -> None:
+    """Background recovery loop for plugins with unhealthy external dependencies.
+
+    Run as a long-lived asyncio task in each process that hosts a plugin router.
+    Two jobs:
+
+    1. Re-run initialize() for DEGRADED/FAILED plugins with per-plugin
+       exponential backoff (initial_delay doubling up to max_delay). On success
+       the plugin flips to INITIALIZED and a "recovered" system event is
+       recorded, so health state reflects reality without a process restart.
+    2. Every health_interval, run health_check() on INITIALIZED plugins; a
+       not-ok result demotes the plugin to DEGRADED, which feeds it back into
+       (1). This catches dependencies that go down mid-day, not just at boot.
+
+    Cancellation-safe; an unexpected error in one tick never kills the loop.
+    """
+    delays: Dict[str, float] = {}  # plugin_id -> current backoff delay
+    next_due: Dict[str, float] = {}  # plugin_id -> monotonic time of next retry
+    last_health_probe = time.monotonic()
+
+    while True:
+        try:
+            await asyncio.sleep(tick)
+            now = time.monotonic()
+
+            # --- 1. Retry init for degraded/failed plugins, with backoff ---
+            for plugin_id, plugin in router.plugins.items():
+                health = router.plugin_health.get(plugin_id)
+                if health is None or not plugin.enabled:
+                    continue
+                if health.status not in (PluginHealth.DEGRADED, PluginHealth.FAILED):
+                    delays.pop(plugin_id, None)
+                    next_due.pop(plugin_id, None)
+                    continue
+
+                if plugin_id not in next_due:
+                    # First time we see this plugin unhealthy: schedule, don't retry yet
+                    delays[plugin_id] = initial_delay
+                    next_due[plugin_id] = now + initial_delay
+                    continue
+                if now < next_due[plugin_id]:
+                    continue
+
+                was_failed = health.status == PluginHealth.FAILED
+                try:
+                    await plugin.initialize()
+                    router.mark_plugin_initialized(plugin_id)
+                    delays.pop(plugin_id, None)
+                    next_due.pop(plugin_id, None)
+                    logger.info(f"Plugin '{plugin_id}' recovered")
+                    record_event_sync(
+                        severity="info",
+                        category="plugin",
+                        source=plugin_id,
+                        title=f"Plugin '{plugin_id}' recovered",
+                        detail="initialize() succeeded on background retry",
+                        metadata={"plugin_id": plugin_id},
+                    )
+                except PluginConnectivityError as e:
+                    # Still unreachable — quiet debug log, back off further
+                    health.error = str(e)
+                    delay = min(delays.get(plugin_id, initial_delay) * 2, max_delay)
+                    delays[plugin_id] = delay
+                    next_due[plugin_id] = now + delay
+                    logger.debug(
+                        f"Plugin '{plugin_id}' still unreachable, next retry in {delay:.0f}s: {e}"
+                    )
+                except Exception as e:
+                    # Only record a FAILED event on the transition, not every retry
+                    if was_failed:
+                        health.error = str(e)
+                    else:
+                        router.mark_plugin_failed(plugin_id, str(e))
+                    delay = min(delays.get(plugin_id, initial_delay) * 2, max_delay)
+                    delays[plugin_id] = delay
+                    next_due[plugin_id] = now + delay
+                    logger.warning(
+                        f"Plugin '{plugin_id}' retry failed, next retry in {delay:.0f}s: {e}"
+                    )
+
+            # --- 2. Periodic health probe: demote initialized plugins that went down ---
+            if now - last_health_probe >= health_interval:
+                last_health_probe = now
+                for plugin_id, plugin in router.plugins.items():
+                    health = router.plugin_health.get(plugin_id)
+                    if (
+                        health is None
+                        or not plugin.enabled
+                        or health.status != PluginHealth.INITIALIZED
+                    ):
+                        continue
+                    try:
+                        result = await asyncio.wait_for(
+                            plugin.health_check(), timeout=10
+                        )
+                    except Exception as e:
+                        result = {"ok": False, "message": str(e)}
+                    if not result.get("ok", False):
+                        router.mark_plugin_degraded(
+                            plugin_id,
+                            str(result.get("message") or "health check failed"),
+                        )
+                        logger.warning(
+                            f"Plugin '{plugin_id}' health check failed, marked degraded: "
+                            f"{result.get('message')}"
+                        )
+
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("Plugin recovery loop tick failed (loop continues)")
+
+
 async def ensure_plugin_router() -> Optional[PluginRouter]:
     """Get or initialize the plugin router with all plugins initialized.
 
@@ -795,14 +963,7 @@ async def ensure_plugin_router() -> Optional[PluginRouter]:
     logger.info("Initializing plugin router in worker process...")
     plugin_router = init_plugin_router()
     if plugin_router:
-        for plugin_id, plugin in plugin_router.plugins.items():
-            try:
-                await plugin.initialize()
-                plugin_router.mark_plugin_initialized(plugin_id)
-                logger.info(f"Plugin '{plugin_id}' initialized")
-            except Exception as e:
-                plugin_router.mark_plugin_failed(plugin_id, str(e))
-                logger.error(f"Failed to initialize plugin '{plugin_id}': {e}")
+        await initialize_plugins(plugin_router)
     return plugin_router
 
 
@@ -928,15 +1089,9 @@ async def reload_plugins(app=None) -> Dict[str, Any]:
     initialized = []
     failed = []
     if new_router:
-        for plugin_id, plugin in new_router.plugins.items():
-            try:
-                await plugin.initialize()
-                new_router.mark_plugin_initialized(plugin_id)
-                initialized.append(plugin_id)
-            except Exception as e:
-                new_router.mark_plugin_failed(plugin_id, str(e))
-                failed.append({"plugin_id": plugin_id, "error": str(e)})
-                logger.error(f"Failed to initialize plugin '{plugin_id}': {e}")
+        summary = await initialize_plugins(new_router)
+        initialized = summary["initialized"] + summary["degraded"]
+        failed = summary["failed"]
 
     # 4. Atomic swap — from this point, all callers see the new router
     _plugin_router = new_router

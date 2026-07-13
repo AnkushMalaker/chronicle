@@ -152,6 +152,7 @@ class PluginHealth:
     # Possible status values
     REGISTERED = "registered"  # Registered but not yet initialized
     INITIALIZED = "initialized"  # Successfully initialized
+    DEGRADED = "degraded"  # External dependency unreachable; retried in background
     FAILED = "failed"  # initialize() raised an exception
 
     def __init__(self, plugin_id: str):
@@ -209,7 +210,9 @@ class PluginRouter:
     def mark_plugin_initialized(self, plugin_id: str) -> None:
         """Mark a plugin as successfully initialized."""
         if plugin_id in self.plugin_health:
-            self.plugin_health[plugin_id].status = PluginHealth.INITIALIZED
+            health = self.plugin_health[plugin_id]
+            health.status = PluginHealth.INITIALIZED
+            health.error = None
 
     def mark_plugin_failed(self, plugin_id: str, error: str) -> None:
         """Mark a plugin as failed during initialization."""
@@ -226,6 +229,29 @@ class PluginRouter:
             metadata={"plugin_id": plugin_id},
         )
 
+    def mark_plugin_degraded(self, plugin_id: str, error: str) -> None:
+        """Mark a plugin as degraded: its external dependency is unreachable.
+
+        Unlike FAILED, degraded plugins are retried in the background (see
+        plugin_service.run_plugin_recovery). The system event is recorded only on
+        the transition into DEGRADED, so retry ticks don't spam the event log.
+        """
+        health = self.plugin_health.get(plugin_id)
+        if health is None:
+            return
+        transition = health.status != PluginHealth.DEGRADED
+        health.status = PluginHealth.DEGRADED
+        health.error = error
+        if transition:
+            record_event_sync(
+                severity="warning",
+                category="plugin",
+                source=plugin_id,
+                title=f"Plugin '{plugin_id}' degraded: dependency unreachable",
+                detail=error,
+                metadata={"plugin_id": plugin_id},
+            )
+
     def get_health_summary(self) -> Dict[str, Any]:
         """Get health summary for all registered plugins."""
         plugins = [h.to_dict() for h in self.plugin_health.values()]
@@ -233,6 +259,7 @@ class PluginRouter:
         return {
             "total": len(plugins),
             "initialized": statuses.count(PluginHealth.INITIALIZED),
+            "degraded": statuses.count(PluginHealth.DEGRADED),
             "failed": statuses.count(PluginHealth.FAILED),
             "registered": statuses.count(PluginHealth.REGISTERED),
             "plugins": plugins,

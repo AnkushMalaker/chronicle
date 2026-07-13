@@ -12,6 +12,17 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 
+class PluginConnectivityError(Exception):
+    """An external dependency (e.g. a Home Assistant server) is unreachable.
+
+    Raise this from initialize() for transient network conditions. The plugin
+    system marks the plugin DEGRADED (not FAILED) and retries initialize() in
+    the background with backoff, instead of logging a full traceback and giving
+    up until process restart. Reserve plain exceptions for real config/setup
+    errors (missing token, bad config) that a retry cannot fix.
+    """
+
+
 @dataclass
 class PluginContext:
     """Context passed to plugin execution"""

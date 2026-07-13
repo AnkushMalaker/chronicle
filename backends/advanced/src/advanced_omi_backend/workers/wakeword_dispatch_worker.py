@@ -26,7 +26,11 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from advanced_omi_backend.client_manager import initialize_redis_for_client_manager
 from advanced_omi_backend.models.user import User
 from advanced_omi_backend.redis_factory import REDIS_URL, create_async_redis
-from advanced_omi_backend.services.plugin_service import init_plugin_router
+from advanced_omi_backend.services.plugin_service import (
+    init_plugin_router,
+    initialize_plugins,
+    run_plugin_recovery,
+)
 from advanced_omi_backend.services.wakeword import WakeWordDispatcher
 
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://mongo:27017")
@@ -85,18 +89,15 @@ async def main():
         logger.info(
             f"✅ Plugin router initialized with {len(plugin_router.plugins)} plugins"
         )
-        for plugin_id, plugin in plugin_router.plugins.items():
-            try:
-                await plugin.initialize()
-                logger.info(f"✅ Plugin '{plugin_id}' initialized in wakeword worker")
-            except Exception as e:
-                logger.exception(
-                    f"Failed to initialize plugin '{plugin_id}' in wakeword worker: {e}"
-                )
+        await initialize_plugins(plugin_router)
     except Exception as e:
         logger.error(f"Failed to initialize plugin router: {e}", exc_info=True)
         await redis_client.aclose()
         sys.exit(1)
+
+    # Background recovery for plugins whose external dependency was unreachable
+    # at boot (e.g. Home Assistant on a server that's still off).
+    recovery_task = asyncio.create_task(run_plugin_recovery(plugin_router))
 
     dispatcher = WakeWordDispatcher(
         redis_client=redis_client, plugin_router=plugin_router
@@ -118,6 +119,7 @@ async def main():
         logger.error(f"Worker error: {e}", exc_info=True)
         sys.exit(1)
     finally:
+        recovery_task.cancel()
         await redis_client.aclose()
         logger.info("👋 Wake-word dispatch worker stopped")
 

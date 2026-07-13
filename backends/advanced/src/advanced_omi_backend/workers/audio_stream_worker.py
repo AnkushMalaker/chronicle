@@ -16,7 +16,11 @@ import sys
 
 from advanced_omi_backend.client_manager import initialize_redis_for_client_manager
 from advanced_omi_backend.redis_factory import REDIS_URL, create_async_redis
-from advanced_omi_backend.services.plugin_service import init_plugin_router
+from advanced_omi_backend.services.plugin_service import (
+    init_plugin_router,
+    initialize_plugins,
+    run_plugin_recovery,
+)
 from advanced_omi_backend.services.transcription.streaming_consumer import (
     StreamingTranscriptionConsumer,
 )
@@ -58,6 +62,7 @@ async def main():
         sys.exit(1)
 
     # Initialize plugin router
+    recovery_task = None
     try:
         plugin_router = init_plugin_router()
         if plugin_router:
@@ -65,17 +70,10 @@ async def main():
                 f"✅ Plugin router initialized with {len(plugin_router.plugins)} plugins"
             )
 
-            # Initialize async plugins
-            for plugin_id, plugin in plugin_router.plugins.items():
-                try:
-                    await plugin.initialize()
-                    logger.info(
-                        f"✅ Plugin '{plugin_id}' initialized in streaming worker"
-                    )
-                except Exception as e:
-                    logger.exception(
-                        f"Failed to initialize plugin '{plugin_id}' in streaming worker: {e}"
-                    )
+            await initialize_plugins(plugin_router)
+            # Background recovery for plugins whose external dependency was
+            # unreachable at boot (e.g. Home Assistant on a server that's off).
+            recovery_task = asyncio.create_task(run_plugin_recovery(plugin_router))
         else:
             logger.warning("No plugin router available - plugins will not be triggered")
     except Exception as e:
@@ -147,6 +145,8 @@ async def main():
         logger.error(f"Worker error: {e}", exc_info=True)
         sys.exit(1)
     finally:
+        if recovery_task is not None:
+            recovery_task.cancel()
         await redis_client.aclose()
         logger.info("👋 Streaming transcription worker stopped")
 

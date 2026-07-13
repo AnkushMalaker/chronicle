@@ -288,42 +288,42 @@ async def lifespan(app: FastAPI):
         try:
             from advanced_omi_backend.services.plugin_service import (
                 init_plugin_router,
+                initialize_plugins,
+                run_plugin_recovery,
                 set_plugin_router,
             )
 
             plugin_router = init_plugin_router()
 
             if plugin_router:
-                for plugin_id, plugin in plugin_router.plugins.items():
-                    if plugin.enabled:
-                        try:
-                            await plugin.initialize()
-                            plugin_router.mark_plugin_initialized(plugin_id)
-                            application_logger.info(f"Plugin '{plugin_id}' initialized")
-                        except Exception as e:
-                            plugin_router.mark_plugin_failed(plugin_id, str(e))
-                            application_logger.error(
-                                f"Failed to initialize plugin '{plugin_id}': {e}",
-                                exc_info=True,
-                            )
+                await initialize_plugins(plugin_router)
 
                 health = plugin_router.get_health_summary()
                 application_logger.info(
                     f"Plugins initialized: {health['initialized']}/{health['total']} active"
+                    + (f", {health['degraded']} degraded" if health["degraded"] else "")
                     + (f", {health['failed']} failed" if health["failed"] else "")
                 )
 
                 app.state.plugin_router = plugin_router
                 set_plugin_router(plugin_router)
+                # Background recovery: retries degraded/failed plugins with backoff
+                # (e.g. Home Assistant on a server that's off at boot) and demotes
+                # initialized plugins whose health_check starts failing.
+                app.state.plugin_recovery_task = asyncio.create_task(
+                    run_plugin_recovery(plugin_router)
+                )
             else:
                 application_logger.info("No plugins configured")
                 app.state.plugin_router = None
+                app.state.plugin_recovery_task = None
 
         except Exception as e:
             application_logger.error(
                 f"Failed to initialize plugin system: {e}", exc_info=True
             )
             app.state.plugin_router = None
+            app.state.plugin_recovery_task = None
 
     await asyncio.gather(
         _init_cron_scheduler(),
@@ -437,6 +437,15 @@ async def lifespan(app: FastAPI):
                 application_logger.info("Reaper stopped")
         except Exception as e:
             application_logger.error(f"Error stopping reaper: {e}")
+
+        # Stop the plugin recovery loop
+        try:
+            recovery_task = getattr(app.state, "plugin_recovery_task", None)
+            if recovery_task is not None:
+                recovery_task.cancel()
+                application_logger.info("Plugin recovery loop stopped")
+        except Exception as e:
+            application_logger.error(f"Error stopping plugin recovery loop: {e}")
 
         # Stop the observability tasks (event drain + health poller)
         for _attr, _label in (
