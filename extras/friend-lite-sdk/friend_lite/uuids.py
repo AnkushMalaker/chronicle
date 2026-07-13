@@ -19,9 +19,11 @@ NEO1_CTRL_CHAR_UUID = "19B10003-E8F2-537E-4F6C-D104768A1214"
 # fragments and plays them. Byte 0 of every write is an opcode (see SPEAKER_OP_* below).
 ELATO_SPEAKER_CHAR_UUID = "19B10004-E8F2-537E-4F6C-D104768A1214"
 SPEAKER_OP_START = 0x01  # speak-start: reset + arm playback (no payload)
-SPEAKER_OP_END = 0x02    # speak-end: drain then stop (no payload)
-SPEAKER_OP_STOP = 0x03   # speak-stop / barge-in: flush now (no payload)
-SPEAKER_OP_AUDIO = 0x10  # [0x10][flags][opus...]; flags bit0 = final fragment of a packet
+SPEAKER_OP_END = 0x02  # speak-end: drain then stop (no payload)
+SPEAKER_OP_STOP = 0x03  # speak-stop / barge-in: flush now (no payload)
+SPEAKER_OP_AUDIO = (
+    0x10  # [0x10][flags][opus...]; flags bit0 = final fragment of a packet
+)
 
 # Features service
 FEATURES_SERVICE_UUID = "19B10020-E8F2-537E-4F6C-D104768A1214"

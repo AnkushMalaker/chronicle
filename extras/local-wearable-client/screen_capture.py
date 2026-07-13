@@ -736,9 +736,11 @@ class ScreenCaptureManager:
             self.dedup,
             self.skip_idle_secs,
             self.retention_days,
-            f"every {self.compact_every_mins}min @q{self.compact_quality}"
-            if self.compact_every_mins > 0
-            else "off",
+            (
+                f"every {self.compact_every_mins}min @q{self.compact_quality}"
+                if self.compact_every_mins > 0
+                else "off"
+            ),
         )
         self._cleanup_compaction_temps()
         self._sweep_retention()
@@ -976,14 +978,40 @@ class ScreenCaptureManager:
                 "".join(f"file '{n}'\n" for n in names), encoding="utf-8"
             )
             cmd = [
-                self._ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
-                "-r", "1", "-f", "concat", "-safe", "0", "-i", list_name,
-                "-c:v", "hevc_videotoolbox", "-q:v", str(self.compact_quality),
-                "-bf", "0", "-g", "30", "-tag:v", "hvc1", "-pix_fmt", "yuv420p",
-                "-fps_mode", "cfr", "-frames:v", str(len(names)),
+                self._ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-r",
+                "1",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                list_name,
+                "-c:v",
+                "hevc_videotoolbox",
+                "-q:v",
+                str(self.compact_quality),
+                "-bf",
+                "0",
+                "-g",
+                "30",
+                "-tag:v",
+                "hvc1",
+                "-pix_fmt",
+                "yuv420p",
+                "-fps_mode",
+                "cfr",
+                "-frames:v",
+                str(len(names)),
                 # Force the muxer: the output name ends in .part, so ffmpeg can't
                 # infer mp4 from the extension.
-                "-f", "mp4", chunk_name + ".part",
+                "-f",
+                "mp4",
+                chunk_name + ".part",
             ]
             res = subprocess.run(
                 cmd, cwd=str(daydir), capture_output=True, text=True, timeout=300
@@ -1021,12 +1049,21 @@ class ScreenCaptureManager:
         try:
             res = subprocess.run(
                 [
-                    self._ffprobe, "-v", "error", "-count_frames",
-                    "-select_streams", "v:0",
-                    "-show_entries", "stream=nb_read_frames",
-                    "-of", "default=nokey=1:noprint_wrappers=1", str(chunk),
+                    self._ffprobe,
+                    "-v",
+                    "error",
+                    "-count_frames",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=nb_read_frames",
+                    "-of",
+                    "default=nokey=1:noprint_wrappers=1",
+                    str(chunk),
                 ],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True,
+                text=True,
+                timeout=120,
             )
             return res.stdout.strip() == str(expected)
         except Exception:
