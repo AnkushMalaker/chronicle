@@ -305,7 +305,14 @@ class ResolvedLLMOperation(BaseModel):
 
         if self.reasoning_effort:
             if openai_reasoning:
-                params["reasoning_effort"] = self.reasoning_effort
+                effort = self.reasoning_effort.strip().lower()
+                # "none" is only accepted from gpt-5.1 on; earlier reasoning
+                # models (gpt-5-nano, o3, …) reject it — "minimal" is their floor.
+                if effort in ("none", "off", "0") and not model_name.lower().startswith(
+                    "gpt-5.1"
+                ):
+                    effort = "minimal"
+                params["reasoning_effort"] = effort
             elif self.model_def.thinking:
                 # "none"/"minimal"/"off"/"0" → thinking off; any other level → on.
                 enable = self.reasoning_effort.strip().lower() not in (
@@ -415,15 +422,19 @@ class AppModels(BaseModel):
         return sorted(set(m.model_type for m in self.models.values()))
 
     def get_llm_operation(
-        self, name: str, *, default_model_type: str = "llm"
+        self,
+        name: str,
+        *,
+        default_model_type: str = "llm",
+        model_override: Optional[str] = None,
     ) -> ResolvedLLMOperation:
         """Resolve a named LLM operation to a self-contained config.
 
         Resolution:
           1. Look up llm_operations[name] (empty LLMOperationConfig if missing)
-          2. Resolve model_def: op.model → get_by_name, else defaults[default_model_type]
-             (falling back to defaults.llm — so e.g. an unset fast_llm reuses the
-             main LLM)
+          2. Resolve model_def: model_override → get_by_name, else op.model →
+             get_by_name, else defaults[default_model_type] (falling back to
+             defaults.llm — so e.g. an unset fast_llm reuses the main LLM)
           3. Merge parameters: operation > model_def.model_params > safe fallback
           4. Return ResolvedLLMOperation ready for use
 
@@ -431,6 +442,8 @@ class AppModels(BaseModel):
             name: Operation name (e.g. "memory_extraction", "chat")
             default_model_type: defaults key to use when the operation pins no model
                 (e.g. "fast_llm"); falls back to "llm" when that default is unset.
+            model_override: pin a specific model by name, overriding both the
+                operation's model and the defaults (used for fallback retries).
 
         Returns:
             ResolvedLLMOperation with model_def, temperature, max_tokens, response_format
@@ -441,7 +454,14 @@ class AppModels(BaseModel):
         op_config = self.llm_operations.get(name, LLMOperationConfig())
 
         # Resolve model definition
-        if op_config.model:
+        if model_override:
+            model_def = self.get_by_name(model_override)
+            if not model_def:
+                raise RuntimeError(
+                    f"LLM operation '{name}' requested override model "
+                    f"'{model_override}' which is not defined in the models list"
+                )
+        elif op_config.model:
             model_def = self.get_by_name(op_config.model)
             if not model_def:
                 raise RuntimeError(
@@ -487,6 +507,33 @@ class AppModels(BaseModel):
             max_tokens=int(max_tokens) if max_tokens is not None else None,
             response_format=response_format,
             reasoning_effort=reasoning_effort,
+        )
+
+    def get_fallback_llm_operation(
+        self,
+        name: str,
+        *,
+        primary: ResolvedLLMOperation,
+        default_model_type: str = "llm",
+    ) -> Optional[ResolvedLLMOperation]:
+        """Resolve operation ``name`` against ``defaults.fallback_llm``.
+
+        Returns None when no fallback is configured, when the fallback entry is
+        missing or not an LLM, or when it is the same model the primary attempt
+        already used (retrying it would be pointless).
+        """
+        fb_name = self.defaults.get("fallback_llm")
+        if not fb_name or fb_name == primary.model_def.name:
+            return None
+        fb_def = self.get_by_name(fb_name)
+        if not fb_def or fb_def.model_type != "llm":
+            logger.warning(
+                "defaults.fallback_llm=%r does not name an LLM model — ignoring",
+                fb_name,
+            )
+            return None
+        return self.get_llm_operation(
+            name, default_model_type=default_model_type, model_override=fb_name
         )
 
 

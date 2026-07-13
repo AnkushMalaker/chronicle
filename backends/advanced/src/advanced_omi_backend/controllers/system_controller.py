@@ -1390,6 +1390,7 @@ async def test_llm_model(model_name: Optional[str]):
 _DEFAULT_KEY_TO_MODEL_TYPE = {
     "llm": "llm",
     "fast_llm": "llm",
+    "fallback_llm": "llm",
     "embedding": "embedding",
     "stt": "stt",
     "stt_stream": "stt_stream",
@@ -1486,6 +1487,7 @@ async def get_models():
         for key in (
             "llm",
             "fast_llm",
+            "fallback_llm",
             "embedding",
             "stt",
             "stt_stream",

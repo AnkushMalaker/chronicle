@@ -1104,6 +1104,137 @@ class ChronicleSetup:
             "(defaults.fast_llm: fast-llm)"
         )
 
+    def setup_fallback_llm(self):
+        """Configure a fallback LLM that calls retry against when the primary
+        LLM is unreachable (connection failure, timeout, 5xx).
+        Default: OpenAI gpt-5-nano."""
+        self.print_section("Fallback LLM (recommended)")
+        self.console.print(
+            "[blue][INFO][/blue] If your main LLM is unreachable (e.g. a local "
+            "model is down), LLM calls are retried once against a fallback model."
+        )
+        self.console.print(
+            "The default fallback is OpenAI gpt-5-nano (cheap, always available). "
+            "It uses your OPENAI_API_KEY."
+        )
+        self.console.print()
+
+        full_config = self.config_manager.get_full_config()
+        defaults_cfg = full_config.get("defaults", {})
+        existing_fb = defaults_cfg.get("fallback_llm") or ""
+        explicitly_disabled = "fallback_llm" in defaults_cfg and not existing_fb
+        existing_model = next(
+            (
+                m
+                for m in full_config.get("models", [])
+                if m.get("name") == "fallback-llm"
+            ),
+            {},
+        )
+        is_custom = bool(existing_fb) and (
+            existing_fb != "fallback-llm"
+            or (
+                existing_model
+                and existing_model.get("model_name") not in ("", "gpt-5-nano")
+            )
+        )
+
+        choices = {
+            "1": "OpenAI gpt-5-nano (recommended)",
+            "2": "Custom OpenAI-compatible endpoint",
+            "3": "No fallback",
+        }
+        default_choice = "3" if explicitly_disabled else ("2" if is_custom else "1")
+        choice = self.prompt_choice(
+            "Fallback LLM when the main LLM is down?", choices, default_choice
+        )
+
+        if choice == "3":
+            self.config_manager.update_config_defaults({"fallback_llm": ""})
+            self.console.print(
+                "[blue][INFO][/blue] No fallback LLM — calls fail if the main "
+                "LLM is unreachable (defaults.fallback_llm cleared)"
+            )
+            return
+
+        if choice == "1":
+            # Stock gpt-5-nano entry ships in defaults.yml; re-sync a stale
+            # customized copy in config.yml so it doesn't shadow the default.
+            if existing_model:
+                self.config_manager.sync_models_from_defaults(["fallback-llm"])
+            api_key = self.prompt_with_existing_masked(
+                prompt_text="OpenAI API key for the fallback (leave empty to keep existing)",
+                env_key="OPENAI_API_KEY",
+                placeholders=["your_openai_api_key_here", "your-openai-key-here"],
+                is_password=True,
+                default="",
+            )
+            if api_key:
+                self.config["OPENAI_API_KEY"] = api_key
+            else:
+                self.console.print(
+                    "[yellow][WARNING][/yellow] No OPENAI_API_KEY — the fallback "
+                    "will not work until one is set in .env"
+                )
+            self.config_manager.update_config_defaults({"fallback_llm": "fallback-llm"})
+            self.console.print(
+                "[green][SUCCESS][/green] Fallback LLM: OpenAI gpt-5-nano "
+                "(defaults.fallback_llm: fallback-llm)"
+            )
+            return
+
+        # Custom OpenAI-compatible fallback endpoint
+        base_url = self.prompt_value(
+            "Fallback LLM API Base URL",
+            existing_model.get("model_url", "https://api.openai.com/v1"),
+        )
+        if not base_url:
+            self.console.print(
+                "[yellow][WARNING][/yellow] No base URL - fallback disabled"
+            )
+            self.config_manager.update_config_defaults({"fallback_llm": ""})
+            return
+
+        api_key = self.prompt_with_existing_masked(
+            prompt_text="Fallback LLM API Key (leave empty if not required)",
+            env_key="FALLBACK_LLM_API_KEY",
+            placeholders=["your_fallback_llm_api_key_here"],
+            is_password=True,
+            default="",
+        )
+        if api_key:
+            self.config["FALLBACK_LLM_API_KEY"] = api_key
+
+        model_name = self.prompt_value(
+            "Fallback LLM model name (e.g., gpt-5-nano, llama-3.1-8b-instant)",
+            existing_model.get("model_name", "gpt-5-nano"),
+        )
+        if not model_name:
+            self.console.print(
+                "[yellow][WARNING][/yellow] No model name - fallback disabled"
+            )
+            self.config_manager.update_config_defaults({"fallback_llm": ""})
+            return
+
+        fallback_model = {
+            "name": "fallback-llm",
+            "description": "Fallback LLM used when the primary LLM is unreachable",
+            "model_type": "llm",
+            "model_provider": "openai",
+            "api_family": "openai",
+            "model_name": model_name,
+            "model_url": base_url,
+            "api_key": "${oc.env:FALLBACK_LLM_API_KEY,''}",
+            "model_params": {"temperature": 0.2, "max_tokens": 4000},
+            "model_output": "json",
+        }
+        self.config_manager.add_or_update_model(fallback_model)
+        self.config_manager.update_config_defaults({"fallback_llm": "fallback-llm"})
+        self.console.print(
+            "[green][SUCCESS][/green] Custom fallback LLM configured "
+            "(defaults.fallback_llm: fallback-llm)"
+        )
+
     def setup_memory(self):
         """Configure memory provider - updates config.yml.
 
@@ -1668,6 +1799,7 @@ class ChronicleSetup:
             self.setup_live_segmentation()
             self.setup_llm()
             self.setup_fast_llm()
+            self.setup_fallback_llm()
             self.setup_memory()
             self.setup_optional_services()
             self.setup_langfuse()

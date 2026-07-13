@@ -20,7 +20,11 @@ from advanced_omi_backend.controllers.queue_controller import (
     get_queue_health,
     redis_conn,
 )
-from advanced_omi_backend.llm_client import async_health_check, async_health_check_fast
+from advanced_omi_backend.llm_client import (
+    async_health_check,
+    async_health_check_fallback,
+    async_health_check_fast,
+)
 from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.services.transcription import get_transcription_provider
@@ -281,6 +285,29 @@ async def health_check():
                 overall_healthy = False
     except Exception as e:  # noqa: BLE001 - fast LLM is optional/non-critical
         health_status["services"]["fast_llm"] = {
+            "status": f"⚠️ Connection Failed: {str(e)} - Service may not be running",
+            "healthy": False,
+            "critical": False,
+        }
+        overall_healthy = False
+
+    # Check separate fallback LLM, only when one is configured
+    # (defaults.fallback_llm set and distinct from defaults.llm).
+    try:
+        fb_health = await asyncio.wait_for(async_health_check_fallback(), timeout=8.0)
+        if fb_health is not None:
+            is_healthy = fb_health.get("healthy", False)
+            health_status["services"]["fallback_llm"] = {
+                "status": fb_health.get("status", "❌ Unknown"),
+                "healthy": is_healthy,
+                "base_url": fb_health.get("base_url", ""),
+                "model": fb_health.get("default_model", ""),
+                "critical": False,
+            }
+            if not is_healthy:
+                overall_healthy = False
+    except Exception as e:  # noqa: BLE001 - fallback LLM is optional/non-critical
+        health_status["services"]["fallback_llm"] = {
             "status": f"⚠️ Connection Failed: {str(e)} - Service may not be running",
             "healthy": False,
             "critical": False,
