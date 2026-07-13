@@ -12,6 +12,12 @@ import time
 
 from fastapi.responses import JSONResponse
 
+from advanced_omi_backend.controllers.queue_controller import (
+    all_jobs_complete_for_client,
+    default_queue,
+    memory_queue,
+    transcription_queue,
+)
 from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
     SessionStore,
@@ -51,13 +57,6 @@ def _session_info_dict(view: SessionView, conversation_count: int) -> dict:
 
 async def get_streaming_status(request):
     """Get status of active streaming sessions and Redis Streams health."""
-    from advanced_omi_backend.controllers.queue_controller import (
-        all_jobs_complete_for_client,
-        default_queue,
-        memory_queue,
-        transcription_queue,
-    )
-
     try:
         # Get Redis client from request.app.state (initialized during startup)
         redis_client = request.app.state.redis_audio_stream
@@ -362,10 +361,6 @@ async def get_streaming_status(request):
 
 async def cleanup_old_sessions(request, max_age_seconds: int = 3600):
     """Clean up old session tracking metadata and old audio streams from Redis."""
-    import time
-
-    from fastapi.responses import JSONResponse
-
     try:
         # Get Redis client from request.app.state (initialized during startup)
         redis_client = request.app.state.redis_audio_stream

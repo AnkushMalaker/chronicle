@@ -571,6 +571,7 @@ class SessionStore:
 
 def get_session_store() -> SessionStore:
     """Convenience for FastAPI/singleton callers: wrap the producer's shared client."""
+    # Lazy import: circular dependency (producer imports SessionStore at module top)
     from advanced_omi_backend.services.audio_stream.producer import (
         get_audio_stream_producer,
     )

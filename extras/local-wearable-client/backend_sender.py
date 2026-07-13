@@ -6,7 +6,9 @@ import json
 import logging
 import os
 import ssl
+import sys
 import tempfile
+from pathlib import Path
 from typing import AsyncGenerator, Optional
 from urllib.parse import quote
 
@@ -36,9 +38,7 @@ async def play_audio_on_laptop(audio_b64: str, fmt: str = "wav") -> None:
 
     tmp_path = None
     try:
-        with tempfile.NamedTemporaryFile(
-            suffix=f".{fmt}", delete=False
-        ) as tmp:
+        with tempfile.NamedTemporaryFile(suffix=f".{fmt}", delete=False) as tmp:
             tmp.write(audio)
             tmp_path = tmp.name
 
@@ -75,13 +75,11 @@ def _resolve_backend_url() -> str:
         logger.info("Backend URL from BACKEND_HOST: %s", url)
         return url
 
-    import sys
-    from pathlib import Path
-
     _repo_root = str(Path(__file__).resolve().parent.parent.parent)
     if _repo_root not in sys.path:
         sys.path.insert(0, _repo_root)
     try:
+        # Lazy import: sys.path-dependent (repo-root discovery.py, inserted above)
         from discovery import resolve_backend_url
 
         return resolve_backend_url(None, logger=logger)
@@ -280,9 +278,7 @@ async def stream_to_backend(
         # picks up a fresh token without cycling the BLE session.
         token = await get_jwt_token(ADMIN_EMAIL, ADMIN_PASSWORD)
         if not token:
-            logger.error(
-                "Failed to get JWT token; retrying in %.0fs", backoff
-            )
+            logger.error("Failed to get JWT token; retrying in %.0fs", backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * _BACKOFF_FACTOR, _BACKOFF_MAX)
             continue
@@ -362,9 +358,7 @@ async def stream_to_backend(
                         "payload_length": None,
                     }
                     await websocket.send(json.dumps(audio_stop) + "\n")
-                    logger.info(
-                        "Sent audio-stop event. Total chunks: %d", chunk_count
-                    )
+                    logger.info("Sent audio-stop event. Total chunks: %d", chunk_count)
 
                 finally:
                     _active_websocket = None
@@ -387,8 +381,6 @@ async def stream_to_backend(
             )
             if healthy:
                 backoff = _BACKOFF_INITIAL
-            logger.warning(
-                "Backend WS dropped (%s); reconnecting in %.0fs", e, backoff
-            )
+            logger.warning("Backend WS dropped (%s); reconnecting in %.0fs", e, backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * _BACKOFF_FACTOR, _BACKOFF_MAX)

@@ -20,6 +20,10 @@ from advanced_omi_backend.controllers import (
 )
 from advanced_omi_backend.models.user import User
 from advanced_omi_backend.services import plugin_assistant
+from advanced_omi_backend.services.plugin_service import get_plugin_router
+from advanced_omi_backend.services.status_reconciler import (
+    reconcile_conversation_statuses,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -207,10 +211,6 @@ async def reconcile_conversation_status(
     """Recompute conversation processing_status from facts (transcript present =>
     completed; none, once settled => failed). Self-heals drift left by crashed or
     timed-out jobs. Pass dry_run=true to preview without writing. Admin only."""
-    from advanced_omi_backend.services.status_reconciler import (
-        reconcile_conversation_statuses,
-    )
-
     return await reconcile_conversation_statuses(dry_run=dry_run)
 
 
@@ -422,8 +422,6 @@ async def restart_backend(current_user: User = Depends(current_superuser)):
 async def get_plugins_health(current_user: User = Depends(current_superuser)):
     """Get plugin health status for all registered plugins. Admin only."""
     try:
-        from advanced_omi_backend.services.plugin_service import get_plugin_router
-
         plugin_router = get_plugin_router()
         if not plugin_router:
             return {
@@ -446,8 +444,6 @@ async def get_plugins_connectivity(current_user: User = Depends(current_superuse
     Runs each plugin's health_check() with a 10s timeout and returns results.
     """
     try:
-        from advanced_omi_backend.services.plugin_service import get_plugin_router
-
         plugin_router = get_plugin_router()
         if not plugin_router:
             return {"plugins": {}}

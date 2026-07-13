@@ -19,10 +19,12 @@ from typing import Dict, Optional
 
 import redis.asyncio as redis
 from redis import exceptions as redis_exceptions
+from websockets.exceptions import ConnectionClosed
 
 from advanced_omi_backend.client_manager import get_client_owner_async
 from advanced_omi_backend.heartbeat import beat
 from advanced_omi_backend.models.user import get_user_by_id
+from advanced_omi_backend.observability.otel_setup import set_span_attrs
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.plugins.router import PluginRouter
 from advanced_omi_backend.services.audio_stream.session_store import SessionStore
@@ -55,8 +57,6 @@ STREAM_IDLE_TIMEOUT_SECONDS = 300
 
 def _is_connection_error(e: Exception) -> bool:
     """Check if exception indicates WebSocket connection death."""
-    from websockets.exceptions import ConnectionClosed
-
     if isinstance(e, (ConnectionClosed, ConnectionError, OSError)):
         return True
     # Check wrapped exceptions
@@ -755,8 +755,6 @@ class StreamingTranscriptionConsumer:
             result: Final transcription result
             chunk_id: Optional chunk identifier
         """
-        from advanced_omi_backend.observability.otel_setup import set_span_attrs
-
         set_span_attrs(pipeline_stage="transcription_streaming")
         try:
             stream_name = f"transcription:results:{session_id}"

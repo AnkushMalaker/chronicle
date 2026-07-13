@@ -93,6 +93,7 @@ class KittenSynthesizer:
             logger.info("Model already loaded")
             return
 
+        # Lazy import: kittentts is only needed once model loading starts.
         from kittentts import KittenTTS
 
         # KittenTTS 0.8.x takes the HF model id and self-wires espeak via

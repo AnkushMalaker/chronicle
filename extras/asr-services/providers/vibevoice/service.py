@@ -7,10 +7,12 @@ Includes LoRA fine-tuning endpoints for model adaptation from user corrections.
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import logging
 import os
 import shutil
+import sys
 import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -153,8 +155,6 @@ def _run_lora_training(
         _finetune_state["progress"] = "starting"
 
         # Import VibeVoice's LoRA fine-tuning module
-        import sys
-
         hf_home = Path(os.getenv("HF_HOME", "/models"))
         vibevoice_dir = hf_home / "vibevoice"
         if str(vibevoice_dir) not in sys.path:
@@ -167,8 +167,6 @@ def _run_lora_training(
             )
 
         # Use importlib to load the script as a module
-        import importlib.util
-
         spec = importlib.util.spec_from_file_location(
             "lora_finetune", str(finetune_script)
         )
@@ -190,6 +188,8 @@ def _run_lora_training(
             lora_alpha=lora_alpha,
         )
 
+        # Lazy import: transformers is heavy and only needed for this
+        # background fine-tuning task.
         from transformers import TrainingArguments
 
         # Determine logging backend from env

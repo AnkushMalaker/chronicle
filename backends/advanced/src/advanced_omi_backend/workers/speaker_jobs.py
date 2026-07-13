@@ -7,6 +7,7 @@ This module contains all jobs related to speaker identification and recognition.
 import asyncio
 import logging
 import time
+import traceback
 from typing import Any, Dict
 
 from advanced_omi_backend.auth import generate_jwt_for_user
@@ -21,6 +22,7 @@ from advanced_omi_backend.services.forced_alignment import (
 from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 from advanced_omi_backend.users import get_user_by_id
 from advanced_omi_backend.utils.job_utils import update_job_meta
+from advanced_omi_backend.utils.segment_utils import classify_segment_text
 
 logger = logging.getLogger(__name__)
 
@@ -656,8 +658,6 @@ async def recognise_speakers_job(
             ]
 
             # Classify segment type from content
-            from advanced_omi_backend.utils.segment_utils import classify_segment_text
-
             seg_classification = classify_segment_text(text)
             seg_type = "event" if seg_classification == "event" else "speech"
 
@@ -840,8 +840,6 @@ async def recognise_speakers_job(
 
     except Exception as speaker_error:
         logger.error(f"❌ Speaker recognition failed: {speaker_error}")
-        import traceback
-
         logger.debug(traceback.format_exc())
 
         # Create mode created no version — surface the failure so it isn't a silent

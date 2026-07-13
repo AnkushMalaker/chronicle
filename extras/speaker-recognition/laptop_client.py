@@ -29,6 +29,7 @@ Requirements:
 import argparse
 import asyncio
 import logging
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Optional
@@ -128,8 +129,6 @@ class SpeakerClient:
         """Verify if audio matches specific speaker by uploading it."""
         # For now, copy file to a shared location accessible by Docker
         # TODO: Add /verify/upload endpoint to speaker service
-        import shutil
-
         shared_path = f"/tmp/audio_upload_{Path(audio_path).name}"
         shutil.copy2(audio_path, shared_path)
 
@@ -245,8 +244,6 @@ async def record_audio(duration: float, sample_rate: int = 16000) -> str:
 
 def save_audio(temp_path: str, save_path: str):
     """Save recorded audio to specified path."""
-    import shutil
-
     save_path_obj = Path(save_path)
     save_path_obj.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(temp_path, save_path_obj)

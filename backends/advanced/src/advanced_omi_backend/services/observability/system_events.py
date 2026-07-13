@@ -25,7 +25,10 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from advanced_omi_backend.models.system_event import SystemEvent
+from advanced_omi_backend.models.user import User
 from advanced_omi_backend.redis_factory import create_async_redis, create_sync_redis
+from advanced_omi_backend.services.sse_publisher import publish_sse_event
 
 logger = logging.getLogger("observability.system_events")
 
@@ -158,8 +161,6 @@ async def _persist_and_publish(event: dict) -> None:
 
 async def _upsert(event: dict):
     """Insert a new event, or collapse onto a recent identical one (dedup window)."""
-    from advanced_omi_backend.models.system_event import SystemEvent
-
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(seconds=_DEDUP_WINDOW_SECS)
     existing = await SystemEvent.find_one(
@@ -200,8 +201,6 @@ async def _get_admin_ids() -> list[str]:
     if _admin_ids_cache["ids"] and now - _admin_ids_cache["ts"] < _ADMIN_CACHE_TTL:
         return _admin_ids_cache["ids"]
     try:
-        from advanced_omi_backend.models.user import User
-
         admins = await User.find(User.is_superuser == True).to_list()  # noqa: E712
         _admin_ids_cache["ids"] = [str(u.id) for u in admins]
         _admin_ids_cache["ts"] = now
@@ -213,8 +212,6 @@ async def _get_admin_ids() -> list[str]:
 async def _fan_out_sse(doc) -> None:
     """Push a lightweight notification to every admin's SSE channel (per-user bus)."""
     try:
-        from advanced_omi_backend.services.sse_publisher import publish_sse_event
-
         payload = {
             "id": str(doc.id),
             "severity": doc.severity,

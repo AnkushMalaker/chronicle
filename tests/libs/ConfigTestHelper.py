@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import patch
+from urllib.parse import urlparse
 
 import yaml
 from omegaconf import OmegaConf
@@ -42,8 +43,6 @@ class ConfigTestHelper:
         """
         Parses a URL and returns its components to verify correct parsing.
         """
-        from urllib.parse import urlparse
-
         parsed = urlparse(url)
         return {"scheme": parsed.scheme, "netloc": parsed.netloc, "path": parsed.path}
 

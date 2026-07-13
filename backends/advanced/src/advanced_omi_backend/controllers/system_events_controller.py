@@ -12,6 +12,9 @@ from typing import Any, Optional
 from beanie import PydanticObjectId
 from fastapi import HTTPException
 
+from advanced_omi_backend.models.system_event import SystemEvent
+from advanced_omi_backend.services.observability.system_events import record_event
+
 logger = logging.getLogger(__name__)
 
 
@@ -61,8 +64,6 @@ async def ingest_external_event(
     set, free-text fields are size-clamped, and the source is namespaced with a
     ``service:`` prefix so a remote service can't masquerade as a backend logger.
     """
-    from advanced_omi_backend.services.observability.system_events import record_event
-
     severity = severity if severity in _VALID_SEVERITIES else "error"
     # External submissions are, by definition, service-originated unless they say
     # otherwise; default the category accordingly.
@@ -104,8 +105,6 @@ async def list_system_events(
     offset: int = 0,
 ) -> dict[str, Any]:
     """Paginated, newest-first list of events with optional facet filters."""
-    from advanced_omi_backend.models.system_event import SystemEvent
-
     conditions = []
     if severity:
         conditions.append(SystemEvent.severity == severity)
@@ -144,8 +143,6 @@ async def list_system_events(
 
 async def get_system_events_summary(*, window_hours: float = 24) -> dict[str, Any]:
     """Counts by severity/category/source over a time window (for the strip + badge)."""
-    from advanced_omi_backend.models.system_event import SystemEvent
-
     since = datetime.now(timezone.utc) - timedelta(hours=window_hours)
     pipeline = [
         {"$match": {"created_at": {"$gte": since}}},
@@ -187,8 +184,6 @@ async def get_system_events_summary(*, window_hours: float = 24) -> dict[str, An
 
 
 async def ack_system_event(event_id: str) -> dict[str, Any]:
-    from advanced_omi_backend.models.system_event import SystemEvent
-
     try:
         oid = PydanticObjectId(event_id)
     except Exception:
@@ -203,8 +198,6 @@ async def ack_system_event(event_id: str) -> dict[str, Any]:
 
 async def ack_system_events_by_ids(event_ids: list[str]) -> dict[str, Any]:
     """Acknowledge a specific set of events by id (skips any already acked)."""
-    from advanced_omi_backend.models.system_event import SystemEvent
-
     oids = []
     for eid in event_ids:
         try:
@@ -234,8 +227,6 @@ async def ack_system_events(
     Filters mirror :func:`list_system_events` so the UI can acknowledge exactly the
     set the operator is currently looking at. Always scoped to ``acked == False``.
     """
-    from advanced_omi_backend.models.system_event import SystemEvent
-
     conditions = [SystemEvent.acked == False]  # noqa: E712
     if severity:
         conditions.append(SystemEvent.severity == severity)
@@ -256,8 +247,6 @@ async def ack_system_events(
 
 
 async def clear_system_events(*, acked_only: bool = False) -> dict[str, Any]:
-    from advanced_omi_backend.models.system_event import SystemEvent
-
     if acked_only:
         result = await SystemEvent.find(
             SystemEvent.acked == True

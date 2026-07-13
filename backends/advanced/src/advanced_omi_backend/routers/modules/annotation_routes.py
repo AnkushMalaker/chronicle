@@ -6,6 +6,7 @@ Supports both user edits and AI-powered suggestions.
 """
 
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import List
 
@@ -32,8 +33,11 @@ from advanced_omi_backend.models.annotation import (
     TranscriptAnnotationCreate,
 )
 from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.job import JobPriority
 from advanced_omi_backend.services.memory import get_memory_service
+from advanced_omi_backend.services.memory.audit import MemoryCause, UpdateStrategy
 from advanced_omi_backend.users import User
+from advanced_omi_backend.workers.memory_jobs import enqueue_memory_processing
 
 logger = logging.getLogger(__name__)
 
@@ -956,8 +960,6 @@ async def apply_diarization_annotations(
             raise HTTPException(status_code=404, detail="No active transcript found")
 
         # Create NEW transcript version with corrected speakers
-        import uuid
-
         new_version_id = str(uuid.uuid4())
 
         # Copy segments and apply corrections (most recent annotation wins)
@@ -1024,13 +1026,6 @@ async def apply_diarization_annotations(
         # Chain memory reprocessing. Diarization-only edits change speaker
         # attribution, so use the same speaker-diff strategy as a speaker
         # reprocess (it falls back to a full re-extraction if no diff applies).
-        from advanced_omi_backend.models.job import JobPriority
-        from advanced_omi_backend.services.memory.audit import (
-            MemoryCause,
-            UpdateStrategy,
-        )
-        from advanced_omi_backend.workers.memory_jobs import enqueue_memory_processing
-
         enqueue_memory_processing(
             conversation_id=conversation_id,
             priority=JobPriority.NORMAL,
@@ -1258,13 +1253,6 @@ async def apply_all_annotations(
 
         # Trigger memory reprocessing (once for all changes). Combined apply may
         # change transcript text as well as speakers, so re-extract in full.
-        from advanced_omi_backend.models.job import JobPriority
-        from advanced_omi_backend.services.memory.audit import (
-            MemoryCause,
-            UpdateStrategy,
-        )
-        from advanced_omi_backend.workers.memory_jobs import enqueue_memory_processing
-
         enqueue_memory_processing(
             conversation_id=conversation_id,
             priority=JobPriority.NORMAL,

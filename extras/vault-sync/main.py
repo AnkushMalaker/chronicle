@@ -2,6 +2,8 @@
 
 import argparse
 
+from service import install, kickstart, logs, status, uninstall
+
 _COMMANDS = ("menu", "install", "uninstall", "kickstart", "status", "logs")
 
 
@@ -19,28 +21,19 @@ def cli() -> None:
     command = args.command or "menu"
 
     if command == "menu":
+        # Lazy import: macOS-only (rumps, darwin-only per pyproject.toml)
         from menu_vault import main as menu_main
 
         menu_main()
     elif command == "install":
-        from service import install
-
         install()
     elif command == "uninstall":
-        from service import uninstall
-
         uninstall()
     elif command == "kickstart":
-        from service import kickstart
-
         kickstart()
     elif command == "status":
-        from service import status
-
         status()
     elif command == "logs":
-        from service import logs
-
         logs()
 
 

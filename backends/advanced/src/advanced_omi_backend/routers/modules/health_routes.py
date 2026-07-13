@@ -16,7 +16,10 @@ from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 
 from advanced_omi_backend.client_manager import get_client_manager
-from advanced_omi_backend.controllers.queue_controller import redis_conn
+from advanced_omi_backend.controllers.queue_controller import (
+    get_queue_health,
+    redis_conn,
+)
 from advanced_omi_backend.llm_client import async_health_check, async_health_check_fast
 from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.services.memory import get_memory_service
@@ -180,8 +183,6 @@ async def health_check():
 
     # Check Redis and RQ Workers (critical for queue processing)
     try:
-        from advanced_omi_backend.controllers.queue_controller import get_queue_health
-
         # Get queue health (includes Redis connection test and worker count)
         queue_health = await asyncio.wait_for(
             asyncio.to_thread(get_queue_health), timeout=5.0

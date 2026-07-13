@@ -121,6 +121,8 @@ def start_wrapper() -> None:
     chronicle_dir = os.path.abspath(chronicle_dir)
     sys.path.insert(0, chronicle_dir)
 
+    # Lazy import: common.base_service / providers.fish_speech.service are only
+    # importable after the sys.path.insert above runs, so this must stay deferred.
     import uvicorn
     from common.base_service import create_tts_app
     from providers.fish_speech.service import FishSpeechService

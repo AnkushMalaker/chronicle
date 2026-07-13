@@ -12,6 +12,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from beanie import init_beanie
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
@@ -26,6 +27,12 @@ from advanced_omi_backend.auth import (
 )
 from advanced_omi_backend.client_manager import get_client_manager
 from advanced_omi_backend.middleware.app_middleware import setup_middleware
+from advanced_omi_backend.models.annotation import Annotation
+from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
+from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
+from advanced_omi_backend.models.system_event import SystemEvent
+from advanced_omi_backend.models.waveform import WaveformData
 from advanced_omi_backend.redis_factory import create_async_redis
 from advanced_omi_backend.routers.api_router import router as api_router
 from advanced_omi_backend.routers.modules.health_routes import router as health_router
@@ -63,16 +70,6 @@ async def lifespan(app: FastAPI):
 
     # Initialize Beanie for all document models
     try:
-        from beanie import init_beanie
-
-        from advanced_omi_backend.models.annotation import Annotation
-        from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
-        from advanced_omi_backend.models.conversation import Conversation
-        from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
-        from advanced_omi_backend.models.system_event import SystemEvent
-        from advanced_omi_backend.models.user import User
-        from advanced_omi_backend.models.waveform import WaveformData
-
         await init_beanie(
             database=config.db,
             document_models=[

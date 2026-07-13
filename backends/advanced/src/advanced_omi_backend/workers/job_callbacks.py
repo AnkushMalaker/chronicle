@@ -50,6 +50,8 @@ _conversations_col = None
 def _get_conversations_col():
     global _mongo_client, _conversations_col
     if _conversations_col is None:
+        # Lazy import: intentional standalone sync pymongo client (NOT Beanie/Motor),
+        # created on first failure only — see module docstring for the full rationale.
         from pymongo import MongoClient
 
         uri = os.getenv("MONGODB_URI", "mongodb://mongo:27017")

@@ -39,6 +39,8 @@ log = logging.getLogger("websocket_wrapper")
 # Dependency functions
 async def get_db():
     """Get speaker database dependency."""
+    # Lazy import: `service` imports this routers package at module load time,
+    # so importing it at module level here would create a circular import.
     from .. import service
 
     return await service.get_db()
@@ -46,6 +48,8 @@ async def get_db():
 
 def get_audio_backend():
     """Get audio backend."""
+    # Lazy import: `service` imports this routers package at module load time,
+    # so importing it at module level here would create a circular import.
     from .. import service
 
     return service.audio_backend
@@ -53,6 +57,8 @@ def get_audio_backend():
 
 def get_speaker_db():
     """Get speaker database."""
+    # Lazy import: `service` imports this routers package at module load time,
+    # so importing it at module level here would create a circular import.
     from .. import service
 
     return service.speaker_db
@@ -60,6 +66,8 @@ def get_speaker_db():
 
 def get_auth():
     """Get auth settings."""
+    # Lazy import: `service` imports this routers package at module load time,
+    # so importing it at module level here would create a circular import.
     from .. import service
 
     return service.auth

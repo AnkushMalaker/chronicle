@@ -237,8 +237,6 @@ def main():
                 detail=f"Invalid strictness: {strictness}. Must be strict, balanced, or lenient.",
             )
 
-        import tempfile
-
         tmp_filename = None
         try:
             audio_content = await file.read()

@@ -5,13 +5,18 @@ Provides admin-only endpoints for system management and cleanup operations.
 """
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from advanced_omi_backend.auth import current_active_user
+from advanced_omi_backend.config import get_cleanup_settings
+from advanced_omi_backend.controllers.queue_controller import get_queue
+from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.users import User
+from advanced_omi_backend.workers.cleanup_jobs import purge_old_deleted_conversations
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +33,6 @@ def require_admin(current_user: User = Depends(current_active_user)) -> User:
 @router.get("/cleanup/settings")
 async def get_cleanup_settings_admin(admin: User = Depends(require_admin)):
     """Get current cleanup settings (admin only)."""
-    from advanced_omi_backend.config import get_cleanup_settings
-
     settings = get_cleanup_settings()
     return {
         **settings,
@@ -47,11 +50,6 @@ async def trigger_cleanup(
 ):
     """Manually trigger cleanup of soft-deleted conversations (admin only)."""
     try:
-        from advanced_omi_backend.controllers.queue_controller import get_queue
-        from advanced_omi_backend.workers.cleanup_jobs import (
-            purge_old_deleted_conversations,
-        )
-
         # Enqueue cleanup job
         queue = get_queue("default")
         job = queue.enqueue(
@@ -92,11 +90,6 @@ async def preview_cleanup(
 ):
     """Preview what would be deleted by cleanup (admin only)."""
     try:
-        from datetime import datetime, timedelta, timezone
-
-        from advanced_omi_backend.config import get_cleanup_settings
-        from advanced_omi_backend.models.conversation import Conversation
-
         # Use provided retention or default from config
         if retention_days is None:
             settings_dict = get_cleanup_settings()

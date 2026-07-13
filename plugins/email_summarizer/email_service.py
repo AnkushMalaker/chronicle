@@ -10,10 +10,13 @@ Provides email sending functionality via SMTP protocol with support for:
 
 import asyncio
 import logging
+import os
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any, Dict, Optional
+
+from dotenv import load_dotenv
 
 from advanced_omi_backend.utils.logging_utils import mask_dict
 
@@ -199,10 +202,6 @@ class SMTPEmailService:
 # Test script for development/debugging
 async def main():
     """Test the SMTP email service."""
-    import os
-
-    from dotenv import load_dotenv
-
     load_dotenv()
 
     config = {

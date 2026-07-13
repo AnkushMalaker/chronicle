@@ -17,6 +17,7 @@ from simple_speaker_recognition.api.core.utils import (
     validate_confidence,
 )
 from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
+from simple_speaker_recognition.core.backend_client import BackendClient
 from simple_speaker_recognition.core.cluster_identify import assign_clusters_to_speakers
 from simple_speaker_recognition.core.models import (
     DiarizeAndIdentifyRequest,
@@ -38,6 +39,8 @@ log = logging.getLogger("speaker_service")
 # Dependency functions - will be resolved during integration
 async def get_db():
     """Get speaker database dependency."""
+    # Lazy import: `service` imports this routers package at module load time,
+    # so importing it at module level here would create a circular import.
     from .. import service
 
     return await service.get_db()
@@ -45,6 +48,8 @@ async def get_db():
 
 def get_audio_backend():
     """Get audio backend."""
+    # Lazy import: `service` imports this routers package at module load time,
+    # so importing it at module level here would create a circular import.
     from .. import service
 
     return service.audio_backend
@@ -175,8 +180,6 @@ async def diarize_and_identify(
         tmp_path = Path(tmp.name)
 
     # Save audio to debug directory for analysis
-    from datetime import datetime
-
     debug_dir = Path("/app/debug")
     if debug_dir.exists():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -503,6 +506,8 @@ async def diarize_identify_match(
         )
 
     # Get settings for chunking configuration
+    # Lazy import: api.service imports this routers package at module load
+    # time, so importing it at module level here would create a circular import.
     from simple_speaker_recognition.api.service import auth as settings
 
     max_diarize_duration = settings.max_diarize_duration  # Default 60 seconds
@@ -511,8 +516,6 @@ async def diarize_identify_match(
 
     # Mode 1: Conversation mode - fetch audio from backend
     if conversation_id:
-        from simple_speaker_recognition.core.backend_client import BackendClient
-
         backend_client = BackendClient(settings.backend_api_url)
         try:
             # Get conversation metadata
@@ -557,8 +560,6 @@ async def diarize_identify_match(
             tmp_path = Path(tmp_file.name)
 
         # Get audio duration for validation
-        from simple_speaker_recognition.utils.audio_processing import get_audio_info
-
         audio_info = get_audio_info(str(tmp_path))
         total_duration = audio_info.get("duration_seconds", 0)
 
@@ -796,8 +797,9 @@ async def embed_clusters(
         raise HTTPException(400, "No usable segments (need speaker + start + end)")
 
     if conversation_id:
+        # Lazy import: api.service imports this routers package at module load
+        # time, so importing it at module level here would create a circular import.
         from simple_speaker_recognition.api.service import auth as settings
-        from simple_speaker_recognition.core.backend_client import BackendClient
 
         backend_client = BackendClient(settings.backend_api_url)
         try:
@@ -1035,8 +1037,6 @@ async def analyze_annotation_segments(
     This endpoint extracts embeddings from specific segments in an audio file
     and performs clustering analysis to help visualize speaker separation.
     """
-    import json
-
     # Parse segments JSON
     try:
         segments_data = json.loads(segments)
@@ -1187,8 +1187,6 @@ async def analyze_segments_with_enrolled_speakers(
     3. Combines both in unified visualization
     4. Suggests optimal threshold based on separation
     """
-    import json
-
     # Parse segments JSON
     try:
         segments_data = json.loads(segments)

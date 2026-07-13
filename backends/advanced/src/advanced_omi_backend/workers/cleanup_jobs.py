@@ -135,6 +135,8 @@ def schedule_cleanup_job(retention_days: Optional[int] = None) -> Optional[str]:
         return None
 
     try:
+        # Lazy import: circular dependency with queue_controller (the workers
+        # package __init__ imports queue_controller, which lazily imports workers).
         from advanced_omi_backend.controllers.queue_controller import get_queue
 
         if retention_days is None:

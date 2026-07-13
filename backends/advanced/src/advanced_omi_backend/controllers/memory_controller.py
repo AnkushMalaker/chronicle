@@ -10,7 +10,11 @@ from typing import Optional
 from beanie import PydanticObjectId
 from fastapi.responses import JSONResponse
 
+from advanced_omi_backend.controllers.conversation_controller import (
+    _memory_audit_to_dict,
+)
 from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
 from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.services.memory.base import MemoryEntry
 from advanced_omi_backend.users import User
@@ -38,11 +42,6 @@ async def get_memory_audit(
     each change (memory extraction, speaker reprocess, or an inbound Obsidian edit).
     """
     try:
-        from advanced_omi_backend.controllers.conversation_controller import (
-            _memory_audit_to_dict,
-        )
-        from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
-
         target_user_id = _resolve_target_user(user, user_id)
 
         query = MemoryAuditEntry.find(MemoryAuditEntry.user_id == target_user_id)
@@ -74,8 +73,6 @@ async def get_memory_audit_diff(user: User, entry_id: str):
     whether the previous writer was the AI or an inbound Obsidian (human) edit.
     """
     try:
-        from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
-
         try:
             oid = PydanticObjectId(entry_id)
         except Exception:

@@ -15,6 +15,7 @@ change quality. Every Gemma 4 size ships a matching ``*-it-assistant`` drafter
 """
 
 import base64
+import json
 import logging
 import os
 import re
@@ -620,8 +621,6 @@ class Gemma4Transcriber:
     @staticmethod
     def _parse_judge_output(raw_text: str) -> dict:
         """Parse the model's judge output into a structured dict."""
-        import json as _json
-
         # Try direct JSON parse first
         # The model may wrap JSON in markdown code fences
         cleaned = raw_text.strip()
@@ -632,7 +631,7 @@ class Gemma4Transcriber:
             cleaned = "\n".join(lines).strip()
 
         try:
-            result = _json.loads(cleaned)
+            result = json.loads(cleaned)
             # Validate expected fields
             return {
                 "verdict": result.get("verdict", "inaccurate"),
@@ -640,7 +639,7 @@ class Gemma4Transcriber:
                 "errors": result.get("errors", []),
                 "reasoning": result.get("reasoning", ""),
             }
-        except (_json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError):
             pass
 
         # Fallback: regex extraction

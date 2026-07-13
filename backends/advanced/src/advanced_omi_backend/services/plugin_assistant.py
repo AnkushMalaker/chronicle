@@ -13,6 +13,7 @@ from advanced_omi_backend.controllers import system_controller
 from advanced_omi_backend.llm_client import async_chat_with_tools
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.prompt_registry import get_prompt_registry
+from advanced_omi_backend.services.plugin_service import get_plugin_router
 
 logger = logging.getLogger(__name__)
 
@@ -333,8 +334,6 @@ async def _exec_tool(name: str, arguments: dict) -> dict:
         }
 
     if name == "get_recent_events":
-        from advanced_omi_backend.services.plugin_service import get_plugin_router
-
         router = get_plugin_router()
         if not router:
             return {"events": [], "status": "plugin_router_not_initialized"}

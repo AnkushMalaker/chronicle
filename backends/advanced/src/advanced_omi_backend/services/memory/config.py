@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 import yaml
 
+from advanced_omi_backend.config import get_config_yml_path
 from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.utils.config_utils import resolve_value
 
@@ -53,8 +54,6 @@ def load_config_yml() -> Dict[str, Any]:
     Raises:
         FileNotFoundError: If config.yml does not exist
     """
-    from advanced_omi_backend.config import get_config_yml_path
-
     config_path = get_config_yml_path()
 
     if not config_path.exists():

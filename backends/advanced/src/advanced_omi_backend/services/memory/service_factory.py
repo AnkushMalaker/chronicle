@@ -10,6 +10,7 @@ from typing import Optional
 
 from .base import MemoryServiceBase
 from .config import MemoryConfig, MemoryProvider, build_memory_config_from_env
+from .providers.chronicle import MemoryService as ChronicleMemoryService
 
 memory_logger = logging.getLogger("memory_service")
 
@@ -37,8 +38,6 @@ def create_memory_service(config: MemoryConfig) -> MemoryServiceBase:
     )
 
     if config.memory_provider == MemoryProvider.CHRONICLE:
-        from .providers.chronicle import MemoryService as ChronicleMemoryService
-
         return ChronicleMemoryService(config)
 
     raise ValueError(f"Unsupported memory provider: {config.memory_provider}")

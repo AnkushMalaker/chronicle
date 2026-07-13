@@ -80,6 +80,8 @@ def main():
     signal.signal(signal.SIGINT, _handle_signal)
 
     try:
+        # Lazy import: keeps the ImportError path as a clean logged exit(1)
+        # instead of an unhandled traceback if minidisc-python isn't installed.
         import minidisc
     except ImportError:
         logger.error("minidisc-python not installed")

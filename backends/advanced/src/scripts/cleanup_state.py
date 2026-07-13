@@ -23,6 +23,7 @@ import shutil
 import struct
 import sys
 import tarfile
+import wave
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -53,6 +54,7 @@ try:
     from advanced_omi_backend.models.conversation import Conversation
     from advanced_omi_backend.models.user import User
     from advanced_omi_backend.models.waveform import WaveformData
+    from advanced_omi_backend.utils.audio_chunk_utils import decode_opus_to_pcm
 except ImportError as e:
     print(f"Error: Missing required dependency: {e}")
     print("This script must be run inside the chronicle-backend container")
@@ -583,10 +585,6 @@ class BackupManager:
         most one minute of PCM), even for multi-hour conversations.
         Returns True if audio was exported.
         """
-        import wave
-
-        from advanced_omi_backend.utils.audio_chunk_utils import decode_opus_to_pcm
-
         cursor = AudioChunkDocument.find(
             AudioChunkDocument.conversation_id == conversation_id
         ).sort("+chunk_index")

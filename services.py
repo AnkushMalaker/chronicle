@@ -16,6 +16,7 @@ import sys
 import time
 from pathlib import Path
 
+import requests
 import yaml
 from config_manager import ConfigManager
 from dotenv import dotenv_values, set_key
@@ -545,8 +546,6 @@ def check_service_health(service_name):
         "unhealthy" — responding but returning errors
         "stopped"  — not reachable at all
     """
-    import requests
-
     service = SERVICES[service_name]
     endpoints = service.get("health_endpoints", [])
     if not endpoints:

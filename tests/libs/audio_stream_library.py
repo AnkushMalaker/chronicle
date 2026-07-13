@@ -17,6 +17,7 @@ Usage in Robot Framework:
     Stop Audio Stream    ${stream_id}
 """
 
+import asyncio
 import sys
 from pathlib import Path
 from typing import Optional
@@ -117,8 +118,6 @@ def send_audio_stop_event(stream_id: str) -> None:
     session = _manager._sessions.get(stream_id)
     if not session:
         raise ValueError(f"Stream {stream_id} not found")
-
-    import asyncio
 
     async def _send_stop():
         try:

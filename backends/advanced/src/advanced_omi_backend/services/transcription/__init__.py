@@ -9,14 +9,17 @@ or provider-specific branching is used for batch transcription.
 import asyncio
 import json
 import logging
+import re
 from typing import Optional
 from urllib.parse import urlencode
 
 import httpx
 import websockets
 
+from advanced_omi_backend.config_loader import get_backend_config
 from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.prompt_registry import get_prompt_registry
+from advanced_omi_backend.services.plugin_service import get_plugin_router
 
 from .base import (
     BaseTranscriptionProvider,
@@ -33,8 +36,6 @@ def _get_plugin_keywords() -> list[str]:
     Returns an empty list if the plugin system is not initialised yet.
     """
     try:
-        from advanced_omi_backend.services.plugin_service import get_plugin_router
-
         router = get_plugin_router()
         if router:
             return router.get_asr_keywords()
@@ -45,8 +46,6 @@ def _get_plugin_keywords() -> list[str]:
 
 def _merge_hot_words(prompt_hot_words: str, plugin_keywords: list[str]) -> str:
     """Merge prompt-registry hot words with plugin keywords (deduplicated)."""
-    import re
-
     parts: list[str] = []
     seen: set[str] = set()
 
@@ -78,8 +77,6 @@ def _parse_hot_words_to_keyterm(hot_words_str: str) -> str:
     """
     if not hot_words_str or not hot_words_str.strip():
         return ""
-    import re
-
     terms = []
     for word in re.split(r"[,\n]+", hot_words_str):
         word = word.strip().lower()
@@ -110,8 +107,6 @@ def _resolve_asr_context(model) -> str:
     entry. Returns "" when neither is set.
     """
     try:
-        from advanced_omi_backend.config_loader import get_backend_config
-
         asr_cfg = get_backend_config("asr") or {}
         ctx_map = asr_cfg.get("context", {}) or {}
         override = ctx_map.get(model.name)
@@ -264,6 +259,7 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
     ) -> dict:
         # Special handling for mock provider (no HTTP server needed)
         if self.model.model_provider == "mock":
+            # Lazy import: test/mock-only provider
             from .mock_provider import MockTranscriptionProvider
 
             mock = MockTranscriptionProvider(fail_mode=False)
@@ -881,6 +877,7 @@ def get_mock_transcription_provider(
     Returns:
         MockTranscriptionProvider instance
     """
+    # Lazy import: test/mock-only provider
     from .mock_provider import MockTranscriptionProvider
 
     return MockTranscriptionProvider(fail_mode=fail_mode)

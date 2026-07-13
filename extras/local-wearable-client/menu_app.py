@@ -17,7 +17,7 @@ from typing import Optional
 import rumps
 import yaml
 from bleak import BleakScanner
-from dotenv import load_dotenv
+from dotenv import load_dotenv, set_key
 from main import (
     CONFIG_PATH,
     ENV_PATH,
@@ -91,6 +91,7 @@ log_buffer = MemoryLogHandler()
 
 def _show_logs_dialog(title: str, lines) -> None:
     """Show log lines in a scrollable modal dialog."""
+    # Lazy import: macOS-only (AppKit/Foundation, not available cross-platform)
     from AppKit import (
         NSAlert,
         NSBezelBorder,
@@ -191,7 +192,10 @@ def _open_privacy_pane(anchor: str) -> None:
     """
     try:
         subprocess.run(
-            ["open", f"x-apple.systempreferences:com.apple.preference.security?{anchor}"],
+            [
+                "open",
+                f"x-apple.systempreferences:com.apple.preference.security?{anchor}",
+            ],
             check=False,
         )
     except Exception as e:
@@ -202,8 +206,8 @@ def _show_settings_dialog(capture, env_path: str) -> bool:
     """Show the capture-settings form. On Save, validates, applies changes live to
     the running ``capture`` manager, and persists them to ``env_path`` (.env) so
     they survive a restart. Returns True if saved, False if cancelled/invalid."""
+    # Lazy import: macOS-only (AppKit/Foundation, not available cross-platform)
     from AppKit import NSAlert, NSButton, NSSwitchButton, NSTextField, NSView
-    from dotenv import set_key
     from Foundation import NSMakeRect
 
     row_h, label_w, field_w, pad = 30, 230, 110, 10
@@ -523,7 +527,12 @@ class BLEManager:
             # Auto-discover recognized names
             if auto_discover and d.name:
                 lower = d.name.casefold()
-                if "omi" in lower or "neo" in lower or "friend" in lower or "elato" in lower:
+                if (
+                    "omi" in lower
+                    or "neo" in lower
+                    or "friend" in lower
+                    or "elato" in lower
+                ):
                     devices.append(
                         {
                             "mac": d.address,
@@ -815,6 +824,7 @@ def run_menu_app() -> None:
     """Launch the menu bar app with background BLE thread."""
     # Register as accessory app so macOS allows menu bar icons
     # (non-bundled Python processes default to no-UI policy on Sequoia)
+    # Lazy import: macOS-only (AppKit, not available cross-platform)
     from AppKit import NSApplication
 
     NSApplication.sharedApplication().setActivationPolicy_(1)  # Accessory

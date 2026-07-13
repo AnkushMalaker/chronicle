@@ -3,23 +3,41 @@ Simple queue API routes for job monitoring.
 Provides basic endpoints for viewing job status and statistics.
 """
 
+import asyncio
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
+from rq.command import send_stop_job_command
 from rq.job import Job
+from rq.registry import (
+    CanceledJobRegistry,
+    DeferredJobRegistry,
+    FailedJobRegistry,
+    FinishedJobRegistry,
+    ScheduledJobRegistry,
+    StartedJobRegistry,
+)
 
 from advanced_omi_backend.auth import current_active_user
+from advanced_omi_backend.controllers import session_controller, system_controller
 from advanced_omi_backend.controllers.queue_controller import (
     QUEUE_NAMES,
     get_job_stats,
     get_job_status_from_rq,
     get_jobs,
+    get_queue,
+    get_queue_health,
     redis_conn,
 )
+from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.redis_factory import create_async_redis
+from advanced_omi_backend.services.audio_service import get_audio_stream_service
+from advanced_omi_backend.services.audio_stream.session_store import SessionStore
+from advanced_omi_backend.services.plugin_service import get_plugin_router
 from advanced_omi_backend.users import User
 
 logger = logging.getLogger(__name__)
@@ -207,18 +225,6 @@ async def get_jobs_by_client(
 ):
     """Get all jobs associated with a specific client device."""
     try:
-        from rq.registry import (
-            CanceledJobRegistry,
-            DeferredJobRegistry,
-            FailedJobRegistry,
-            FinishedJobRegistry,
-            ScheduledJobRegistry,
-            StartedJobRegistry,
-        )
-
-        from advanced_omi_backend.controllers.queue_controller import get_queue
-        from advanced_omi_backend.models.conversation import Conversation
-
         all_jobs = []
         processed_job_ids = set()  # Track which jobs we've already processed
         queues = QUEUE_NAMES
@@ -364,8 +370,6 @@ async def get_events(
         raise HTTPException(status_code=403, detail="Admin access required")
 
     try:
-        from advanced_omi_backend.services.plugin_service import get_plugin_router
-
         router_instance = get_plugin_router()
         if not router_instance:
             return {"events": [], "total": 0}
@@ -388,10 +392,6 @@ async def clear_jobs(
         raise HTTPException(status_code=403, detail="Admin access required")
 
     try:
-        from rq.registry import FailedJobRegistry, FinishedJobRegistry
-
-        from advanced_omi_backend.controllers.queue_controller import get_queue
-
         total_removed = 0
 
         for queue_name in QUEUE_NAMES:
@@ -437,8 +437,6 @@ async def clear_events(
         raise HTTPException(status_code=403, detail="Admin access required")
 
     try:
-        from advanced_omi_backend.services.plugin_service import get_plugin_router
-
         router_instance = get_plugin_router()
         if not router_instance:
             return {"deleted": 0}
@@ -474,10 +472,6 @@ async def get_queue_stats_endpoint(current_user: User = Depends(current_active_u
 async def get_queue_worker_details(current_user: User = Depends(current_active_user)):
     """Get detailed queue and worker status including task manager health."""
     try:
-        import time
-
-        from advanced_omi_backend.controllers.queue_controller import get_queue_health
-
         # Get queue health directly
         queue_health = get_queue_health()
 
@@ -510,8 +504,6 @@ async def get_stream_stats(
 ):
     """Get Redis Streams statistics with consumer group information."""
     try:
-        from advanced_omi_backend.services.audio_service import get_audio_stream_service
-
         audio_service = get_audio_stream_service()
 
         if not audio_service.redis:
@@ -527,8 +519,6 @@ async def get_stream_stats(
             stream_keys.extend(keys[: limit - len(stream_keys)])
 
         # Use asyncio.gather to fetch stream info in parallel
-        import asyncio
-
         async def get_stream_info(stream_key):
             try:
                 stream_name = (
@@ -686,14 +676,6 @@ async def flush_jobs(
         raise HTTPException(status_code=403, detail="Admin access required")
 
     try:
-        from rq.registry import (
-            CanceledJobRegistry,
-            FailedJobRegistry,
-            FinishedJobRegistry,
-        )
-
-        from advanced_omi_backend.controllers.queue_controller import get_queue
-
         cutoff_time = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
             hours=request.older_than_hours
         )
@@ -763,17 +745,6 @@ async def flush_all_jobs(
         raise HTTPException(status_code=400, detail="Confirmation required")
 
     try:
-        from rq.registry import (
-            CanceledJobRegistry,
-            DeferredJobRegistry,
-            FailedJobRegistry,
-            FinishedJobRegistry,
-            ScheduledJobRegistry,
-            StartedJobRegistry,
-        )
-
-        from advanced_omi_backend.controllers.queue_controller import get_queue
-
         # Preview mode: list everything that would be flushed without mutating anything.
         if request.dry_run:
             matched_jobs = []
@@ -900,8 +871,6 @@ async def flush_all_jobs(
                             # Send stop command to worker instead of canceling/deleting immediately
                             # This lets the worker clean up gracefully and prevents deadlock
                             try:
-                                from rq.command import send_stop_job_command
-
                                 send_stop_job_command(redis_conn, job_id)
                                 logger.info(
                                     f"Sent stop command to worker for job {job_id}"
@@ -1006,10 +975,6 @@ async def get_redis_sessions(
 ):
     """Get Redis session tracking information."""
     try:
-        from advanced_omi_backend.services.audio_stream.session_store import (
-            SessionStore,
-        )
-
         redis_client = create_async_redis()
         try:
             store = SessionStore(redis_client)
@@ -1054,12 +1019,6 @@ async def clear_old_sessions(
         raise HTTPException(status_code=403, detail="Admin access required")
 
     try:
-        import time
-
-        from advanced_omi_backend.services.audio_stream.session_store import (
-            SessionStore,
-        )
-
         redis_client = create_async_redis()
         try:
             cutoff_time = time.time() - older_than_seconds
@@ -1104,17 +1063,6 @@ async def get_dashboard_data(
     - Client jobs for expanded clients
     """
     try:
-        from rq.registry import (
-            DeferredJobRegistry,
-            FailedJobRegistry,
-            FinishedJobRegistry,
-            ScheduledJobRegistry,
-            StartedJobRegistry,
-        )
-
-        from advanced_omi_backend.controllers import system_controller
-        from advanced_omi_backend.controllers.queue_controller import get_queue
-
         # Parse expanded clients list
         expanded_client_ids = (
             [c.strip() for c in expanded_clients.split(",") if c.strip()]
@@ -1123,8 +1071,6 @@ async def get_dashboard_data(
         )
 
         # Fetch all data in parallel
-        import asyncio
-
         async def fetch_jobs_by_status(status_name: str, limit: int = 100):
             """Fetch jobs by status using existing registry logic."""
             try:
@@ -1252,9 +1198,6 @@ async def get_dashboard_data(
         async def fetch_streaming_status():
             """Fetch streaming status."""
             try:
-                # Import session_controller for streaming status
-                from advanced_omi_backend.controllers import session_controller
-
                 # Use the actual request object from the parent function
                 return await session_controller.get_streaming_status(request)
             except Exception as e:
@@ -1265,8 +1208,6 @@ async def get_dashboard_data(
             """Fetch jobs for a specific client device."""
             try:
                 # Reuse the existing logic from get_jobs_by_client endpoint
-                from advanced_omi_backend.models.conversation import Conversation
-
                 all_jobs = []
                 processed_job_ids = set()
                 queues = QUEUE_NAMES
@@ -1285,15 +1226,6 @@ async def get_dashboard_data(
                     queue = get_queue(queue_name)
 
                     # Check all registries
-                    from rq.registry import (
-                        CanceledJobRegistry,
-                        DeferredJobRegistry,
-                        FailedJobRegistry,
-                        FinishedJobRegistry,
-                        ScheduledJobRegistry,
-                        StartedJobRegistry,
-                    )
-
                     registries = [
                         ("queued", queue.job_ids),
                         (
@@ -1385,10 +1317,6 @@ async def get_dashboard_data(
             if not current_user.is_superuser:
                 return []
             try:
-                from advanced_omi_backend.services.plugin_service import (
-                    get_plugin_router,
-                )
-
                 router_instance = get_plugin_router()
                 if not router_instance:
                     return []

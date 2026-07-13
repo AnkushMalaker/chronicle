@@ -385,6 +385,9 @@ def create_asr_app(service: BaseASRService) -> FastAPI:
         conversation time. This lets downstream re-diarization re-attach transcript text
         to fresh speaker boundaries.
         """
+        # Lazy import: base_service.py is shared by every provider image, including
+        # ones that don't install torch/numpy/torchaudio. Only providers that call
+        # /align need them.
         import numpy as np
         import torch
         import torchaudio  # only torchaudio.functional.resample (no codec dependency)

@@ -15,7 +15,9 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.model_registry import ModelDef, get_models_registry
+from advanced_omi_backend.observability.otel_setup import set_span_attrs
 from advanced_omi_backend.openai_factory import create_openai_client
+from advanced_omi_backend.prompt_optimizer import get_user_prompt
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 from advanced_omi_backend.utils.text_chunking import semantic_chunk_text
 
@@ -212,16 +214,12 @@ class OpenAIProvider(LLMProviderBase):
         Returns:
             List of extracted memory strings
         """
-        from advanced_omi_backend.observability.otel_setup import set_span_attrs
-
         set_span_attrs(gen_ai_operation="chat", user_id=user_id)
         try:
             # Use the provided prompt or fall back to registry default
             if prompt and prompt.strip():
                 system_prompt = prompt
             else:
-                from advanced_omi_backend.prompt_optimizer import get_user_prompt
-
                 system_prompt = await get_user_prompt(
                     "memory.fact_retrieval",
                     user_id,
@@ -379,7 +377,6 @@ class OpenAIProvider(LLMProviderBase):
         Returns:
             Dictionary containing proposed memory actions
         """
-        from advanced_omi_backend.observability.otel_setup import set_span_attrs
 
         set_span_attrs(gen_ai_operation="chat")
         try:

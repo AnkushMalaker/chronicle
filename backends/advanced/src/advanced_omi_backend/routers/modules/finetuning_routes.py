@@ -15,9 +15,14 @@ from pydantic import BaseModel
 
 from advanced_omi_backend.auth import current_active_user
 from advanced_omi_backend.constants import is_non_enrollable_speaker
+from advanced_omi_backend.cron_scheduler import get_scheduler
 from advanced_omi_backend.models.annotation import Annotation, AnnotationType
+from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.services.observability.system_events import record_event
+from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 from advanced_omi_backend.users import User
+from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segment
+from advanced_omi_backend.workers.finetuning_jobs import run_asr_finetuning_job
 
 logger = logging.getLogger(__name__)
 
@@ -112,15 +117,6 @@ async def process_annotations_for_training(
                     "processed_count": 0,
                 }
             )
-
-        # Import required modules
-        from advanced_omi_backend.models.conversation import Conversation
-        from advanced_omi_backend.speaker_recognition_client import (
-            SpeakerRecognitionClient,
-        )
-        from advanced_omi_backend.utils.audio_chunk_utils import (
-            reconstruct_audio_segment,
-        )
 
         # Initialize speaker client
         speaker_client = SpeakerRecognitionClient()
@@ -375,8 +371,6 @@ async def export_asr_dataset(
         )
 
     try:
-        from advanced_omi_backend.workers.finetuning_jobs import run_asr_finetuning_job
-
         result = await run_asr_finetuning_job()
         return JSONResponse(content=result)
     except Exception as e:
@@ -404,8 +398,6 @@ async def get_finetuning_status(
         # ------------------------------------------------------------------
         # Per-type annotation counts (with orphan detection)
         # ------------------------------------------------------------------
-        from advanced_omi_backend.models.conversation import Conversation
-
         annotation_counts: dict[str, dict] = {}
         trained_diarization_list: list = []
         failed_diarization_errors: list[str] = []
@@ -519,8 +511,6 @@ async def get_finetuning_status(
 
         # Get cron job status from scheduler
         try:
-            from advanced_omi_backend.cron_scheduler import get_scheduler
-
             scheduler = get_scheduler()
             all_jobs = await scheduler.get_all_jobs_status()
             # Find speaker finetuning job for backward compat
@@ -582,8 +572,6 @@ async def delete_orphaned_annotations(
     """
     if not current_user.is_superuser:
         raise HTTPException(status_code=403, detail="Admin access required")
-
-    from advanced_omi_backend.models.conversation import Conversation
 
     conv_annotation_types = {AnnotationType.DIARIZATION, AnnotationType.TRANSCRIPT}
 
@@ -760,8 +748,6 @@ async def get_cron_jobs(current_user: User = Depends(current_active_user)):
     if not current_user.is_superuser:
         raise HTTPException(status_code=403, detail="Admin access required")
 
-    from advanced_omi_backend.cron_scheduler import get_scheduler
-
     scheduler = get_scheduler()
     return await scheduler.get_all_jobs_status()
 
@@ -775,8 +761,6 @@ async def update_cron_job(
     """Update a cron job's schedule or enabled state."""
     if not current_user.is_superuser:
         raise HTTPException(status_code=403, detail="Admin access required")
-
-    from advanced_omi_backend.cron_scheduler import get_scheduler
 
     scheduler = get_scheduler()
     try:
@@ -795,8 +779,6 @@ async def run_cron_job_now(
     """Manually trigger a cron job."""
     if not current_user.is_superuser:
         raise HTTPException(status_code=403, detail="Admin access required")
-
-    from advanced_omi_backend.cron_scheduler import get_scheduler
 
     scheduler = get_scheduler()
     try:

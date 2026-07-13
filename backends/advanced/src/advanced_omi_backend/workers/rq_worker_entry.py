@@ -40,6 +40,8 @@ def main():
     except Exception:
         pass  # Optional — don't block workers
 
+    # Kept local (not hoisted): these must load AFTER init_otel() above, which
+    # patches OpenAI/instrumentation before any application module is imported.
     from rq import Worker
 
     from advanced_omi_backend.redis_factory import REDIS_URL, create_sync_redis

@@ -13,15 +13,24 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from omegaconf import OmegaConf
+from rq import get_current_job
 from rq.exceptions import NoSuchJobError
 from rq.job import Job
 
 from advanced_omi_backend.config import get_live_segmentation
+from advanced_omi_backend.config_loader import get_backend_config
 from advanced_omi_backend.controllers.queue_controller import (
+    JOB_RESULT_TTL,
+    enqueue_speech_detection,
     redis_conn,
     start_post_conversation_jobs,
+    transcription_queue,
 )
+from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
+from advanced_omi_backend.models.conversation import Conversation, create_conversation
 from advanced_omi_backend.models.job import async_job
+from advanced_omi_backend.models.user import User
 from advanced_omi_backend.observability.otel_setup import (
     set_otel_session,
     set_span_attrs,
@@ -29,10 +38,12 @@ from advanced_omi_backend.observability.otel_setup import (
     traced_job,
 )
 from advanced_omi_backend.plugins.events import PluginEvent
+from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggregator
 from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
     SessionStore,
 )
+from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.services.plugin_service import (
     dispatch_plugin_event,
     get_plugin_router,
@@ -41,15 +52,19 @@ from advanced_omi_backend.services.sse_publisher import (
     publish_sse_event,
     publish_sse_event_throttled,
 )
+from advanced_omi_backend.utils.audio_chunk_utils import wait_for_audio_chunks
 from advanced_omi_backend.utils.conversation_utils import (
     analyze_speech,
     extract_speakers_from_segments,
+    generate_detailed_summary,
+    generate_title_and_summary,
     is_meaningful_speech,
     mark_conversation_deleted,
     track_speech_activity,
     update_job_progress_metadata,
 )
-from advanced_omi_backend.utils.job_utils import update_job_meta
+from advanced_omi_backend.utils.job_utils import check_job_alive, update_job_meta
+from advanced_omi_backend.utils.vad_analysis import analyze_conversation_audio
 
 logger = logging.getLogger(__name__)
 
@@ -106,12 +121,6 @@ async def trim_leading_silence(
     Mirrors the crash-safe ordering of data_audit's split (create remnant first, move
     chunks, mutate the conversation last) and reuses the same chunk-reassignment shape.
     """
-    from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
-    from advanced_omi_backend.models.conversation import (
-        Conversation,
-        create_conversation,
-    )
-
     chunks = [
         {
             "chunk_index": c.chunk_index,
@@ -213,8 +222,6 @@ async def _wait_for_chunk_count_stable(
     (written with its pre-trim index) would corrupt the sequence. By finalize the
     persistence side has rotated away, but this closes the brief flush-race.
     """
-    from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
-
     deadline = time.time() + timeout_seconds
     last = None
     stable_start = time.time()
@@ -256,9 +263,6 @@ async def maybe_trim_leading_silence(
 
     Returns True if a trim happened, False otherwise.
     """
-    from advanced_omi_backend.models.conversation import Conversation
-    from advanced_omi_backend.utils.vad_analysis import analyze_conversation_audio
-
     try:
         conversation = await Conversation.find_one(
             Conversation.conversation_id == conversation_id
@@ -367,10 +371,6 @@ async def handle_end_of_conversation(
     logger.info(f"🧹 Deleted conversation:current signal for session {session_id[:12]}")
 
     # Update conversation in database with end reason and completion time
-    from datetime import datetime
-
-    from advanced_omi_backend.models.conversation import Conversation
-
     conversation = await Conversation.find_one(
         Conversation.conversation_id == conversation_id
     )
@@ -432,10 +432,6 @@ async def handle_end_of_conversation(
             completion_key = f"transcription:complete:{session_id}"
             await redis_client.delete(completion_key)
             logger.info(f"🧹 Cleared transcription completion flag: {completion_key}")
-
-            from advanced_omi_backend.controllers.queue_controller import (
-                enqueue_speech_detection,
-            )
 
             # Enqueue speech detection for the next conversation (audio persistence
             # keeps running). Single-flight: when several conversation-end handlers
@@ -687,11 +683,6 @@ async def _initialize_conversation(
     Returns:
         conversation_id of the created/reused conversation.
     """
-    from advanced_omi_backend.models.conversation import (
-        Conversation,
-        create_conversation,
-    )
-
     # Check if a placeholder conversation already exists for this session
     conversation_key = f"conversation:current:{session_id}"
     existing_conversation_id_bytes = await redis_client.get(conversation_key)
@@ -851,8 +842,6 @@ async def _monitor_conversation_loop(
     Mutates ``state`` in place with final values for timeout_triggered,
     close_requested_reason, last_result_count, and last_word_count.
     """
-    from advanced_omi_backend.utils.job_utils import check_job_alive
-
     store = SessionStore(redis_client)
     max_runtime = 86400  # 24h safety ceiling
 
@@ -1245,8 +1234,6 @@ async def _create_live_transcript_version(
     Uses a single atomic update to push the version and set it as active,
     avoiding a full Beanie document load/save cycle.
     """
-    from advanced_omi_backend.models.conversation import Conversation
-
     transcript_text = combined.get("text", "")
     segments_as_dicts = [
         {
@@ -1304,8 +1291,6 @@ async def _update_live_transcript(
     metadata.word_count within the matching array element.
     Uses PyMongo collection (sync) wrapped in Beanie's find pattern.
     """
-    from advanced_omi_backend.models.conversation import Conversation
-
     transcript_text = combined.get("text", "")
     segments_as_dicts = [
         {
@@ -1403,8 +1388,6 @@ async def _save_streaming_transcript(
     Returns:
         version_id of the saved transcript version.
     """
-    from advanced_omi_backend.models.conversation import Conversation
-
     logger.info(
         f"📝 Retrieving final streaming transcript for conversation {conversation_id[:12]}"
     )
@@ -1571,23 +1554,16 @@ async def _enqueue_post_processing(
     a batch transcription job first with post-processing depending on it.
     Otherwise starts post-processing immediately with the streaming transcript.
     """
-    from advanced_omi_backend.config_loader import get_backend_config
-
     transcription_cfg = get_backend_config("transcription")
     batch_retranscribe = False
     if transcription_cfg:
-        from omegaconf import OmegaConf
-
         cfg_dict = OmegaConf.to_container(transcription_cfg, resolve=True)
         batch_retranscribe = cfg_dict.get("always_batch_retranscribe", False)
 
     if batch_retranscribe:
         # BATCH PATH: Streaming transcript saved as preview — user sees it immediately
         # Full post-processing (speaker, memory, title) waits for batch transcript
-        from advanced_omi_backend.controllers.queue_controller import (
-            JOB_RESULT_TTL,
-            transcription_queue,
-        )
+        # Lazy import: circular dependency — transcription_jobs imports conversation_jobs.
         from advanced_omi_backend.workers.transcription_jobs import (
             transcribe_full_audio_job,
         )
@@ -1679,12 +1655,6 @@ async def open_conversation_job(
 
     Note: user_email is fetched from the database when needed.
     """
-    from rq import get_current_job
-
-    from advanced_omi_backend.services.audio_stream import (
-        TranscriptionResultsAggregator,
-    )
-
     logger.info(
         f"📝 Creating and opening conversation for session {session_id} (speech detected at {speech_detected_at})"
     )
@@ -1802,8 +1772,6 @@ async def open_conversation_job(
                 )
 
         # Phase 5: Wait for audio chunks in MongoDB
-        from advanced_omi_backend.utils.audio_chunk_utils import wait_for_audio_chunks
-
         chunks_ready = await wait_for_audio_chunks(
             conversation_id=conversation_id, max_wait_seconds=30, min_chunks=1
         )
@@ -1814,8 +1782,6 @@ async def open_conversation_job(
             # always_persist placeholder under a different id. Decide salvage-vs-discard
             # by whether a real transcript exists: losing a real transcript is worse
             # than keeping an audio-less conversation.
-            from advanced_omi_backend.models.conversation import Conversation
-
             salvage_conv = await Conversation.find_one(
                 Conversation.conversation_id == conversation_id
             )
@@ -1957,12 +1923,6 @@ async def generate_title_summary_job(
     Returns:
         Dict with generated title, summary, and detailed_summary
     """
-    from advanced_omi_backend.models.conversation import Conversation
-    from advanced_omi_backend.utils.conversation_utils import (
-        generate_detailed_summary,
-        generate_title_and_summary,
-    )
-
     set_otel_session(conversation_id)
     logger.info(
         f"📝 Starting title/summary generation for conversation {conversation_id}"
@@ -2007,8 +1967,6 @@ async def generate_title_summary_job(
         # so all key topics/entities in the conversation can find relevant memories
         memory_context = None
         try:
-            from advanced_omi_backend.services.memory import get_memory_service
-
             memory_service = get_memory_service()
             memories = await memory_service.search_memories(
                 transcript_text, conversation.user_id, limit=10
@@ -2026,8 +1984,6 @@ async def generate_title_summary_job(
             )
 
         # Generate title+summary (one call) and detailed summary in parallel
-        import asyncio
-
         (title, short_summary), detailed_summary = await asyncio.gather(
             generate_title_and_summary(
                 transcript_text,
@@ -2150,8 +2106,6 @@ async def dispatch_conversation_complete_event_job(
     Returns:
         Dict with success status and plugin results
     """
-    from advanced_omi_backend.models.conversation import Conversation
-
     logger.info(
         f"📌 Dispatching conversation.complete event for conversation {conversation_id}"
     )
@@ -2201,8 +2155,6 @@ async def dispatch_conversation_complete_event_job(
         await conversation.save()
 
     # Get user email for event data
-    from advanced_omi_backend.models.user import User
-
     user = await User.get(user_id)
     user_email = user.email if user else ""
 

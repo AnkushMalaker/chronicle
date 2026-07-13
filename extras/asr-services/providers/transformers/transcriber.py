@@ -73,6 +73,7 @@ class TransformersTranscriber:
 
         logger.info(f"Loading transformers model: {self.model_id}")
 
+        # Lazy import: transformers is heavy and only needed once model loading starts.
         from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 
         # Load processor

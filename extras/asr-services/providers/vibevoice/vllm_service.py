@@ -43,6 +43,9 @@ def _ensure_tokenizer_files(model_id: str) -> str:
     Runs the plugin's generate_tokenizer_files SCRIPT (kept in the image) rather
     than importing it as a module — matches the upstream Dockerfile.vllm and avoids
     relying on ``vllm_plugin`` being importable after a non-editable install."""
+    # Lazy import: huggingface_hub isn't a declared top-level dependency of this
+    # image (this file's imports are kept minimal); it arrives transitively via
+    # vLLM/VibeVoice, so only import it where it's actually used.
     from huggingface_hub import snapshot_download
 
     model_path = snapshot_download(model_id)

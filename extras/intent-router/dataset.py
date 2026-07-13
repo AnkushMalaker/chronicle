@@ -16,6 +16,8 @@ Keep training examples UNambiguous. Genuinely borderline phrasings (timers,
 AMBIGUOUS_WATCH so we can observe (not score) how the model treats them.
 """
 
+import random
+
 # ---------------------------------------------------------------------------
 # DIRECT home commands - generated from templates
 # ---------------------------------------------------------------------------
@@ -439,8 +441,6 @@ def build_dataset(home_direct_cap=240, seed=42):
     giving a roughly balanced set. Held-out REAL_PHRASES are excluded so the
     evaluation in train.py is honest.
     """
-    import random
-
     rng = random.Random(seed)
     held_out = {t for t, _ in REAL_PHRASES}
 

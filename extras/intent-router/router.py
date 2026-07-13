@@ -63,6 +63,8 @@ class IntentRouter:
             if self._loaded:
                 return self._clf is not None
             try:
+                # Lazy import: deliberate — fail-open policy (see module docstring).
+                # Model/artifact deps only need to load on first real classify() call.
                 import joblib
                 import numpy as np  # noqa: F401  (imported for side-effect/availability)
                 from model2vec import StaticModel
@@ -102,6 +104,7 @@ class IntentRouter:
             # fail open -> home cascade (which self-corrects to Hermes)
             return RouteResult("home", 1.0, "home", (time.time() - t0) * 1000, ok=False)
 
+        # Lazy import: deliberate — same fail-open policy as _ensure_loaded above.
         import numpy as np
 
         vec = np.asarray(self._enc.encode([text]))

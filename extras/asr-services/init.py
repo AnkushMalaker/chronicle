@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import yaml
 from dotenv import set_key
 from rich.console import Console
 from rich.panel import Panel
@@ -640,8 +641,6 @@ class ASRServicesSetup:
                 # Load defaults.yml to get model definitions
                 defaults_path = config_manager.config_dir / "defaults.yml"
                 if defaults_path.exists():
-                    import yaml
-
                     with open(defaults_path) as f:
                         defaults = yaml.safe_load(f) or {}
                     defaults_models = defaults.get("models", []) or []

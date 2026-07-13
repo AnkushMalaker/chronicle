@@ -26,7 +26,8 @@ from pydantic import (
 
 # Import config merging for defaults.yml + config.yml integration
 # OmegaConf handles environment variable resolution (${VAR:-default} syntax)
-from advanced_omi_backend.config import get_config
+from advanced_omi_backend.config import get_config, get_config_yml_path
+from advanced_omi_backend.openai_factory import create_openai_client, is_reasoning_model
 
 logger = logging.getLogger(__name__)
 
@@ -290,8 +291,6 @@ class ResolvedLLMOperation(BaseModel):
         the OpenAI SDK's ``extra_body``. Extended thinking is bounded server-side by
         llama.cpp's ``--reasoning-budget``.
         """
-        from advanced_omi_backend.openai_factory import is_reasoning_model
-
         model_name = self.model_def.model_name
         openai_reasoning = is_reasoning_model(model_name)
 
@@ -325,8 +324,6 @@ class ResolvedLLMOperation(BaseModel):
 
         Uses create_openai_client which handles Langfuse tracing.
         """
-        from advanced_omi_backend.openai_factory import create_openai_client
-
         return create_openai_client(
             api_key=self.model_def.api_key or "",
             base_url=self.model_def.resolved_url(),
@@ -507,8 +504,6 @@ def _find_config_path() -> Path:
     Returns:
         Path to config.yml
     """
-    from advanced_omi_backend.config import get_config_yml_path
-
     return get_config_yml_path()
 
 

@@ -10,8 +10,10 @@ import base64
 import json
 import logging
 import os
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 import websockets
@@ -46,15 +48,14 @@ class RelayConfig:
 
     @classmethod
     def from_env(cls) -> "RelayConfig":
-        import sys
-        from pathlib import Path
-
         # discovery.py lives at the repo root (two levels up)
         _repo_root = str(Path(__file__).resolve().parent.parent.parent)
         if _repo_root not in sys.path:
             sys.path.insert(0, _repo_root)
 
         try:
+            # Lazy import: sys.path-dependent (only importable after the
+            # repo-root insertion above).
             from discovery import resolve_backend_url
 
             backend_url = resolve_backend_url(os.getenv("BACKEND_URL"), logger=logger)

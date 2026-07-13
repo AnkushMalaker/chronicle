@@ -46,6 +46,8 @@ class ForcedAligner:
         self.sample_rate = 16000
 
     def load(self) -> None:
+        # Lazy import: defers pulling in the MMS_FA bundle metadata/weights until
+        # the aligner is actually loaded, not at module import time.
         from torchaudio.pipelines import MMS_FA as bundle
 
         logger.info("Loading MMS_FA forced-alignment model...")

@@ -44,6 +44,7 @@ log_buffer = MemoryLogHandler()
 
 def _show_logs_dialog(title: str, lines) -> None:
     """Show log lines in a scrollable modal dialog."""
+    # Lazy import: macOS-only (AppKit/Foundation, not available cross-platform)
     from AppKit import (
         NSAlert,
         NSBezelBorder,
@@ -87,6 +88,7 @@ def _show_logs_dialog(title: str, lines) -> None:
 
 def _choose_directory(default_path: str) -> Optional[str]:
     """Open a native folder picker; return the chosen absolute path or None."""
+    # Lazy import: macOS-only (AppKit, not available cross-platform)
     from AppKit import NSURL, NSOpenPanel
 
     panel = NSOpenPanel.openPanel()
@@ -347,6 +349,7 @@ class VaultSyncApp(rumps.App):
 
 
 def main() -> None:
+    # Lazy import: macOS-only (AppKit, not available cross-platform)
     from AppKit import NSApplication
 
     NSApplication.sharedApplication().setActivationPolicy_(1)  # menu bar only

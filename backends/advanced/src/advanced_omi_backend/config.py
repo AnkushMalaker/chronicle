@@ -7,7 +7,7 @@ Secrets are stored in .env files, all other config in config/config.yml.
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -137,8 +137,6 @@ def save_cleanup_settings(settings: CleanupSettings) -> bool:
     Returns:
         True if saved successfully, False otherwise
     """
-    from dataclasses import asdict
-
     return save_config_section("backend.cleanup", asdict(settings))
 
 

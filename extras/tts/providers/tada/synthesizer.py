@@ -53,6 +53,8 @@ class TadaSynthesizer:
 
         logger.info(f"Loading TADA model: {self.model_id}")
 
+        # Lazy import: tada.modules pulls in the model weights/deps and is only
+        # needed once model loading starts.
         from tada.modules.encoder import Encoder
         from tada.modules.tada import TadaForCausalLM
 

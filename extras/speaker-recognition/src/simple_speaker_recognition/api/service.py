@@ -13,6 +13,7 @@ import yaml
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from omegaconf import OmegaConf
 from pydantic import Field
 from pydantic_settings import BaseSettings
 from simple_speaker_recognition.api.core.utils import get_data_directory
@@ -44,8 +45,6 @@ def load_speaker_config_from_root() -> dict:
         Dictionary with speaker_recognition config, or empty dict if not found
     """
     try:
-        from omegaconf import OmegaConf
-
         config_dir = Path(os.getenv("CONFIG_DIR", "/app/config"))
         defaults_path = config_dir / "defaults.yml"
         config_path = config_dir / "config.yml"

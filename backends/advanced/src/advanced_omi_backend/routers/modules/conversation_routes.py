@@ -5,19 +5,23 @@ Handles conversation CRUD operations, audio processing, and transcript managemen
 """
 
 import logging
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from advanced_omi_backend.auth import current_active_user, current_superuser
 from advanced_omi_backend.controllers import conversation_controller
+from advanced_omi_backend.controllers.drift_controller import find_drift_conversations
 from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.waveform import WaveformData
 from advanced_omi_backend.users import User
 from advanced_omi_backend.utils.audio_chunk_utils import (
     audio_cache_duration_matches,
     get_trimmed_opus_for_time_range,
     reconstruct_audio_segment,
 )
+from advanced_omi_backend.workers.waveform_jobs import generate_waveform_data
 
 logger = logging.getLogger(__name__)
 
@@ -89,10 +93,6 @@ async def identify_drift(current_user: User = Depends(current_superuser)):
     voiceprints (no GPU). Use after cleaning enrollment to decide what to reprocess.
     Declared before ``/{conversation_id}`` so the static path isn't captured as an id.
     """
-    from advanced_omi_backend.controllers.drift_controller import (
-        find_drift_conversations,
-    )
-
     return await find_drift_conversations()
 
 
@@ -226,12 +226,6 @@ async def get_conversation_waveform(
         - sample_rate: int - Samples per second (10)
         - duration_seconds: float - Total audio duration
     """
-    from fastapi import HTTPException
-
-    from advanced_omi_backend.models.conversation import Conversation
-    from advanced_omi_backend.models.waveform import WaveformData
-    from advanced_omi_backend.workers.waveform_jobs import generate_waveform_data
-
     # Verify conversation exists and user has access
     conversation = await Conversation.find_one(
         Conversation.conversation_id == conversation_id
@@ -351,8 +345,6 @@ async def get_audio_segment(
     With format=opus (default), serves a single ogg/opus stream trimmed to
     the exact time range. With format=wav, decodes to exact time-clipped WAV.
     """
-    import time
-
     request_start = time.time()
 
     # Verify conversation exists and user has access

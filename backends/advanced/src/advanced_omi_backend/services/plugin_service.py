@@ -22,6 +22,7 @@ from advanced_omi_backend.config_loader import get_plugins_yml_path
 from advanced_omi_backend.plugins import BasePlugin, PluginRouter
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.plugins.services import PluginServices
+from advanced_omi_backend.prompt_registry import get_prompt_registry
 from advanced_omi_backend.redis_factory import create_sync_redis
 
 logger = logging.getLogger(__name__)
@@ -724,10 +725,6 @@ def _build_plugin_router() -> Optional[PluginRouter]:
 
                     # Let plugin register its prompts with the prompt registry
                     try:
-                        from advanced_omi_backend.prompt_registry import (
-                            get_prompt_registry,
-                        )
-
                         plugin.register_prompts(get_prompt_registry())
                     except Exception as e:
                         logger.debug(

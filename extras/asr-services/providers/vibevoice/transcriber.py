@@ -186,6 +186,7 @@ class VibeVoiceTranscriber:
         if not self.quantization:
             return None
 
+        # Lazy import: transformers is heavy and only needed when quantization is used.
         from transformers import BitsAndBytesConfig
 
         if self.quantization == "4bit":
@@ -213,6 +214,7 @@ class VibeVoiceTranscriber:
 
         logger.info(f"Loading VibeVoice model: {self.model_id}")
 
+        # Lazy import: transformers is heavy and only needed once model loading starts.
         from transformers import AutoProcessor, VibeVoiceAsrForConditionalGeneration
 
         # Load processor
@@ -284,6 +286,7 @@ class VibeVoiceTranscriber:
 
     def load_lora_adapter(self, adapter_path: str) -> None:
         """Load or replace a LoRA adapter on the base model."""
+        # Lazy import: peft is heavy and only needed when a LoRA adapter is loaded.
         from peft import PeftModel
 
         if self.model is None:

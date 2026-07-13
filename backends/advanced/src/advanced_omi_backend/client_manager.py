@@ -12,10 +12,10 @@ from typing import TYPE_CHECKING, Dict, Optional
 
 import redis.asyncio as redis
 
+from advanced_omi_backend.client import ClientState
 from advanced_omi_backend.redis_factory import create_async_redis
 
 if TYPE_CHECKING:
-    from advanced_omi_backend.client import ClientState
     from advanced_omi_backend.users import User
 
 logger = logging.getLogger(__name__)
@@ -122,9 +122,6 @@ class ClientManager:
         """
         if client_id in self._active_clients:
             raise ValueError(f"Client {client_id} already exists")
-
-        # Import here to avoid circular imports
-        from advanced_omi_backend.client import ClientState
 
         # Create client state
         client_state = ClientState(client_id, user_id, user_email)

@@ -27,6 +27,7 @@ from advanced_omi_backend.controllers.queue_controller import (
     default_queue,
     start_post_conversation_jobs,
 )
+from advanced_omi_backend.models.annotation import Annotation, AnnotationType
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation, create_conversation
 from advanced_omi_backend.services.memory import get_memory_service
@@ -957,8 +958,6 @@ async def get_triage_pending(user: User):
     """Count of unapplied speaker-triage decisions (pending diarization
     annotations) and how many conversations they span — drives the toolbar's
     'Apply all' control."""
-    from advanced_omi_backend.models.annotation import Annotation, AnnotationType
-
     base = {
         "annotation_type": AnnotationType.DIARIZATION,
         "processed": False,
@@ -982,7 +981,9 @@ async def apply_triage(user: User):
     action reserved for the finetuning / Enrollment pages. Noise decisions ride along:
     apply reclassifies them to non-speech.
     """
-    from advanced_omi_backend.models.annotation import Annotation, AnnotationType
+    # Lazy import: the routers.modules package has import-time side effects
+    # (health_routes instantiates the memory service at module load), so importing
+    # this router at module top would pull that in during controller import.
     from advanced_omi_backend.routers.modules.annotation_routes import (
         apply_diarization_annotations,
     )

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.llm_client import async_chat_with_tools
+from advanced_omi_backend.prompt_registry import get_prompt_registry
 
 from ..vault_templates import CONVERSATION_TEMPLATE, PERSON_TEMPLATE, TOPIC_TEMPLATE
 from .vault_tools import (
@@ -190,8 +191,6 @@ async def _get_prompt(prompt_id: str, default: str, vault_summary: str = "") -> 
     Both prompts carry a ``{{vault_summary}}`` slot for learned per-user conventions.
     """
     try:
-        from advanced_omi_backend.prompt_registry import get_prompt_registry
-
         registry = get_prompt_registry()
         return await registry.get_prompt(prompt_id, vault_summary=vault_summary)
     except Exception as e:  # noqa: BLE001 - registry optional; fall back to constant

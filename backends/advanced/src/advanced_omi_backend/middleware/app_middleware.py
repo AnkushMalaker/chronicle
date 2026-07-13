@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pymongo.errors import ConnectionFailure, PyMongoError
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 from advanced_omi_backend.app_config import get_app_config
 
@@ -161,8 +162,6 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                         )
 
                 # Recreate response with the body we consumed
-                from starlette.responses import Response
-
                 return Response(
                     content=response_body,
                     status_code=response.status_code,

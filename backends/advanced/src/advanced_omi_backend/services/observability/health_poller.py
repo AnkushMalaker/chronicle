@@ -21,6 +21,17 @@ re-alarming a still-down service.
 import asyncio
 import logging
 
+from rq.job import Job
+
+from advanced_omi_backend.controllers.queue_controller import (
+    QUEUE_NAMES,
+    get_queue,
+    redis_conn,
+)
+from advanced_omi_backend.controllers.system_controller import (
+    get_config_diagnostics,
+    get_external_services,
+)
 from advanced_omi_backend.redis_factory import create_async_redis
 from advanced_omi_backend.services.observability.system_events import record_event
 
@@ -51,8 +62,6 @@ def _bad_severity(health: str | None, detail: str) -> str | None:
 
 
 async def _poll_external_services(redis) -> None:
-    from advanced_omi_backend.controllers.system_controller import get_external_services
-
     data = await get_external_services()
     if not data.get("available"):
         return  # agent unreachable/unconfigured → unknown, don't fabricate transitions
@@ -95,14 +104,6 @@ async def _poll_external_services(redis) -> None:
 
 
 async def _poll_failed_jobs(redis) -> None:
-    from rq.job import Job
-
-    from advanced_omi_backend.controllers.queue_controller import (
-        QUEUE_NAMES,
-        get_queue,
-        redis_conn,
-    )
-
     for qname in QUEUE_NAMES:
         try:
             queue = get_queue(qname)
@@ -139,10 +140,6 @@ async def _poll_failed_jobs(redis) -> None:
 
 
 async def _poll_config_diagnostics(redis) -> None:
-    from advanced_omi_backend.controllers.system_controller import (
-        get_config_diagnostics,
-    )
-
     diag = await get_config_diagnostics()
     issues = diag.get("issues", []) or []
 

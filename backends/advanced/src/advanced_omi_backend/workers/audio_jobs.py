@@ -10,10 +10,15 @@ import os
 import time
 from typing import Any, Dict, Optional
 
+from bson import Binary
+from rq import get_current_job
+
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
     default_queue,
 )
+from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
+from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import (
     JobPriority,
     _ensure_beanie_initialized,
@@ -23,6 +28,11 @@ from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
     SessionStore,
 )
+from advanced_omi_backend.utils.audio_chunk_utils import (
+    encode_pcm_to_opus,
+    get_resume_position,
+)
+from advanced_omi_backend.utils.job_utils import check_job_alive
 
 logger = logging.getLogger(__name__)
 
@@ -100,8 +110,6 @@ async def audio_streaming_persistence_job(
         # create a fresh placeholder instead of silently reusing a non-existent conversation.
         if existing_conversation_id:
             existing_id_str = existing_conversation_id.decode()
-            from advanced_omi_backend.models.conversation import Conversation
-
             existing_conv = await Conversation.find_one(
                 Conversation.conversation_id == existing_id_str
             )
@@ -117,9 +125,6 @@ async def audio_streaming_persistence_job(
             logger.info(
                 f"📝 always_persist=True - creating placeholder conversation for session {session_id[:12]}"
             )
-
-            # Import conversation model
-            from advanced_omi_backend.models.conversation import Conversation
 
             # TODO: Route to ERRLOG and create interface to create conversation
             # Create placeholder conversation
@@ -161,16 +166,6 @@ async def audio_streaming_persistence_job(
     max_runtime = 86340  # 24 hours - 60 seconds (graceful exit before RQ timeout)
     start_time = time.time()
 
-    # Import MongoDB chunk utilities
-    from bson import Binary
-
-    from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
-    from advanced_omi_backend.models.conversation import Conversation
-    from advanced_omi_backend.utils.audio_chunk_utils import (
-        encode_pcm_to_opus,
-        get_resume_position,
-    )
-
     # Conversation rotation state. Seed from the placeholder created above so the
     # first flush persists to MongoDB and the first-iteration rotation check is a
     # no-op (instead of discarding the initial buffer as a spurious rotation).
@@ -210,10 +205,6 @@ async def audio_streaming_persistence_job(
     max_empty_reads = 3
 
     # Get current job for zombie detection
-    from rq import get_current_job
-
-    from advanced_omi_backend.utils.job_utils import check_job_alive
-
     current_job = get_current_job()
 
     async def flush_pcm_buffer() -> bool:
@@ -471,8 +462,6 @@ async def audio_streaming_persistence_job(
                 logger.warning(
                     f"⚠️ always_persist=True but no conversation key — recreating placeholder"
                 )
-                from advanced_omi_backend.models.conversation import Conversation
-
                 # TODO: Route to ERRLOG and create interface to create conversation
                 conversation = Conversation(
                     user_id=user_id,

@@ -27,6 +27,8 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from advanced_omi_backend.models.conversation import Conversation
+
 logger = logging.getLogger(__name__)
 
 # A conversation older than this with no terminal marker is treated as "settled"
@@ -47,8 +49,6 @@ async def reconcile_conversation_statuses(
     case no further pipeline work is expected, so the absence of a transcript is a
     real failure rather than "not yet". Returns a summary with the changes applied.
     """
-    from advanced_omi_backend.models.conversation import Conversation
-
     now = datetime.now(timezone.utc)
     stale_cutoff = now - timedelta(hours=stale_after_hours)
 

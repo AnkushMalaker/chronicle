@@ -16,9 +16,20 @@ from typing import Optional
 
 import httpx
 
+from advanced_omi_backend.constants import is_non_enrollable_speaker
 from advanced_omi_backend.llm_client import async_generate
+from advanced_omi_backend.model_registry import get_models_registry
+from advanced_omi_backend.models.annotation import Annotation, AnnotationType
+from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.user import User
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 from advanced_omi_backend.redis_factory import create_async_redis
+from advanced_omi_backend.services.memory import get_memory_service
+from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
+from advanced_omi_backend.utils.audio_chunk_utils import (
+    reconstruct_audio_segment,
+    reconstruct_wav_from_conversation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,12 +67,6 @@ async def run_speaker_finetuning_job() -> dict:
     This mirrors the logic in ``finetuning_routes.process_annotations_for_training``
     but is invocable from the cron scheduler without an HTTP request.
     """
-    from advanced_omi_backend.constants import is_non_enrollable_speaker
-    from advanced_omi_backend.models.annotation import Annotation, AnnotationType
-    from advanced_omi_backend.models.conversation import Conversation
-    from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
-    from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segment
-
     # Find annotations ready for training
     annotations = await Annotation.find(
         Annotation.annotation_type == AnnotationType.DIARIZATION,
@@ -250,13 +255,6 @@ async def run_asr_finetuning_job() -> dict:
     yet consumed by ASR training. Groups by conversation, reconstructs WAV audio,
     builds VibeVoice training labels, and POSTs to the ASR service's /fine-tune endpoint.
     """
-    from advanced_omi_backend.model_registry import get_models_registry
-    from advanced_omi_backend.models.annotation import Annotation, AnnotationType
-    from advanced_omi_backend.models.conversation import Conversation
-    from advanced_omi_backend.utils.audio_chunk_utils import (
-        reconstruct_wav_from_conversation,
-    )
-
     # Resolve STT service URL from model registry (same URL used for transcription)
     registry = get_models_registry()
     stt_model = registry.get_default("stt") if registry else None
@@ -443,8 +441,6 @@ async def run_asr_finetuning_job() -> dict:
 
 async def run_asr_jargon_extraction_job() -> dict:
     """Extract jargon from recent memories for all users and cache in Redis."""
-    from advanced_omi_backend.models.user import User
-
     users = await User.find_all().to_list()
     processed = 0
     skipped = 0
@@ -482,8 +478,6 @@ async def _extract_jargon_for_user(user_id: str) -> Optional[str]:
 
     Returns a comma-separated string of jargon terms, or None if nothing found.
     """
-    from advanced_omi_backend.services.memory import get_memory_service
-
     memory_service = get_memory_service()
     if memory_service is None:
         return None

@@ -15,6 +15,8 @@ import importlib.util
 import logging
 import os
 import stat
+import threading
+import time
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -53,8 +55,8 @@ def advertise_service(
     or None if Tailscale/minidisc is unavailable.
     """
     try:
-        import threading
-
+        # Lazy import: optional dependency — this module is imported by consumers
+        # (e.g. the backend) that don't guarantee minidisc is installed.
         import minidisc
 
         # start_registry() blocks on ready.wait() with no timeout.
@@ -102,9 +104,7 @@ def start_advertising(entries: list, backoff: Optional[list] = None):
     this start/backoff logic because its Docker build context excludes this module.
     """
     try:
-        import threading
-        import time
-
+        # Lazy import: optional dependency — see comment on advertise_service.
         import minidisc
     except ImportError:
         logger.debug("minidisc not installed — skipping advertisement")
@@ -165,6 +165,7 @@ def discover_service(
     Returns ``"http://{addr}:{port}"`` or None if not found.
     """
     try:
+        # Lazy import: optional dependency — see comment on advertise_service.
         import minidisc
 
         endpoint = minidisc.find_service(name, labels or {})
@@ -269,6 +270,7 @@ def list_all_services() -> list[dict]:
     Gracefully returns [] on ImportError or any exception.
     """
     try:
+        # Lazy import: optional dependency — see comment on advertise_service.
         import minidisc
 
         raw = minidisc.list_services()

@@ -18,7 +18,11 @@ import wave
 from pathlib import Path
 from typing import List, Optional
 
+from bson import Binary
+
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
+from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.waveform import WaveformData
 
 logger = logging.getLogger(__name__)
 
@@ -261,9 +265,6 @@ async def invalidate_conversation_audio_caches(conversation_id: str) -> dict:
     move chunks to fresh conversation_ids, so children regenerate naturally and
     don't need this. Lazy regeneration happens on next read.
     """
-    from advanced_omi_backend.models.conversation import Conversation
-    from advanced_omi_backend.models.waveform import WaveformData
-
     waveforms_deleted = (
         await WaveformData.find(
             WaveformData.conversation_id == conversation_id
@@ -531,8 +532,6 @@ async def reconstruct_audio_segments(
         speaker continuity across segment boundaries. Overlapping regions
         should be merged during post-processing.
     """
-    from advanced_omi_backend.models.conversation import Conversation
-
     # Get conversation metadata
     conversation = await Conversation.find_one(
         Conversation.conversation_id == conversation_id
@@ -633,8 +632,6 @@ async def get_clipped_pcm_for_time_range(
     Raises:
         ValueError: If conversation not found, has no audio, or range is invalid
     """
-    from advanced_omi_backend.models.conversation import Conversation
-
     # Validate start_time
     if start_time < 0:
         raise ValueError(f"start_time must be >= 0, got {start_time}")
@@ -841,10 +838,6 @@ async def convert_audio_to_chunks(
         ... )
         >>> print(f"Created {num_chunks} chunks")
     """
-    from bson import Binary
-
-    from advanced_omi_backend.models.conversation import Conversation
-
     logger.info(f"📦 Converting audio to MongoDB chunks: {len(audio_data)} bytes PCM")
 
     # Calculate audio duration
@@ -1005,15 +998,9 @@ async def convert_wav_to_chunks(
     if not wav_file_path.exists():
         raise FileNotFoundError(f"WAV file not found: {wav_file_path}")
 
-    from bson import Binary
-
-    from advanced_omi_backend.models.conversation import Conversation
-
     logger.info(f"📦 Converting WAV file to MongoDB chunks: {wav_file_path}")
 
     # Read WAV file
-    import wave
-
     with wave.open(str(wav_file_path), "rb") as wav:
         sample_rate = wav.getframerate()
         channels = wav.getnchannels()
@@ -1176,9 +1163,6 @@ async def wait_for_audio_chunks(
         ... else:
         ...     logger.error("No audio chunks available")
     """
-    import asyncio
-    import time
-
     wait_start = time.time()
 
     while time.time() - wait_start < max_wait_seconds:

@@ -54,6 +54,7 @@ class VaultSyncConfig:
 
     @classmethod
     def from_env(cls) -> "VaultSyncConfig":
+        # Lazy import: sys.path-dependent (repo-root discovery.py, inserted above)
         from discovery import resolve_backend_url
 
         backend_url = resolve_backend_url(os.getenv("BACKEND_URL"), logger=logger)

@@ -95,6 +95,7 @@ class HavpeRelaySetup:
         """Try to auto-discover the Chronicle backend via minidisc on Tailnet."""
         try:
             sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+            # Lazy import: sys.path-dependent (repo-root discovery.py, inserted above)
             from discovery import CHRONICLE_BACKEND, discover_service
 
             url = discover_service(CHRONICLE_BACKEND)

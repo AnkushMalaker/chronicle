@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable, Dict, List, NamedTuple, Optional
 
 from advanced_omi_backend.redis_factory import create_sync_redis
 from advanced_omi_backend.services.observability import record_event_sync
+from advanced_omi_backend.services.sse_publisher import publish_sse_event
 
 from .base import BasePlugin, PluginContext, PluginResult
 from .events import PluginEvent
@@ -561,8 +562,6 @@ class PluginRouter:
             pipe.execute()
 
             # Publish SSE event for queue page live updates
-            from advanced_omi_backend.services.sse_publisher import publish_sse_event
-
             if user_id:
                 publish_sse_event(
                     user_id,

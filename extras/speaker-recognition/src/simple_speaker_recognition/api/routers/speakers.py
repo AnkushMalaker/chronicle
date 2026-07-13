@@ -27,6 +27,8 @@ log = logging.getLogger("speaker_service")
 # These will be properly resolved when the service starts
 async def get_db():
     """Get speaker database dependency."""
+    # Lazy import: `service` imports this routers package at module load time,
+    # so importing it at module level here would create a circular import.
     from .. import service
 
     return await service.get_db()
@@ -34,6 +36,8 @@ async def get_db():
 
 def get_auth():
     """Get auth settings."""
+    # Lazy import: `service` imports this routers package at module load time,
+    # so importing it at module level here would create a circular import.
     from .. import service
 
     return service.auth
@@ -95,6 +99,8 @@ async def get_speakers_analysis(
     db: UnifiedSpeakerDB = Depends(get_db),
 ):
     """Get comprehensive analysis of speaker embeddings including clustering and visualization data."""
+    # Lazy import: `analysis` pulls in umap/numba, which can trigger
+    # ROCm/llvmlite startup-time segfaults on Strix Halo when imported at module load.
     from simple_speaker_recognition.utils.analysis import create_speaker_analysis
 
     log.info(

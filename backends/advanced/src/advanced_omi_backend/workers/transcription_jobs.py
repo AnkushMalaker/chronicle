@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import time
+import traceback
 import wave
 from datetime import datetime, timezone
 from typing import Any, Dict
@@ -25,9 +26,12 @@ from advanced_omi_backend.config import (
 )
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
+    enqueue_speech_detection,
+    redis_conn,
     start_post_conversation_jobs,
     transcription_queue,
 )
+from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import async_job
@@ -50,6 +54,11 @@ from advanced_omi_backend.services.transcription import (
     get_transcription_provider,
     is_transcription_available,
 )
+from advanced_omi_backend.services.transcription.context import (
+    gather_transcription_context,
+    get_asr_context,
+)
+from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 from advanced_omi_backend.utils.audio_chunk_utils import (
     reconstruct_audio_segment,
     reconstruct_wav_from_conversation,
@@ -58,7 +67,8 @@ from advanced_omi_backend.utils.conversation_utils import (
     analyze_speech,
     mark_conversation_deleted,
 )
-from advanced_omi_backend.utils.job_utils import update_job_meta
+from advanced_omi_backend.utils.job_utils import check_job_alive, update_job_meta
+from advanced_omi_backend.utils.segment_utils import classify_segment_text
 
 logger = logging.getLogger(__name__)
 
@@ -88,10 +98,6 @@ async def apply_speaker_recognition(
         Updated list of segments with identified speakers
     """
     try:
-        from advanced_omi_backend.speaker_recognition_client import (
-            SpeakerRecognitionClient,
-        )
-
         speaker_client = SpeakerRecognitionClient()
         if not speaker_client.enabled:
             logger.info(
@@ -160,8 +166,6 @@ async def apply_speaker_recognition(
     except Exception as speaker_error:
         logger.warning(f"⚠️ Speaker recognition failed: {speaker_error}")
         logger.warning(f"Continuing with original transcription speaker labels")
-        import traceback
-
         logger.debug(traceback.format_exc())
         return segments
 
@@ -467,8 +471,6 @@ async def process_transcription_result(
         # Cancel dependent jobs
         current_job = get_current_job()
         if current_job:
-            from advanced_omi_backend.controllers.queue_controller import redis_conn
-
             # Include event_complete: it depends on memory/title_summary, and
             # cancelling those (enqueue_dependents=False) would otherwise strand the
             # finalizer in the deferred registry forever. mark_conversation_deleted
@@ -529,8 +531,6 @@ async def process_transcription_result(
     segments_created_by = "speaker_service"
 
     if segments:
-        from advanced_omi_backend.utils.segment_utils import classify_segment_text
-
         speaker_segments = []
         for seg in segments:
             raw_speaker = seg.get("speaker")
@@ -720,10 +720,6 @@ async def transcribe_full_audio_job(
     # Build ASR context
     context_info = None
     try:
-        from advanced_omi_backend.services.transcription.context import (
-            gather_transcription_context,
-        )
-
         asr_ctx = await gather_transcription_context(user_id=user_id)
         context_info = asr_ctx.combined
 
@@ -998,8 +994,6 @@ async def transcription_fallback_check_job(
     # Build ASR context
     context_info = None
     try:
-        from advanced_omi_backend.services.transcription.context import get_asr_context
-
         context_info = await get_asr_context(user_id=user_id)
     except Exception as e:
         logger.warning(f"Failed to build ASR context: {e}")
@@ -1045,6 +1039,7 @@ async def transcription_fallback_check_job(
     # open_conversation_job's Phase 6b never ran); the same trim must happen here so an
     # always_persist conversation that recorded a long pause before speech still gets
     # the silence split off. Best-effort — never blocks the chain.
+    # Lazy import: circular dependency — conversation_jobs imports transcription_jobs.
     from advanced_omi_backend.workers.conversation_jobs import (
         maybe_trim_leading_silence,
     )
@@ -1100,8 +1095,6 @@ async def _transcription_failure_context(
 
     # Which streaming provider was configured (so it's clear what to check).
     try:
-        from advanced_omi_backend.model_registry import get_models_registry
-
         registry = get_models_registry()
         stream_model = registry.get_default("stt_stream") if registry else None
         provider_name = stream_model.name if stream_model else "none configured"
@@ -1215,8 +1208,6 @@ async def stream_speech_detection_job(
     # Main loop: Listen for speech
     while True:
         # Check if job still exists in Redis (detect zombie state)
-        from advanced_omi_backend.utils.job_utils import check_job_alive
-
         if not await check_job_alive(redis_client, current_job, session_id):
             break
 
@@ -1584,10 +1575,6 @@ async def stream_speech_detection_job(
                 f"still ACTIVE (reason: {reason}). Not failing the live placeholder; "
                 f"re-arming listener and deferring to session-close handling."
             )
-            from advanced_omi_backend.controllers.queue_controller import (
-                enqueue_speech_detection,
-            )
-
             # Brief backoff so a persistent provider error can't spin a tight
             # re-arm loop; single-flight keeps this to one listener regardless.
             await asyncio.sleep(5)
@@ -1713,10 +1700,6 @@ async def stream_speech_detection_job(
     if max_runtime_reached and not expects_live_results:
         status = await store.get_status(session_id)
         if status == SessionStatus.ACTIVE:
-            from advanced_omi_backend.controllers.queue_controller import (
-                enqueue_speech_detection,
-            )
-
             next_count = await store.increment_conversation_count(session_id)
 
             # Clear conversation:current so audio_streaming_persistence_job opens a

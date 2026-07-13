@@ -9,6 +9,11 @@ import logging
 import os
 from typing import List
 
+import yaml
+
+from advanced_omi_backend.config_loader import get_plugins_yml_path
+from advanced_omi_backend.model_registry import get_models_registry
+
 from .config import WorkerDefinition, WorkerType
 
 logger = logging.getLogger(__name__)
@@ -24,8 +29,6 @@ def _get_live_segmentation() -> str:
     Exactly one of the two transcript-producing workers runs, gated on this switch.
     """
     try:
-        from advanced_omi_backend.model_registry import get_models_registry
-
         registry = get_models_registry()
         if registry and registry.defaults:
             return registry.defaults.get("live_segmentation", "streaming_stt")
@@ -48,8 +51,6 @@ def has_streaming_stt_configured() -> bool:
     if _get_live_segmentation() != "streaming_stt":
         return False
     try:
-        from advanced_omi_backend.model_registry import get_models_registry
-
         registry = get_models_registry()
         if registry and registry.defaults:
             stt_stream_model = registry.get_default("stt_stream")
@@ -71,8 +72,6 @@ def has_windowed_batch_configured() -> bool:
     if _get_live_segmentation() != "windowed_batch":
         return False
     try:
-        from advanced_omi_backend.model_registry import get_models_registry
-
         registry = get_models_registry()
         if registry and registry.defaults:
             return registry.get_default("stt") is not None
@@ -96,10 +95,6 @@ def has_wakeword_dispatch_enabled() -> bool:
         True if any enabled plugin subscribes to the ``wake_word.detected`` event.
     """
     try:
-        import yaml
-
-        from advanced_omi_backend.config_loader import get_plugins_yml_path
-
         plugins_yml = get_plugins_yml_path()
         if not plugins_yml.exists():
             return False
@@ -248,8 +243,6 @@ def build_worker_definitions() -> List[WorkerDefinition]:
 
     # Log worker configuration
     try:
-        from advanced_omi_backend.model_registry import get_models_registry
-
         registry = get_models_registry()
         if registry:
             stt_stream = registry.get_default("stt_stream")

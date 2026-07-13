@@ -16,11 +16,14 @@ import logging
 import time
 from typing import Any, Dict, List
 
+from rq import get_current_job
+
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
     memory_queue,
     post_conv_enqueue_kwargs,
 )
+from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import JobPriority, async_job
 from advanced_omi_backend.observability.otel_setup import (
     set_otel_session,
@@ -29,6 +32,7 @@ from advanced_omi_backend.observability.otel_setup import (
     traced_job,
 )
 from advanced_omi_backend.plugins.events import PluginEvent
+from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.services.memory.audit import (
     MemoryCause,
     UpdateStrategy,
@@ -36,6 +40,7 @@ from advanced_omi_backend.services.memory.audit import (
 )
 from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
 from advanced_omi_backend.services.sse_publisher import publish_sse_event
+from advanced_omi_backend.users import get_user_by_id
 
 logger = logging.getLogger(__name__)
 
@@ -148,10 +153,6 @@ async def process_memory_job(
     Returns:
         Dict with processing results
     """
-    from advanced_omi_backend.models.conversation import Conversation
-    from advanced_omi_backend.services.memory import get_memory_service
-    from advanced_omi_backend.users import get_user_by_id
-
     set_otel_session(conversation_id)
     start_time = time.time()
     logger.info(f"🔄 Starting memory processing for conversation {conversation_id}")
@@ -242,9 +243,7 @@ async def process_memory_job(
     # Read provenance from RQ job metadata. `cause` is descriptive (recorded on
     # the ledger); `strategy` is control flow (which update pathway runs). They
     # are independent — see services/memory/audit.py.
-    from rq import get_current_job as _get_current_job
-
-    current_rq_job = _get_current_job()
+    current_rq_job = get_current_job()
     job_meta = current_rq_job.meta if current_rq_job and current_rq_job.meta else {}
     cause = job_meta.get("cause") or MemoryCause.AUTO_EXTRACTION.value
     strategy = job_meta.get("strategy") or UpdateStrategy.FULL.value
@@ -318,8 +317,6 @@ async def process_memory_job(
                 )
 
                 # Update job metadata with memory information
-                from rq import get_current_job
-
                 current_job = get_current_job()
                 if current_job:
                     if not current_job.meta:

@@ -9,7 +9,10 @@ import json
 import logging
 from typing import TYPE_CHECKING, Optional
 
+from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.redis_factory import create_async_redis
+from advanced_omi_backend.services.audio_stream.session_store import SessionStore
+from advanced_omi_backend.users import User
 
 from .base import PluginContext, PluginResult
 from .events import ConversationCloseReason, PluginEvent
@@ -67,10 +70,6 @@ class PluginServices:
             )
             return False
 
-        from advanced_omi_backend.services.audio_stream.session_store import (
-            SessionStore,
-        )
-
         return await SessionStore(self._async_redis).request_close(
             session_id, reason.value
         )
@@ -86,9 +85,9 @@ class PluginServices:
         Returns:
             True if the star toggle was successful
         """
+        # Lazy import: circular dependency (conversation_controller imports
+        # plugin_service, which imports this module)
         from advanced_omi_backend.controllers.conversation_controller import toggle_star
-        from advanced_omi_backend.models.conversation import Conversation
-        from advanced_omi_backend.users import User
 
         # Look up current conversation_id from Redis
         conversation_id = await self._async_redis.get(

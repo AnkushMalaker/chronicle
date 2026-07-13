@@ -7,6 +7,8 @@ This module provides common utilities for long-running RQ jobs.
 import logging
 from typing import Optional
 
+from rq import get_current_job
+
 from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
     SessionStore,
@@ -27,8 +29,6 @@ def update_job_meta(**kwargs) -> None:
     Example:
         update_job_meta(conversation_id="abc", processing_time=1.5)
     """
-    from rq import get_current_job
-
     current_job = get_current_job()
     if current_job:
         if not current_job.meta:

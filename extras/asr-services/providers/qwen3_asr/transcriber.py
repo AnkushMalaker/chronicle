@@ -27,6 +27,9 @@ import wave
 from typing import Optional, Tuple
 
 import httpx
+import numpy as np
+import soundfile as sf
+from common.audio_utils import load_audio_file
 from common.response_models import TranscriptionResult, Word
 
 logger = logging.getLogger(__name__)
@@ -58,9 +61,6 @@ def _audio_to_wav_base64(audio_file_path: str) -> str:
         pass
 
     # Not a WAV – use soundfile to convert
-    import numpy as np
-    import soundfile as sf
-
     data, sr = sf.read(audio_file_path, dtype="int16")
 
     # Mono conversion
@@ -69,8 +69,6 @@ def _audio_to_wav_base64(audio_file_path: str) -> str:
 
     # Resample to 16 kHz if needed
     if sr != 16000:
-        from common.audio_utils import load_audio_file
-
         audio_array, sr = load_audio_file(audio_file_path, target_rate=16000)
         data = (audio_array * 32767).astype("int16")
         sr = 16000
@@ -224,6 +222,9 @@ class Qwen3ASRTranscriber:
         aligner_model = os.getenv("FORCED_ALIGNER_MODEL")
         if aligner_model and HAS_FORCED_ALIGNER:
             try:
+                # Lazy import: torch is only installed in the qwen3-asr-full
+                # image (needed for ForcedAligner); the lightweight default
+                # image doesn't have it.
                 import torch
 
                 device = "cuda" if torch.cuda.is_available() else "cpu"

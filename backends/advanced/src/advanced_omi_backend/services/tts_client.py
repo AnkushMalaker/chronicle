@@ -22,6 +22,7 @@ def _resolve_tts_url() -> str | None:
     if url:
         return url
     try:
+        # Lazy import: sys.path-dependent optional module (repo-root `discovery`)
         from discovery import CHRONICLE_TTS, resolve_service_url
 
         return resolve_service_url(None, CHRONICLE_TTS, default=None)

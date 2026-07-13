@@ -21,6 +21,10 @@ from typing import Any, Dict, Sequence
 
 logger = logging.getLogger(__name__)
 
+# NOTE: All opentelemetry / openinference imports in this module are done lazily
+# inside the functions below (guarded by try/except ImportError) so the backend
+# runs fine when the optional OTel dependencies are not installed.
+
 # Surface silent Galileo SDK errors (it catches exceptions internally)
 logging.getLogger("galileo.utils.catch_log").setLevel(logging.WARNING)
 

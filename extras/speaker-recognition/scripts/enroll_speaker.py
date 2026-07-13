@@ -188,6 +188,8 @@ def download_youtube_audio(
 ) -> Optional[str]:
     """Download audio from YouTube video."""
     try:
+        # Lazy import: yt_dlp is an optional heavy dependency only needed for
+        # YouTube enrollment; degrade gracefully if it isn't installed.
         import yt_dlp
     except ImportError:
         logger.error("yt-dlp not installed. Install with: pip install yt-dlp")

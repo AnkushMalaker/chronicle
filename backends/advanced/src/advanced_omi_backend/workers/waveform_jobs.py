@@ -13,6 +13,12 @@ import struct
 import time
 from typing import Any, Dict, List, Optional
 
+from advanced_omi_backend.models.waveform import WaveformData
+from advanced_omi_backend.utils.audio_chunk_utils import (
+    decode_opus_to_pcm,
+    retrieve_audio_chunks,
+)
+
 logger = logging.getLogger(__name__)
 
 # 5 minutes of 10s chunks
@@ -57,11 +63,6 @@ async def _process_batch(
 
     Returns (peaks, duration, chunk_count, pcm_sample_rate, channels, fetch_dt, decode_dt).
     """
-    from advanced_omi_backend.utils.audio_chunk_utils import (
-        decode_opus_to_pcm,
-        retrieve_audio_chunks,
-    )
-
     start_index = batch_index * BATCH_SIZE
 
     fetch_start = time.time()
@@ -121,8 +122,6 @@ async def generate_waveform_data(
 
     Returns dict with success/samples/sample_rate/duration_seconds or success/error.
     """
-    from advanced_omi_backend.models.waveform import WaveformData
-
     start_time = time.time()
     total_fetch = 0.0
     total_decode = 0.0

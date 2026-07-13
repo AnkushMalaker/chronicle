@@ -38,6 +38,8 @@ import logging
 from enum import Enum
 from typing import Any, Iterator, NamedTuple, Optional
 
+from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
+
 logger = logging.getLogger("memory_service.audit")
 
 
@@ -211,9 +213,6 @@ async def record_vault_change(
     so a before→after diff can later be reconstructed from the note's history.
     Pass ``after=None`` for deletions.
     """
-    # Imported lazily so this module stays importable before Beanie is set up.
-    from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
-
     provenance = _current_provenance.get()
     try:
         entry = MemoryAuditEntry(

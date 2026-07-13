@@ -70,6 +70,7 @@ def reduce_dimensionality(
             reduced = reducer.fit_transform(embeddings_scaled)
         else:
             # Fallback to PCA
+            # Lazy import: only needed on this rarely-hit fallback path.
             from sklearn.decomposition import PCA
 
             reducer = PCA(n_components=n_components, random_state=random_state)

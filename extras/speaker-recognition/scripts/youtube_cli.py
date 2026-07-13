@@ -20,6 +20,7 @@ Features:
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -57,6 +58,7 @@ class YouTubeAudioCLI:
 
         # Get video info first
         try:
+            # Lazy import: yt_dlp is an optional heavy dependency only needed by this CLI tool.
             import yt_dlp
 
             ydl_opts = {"quiet": True}
@@ -147,6 +149,7 @@ class YouTubeAudioCLI:
 
     async def _download_original_audio(self, url: str, title: str) -> Path:
         """Download original high-quality audio"""
+        # Lazy import: yt_dlp is an optional heavy dependency only needed by this CLI tool.
         import yt_dlp
 
         original_path = self.audio_dir / f"{title}-original.wav"
@@ -179,8 +182,6 @@ class YouTubeAudioCLI:
         json_path = self.json_dir / f"{title}-segment-{segment_num}-deepgram-raw.json"
 
         try:
-            import json
-
             # Convert response to dict
             if hasattr(response, "to_dict"):
                 response_dict = response.to_dict()

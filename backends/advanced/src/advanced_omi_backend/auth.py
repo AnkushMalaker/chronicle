@@ -265,8 +265,6 @@ def _check_token_expired(token_str: str) -> bool:
         )
         exp = payload.get("exp")
         if exp is not None:
-            from datetime import datetime, timezone
-
             return datetime.now(timezone.utc).timestamp() > exp
     except Exception:
         pass

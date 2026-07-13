@@ -27,6 +27,8 @@ log = logging.getLogger("speaker_service")
 
 async def get_db():
     """Get speaker database dependency."""
+    # Lazy import: `service` imports this routers package at module load time,
+    # so importing it at module level here would create a circular import.
     from .. import service
 
     return await service.get_db()
@@ -34,6 +36,8 @@ async def get_db():
 
 def get_auth():
     """Get auth settings."""
+    # Lazy import: `service` imports this routers package at module load time,
+    # so importing it at module level here would create a circular import.
     from .. import service
 
     return service.auth

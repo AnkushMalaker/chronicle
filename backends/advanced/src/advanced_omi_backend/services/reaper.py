@@ -25,6 +25,7 @@ import time
 from advanced_omi_backend.client_manager import get_client_manager
 from advanced_omi_backend.config import WS_IDLE_TIMEOUT_SECS
 from advanced_omi_backend.redis_factory import create_async_redis
+from advanced_omi_backend.services.job_reaper import reap_orphaned_deferred_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +95,6 @@ async def _reap_orphaned_streams() -> int:
 async def _reap_orphaned_deferred_jobs() -> int:
     """Delete deferred RQ jobs whose dependency chain can never promote them."""
     # job_reaper uses synchronous RQ/Redis calls — run them off the event loop.
-    from advanced_omi_backend.services.job_reaper import reap_orphaned_deferred_jobs
-
     result = await asyncio.to_thread(reap_orphaned_deferred_jobs)
     reaped = result.get("deleted", 0)
     for d in result.get("details", []):

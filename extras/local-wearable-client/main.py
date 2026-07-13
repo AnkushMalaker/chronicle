@@ -36,6 +36,8 @@ from friend_lite import (
     parse_button_event,
 )
 from friend_lite.decoder import OmiOpusDecoder
+from friend_lite.wifi import WifiErrorCode
+from service import install, kickstart, logs, status, uninstall
 from wifi_join import get_current_wifi, join_wifi_ap
 from wifi_receiver import WifiAudioReceiver
 from wyoming.audio import AudioChunk
@@ -128,7 +130,12 @@ async def scan_all_devices(config: dict) -> list[dict]:
             )
         elif auto_discover and d.name:
             lower = d.name.casefold()
-            if "omi" in lower or "neo" in lower or "friend" in lower or "elato" in lower:
+            if (
+                "omi" in lower
+                or "neo" in lower
+                or "friend" in lower
+                or "elato" in lower
+            ):
                 devices.append(
                     {
                         "mac": d.address,
@@ -362,8 +369,6 @@ async def wifi_sync(
     output_dir: str = "./wifi_audio",
 ) -> None:
     """Download stored audio from an OMI device over WiFi sync."""
-    from friend_lite.wifi import WifiErrorCode
-
     config = load_config()
 
     # --- Find and connect to device via BLE ---
@@ -648,9 +653,7 @@ async def run(target_mac: str | None = None) -> None:
             else:
                 # Quick failure — grow backoff.
                 backoff = (
-                    BACKOFF_INITIAL
-                    if backoff == 0.0
-                    else min(backoff * 2, BACKOFF_MAX)
+                    BACKOFF_INITIAL if backoff == 0.0 else min(backoff * 2, BACKOFF_MAX)
                 )
                 logger.info(
                     "Session lasted %.1fs (< %.0fs), backoff %.0fs before next scan",
@@ -688,7 +691,12 @@ async def scan_and_print() -> None:
             )
         elif auto_discover and d.name:
             lower = d.name.casefold()
-            if "omi" in lower or "neo" in lower or "friend" in lower or "elato" in lower:
+            if (
+                "omi" in lower
+                or "neo" in lower
+                or "friend" in lower
+                or "elato" in lower
+            ):
                 devices.append(
                     {
                         "mac": d.address,
@@ -781,6 +789,8 @@ def main() -> None:
         asyncio.run(run(target_mac=getattr(args, "device", None)))
 
     elif command == "menu":
+        # Lazy import: macOS-only menu app (rumps/AppKit); also avoids a circular
+        # import since menu_app imports back from this module.
         from menu_app import run_menu_app
 
         run_menu_app()
@@ -789,28 +799,18 @@ def main() -> None:
         asyncio.run(scan_and_print())
 
     elif command == "install":
-        from service import install
-
         install()
 
     elif command == "uninstall":
-        from service import uninstall
-
         uninstall()
 
     elif command == "kickstart":
-        from service import kickstart
-
         kickstart()
 
     elif command == "status":
-        from service import status
-
         status()
 
     elif command == "logs":
-        from service import logs
-
         logs()
 
 

@@ -15,6 +15,7 @@ from typing import Optional
 
 import numpy as np
 import uvicorn
+from common.audio_utils import save_to_temp_wav
 from common.base_service import BaseASRService, create_asr_app
 from common.response_models import TranscriptionResult, Word
 from fastapi import WebSocket, WebSocketDisconnect
@@ -82,9 +83,6 @@ class NemoService(BaseASRService):
         # Warm up with short audio
         logger.info("Warming up model...")
         try:
-            import numpy as np
-            from common.audio_utils import save_to_temp_wav
-
             # Create 0.1s silence for warmup
             silence = np.zeros(1600, dtype=np.float32)  # 0.1s at 16kHz
             tmp_path = save_to_temp_wav(silence)

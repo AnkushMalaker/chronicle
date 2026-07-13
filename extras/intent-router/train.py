@@ -14,6 +14,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
+import joblib
 import numpy as np
 from dataset import AMBIGUOUS_WATCH, REAL_PHRASES, build_dataset
 from model2vec import StaticModel
@@ -89,8 +90,6 @@ def main():
     print(f"  end-to-end (encode+logreg): {dt:.3f} ms/call over {N} calls")
 
     # ---- save ----
-    import joblib
-
     joblib.dump(
         {
             "clf": clf,

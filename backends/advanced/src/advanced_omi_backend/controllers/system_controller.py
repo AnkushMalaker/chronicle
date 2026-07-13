@@ -23,17 +23,26 @@ from dotenv import set_key as dotenv_set_key
 from fastapi import HTTPException
 from ruamel.yaml import YAML
 
+from advanced_omi_backend.client_manager import get_client_manager
+from advanced_omi_backend.config import CleanupSettings, get_cleanup_settings
 from advanced_omi_backend.config import (
     get_diarization_settings as load_diarization_settings,
 )
 from advanced_omi_backend.config import get_misc_settings as load_misc_settings
-from advanced_omi_backend.config import save_diarization_settings, save_misc_settings
+from advanced_omi_backend.config import (
+    save_cleanup_settings,
+    save_diarization_settings,
+    save_misc_settings,
+)
 from advanced_omi_backend.config_loader import (
+    get_backend_config,
     get_plugins_yml_path,
     get_raw_models,
+    load_config,
     save_config_section,
     save_models_list,
 )
+from advanced_omi_backend.controllers import client_controller
 from advanced_omi_backend.model_registry import (
     ModelDef,
     _find_config_path,
@@ -41,6 +50,20 @@ from advanced_omi_backend.model_registry import (
     load_models_config,
 )
 from advanced_omi_backend.models.user import User
+from advanced_omi_backend.observability.otel_setup import is_langfuse_enabled
+from advanced_omi_backend.openai_factory import create_openai_client
+from advanced_omi_backend.services.memory import get_memory_service
+from advanced_omi_backend.services.plugin_service import (
+    _get_plugins_dir,
+    discover_plugins,
+    expand_env_vars,
+    get_plugin_metadata,
+    load_plugin_env,
+    reload_plugins,
+    save_plugin_env,
+    signal_worker_restart,
+)
+from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 
 logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
@@ -52,7 +75,6 @@ async def get_network_discovery(app, current_user=None):
     The *app* parameter is the FastAPI application instance (kept for API
     compatibility but no longer used — the node agent handles advertising).
     """
-    import asyncio as _asyncio
 
     result = {
         "tailscale_available": False,
@@ -61,6 +83,8 @@ async def get_network_discovery(app, current_user=None):
     }
 
     try:
+        # Lazy import: optional external module (edge/discovery, resolved via a
+        # sys.path arrangement) that may be absent; guarded by the ImportError below.
         from discovery import is_tailscale_available, list_all_services
     except ImportError:
         result["error"] = "discovery module not available"
@@ -81,7 +105,7 @@ async def get_network_discovery(app, current_user=None):
         return result
 
     # Discover all chronicle-* services on the Tailnet via list_all_services()
-    loop = _asyncio.get_running_loop()
+    loop = asyncio.get_running_loop()
     all_services = await loop.run_in_executor(None, list_all_services)
 
     async def _health_check(svc: dict):
@@ -95,8 +119,6 @@ async def get_network_discovery(app, current_user=None):
         reachable = False
         if url:
             try:
-                import httpx
-
                 async with httpx.AsyncClient(timeout=3.0) as client:
                     resp = await client.get(f"{url}/health")
                     reachable = resp.status_code < 500
@@ -111,22 +133,16 @@ async def get_network_discovery(app, current_user=None):
         }
 
     if all_services:
-        discovered = await _asyncio.gather(
-            *[_health_check(svc) for svc in all_services]
-        )
+        discovered = await asyncio.gather(*[_health_check(svc) for svc in all_services])
         result["discovered_services"] = list(discovered)
     else:
         result["discovered_services"] = []
 
     # Connected WebSocket clients (phones, relays, etc.)
-    from advanced_omi_backend.client_manager import get_client_manager
-
     # Devices are the user's *remembered* devices (the registry) joined with live
     # connection state — so a known device shows whether it's online now or when it was
     # last seen, with its editable friendly name. "connected" is derived from real
     # activity (the live ClientState's last_activity), never a persisted flag.
-    from advanced_omi_backend.controllers import client_controller
-
     mgr = get_client_manager()
     if current_user is not None:
         devices = (await client_controller.list_devices(current_user, mgr))["devices"]
@@ -176,8 +192,6 @@ async def get_config_diagnostics():
 
     # Test OmegaConf configuration loading
     try:
-        from advanced_omi_backend.config_loader import load_config
-
         # Capture warnings during config load
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
@@ -220,8 +234,6 @@ async def get_config_diagnostics():
 
     # Test model registry
     try:
-        from advanced_omi_backend.model_registry import get_models_registry
-
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             registry = get_models_registry()
@@ -462,14 +474,10 @@ async def get_observability_config():
 
     Returns non-secret data only (enabled status and browser URL).
     """
-    from advanced_omi_backend.observability.otel_setup import is_langfuse_enabled
-
     enabled = is_langfuse_enabled()
     session_base_url = None
 
     if enabled:
-        from advanced_omi_backend.config_loader import load_config
-
         cfg = load_config()
         public_url = (
             cfg.get("observability", {}).get("langfuse", {}).get("public_url", "")
@@ -602,8 +610,6 @@ def _asr_model_info(model) -> Optional[dict]:
     """Summarise an STT model's hint mechanism + resolved context for the UI."""
     if not model:
         return None
-    from advanced_omi_backend.config_loader import get_backend_config
-
     asr_cfg = get_backend_config("asr") or {}
     ctx_map = asr_cfg.get("context", {}) or {}
     override = ctx_map.get(model.name)
@@ -660,8 +666,6 @@ async def save_asr_context_controller(payload: dict):
     # picked up on the next transcription (same pattern as a provider switch).
     load_models_config(force_reload=True)
     try:
-        from advanced_omi_backend.services.plugin_service import signal_worker_restart
-
         signal_worker_restart()
     except Exception as e:
         logger.warning(f"Could not signal worker restart after ASR context save: {e}")
@@ -782,8 +786,6 @@ async def get_cleanup_settings_controller(user: User) -> dict:
     Returns:
         Dict with cleanup settings
     """
-    from advanced_omi_backend.config import get_cleanup_settings
-
     return get_cleanup_settings()
 
 
@@ -804,8 +806,6 @@ async def save_cleanup_settings_controller(
     Raises:
         ValueError: If validation fails
     """
-    from advanced_omi_backend.config import CleanupSettings, save_cleanup_settings
-
     # Validation
     if not isinstance(auto_cleanup_enabled, bool):
         raise ValueError("auto_cleanup_enabled must be a boolean")
@@ -946,10 +946,6 @@ async def update_wakeword_speaker_gate(user: User, enabled: bool, speakers: list
 async def get_enrolled_speakers(user: User):
     """Get enrolled speakers from speaker recognition service."""
     try:
-        from advanced_omi_backend.speaker_recognition_client import (
-            SpeakerRecognitionClient,
-        )
-
         # Initialize speaker recognition client
         speaker_client = SpeakerRecognitionClient()
 
@@ -979,10 +975,6 @@ async def get_enrolled_speakers(user: User):
 async def get_speaker_service_status():
     """Check speaker recognition service health status."""
     try:
-        from advanced_omi_backend.speaker_recognition_client import (
-            SpeakerRecognitionClient,
-        )
-
         # Initialize speaker recognition client
         speaker_client = SpeakerRecognitionClient()
 
@@ -1129,8 +1121,6 @@ async def reload_memory_config():
 async def delete_all_user_memories(user: User):
     """Delete all memories for the current user."""
     try:
-        from advanced_omi_backend.services.memory import get_memory_service
-
         memory_service = get_memory_service()
 
         # Delete all memories for the user
@@ -1337,8 +1327,6 @@ async def save_llm_operations(operations: dict):
 async def test_llm_model(model_name: Optional[str]):
     """Test an LLM model connection with a trivial prompt."""
     try:
-        from advanced_omi_backend.openai_factory import create_openai_client
-
         registry = get_models_registry()
         if not registry:
             raise RuntimeError("Model registry not loaded")
@@ -1546,8 +1534,6 @@ async def set_active_defaults(body: dict):
         return {"status": "error", "message": "Failed to save defaults"}
 
     load_models_config(force_reload=True)
-    from advanced_omi_backend.services.plugin_service import signal_worker_restart
-
     signal_worker_restart()
     logger.info("Updated active defaults: %s", updates)
     return {
@@ -1606,8 +1592,6 @@ async def upsert_model(body: dict):
         return {"status": "error", "message": "Failed to save model"}
 
     load_models_config(force_reload=True)
-    from advanced_omi_backend.services.plugin_service import signal_worker_restart
-
     signal_worker_restart()
     logger.info("%s model '%s'", "Updated" if replaced else "Added", body["name"])
 
@@ -1652,8 +1636,6 @@ async def delete_model(name: str):
         return {"status": "error", "message": "Failed to delete model"}
 
     load_models_config(force_reload=True)
-    from advanced_omi_backend.services.plugin_service import signal_worker_restart
-
     signal_worker_restart()
     logger.info("Deleted model '%s'", name)
     return {"status": "success", "deleted": name}
@@ -1683,8 +1665,6 @@ async def test_model(model_name: Optional[str]):
 
     if model_def.model_type == "embedding":
         try:
-            from advanced_omi_backend.openai_factory import create_openai_client
-
             client = create_openai_client(
                 api_key=model_def.api_key or "",
                 base_url=model_def.resolved_url(),
@@ -1885,11 +1865,6 @@ async def _reload_and_signal(app=None) -> tuple[dict, bool]:
     Returns:
         (reload_result, worker_signal_sent) tuple.
     """
-    from advanced_omi_backend.services.plugin_service import (
-        reload_plugins,
-        signal_worker_restart,
-    )
-
     reload_result = await reload_plugins(app=app)
 
     worker_signal_sent = False
@@ -1908,8 +1883,6 @@ async def restart_workers() -> dict:
     Workers finish their current job before restarting.
     Uses the existing plugin-reload worker restart mechanism.
     """
-    from advanced_omi_backend.services.plugin_service import signal_worker_restart
-
     try:
         signal_worker_restart()
         logger.info("Worker restart signaled via Redis")
@@ -1981,11 +1954,6 @@ async def get_plugins_metadata() -> dict:
         Dict with plugins list containing metadata for each plugin
     """
     try:
-        from advanced_omi_backend.services.plugin_service import (
-            discover_plugins,
-            get_plugin_metadata,
-        )
-
         # Discover all available plugins
         discovered_plugins = discover_plugins()
 
@@ -2038,11 +2006,6 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
         Success message with list of updated files
     """
     try:
-        from advanced_omi_backend.services.plugin_service import (
-            _get_plugins_dir,
-            discover_plugins,
-        )
-
         # Validate plugin exists
         discovered_plugins = discover_plugins()
         if plugin_id not in discovered_plugins:
@@ -2119,8 +2082,6 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
 
         # 3. Update per-plugin .env (only changed env vars)
         if "env_vars" in config and config["env_vars"]:
-            from advanced_omi_backend.services.plugin_service import save_plugin_env
-
             # Filter out masked values (unchanged secrets)
             changed_vars = {
                 k: v for k, v in config["env_vars"].items() if v != "••••••••••••"
@@ -2177,12 +2138,6 @@ async def test_plugin_connection(plugin_id: str, config: dict) -> dict:
         Test result with success status and details
     """
     try:
-        from advanced_omi_backend.services.plugin_service import (
-            discover_plugins,
-            expand_env_vars,
-            load_plugin_env,
-        )
-
         # Validate plugin exists
         discovered_plugins = discover_plugins()
         if plugin_id not in discovered_plugins:
@@ -2268,11 +2223,6 @@ async def create_plugin(
     Returns:
         Success dict with plugin_id and created_files list
     """
-    from advanced_omi_backend.services.plugin_service import (
-        _get_plugins_dir,
-        discover_plugins,
-    )
-
     # Validate name
     if not plugin_name.replace("_", "").isalnum():
         return {
@@ -2436,8 +2386,6 @@ async def write_plugin_code(
     Returns:
         Success dict with updated_files list
     """
-    from advanced_omi_backend.services.plugin_service import _get_plugins_dir
-
     plugins_dir = _get_plugins_dir()
     plugin_dir = plugins_dir / plugin_id
 
@@ -2490,8 +2438,6 @@ async def delete_plugin(plugin_id: str, remove_files: bool = False) -> dict:
     Returns:
         Success dict
     """
-    from advanced_omi_backend.services.plugin_service import _get_plugins_dir
-
     plugins_yml_path = get_plugins_yml_path()
 
     # Check plugins.yml
@@ -2693,10 +2639,6 @@ async def set_external_service_provider(name: str, body: dict):
         )
         stt_model = model_map.get(body.get("provider", ""))
         if stt_model:
-            from advanced_omi_backend.services.plugin_service import (
-                signal_worker_restart,
-            )
-
             save_config_section("defaults", {default_key: stt_model})
             load_models_config(force_reload=True)
             signal_worker_restart()

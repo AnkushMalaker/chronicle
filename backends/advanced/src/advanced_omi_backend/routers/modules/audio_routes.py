@@ -6,7 +6,9 @@ Audio is served from MongoDB chunks with Opus compression.
 """
 
 import io
+import logging
 import re
+import wave
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
@@ -26,6 +28,7 @@ from advanced_omi_backend.utils.audio_chunk_utils import (
     concatenate_chunks_to_pcm,
     get_opus_for_conversation,
     get_trimmed_opus_for_time_range,
+    reconstruct_audio_segment,
     reconstruct_wav_from_conversation,
     retrieve_audio_chunks,
 )
@@ -287,8 +290,6 @@ async def stream_conversation_audio(
         # Build minimal WAV header (44 bytes)
         # We'll write a placeholder size since we're streaming
         wav_header = io.BytesIO()
-        import wave
-
         with wave.open(wav_header, "wb") as wav:
             wav.setnchannels(CHANNELS)
             wav.setsampwidth(SAMPLE_WIDTH)
@@ -357,8 +358,6 @@ async def get_audio_chunk_range(
     Example:
         GET /api/audio/chunks/uuid?start_time=15.5&end_time=25.5&token=xxx
     """
-    import logging
-
     logger = logging.getLogger(__name__)
 
     # Try token param if header auth failed
@@ -413,8 +412,6 @@ async def get_audio_chunk_range(
         )
 
     # format=wav: decode to exact time-clipped WAV
-    from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segment
-
     try:
         wav_data = await reconstruct_audio_segment(
             conversation_id, start_time, end_time

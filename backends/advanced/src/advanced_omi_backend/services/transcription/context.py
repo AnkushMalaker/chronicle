@@ -9,6 +9,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
+from advanced_omi_backend.prompt_registry import get_prompt_registry
 from advanced_omi_backend.redis_factory import create_async_redis
 
 logger = logging.getLogger(__name__)
@@ -65,8 +66,6 @@ async def gather_transcription_context(
     Returns:
         TranscriptionContext with individual components.
     """
-    from advanced_omi_backend.prompt_registry import get_prompt_registry
-
     registry = get_prompt_registry()
     try:
         hot_words = await registry.get_prompt("asr.hot_words")

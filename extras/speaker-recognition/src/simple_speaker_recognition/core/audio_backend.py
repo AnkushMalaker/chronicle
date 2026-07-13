@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
+import soundfile as sf
 import torch
 from pyannote.audio import Audio, Pipeline
 from pyannote.audio.pipelines.speaker_verification import PretrainedSpeakerEmbedding
@@ -218,8 +219,6 @@ class AudioBackend:
 
             # Write chunk to temp file for PyAnnote
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                import soundfile as sf
-
                 # Extract tensor data and write as WAV
                 audio_tensor = chunk_audio.squeeze().cpu().numpy()
                 sf.write(tmp.name, audio_tensor, 16000)

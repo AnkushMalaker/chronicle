@@ -79,6 +79,8 @@ class MemoryService(MemoryServiceBase):
         vault-relative note paths stand in for the chunk/memory ids the older index
         path returned, so the existing job bookkeeping (counts, versions) works unchanged.
         """
+        # Lazy import: circular dependency (agent → memory_agent → llm_client →
+        # services.memory.config → service_factory → this module)
         from ..agent import MemoryAgent
 
         if not transcript or len(transcript.strip()) < 10:
@@ -138,6 +140,8 @@ class MemoryService(MemoryServiceBase):
         backlinks) instead of leaving orphaned ``[[Speaker 0]]`` notes. Person/topic notes
         are kept and surgically updated — only the conversation note is regenerated.
         """
+        # Lazy import: circular dependency (agent → memory_agent → llm_client →
+        # services.memory.config → service_factory → this module)
         from ..agent import MemoryAgent
 
         if not transcript or len(transcript.strip()) < 10:
@@ -268,6 +272,8 @@ class MemoryService(MemoryServiceBase):
         one MemoryEntry per note the agent read (capped), with the synthesised answer
         as the top entry so chat gets both the conclusion and the supporting notes.
         """
+        # Lazy import: circular dependency (agent → memory_agent → llm_client →
+        # services.memory.config → service_factory → this module)
         from ..agent import search_vault
 
         result = await search_vault(query, self.vault.user_root(user_id))

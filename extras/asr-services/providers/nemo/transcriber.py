@@ -114,6 +114,7 @@ class NemoTranscriber:
 
         logger.info(f"Loading NeMo ASR model: {self.model_id}")
 
+        # Lazy import: nemo is a heavy dependency only installed in the nemo provider image.
         import nemo.collections.asr as nemo_asr
 
         self.model = cast(
@@ -148,6 +149,7 @@ class NemoTranscriber:
         streaming session in ~2 s chunks. Used for prompt-conditioned models
         whose NeMo offline file path is unavailable (see transcribe()).
         """
+        # Lazy import: librosa is heavy and only needed on this path.
         import librosa
 
         samples, _ = librosa.load(audio_file_path, sr=NEMO_SAMPLE_RATE, mono=True)
@@ -271,6 +273,7 @@ class NemoStreamingSession:
     def __init__(
         self, model, online_normalization: bool = False, target_lang: str = "auto"
     ):
+        # Lazy import: nemo is a heavy dependency only installed in the nemo provider image.
         from nemo.collections.asr.parts.utils.streaming_utils import (
             CacheAwareStreamingAudioBuffer,
         )

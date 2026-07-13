@@ -10,15 +10,18 @@ This module provides:
 
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from fastapi.responses import JSONResponse
 from rq import Queue, Retry, Worker
 from rq.exceptions import NoSuchJobError
 from rq.job import Dependency, Job, JobStatus
 from rq.registry import DeferredJobRegistry, ScheduledJobRegistry
 
+from advanced_omi_backend.config import get_misc_settings
 from advanced_omi_backend.config_loader import get_service_config
 from advanced_omi_backend.redis_factory import create_sync_redis
 from advanced_omi_backend.services.memory.audit import MemoryCause, UpdateStrategy
@@ -472,6 +475,8 @@ def enqueue_audio_persistence(
     directly; a short Redis mutex collapses a simultaneous reconnect burst into one
     winner. Returns the live or newly-enqueued job id.
     """
+    # Lazy import: circular dependency with the `workers` package (its __init__
+    # imports back from this module).
     from advanced_omi_backend.workers.audio_jobs import audio_streaming_persistence_job
 
     job_id = f"audio-persist_{session_id}"
@@ -544,6 +549,8 @@ def enqueue_speech_detection(
 
     Returns the live or newly-enqueued job id, or None if it could not enqueue.
     """
+    # Lazy import: circular dependency with the `workers` package (its __init__
+    # imports back from this module).
     from advanced_omi_backend.workers.transcription_jobs import (
         stream_speech_detection_job,
     )
@@ -634,7 +641,8 @@ def start_streaming_jobs(
         - user_email is fetched from the database when needed.
         - always_persist setting is read from global config at enqueue time and passed to worker.
     """
-    from advanced_omi_backend.config import get_misc_settings
+    # Lazy import: circular dependency with the `workers` package (its __init__
+    # imports back from this module).
     from advanced_omi_backend.workers.audio_jobs import audio_streaming_persistence_job
 
     # Read always_persist from global config NOW (backend process has fresh config)
@@ -812,6 +820,8 @@ def start_post_conversation_jobs(
     Returns:
         Dict with job IDs for speaker_recognition, memory, title_summary, event_dispatch
     """
+    # Lazy import: circular dependency with the `workers` package (its __init__
+    # imports back from this module).
     from advanced_omi_backend.workers.conversation_jobs import (
         dispatch_conversation_complete_event_job,
         generate_title_summary_job,
@@ -1098,10 +1108,6 @@ def get_queue_health() -> Dict[str, Any]:
 # needs tidying but works for now
 async def cleanup_stuck_stream_workers(request):
     """Clean up stuck Redis Stream consumers and pending messages from all active streams."""
-    import time
-
-    from fastapi.responses import JSONResponse
-
     try:
         # Get Redis client from request.app.state (initialized during startup)
         redis_client = request.app.state.redis_audio_stream

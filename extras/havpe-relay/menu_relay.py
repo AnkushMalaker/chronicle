@@ -44,6 +44,7 @@ log_buffer = MemoryLogHandler()
 
 def _show_logs_dialog(title: str, lines) -> None:
     """Show log lines in a scrollable modal dialog."""
+    # Lazy import: macOS-only (AppKit/Foundation, not available cross-platform)
     from AppKit import (
         NSAlert,
         NSBezelBorder,
@@ -306,6 +307,7 @@ class RelayMenuApp(rumps.App):
 
 
 def main() -> None:
+    # Lazy import: macOS-only (AppKit, not available cross-platform)
     from AppKit import NSApplication
 
     NSApplication.sharedApplication().setActivationPolicy_(1)

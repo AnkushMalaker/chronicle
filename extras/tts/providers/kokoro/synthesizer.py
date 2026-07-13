@@ -61,6 +61,7 @@ class KokoroSynthesizer:
             logger.info("Model already loaded")
             return
 
+        # Lazy import: kokoro is only needed once model loading starts.
         from kokoro import KPipeline
 
         logger.info(f"Loading Kokoro pipeline: {self.model_id} ({self.lang_code})")

@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.config import get_speech_detection_settings
 from advanced_omi_backend.llm_client import async_generate
+from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.prompt_optimizer import get_user_prompt
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 
@@ -523,8 +524,6 @@ async def mark_conversation_deleted(conversation_id: str, deletion_reason: str) 
         conversation_id: Conversation ID to mark as deleted
         deletion_reason: Reason for deletion (e.g., "no_meaningful_speech", "audio_file_not_ready")
     """
-    from advanced_omi_backend.models.conversation import Conversation
-
     logger.warning(
         f"🗑️ Marking conversation {conversation_id} as deleted - reason: {deletion_reason}"
     )

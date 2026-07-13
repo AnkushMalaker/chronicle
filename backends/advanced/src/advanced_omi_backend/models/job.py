@@ -9,6 +9,7 @@ This module provides:
 
 import asyncio
 import logging
+import os
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -36,8 +37,9 @@ async def _ensure_beanie_initialized():
         if _beanie_initialized:
             return
         try:
-            import os
-
+            # Lazy import: Beanie + Mongo drivers + document models are only pulled in
+            # when an RQ worker process first needs them, so importing this module
+            # (e.g. for BaseRQJob/async_job) doesn't drag in the DB stack.
             from beanie import init_beanie
             from motor.motor_asyncio import AsyncIOMotorClient
             from pymongo.errors import ConfigurationError

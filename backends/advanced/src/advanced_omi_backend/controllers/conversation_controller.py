@@ -28,6 +28,7 @@ from advanced_omi_backend.controllers.queue_controller import (
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import JobPriority
+from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
 from advanced_omi_backend.models.waveform import WaveformData
 from advanced_omi_backend.plugins.events import ConversationCloseReason, PluginEvent
 from advanced_omi_backend.redis_factory import create_async_redis
@@ -40,6 +41,7 @@ from advanced_omi_backend.services.memory.audit import (
     source_kind_for,
     source_label_for,
 )
+from advanced_omi_backend.services.plugin_service import get_plugin_router
 from advanced_omi_backend.users import User
 from advanced_omi_backend.workers.conversation_jobs import generate_title_summary_job
 from advanced_omi_backend.workers.memory_jobs import (
@@ -47,6 +49,7 @@ from advanced_omi_backend.workers.memory_jobs import (
     process_memory_job,
 )
 from advanced_omi_backend.workers.speaker_jobs import recognise_speakers_job
+from advanced_omi_backend.workers.transcription_jobs import transcribe_full_audio_job
 
 logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
@@ -905,10 +908,6 @@ def _enqueue_transcript_reprocessing(
 
     Returns (version_id, transcript_job, post_jobs dict).
     """
-    from advanced_omi_backend.workers.transcription_jobs import (
-        transcribe_full_audio_job,
-    )
-
     version_id = str(uuid.uuid4())
 
     transcript_job = transcription_queue.enqueue(
@@ -1069,8 +1068,6 @@ async def toggle_star(conversation_id: str, user: User):
 
         # Dispatch plugin event (fire-and-forget)
         try:
-            from advanced_omi_backend.services.plugin_service import get_plugin_router
-
             plugin_router = get_plugin_router()
             if plugin_router:
                 await plugin_router.dispatch_event(
@@ -1510,8 +1507,6 @@ async def get_conversation_memory_audit(
         _, error = await _get_conversation_or_error(conversation_id, user)
         if error:
             return error
-
-        from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
 
         entries = (
             await MemoryAuditEntry.find(

@@ -20,13 +20,26 @@ from friend_lite.decoder import OmiOpusDecoder
 from starlette.websockets import WebSocketState
 
 from advanced_omi_backend.auth import websocket_auth
-from advanced_omi_backend.client_manager import generate_client_id, get_client_manager
+from advanced_omi_backend.client_manager import (
+    generate_client_id,
+    get_client_manager,
+    track_client_user_relationship_async,
+)
 from advanced_omi_backend.config import WS_IDLE_TIMEOUT_SECS
 from advanced_omi_backend.constants import (
     OMI_CHANNELS,
     OMI_SAMPLE_RATE,
     OMI_SAMPLE_WIDTH,
 )
+from advanced_omi_backend.controllers.queue_controller import (
+    JOB_RESULT_TTL,
+    start_post_conversation_jobs,
+    start_streaming_jobs,
+    transcription_queue,
+)
+from advanced_omi_backend.model_registry import get_models_registry
+from advanced_omi_backend.models.conversation import create_conversation
+from advanced_omi_backend.plugins.events import BUTTON_STATE_TO_EVENT, ButtonState
 from advanced_omi_backend.redis_factory import create_async_redis
 from advanced_omi_backend.services.audio_stream.producer import (
     get_audio_stream_producer,
@@ -41,7 +54,13 @@ from advanced_omi_backend.services.device_audio import (
     stream_play_audio_as_opus,
 )
 from advanced_omi_backend.services.observability import record_event_sync
+from advanced_omi_backend.services.plugin_service import get_plugin_router
 from advanced_omi_backend.services.sse_publisher import publish_sse_event
+from advanced_omi_backend.services.transcription import is_transcription_available
+from advanced_omi_backend.services.wakeword.followup import handle_dial_followup
+from advanced_omi_backend.users import register_client_to_user, touch_client_last_seen
+from advanced_omi_backend.utils.audio_chunk_utils import convert_audio_to_chunks
+from advanced_omi_backend.workers.transcription_jobs import transcribe_full_audio_job
 
 # Thread pool executors for audio decoding
 _DEC_IO_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
@@ -392,13 +411,9 @@ async def create_client_state(client_id: str, user, device_name: Optional[str] =
         client_state = client_manager.create_client(client_id, user.user_id, user.email)
 
     # Also track in persistent mapping (for database queries + cross-container Redis)
-    from advanced_omi_backend.client_manager import track_client_user_relationship_async
-
     await track_client_user_relationship_async(client_id, user.user_id)
 
     # Register client in user model (persistent)
-    from advanced_omi_backend.users import register_client_to_user
-
     await register_client_to_user(user, client_id, device_name)
 
     return client_state
@@ -428,10 +443,6 @@ async def cleanup_client_state(client_id: str):
         async_redis = create_async_redis(decode_responses=False)
 
         # Get audio stream producer for finalization
-        from advanced_omi_backend.services.audio_stream.producer import (
-            get_audio_stream_producer,
-        )
-
         audio_stream_producer = get_audio_stream_producer()
 
         # Find all sessions for this client and mark them complete
@@ -567,8 +578,6 @@ async def cleanup_client_state(client_id: str):
     # Stamp the device's last_seen in the registry so the Network page shows an
     # accurate "last seen" once it's offline (the live ClientState is now gone).
     try:
-        from advanced_omi_backend.users import touch_client_last_seen
-
         await touch_client_last_seen(client_id)
     except Exception as e:
         logger.debug(f"Could not stamp last_seen for {client_id}: {e}")
@@ -713,8 +722,6 @@ async def _initialize_streaming_session(
     )
 
     # Determine transcription provider from config.yml
-    from advanced_omi_backend.model_registry import get_models_registry
-
     registry = get_models_registry()
     if not registry:
         raise ValueError(
@@ -753,8 +760,6 @@ async def _initialize_streaming_session(
     )
 
     # Enqueue streaming jobs (speech detection + audio persistence)
-    from advanced_omi_backend.controllers.queue_controller import start_streaming_jobs
-
     job_ids = start_streaming_jobs(
         session_id=client_state.stream_session_id, user_id=user_id, client_id=client_id
     )
@@ -1143,8 +1148,6 @@ async def _handle_audio_session_start(
     Returns:
         (audio_streaming_flag, recording_mode)
     """
-    from advanced_omi_backend.services.transcription import is_transcription_available
-
     recording_mode = audio_format.get("mode", "batch")
 
     application_logger.info(
@@ -1268,9 +1271,6 @@ async def _handle_button_event(
         user_id: User ID
         client_id: Client ID
     """
-    from advanced_omi_backend.plugins.events import BUTTON_STATE_TO_EVENT, ButtonState
-    from advanced_omi_backend.services.plugin_service import get_plugin_router
-
     timestamp = time.time()
     # The live conversation id is assigned later in the RQ pipeline and is not
     # tracked on ClientState; markers carry the session id instead.
@@ -1333,10 +1333,6 @@ async def _handle_dial_event(
     window it's a no-op here — the device may still use the dial locally (e.g. for
     volume). Best-effort: never breaks the audio loop.
     """
-    from advanced_omi_backend.redis_factory import create_async_redis
-    from advanced_omi_backend.services.plugin_service import get_plugin_router
-    from advanced_omi_backend.services.wakeword.followup import handle_dial_followup
-
     session_id = client_state.stream_session_id
     router = get_plugin_router()
     if not router or not session_id:
@@ -1386,16 +1382,6 @@ async def _create_batch_conversation_and_enqueue(
     Returns:
         conversation_id on success, None on failure.
     """
-    from advanced_omi_backend.controllers.queue_controller import (
-        JOB_RESULT_TTL,
-        transcription_queue,
-    )
-    from advanced_omi_backend.models.conversation import create_conversation
-    from advanced_omi_backend.utils.audio_chunk_utils import convert_audio_to_chunks
-    from advanced_omi_backend.workers.transcription_jobs import (
-        transcribe_full_audio_job,
-    )
-
     complete_audio = b"".join(client_state.batch_audio_chunks)
     audio_format = client_state.batch_audio_format
     sample_rate = audio_format.get("rate", 16000)
@@ -1457,10 +1443,6 @@ async def _create_batch_conversation_and_enqueue(
 
     # Optionally chain post-conversation jobs
     if enqueue_post_jobs:
-        from advanced_omi_backend.controllers.queue_controller import (
-            start_post_conversation_jobs,
-        )
-
         job_ids = start_post_conversation_jobs(
             conversation_id=conversation_id,
             user_id=None,
