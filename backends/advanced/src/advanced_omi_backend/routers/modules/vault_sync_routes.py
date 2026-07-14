@@ -19,9 +19,9 @@ from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
 
 from advanced_omi_backend.auth import current_active_user
+from advanced_omi_backend.models.vault_sync import PairRequest
 from advanced_omi_backend.users import User
 
 logger = logging.getLogger(__name__)
@@ -66,11 +66,6 @@ async def _server_device_id(client: httpx.AsyncClient) -> str:
     resp = await client.get("/rest/system/status")
     resp.raise_for_status()
     return resp.json()["myID"]
-
-
-class PairRequest(BaseModel):
-    device_id: str
-    device_name: str = "mac"
 
 
 @router.get("/info")
