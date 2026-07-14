@@ -1825,9 +1825,9 @@ class ChronicleSetup:
             )
             self.console.print()
             self.console.print("For detailed documentation, see:")
-            self.console.print("  • Docs/quickstart.md")
+            self.console.print("  • quickstart.md")
             self.console.print("  • MEMORY_PROVIDERS.md")
-            self.console.print("  • CLAUDE.md")
+            self.console.print("  • AGENTS.md")
 
         except KeyboardInterrupt:
             self.console.print()

@@ -38,8 +38,8 @@ For step-by-step instructions, see the [setup guide](quickstart.md).
 ## Links
 
 - **📚 [Setup Guide](quickstart.md)** - Start here
-- **🔧 [Full Documentation](CLAUDE.md)** - Comprehensive reference
-- **🏗️ [Project Overview](Docs/overview.md)** - Architecture and vision
+- **🔧 [Full Documentation](AGENTS.md)** - Comprehensive reference
+- **🏗️ [Project Overview](docs/overview.md)** - Architecture and vision
 - **🐳 [Docker/K8s](README-K8S.md)** - Container deployment
 
 ## Project Structure
@@ -60,7 +60,7 @@ chronicle/
 │   ├── speaker-recognition/  # Voice identification service
 │   ├── asr-services/        # Offline speech-to-text (Parakeet)
 │   └── openmemory-mcp/      # External memory server
-├── Docs/                   # Technical documentation
+├── docs/                   # Technical documentation
 ├── config/                 # Central configuration files
 ├── tests/                  # Integration & unit tests
 ├── wizard.py              # Root setup orchestrator

@@ -2,7 +2,7 @@
 
 A FastAPI backend with pluggable memory providers, real-time audio processing, and comprehensive conversation management.
 
-[QuickStart](../../quickstart.md) | [Memory Providers](./MEMORY_PROVIDERS.md) | [Configuration Guide](./Docs/memories.md)
+[Quick Start](../../quickstart.md) | [Memory System](../../docs/backend/memories.md) | [Configuration Guide](../../config/README.md)
 
 ## Key Features
 
@@ -74,7 +74,7 @@ docker compose --profile https up --build -d
 - 🌐 **Network Access** from other devices via Tailscale/LAN
 - 🔄 **Automatic protocol detection** - Frontend auto-configures for HTTP/HTTPS
 
-See [Docs/ssl-certificates.md](../../Docs/ssl-certificates.md) for how SSL is configured.
+See [SSL certificates](../../docs/ssl-certificates.md) for how SSL is configured.
 
 ## Testing
 

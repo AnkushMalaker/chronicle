@@ -817,8 +817,7 @@ This script handles speaker recognition service deployment with proper environme
 
 For additional support:
 - Check the main [README.md](README.md)
-- Review [CLAUDE.md](CLAUDE.md) for development notes
-- Check [README-skaffold.md](README-skaffold.md) for Skaffold-specific information
+- Review [AGENTS.md](AGENTS.md) for development notes
 
 ---
 

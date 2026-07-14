@@ -38,7 +38,8 @@ Chronicle uses a clean three-file separation for plugin configuration:
    - Event subscriptions
    - Trigger conditions
 
-This separation keeps secrets secure and configuration organized. See [`plugin-configuration.md`](../../../Docs/plugin-configuration.md) for details.
+This separation keeps secrets secure and configuration organized. See the
+[plugin configuration guide](../../docs/backend/plugin-configuration.md) for details.
 
 ## Configuration
 

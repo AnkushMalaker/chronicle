@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to coding agents working in this repository.
 
 ## Project Overview
 
@@ -40,7 +40,7 @@ uv run --with-requirements setup-requirements.txt python wizard.py
 ### Setup Documentation
 For detailed setup instructions and troubleshooting, see:
 - **[@quickstart.md](quickstart.md)**: Beginner-friendly step-by-step setup guide
-- **[@Docs/init-system.md](Docs/init-system.md)**: Complete initialization system architecture and design
+- **[@docs/init-system.md](docs/init-system.md)**: Complete initialization system architecture and design
 
 ### Wizard Architecture
 The initialization system uses a **root orchestrator pattern**:
@@ -552,7 +552,7 @@ tailscale ip -4
 ### Package Management
 - **Backend**: Uses `uv` for Python dependency management (faster than pip)
 - **Mobile**: Uses `npm` with React Native and Expo
-- **Containers**: The service lifecycle (`services.py`/`status.py`/service-manager) supports **both Docker and Podman**, selected via `container_engine: docker|podman` in `config/config.yml` (or the `CONTAINER_ENGINE`/`COMPOSE_CMD` env vars). The repo's compose files run unmodified under either engine. For Podman it drives `podman-compose` and needs CDI for GPU. See **[@Docs/podman.md](Docs/podman.md)** for rootless/GPU setup and migration notes.
+- **Containers**: The service lifecycle (`services.py`/`status.py`/service-manager) supports **both Docker and Podman**, selected via `container_engine: docker|podman` in `config/config.yml` (or the `CONTAINER_ENGINE`/`COMPOSE_CMD` env vars). The repo's compose files run unmodified under either engine. For Podman it drives `podman-compose` and needs CDI for GPU. See **[@docs/podman.md](docs/podman.md)** for rootless/GPU setup and migration notes.
 
 ### Testing Strategy
 - **Makefile-Based**: All test operations through simple `make` commands (`make test`, `make start`, `make stop`)
@@ -592,22 +592,18 @@ The system includes comprehensive health checks:
 - **Log Preservation**: All cleanup operations save logs to `tests/logs/` automatically
 - **CI Compatibility**: Same test logic runs locally and in GitHub Actions
 
-### Cursor Rule Integration
-Project includes `.cursor/rules/always-plan-first.mdc` requiring understanding before coding. Always explain the task and confirm approach before implementation.
-
 ## Extended Documentation
 
 For detailed technical documentation, see:
-- **[@Docs/overview.md](Docs/overview.md)**: Architecture overview and technical deep dive
-- **[@Docs/init-system.md](Docs/init-system.md)**: Initialization system and service management
-- **[@Docs/ssl-certificates.md](Docs/ssl-certificates.md)**: HTTPS/SSL setup details
-- **[@Docs/podman.md](Docs/podman.md)**: Running with Podman instead of Docker (engine selection, rootless/GPU setup)
-- **[@Docs/audio-pipeline-architecture.md](Docs/audio-pipeline-architecture.md)**: Audio pipeline design
-- **[@backends/advanced/Docs/auth.md](backends/advanced/Docs/auth.md)**: Authentication architecture
-- **[backends/advanced/Docs/architecture.md](backends/advanced/Docs/architecture.md)**: Backend architecture details
-- **[backends/advanced/Docs/memories.md](backends/advanced/Docs/memories.md)**: Memory system documentation
-- **[backends/advanced/Docs/data-audit.md](backends/advanced/Docs/data-audit.md)**: Data Audit (VAD analysis, split/merge, audio preview)
-- **[backends/advanced/Docs/plugin-development-guide.md](backends/advanced/Docs/plugin-development-guide.md)**: Plugin development guide
+- **[@docs/README.md](docs/README.md)**: Documentation index
+- **[@docs/overview.md](docs/overview.md)**: Architecture overview and technical deep dive
+- **[@docs/init-system.md](docs/init-system.md)**: Initialization system and service management
+- **[@docs/ssl-certificates.md](docs/ssl-certificates.md)**: HTTPS/SSL setup details
+- **[@docs/podman.md](docs/podman.md)**: Running with Podman instead of Docker (engine selection, rootless/GPU setup)
+- **[@docs/audio-pipeline-architecture.md](docs/audio-pipeline-architecture.md)**: Audio pipeline design
+- **[@docs/backend/auth.md](docs/backend/auth.md)**: Authentication architecture
+- **[@docs/backend/memories.md](docs/backend/memories.md)**: Memory system documentation
+- **[@docs/backend/plugin-development-guide.md](docs/backend/plugin-development-guide.md)**: Plugin development guide
 
 ## Robot Framework Testing
 
@@ -634,14 +630,14 @@ Key Testing Rules:
 - Use space-separated tags (must be tab-separated)
 - Skip reading the guidelines before writing tests
 
-## Notes for Claude
+## Notes for Coding Agents
 Check if the src/ is volume mounted. If not, do compose build so that code changes are reflected. Do not simply run `docker compose restart` as it will not rebuild the image.
-Check backends/advanced/Docs for up to date information on advanced backend.
+Check `docs/backend/` for up-to-date information on the advanced backend.
 All docker projects have .dockerignore following the exclude pattern. That means files need to be included for them to be visible to docker.
 The uv package manager is used for all python projects. Wherever you'd call `python3 main.py` you'd call `uv run python main.py`
 
 **Container Engine (Docker or Podman):**
-- The project supports **both Docker and Podman**. The active engine is set by `container_engine` in `config/config.yml` (default `docker`); prefer the lifecycle scripts (`./start.sh`/`./stop.sh`/`./restart.sh`) which route through the selected engine. For one-off manual commands under Podman use `podman-compose` (not `docker compose`). See **[@Docs/podman.md](Docs/podman.md)**.
+- The project supports **both Docker and Podman**. The active engine is set by `container_engine` in `config/config.yml` (default `docker`); prefer the lifecycle scripts (`./start.sh`/`./stop.sh`/`./restart.sh`) which route through the selected engine. For one-off manual commands under Podman use `podman-compose` (not `docker compose`). See **[@docs/podman.md](docs/podman.md)**.
 
 **Docker Build Guidelines:**
 - Use `docker compose build` (or `podman-compose build`) without `--no-cache` by default for faster builds

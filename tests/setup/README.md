@@ -233,6 +233,6 @@ FRESH_RUN=true robot tests/
 
 ## Related Documentation
 
-- **[@CLAUDE.md](../../CLAUDE.md)**: Project overview and development guide
+- **[@AGENTS.md](../../AGENTS.md)**: Project overview and development guide
 - **[@tests/README.md](../README.md)**: Testing overview (if exists)
 - **[@backends/advanced/README.md](../../backends/advanced/README.md)**: Backend service documentation
