@@ -84,7 +84,7 @@ plugins:
   # Double press: cross-plugin call (e.g., toggle lights via Home Assistant)
   #
   # Actions are configured in: plugins/test_button_actions/config.yml
-  # See: backends/advanced/Docs/plugin-development-guide.md for button event data flow
+  # See: docs/backend/plugin-development-guide.md for button event data flow
 
   test_button_actions:
     enabled: false  # Set to true to enable button actions

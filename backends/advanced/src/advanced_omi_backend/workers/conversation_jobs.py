@@ -421,7 +421,7 @@ async def handle_end_of_conversation(
             # Session still active - enqueue new speech detection for next conversation.
             # Clear any TTL: the hash must live as long as the connection does, otherwise
             # a quiet gap > TTL expires it mid-session → next close reads status=None →
-            # speech detection never restarts (deaf connection). See Docs/system-oddities.md #4.
+            # speech detection never restarts, leaving the connection unable to receive audio.
             await store.persist_session(session_id)
             logger.info(
                 f"🔄 Enqueueing new speech detection (conversation #{conversation_count + 1})"

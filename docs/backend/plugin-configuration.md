@@ -393,7 +393,7 @@ ha_token = prompt_token("Home Assistant", env_file_path="../../.env")
 
 ## See Also
 
-- [CLAUDE.md](../../../CLAUDE.md) - Main documentation
-- [Plugin Development Guide](plugin-development.md) - Creating custom plugins
-- [Environment Variables](environment-variables.md) - Complete .env reference
-- [setup_utils.py](../../../setup_utils.py) - Shared setup utility reference
+- [AGENTS.md](../../AGENTS.md) - Main development reference
+- [Plugin Development Guide](plugin-development-guide.md) - Creating custom plugins
+- [Configuration Guide](../../config/README.md) - Configuration and environment reference
+- [setup_utils.py](../../setup_utils.py) - Shared setup utility reference

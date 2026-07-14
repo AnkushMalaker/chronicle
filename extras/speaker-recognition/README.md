@@ -59,7 +59,7 @@ manual generation step. `./wizard.sh` configures it based on your address:
 - **Real domain** → Let's Encrypt, auto-renewed.
 - **IP / `localhost`** → Caddy's internal-CA self-signed cert (accept the browser warning).
 
-See [../../Docs/ssl-certificates.md](../../Docs/ssl-certificates.md) for the full model
+See [../../docs/ssl-certificates.md](../../docs/ssl-certificates.md) for the full model
 (including the Docker-Desktop `static` fallback).
 
 ### 5. Start the system
@@ -351,7 +351,6 @@ When you see issues with transcript processing:
 
 For detailed documentation, API reference, and advanced usage:
 - **[README.detailed.md](README.detailed.md)** - Comprehensive guide
-- **[plan.md](plan.md)** - Implementation details
 
 ## 🔧 Configuration
 
@@ -411,7 +410,7 @@ The React UI is configured with HTTPS enabled by default (`REACT_UI_HTTPS=true`)
   `docker inspect speaker-recognition-caddy-1 --format '{{range .Mounts}}{{.Destination}} {{end}}'`
   should list `/var/run/tailscale/tailscaled.sock`.
 - Confirm the served cert: `echo | openssl s_client -connect localhost:8444 -servername <your-name> 2>/dev/null | openssl x509 -noout -issuer -enddate`
-- See [../../Docs/ssl-certificates.md](../../Docs/ssl-certificates.md) for details.
+- See [../../docs/ssl-certificates.md](../../docs/ssl-certificates.md) for details.
 
 **Can't access the web UI?**
 - Check if services are running: `docker compose --profile cpu ps` (or `--profile gpu`)

@@ -101,7 +101,7 @@ chronicle/
 │   ├── havpe-relay/         # ESP32 audio bridge
 │   └── vault-sync/          # macOS menu bar app: vault ⇄ Obsidian via Syncthing
 ├── config/                  # Central configuration
-├── Docs/                    # Documentation
+├── docs/                    # Documentation
 ├── tests/                   # Integration tests (Robot Framework)
 ├── wizard.py                # Setup wizard
 └── services.py              # Service lifecycle manager
@@ -128,4 +128,5 @@ open http://localhost:5173
 - [Initialization System](init-system.md) — Setup wizard internals and port configuration
 - [Audio Pipeline Architecture](audio-pipeline-architecture.md) — Deep technical reference
 - [SSL Certificates](ssl-certificates.md) — HTTPS setup
-- [Backend Architecture](../backends/advanced/Docs/architecture.md) — Backend internals
+- [Authentication Architecture](backend/auth.md) — Backend authentication internals
+- [Memory System](backend/memories.md) — Agentic Markdown vault architecture

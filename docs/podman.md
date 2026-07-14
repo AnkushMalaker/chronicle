@@ -156,6 +156,6 @@ one-command choice for the user, the wizard / `services.py` should automate them
 | Data-dir ownership remap (`sudo chown` + `podman unshare chown 999`) | a `services.py migrate-podman` helper (one-shot) | only when migrating an existing docker install |
 | Clear Docker Desktop `credsStore` | wizard (detect `desktop` credsStore, offer to neutralize) | harmless on fresh hosts |
 
-Until automated, `Docs/podman.md` (this file) is the checklist. The **engine
+Until automated, `docs/podman.md` (this file) is the checklist. The **engine
 abstraction itself** (`container_engine`/`compose_cmd`) is already seamless — only the
 host prerequisites need wiring into setup.

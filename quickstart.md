@@ -287,6 +287,6 @@ Before connecting your phone, make sure everything works:
 
 ## Need Help?
 
-- **Full Documentation**: [CLAUDE.md](CLAUDE.md) - Complete technical reference
-- **Architecture Details**: [Docs/overview.md](Docs/overview.md) - How everything works
-- **Advanced Setup**: [Docs/init-system.md](Docs/init-system.md) - Power user options
+- **Full Documentation**: [AGENTS.md](AGENTS.md) - Complete technical reference
+- **Architecture Details**: [docs/overview.md](docs/overview.md) - How everything works
+- **Advanced Setup**: [docs/init-system.md](docs/init-system.md) - Power user options

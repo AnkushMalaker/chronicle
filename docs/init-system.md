@@ -3,7 +3,7 @@
 ## Quick Links
 
 - **👉 [Start Here: Quick Start Guide](../quickstart.md)** - Main setup path for new users
-- **📚 [Full Documentation](../CLAUDE.md)** - Comprehensive reference
+- **📚 [Full Documentation](../AGENTS.md)** - Comprehensive reference
 - **🏗️ [Architecture Details](overview.md)** - Technical deep dive
 - **🐧 [Running with Podman](podman.md)** - Use Podman instead of Docker (engine selection, rootless/GPU)
 

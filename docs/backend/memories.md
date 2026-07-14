@@ -1,6 +1,6 @@
 # Memory Service: The Agentic Markdown Vault
 
-> 📖 **Prerequisite**: Read [quickstart.md](./quickstart.md) first for system overview.
+> 📖 **Prerequisite**: Read the [Quick Start Guide](../../quickstart.md) first for system overview.
 
 This document explains how Chronicle stores and retrieves memories.
 
