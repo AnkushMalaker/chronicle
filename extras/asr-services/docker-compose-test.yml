@@ -41,7 +41,6 @@ services:
       - ./results_test:/app/results
     environment:
       - HF_HOME=/models
-    restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
       interval: 30s

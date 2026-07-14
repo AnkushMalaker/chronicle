@@ -9,6 +9,7 @@ or provider-specific branching is used for batch transcription.
 import asyncio
 import json
 import logging
+import re
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -18,6 +19,7 @@ import websockets
 from advanced_omi_backend.config_loader import get_backend_config
 from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.prompt_registry import get_prompt_registry
+from advanced_omi_backend.services.plugin_service import get_plugin_router
 
 from .base import (
     BaseTranscriptionProvider,
@@ -34,8 +36,6 @@ def _get_plugin_keywords() -> list[str]:
     Returns an empty list if the plugin system is not initialised yet.
     """
     try:
-        from advanced_omi_backend.services.plugin_service import get_plugin_router
-
         router = get_plugin_router()
         if router:
             return router.get_asr_keywords()
@@ -46,8 +46,6 @@ def _get_plugin_keywords() -> list[str]:
 
 def _merge_hot_words(prompt_hot_words: str, plugin_keywords: list[str]) -> str:
     """Merge prompt-registry hot words with plugin keywords (deduplicated)."""
-    import re
-
     parts: list[str] = []
     seen: set[str] = set()
 
@@ -74,13 +72,11 @@ def _parse_hot_words_to_keyterm(hot_words_str: str) -> str:
 
     Splits on commas and newlines (context may arrive in either format).
 
-    Input:  "hey vivi\\nchronicle\\nomi"  or  "hey vivi, chronicle, omi"
-    Output: "hey vivi Hey Vivi chronicle Chronicle omi Omi"
+    Input:  "hey hermes\\nchronicle\\nomi"  or  "hey hermes, chronicle, omi"
+    Output: "hey hermes Hey Hermes chronicle Chronicle omi Omi"
     """
     if not hot_words_str or not hot_words_str.strip():
         return ""
-    import re
-
     terms = []
     for word in re.split(r"[,\n]+", hot_words_str):
         word = word.strip().lower()
@@ -88,6 +84,61 @@ def _parse_hot_words_to_keyterm(hot_words_str: str) -> str:
             continue
         terms.append(word)
     return " ".join(terms)
+
+
+# ASR hint mechanisms (see ModelDef.capabilities). A provider consumes context in
+# exactly one of two ways, which must NOT be conflated:
+#   keyword_boosting — a hot-word list used as an acoustic recognition hint that
+#       biases decoding without ever appearing in the output (Deepgram keyterm,
+#       VibeVoice prompt, Parakeet context_info). Safe to feed plugin wake-words.
+#   context_prompt — an LLM-backbone ASR that takes free-form context as prompt
+#       text. Feeding it the wake-word list makes it echo those words into the
+#       transcript (the leak we are fixing), so it gets the user-authored
+#       asr_context ONLY — never the boost list.
+CAP_KEYWORD_BOOSTING = "keyword_boosting"
+CAP_CONTEXT_PROMPT = "context_prompt"
+
+
+def _resolve_asr_context(model) -> str:
+    """Resolve the user-authored context string for a context_prompt provider.
+
+    Precedence: the ``backend.asr.context.<model_name>`` override (written by the
+    System page / wizard) over the inline ``asr_context`` shipped on the model
+    entry. Returns "" when neither is set.
+    """
+    try:
+        asr_cfg = get_backend_config("asr") or {}
+        ctx_map = asr_cfg.get("context", {}) or {}
+        override = ctx_map.get(model.name)
+        if override is not None and str(override).strip():
+            return str(override).strip()
+    except Exception as e:
+        logger.debug(f"Failed to read backend.asr.context override: {e}")
+    inline = getattr(model, "asr_context", None)
+    return inline.strip() if isinstance(inline, str) else ""
+
+
+def _resolve_asr_hint(
+    model, capabilities: set, caller_context: Optional[str], prompt_hot_words: str
+) -> tuple[Optional[str], str]:
+    """Decide which kind of ASR hint to send to ``model`` and its text.
+
+    Returns ``(kind, text)`` where ``kind`` is:
+      "context" — free-form LLM context (context_prompt providers); the wake-word
+          boost list is deliberately excluded so the LLM does not echo it.
+      "keyword" — acoustic hot-word boost list (every other provider; current
+          behaviour). Empty text means "no hint".
+    """
+    if CAP_CONTEXT_PROMPT in capabilities:
+        context = (
+            caller_context.strip() if caller_context else _resolve_asr_context(model)
+        )
+        return ("context", context)
+
+    # Default (keyword/acoustic) path — preserves prior behaviour for all
+    # non-LLM providers: merge prompt-registry hot words with plugin wake-words.
+    base = caller_context if caller_context else prompt_hot_words
+    return ("keyword", _merge_hot_words(base, _get_plugin_keywords()).strip())
 
 
 def _dotted_get(d: dict | list | None, dotted: Optional[str]):
@@ -203,10 +254,12 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
         diarize: bool = False,
         context_info: Optional[str] = None,
         progress_callback=None,
+        priority: bool = False,
         **kwargs,
     ) -> dict:
         # Special handling for mock provider (no HTTP server needed)
         if self.model.model_provider == "mock":
+            # Lazy import: test/mock-only provider
             from .mock_provider import MockTranscriptionProvider
 
             mock = MockTranscriptionProvider(fail_mode=False)
@@ -216,7 +269,7 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
         method = (op.get("method") or "POST").upper()
         path = op.get("path") or "/listen"
         # Build URL
-        base = self.model.model_url.rstrip("/")
+        base = self.model.resolved_url().rstrip("/")
         url = base + ("/" + path.lstrip("/"))
 
         # Check if we should use multipart file upload (for Parakeet)
@@ -263,22 +316,33 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
         if "diarize" in query:
             query["diarize"] = "true" if diarize else "false"
 
-        # Use caller-provided context or fall back to LangFuse prompt store,
-        # then merge with plugin wake words / keywords for ASR boosting.
-        if context_info:
-            hot_words_str = context_info
-        else:
-            hot_words_str = ""
+        # Resolve the ASR hint by the provider's hint mechanism (see
+        # _resolve_asr_hint): keyword_boosting providers get the merged hot-word
+        # boost list; context_prompt (LLM) providers get the user-authored
+        # asr_context ONLY — never the wake-word list, which they would echo.
+        prompt_hot_words = ""
+        if not context_info:
             try:
                 registry = get_prompt_registry()
-                hot_words_str = await registry.get_prompt("asr.hot_words")
+                prompt_hot_words = await registry.get_prompt("asr.hot_words")
             except Exception as e:
                 logger.debug(f"Failed to fetch asr.hot_words prompt: {e}")
 
-        hot_words_str = _merge_hot_words(hot_words_str, _get_plugin_keywords())
+        hint_kind, hot_words_str = _resolve_asr_hint(
+            self.model, self._capabilities, context_info, prompt_hot_words
+        )
+        if hot_words_str:
+            logger.debug(
+                f"ASR hint for {self.model.name}: kind={hint_kind}, "
+                f"text={hot_words_str[:80]!r}"
+            )
 
-        # For Deepgram: inject as keyterm query param
-        if self.model.model_provider == "deepgram" and hot_words_str.strip():
+        # For Deepgram: inject keyword boost as the keyterm query param.
+        if (
+            CAP_KEYWORD_BOOSTING in self._capabilities
+            and self.model.model_provider == "deepgram"
+            and hot_words_str.strip()
+        ):
             keyterm = _parse_hot_words_to_keyterm(hot_words_str)
             if keyterm:
                 query["keyterm"] = keyterm
@@ -302,6 +366,11 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
                         form_data = {}
                         if hot_words_str and hot_words_str.strip():
                             form_data["context_info"] = hot_words_str.strip()
+                        # Route latency-sensitive requests (e.g. wake-word command
+                        # clips) to the service's dedicated priority GPU lane so they
+                        # don't queue behind a long batch.
+                        if priority:
+                            form_data["priority"] = "1"
 
                         # Use streaming to handle NDJSON progress responses
                         async with client.stream(
@@ -358,10 +427,40 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
             ) from e
         except httpx.HTTPStatusError as e:
             status = e.response.status_code
-            raise RuntimeError(
+            # For streaming requests the body isn't consumed yet, so read it
+            # to surface the actual error the transcription service reported.
+            body = ""
+            try:
+                if not e.response.is_closed:
+                    await e.response.aread()
+                body = e.response.text
+            except Exception as read_err:
+                body = f"<could not read response body: {read_err}>"
+            # Try to pull a cleaner message out of a JSON error payload.
+            detail = body.strip()
+            if detail:
+                try:
+                    payload = json.loads(detail)
+                    if isinstance(payload, dict):
+                        detail = str(
+                            payload.get("detail")
+                            or payload.get("error")
+                            or payload.get("message")
+                            or detail
+                        )
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            # Keep the surfaced body bounded so a giant traceback doesn't bloat logs.
+            if len(detail) > 2000:
+                detail = detail[:2000] + "… (truncated)"
+            hint = "Check your API key. " if status in (401, 403) else ""
+            msg = (
                 f"Transcription service '{self._name}' at {url} returned HTTP {status}. "
-                f"{'Check your API key.' if status in (401, 403) else ''}"
-            ) from e
+                f"{hint}"
+            )
+            if detail:
+                msg += f"Service error: {detail}"
+            raise RuntimeError(msg) from e
 
             # DEBUG: Log Deepgram response structure
             if "results" in data and "channels" in data.get("results", {}):
@@ -381,27 +480,18 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
             segments = _dotted_get(data, extract.get("segments")) or []
             segments = _normalize_provider_segments(segments)
 
-            # Check config to decide whether to keep or discard provider segments
-            transcription_config = get_backend_config("transcription")
-            use_provider_segments = transcription_config.get(
-                "use_provider_segments", False
+            # Provider segments are always stored; the diarization_source setting
+            # decides downstream whether the speaker pipeline trusts them or
+            # re-diarizes with pyannote.
+            logger.debug(
+                f"Transcription: Extracted {len(words)} words, {len(segments)} provider segments"
             )
-
-            if not use_provider_segments:
-                segments = []
-                logger.debug(
-                    f"Transcription: Extracted {len(words)} words, ignoring provider segments (use_provider_segments=false)"
-                )
-            else:
-                logger.debug(
-                    f"Transcription: Extracted {len(words)} words, keeping {len(segments)} provider segments (use_provider_segments=true)"
-                )
 
         return {"text": text, "words": words, "segments": segments}
 
     async def health_check(self) -> dict:
         """Check batch STT service reachability and auth by hitting the base URL."""
-        base = self.model.model_url.rstrip("/")
+        base = self.model.resolved_url().rstrip("/")
         headers = {}
         if self.model.api_key:
             op = (self.model.operations or {}).get("stt_transcribe") or {}
@@ -467,7 +557,7 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
     async def start_stream(
         self, client_id: str, sample_rate: int = 16000, diarize: bool = False
     ):
-        base_url = self.model.model_url
+        base_url = self.model.resolved_url()
         ops = self.model.operations or {}
 
         # Build WebSocket URL with query parameters (for Deepgram streaming)
@@ -488,9 +578,19 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
         except Exception as e:
             logger.debug(f"Failed to fetch asr.hot_words for streaming: {e}")
 
-        merged_hot_words = _merge_hot_words(prompt_hot_words, _get_plugin_keywords())
+        # Streaming keyword boosting is only wired for Deepgram (keyterm). A
+        # context_prompt streaming provider would get nothing here — and the
+        # gemma4 /stream endpoint does not accept context at all, so there is no
+        # LLM-echo leak on the streaming path.
+        _, merged_hot_words = _resolve_asr_hint(
+            self.model, self._capabilities, None, prompt_hot_words
+        )
 
-        if self.model.model_provider == "deepgram" and merged_hot_words:
+        if (
+            CAP_KEYWORD_BOOSTING in self._capabilities
+            and self.model.model_provider == "deepgram"
+            and merged_hot_words
+        ):
             keyterm = _parse_hot_words_to_keyterm(merged_hot_words)
             if keyterm:
                 query_dict["keyterm"] = keyterm
@@ -511,7 +611,9 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
         url = f"{base_url}?{query_str}" if query_str else base_url
 
         # Debug: Log the URL
-        logger.info(f"🔗 Connecting to Deepgram WebSocket: {url}")
+        logger.info(
+            f"🔗 Connecting to streaming STT WebSocket [{self.model.model_provider}]: {url}"
+        )
 
         # Connect to WebSocket with Authorization header
         headers = {}
@@ -691,7 +793,7 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
 
     async def health_check(self) -> dict:
         """Check streaming STT service by attempting a WebSocket handshake."""
-        base_url = self.model.model_url
+        base_url = self.model.resolved_url()
         ops = self.model.operations or {}
         headers = {}
         if self.model.api_key:
@@ -775,6 +877,7 @@ def get_mock_transcription_provider(
     Returns:
         MockTranscriptionProvider instance
     """
+    # Lazy import: test/mock-only provider
     from .mock_provider import MockTranscriptionProvider
 
     return MockTranscriptionProvider(fail_mode=fail_mode)

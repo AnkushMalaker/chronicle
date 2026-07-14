@@ -12,6 +12,17 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 
+class PluginConnectivityError(Exception):
+    """An external dependency (e.g. a Home Assistant server) is unreachable.
+
+    Raise this from initialize() for transient network conditions. The plugin
+    system marks the plugin DEGRADED (not FAILED) and retries initialize() in
+    the background with backoff, instead of logging a full traceback and giving
+    up until process restart. Reserve plain exceptions for real config/setup
+    errors (missing token, bad config) that a retry cannot fix.
+    """
+
+
 @dataclass
 class PluginContext:
     """Context passed to plugin execution"""
@@ -66,6 +77,12 @@ class BasePlugin(ABC):
         self.enabled = config.get("enabled", False)
         self.events = config.get("events", [])
         self.condition = config.get("condition", {"type": "always"})
+        # Lower runs earlier. Plugins form an ordered chain of responsibility per
+        # event: a plugin that handles a command returns should_continue=False to
+        # stop the chain; returning None (or should_continue=True) passes it to
+        # the next plugin. This is the configurable routing hierarchy (a future
+        # drag-to-reorder UI would just edit this value in config/plugins.yml).
+        self.priority = config.get("priority", 100)
 
     def register_prompts(self, registry) -> None:
         """Register plugin prompts with the prompt registry.
@@ -186,6 +203,27 @@ class BasePlugin(ABC):
             - state: str - Button state (e.g., "SINGLE_PRESS", "DOUBLE_PRESS", "LONG_PRESS")
             - timestamp: float - Unix timestamp of the event
             - audio_uuid: str - Current audio session UUID (may be None)
+
+        Returns:
+            PluginResult with success status, optional message, and should_continue flag
+        """
+        pass
+
+    async def on_wake_word_detected(
+        self, context: PluginContext
+    ) -> Optional[PluginResult]:
+        """
+        Called when the standalone wakeword-service detects the acoustic wake word
+        and captures the command turn.
+
+        Context data contains:
+            - command: str - The captured command text (resolved from existing
+              transcription; may be empty if transcription lagged)
+            - client_id: str - Client identifier
+            - session_id: str - Audio session id
+            - conversation_id: str or None - Current conversation id (if any)
+            - score: float - Acoustic detection score
+            - reason: str - End-of-turn reason ("smart_turn" | "max_duration")
 
         Returns:
             PluginResult with success status, optional message, and should_continue flag

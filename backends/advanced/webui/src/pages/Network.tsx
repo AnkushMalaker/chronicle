@@ -1,0 +1,489 @@
+import { useState } from 'react'
+import { Network as NetworkIcon, RefreshCw, CheckCircle, XCircle, Wifi, WifiOff, Radio, Search, Server, Smartphone, Pencil, Trash2, Check, X } from 'lucide-react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useAuth } from '../contexts/AuthContext'
+import { systemApi, clientsApi } from '../services/api'
+
+interface DiscoveredService {
+  name: string
+  url: string | null
+  reachable: boolean
+  error?: string
+  labels?: Record<string, string>
+  host?: string
+}
+
+interface AdvertisedService {
+  name: string
+  port: number
+  label?: string
+}
+
+interface ConnectedDevice {
+  client_id: string
+  device_name: string
+  name?: string  // user-editable friendly label
+  user_email?: string
+  connected: boolean
+  has_active_conversation: boolean
+  last_seen?: number  // seconds since last inbound message
+}
+
+interface NetworkData {
+  tailscale_available: boolean
+  advertising: AdvertisedService[]
+  discovered_services: DiscoveredService[]
+  connected_devices?: ConnectedDevice[]
+  error?: string
+}
+
+// Human-readable "last seen" from seconds-since-last-message.
+function formatAgo(secs?: number): string {
+  if (secs == null) return 'unknown'
+  if (secs < 60) return `${Math.round(secs)}s ago`
+  if (secs < 3600) return `${Math.round(secs / 60)}m ago`
+  if (secs < 86400) return `${Math.round(secs / 3600)}h ago`
+  return `${Math.round(secs / 86400)}d ago`
+}
+
+const SERVICE_DISPLAY: Record<string, { label: string; description: string }> = {
+  'chronicle-backend': { label: 'Chronicle Backend', description: 'Core API and audio processing' },
+  'chronicle-speaker': { label: 'Speaker Recognition', description: 'Voice identification service' },
+  'chronicle-asr': { label: 'ASR Service', description: 'Offline speech-to-text' },
+  'chronicle-llm': { label: 'Local LLM', description: 'Local LLM via llama.cpp' },
+  'chronicle-tts': { label: 'Text-to-Speech', description: 'TTS synthesis service' },
+  'chronicle-relay': { label: 'HAVPE Relay', description: 'ESP32 audio bridge' },
+}
+
+function getServiceDisplay(name: string) {
+  if (SERVICE_DISPLAY[name]) return SERVICE_DISPLAY[name]
+  // Derive a label from unknown chronicle-* names
+  const suffix = name.replace('chronicle-', '')
+  return { label: suffix.charAt(0).toUpperCase() + suffix.slice(1), description: '' }
+}
+
+// The advertising node's OWN view of a service's health, carried in the minidisc
+// labels (health/running) that the node agent refreshes live. Distinct from the
+// reachability icon, which is this backend's own probe of the service URL.
+function healthBadge(health?: string): { text: string; cls: string } | null {
+  switch (health) {
+    case 'healthy':
+      return { text: 'healthy', cls: 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' }
+    case 'partial':
+      return { text: 'partial', cls: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300' }
+    case 'unhealthy':
+      return { text: 'unhealthy', cls: 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300' }
+    case 'stopped':
+      return { text: 'stopped', cls: 'bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-300' }
+    default:
+      return null
+  }
+}
+
+// Group discovered services by host
+function groupByHost(services: DiscoveredService[]): Record<string, DiscoveredService[]> {
+  const groups: Record<string, DiscoveredService[]> = {}
+  for (const svc of services) {
+    const host = svc.host || svc.url?.replace(/^https?:\/\//, '').replace(/:\d+$/, '') || 'unknown'
+    if (!groups[host]) groups[host] = []
+    groups[host].push(svc)
+  }
+  return groups
+}
+
+export default function Network() {
+  const { isAdmin } = useAuth()
+  const queryClient = useQueryClient()
+  const [isScanning, setIsScanning] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [draftName, setDraftName] = useState('')
+
+  const { data, isLoading, refetch, dataUpdatedAt } = useQuery<NetworkData>({
+    queryKey: ['system', 'network'],
+    queryFn: async () => {
+      const response = await systemApi.getNetworkDiscovery()
+      return response.data
+    },
+    enabled: isAdmin,
+    staleTime: 60_000,
+  })
+
+  const startEdit = (d: ConnectedDevice) => {
+    setEditingId(d.client_id)
+    setDraftName(d.name || d.device_name || d.client_id)
+  }
+  const cancelEdit = () => {
+    setEditingId(null)
+    setDraftName('')
+  }
+  const saveEdit = async (clientId: string) => {
+    const name = draftName.trim()
+    if (name) await clientsApi.rename(clientId, name)
+    cancelEdit()
+    await queryClient.invalidateQueries({ queryKey: ['system', 'network'] })
+  }
+  const forgetDevice = async (clientId: string) => {
+    if (!window.confirm('Forget this device? It will reappear if it reconnects.')) return
+    await clientsApi.forget(clientId)
+    await queryClient.invalidateQueries({ queryKey: ['system', 'network'] })
+  }
+
+  const handleScan = async () => {
+    setIsScanning(true)
+    try {
+      await refetch()
+    } finally {
+      setIsScanning(false)
+    }
+  }
+
+  if (!isAdmin) {
+    return (
+      <div className="text-center">
+        <NetworkIcon className="h-12 w-12 mx-auto mb-4 text-gray-400" />
+        <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-2">
+          Access Restricted
+        </h2>
+        <p className="text-gray-600 dark:text-gray-400">
+          You need administrator privileges to view network status.
+        </p>
+      </div>
+    )
+  }
+
+  const loading = isLoading || isScanning
+  const lastUpdated = dataUpdatedAt ? new Date(dataUpdatedAt) : null
+  const advertisedNames = new Set(data?.advertising?.map(s => s.name) || [])
+  const nodeGroups = data?.discovered_services ? groupByHost(data.discovered_services) : {}
+
+  return (
+    <div>
+      {/* Header */}
+      <div className="flex justify-between items-center mb-6">
+        <div className="flex items-center space-x-2">
+          <NetworkIcon className="h-6 w-6 text-blue-600" />
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
+            Network
+          </h1>
+        </div>
+        <div className="flex items-center space-x-4">
+          {lastUpdated && (
+            <span className="text-sm text-gray-600 dark:text-gray-400">
+              Last scan: {lastUpdated.toLocaleTimeString()}
+            </span>
+          )}
+          <button
+            onClick={handleScan}
+            disabled={loading}
+            className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
+          >
+            {loading ? (
+              <RefreshCw className="h-4 w-4 animate-spin" />
+            ) : (
+              <Search className="h-4 w-4" />
+            )}
+            <span>{loading ? 'Scanning...' : 'Scan Network'}</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Tailscale Status */}
+      <div className={`rounded-lg p-4 border mb-6 ${
+        loading && !data
+          ? 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800'
+          : data?.tailscale_available
+            ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800'
+            : 'bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800'
+      }`}>
+        <div className="flex items-center space-x-3">
+          {loading && !data ? (
+            <>
+              <RefreshCw className="h-5 w-5 text-blue-600 dark:text-blue-400 animate-spin" />
+              <div>
+                <span className="font-medium text-blue-800 dark:text-blue-200">Scanning Network…</span>
+                <p className="text-sm text-blue-600 dark:text-blue-400">
+                  Checking for Tailscale and discovering services on your Tailnet.
+                </p>
+              </div>
+            </>
+          ) : data?.tailscale_available ? (
+            <>
+              <Wifi className="h-5 w-5 text-green-600 dark:text-green-400" />
+              <div>
+                <span className="font-medium text-green-800 dark:text-green-200">Tailscale Connected</span>
+                <p className="text-sm text-green-600 dark:text-green-400">
+                  Service discovery via minidisc is active. Services on your Tailnet can find each other automatically.
+                </p>
+              </div>
+            </>
+          ) : (
+            <>
+              <WifiOff className="h-5 w-5 text-yellow-600 dark:text-yellow-400" />
+              <div>
+                <span className="font-medium text-yellow-800 dark:text-yellow-200">Tailscale Not Detected</span>
+                <p className="text-sm text-yellow-600 dark:text-yellow-400">
+                  {data?.error
+                    ? data.error
+                    : 'Install Tailscale and mount the socket to enable automatic service discovery across machines.'}
+                </p>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Advertising (This Node) */}
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center">
+          <Radio className="h-5 w-5 mr-2 text-blue-600" />
+          This Node is Advertising
+        </h3>
+        {data?.advertising && data.advertising.length > 0 ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {data.advertising.map((svc) => {
+              const display = getServiceDisplay(svc.name)
+              const displayLabel = svc.label || display.label
+              return (
+                <div key={svc.name} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-md">
+                  <div>
+                    <div className="font-medium text-gray-900 dark:text-gray-100">{displayLabel}</div>
+                    <div className="text-sm text-gray-500 dark:text-gray-400">Port {svc.port}</div>
+                  </div>
+                  <span className="text-xs px-2 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded">
+                    broadcasting
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        ) : (
+          <p className="text-gray-500 dark:text-gray-400 text-center py-4">
+            {data?.tailscale_available
+              ? 'No services being advertised'
+              : 'Tailscale required for service advertisement'}
+          </p>
+        )}
+      </div>
+
+      {/* Discovered Services — grouped by node */}
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center">
+          <Search className="h-5 w-5 mr-2 text-blue-600" />
+          Discovered on Tailnet
+        </h3>
+        {Object.keys(nodeGroups).length > 0 ? (
+          <div className="space-y-4">
+            {Object.entries(nodeGroups).map(([host, allServices]) => {
+              // The node agent advertises a `chronicle-node` self-entry carrying this
+              // node's identity (arch/gpu) — pull it out for the header rather than
+              // showing it as a service row.
+              const nodeEntry = allServices.find(s => s.labels?.type === 'node')
+              const services = allServices.filter(s => s.labels?.type !== 'node')
+              const hasEdge = allServices.some(s => s.labels?.type === 'edge')
+              const arch = nodeEntry?.labels?.arch
+              const hasGpu = nodeEntry?.labels?.gpu === '1'
+              return (
+                <div key={host} className="border border-gray-200 dark:border-gray-600 rounded-lg overflow-hidden">
+                  {/* Node header */}
+                  <div className="flex items-center justify-between px-4 py-2.5 bg-gray-100 dark:bg-gray-700">
+                    <div className="flex items-center space-x-2 flex-wrap">
+                      <Server className="h-4 w-4 text-gray-500 dark:text-gray-400" />
+                      <span className="font-medium text-gray-900 dark:text-gray-100 font-mono text-sm">{host}</span>
+                      {nodeEntry && (
+                        <span className="text-xs px-1.5 py-0.5 bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300 rounded">
+                          node
+                        </span>
+                      )}
+                      {hasEdge && (
+                        <span className="text-xs px-1.5 py-0.5 bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300 rounded">
+                          edge
+                        </span>
+                      )}
+                      {arch && (
+                        <span className="text-xs text-gray-500 dark:text-gray-400 font-mono">{arch}</span>
+                      )}
+                      {hasGpu && (
+                        <span className="text-xs px-1.5 py-0.5 bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300 rounded">
+                          GPU
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-xs text-gray-500 dark:text-gray-400">
+                      {services.length} service{services.length !== 1 ? 's' : ''}
+                    </span>
+                  </div>
+                  {/* Services on this node */}
+                  <div className="divide-y divide-gray-100 dark:divide-gray-700">
+                    {services.map((svc) => {
+                      const display = getServiceDisplay(svc.name)
+                      const isLocal = advertisedNames.has(svc.name)
+                      const hb = healthBadge(svc.labels?.health)
+                      return (
+                        <div key={svc.name} className={`p-3 ${!svc.url ? 'opacity-60' : ''}`}>
+                          <div className="flex items-center justify-between">
+                            <div className="flex-1">
+                              <div className="flex items-center space-x-2">
+                                <span className="font-medium text-gray-900 dark:text-gray-100">
+                                  {display.label}
+                                </span>
+                                {hb && (
+                                  <span className={`text-xs px-1.5 py-0.5 rounded ${hb.cls}`}>
+                                    {hb.text}
+                                  </span>
+                                )}
+                                {isLocal && svc.url && (
+                                  <span className="text-xs px-1.5 py-0.5 bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300 rounded">
+                                    local
+                                  </span>
+                                )}
+                              </div>
+                              {display.description && (
+                                <div className="text-sm text-gray-500 dark:text-gray-400">
+                                  {display.description}
+                                </div>
+                              )}
+                              {svc.url && (
+                                <code className="text-xs text-gray-600 dark:text-gray-400 font-mono mt-1 block">
+                                  {svc.url}
+                                </code>
+                              )}
+                            </div>
+                            <div className="ml-3 flex-shrink-0">
+                              {svc.url ? (
+                                svc.reachable ? (
+                                  <CheckCircle className="h-5 w-5 text-green-500" />
+                                ) : (
+                                  <XCircle className="h-5 w-5 text-yellow-500" />
+                                )
+                              ) : (
+                                <span className="text-xs text-gray-400 dark:text-gray-500">not found</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        ) : (
+          <p className="text-gray-500 dark:text-gray-400 text-center py-4">
+            {loading
+              ? 'Scanning Tailnet...'
+              : data?.tailscale_available
+                ? 'No services discovered. Make sure other machines are running Chronicle services.'
+                : 'Tailscale required for service discovery'}
+          </p>
+        )}
+      </div>
+
+      {/* Devices */}
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center">
+          <Smartphone className="h-5 w-5 mr-2 text-blue-600" />
+          Devices
+        </h3>
+        {data?.connected_devices && data.connected_devices.length > 0 ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {data.connected_devices.map((device) => (
+              <div key={device.client_id} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-md">
+                <div className="min-w-0">
+                  {editingId === device.client_id ? (
+                    <div className="flex items-center gap-1">
+                      <input
+                        autoFocus
+                        value={draftName}
+                        onChange={(e) => setDraftName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') saveEdit(device.client_id)
+                          if (e.key === 'Escape') cancelEdit()
+                        }}
+                        className="px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 w-36"
+                      />
+                      <button onClick={() => saveEdit(device.client_id)} title="Save" className="p-1 text-green-600 hover:text-green-700">
+                        <Check className="h-4 w-4" />
+                      </button>
+                      <button onClick={cancelEdit} title="Cancel" className="p-1 text-gray-500 hover:text-gray-700">
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1.5 group">
+                      <span className="font-medium text-gray-900 dark:text-gray-100 truncate">{device.name || device.device_name}</span>
+                      <button onClick={() => startEdit(device)} title="Rename" className="p-0.5 text-gray-400 hover:text-blue-600 opacity-0 group-hover:opacity-100">
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  )}
+                  {device.user_email && (
+                    <div className="text-sm text-gray-500 dark:text-gray-400 truncate">{device.user_email}</div>
+                  )}
+                  <code className="text-xs text-gray-400 dark:text-gray-500 font-mono">{device.client_id}</code>
+                </div>
+                <div className="ml-3 flex-shrink-0 flex flex-col items-end space-y-1">
+                  {device.connected ? (
+                    <span className="text-xs px-2 py-1 bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 rounded">
+                      online
+                    </span>
+                  ) : (
+                    <span className="text-xs px-2 py-1 bg-gray-100 text-gray-600 dark:bg-gray-600 dark:text-gray-300 rounded">
+                      offline
+                    </span>
+                  )}
+                  <span className="text-xs text-gray-400 dark:text-gray-500">
+                    last seen {formatAgo(device.last_seen)}
+                  </span>
+                  {device.has_active_conversation && (
+                    <span className="text-xs px-2 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded">
+                      streaming
+                    </span>
+                  )}
+                  <button onClick={() => forgetDevice(device.client_id)} title="Forget device" className="p-0.5 text-gray-400 hover:text-red-600">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-gray-500 dark:text-gray-400 text-center py-4">
+            No devices registered yet
+          </p>
+        )}
+      </div>
+
+      {/* Legend */}
+      <div className="bg-gray-50 dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600 p-4">
+        <h4 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Status Legend</h4>
+        <div className="flex flex-wrap gap-4 text-sm text-gray-600 dark:text-gray-400">
+          <div className="flex items-center space-x-1.5">
+            <CheckCircle className="h-4 w-4 text-green-500" />
+            <span>Reachable (this backend's probe)</span>
+          </div>
+          <div className="flex items-center space-x-1.5">
+            <XCircle className="h-4 w-4 text-yellow-500" />
+            <span>Found but /health unreachable</span>
+          </div>
+          <div className="flex items-center space-x-1.5">
+            <span className="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300">healthy</span>
+            <span>Source node's own health (live)</span>
+          </div>
+          <div className="flex items-center space-x-1.5">
+            <span className="text-xs px-1.5 py-0.5 bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300 rounded">node</span>
+            <span>Full node agent (control + advertise)</span>
+          </div>
+          <div className="flex items-center space-x-1.5">
+            <span className="text-xs px-1.5 py-0.5 bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300 rounded">edge</span>
+            <span>Advertise-only edge node</span>
+          </div>
+          <div className="flex items-center space-x-1.5">
+            <span className="text-xs px-1.5 py-0.5 bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300 rounded">GPU</span>
+            <span>NVIDIA GPU present</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}

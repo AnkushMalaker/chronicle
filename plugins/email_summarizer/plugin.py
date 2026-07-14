@@ -5,6 +5,7 @@ Automatically sends email summaries after memory extraction.
 """
 
 import logging
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -117,8 +118,6 @@ class EmailSummarizerPlugin(BasePlugin):
 
     async def health_check(self) -> dict:
         """Test SMTP connectivity using the initialized email service."""
-        import time
-
         if not self.email_service:
             return {"ok": False, "message": "Email service not initialized"}
 
@@ -301,8 +300,6 @@ class EmailSummarizerPlugin(BasePlugin):
             >>> result['success']
             True
         """
-        import time
-
         try:
             # Validate required config fields
             required_fields = [

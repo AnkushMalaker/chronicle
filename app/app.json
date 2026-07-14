@@ -2,7 +2,7 @@
   "expo": {
     "name": "chronicle",
     "slug": "friend-lite-app",
-    "version": "1.0.0",
+    "version": "1.0.8",
     "scheme": "chronicle",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -43,11 +43,18 @@
         "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.RECORD_AUDIO",
+        "android.permission.CAMERA",
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_ADMIN",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.RECORD_AUDIO",
         "android.permission.CAMERA"
-      ],
-      "usesCleartextTraffic": true
+      ]
     },
-    "newArchEnabled": true,
     "plugins": [
       [
         "@siteed/expo-audio-studio",
@@ -57,6 +64,7 @@
           "enableBackgroundAudio": true,
           "enableDeviceDetection": true,
           "iosBackgroundModes": {
+            "useAudio": true,
             "useProcessing": true
           },
           "iosConfig": {
@@ -88,6 +96,7 @@
           }
         }
       ],
+      "expo-audio",
       [
         "expo-build-properties",
         {
@@ -108,13 +117,19 @@
         }
       ],
       "expo-image-picker",
-      "./plugins/with-ats"
+      "./plugins/with-ats",
+      "expo-asset",
+      "expo-secure-store"
     ],
     "owner": "cupbearer5517",
     "extra": {
       "eas": {
         "projectId": "05d8598e-6fe7-4373-81e4-1654f3d8e181"
       }
+    },
+    "runtimeVersion": "1.0.0",
+    "updates": {
+      "enabled": false
     }
   }
 }

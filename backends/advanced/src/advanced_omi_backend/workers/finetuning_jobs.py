@@ -10,20 +10,28 @@ Jobs:
 import io
 import json
 import logging
-import os
 import time
 from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
-import redis.asyncio as aioredis
 
+from advanced_omi_backend.constants import is_non_enrollable_speaker
 from advanced_omi_backend.llm_client import async_generate
+from advanced_omi_backend.model_registry import get_models_registry
+from advanced_omi_backend.models.annotation import Annotation, AnnotationType
+from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.user import User
 from advanced_omi_backend.prompt_registry import get_prompt_registry
+from advanced_omi_backend.redis_factory import create_async_redis
+from advanced_omi_backend.services.memory import get_memory_service
+from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
+from advanced_omi_backend.utils.audio_chunk_utils import (
+    reconstruct_audio_segment,
+    reconstruct_wav_from_conversation,
+)
 
 logger = logging.getLogger(__name__)
-
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # TTL for cached jargon: 2 hours (job runs every 30 min, so always refreshed)
 JARGON_CACHE_TTL = 7200
@@ -40,17 +48,25 @@ MEMORY_LOOKBACK_SECONDS = 86400
 # ---------------------------------------------------------------------------
 
 
+async def _record_failure(annotation, reason: str) -> None:
+    """Persist a training failure on an annotation so it can be surfaced/cleared.
+
+    Mirrors ``finetuning_routes._record_training_failure`` for the cron path: a
+    failed annotation records its attempt count + reason instead of being silently
+    re-tried forever, so the Fine-tuning page can show it and offer retry/discard.
+    """
+    annotation.training_attempts = (annotation.training_attempts or 0) + 1
+    annotation.training_error = reason
+    annotation.updated_at = datetime.now(timezone.utc)
+    await annotation.save()
+
+
 async def run_speaker_finetuning_job() -> dict:
     """Process applied diarization annotations and send to speaker recognition service.
 
     This mirrors the logic in ``finetuning_routes.process_annotations_for_training``
     but is invocable from the cron scheduler without an HTTP request.
     """
-    from advanced_omi_backend.models.annotation import Annotation, AnnotationType
-    from advanced_omi_backend.models.conversation import Conversation
-    from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
-    from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segment
-
     # Find annotations ready for training
     annotations = await Annotation.find(
         Annotation.annotation_type == AnnotationType.DIARIZATION,
@@ -75,8 +91,23 @@ async def run_speaker_finetuning_job() -> dict:
     failed = 0
     cleaned = 0
 
+    skipped = 0
+
     for annotation in ready_for_training:
         try:
+            # Noise and placeholder "Unknown Speaker N" labels are not real people —
+            # never enroll them as voiceprints. Mark trained so they aren't retried.
+            if is_non_enrollable_speaker(annotation.corrected_speaker):
+                annotation.processed_by = (
+                    f"{annotation.processed_by},training"
+                    if annotation.processed_by
+                    else "training"
+                )
+                annotation.updated_at = datetime.now(timezone.utc)
+                await annotation.save()
+                skipped += 1
+                continue
+
             conversation = await Conversation.find_one(
                 Conversation.conversation_id == annotation.conversation_id
             )
@@ -108,6 +139,7 @@ async def run_speaker_finetuning_job() -> dict:
             )
             if not wav_bytes:
                 failed += 1
+                await _record_failure(annotation, "No audio for segment")
                 continue
 
             # Intentional: only single admin user (user_id=1) is supported currently
@@ -122,6 +154,9 @@ async def run_speaker_finetuning_job() -> dict:
                 )
                 if "error" in result:
                     failed += 1
+                    await _record_failure(
+                        annotation, f"Append failed: {result.get('error')}"
+                    )
                     continue
                 appended += 1
             else:
@@ -132,15 +167,19 @@ async def run_speaker_finetuning_job() -> dict:
                 )
                 if "error" in result:
                     failed += 1
+                    await _record_failure(
+                        annotation, f"Enroll failed: {result.get('error')}"
+                    )
                     continue
                 enrolled += 1
 
-            # Mark as trained
+            # Mark as trained (clear any prior failure record)
             annotation.processed_by = (
                 f"{annotation.processed_by},training"
                 if annotation.processed_by
                 else "training"
             )
+            annotation.training_error = None
             annotation.updated_at = datetime.now(timezone.utc)
             await annotation.save()
 
@@ -149,16 +188,24 @@ async def run_speaker_finetuning_job() -> dict:
                 f"Speaker finetuning: error processing annotation {annotation.id}: {e}"
             )
             failed += 1
+            try:
+                await _record_failure(annotation, f"Exception: {str(e)[:50]}")
+            except Exception:
+                logger.error(
+                    f"Speaker finetuning: failed to record failure for {annotation.id}"
+                )
 
     total = enrolled + appended
     logger.info(
         f"Speaker finetuning complete: {total} processed "
-        f"({enrolled} new, {appended} appended, {failed} failed, {cleaned} orphaned cleaned)"
+        f"({enrolled} new, {appended} appended, {failed} failed, "
+        f"{skipped} non-enrollable skipped, {cleaned} orphaned cleaned)"
     )
     return {
         "enrolled": enrolled,
         "appended": appended,
         "failed": failed,
+        "skipped": skipped,
         "cleaned": cleaned,
         "processed": total,
     }
@@ -208,13 +255,6 @@ async def run_asr_finetuning_job() -> dict:
     yet consumed by ASR training. Groups by conversation, reconstructs WAV audio,
     builds VibeVoice training labels, and POSTs to the ASR service's /fine-tune endpoint.
     """
-    from advanced_omi_backend.model_registry import get_models_registry
-    from advanced_omi_backend.models.annotation import Annotation, AnnotationType
-    from advanced_omi_backend.models.conversation import Conversation
-    from advanced_omi_backend.utils.audio_chunk_utils import (
-        reconstruct_wav_from_conversation,
-    )
-
     # Resolve STT service URL from model registry (same URL used for transcription)
     registry = get_models_registry()
     stt_model = registry.get_default("stt") if registry else None
@@ -226,7 +266,7 @@ async def run_asr_finetuning_job() -> dict:
             "message": "No STT model configured",
         }
 
-    vibevoice_url = stt_model.model_url.rstrip("/")
+    vibevoice_url = stt_model.resolved_url().rstrip("/")
 
     # Find applied annotations (TRANSCRIPT and DIARIZATION) not yet consumed by ASR training
     annotations = await Annotation.find(
@@ -269,7 +309,7 @@ async def run_asr_finetuning_job() -> dict:
     pending_annotations = []  # annotations to mark after success
 
     # Optionally load cached jargon for customized_context
-    redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+    redis_client = create_async_redis(decode_responses=True)
 
     try:
         for conv_id, conv_annotations in by_conversation.items():
@@ -401,14 +441,12 @@ async def run_asr_finetuning_job() -> dict:
 
 async def run_asr_jargon_extraction_job() -> dict:
     """Extract jargon from recent memories for all users and cache in Redis."""
-    from advanced_omi_backend.models.user import User
-
     users = await User.find_all().to_list()
     processed = 0
     skipped = 0
     errors = 0
 
-    redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+    redis_client = create_async_redis(decode_responses=True)
     try:
         for user in users:
             user_id = str(user.id)
@@ -436,28 +474,16 @@ async def run_asr_jargon_extraction_job() -> dict:
 
 
 async def _extract_jargon_for_user(user_id: str) -> Optional[str]:
-    """Pull recent memories from Qdrant, call LLM to extract jargon terms.
+    """Pull recent memories, call LLM to extract jargon terms.
 
     Returns a comma-separated string of jargon terms, or None if nothing found.
     """
-    from advanced_omi_backend.services.memory import get_memory_service
-    from advanced_omi_backend.services.memory.providers.chronicle import MemoryService
-
     memory_service = get_memory_service()
-
-    # Only works with Chronicle provider (has Qdrant vector store)
-    if not isinstance(memory_service, MemoryService):
-        logger.debug("Jargon extraction requires Chronicle memory provider, skipping")
+    if memory_service is None:
         return None
 
-    if memory_service.vector_store is None:
-        return None
-
-    since_ts = int(time.time()) - MEMORY_LOOKBACK_SECONDS
-
-    memories = await memory_service.vector_store.get_recent_memories(
+    memories = await memory_service.get_all_memories(
         user_id=user_id,
-        since_timestamp=since_ts,
         limit=MAX_RECENT_MEMORIES,
     )
 

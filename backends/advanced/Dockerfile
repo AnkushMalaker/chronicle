@@ -20,11 +20,25 @@ WORKDIR /app
 # Copy dependency files first (cache-friendly)
 COPY pyproject.toml uv.lock ./
 
-# Export locked deps to requirements.txt (handles extras, git sources, custom indexes)
-# Install to system Python (no venv) - container IS the isolation
+# Build a project .venv from the lockfile (includes git deps like Graphiti)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv export --frozen --no-dev --extra deepgram --extra galileo --no-emit-project -o requirements.txt && \
-    uv pip install --system -r requirements.txt
+    uv sync --frozen --no-dev --extra deepgram --extra galileo --extra benchmark --no-install-project
+
+
+# ============================================
+# notesmd-cli builder - vault note rename/move with backlink rewrite
+# ============================================
+# The memory agent uses `notesmd-cli move` to rename a person note and rewrite every
+# [[wikilink]] to it across the vault in one shot (verified non-destructive), and the
+# fork adds `create --template` (seed a note from a Templates/ note + {{date}}/{{title}}).
+# Pinned to the commit vendored in untracked/; vendor/ in the repo means the build is hermetic.
+FROM golang:1.25-bookworm AS notesmd-builder
+ARG NOTESMD_REPO=https://github.com/AnkushMalaker/notesmd-cli
+ARG NOTESMD_REF=2566ac2
+RUN git clone ${NOTESMD_REPO} /src \
+    && cd /src \
+    && git checkout ${NOTESMD_REF} \
+    && CGO_ENABLED=0 go build -trimpath -mod=vendor -o /out/notesmd-cli .
 
 
 # ============================================
@@ -36,22 +50,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsndfile1 \
     curl \
     ffmpeg \
+    ripgrep \
+    libc++1 \
     && rm -rf /var/lib/apt/lists/*
+
+# notesmd-cli on PATH so the memory agent auto-detects it (shutil.which).
+COPY --from=notesmd-builder /out/notesmd-cli /usr/local/bin/notesmd-cli
 
 WORKDIR /app
 
-# Copy installed packages from builder
-COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
+# Copy locked virtual environment from builder
+COPY --from=builder /app/.venv /app/.venv
 
-# Source layout needs PYTHONPATH
-ENV PYTHONPATH=/app/src
+# Source layout + venv defaults for runtime shells and commands
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH="/app/.venv/bin:${PATH}"
+ENV PYTHONPATH=/app/src:/app
 
 # Copy application code
 COPY . .
 
-# Copy configuration files if they exist
-COPY diarization_config.json* ./
+# diarization_config.json (if present) is already included by "COPY . ." above.
+# A separate optional-glob COPY ("json*") errors under buildah/podman when the
+# file is absent, and is redundant under docker — so it's intentionally omitted.
 
 # Copy and make startup script executable
 COPY start.sh ./
@@ -69,27 +90,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsndfile1 \
     curl \
     ffmpeg \
+    ripgrep \
+    libc++1 \
     build-essential \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# notesmd-cli on PATH so the memory agent auto-detects it (shutil.which).
+COPY --from=notesmd-builder /out/notesmd-cli /usr/local/bin/notesmd-cli
+
 WORKDIR /app
 
-# For dev, install deps + test group using uv temporarily
+# For dev, create project .venv with test deps
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv export --frozen --extra deepgram --extra galileo --group test --no-emit-project -o requirements.txt && \
-    uv pip install --system -r requirements.txt && \
+    uv sync --frozen --extra deepgram --extra galileo --extra benchmark --group test --no-install-project && \
     rm /bin/uv /bin/uvx
 
-ENV PYTHONPATH=/app/src
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH="/app/.venv/bin:${PATH}"
+ENV PYTHONPATH=/app/src:/app
 
 # Copy application code
 COPY . .
 
-# Copy configuration files if they exist
-COPY diarization_config.json* ./
+# diarization_config.json (if present) is already included by "COPY . ." above.
+# A separate optional-glob COPY ("json*") errors under buildah/podman when the
+# file is absent, and is redundant under docker — so it's intentionally omitted.
 
 # Copy and make startup script executable
 COPY start.sh ./

@@ -6,23 +6,27 @@ Handles service selection and delegation only - no configuration duplication
 
 import shutil
 import subprocess
-from datetime import datetime
 from pathlib import Path
 
+import discovery
+import services
 from config_manager import ConfigManager
+from dotenv import set_key
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
 # Import shared setup utilities
 from setup_utils import (
+    decide_cert_mode,
     detect_tailscale_info,
-    generate_self_signed_certs,
+    enable_tailscaled_at_boot,
     generate_tailscale_certs,
     is_placeholder,
     mask_value,
     prompt_password,
     prompt_with_existing_masked,
     read_env_value,
+    tailscaled_enabled_at_boot,
 )
 
 console = Console()
@@ -39,6 +43,9 @@ def get_existing_stt_provider(config_yml: dict):
         "stt-qwen3-asr": "qwen3-asr",
         "stt-smallest": "smallest",
         "stt-smallest-stream": "smallest",
+        "stt-gemma4": "gemma4",
+        "stt-af-next": "af-next",
+        "stt-granite": "granite",
     }
     return mapping.get(stt)
 
@@ -51,6 +58,8 @@ def get_existing_stream_provider(config_yml: dict):
         "stt-smallest-stream": "smallest",
         "stt-qwen3-asr": "qwen3-asr",
         "stt-qwen3-asr-stream": "qwen3-asr",
+        "stt-gemma4-stream": "gemma4",
+        "stt-nemotron-stream": "nemotron",
     }
     return mapping.get(stt_stream)
 
@@ -96,11 +105,6 @@ SERVICES = {
             ],
             "description": "Offline speech-to-text",
         },
-        "openmemory-mcp": {
-            "path": "extras/openmemory-mcp",
-            "cmd": ["./setup.sh"],
-            "description": "OpenMemory MCP server",
-        },
         "langfuse": {
             "path": "extras/langfuse",
             "cmd": [
@@ -125,7 +129,47 @@ SERVICES = {
             ],
             "description": "Local LLM via llama.cpp (chat + embeddings)",
         },
+        "wakeword-service": {
+            "path": "extras/wakeword-service",
+            "cmd": [
+                "uv",
+                "run",
+                "--with-requirements",
+                "../../setup-requirements.txt",
+                "python",
+                "init.py",
+            ],
+            "description": "Hermes acoustic wake-word detection",
+        },
+        "tts": {
+            "path": "extras/tts",
+            "cmd": [
+                "uv",
+                "run",
+                "--with-requirements",
+                "../../setup-requirements.txt",
+                "python",
+                "init.py",
+            ],
+            "description": "Text-to-speech (TADA / Fish Speech / KittenTTS)",
+        },
     },
+}
+
+# Repo-root .env is the canonical store for the shared Hugging Face token: the wizard
+# reads/writes it here, and each service's init.py also falls back to it. So a token
+# set once (here or by hand) flows to every service that pulls models from HF.
+ROOT_ENV_PATH = ".env"
+
+# Services whose containers pull (possibly gated) models from HuggingFace and thus
+# benefit from an HF token (avoids 429 IP rate-limits, unlocks gated repos). The
+# wizard prompts once if any of these is selected and passes --hf-token to each.
+HF_TOKEN_SERVICES = {
+    "speaker-recognition",
+    "asr-services",
+    "llm-services",
+    "tts",
+    "wakeword-service",
 }
 
 
@@ -183,6 +227,8 @@ def check_service_exists(service_name, service_config):
         "asr-services",
         "langfuse",
         "llm-services",
+        "wakeword-service",
+        "tts",
     ]:
         script_path = service_path / "init.py"
         if not script_path.exists():
@@ -219,7 +265,14 @@ def select_services(
 
     # Services that will be auto-added based on provider choices
     auto_added = set()
-    if transcription_provider in ("parakeet", "vibevoice", "qwen3-asr"):
+    if transcription_provider in (
+        "parakeet",
+        "vibevoice",
+        "qwen3-asr",
+        "gemma4",
+        "af-next",
+        "granite",
+    ):
         auto_added.add("asr-services")
     if llm_provider == "llamacpp":
         auto_added.add("llm-services")
@@ -236,6 +289,9 @@ def select_services(
                     "vibevoice": "VibeVoice",
                     "parakeet": "Parakeet",
                     "qwen3-asr": "Qwen3-ASR",
+                    "gemma4": "Gemma 4",
+                    "af-next": "Audio Flamingo Next",
+                    "granite": "Granite Speech",
                 }.get(transcription_provider, transcription_provider)
             console.print(
                 f"  ✅ {service_config['description']} ({label}) [dim](auto-selected)[/dim]"
@@ -252,12 +308,19 @@ def select_services(
             console.print(f"  ⏸️  {service_config['description']} - [dim]{msg}[/dim]")
             continue
 
+        # Default to whatever was enabled last time (config.yml services map is the
+        # source of truth) so a re-run is press-Enter-through. Smart per-service
+        # heuristics below can still flip a never-configured service on.
+        prior_enabled = bool(
+            (config_yml.get("services") or {}).get(service_name, False)
+        )
+
         # Determine smart default based on existing config
         if service_name == "speaker-recognition":
-            # Default to True if speaker-recognition .env exists and has a valid (non-placeholder) HF_TOKEN
+            # Also default True if speaker-recognition .env has a valid HF_TOKEN
             speaker_env = "extras/speaker-recognition/.env"
             existing_hf = read_env_value(speaker_env, "HF_TOKEN")
-            default_enable = bool(
+            default_enable = prior_enabled or bool(
                 existing_hf
                 and not is_placeholder(
                     existing_hf,
@@ -266,11 +329,8 @@ def select_services(
                     "hf_xxxxx",
                 )
             )
-        elif service_name == "openmemory-mcp":
-            # Default to True if memory provider was selected as openmemory_mcp
-            default_enable = memory_provider == "openmemory_mcp"
         else:
-            default_enable = False
+            default_enable = prior_enabled
 
         try:
             enable_service = Confirm.ask(
@@ -286,27 +346,27 @@ def select_services(
     return selected
 
 
-def cleanup_unselected_services(selected_services):
-    """Backup and remove .env files from services that weren't selected"""
+def persist_enabled_services(selected_services):
+    """Write the enabled-services map to config.yml — the source of truth for the
+    lifecycle (services.py ``--all``).
 
-    all_services = list(SERVICES["backend"].keys()) + list(SERVICES["extras"].keys())
+    Replaces the old approach of renaming an unselected service's ``.env`` away to
+    signal "disabled". Enabled/disabled is now declared explicitly in
+    config/config.yml ``services:``, decoupled from whether a ``.env`` exists, so a
+    stale or half-written ``.env`` never counts as "configured". Secrets in ``.env``
+    are left untouched.
+    """
+    # Lifecycle service names = services.py registry keys. The wizard calls the
+    # backend "advanced"; the lifecycle calls it "backend".
+    lifecycle_names = ["backend"] + list(SERVICES["extras"].keys())
+    wizard_to_lifecycle = {"advanced": "backend"}
+    selected_lifecycle = {wizard_to_lifecycle.get(s, s) for s in selected_services}
 
-    for service_name in all_services:
-        if service_name not in selected_services:
-            if service_name == "advanced":
-                service_path = Path(SERVICES["backend"][service_name]["path"])
-            else:
-                service_path = Path(SERVICES["extras"][service_name]["path"])
+    enabled = {name: (name in selected_lifecycle) for name in lifecycle_names}
+    ConfigManager().set_enabled_services(enabled)
 
-            env_file = service_path / ".env"
-            if env_file.exists():
-                # Create backup with timestamp
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                backup_file = service_path / f".env.backup.{timestamp}.unselected"
-                env_file.rename(backup_file)
-                console.print(
-                    f"🧹 [dim]Backed up {service_name} configuration to {backup_file.name} (service not selected)[/dim]"
-                )
+    on = ", ".join(name for name, is_on in enabled.items() if is_on)
+    console.print(f"🧩 [dim]Enabled services written to config.yml: {on}[/dim]")
 
 
 def run_service_setup(
@@ -314,8 +374,6 @@ def run_service_setup(
     selected_services,
     https_enabled=False,
     server_ip=None,
-    obsidian_enabled=False,
-    neo4j_password=None,
     hf_token=None,
     transcription_provider="deepgram",
     admin_email=None,
@@ -323,10 +381,20 @@ def run_service_setup(
     langfuse_public_key=None,
     langfuse_secret_key=None,
     langfuse_host=None,
+    langfuse_public_url=None,
     streaming_provider=None,
     llm_provider=None,
     memory_provider=None,
     hardware_profile=None,
+    live_segmentation="streaming_stt",
+    asr_url=None,
+    asr_discover=False,
+    llm_base_url=None,
+    llm_discover=False,
+    speaker_url=None,
+    speaker_discover=False,
+    tts_url=None,
+    tts_discover=False,
 ):
     """Execute individual service setup script"""
     if service_name == "advanced":
@@ -334,40 +402,58 @@ def run_service_setup(
 
         # For advanced backend, pass URLs of other selected services and HTTPS config
         cmd = service["cmd"].copy()
+        # Speaker Recognition URL: local service → compose DNS name; otherwise honor
+        # the wizard's source choice (remote endpoint, or discover on the Tailnet).
         if "speaker-recognition" in selected_services:
             cmd.extend(["--speaker-service-url", "http://speaker-service:8085"])
-        if "asr-services" in selected_services:
+        elif speaker_discover:
+            cmd.append("--speaker-discover")
+        elif speaker_url:
+            cmd.extend(["--speaker-service-url", speaker_url])
+
+        # TTS endpoint source (own/remote/Tailnet/discover).
+        if tts_discover:
+            cmd.append("--tts-discover")
+        elif tts_url:
+            cmd.extend(["--tts-url", tts_url])
+
+        # Legacy local-parakeet wiring — skipped when the wizard chose an ASR source
+        # (own/Tailnet/discover), which drives the URL via --asr-url/--asr-discover.
+        if "asr-services" in selected_services and not (asr_url or asr_discover):
             cmd.extend(["--parakeet-asr-url", "host.docker.internal:8767"])
 
         # Pass transcription provider choice from wizard
         if transcription_provider:
             cmd.extend(["--transcription-provider", transcription_provider])
 
+        # ASR source (where the offline provider runs): discover on the Tailnet,
+        # or pin an own/remote/picked URL. Overrides the local default above.
+        if asr_discover:
+            cmd.append("--asr-discover")
+        elif asr_url:
+            cmd.extend(["--asr-url", asr_url])
+
+        # LLM source for the Chronicle-managed llama.cpp endpoint.
+        if llm_discover:
+            cmd.append("--llm-discover")
+        elif llm_base_url:
+            cmd.extend(["--llm-base-url", llm_base_url])
+
         # Pass streaming provider (different from batch) for re-transcription setup
         if streaming_provider:
             cmd.extend(["--streaming-provider", streaming_provider])
+
+        # Pass live-segmentation mode (windowed_batch when no streaming ASR)
+        if live_segmentation:
+            cmd.extend(["--live-segmentation", live_segmentation])
 
         # Add HTTPS configuration
         if https_enabled and server_ip:
             cmd.extend(["--enable-https", "--server-ip", server_ip])
 
-        # Always pass Neo4j password (neo4j is a required service)
-        if neo4j_password:
-            cmd.extend(["--neo4j-password", neo4j_password])
-
-        # Always pass obsidian choice to avoid double-ask
-        if obsidian_enabled:
-            cmd.extend(["--enable-obsidian"])
-        else:
-            cmd.extend(["--no-obsidian"])
-
         # Pass LLM provider choice
         if llm_provider:
             cmd.extend(["--llm-provider", llm_provider])
-
-        # Pass memory provider choice
-        if memory_provider:
-            cmd.extend(["--memory-provider", memory_provider])
 
         # Pass LangFuse keys from langfuse init or external config
         if langfuse_public_key and langfuse_secret_key:
@@ -375,16 +461,24 @@ def run_service_setup(
             cmd.extend(["--langfuse-secret-key", langfuse_secret_key])
             if langfuse_host:
                 cmd.extend(["--langfuse-host", langfuse_host])
+            if langfuse_public_url:
+                cmd.extend(["--langfuse-public-url", langfuse_public_url])
 
     else:
         service = SERVICES["extras"][service_name]
         cmd = service["cmd"].copy()
 
+        # Centralized HF token: every HuggingFace-backed service gets the same token
+        # (resolved once by setup_hf_token_if_needed / join_cluster) so its init.py
+        # writes it into that service's .env.
+        if service_name in HF_TOKEN_SERVICES and hf_token:
+            cmd.extend(["--hf-token", hf_token])
+
         # Add HTTPS configuration for services that support it
         if service_name == "speaker-recognition" and https_enabled and server_ip:
             cmd.extend(["--enable-https", "--server-ip", server_ip])
 
-        # For speaker-recognition, pass HF_TOKEN from centralized configuration
+        # For speaker-recognition, pass remaining centralized configuration
         if service_name == "speaker-recognition":
             # Define the speaker env path
             speaker_env_path = "extras/speaker-recognition/.env"
@@ -397,10 +491,7 @@ def run_service_setup(
                     "[blue][INFO][/blue] Using AMD Strix Halo profile for speaker recognition"
                 )
 
-            # HF Token should have been provided via setup_hf_token_if_needed()
-            if hf_token:
-                cmd.extend(["--hf-token", hf_token])
-            else:
+            if not hf_token:
                 console.print(
                     "[yellow][WARNING][/yellow] No HF_TOKEN provided - speaker recognition may fail to download models"
                 )
@@ -432,18 +523,30 @@ def run_service_setup(
                     "vibevoice": "vibevoice-strixhalo",
                     "parakeet": "nemo-strixhalo",
                     "qwen3-asr": "qwen3-asr",
+                    "gemma4": "gemma4",
+                    "af-next": "af-next",
                 }
             else:
                 wizard_to_asr_provider = {
                     "vibevoice": "vibevoice",
                     "parakeet": "nemo",
                     "qwen3-asr": "qwen3-asr",
+                    "gemma4": "gemma4",
+                    "af-next": "af-next",
+                    "granite": "granite",
+                    "nemotron": "nemotron",
                 }
-            asr_provider = wizard_to_asr_provider.get(transcription_provider)
+            # Prefer the batch provider; fall back to the streaming provider when the
+            # batch one is cloud (no local container) but streaming is local — e.g.
+            # batch=deepgram + streaming=nemotron must still configure the nemotron
+            # container in asr-services.
+            asr_provider = wizard_to_asr_provider.get(
+                transcription_provider
+            ) or wizard_to_asr_provider.get(streaming_provider)
             if asr_provider:
                 cmd.extend(["--provider", asr_provider])
                 console.print(
-                    f"[blue][INFO][/blue] Pre-selecting ASR provider: {asr_provider} (from wizard choice: {transcription_provider})"
+                    f"[blue][INFO][/blue] Pre-selecting ASR provider: {asr_provider}"
                 )
 
             speaker_env_path = "extras/speaker-recognition/.env"
@@ -454,7 +557,6 @@ def run_service_setup(
                     "[blue][INFO][/blue] Using AMD Strix Halo profile for ASR services"
                 )
             elif cuda_version and cuda_version in [
-                "cu121",
                 "cu126",
                 "cu128",
                 "strixhalo",
@@ -470,86 +572,6 @@ def run_service_setup(
                 cmd.extend(["--admin-email", admin_email])
             if admin_password:
                 cmd.extend(["--admin-password", admin_password])
-
-        # For openmemory-mcp, try to pass OpenAI API key from backend if available
-        if service_name == "openmemory-mcp":
-            backend_env_path = "backends/advanced/.env"
-            openmemory_env_path = "extras/openmemory-mcp/.env"
-            openai_key = read_env_value(backend_env_path, "OPENAI_API_KEY")
-            backend_openai_base_url = read_env_value(
-                backend_env_path, "OPENAI_BASE_URL"
-            )
-            backend_embedding_model = read_env_value(
-                backend_env_path, "OPENAI_EMBEDDING_MODEL"
-            )
-            backend_embedding_dims = read_env_value(
-                backend_env_path, "OPENAI_EMBEDDING_DIMENSIONS"
-            )
-
-            existing_embeddings_provider = read_env_value(
-                openmemory_env_path, "OPENMEMORY_EMBEDDINGS_PROVIDER"
-            )
-            existing_embeddings_base_url = read_env_value(
-                openmemory_env_path, "OPENMEMORY_EMBEDDINGS_BASE_URL"
-            )
-            existing_embeddings_model = read_env_value(
-                openmemory_env_path, "OPENMEMORY_EMBEDDINGS_MODEL"
-            )
-            existing_embeddings_api_key = read_env_value(
-                openmemory_env_path, "OPENMEMORY_EMBEDDINGS_API_KEY"
-            )
-            existing_embeddings_dims = read_env_value(
-                openmemory_env_path, "OPENMEMORY_EMBEDDINGS_DIMENSIONS"
-            )
-
-            def _has_value(value):
-                return value and value.strip()
-
-            has_openai_key = _has_value(openai_key) and not is_placeholder(
-                openai_key,
-                "your_openai_api_key_here",
-                "your-openai-api-key-here",
-                "your_openai_key_here",
-                "your-openai-key-here",
-            )
-
-            # Prefer an existing OpenMemory local embedding configuration if available.
-            if (
-                existing_embeddings_provider == "local"
-                and _has_value(existing_embeddings_base_url)
-                and _has_value(existing_embeddings_model)
-                and _has_value(existing_embeddings_api_key)
-                and _has_value(existing_embeddings_dims)
-            ):
-                cmd.extend(["--embeddings-provider", "local"])
-                cmd.extend(["--embeddings-base-url", existing_embeddings_base_url])
-                cmd.extend(["--embeddings-model", existing_embeddings_model])
-                cmd.extend(["--embeddings-api-key", existing_embeddings_api_key])
-                cmd.extend(["--embeddings-dimensions", existing_embeddings_dims])
-                console.print(
-                    "[blue][INFO][/blue] Found existing local embeddings config for OpenMemory, reusing"
-                )
-            elif (
-                has_openai_key
-                and _has_value(backend_openai_base_url)
-                and "api.openai.com" not in backend_openai_base_url
-            ):
-                # Backend appears to use a local OpenAI-compatible endpoint.
-                cmd.extend(["--embeddings-provider", "local"])
-                cmd.extend(["--embeddings-base-url", backend_openai_base_url])
-                cmd.extend(["--embeddings-api-key", openai_key])
-                if _has_value(backend_embedding_model):
-                    cmd.extend(["--embeddings-model", backend_embedding_model])
-                if _has_value(backend_embedding_dims):
-                    cmd.extend(["--embeddings-dimensions", backend_embedding_dims])
-                console.print(
-                    "[blue][INFO][/blue] Found OpenAI-compatible local endpoint in backend config, pre-filling OpenMemory local embeddings"
-                )
-            elif has_openai_key:
-                cmd.extend(["--openai-api-key", openai_key])
-                console.print(
-                    "[blue][INFO][/blue] Found existing OPENAI_API_KEY from backend config, reusing"
-                )
 
     console.print(f"\n🔧 [bold]Setting up {service_name}...[/bold]")
 
@@ -743,8 +765,45 @@ def setup_git_hooks():
         console.print(f"⚠️  [yellow]Could not setup git hooks: {e} (optional)[/yellow]")
 
 
+def _existing_hf_token():
+    """Existing HF token, sourced like other shared secrets: backend .env first
+    (the canonical hub on a main machine), then the repo-root .env (the per-node
+    store for backend-less join nodes), then the legacy speaker-recognition .env.
+    """
+    for path in (
+        "backends/advanced/.env",
+        ROOT_ENV_PATH,
+        "extras/speaker-recognition/.env",
+    ):
+        value = read_env_value(path, "HF_TOKEN")
+        if value and not is_placeholder(
+            value,
+            "your_huggingface_token_here",
+            "your-huggingface-token-here",
+            "hf_xxxxx",
+        ):
+            return value
+    return None
+
+
+def _persist_hf_token(hf_token):
+    """Write the resolved token to the canonical store: backend .env if it exists
+    (main machine), else the repo-root .env (backend-less join node). Both are
+    gitignored. Each service's init.py reads from the same locations.
+    """
+    backend_env = Path("backends/advanced/.env")
+    target = str(backend_env) if backend_env.exists() else ROOT_ENV_PATH
+    Path(target).touch(mode=0o600, exist_ok=True)
+    set_key(target, "HF_TOKEN", hf_token, quote_mode="never")
+    return target
+
+
 def setup_hf_token_if_needed(selected_services):
-    """Prompt for Hugging Face token if needed by selected services.
+    """Prompt once for a shared Hugging Face token if any selected service needs it.
+
+    Sources/stores it like other shared secrets (backend .env, falling back to the
+    repo-root .env for join nodes) and returns it so run_service_setup can pass it to
+    each service's init.py.
 
     Args:
         selected_services: List of service names selected by user
@@ -752,48 +811,51 @@ def setup_hf_token_if_needed(selected_services):
     Returns:
         HF_TOKEN string if provided, None otherwise
     """
-    # Check if any selected services need HF_TOKEN
-    needs_hf_token = "speaker-recognition" in selected_services
-
-    if not needs_hf_token:
+    needing = [s for s in selected_services if s in HF_TOKEN_SERVICES]
+    if not needing:
         return None
 
     console.print("\n🤗 [bold cyan]Hugging Face Token Configuration[/bold cyan]")
-    console.print("Required for speaker recognition (PyAnnote models)")
+    console.print(
+        "Used by HuggingFace-backed services ([cyan]"
+        + ", ".join(needing)
+        + "[/cyan]) — unlocks gated models and avoids download rate-limits."
+    )
     console.print(
         "\n[blue][INFO][/blue] Get your token from: https://huggingface.co/settings/tokens"
     )
-    console.print()
-    console.print(
-        "[yellow]⚠️  You must also accept the model agreements for these gated models:[/yellow]"
-    )
-    console.print("   1. [cyan]Speaker Diarization[/cyan]")
-    console.print(
-        "      https://huggingface.co/pyannote/speaker-diarization-community-1"
-    )
-    console.print("   2. [cyan]Segmentation Model[/cyan]")
-    console.print("      https://huggingface.co/pyannote/segmentation-3.0")
-    console.print("   3. [cyan]Segmentation Model[/cyan]")
-    console.print("      https://huggingface.co/pyannote/segmentation-3.1")
-    console.print("   4. [cyan]Embedding Model[/cyan]")
-    console.print(
-        "      https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM"
-    )
-    console.print()
-    console.print(
-        "[yellow]→[/yellow] Open each link and click 'Agree and access repository'"
-    )
-    console.print("[yellow]→[/yellow] Use the same Hugging Face account as your token")
+
+    # The pyannote models are gated and need explicit per-model agreement; only show
+    # this when speaker-recognition is among the selected services.
+    if "speaker-recognition" in needing:
+        console.print()
+        console.print(
+            "[yellow]⚠️  Speaker recognition also needs you to accept these gated model agreements:[/yellow]"
+        )
+        console.print("   1. [cyan]Speaker Diarization[/cyan]")
+        console.print(
+            "      https://huggingface.co/pyannote/speaker-diarization-community-1"
+        )
+        console.print("   2. [cyan]Segmentation Model[/cyan]")
+        console.print("      https://huggingface.co/pyannote/segmentation-3.0")
+        console.print("   3. [cyan]Segmentation Model[/cyan]")
+        console.print("      https://huggingface.co/pyannote/segmentation-3.1")
+        console.print("   4. [cyan]Embedding Model[/cyan]")
+        console.print(
+            "      https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM"
+        )
+        console.print()
+        console.print(
+            "[yellow]→[/yellow] Open each link and click 'Agree and access repository'"
+        )
+        console.print(
+            "[yellow]→[/yellow] Use the same Hugging Face account as your token"
+        )
     console.print()
 
-    # Check for existing token from speaker-recognition service
-    speaker_env_path = "extras/speaker-recognition/.env"
-    existing_token = read_env_value(speaker_env_path, "HF_TOKEN")
-
-    # Use the masked prompt function
     hf_token = prompt_with_existing_masked(
         prompt_text="Hugging Face Token",
-        existing_value=existing_token,
+        existing_value=_existing_hf_token(),
         placeholders=[
             "your_huggingface_token_here",
             "your-huggingface-token-here",
@@ -804,22 +866,190 @@ def setup_hf_token_if_needed(selected_services):
     )
 
     if hf_token:
-        masked = mask_value(hf_token)
-        console.print(f"[green]✅ HF_TOKEN configured: {masked}[/green]\n")
+        target = _persist_hf_token(hf_token)
+        console.print(
+            f"[green]✅ HF_TOKEN configured: {mask_value(hf_token)}[/green] "
+            f"[dim](saved to {target})[/dim]\n"
+        )
         return hf_token
     else:
         console.print(
-            "[yellow]⚠️  No HF_TOKEN provided - speaker recognition may fail[/yellow]\n"
+            "[yellow]⚠️  No HF_TOKEN provided — gated/large HuggingFace models may fail to download[/yellow]\n"
         )
         return None
 
 
 # Providers that support real-time streaming
-STREAMING_CAPABLE = {"deepgram", "smallest", "qwen3-asr"}
+STREAMING_CAPABLE = {"deepgram", "smallest", "qwen3-asr", "gemma4", "nemotron"}
+
+# STT providers that can also serve as LLM (unified multimodal models)
+UNIFIED_CAPABLE_STT = {"gemma4"}
 
 
-def select_transcription_provider(config_yml: dict = None):
-    """Ask user which transcription provider they want (batch/primary)."""
+def _scan_tailnet_services(discovery_name: str) -> list:
+    """Advertised instances of a chronicle-* service on the Tailnet as [{host, url}].
+
+    Empty when Tailscale/minidisc is unavailable or nothing is advertised.
+    """
+    try:
+        found = []
+        for svc in discovery.list_all_services() or []:
+            if svc.get("name") != discovery_name:
+                continue
+            addr, port = svc.get("address"), svc.get("port")
+            host = (svc.get("labels") or {}).get("host", addr)
+            if addr and port:
+                found.append({"host": host, "url": f"http://{addr}:{port}"})
+        return found
+    except Exception:
+        return []
+
+
+def _infer_source_mode(current):
+    """Infer a prior source mode from an existing URL value (for press-Enter defaults).
+
+    ``None`` = not configured before; ``""`` = was set empty (discover/later); a local
+    host → local; a Tailscale address → tailnet; anything else → own.
+    """
+    if current is None:
+        return None
+    if current == "":
+        return "later"
+    low = current.lower()
+    if any(
+        h in low
+        for h in (
+            "host.docker.internal",
+            "localhost",
+            "127.0.0.1",
+            "172.17.0.1",
+            "speaker-service",
+        )
+    ):
+        return "local"
+    if ".ts.net" in low or any(
+        low.split("://")[-1].startswith(p) for p in ("100.", "fd7a:")
+    ):
+        return "tailnet"
+    return "own"
+
+
+def select_service_source(
+    label: str,
+    discovery_name: str,
+    allow_later: bool = True,
+    allow_local: bool = True,
+    current: str = None,
+):
+    """Ask WHERE a remote-capable service runs (hub default), returning a source dict.
+
+    Returns one of:
+      {"mode": "local"}                       — run it on this hub (caller's default flow)
+      {"mode": "own",     "url": "<url>"}     — an existing/external endpoint
+      {"mode": "tailnet", "url": "<url>"}     — pin a node advertised on the Tailnet now
+      {"mode": "later"}                       — leave unset; backend discovers it at runtime
+
+    ``allow_local=False`` drops the on-this-hub option (used when the service was
+    already declined for local setup), defaulting to discover-later. ``current`` is the
+    previously-configured URL ('' = was discover) used to default the menu + prefill, so
+    a re-run is press-Enter-through.
+    """
+    console.print(f"\n🛰️  [bold cyan]{label} — where does it run?[/bold cyan]")
+    # Stable choice keys regardless of which options are shown.
+    options: dict[str, tuple[str, str]] = {}
+    if allow_local:
+        options["1"] = ("local", "On this hub (run it here)")
+    options["2"] = ("own", "My own / external endpoint (enter a URL)")
+    options["3"] = ("tailnet", "Pick a node advertised on the Tailnet now")
+    if allow_later:
+        options["4"] = (
+            "later",
+            "Configure from the Tailnet later (auto-discover at runtime)",
+        )
+    for k, (_mode, desc) in options.items():
+        console.print(f"  {k}) {desc}")
+
+    default_choice = "1" if allow_local else ("4" if allow_later else "2")
+    # Default to the previously-configured source so a re-run is press-Enter-through.
+    prior_mode = _infer_source_mode(current)
+    mode_to_key = {m: k for k, (m, _d) in options.items()}
+    if prior_mode in mode_to_key:
+        default_choice = mode_to_key[prior_mode]
+        console.print(f"[dim]  (previously: {prior_mode})[/dim]")
+
+    # No-op fallback when a sub-step is abandoned: prefer local, else discover-later.
+    _fallback = {"mode": "local"} if allow_local else {"mode": "later"}
+    try:
+        choice = Prompt.ask("Enter choice", default=default_choice)
+    except EOFError:
+        choice = default_choice
+    if choice not in options:
+        choice = default_choice
+
+    if choice == "2":
+        own_default = current if _infer_source_mode(current) == "own" else ""
+        try:
+            url = Prompt.ask(
+                f"{label} endpoint URL (e.g. http://host:8767)", default=own_default
+            ).strip()
+        except EOFError:
+            url = own_default
+        if url:
+            return {"mode": "own", "url": url}
+        console.print("[yellow]No URL entered — falling back.[/yellow]")
+        return _fallback
+
+    if choice == "3":
+        found = _scan_tailnet_services(discovery_name)
+        if not found:
+            console.print(
+                f"[yellow]No '{discovery_name}' advertised on the Tailnet.[/yellow] "
+                + (
+                    "Falling back to 'configure later'."
+                    if allow_later
+                    else "Using fallback."
+                )
+            )
+            return {"mode": "later"} if allow_later else _fallback
+        console.print(f"[green]Found {len(found)} on the Tailnet:[/green]")
+        for i, a in enumerate(found, 1):
+            console.print(f"  {i}) {a['host']} — {a['url']}")
+        # Pre-select the previously-pinned node if it's still advertised.
+        default_pick = "1"
+        if current:
+            base = current.rstrip("/").removesuffix("/v1")
+            for i, a in enumerate(found, 1):
+                if a["url"].rstrip("/") == base:
+                    default_pick = str(i)
+                    break
+        try:
+            pick = Prompt.ask("Pick one", default=default_pick)
+            idx = int(pick) - 1
+        except (EOFError, ValueError):
+            idx = int(default_pick) - 1
+        if 0 <= idx < len(found):
+            console.print(f"[green]✅[/green] Using {found[idx]['url']}")
+            return {"mode": "tailnet", "url": found[idx]["url"]}
+        return {"mode": "later"} if allow_later else _fallback
+
+    if choice == "4" and allow_later:
+        console.print(
+            "[green]✅[/green] Will auto-discover on the Tailnet at runtime (no URL pinned)"
+        )
+        return {"mode": "later"}
+
+    return _fallback
+
+
+def select_transcription_provider(
+    config_yml: dict = None, default_provider: str = None
+):
+    """Ask user which transcription (batch/high-quality) provider they want.
+
+    ``default_provider`` (the streaming provider chosen first) pre-selects the
+    matching batch option when that provider can also do batch — the user can still
+    pick a different provider for higher-quality batch transcription.
+    """
     config_yml = config_yml or {}
     existing_provider = get_existing_stt_provider(config_yml)
 
@@ -829,25 +1059,36 @@ def select_transcription_provider(config_yml: dict = None):
         "vibevoice": "3",
         "qwen3-asr": "4",
         "smallest": "5",
-        "none": "6",
+        "gemma4": "6",
+        "af-next": "7",
+        "granite": "8",
+        "none": "9",
     }
     choice_to_provider = {v: k for k, v in provider_to_choice.items()}
-    default_choice = provider_to_choice.get(existing_provider, "1")
+
+    # Prefer the streaming provider (it can also do batch), else existing config.
+    preferred = default_provider if default_provider in provider_to_choice else None
+    default_choice = provider_to_choice.get(preferred or existing_provider, "1")
 
     console.print("\n🎤 [bold cyan]Transcription Provider[/bold cyan]")
     console.print(
-        "Choose your speech-to-text provider (used for [bold]batch[/bold]/high-quality transcription):"
+        "Choose your speech-to-text provider for [bold]batch[/bold]/high-quality transcription:"
     )
-    console.print(
-        "[dim]If it also supports streaming, it will be used for real-time too by default.[/dim]"
-    )
-    if existing_provider:
+    if preferred:
+        console.print(
+            f"[dim]Defaulting to {preferred} (your streaming choice — it does batch too). "
+            f"Pick another for a different/higher-quality batch engine.[/dim]"
+        )
+    elif existing_provider:
         provider_labels = {
             "deepgram": "Deepgram",
             "parakeet": "Parakeet ASR",
             "vibevoice": "VibeVoice ASR",
             "qwen3-asr": "Qwen3-ASR",
             "smallest": "Smallest.ai Pulse",
+            "gemma4": "Gemma 4",
+            "af-next": "Audio Flamingo Next",
+            "granite": "Granite Speech",
         }
         console.print(
             f"[blue][INFO][/blue] Current: {provider_labels.get(existing_provider, existing_provider)}"
@@ -860,11 +1101,14 @@ def select_transcription_provider(config_yml: dict = None):
         "3": "VibeVoice ASR (offline, batch only, built-in diarization, GPU)",
         "4": "Qwen3-ASR (offline, streaming + batch, 52 languages, GPU)",
         "5": "Smallest.ai Pulse (cloud, streaming + batch)",
-        "6": "None (skip transcription setup)",
+        "6": "Gemma 4 (offline, streaming + batch, prompt-based diarization, MTP, GPU)",
+        "7": "Audio Flamingo Next (offline, batch, timestamped diarization, GPU; noncommercial license)",
+        "8": "IBM Granite Speech (offline, batch, LLM-backbone, en/fr/de/es/pt, GPU)",
+        "9": "None (skip transcription setup)",
     }
 
     for key, desc in choices.items():
-        marker = " [dim](current)[/dim]" if key == default_choice else ""
+        marker = " [dim](default)[/dim]" if key == default_choice else ""
         console.print(f"  {key}) {desc}{marker}")
     console.print()
 
@@ -881,71 +1125,57 @@ def select_transcription_provider(config_yml: dict = None):
             return choice_to_provider.get(default_choice, "deepgram")
 
 
-def select_streaming_provider(batch_provider, config_yml: dict = None):
-    """Ask if user wants a different provider for real-time streaming.
+def select_streaming_provider(config_yml: dict = None):
+    """Ask which real-time streaming provider to use (or skip).
 
-    If the batch provider supports streaming, offer to use the same (saves a step).
-    If it's batch-only, the user must pick a streaming provider or skip.
+    Asked BEFORE the batch provider so a streaming-capable choice can default the
+    batch selection — the common case is one provider doing both, but the user can
+    still pick a different (e.g. higher-quality) batch engine next.
 
     Returns:
-        Streaming provider name if different from batch, or None (same / skipped).
+        Streaming provider name, or None if streaming is skipped.
     """
     config_yml = config_yml or {}
-    if batch_provider in ("none", None):
-        return None
-
     existing_stream = get_existing_stream_provider(config_yml)
 
-    if batch_provider in STREAMING_CAPABLE:
-        # Batch provider can already stream — just confirm
-        # Default to "use different" if a different streaming provider was previously configured
-        has_different_stream = bool(
-            existing_stream and existing_stream != batch_provider
-        )
-        console.print(f"\n🔊 [bold cyan]Streaming[/bold cyan]")
-        console.print(f"{batch_provider} supports both batch and streaming.")
-        try:
-            use_different = Confirm.ask(
-                "Use a different provider for real-time streaming?",
-                default=has_different_stream,
-            )
-        except EOFError:
-            return None
-        if not use_different:
-            return None
-    else:
-        # Batch-only provider — need to pick a streaming provider
-        console.print(f"\n🔊 [bold cyan]Streaming[/bold cyan]")
-        console.print(
-            f"{batch_provider} is batch-only. Pick a streaming provider for real-time transcription:"
-        )
+    console.print("\n🔊 [bold cyan]Real-time Streaming Transcription[/bold cyan]")
+    console.print(
+        "Choose a provider for [bold]real-time[/bold] (live) transcription. "
+        "You'll pick the batch/high-quality provider next."
+    )
+    console.print(
+        "[dim]A provider that also does batch will be offered as the batch default too.[/dim]"
+    )
+    console.print()
 
-    # Show streaming-capable providers (excluding the batch provider)
-    streaming_choices = {}
-    provider_map = {}
-    idx = 1
-
-    for name, desc in [
+    options = [
         ("deepgram", "Deepgram (cloud, streaming)"),
         ("smallest", "Smallest.ai Pulse (cloud, streaming)"),
-        ("qwen3-asr", "Qwen3-ASR (offline, streaming)"),
-    ]:
-        if name != batch_provider:
-            streaming_choices[str(idx)] = desc
-            provider_map[str(idx)] = name
-            idx += 1
-
-    skip_key = str(idx)
+        ("qwen3-asr", "Qwen3-ASR (offline, streaming, GPU)"),
+        (
+            "gemma4",
+            "Gemma 4 (offline, streaming-ish, prompt-based diarization, MTP, GPU)",
+        ),
+        (
+            "nemotron",
+            "Nemotron 3.5 (offline, true cache-aware streaming ~100ms, GPU)",
+        ),
+    ]
+    streaming_choices = {}
+    provider_map = {}
+    for idx, (name, desc) in enumerate(options, start=1):
+        streaming_choices[str(idx)] = desc
+        provider_map[str(idx)] = name
+    skip_key = str(len(options) + 1)
     streaming_choices[skip_key] = "Skip (no real-time streaming)"
     provider_map[skip_key] = None
 
-    # Pre-select the default based on existing config
-    default_stream_choice = "1"
-    if existing_stream and existing_stream != batch_provider:
-        for k, v in provider_map.items():
-            if v == existing_stream:
-                default_stream_choice = k
-                break
+    # Default to the previously-configured streaming provider, else skip.
+    default_stream_choice = skip_key
+    for k, v in provider_map.items():
+        if v and v == existing_stream:
+            default_stream_choice = k
+            break
 
     for key, desc in streaming_choices.items():
         marker = " [dim](current)[/dim]" if key == default_stream_choice else ""
@@ -958,15 +1188,69 @@ def select_streaming_provider(batch_provider, config_yml: dict = None):
             if choice in streaming_choices:
                 result = provider_map[choice]
                 if result:
-                    console.print(
-                        f"[green]✅[/green] Streaming: {result}, Batch: {batch_provider}"
-                    )
+                    console.print(f"[green]✅[/green] Streaming: {result}")
+                else:
+                    console.print("[blue][INFO][/blue] No real-time streaming")
                 return result
             console.print(
                 f"[red]Invalid choice. Please select from {list(streaming_choices.keys())}[/red]"
             )
         except EOFError:
-            return None
+            return provider_map.get(default_stream_choice)
+
+
+def select_live_segmentation(batch_provider):
+    """When there's no streaming ASR, offer windowed-batch live transcription.
+
+    Without a streaming ASR, a continuously-streaming source is only transcribed when
+    it disconnects (24h+ for always-on sources). Windowed batch transcribes fixed
+    ~30s windows so conversations are created incrementally as audio streams in.
+
+    Returns:
+        "windowed_batch" or "streaming_stt".
+    """
+    console.print(
+        "\n🪟 [bold cyan]Live transcription without streaming ASR[/bold cyan]"
+    )
+    console.print(
+        f"{batch_provider} is batch-only and you skipped streaming. Without live "
+        "transcription, a continuously-streaming source is only transcribed when it "
+        "disconnects."
+    )
+    try:
+        enable = Confirm.ask(
+            "Enable windowed batch transcription (transcribe ~every 30s as audio streams in)?",
+            default=True,
+        )
+    except EOFError:
+        return "streaming_stt"
+
+    if enable:
+        console.print("[green]✅[/green] Live segmentation: windowed_batch")
+        return "windowed_batch"
+    return "streaming_stt"
+
+
+def derive_langfuse_public_url(langfuse_mode, langfuse_external, server_ip):
+    """Derive the browser-accessible LangFuse URL used for dashboard deep-links.
+
+    This becomes ``observability.langfuse.public_url`` in config.yml, which the
+    backend serves to the web UI for Langfuse trace/session links.
+
+    - external mode: the host the user entered is already browser-accessible.
+    - local mode: the bundled instance is exposed on plain HTTP port 3002
+      (see extras/langfuse/docker-compose.yml). Use the Tailscale name/IP chosen
+      for HTTPS when available, otherwise fall back to detected Tailscale info,
+      otherwise localhost.
+    """
+    if langfuse_mode == "external":
+        return langfuse_external.get("host")
+
+    host = server_ip
+    if not host:
+        ts_dns, ts_ip = detect_tailscale_info()
+        host = ts_dns or ts_ip or "localhost"
+    return f"http://{host}:3002"
 
 
 def setup_langfuse_choice():
@@ -1104,23 +1388,55 @@ def select_hardware_profile(
             return None
 
 
-def select_llm_provider(config_yml: dict = None) -> str:
+def select_llm_provider(
+    config_yml: dict = None, transcription_provider: str = None
+) -> str:
     """Ask user which LLM provider to use for memory extraction.
 
     Uses Langfuse-style flow: "Do you have your own LLM?" → Yes: custom URL → No: pick managed option.
+    When transcription_provider is a unified-capable model (e.g. Gemma 4), offers to reuse
+    it for LLM tasks too.
 
     Returns:
-        "openai", "ollama", "llamacpp", or "none"
+        "openai", "ollama", "llamacpp", "gemma4-unified", or "none"
     """
     config_yml = config_yml or {}
     existing_llm = config_yml.get("defaults", {}).get("llm", "")
     existing_is_custom = existing_llm in ("custom-llm",)
+    existing_is_unified = existing_llm == "gemma4-llm"
 
     console.print("\n🤖 [bold cyan]LLM Provider[/bold cyan]")
     console.print(
         "Choose your language model provider for memory extraction and analysis:"
     )
     console.print()
+
+    # If the STT provider is a unified-capable model, offer to reuse it for LLM
+    if transcription_provider in UNIFIED_CAPABLE_STT:
+        provider_labels = {"gemma4": "Gemma 4"}
+        label = provider_labels.get(transcription_provider, transcription_provider)
+        console.print(
+            f"[green]💡[/green] {label} is a multimodal model that can also handle LLM tasks "
+            "(memory extraction, chat, summaries)."
+        )
+        console.print(
+            f"[dim]This reuses the same model already loaded for STT — no extra GPU memory needed.[/dim]"
+        )
+        default_unified = existing_is_unified or True
+        try:
+            use_unified = Confirm.ask(
+                f"Use {label} for both STT and LLM?",
+                default=default_unified,
+            )
+        except EOFError:
+            use_unified = default_unified
+        if use_unified:
+            console.print(
+                f"[green]✅[/green] {label} will handle both STT and LLM (unified mode)"
+            )
+            return "gemma4-unified"
+        console.print(f"[dim]OK, choosing a separate LLM provider instead.[/dim]")
+        console.print()
 
     # Step 1: Do you have your own LLM endpoint?
     try:
@@ -1175,45 +1491,345 @@ def select_llm_provider(config_yml: dict = None) -> str:
             )
 
 
-def select_memory_provider(config_yml: dict = None) -> str:
-    """Ask user which memory storage backend to use.
+def maybe_install_agent_services():
+    """Offer to install the boot-persistence systemd user services.
 
-    This is separate from the 'Setup OpenMemory MCP server?' service question.
-    That question is about running the extra service; this is about the backend provider.
-
-    Returns:
-        "chronicle" or "openmemory_mcp"
+    Installs two units (with linger): the native node agent (:8775 — WebUI control
+    + Tailnet advertising), which runs on the host and so doesn't survive a reboot
+    on its own; and a oneshot that runs ``start --all`` on boot to bring the
+    container stack back. The latter matters under rootless Podman, which — unlike
+    Docker — has no daemon to re-apply ``restart:`` policies after a reboot.
     """
-    config_yml = config_yml or {}
-    existing_provider = config_yml.get("memory", {}).get("provider", "chronicle")
-    default_choice = "2" if existing_provider == "openmemory_mcp" else "1"
+    console.print("\n🔁 [bold cyan]Auto-start on boot (Optional)[/bold cyan]")
+    console.print(
+        "Installs systemd user services so both the node agent (:8775) and your"
+    )
+    console.print(
+        "container stack come back after a reboot. (Rootless Podman, unlike Docker,"
+    )
+    console.print(
+        "has no daemon to revive containers on boot, so this is needed there.)"
+    )
 
-    console.print("\n🧠 [bold cyan]Memory Storage Backend[/bold cyan]")
-    console.print("Choose where your memories and conversation facts are stored:")
+    if not services._systemd_user_available():
+        services._print_systemd_unavailable_help()
+        return
+
+    try:
+        install = Confirm.ask(
+            "Install it as a systemd user service so it auto-starts on boot?",
+            default=True,
+        )
+    except EOFError:
+        console.print("Using default: Yes")
+        install = True
+
+    if install:
+        services.install_systemd_agents()
+
+
+def maybe_enable_remote_control():
+    """Offer to run a Claude remote-control session so you can start Claude Code
+    sessions on this machine from the Claude mobile app.
+
+    Off by default: this launches `claude remote-control` (in tmux) and, if you
+    accept, installs it as a systemd user service so it survives reboots. Requires
+    the claude CLI (logged in) and tmux on the host.
+    """
+    console.print("\n📱 [bold cyan]Claude Code from your phone (Optional)[/bold cyan]")
+    console.print(
+        "Run a `claude remote-control` server on this host so you can spawn new"
+    )
+    console.print(
+        "Claude Code sessions from the Claude mobile app (Code tab). It runs in tmux"
+    )
+    console.print(
+        "and can auto-start on boot. Toggle it any time from the WebUI System page."
+    )
+
+    if shutil.which("claude") is None:
+        console.print(
+            "[dim]claude CLI not found — skipping. Install Claude Code and log in, "
+            "then run: services.py remote-control install[/dim]"
+        )
+        return
+    if shutil.which("tmux") is None:
+        console.print("[dim]tmux not found — skipping (install tmux first).[/dim]")
+        return
+
+    try:
+        enable = Confirm.ask(
+            "Enable Claude remote-control (start new sessions from your phone)?",
+            default=False,
+        )
+    except EOFError:
+        console.print("Using default: No")
+        enable = False
+
+    if not enable:
+        return
+
+    if services._systemd_user_available():
+        services.install_remote_control()
+    else:
+        # No systemd user instance (e.g. WSL without systemd=true) — start it now
+        # in tmux; it won't survive a reboot.
+        services._print_systemd_unavailable_help()
+        services.start_remote_control()
+
+
+# Services that make sense to run on a service-only node joining a cluster
+# (the compute-heavy / GPU ones the backend reaches over the Tailnet).
+JOINABLE_SERVICES = {
+    "asr-services": "Offline speech-to-text (ASR) — GPU",
+    "speaker-recognition": "Speaker identification — GPU",
+    "tts": "Text-to-speech — GPU",
+    "llm-services": "Local LLM via llama.cpp — GPU",
+    "wakeword-service": "Acoustic wake-word detection",
+}
+
+
+def select_setup_type():
+    """Ask whether this machine is the main hub or is joining an existing cluster.
+
+    Returns ``"join"`` for a service-only node that contributes a service to an
+    existing backend, else ``"main"`` (the normal full single-machine / hub setup).
+    Defaults to ``"main"`` so re-running the wizard on the hub is unchanged.
+    """
+    console.print("\n🏗️  [bold cyan]Setup type[/bold cyan]")
+    console.print(
+        "  1) Main machine — run the Chronicle backend here (single machine or cluster hub)"
+    )
+    console.print(
+        "  2) Join a cluster — this machine only runs a service (e.g. GPU ASR) and"
+    )
+    console.print(
+        "     advertises it to an existing backend on your Tailnet (no backend here)"
+    )
     console.print()
+    choice = Prompt.ask("Enter choice", default="1")
+    return "join" if choice.strip() == "2" else "main"
 
-    choices = {
-        "1": "Chronicle Native (Qdrant vector database, self-hosted)",
-        "2": "OpenMemory MCP (cross-client compatible, requires openmemory-mcp service)",
-    }
 
-    for key, desc in choices.items():
-        marker = " [dim](current)[/dim]" if key == default_choice else ""
-        console.print(f"  {key}) {desc}{marker}")
-    console.print()
+def join_cluster():
+    """Configure THIS machine as a service-only node joining an existing cluster.
 
-    while True:
-        try:
-            choice = Prompt.ask("Enter choice", default=default_choice)
-            if choice in choices:
-                return {"1": "chronicle", "2": "openmemory_mcp"}[choice]
-            console.print(
-                f"[red]Invalid choice. Please select from {list(choices.keys())}[/red]"
-            )
-        except EOFError:
-            return {"1": "chronicle", "2": "openmemory_mcp"}.get(
-                default_choice, "chronicle"
-            )
+    Discovers the hub (backend) on the Tailnet, lets you pick which service(s) this
+    box provides, runs their init wizards, starts them, and runs the node agent so
+    they advertise on the Tailnet — the hub discovers and uses them automatically.
+    This box does NOT run the backend.
+    """
+    console.print("\n🔗 [bold cyan]Join an existing Chronicle cluster[/bold cyan]")
+    console.print(
+        "This machine will run one or more services (e.g. GPU ASR) and advertise them on\n"
+        "your Tailnet. Your main Chronicle backend then discovers and uses them.\n"
+    )
+
+    # 0. Tailscale prereq — discovery AND advertising both need it. Check up front so
+    # a missing/down Tailscale gives the real cause, not a misleading "no backend found".
+    if shutil.which("tailscale") is None:
+        console.print(
+            "[red]✗ Tailscale isn't installed.[/red] A join node finds the hub and advertises\n"
+            "  its services over your Tailnet. Install it (https://tailscale.com/download),\n"
+            "  run [cyan]sudo tailscale up[/cyan], then re-run this wizard."
+        )
+        return
+    try:
+        ts_connected = (
+            subprocess.run(["tailscale", "status"], capture_output=True).returncode == 0
+        )
+    except OSError:
+        ts_connected = False
+    if not ts_connected:
+        console.print(
+            "[red]✗ Tailscale is installed but not connected.[/red] Run "
+            "[cyan]sudo tailscale up[/cyan]\n  (approve this device on your tailnet), then re-run."
+        )
+        if not Confirm.ask(
+            "Continue anyway? (discovery/advertising won't work — you'd wire service URLs manually)",
+            default=False,
+        ):
+            return
+
+    # 0b. Tailscale running now ≠ Tailscale after a reboot. If the unit is started but
+    # not enabled, it silently won't come back on boot and the node drops off the
+    # Tailnet (services unreachable) until someone notices. Offer to make it stick.
+    if tailscaled_enabled_at_boot() is False:
+        console.print(
+            "[yellow]⚠️  Tailscale is running but not enabled to start on boot.[/yellow]\n"
+            "   After a reboot this node would silently drop off the Tailnet (services\n"
+            "   unreachable) until you start it again manually."
+        )
+        if Confirm.ask(
+            "Enable tailscaled to start on boot now? (sudo systemctl enable --now tailscaled)",
+            default=True,
+        ):
+            if enable_tailscaled_at_boot():
+                console.print(
+                    "[green]✅[/green] tailscaled enabled — it'll survive reboots now."
+                )
+            else:
+                console.print(
+                    "[red]✗ Couldn't enable it.[/red] Run it yourself: "
+                    "[cyan]sudo systemctl enable --now tailscaled[/cyan]"
+                )
+
+    # 1. Discover the hub + what's already advertised in the cluster.
+    console.print("🔍 Looking for your Chronicle backend on the Tailnet…")
+    backend_url = discovery.discover_service(discovery.CHRONICLE_BACKEND)
+    claimed = {s.get("name") for s in discovery.list_all_services()}
+    if backend_url:
+        console.print(f"[green]✅[/green] Found backend at [cyan]{backend_url}[/cyan]")
+    else:
+        console.print(
+            "[yellow]⚠️  No backend discovered on the Tailnet.[/yellow] Make sure your main\n"
+            "   machine is running with Tailscale and this box is on the same Tailnet."
+        )
+        if not Confirm.ask("Continue anyway?", default=True):
+            return
+    if claimed:
+        console.print("\n[dim]Already advertised on the Tailnet:[/dim]")
+        for name in sorted(n for n in claimed if n):
+            console.print(f"   [dim]• {name}[/dim]")
+
+    # 2. Pick the service(s) this node will provide.
+    disc_names = services._DISCOVERY_NAMES  # lifecycle name → chronicle-* name
+    console.print("\n📦 [bold]Which service(s) will THIS machine provide?[/bold]")
+    keys = list(JOINABLE_SERVICES)
+    for i, svc in enumerate(keys, 1):
+        taken = disc_names.get(svc) in claimed
+        tag = (
+            "  [yellow](already in cluster — a 2nd one is usually unnecessary)[/yellow]"
+            if taken
+            else ""
+        )
+        console.print(f"  {i}) {svc} — {JOINABLE_SERVICES[svc]}{tag}")
+    raw = Prompt.ask("Enter number(s), comma-separated", default="1")
+    chosen: list[str] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if part.isdigit() and 1 <= int(part) <= len(keys):
+            svc = keys[int(part) - 1]
+            if svc not in chosen:
+                chosen.append(svc)
+    if not chosen:
+        console.print("[red]No valid services selected. Aborting.[/red]")
+        return
+    console.print(f"[green]✅[/green] This node will provide: {', '.join(chosen)}")
+
+    # 3. Hardware profile (e.g. Strix Halo) for GPU services.
+    hardware_profile = select_hardware_profile(chosen, None, None)
+
+    # 4. Enable ONLY these services in config.yml — a join node runs no backend.
+    persist_enabled_services(chosen)
+
+    # 4b. A join node has no backend .env, so the shared HF token lives in the repo-root
+    #     .env here. Prompt once (if any chosen service needs it) and pass it through.
+    hf_token = setup_hf_token_if_needed(chosen)
+
+    # 5. Configure each chosen service (runs its init.py interactively).
+    for svc in chosen:
+        run_service_setup(
+            svc, chosen, hf_token=hf_token, hardware_profile=hardware_profile
+        )
+
+    # 6. Start the service(s) + the node agent (which advertises on the Tailnet).
+    #    build=True because images won't exist yet on a fresh node.
+    console.print("\n🚀 Starting services + node agent…")
+    services.start_services(chosen, build=True)
+
+    # 7. Offer boot persistence for the node agent (systemd user service).
+    maybe_install_agent_services()
+
+    # 8. Next steps + the one wiring gotcha.
+    console.print("\n🎉 [bold green]This node has joined the cluster![/bold green]")
+    console.print(
+        "   • It's advertising on your Tailnet — it'll appear on the backend's Network page."
+    )
+    console.print(
+        "   • [yellow]Wiring note:[/yellow] if your backend pins the service URL to "
+        "host.docker.internal/localhost"
+    )
+    console.print(
+        "     (e.g. PARAKEET_ASR_URL), clear it or point it at this box's Tailscale name so the"
+    )
+    console.print(
+        "     backend uses THIS node; otherwise minidisc discovery wires it automatically."
+    )
+
+
+def check_container_engine() -> bool:
+    """Container-engine prereq — Chronicle runs everything in containers.
+
+    Resolves the configured engine (docker default, or podman via config.yml /
+    CONTAINER_ENGINE) and verifies both the engine binary and its compose front-end
+    are installed and the runtime is reachable. Mirrors the Tailscale prereq style:
+    on any problem we explain it and let the user continue at their own risk, since
+    there is no container-less install path.
+
+    Returns True to proceed, False to abort the wizard.
+    """
+    engine = services.container_engine()
+    compose = (
+        services.compose_base()
+    )  # e.g. ['docker', 'compose'] or ['podman-compose']
+
+    if shutil.which(engine) is None:
+        console.print(
+            f"[red]✗ {engine} isn't installed.[/red] Chronicle runs every service in "
+            "containers —\n"
+            "  there is no install path without a container engine. Install "
+            f"[cyan]{engine}[/cyan]\n"
+            "  (https://docs.docker.com/engine/install/ or https://podman.io/docs/installation),\n"
+            "  then re-run this wizard."
+        )
+        return Confirm.ask(
+            "Continue anyway? (nothing will start until a container engine is installed)",
+            default=False,
+        )
+
+    # compose front-end: docker ships it as a plugin (`docker compose`), podman as a
+    # separate `podman-compose` binary — check whichever the resolved command needs.
+    compose_bin = compose[0]
+    if shutil.which(compose_bin) is None:
+        hint = (
+            "It ships with Docker Desktop / the docker-compose-plugin package."
+            if compose_bin == "docker"
+            else "Install it with [cyan]pip install podman-compose[/cyan] (or your package manager)."
+        )
+        console.print(
+            f"[red]✗ {' '.join(compose)} isn't available.[/red] Chronicle uses it to "
+            "build and run\n"
+            f"  the service stack. {hint}"
+        )
+        return Confirm.ask("Continue anyway?", default=False)
+
+    # Runtime liveness: `<engine> info` exits non-zero if the daemon/runtime is down
+    # (e.g. Docker Desktop not started, dockerd not running).
+    try:
+        up = (
+            subprocess.run([engine, "info"], capture_output=True, timeout=20).returncode
+            == 0
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        up = False
+    if not up:
+        console.print(
+            f"[red]✗ {engine} is installed but the runtime isn't reachable.[/red] "
+            f"Start it\n"
+            "  (e.g. launch Docker Desktop, or run [cyan]sudo systemctl start docker[/cyan]) "
+            "and re-run."
+        )
+        return Confirm.ask(
+            "Continue anyway? (services won't start until the engine is running)",
+            default=False,
+        )
+
+    console.print(
+        f"[green]✅[/green] Container engine: [cyan]{engine}[/cyan] "
+        f"(compose: [cyan]{' '.join(compose)}[/cyan])"
+    )
+    return True
 
 
 def main():
@@ -1227,9 +1843,15 @@ def main():
         "[dim]When unsure, just press Enter — the defaults will work.[/dim]\n"
     )
 
-    # Ensure config.yml exists (create from template if needed)
+    # Ensure config.yml exists (create from template if needed) — also resolves which
+    # container engine (docker/podman) the rest of the wizard will use.
     config_mgr = ConfigManager()
     config_mgr.ensure_config_yml()
+
+    # Container-engine prereq — everything below runs in containers, so bail early
+    # (with a clear reason) rather than failing deep in a build/start step.
+    if not check_container_engine():
+        return
 
     # Setup git hooks first
     setup_git_hooks()
@@ -1240,27 +1862,162 @@ def main():
     # Read existing config.yml once — used as defaults for ALL wizard questions below
     config_yml = config_mgr.get_full_config()
 
-    # Ask about transcription provider FIRST (determines which services are needed)
-    transcription_provider = select_transcription_provider(config_yml)
+    # Fork: a service-only node joining an existing cluster takes a separate, much
+    # shorter path (no backend / LLM / memory setup here) and returns.
+    if select_setup_type() == "join":
+        join_cluster()
+        return
 
-    # Ask about streaming provider (if batch provider doesn't stream, or user wants a different one)
-    streaming_provider = select_streaming_provider(transcription_provider, config_yml)
+    # Ask about the real-time STREAMING provider FIRST.
+    streaming_provider = select_streaming_provider(config_yml)
+
+    # Then the batch/high-quality provider, defaulting to the streaming provider
+    # when it can also do batch (one provider for both is the simple common case,
+    # but the user can still choose a different/higher-quality batch engine).
+    transcription_provider = select_transcription_provider(
+        config_yml, default_provider=streaming_provider
+    )
+
+    # If batch and streaming are the same provider there is no separate streaming
+    # engine to wire — setup_transcription sets both defaults.stt and stt_stream.
+    # Only pass streaming_provider to init.py when it actually differs from batch.
+    if streaming_provider == transcription_provider:
+        streaming_provider = None
+        console.print(
+            f"[green]✅[/green] Using {transcription_provider} for both batch and streaming"
+        )
+    elif streaming_provider:
+        console.print(
+            f"[blue][INFO][/blue] Batch: {transcription_provider}, "
+            f"streaming: {streaming_provider} (batch-retranscribe enabled)"
+        )
+
+    # No streaming ASR (batch-only provider + streaming skipped) → offer windowed batch
+    live_segmentation = "streaming_stt"
+    if (
+        transcription_provider not in ("none", None)
+        and transcription_provider not in STREAMING_CAPABLE
+        and streaming_provider is None
+    ):
+        live_segmentation = select_live_segmentation(transcription_provider)
 
     # LLM Provider selection (asked once here, passed to init.py — avoids double-ask)
-    llm_provider = select_llm_provider(config_yml)
+    llm_provider = select_llm_provider(config_yml, transcription_provider)
 
-    # Memory Provider selection (asked once here, passed to init.py — avoids double-ask)
-    memory_provider = select_memory_provider(config_yml)
+    # Chronicle's agentic Markdown vault is the only memory provider — no choice.
+    memory_provider = "chronicle"
 
     # Service Selection (pass provider choices so we skip asking about auto-added services)
     selected_services = select_services(
         transcription_provider, config_yml, memory_provider, llm_provider
     )
 
-    # Auto-add asr-services if any local ASR was chosen (batch or streaming)
-    local_asr_providers = ("parakeet", "vibevoice", "qwen3-asr")
-    needs_asr = transcription_provider in local_asr_providers or (
-        streaming_provider and streaming_provider in local_asr_providers
+    # ── Service source: where each remote-capable compute service runs ──────────
+    # Hub flow defaults to "on this hub", but offers own/external endpoint, pinning a
+    # Tailnet-advertised node, or deferring to runtime discovery. A *remote* ASR/LLM
+    # choice (own/Tailnet/later) also suppresses auto-adding the local service below.
+    backend_env = "backends/advanced/.env"
+    OFFLINE_DISCOVERABLE_ASR = {"parakeet", "qwen3-asr", "gemma4", "af-next"}
+    _ASR_ENV_KEY = {
+        "parakeet": "PARAKEET_ASR_URL",
+        "qwen3-asr": "QWEN3_ASR_URL",
+        "gemma4": "GEMMA4_ASR_URL",
+        "af-next": "AF_NEXT_ASR_URL",
+    }
+    asr_url, asr_discover, asr_remote = None, False, False
+    if transcription_provider in OFFLINE_DISCOVERABLE_ASR:
+        asr_current = read_env_value(backend_env, _ASR_ENV_KEY[transcription_provider])
+        src = select_service_source("ASR", "chronicle-asr", current=asr_current)
+        asr_remote = src["mode"] != "local"
+        if src["mode"] == "local":
+            asr_url = "http://host.docker.internal:8767"
+        elif src["mode"] in ("own", "tailnet"):
+            asr_url = src["url"]
+        elif src["mode"] == "later":
+            asr_discover = True
+
+    llm_base_url, llm_discover, llm_remote = None, False, False
+    if llm_provider == "llamacpp":
+        llm_current = read_env_value(backend_env, "LLM_BASE_URL")
+        src = select_service_source(
+            "Local LLM (llama.cpp)", "chronicle-llm", current=llm_current
+        )
+        llm_remote = src["mode"] != "local"
+        if src["mode"] == "local":
+            llm_base_url = "http://host.docker.internal:8083/v1"
+        elif src["mode"] in ("own", "tailnet"):
+            # Discovered/picked URLs are bare host:port → ensure the OpenAI /v1 path.
+            u = src["url"].rstrip("/")
+            llm_base_url = u if u.endswith("/v1") else u + "/v1"
+        elif src["mode"] == "later":
+            llm_discover = True
+
+    # Speaker Recognition + TTS: when NOT run locally, optionally point the backend at
+    # a remote/own endpoint or let it auto-discover one on the Tailnet.
+    speaker_url, speaker_discover = None, False
+    if "speaker-recognition" not in selected_services:
+        speaker_current = read_env_value(backend_env, "SPEAKER_SERVICE_URL")
+        prior_remote = _infer_source_mode(speaker_current) in (
+            "own",
+            "tailnet",
+            "later",
+        )
+        try:
+            if Confirm.ask(
+                "Use a remote / external Speaker Recognition service?",
+                default=prior_remote,
+            ):
+                src = select_service_source(
+                    "Speaker Recognition",
+                    "chronicle-speaker",
+                    allow_local=False,
+                    current=speaker_current,
+                )
+                if src["mode"] in ("own", "tailnet"):
+                    speaker_url = src["url"]
+                else:
+                    speaker_discover = True
+        except EOFError:
+            pass
+
+    tts_url, tts_discover = None, False
+    if "tts" in selected_services:
+        # Running TTS locally on the host — pin the local endpoint (the compose no
+        # longer defaults CHRONICLE_TTS_URL, so an unset value would mean 'discover').
+        tts_url = "http://host.docker.internal:8770"
+    else:
+        tts_current = read_env_value(backend_env, "CHRONICLE_TTS_URL")
+        prior_set = _infer_source_mode(tts_current) in ("own", "tailnet", "later")
+        try:
+            if Confirm.ask(
+                "Configure a Text-to-Speech (TTS) endpoint?", default=prior_set
+            ):
+                src = select_service_source(
+                    "Text-to-Speech",
+                    "chronicle-tts",
+                    allow_local=False,
+                    current=tts_current,
+                )
+                if src["mode"] in ("own", "tailnet"):
+                    tts_url = src["url"]
+                else:
+                    tts_discover = True
+        except EOFError:
+            pass
+
+    # Auto-add asr-services if a LOCAL ASR was chosen (not a remote/discover source)
+    local_asr_providers = (
+        "parakeet",
+        "vibevoice",
+        "qwen3-asr",
+        "gemma4",
+        "af-next",
+        "granite",
+        "nemotron",
+    )
+    needs_asr = not asr_remote and (
+        transcription_provider in local_asr_providers
+        or (streaming_provider and streaming_provider in local_asr_providers)
     )
     if needs_asr and "asr-services" not in selected_services:
         reason = (
@@ -1273,8 +2030,12 @@ def main():
         )
         selected_services.append("asr-services")
 
-    # Auto-add llm-services if llama.cpp was selected as LLM provider
-    if llm_provider == "llamacpp" and "llm-services" not in selected_services:
+    # Auto-add llm-services if llama.cpp runs LOCALLY (not a remote/discover source)
+    if (
+        llm_provider == "llamacpp"
+        and not llm_remote
+        and "llm-services" not in selected_services
+    ):
         exists, _ = check_service_exists(
             "llm-services", SERVICES["extras"]["llm-services"]
         )
@@ -1283,20 +2044,6 @@ def main():
                 "[blue][INFO][/blue] LLM provider is llama.cpp — auto-adding llm-services"
             )
             selected_services.append("llm-services")
-
-    # Auto-add openmemory-mcp service if openmemory_mcp was selected as memory provider
-    if (
-        memory_provider == "openmemory_mcp"
-        and "openmemory-mcp" not in selected_services
-    ):
-        exists, _ = check_service_exists(
-            "openmemory-mcp", SERVICES["extras"]["openmemory-mcp"]
-        )
-        if exists:
-            console.print(
-                "[blue][INFO][/blue] Memory provider is OpenMemory MCP — auto-adding openmemory-mcp service"
-            )
-            selected_services.append("openmemory-mcp")
 
     if not selected_services:
         console.print("\n[yellow]No services selected. Exiting.[/yellow]")
@@ -1394,78 +2141,71 @@ def main():
 
             console.print(f"[green]✅[/green] HTTPS configured for: {server_ip}")
 
-            # Generate certificates centrally in certs/
-            console.print("\n[blue][INFO][/blue] Generating TLS certificates...")
-            if ts_dns and generate_tailscale_certs("certs"):
+            # Decide how the TLS cert is managed. The per-service init scripts derive
+            # the same mode (from server_ip + tailscaled socket) and render their
+            # Caddyfile/compose to match, so nothing needs to be threaded through here.
+            cert_mode = decide_cert_mode(server_ip)
+            if cert_mode == "static":
+                # *.ts.net with no mountable tailscaled socket (e.g. Docker Desktop on
+                # macOS): issue the cert on the host now. The services.py startup hook
+                # renews it on restart — no cron needed.
                 console.print(
-                    f"[green]✅[/green] Tailscale trusted certs generated in certs/ for {ts_dns}"
+                    "\n[blue][INFO][/blue] Generating host-issued TLS certificate..."
                 )
-            elif generate_self_signed_certs(server_ip, "certs"):
-                console.print(
-                    f"[green]✅[/green] Self-signed certs generated in certs/ for {server_ip}"
-                )
+                if generate_tailscale_certs("certs"):
+                    console.print(
+                        f"[green]✅[/green] Tailscale cert generated in certs/ for {server_ip}"
+                    )
+                else:
+                    console.print(
+                        "[yellow]⚠️  Certificate generation failed; it will be retried "
+                        "automatically on the next service start.[/yellow]"
+                    )
             else:
+                # Caddy obtains and auto-renews the cert itself: *.ts.net via the mounted
+                # tailscaled socket, a real domain via Let's Encrypt, IP/localhost via
+                # Caddy's internal CA. No host cert file, no renewal cron.
                 console.print(
-                    "[yellow]⚠️  Certificate generation failed. "
-                    "Generate manually: cd certs && ./generate-ssl.sh <address>[/yellow]"
+                    f"\n[green]✅[/green] Caddy will obtain and auto-renew the TLS "
+                    f"certificate for {server_ip} (no host cert file, no renewal cron)"
+                )
+                console.print(
+                    "[blue][INFO][/blue] Trusted automatically for *.ts.net and real "
+                    "domains; IP/localhost get a self-signed cert you accept in the browser."
                 )
 
-    # Neo4j Configuration (always required - used by Knowledge Graph)
-    neo4j_password = None
-    obsidian_enabled = False
-
-    if "advanced" in selected_services:
-        console.print("\n🗄️ [bold cyan]Neo4j Configuration[/bold cyan]")
-        console.print(
-            "Neo4j is used for Knowledge Graph (entity/relationship extraction from conversations)"
-        )
-        console.print()
-
-        # Read existing Neo4j password and use as default (masked prompt)
-        existing_neo4j_pw = read_env_value("backends/advanced/.env", "NEO4J_PASSWORD")
-        neo4j_password = prompt_with_existing_masked(
-            prompt_text="Neo4j password (min 8 chars)",
-            existing_value=existing_neo4j_pw,
-            placeholders=[
-                "neo4jpassword",
-                "your_neo4j_password",
-                "your-neo4j-password",
-            ],
-            is_password=True,
-            default="neo4jpassword",
-        )
-        if not neo4j_password:
-            neo4j_password = "neo4jpassword"
-
-        console.print("[green]✅[/green] Neo4j configured")
-
-        # Obsidian is optional (graph-based knowledge management for vault notes)
-        console.print("\n🗂️ [bold cyan]Obsidian Integration (Optional)[/bold cyan]")
-        console.print(
-            "Enable graph-based knowledge management for Obsidian vault notes"
-        )
-        console.print()
-
-        # Load existing obsidian enabled state from config.yml as default
-        existing_obsidian = (
-            config_yml.get("memory", {}).get("obsidian", {}).get("enabled", False)
-        )
-        try:
-            obsidian_enabled = Confirm.ask(
-                "Enable Obsidian integration?", default=existing_obsidian
+            # If this box is served over a Tailscale address, both reachability and
+            # (Caddy-managed) cert renewal depend on tailscaled being up. Started-but-
+            # not-enabled means it silently won't come back after a reboot — offer to
+            # make it stick, same as the join-node path.
+            served_over_tailscale = server_ip.endswith(".ts.net") or (
+                bool(ts_ip) and server_ip == ts_ip
             )
-        except EOFError:
-            console.print(f"Using default: {'Yes' if existing_obsidian else 'No'}")
-            obsidian_enabled = existing_obsidian
-
-        if obsidian_enabled:
-            console.print("[green]✅[/green] Obsidian integration will be configured")
+            if served_over_tailscale and tailscaled_enabled_at_boot() is False:
+                console.print(
+                    "\n[yellow]⚠️  Tailscale is running but not enabled to start on boot.[/yellow]\n"
+                    "   After a reboot this box would silently drop off the Tailnet —\n"
+                    "   the dashboard/API would be unreachable and the TLS cert wouldn't renew."
+                )
+                if Confirm.ask(
+                    "Enable tailscaled to start on boot now? (sudo systemctl enable --now tailscaled)",
+                    default=True,
+                ):
+                    if enable_tailscaled_at_boot():
+                        console.print(
+                            "[green]✅[/green] tailscaled enabled — it'll survive reboots now."
+                        )
+                    else:
+                        console.print(
+                            "[red]✗ Couldn't enable it.[/red] Run it yourself: "
+                            "[cyan]sudo systemctl enable --now tailscaled[/cyan]"
+                        )
 
     # Pure Delegation - Run Each Service Setup
     console.print(f"\n📋 [bold]Setting up {len(selected_services)} services...[/bold]")
 
-    # Clean up .env files from unselected services (creates backups)
-    cleanup_unselected_services(selected_services)
+    # Record which services are enabled (config.yml is the lifecycle source of truth)
+    persist_enabled_services(selected_services)
 
     success_count = 0
     failed_services = []
@@ -1476,6 +2216,12 @@ def main():
     langfuse_host = langfuse_external.get(
         "host"
     )  # None for local (backend defaults to langfuse-web)
+
+    # Browser-accessible URL for Langfuse dashboard deep-links (stored in config.yml).
+    # Derived from server_ip/Tailscale so links don't hardcode localhost.
+    langfuse_public_url = derive_langfuse_public_url(
+        langfuse_mode, langfuse_external, server_ip
+    )
 
     # Determine setup order: langfuse first (to get API keys), then backend (with langfuse keys), then others
     setup_order = []
@@ -1498,8 +2244,6 @@ def main():
             selected_services,
             https_enabled,
             server_ip,
-            obsidian_enabled,
-            neo4j_password,
             hf_token,
             transcription_provider,
             admin_email=wizard_admin_email,
@@ -1507,10 +2251,20 @@ def main():
             langfuse_public_key=langfuse_public_key,
             langfuse_secret_key=langfuse_secret_key,
             langfuse_host=langfuse_host,
+            langfuse_public_url=langfuse_public_url,
             streaming_provider=streaming_provider,
             llm_provider=llm_provider,
             memory_provider=memory_provider,
             hardware_profile=hardware_profile,
+            live_segmentation=live_segmentation,
+            asr_url=asr_url,
+            asr_discover=asr_discover,
+            llm_base_url=llm_base_url,
+            llm_discover=llm_discover,
+            speaker_url=speaker_url,
+            speaker_discover=speaker_discover,
+            tts_url=tts_url,
+            tts_discover=tts_discover,
         ):
             success_count += 1
 
@@ -1534,6 +2288,14 @@ def main():
     # This ensures plugins can add their secrets to the existing .env file
     # without the backend init overwriting them
     setup_plugins()
+
+    # Optional: install the native host agents (service manager + discovery) as
+    # systemd user services so they auto-start on boot like the containers do.
+    if "advanced" in selected_services:
+        maybe_install_agent_services()
+        # Optional (off by default): a Claude remote-control session so you can
+        # start Claude Code sessions on this host from the Claude mobile app.
+        maybe_enable_remote_control()
 
     # Final Summary
     console.print(f"\n🎊 [bold green]Setup Complete![/bold green]")
@@ -1583,11 +2345,6 @@ def main():
         configured_services.append("speaker-recognition")
     if "asr-services" in selected_services and "asr-services" not in failed_services:
         configured_services.append("asr-services")
-    if (
-        "openmemory-mcp" in selected_services
-        and "openmemory-mcp" not in failed_services
-    ):
-        configured_services.append("openmemory-mcp")
     if "langfuse" in selected_services and "langfuse" not in failed_services:
         configured_services.append("langfuse")
 
@@ -1597,14 +2354,8 @@ def main():
         console.print(
             "[bold cyan]Prompt Management:[/bold cyan] Once services are running, edit AI prompts at:"
         )
-        if https_enabled and server_ip:
-            console.print(
-                f"   [link=https://{server_ip}:3443/project/chronicle/prompts]https://{server_ip}:3443/project/chronicle/prompts[/link]"
-            )
-        else:
-            console.print(
-                "   [link=http://localhost:3002/project/chronicle/prompts]http://localhost:3002/project/chronicle/prompts[/link]"
-            )
+        prompts_url = f"{langfuse_public_url.rstrip('/')}/project/chronicle/prompts"
+        console.print(f"   [link={prompts_url}]{prompts_url}[/link]")
     elif langfuse_mode == "external" and langfuse_host:
         console.print("")
         console.print(

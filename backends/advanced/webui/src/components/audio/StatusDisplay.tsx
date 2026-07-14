@@ -1,6 +1,6 @@
 import React from 'react'
-import { Check, Loader2, AlertCircle, Mic, Wifi, Play, Radio } from 'lucide-react'
-import { RecordingContextType, RecordingStep } from '../../contexts/RecordingContext'
+import { Check, Loader2, AlertCircle, Mic, Monitor, Wifi, Play, Radio } from 'lucide-react'
+import { RecordingContextType, RecordingStep, AudioSource } from '../../contexts/RecordingContext'
 
 interface StatusDisplayProps {
   recording: RecordingContextType
@@ -13,7 +13,7 @@ interface StepInfo {
   description: string
 }
 
-const steps: StepInfo[] = [
+const baseSteps: StepInfo[] = [
   {
     id: 'mic',
     label: 'Microphone',
@@ -40,9 +40,28 @@ const steps: StepInfo[] = [
   }
 ]
 
-const getStepStatus = (stepId: RecordingStep, currentStep: RecordingStep, isRecording: boolean): 'pending' | 'current' | 'completed' | 'error' => {
+const displayAudioStep: StepInfo = {
+  id: 'display-audio',
+  label: 'Tab Audio',
+  icon: <Monitor className="h-4 w-4" />,
+  description: 'Share tab or system audio'
+}
+
+const getSteps = (audioSource: AudioSource): StepInfo[] => {
+  switch (audioSource) {
+    case 'mic':
+      return baseSteps
+    case 'meeting':
+      // Insert display-audio step after mic
+      return [baseSteps[0], displayAudioStep, ...baseSteps.slice(1)]
+    case 'tab':
+      // Replace mic step with display-audio step
+      return [displayAudioStep, ...baseSteps.slice(1)]
+  }
+}
+
+const getStepStatus = (stepId: RecordingStep, currentStep: RecordingStep, isRecording: boolean, steps: StepInfo[]): 'pending' | 'current' | 'completed' | 'error' => {
   if (currentStep === 'error') {
-    // Find which step we were on when error occurred
     const stepIndex = steps.findIndex(s => s.id === stepId)
     const currentStepIndex = steps.findIndex(s => s.id === currentStep)
     if (stepIndex <= currentStepIndex) return 'error'
@@ -50,7 +69,7 @@ const getStepStatus = (stepId: RecordingStep, currentStep: RecordingStep, isReco
   }
 
   if (isRecording) {
-    return 'completed' // All steps completed when recording
+    return 'completed'
   }
 
   const stepIndex = steps.findIndex(s => s.id === stepId)
@@ -80,6 +99,8 @@ const getStatusColor = (status: string): string => {
 }
 
 export default function StatusDisplay({ recording }: StatusDisplayProps) {
+  const steps = getSteps(recording.audioSource)
+
   // Don't show status display when idle or recording (keep it clean)
   if (recording.currentStep === 'idle' || recording.isRecording) {
     return null
@@ -94,7 +115,7 @@ export default function StatusDisplay({ recording }: StatusDisplayProps) {
 
       <div className="space-y-3">
         {steps.map((step, index) => {
-          const status = getStepStatus(step.id, recording.currentStep, recording.isRecording)
+          const status = getStepStatus(step.id, recording.currentStep, recording.isRecording, steps)
 
           return (
             <div

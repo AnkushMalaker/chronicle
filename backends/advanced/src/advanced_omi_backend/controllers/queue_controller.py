@@ -10,23 +10,77 @@ This module provides:
 
 import logging
 import os
+import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-import redis
-from rq import Queue, Worker
-from rq.job import Job, JobStatus
+from fastapi.responses import JSONResponse
+from rq import Queue, Retry, Worker
+from rq.exceptions import NoSuchJobError
+from rq.job import Dependency, Job, JobStatus
 from rq.registry import DeferredJobRegistry, ScheduledJobRegistry
 
+from advanced_omi_backend.config import get_misc_settings
 from advanced_omi_backend.config_loader import get_service_config
+from advanced_omi_backend.redis_factory import create_sync_redis
+from advanced_omi_backend.services.memory.audit import MemoryCause, UpdateStrategy
 from advanced_omi_backend.services.sse_publisher import publish_sse_event
 
 logger = logging.getLogger(__name__)
 
-# Redis connection configuration
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-redis_conn = redis.from_url(REDIS_URL)
+# Shared sync Redis connection for RQ (decode_responses=False, as RQ requires).
+redis_conn = create_sync_redis()
+
+
+def _as_allow_failure_dependency(depends_on):
+    """Wrap a job (or list of jobs) in a ``Dependency`` with ``allow_failure=True``.
+
+    A plain ``depends_on`` leaves a dependent ``deferred`` forever when an upstream
+    job ends up FAILED (e.g. abandoned + retries exhausted). ``allow_failure=True``
+    makes RQ *promote* the dependent on upstream failure instead — so the chain
+    always drains to the finalizer, which reconciles the real status. Returns
+    ``None`` for an empty/all-None input (enqueue with no dependency).
+    """
+    if depends_on is None:
+        return None
+    if isinstance(depends_on, Dependency):
+        return depends_on
+    jobs = list(depends_on) if isinstance(depends_on, (list, tuple)) else [depends_on]
+    jobs = [j for j in jobs if j is not None]
+    if not jobs:
+        return None
+    return Dependency(jobs=jobs, allow_failure=True)
+
+
+def post_conv_enqueue_kwargs(stage: str, meta: dict, depends_on=None) -> dict:
+    """Shared enqueue kwargs for every post-conversation chain job.
+
+    Centralises the three things each chain job needs so the three enqueue sites
+    (this module, conversation_controller reprocess, enqueue_memory_processing)
+    can't drift:
+
+    - ``retry``: bounded immediate re-enqueue, so a transient crash / worker death
+      doesn't permanently strand the job (``interval=0`` needs no rq-scheduler).
+    - ``on_failure``: emits a visible ``system_event`` + diagnostic breadcrumb when
+      the job fails or is abandoned (instead of failing silently).
+    - ``meta.failure_stage``: tells that callback which stage this job is.
+    - ``depends_on`` wrapped with ``allow_failure=True`` (see helper above).
+    """
+    # Lazy import: job_callbacks lives in the `workers` package, whose __init__
+    # imports back from this module — importing it at module top would create a
+    # circular import. By call time (enqueue) all modules are fully loaded.
+    from advanced_omi_backend.workers.job_callbacks import on_chain_job_failure
+
+    kwargs: dict = {
+        "retry": Retry(max=2, interval=0),
+        "on_failure": on_chain_job_failure,
+        "meta": {**meta, "failure_stage": stage},
+    }
+    dep = _as_allow_failure_dependency(depends_on)
+    if dep is not None:
+        kwargs["depends_on"] = dep
+    return kwargs
 
 
 def get_job_status_from_rq(job: Job) -> str:
@@ -146,16 +200,16 @@ def get_job_stats() -> Dict[str, Any]:
         "failed_jobs": failed_jobs,
         "canceled_jobs": canceled_jobs,
         "deferred_jobs": deferred_jobs,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
 def get_jobs(
     limit: int = 20,
     offset: int = 0,
-    queue_name: str = None,
-    job_type: str = None,
-    client_id: str = None,
+    queue_name: Optional[str] = None,
+    job_type: Optional[str] = None,
+    client_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Get jobs from a specific queue or all queues with optional filtering.
@@ -377,6 +431,194 @@ def all_jobs_complete_for_client(client_id: str) -> bool:
     return True
 
 
+# Job statuses that mean a speech-detection job is still live, so re-enqueuing
+# would create a duplicate detector for the same session.
+_LIVE_JOB_STATUSES = {"queued", "started", "deferred", "scheduled"}
+
+
+def _job_is_live(job_id: str) -> bool:
+    """True if the given job exists in Redis and hasn't terminated."""
+    try:
+        job = Job.fetch(job_id, connection=redis_conn)
+        return job.get_status(refresh=True) in _LIVE_JOB_STATUSES
+    except NoSuchJobError:
+        return False
+    except Exception:
+        return False
+
+
+def _speech_detection_job_is_live(job_id: str) -> bool:
+    """True if the given speech-detection job exists and hasn't terminated."""
+    return _job_is_live(job_id)
+
+
+def enqueue_audio_persistence(
+    session_id: str,
+    user_id: str,
+    client_id: str,
+    *,
+    always_persist: bool,
+) -> str:
+    """Single-flight enqueue of the per-session audio-persistence job.
+
+    The persistence job is SESSION-scoped — one consumer for the whole
+    ``audio:stream:{client_id}``, surviving WebSocket reconnects. A reconnect
+    re-runs ``start_streaming_jobs``; if a persistence job is already live we must
+    NOT enqueue a second one. Two persistence jobs share the same Redis consumer
+    name (``persistence-{session_id[:8]}``), so each new stream message is
+    delivered to only one of them — the audio gets split between the jobs, and the
+    speech-detected conversations created after the reconnect find no chunks under
+    their id and get deleted as ``audio_chunks_not_ready`` while their transcripts
+    are stranded on a different conversation.
+
+    The job id is deterministic per session, so liveness is checked by fetching it
+    directly; a short Redis mutex collapses a simultaneous reconnect burst into one
+    winner. Returns the live or newly-enqueued job id.
+    """
+    # Lazy import: circular dependency with the `workers` package (its __init__
+    # imports back from this module).
+    from advanced_omi_backend.workers.audio_jobs import audio_streaming_persistence_job
+
+    job_id = f"audio-persist_{session_id}"
+    lock_key = f"audio_persistence_enqueue_lock:{session_id}"
+
+    if _job_is_live(job_id):
+        logger.info(
+            f"⏭️ Audio persistence already live for session {session_id[:12]} "
+            f"({job_id}) — skipping duplicate enqueue (reconnect)"
+        )
+        return job_id
+
+    if not redis_conn.set(lock_key, "1", nx=True, ex=15):
+        logger.info(
+            f"⏭️ Concurrent audio-persistence enqueue in progress for session "
+            f"{session_id[:12]} — skipping"
+        )
+        return job_id
+    try:
+        # Re-check liveness under the mutex (another caller may have just enqueued).
+        if _job_is_live(job_id):
+            return job_id
+
+        audio_job = audio_queue.enqueue(
+            audio_streaming_persistence_job,
+            session_id,
+            user_id,
+            client_id,
+            always_persist,
+            job_timeout=86400,  # 24 hours for all-day sessions
+            ttl=None,  # No pre-run expiry (job can wait indefinitely in queue)
+            result_ttl=JOB_RESULT_TTL,  # Cleanup AFTER completion
+            failure_ttl=86400,  # Cleanup failed jobs after 24h
+            job_id=job_id,
+            description=f"Audio persistence for session {session_id}",
+            meta={"client_id": client_id, "session_level": True},
+        )
+        logger.info(
+            f"📥 RQ: Enqueued audio persistence job {audio_job.id} on audio queue "
+            f"(session {session_id[:12]})"
+        )
+        return audio_job.id
+    finally:
+        redis_conn.delete(lock_key)
+
+
+def enqueue_speech_detection(
+    session_id: str,
+    user_id: str,
+    client_id: str,
+    *,
+    reason: str = "restart",
+    replaces_current: bool = False,
+) -> Optional[str]:
+    """Single-flight enqueue of the per-session speech-detection job.
+
+    At most ONE speech-detection job may be live per session. Re-enqueuing while
+    one is already listening (a WebSocket reconnect, or several conversation-end
+    handlers firing at once) previously spawned a swarm of duplicate detectors
+    that raced to mark the actively-recording placeholder conversation as
+    ``transcription_failed``. This guards every restart path against that.
+
+    The current live job (if any) is tracked in ``speech_detection_job:{session_id}``;
+    a short Redis mutex collapses a simultaneous burst of callers into one winner.
+
+    Args:
+        replaces_current: set by the off-mode rotation path, where the caller IS
+            the current tracked job and is deliberately handing off to a successor
+            (so the liveness check would otherwise see itself and skip).
+
+    Returns the live or newly-enqueued job id, or None if it could not enqueue.
+    """
+    # Lazy import: circular dependency with the `workers` package (its __init__
+    # imports back from this module).
+    from advanced_omi_backend.workers.transcription_jobs import (
+        stream_speech_detection_job,
+    )
+
+    job_key = f"speech_detection_job:{session_id}"
+    lock_key = f"speech_detection_enqueue_lock:{session_id}"
+
+    def _tracked_id() -> Optional[str]:
+        val = redis_conn.get(job_key)
+        if isinstance(val, bytes):
+            return val.decode()
+        if isinstance(val, str):
+            return val
+        return None
+
+    if not replaces_current:
+        existing_id = _tracked_id()
+        if existing_id and _speech_detection_job_is_live(existing_id):
+            logger.info(
+                f"⏭️ Speech detection already live for session {session_id[:12]} "
+                f"({existing_id}) — skipping duplicate enqueue (reason={reason})"
+            )
+            return existing_id
+
+    # Collapse a concurrent-enqueue burst (several end handlers firing together)
+    # into a single winner. The loser skips; the winner records the new job in
+    # job_key so any later caller sees it live and also skips.
+    if not redis_conn.set(lock_key, "1", nx=True, ex=15):
+        logger.info(
+            f"⏭️ Concurrent speech-detection enqueue in progress for session "
+            f"{session_id[:12]} — skipping (reason={reason})"
+        )
+        return _tracked_id()
+    try:
+        if not replaces_current:
+            # Re-check liveness under the mutex (another caller may have just enqueued).
+            existing_id = _tracked_id()
+            if existing_id and _speech_detection_job_is_live(existing_id):
+                logger.info(
+                    f"⏭️ Speech detection became live for session {session_id[:12]} "
+                    f"while acquiring lock — skipping (reason={reason})"
+                )
+                return existing_id
+
+        speech_job = transcription_queue.enqueue(
+            stream_speech_detection_job,
+            session_id,
+            user_id,
+            client_id,
+            job_timeout=86400,  # 24 hours for all-day sessions
+            ttl=None,  # No pre-run expiry (job can wait indefinitely in queue)
+            result_ttl=JOB_RESULT_TTL,  # Cleanup AFTER completion
+            failure_ttl=86400,  # Cleanup failed jobs after 24h
+            job_id=f"speech-detect_{session_id}_{uuid.uuid4().hex[:8]}",
+            description="Listening for speech...",
+            meta={"client_id": client_id, "session_level": True},
+        )
+        # Track the live job for both single-flight and WebSocket cleanup.
+        redis_conn.set(job_key, speech_job.id, ex=86400)
+        logger.info(
+            f"📥 RQ: Enqueued speech detection job {speech_job.id} for session "
+            f"{session_id[:12]} (reason={reason})"
+        )
+        return speech_job.id
+    finally:
+        redis_conn.delete(lock_key)
+
+
 def start_streaming_jobs(
     session_id: str, user_id: str, client_id: str
 ) -> Dict[str, str]:
@@ -399,77 +641,41 @@ def start_streaming_jobs(
         - user_email is fetched from the database when needed.
         - always_persist setting is read from global config at enqueue time and passed to worker.
     """
-    from advanced_omi_backend.config import get_misc_settings
+    # Lazy import: circular dependency with the `workers` package (its __init__
+    # imports back from this module).
     from advanced_omi_backend.workers.audio_jobs import audio_streaming_persistence_job
-    from advanced_omi_backend.workers.transcription_jobs import (
-        stream_speech_detection_job,
-    )
 
     # Read always_persist from global config NOW (backend process has fresh config)
     misc_settings = get_misc_settings()
     always_persist = misc_settings.get("always_persist_enabled", False)
 
-    # Enqueue speech detection job
-    speech_job = transcription_queue.enqueue(
-        stream_speech_detection_job,
-        session_id,
-        user_id,
-        client_id,
-        job_timeout=86400,  # 24 hours for all-day sessions
-        ttl=None,  # No pre-run expiry (job can wait indefinitely in queue)
-        result_ttl=JOB_RESULT_TTL,  # Cleanup AFTER completion
-        failure_ttl=86400,  # Cleanup failed jobs after 24h
-        job_id=f"speech-detect_{session_id}",
-        description=f"Listening for speech...",
-        meta={"client_id": client_id, "session_level": True},
-    )
-    # Log job enqueue with TTL information for debugging
-    actual_ttl = redis_conn.ttl(f"rq:job:{speech_job.id}")
-    logger.info(f"📥 RQ: Enqueued speech detection job {speech_job.id}")
-    logger.info(
-        f"🔍 Job enqueue details: ID={speech_job.id}, "
-        f"job_timeout={speech_job.timeout}, result_ttl={speech_job.result_ttl}, "
-        f"failure_ttl={speech_job.failure_ttl}, redis_key_ttl={actual_ttl}, "
-        f"queue_length={transcription_queue.count}, client_id={client_id}"
+    # In "off" live-segmentation mode there is no live transcript to gate on, so batch
+    # transcription is the ONLY path to a transcript — and batch reads audio from
+    # MongoDB. always_persist=False would mean nothing is persisted (no speech signal
+    # to trigger it), so the audio would only ever exist in the soon-trimmed Redis
+    # stream and never get transcribed. Force persistence so off mode always has audio
+    # for batch; no-speech sessions are still hidden via post-batch soft-delete.
+    live_segmentation = misc_settings.get("live_segmentation", "streaming_stt")
+    if live_segmentation == "off" and not always_persist:
+        logger.info(
+            "🔒 live_segmentation=off → forcing always_persist=True so batch "
+            "transcription has persisted audio to read"
+        )
+        always_persist = True
+
+    # Enqueue speech detection job (single-flight: skips if one is already live
+    # for this session, e.g. on a WebSocket reconnect mid-session).
+    speech_job_id = (
+        enqueue_speech_detection(session_id, user_id, client_id, reason="session_start")
+        or ""
     )
 
-    # Store job ID for cleanup (keyed by client_id for easy WebSocket cleanup)
-    try:
-        redis_conn.set(
-            f"speech_detection_job:{client_id}", speech_job.id, ex=86400
-        )  # 24 hour TTL
-        logger.info(f"📌 Stored speech detection job ID for client {client_id}")
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to store job ID for {client_id}: {e}")
-
-    # Enqueue audio persistence job on dedicated audio queue
-    # NOTE: This job handles file rotation for multiple conversations automatically
-    # Runs for entire session, not tied to individual conversations
-    audio_job = audio_queue.enqueue(
-        audio_streaming_persistence_job,
-        session_id,
-        user_id,
-        client_id,
-        always_persist,
-        job_timeout=86400,  # 24 hours for all-day sessions
-        ttl=None,  # No pre-run expiry (job can wait indefinitely in queue)
-        result_ttl=JOB_RESULT_TTL,  # Cleanup AFTER completion
-        failure_ttl=86400,  # Cleanup failed jobs after 24h
-        job_id=f"audio-persist_{session_id}",
-        description=f"Audio persistence for session {session_id}",
-        meta={
-            "client_id": client_id,
-            "session_level": True,
-        },  # Mark as session-level job
-    )
-    # Log job enqueue with TTL information for debugging
-    actual_ttl = redis_conn.ttl(f"rq:job:{audio_job.id}")
-    logger.info(f"📥 RQ: Enqueued audio persistence job {audio_job.id} on audio queue")
-    logger.info(
-        f"🔍 Job enqueue details: ID={audio_job.id}, "
-        f"job_timeout={audio_job.timeout}, result_ttl={audio_job.result_ttl}, "
-        f"failure_ttl={audio_job.failure_ttl}, redis_key_ttl={actual_ttl}, "
-        f"queue_length={audio_queue.count}, client_id={client_id}"
+    # Enqueue audio persistence job on dedicated audio queue (single-flight: a
+    # reconnect mid-session reuses the live job instead of starting a second
+    # consumer that would split the audio stream). This job handles file rotation
+    # for multiple conversations and runs for the entire session.
+    audio_job_id = enqueue_audio_persistence(
+        session_id, user_id, client_id, always_persist=always_persist
     )
 
     # Notify frontend that streaming jobs are queued
@@ -483,7 +689,99 @@ def start_streaming_jobs(
         },
     )
 
-    return {"speech_detection": speech_job.id, "audio_persistence": audio_job.id}
+    return {"speech_detection": speech_job_id, "audio_persistence": audio_job_id}
+
+
+def _clear_post_conversation_chain(conversation_id: str) -> list:
+    """Delete any existing post-conversation chain jobs for a conversation.
+
+    The post-conversation jobs (speaker → memory → title/summary → event) use
+    deterministic job_ids keyed on the conversation. When the chain is
+    re-triggered (e.g. a transcript reprocess) while a previous chain is still
+    ``deferred``, re-enqueuing the same job_id with a *new* ``depends_on`` makes
+    RQ **accumulate** dependencies on the existing deferred job rather than
+    replacing it. If one upstream dependency then finishes and is evicted from
+    Redis before the others resolve, RQ never promotes the dependents and the
+    whole chain stays ``deferred`` forever (orphaned).
+
+    Deleting the stale chain first guarantees each re-enqueue starts fresh with
+    a single, correct dependency. Jobs that are currently ``started`` are left
+    alone so we never yank work out from under a running worker.
+
+    Returns the list of job_ids that were actually deleted (for logging).
+    """
+    suffix = conversation_id[:12]
+    job_ids = [
+        f"speaker_{suffix}",
+        f"memory_{suffix}",
+        f"title_summary_{suffix}",
+        f"event_complete_{suffix}",
+    ]
+    cleared = []
+    for job_id in job_ids:
+        try:
+            job = Job.fetch(job_id, connection=redis_conn)
+        except NoSuchJobError:
+            continue
+        if get_job_status_from_rq(job) == JobStatus.STARTED.value:
+            logger.warning(
+                f"⚠️  Not clearing post-conversation job {job_id} for "
+                f"{conversation_id[:8]}: currently running"
+            )
+            continue
+        try:
+            job.delete(remove_from_queue=True)
+            cleared.append(job_id)
+        except Exception as e:
+            logger.error(f"Failed to delete stale chain job {job_id}: {e}")
+    if cleared:
+        logger.info(
+            f"🧹 Cleared {len(cleared)} stale post-conversation job(s) for "
+            f"{conversation_id[:8]}: {cleared}"
+        )
+    return cleared
+
+
+# Statuses that mean a job is still occupying the chain (not yet terminal).
+_IN_FLIGHT_JOB_STATUSES = frozenset(
+    {
+        JobStatus.QUEUED.value,
+        JobStatus.STARTED.value,
+        JobStatus.DEFERRED.value,
+        JobStatus.SCHEDULED.value,
+    }
+)
+
+
+def conversation_edit_chain_in_flight(conversation_id: str) -> Optional[str]:
+    """Return an in-flight edit-chain job_id for this conversation, else None.
+
+    Several endpoints edit a conversation by creating a new transcript version and
+    enqueuing follow-up work under deterministic job_ids keyed on the conversation:
+
+    - ``reprocess_speakers`` → reprocess_speaker → memory → title_summary
+    - annotation apply (``/diarization/{id}/apply``, ``/{id}/apply``) → memory
+
+    Firing any of these again while a previous one is still running spawns overlapping
+    work that races on the conversation's full-document ``save()`` — a stale writer can
+    clobber a newer version's segments/metadata (e.g. lost speaker labels, an orphaned
+    stale ``active`` version). Callers use this as a single-flight guard: if an edit
+    chain is already live, don't create a new transcript version or enqueue more work.
+    """
+    suffix = conversation_id[:12]
+    job_ids = [
+        f"reprocess_speaker_{suffix}",
+        f"memory_{suffix}",
+        f"title_summary_{suffix}",
+    ]
+    for job_id in job_ids:
+        try:
+            job = Job.fetch(job_id, connection=redis_conn)
+        except NoSuchJobError:
+            continue
+        if get_job_status_from_rq(job) in _IN_FLIGHT_JOB_STATUSES:
+            return job_id
+    return None
 
 
 def start_post_conversation_jobs(
@@ -493,6 +791,9 @@ def start_post_conversation_jobs(
     depends_on_job=None,
     client_id: Optional[str] = None,
     end_reason: str = "file_upload",
+    skip_speaker_recognition: bool = False,
+    memory_cause: MemoryCause = MemoryCause.AUTO_EXTRACTION,
+    memory_strategy: UpdateStrategy = UpdateStrategy.FULL,
 ) -> Dict[str, str]:
     """
     Start post-conversation processing jobs after conversation is created.
@@ -513,16 +814,25 @@ def start_post_conversation_jobs(
         depends_on_job: Optional job dependency for first job (e.g., transcription for file uploads)
         client_id: Client ID for UI tracking
         end_reason: Reason conversation ended (e.g., 'file_upload', 'websocket_disconnect', 'user_stopped')
+        skip_speaker_recognition: Skip the speaker step even when enabled — used
+            by split/merge, whose transcripts already carry speaker labels
 
     Returns:
         Dict with job IDs for speaker_recognition, memory, title_summary, event_dispatch
     """
+    # Lazy import: circular dependency with the `workers` package (its __init__
+    # imports back from this module).
     from advanced_omi_backend.workers.conversation_jobs import (
         dispatch_conversation_complete_event_job,
         generate_title_summary_job,
     )
     from advanced_omi_backend.workers.memory_jobs import process_memory_job
     from advanced_omi_backend.workers.speaker_jobs import recognise_speakers_job
+
+    # Re-triggering the chain (e.g. transcript reprocess) must not stack new
+    # dependencies onto a previously-deferred chain — that orphans it forever.
+    # Clear any stale chain jobs first so each enqueue below starts fresh.
+    _clear_post_conversation_chain(conversation_id)
 
     version_id = transcript_version_id or str(uuid.uuid4())
 
@@ -543,6 +853,12 @@ def start_post_conversation_jobs(
     )
     speaker_job = None
 
+    if speaker_enabled and skip_speaker_recognition:
+        logger.info(
+            f"⏭️  Speaker recognition skipped by caller for conversation {conversation_id[:8]}"
+        )
+        speaker_enabled = False
+
     if speaker_enabled:
         speaker_job_id = f"speaker_{conversation_id[:12]}"
         logger.info(
@@ -555,10 +871,11 @@ def start_post_conversation_jobs(
             version_id,
             job_timeout=1200,  # 20 minutes
             result_ttl=JOB_RESULT_TTL,
-            depends_on=speaker_dependency,
             job_id=speaker_job_id,
             description=f"Speaker recognition for conversation {conversation_id[:8]}",
-            meta=job_meta,
+            **post_conv_enqueue_kwargs(
+                "speaker", job_meta, depends_on=speaker_dependency
+            ),
         )
         speaker_dependency = speaker_job  # Chain for next jobs
         if depends_on_job:
@@ -589,15 +906,23 @@ def start_post_conversation_jobs(
             f"🔍 DEBUG: Creating memory job with job_id={memory_job_id}, conversation_id={conversation_id[:12]}"
         )
 
+        # Memory job carries provenance (cause/strategy) on top of the shared meta.
+        memory_meta = {
+            **job_meta,
+            "cause": memory_cause.value,
+            "strategy": memory_strategy.value,
+        }
         memory_job = memory_queue.enqueue(
             process_memory_job,
             conversation_id,
             job_timeout=900,  # 15 minutes
             result_ttl=JOB_RESULT_TTL,
-            depends_on=speaker_dependency,  # Either speaker_job or upstream dependency
             job_id=memory_job_id,
             description=f"Memory extraction for conversation {conversation_id[:8]}",
-            meta=job_meta,
+            # Either speaker_job or upstream dependency
+            **post_conv_enqueue_kwargs(
+                "memory", memory_meta, depends_on=speaker_dependency
+            ),
         )
         if speaker_job:
             logger.info(
@@ -630,10 +955,11 @@ def start_post_conversation_jobs(
         conversation_id,
         job_timeout=300,  # 5 minutes
         result_ttl=JOB_RESULT_TTL,
-        depends_on=title_dependency,
         job_id=title_job_id,
         description=f"Generate title and summary for conversation {conversation_id[:8]}",
-        meta=job_meta,
+        **post_conv_enqueue_kwargs(
+            "title_summary", job_meta, depends_on=title_dependency
+        ),
     )
     if memory_job:
         logger.info(
@@ -676,12 +1002,13 @@ def start_post_conversation_jobs(
         end_reason,  # Use the end_reason parameter (defaults to 'file_upload' for backward compatibility)
         job_timeout=120,  # 2 minutes
         result_ttl=JOB_RESULT_TTL,
-        depends_on=(
-            event_dependencies if event_dependencies else None
-        ),  # Wait for jobs that were enqueued
         job_id=event_job_id,
         description=f"Dispatch conversation complete event ({end_reason}) for {conversation_id[:8]}",
-        meta=job_meta,
+        # Wait for whichever upstream jobs were enqueued; allow_failure so this
+        # finalizer still runs (and reconciles status) even if one failed.
+        **post_conv_enqueue_kwargs(
+            "event_complete", job_meta, depends_on=event_dependencies or None
+        ),
     )
 
     # Log event dispatch dependencies
@@ -781,10 +1108,6 @@ def get_queue_health() -> Dict[str, Any]:
 # needs tidying but works for now
 async def cleanup_stuck_stream_workers(request):
     """Clean up stuck Redis Stream consumers and pending messages from all active streams."""
-    import time
-
-    from fastapi.responses import JSONResponse
-
     try:
         # Get Redis client from request.app.state (initialized during startup)
         redis_client = request.app.state.redis_audio_stream

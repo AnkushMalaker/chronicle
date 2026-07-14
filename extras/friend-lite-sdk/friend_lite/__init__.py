@@ -4,6 +4,7 @@ from .neo1 import Neo1Connection
 from .uuids import (
     BATTERY_LEVEL_CHAR_UUID,
     BATTERY_SERVICE_UUID,
+    ELATO_SPEAKER_CHAR_UUID,
     FEATURE_HAPTIC,
     FEATURE_WIFI,
     FEATURES_CHAR_UUID,
@@ -24,6 +25,7 @@ from .wifi import WifiErrorCode
 __all__ = [
     "BATTERY_LEVEL_CHAR_UUID",
     "BATTERY_SERVICE_UUID",
+    "ELATO_SPEAKER_CHAR_UUID",
     "ButtonState",
     "FEATURE_HAPTIC",
     "FEATURE_WIFI",

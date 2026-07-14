@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import threading
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -22,6 +23,71 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 RELAY_PORT = int(os.getenv("RELAY_PORT", "8989"))
+
+
+class MemoryLogHandler(logging.Handler):
+    """Keep recent formatted log lines in memory for display in the menu bar UI."""
+
+    def __init__(self, capacity: int = 500) -> None:
+        super().__init__()
+        self.lines: deque = deque(maxlen=capacity)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.lines.append(self.format(record))
+        except Exception:
+            self.handleError(record)
+
+
+log_buffer = MemoryLogHandler()
+
+
+def _show_logs_dialog(title: str, lines) -> None:
+    """Show log lines in a scrollable modal dialog."""
+    # Lazy import: macOS-only (AppKit/Foundation, not available cross-platform)
+    from AppKit import (
+        NSAlert,
+        NSBezelBorder,
+        NSFont,
+        NSScrollView,
+        NSTextView,
+        NSViewWidthSizable,
+    )
+    from Foundation import NSMakeRect, NSMakeSize
+
+    text = "\n".join(lines) or "(no logs yet)"
+    width, height = 720, 380
+
+    scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
+    scroll.setHasVerticalScroller_(True)
+    scroll.setHasHorizontalScroller_(False)
+    scroll.setBorderType_(NSBezelBorder)
+    scroll.setAutohidesScrollers_(False)
+
+    content = scroll.contentSize()
+    text_view = NSTextView.alloc().initWithFrame_(
+        NSMakeRect(0, 0, content.width, content.height)
+    )
+    text_view.setMinSize_(NSMakeSize(0, content.height))
+    text_view.setMaxSize_(NSMakeSize(1e7, 1e7))
+    text_view.setVerticallyResizable_(True)
+    text_view.setHorizontallyResizable_(False)
+    text_view.setAutoresizingMask_(NSViewWidthSizable)
+    text_view.setEditable_(False)
+    text_view.setFont_(NSFont.userFixedPitchFontOfSize_(11))
+    text_view.textContainer().setContainerSize_(NSMakeSize(content.width, 1e7))
+    text_view.textContainer().setWidthTracksTextView_(True)
+    text_view.setString_(text)
+    text_view.scrollRangeToVisible_((len(text), 0))
+
+    scroll.setDocumentView_(text_view)
+
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_(title)
+    alert.setInformativeText_(f"Last {len(lines)} log line(s)")
+    alert.addButtonWithTitle_("Close")
+    alert.setAccessoryView_(scroll)
+    alert.runModal()
 
 
 # --- Shared state ------------------------------------------------------------
@@ -185,11 +251,13 @@ class RelayMenuApp(rumps.App):
 
         self.status_item = rumps.MenuItem("Status: Starting...", callback=None)
         self.toggle_item = rumps.MenuItem("Stop Relay", callback=self.on_toggle)
+        self.logs_item = rumps.MenuItem("View Logs", callback=self.on_view_logs)
 
         self.menu = [
             self.status_item,
             None,
             self.toggle_item,
+            self.logs_item,
             None,
         ]
 
@@ -230,19 +298,24 @@ class RelayMenuApp(rumps.App):
             logger.info("User starting relay")
             self.relay.start()
 
+    def on_view_logs(self, _sender) -> None:
+        """Show recent log output in a scrollable dialog."""
+        _show_logs_dialog("Chronicle Relay — Logs", list(log_buffer.lines))
+
 
 # --- Entry point --------------------------------------------------------------
 
 
 def main() -> None:
+    # Lazy import: macOS-only (AppKit, not available cross-platform)
     from AppKit import NSApplication
 
     NSApplication.sharedApplication().setActivationPolicy_(1)
 
-    logging.basicConfig(
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        level=logging.INFO,
-    )
+    log_format = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    logging.basicConfig(format=log_format, level=logging.INFO)
+    log_buffer.setFormatter(logging.Formatter(log_format))
+    logging.getLogger().addHandler(log_buffer)
     logging.getLogger("websockets").setLevel(logging.WARNING)
     logging.getLogger("aioesphomeapi").setLevel(logging.WARNING)
 

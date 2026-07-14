@@ -8,6 +8,11 @@ set -e
 
 echo "🚀 Starting Chronicle Backend..."
 
+# Use project virtualenv when available.
+if [ -f "/app/.venv/bin/activate" ]; then
+    . /app/.venv/bin/activate
+fi
+
 # Function to handle shutdown
 shutdown() {
     echo "🛑 Shutting down services..."

@@ -204,3 +204,91 @@ Conversation Closes On Inactivity Timeout And Restarts Speech Detection
     # Memory extraction job should be created
     ${memory_jobs}=    Get Jobs By Type And Conversation    process_memory_job    ${conversation_id}
     Log To Console    Memory jobs found: ${memory_jobs.__len__()}
+
+
+Live Transcript Available During Active Recording
+    [Documentation]    Verify that conversation has live-v0 transcript version
+    ...                while audio is still being streamed. The monitoring loop
+    ...                should create and update the live version in MongoDB.
+    ...
+    ...                Strategy: Send audio fast (no realtime pacing) to quickly
+    ...                trigger speech detection and conversation creation. Then keep
+    ...                sending small batches to keep the conversation alive while
+    ...                checking for live-v0 transcript in the database.
+    [Tags]    audio-streaming	conversation	requires-api-keys
+    [Timeout]    180s
+
+    ${device_name}=    Set Variable    ws-live-tx
+    ${stream_id}=    Open Audio Stream    device_name=${device_name}
+    ${client_id}=    Get Client ID From Device Name    ${device_name}
+
+    # Send initial batch fast to trigger speech detection quickly
+    Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=200
+
+    # Wait for conversation to be created (speech detection → open_conversation_job)
+    ${jobs}=    Wait Until Keyword Succeeds    60s    3s
+    ...    Job Type Exists For Client    open_conversation    ${client_id}
+    ${conv_meta}=    Set Variable    ${jobs}[0][meta]
+    ${conversation_id}=    Evaluate    $conv_meta.get('conversation_id', '')
+    Should Not Be Empty    ${conversation_id}    msg=Conversation ID not found in job meta
+
+    # Keep conversation alive by sending more audio while we check for live-v0
+    # Send audio in small bursts with polling between
+    FOR    ${i}    IN RANGE    10
+        # Send more audio to keep conversation active (prevents inactivity timeout)
+        Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=50
+
+        # Check if live transcript has appeared
+        ${status}=    Run Keyword And Return Status
+        ...    Conversation Should Have Live Transcript    ${conversation_id}
+        IF    ${status}
+            ${conversation}=    Conversation Should Have Live Transcript    ${conversation_id}
+            Log To Console    Live transcript found on iteration ${i}
+
+            # Verify transcript has actual content
+            Should Not Be Empty    ${conversation}[transcript]
+            ...    Live transcript should have text content
+
+            Log To Console    Live transcript verified: ${conversation}[transcript][:80]...
+            BREAK
+        END
+        Sleep    2s
+    END
+
+    Should Be True    ${status}    Live transcript (live-v0) was never created during active recording
+
+    [Teardown]    Run Keyword And Ignore Error    Close Audio Stream    ${stream_id}
+
+
+API Close Request Stops Active Conversation
+    [Documentation]    Verify that POST /api/conversations/{client_id}/close
+    ...                stops an active streaming conversation with end_reason=close_requested
+    [Tags]    audio-streaming	conversation	requires-api-keys
+    [Timeout]    120s
+
+    ${device_name}=    Set Variable    ws-api-close
+    ${stream_id}=    Open Audio Stream    device_name=${device_name}
+    ${client_id}=    Get Client ID From Device Name    ${device_name}
+
+    # Get baseline conversation jobs
+    ${baseline_jobs}=    Get Jobs By Type And Client    open_conversation    ${client_id}
+    ${baseline_count}=    Get Length    ${baseline_jobs}
+
+    # Send audio to create conversation
+    Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}
+    ...    num_chunks=200    realtime_pacing=True
+
+    # Wait for conversation job
+    ${jobs}=    Wait Until Keyword Succeeds    60s    3s
+    ...    Wait For New Job To Appear    open_conversation    ${client_id}    ${baseline_count}
+    ${conversation_id}=    Evaluate    $jobs[0]['meta'].get('conversation_id', '')
+    Should Not Be Empty    ${conversation_id}    msg=Conversation ID not found in job meta
+
+    # Close via API (POST directly on the admin session)
+    ${response}=    POST On Session    api    /api/conversations/${client_id}/close    expected_status=200
+
+    # Verify end_reason
+    Wait Until Keyword Succeeds    30s    2s
+    ...    Conversation Should Have End Reason    ${conversation_id}    close_requested
+
+    [Teardown]    Run Keyword And Ignore Error    Close Audio Stream    ${stream_id}

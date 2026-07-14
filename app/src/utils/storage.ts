@@ -1,12 +1,48 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Platform } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
 
 const LAST_CONNECTED_DEVICE_ID_KEY = 'LAST_CONNECTED_DEVICE_ID';
 const WEBSOCKET_URL_KEY = 'WEBSOCKET_URL_KEY';
 const DEEPGRAM_API_KEY_KEY = 'DEEPGRAM_API_KEY_KEY';
 const USER_ID_KEY = 'USER_ID_KEY';
 const AUTH_EMAIL_KEY = 'AUTH_EMAIL_KEY';
+const SERVICE_MANAGER_URL_KEY = 'SERVICE_MANAGER_URL_KEY';
+const AUTO_RECONNECT_ENABLED_KEY = 'AUTO_RECONNECT_ENABLED_KEY';
+// SecureStore keys must be alphanumeric + ._- (no other punctuation).
 const AUTH_PASSWORD_KEY = 'AUTH_PASSWORD_KEY';
 const JWT_TOKEN_KEY = 'JWT_TOKEN_KEY';
+const SERVICE_MANAGER_TOKEN_KEY = 'SERVICE_MANAGER_TOKEN_KEY';
+
+/**
+ * Secret storage helpers. Secrets (password, JWT) live in the OS keychain via
+ * expo-secure-store on native. SecureStore is unavailable on web, so there we
+ * fall back to AsyncStorage (the web build is dev-only).
+ */
+const secureAvailable = Platform.OS !== 'web';
+
+const secureSet = async (key: string, value: string): Promise<void> => {
+  if (secureAvailable) {
+    await SecureStore.setItemAsync(key, value);
+  } else {
+    await AsyncStorage.setItem(key, value);
+  }
+};
+
+const secureGet = async (key: string): Promise<string | null> => {
+  if (secureAvailable) {
+    return await SecureStore.getItemAsync(key);
+  }
+  return await AsyncStorage.getItem(key);
+};
+
+const secureRemove = async (key: string): Promise<void> => {
+  if (secureAvailable) {
+    await SecureStore.deleteItemAsync(key);
+  } else {
+    await AsyncStorage.removeItem(key);
+  }
+};
 
 export const saveLastConnectedDeviceId = async (deviceId: string | null): Promise<void> => {
   try {
@@ -139,14 +175,14 @@ export const getAuthEmail = async (): Promise<string | null> => {
   }
 };
 
-// Authentication Password
+// Authentication Password (SecureStore-backed)
 export const saveAuthPassword = async (password: string | null): Promise<void> => {
   try {
     if (password) {
-      await AsyncStorage.setItem(AUTH_PASSWORD_KEY, password);
+      await secureSet(AUTH_PASSWORD_KEY, password);
       console.log('[Storage] Auth password saved.'); // Don't log password for security
     } else {
-      await AsyncStorage.removeItem(AUTH_PASSWORD_KEY);
+      await secureRemove(AUTH_PASSWORD_KEY);
       console.log('[Storage] Auth password removed.');
     }
   } catch (error) {
@@ -156,7 +192,7 @@ export const saveAuthPassword = async (password: string | null): Promise<void> =
 
 export const getAuthPassword = async (): Promise<string | null> => {
   try {
-    const password = await AsyncStorage.getItem(AUTH_PASSWORD_KEY);
+    const password = await secureGet(AUTH_PASSWORD_KEY);
     if (password) {
       console.log('[Storage] Retrieved auth password.');
     }
@@ -167,14 +203,14 @@ export const getAuthPassword = async (): Promise<string | null> => {
   }
 };
 
-// JWT Token
+// JWT Token (SecureStore-backed)
 export const saveJwtToken = async (token: string | null): Promise<void> => {
   try {
     if (token) {
-      await AsyncStorage.setItem(JWT_TOKEN_KEY, token);
+      await secureSet(JWT_TOKEN_KEY, token);
       console.log('[Storage] JWT token saved.');
     } else {
-      await AsyncStorage.removeItem(JWT_TOKEN_KEY);
+      await secureRemove(JWT_TOKEN_KEY);
       console.log('[Storage] JWT token removed.');
     }
   } catch (error) {
@@ -184,7 +220,7 @@ export const saveJwtToken = async (token: string | null): Promise<void> => {
 
 export const getJwtToken = async (): Promise<string | null> => {
   try {
-    const token = await AsyncStorage.getItem(JWT_TOKEN_KEY);
+    const token = await secureGet(JWT_TOKEN_KEY);
     if (token) {
       console.log('[Storage] Retrieved JWT token.');
     }
@@ -195,13 +231,92 @@ export const getJwtToken = async (): Promise<string | null> => {
   }
 };
 
-// Clear all authentication data
+// Auto-reconnect preference: true (default) = stay connected / persistent
+// reconnect; false = connect once (no auto-reconnect on drop).
+export const saveAutoReconnectEnabled = async (enabled: boolean): Promise<void> => {
+  try {
+    await AsyncStorage.setItem(AUTO_RECONNECT_ENABLED_KEY, enabled ? '1' : '0');
+  } catch (error) {
+    console.error('[Storage] Error saving auto-reconnect preference:', error);
+  }
+};
+
+export const getAutoReconnectEnabled = async (): Promise<boolean> => {
+  try {
+    const v = await AsyncStorage.getItem(AUTO_RECONNECT_ENABLED_KEY);
+    return v === null ? true : v === '1'; // default ON
+  } catch (error) {
+    console.error('[Storage] Error retrieving auto-reconnect preference:', error);
+    return true;
+  }
+};
+
+// Service Manager URL (non-secret; derivable from backend host but persisted
+// when delivered via QR so "start the backend" works when the backend is down).
+export const saveServiceManagerUrl = async (url: string | null): Promise<void> => {
+  try {
+    if (url) {
+      await AsyncStorage.setItem(SERVICE_MANAGER_URL_KEY, url);
+      console.log('[Storage] Service manager URL saved:', url);
+    } else {
+      await AsyncStorage.removeItem(SERVICE_MANAGER_URL_KEY);
+    }
+  } catch (error) {
+    console.error('[Storage] Error saving service manager URL:', error);
+  }
+};
+
+export const getServiceManagerUrl = async (): Promise<string | null> => {
+  try {
+    return await AsyncStorage.getItem(SERVICE_MANAGER_URL_KEY);
+  } catch (error) {
+    console.error('[Storage] Error retrieving service manager URL:', error);
+    return null;
+  }
+};
+
+// Service Manager bearer token (secret → SecureStore).
+export const saveServiceManagerToken = async (token: string | null): Promise<void> => {
+  try {
+    if (token) {
+      await secureSet(SERVICE_MANAGER_TOKEN_KEY, token);
+      console.log('[Storage] Service manager token saved.');
+    } else {
+      await secureRemove(SERVICE_MANAGER_TOKEN_KEY);
+    }
+  } catch (error) {
+    console.error('[Storage] Error saving service manager token:', error);
+  }
+};
+
+export const getServiceManagerToken = async (): Promise<string | null> => {
+  try {
+    return await secureGet(SERVICE_MANAGER_TOKEN_KEY);
+  } catch (error) {
+    console.error('[Storage] Error retrieving service manager token:', error);
+    return null;
+  }
+};
+
+// Log out: clear the token only. Email and password are kept so re-login is one
+// tap (and silent refresh can re-authenticate). Use clearAuthData() to fully
+// forget the account.
+export const clearToken = async (): Promise<void> => {
+  try {
+    await secureRemove(JWT_TOKEN_KEY);
+    console.log('[Storage] JWT token cleared (logout).');
+  } catch (error) {
+    console.error('[Storage] Error clearing token:', error);
+  }
+};
+
+// Forget account: clear ALL authentication data (email + password + token).
 export const clearAuthData = async (): Promise<void> => {
   try {
     await Promise.all([
       AsyncStorage.removeItem(AUTH_EMAIL_KEY),
-      AsyncStorage.removeItem(AUTH_PASSWORD_KEY),
-      AsyncStorage.removeItem(JWT_TOKEN_KEY)
+      secureRemove(AUTH_PASSWORD_KEY),
+      secureRemove(JWT_TOKEN_KEY),
     ]);
     console.log('[Storage] All auth data cleared.');
   } catch (error) {

@@ -237,7 +237,7 @@ for i, worker in enumerate(workers, 1):
 
 # Capture logs from all services
 print_info "Capturing service logs..."
-SERVICES=(chronicle-backend-test workers-test mongo-test redis-test qdrant-test speaker-service-test)
+SERVICES=(chronicle-backend-test workers-test mongo-test redis-test speaker-service-test)
 for service in "${SERVICES[@]}"; do
     docker compose -f docker-compose-test.yml logs --tail=200 "$service" > "$LOG_DIR/${service}.log" 2>&1 || true
 done

@@ -1,8 +1,10 @@
+import { useState, useEffect } from 'react'
 import { Link, useLocation, Outlet } from 'react-router-dom'
-import { Music, MessageSquare, MessageCircle, Brain, Users, Upload, Settings, LogOut, Sun, Moon, Shield, Radio, Layers, Puzzle, Zap, Activity } from 'lucide-react'
+import { Music, MessageSquare, MessageCircle, Users, Upload, Settings, LogOut, Sun, Moon, Shield, Radio, Layers, Puzzle, Zap, Activity, Network, Sparkles, Target, ScrollText, AlertTriangle, Menu, X } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
 import { useSSE, SSEStatus } from '../../hooks/useSSE'
+import { useSystemEventsSummary } from '../../hooks/useSystemEvents'
 import GlobalRecordingIndicator from './GlobalRecordingIndicator'
 import UserLoopModal from '../UserLoopModal'
 
@@ -11,39 +13,86 @@ export default function Layout() {
   const { user, logout, isAdmin } = useAuth()
   const { isDark, toggleTheme } = useTheme()
 
+  // Mobile navigation drawer (below the lg breakpoint the sidebar is hidden)
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+
+  // Close the drawer whenever the route changes (e.g. after tapping a link)
+  useEffect(() => {
+    setMobileNavOpen(false)
+  }, [location.pathname])
+
   // Single SSE connection for real-time updates across all pages
   const sseStatus = useSSE()
+
+  // Live unacknowledged-error count for the nav badge (admin only; refreshed by
+  // the SSE 'system.error' invalidation in useSSE).
+  const { data: sysSummary } = useSystemEventsSummary(24, isAdmin)
+  const unackedErrors = sysSummary?.unacked ?? 0
 
   const navigationItems = [
     { path: '/live-record', label: 'Live Record', icon: Radio },
     { path: '/chat', label: 'Chat', icon: MessageCircle },
     { path: '/conversations', label: 'Conversations', icon: MessageSquare },
-    { path: '/memories', label: 'Memories', icon: Brain },
+    { path: '/memory-ledger', label: 'Memory Ledger', icon: ScrollText },
     { path: '/users', label: 'User Management', icon: Users },
 
     ...(isAdmin ? [
       { path: '/upload', label: 'Upload Audio', icon: Upload },
+      { path: '/data-audit', label: 'Data Audit', icon: Sparkles },
+      { path: '/wakeword-lab', label: 'Wake-Word Lab', icon: Target },
       { path: '/queue', label: 'Queue & Events', icon: Layers },
       { path: '/plugins', label: 'Plugins', icon: Puzzle },
       { path: '/finetuning', label: 'Fine-tuning', icon: Zap },
+      { path: '/network', label: 'Network', icon: Network },
       { path: '/system', label: 'System Status', icon: Activity },
+      { path: '/system-errors', label: 'System Errors', icon: AlertTriangle },
       { path: '/settings', label: 'Settings', icon: Settings },
     ] : []),
   ]
+
+  // Shared nav <li> items rendered in both the desktop sidebar and the mobile drawer
+  const navLinks = navigationItems.map(({ path, label, icon: Icon }) => (
+    <li key={path}>
+      <Link
+        to={path}
+        className={`flex items-center space-x-3 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+          location.pathname === path
+            ? 'bg-blue-100 text-blue-900 dark:bg-blue-900 dark:text-blue-100'
+            : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
+        }`}
+      >
+        <Icon className="h-5 w-5" />
+        <span>{label}</span>
+        {path === '/system-errors' && unackedErrors > 0 && (
+          <span className="ml-auto inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-red-600 px-1.5 py-0.5 text-xs font-semibold text-white" title="Unacknowledged events">
+            {unackedErrors > 99 ? '99+' : unackedErrors}
+          </span>
+        )}
+      </Link>
+    </li>
+  ))
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
       {/* Header */}
       <header className="bg-white dark:bg-gray-800 shadow-sm border-b border-gray-200 dark:border-gray-700">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between items-center h-16">
-            <div className="flex items-center space-x-4">
-              <Music className="h-8 w-8 text-blue-600" />
-              <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+          <div className="flex justify-between items-center h-16 gap-2">
+            <div className="flex items-center space-x-2 sm:space-x-4 min-w-0">
+              {/* Hamburger — opens the nav drawer on mobile only */}
+              <button
+                onClick={() => setMobileNavOpen(true)}
+                className="lg:hidden p-2 -ml-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300"
+                aria-label="Open navigation menu"
+              >
+                <Menu className="h-6 w-6" />
+              </button>
+              <Music className="h-8 w-8 text-blue-600 flex-shrink-0" />
+              <h1 className="text-base sm:text-xl font-semibold text-gray-900 dark:text-gray-100 whitespace-nowrap truncate">
                 Chronicle Dashboard
               </h1>
             </div>
-            <div className="flex items-center space-x-4">
+            <div className="flex items-center space-x-2 sm:space-x-4 flex-shrink-0">
               {/* SSE connection status */}
               <SSEIndicator status={sseStatus} />
 
@@ -58,55 +107,72 @@ export default function Layout() {
                 {isDark ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
               </button>
 
-              {/* User info */}
-              <div className="flex items-center space-x-2 text-sm text-gray-700 dark:text-gray-300">
+              {/* User info — hidden on small screens to avoid overflow */}
+              <div className="hidden md:flex items-center space-x-2 text-sm text-gray-700 dark:text-gray-300">
                 <div className="flex items-center space-x-1">
                   {isAdmin && <Shield className="h-4 w-4 text-blue-600" />}
-                  <span>{user?.name || user?.email}</span>
+                  <span className="truncate max-w-[160px]">{user?.name || user?.email}</span>
                 </div>
               </div>
 
               <button
                 onClick={logout}
-                className="flex items-center space-x-2 px-3 py-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors text-gray-600 dark:text-gray-300"
+                className="flex items-center space-x-2 px-2 sm:px-3 py-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors text-gray-600 dark:text-gray-300"
                 aria-label="Logout"
               >
-                <LogOut className="h-4 w-4" />
-                <span className="text-sm">Logout</span>
+                <LogOut className="h-5 w-5 sm:h-4 sm:w-4" />
+                <span className="hidden sm:inline text-sm">Logout</span>
               </button>
             </div>
           </div>
         </div>
       </header>
 
-      <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      {/* Mobile navigation drawer */}
+      {mobileNavOpen && (
+        <div className="lg:hidden fixed inset-0 z-50">
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-black/50"
+            onClick={() => setMobileNavOpen(false)}
+            aria-hidden="true"
+          />
+          {/* Drawer panel */}
+          <nav className="absolute left-0 top-0 h-full w-72 max-w-[85%] bg-white dark:bg-gray-800 shadow-xl flex flex-col">
+            <div className="flex items-center justify-between h-16 px-4 border-b border-gray-200 dark:border-gray-700">
+              <div className="flex items-center space-x-2">
+                <Music className="h-6 w-6 text-blue-600" />
+                <span className="font-semibold text-gray-900 dark:text-gray-100">Chronicle</span>
+              </div>
+              <button
+                onClick={() => setMobileNavOpen(false)}
+                className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300"
+                aria-label="Close navigation menu"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+            <ul className="flex-1 overflow-y-auto p-4 space-y-1">
+              {navLinks}
+            </ul>
+          </nav>
+        </div>
+      )}
+
+      <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-4 lg:py-8">
         <div className="flex flex-col lg:flex-row gap-8">
-          {/* Sidebar Navigation */}
-          <nav className="lg:w-64 flex-shrink-0">
+          {/* Sidebar Navigation — desktop only; mobile uses the drawer above */}
+          <nav className="hidden lg:block lg:w-64 flex-shrink-0">
             <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-4">
               <ul className="space-y-2">
-                {navigationItems.map(({ path, label, icon: Icon }) => (
-                  <li key={path}>
-                    <Link
-                      to={path}
-                      className={`flex items-center space-x-3 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                        location.pathname === path
-                          ? 'bg-blue-100 text-blue-900 dark:bg-blue-900 dark:text-blue-100'
-                          : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
-                      }`}
-                    >
-                      <Icon className="h-5 w-5" />
-                      <span>{label}</span>
-                    </Link>
-                  </li>
-                ))}
+                {navLinks}
               </ul>
             </div>
           </nav>
 
           {/* Main Content */}
-          <main className="flex-1">
-            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-6">
+          <main className="flex-1 min-w-0">
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-4 sm:p-6">
               <Outlet />
             </div>
           </main>
@@ -117,7 +183,7 @@ export default function Layout() {
       <footer className="bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 mt-auto">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
           <div className="text-center text-sm text-gray-500 dark:text-gray-400">
-            🎵 Chronicle Dashboard v1.0 | AI-powered personal audio system
+            Chronicle — understand everything, everywhere, all at once.
           </div>
         </div>
       </footer>

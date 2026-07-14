@@ -9,6 +9,7 @@ This module provides:
 
 import asyncio
 import logging
+import os
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ import redis.asyncio as redis_async
 
 from advanced_omi_backend.prompt_defaults import register_all_defaults
 from advanced_omi_backend.prompt_registry import get_prompt_registry
+from advanced_omi_backend.redis_factory import create_async_redis
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +37,16 @@ async def _ensure_beanie_initialized():
         if _beanie_initialized:
             return
         try:
-            import os
-
+            # Lazy import: Beanie + Mongo drivers + document models are only pulled in
+            # when an RQ worker process first needs them, so importing this module
+            # (e.g. for BaseRQJob/async_job) doesn't drag in the DB stack.
             from beanie import init_beanie
             from motor.motor_asyncio import AsyncIOMotorClient
             from pymongo.errors import ConfigurationError
 
             from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
             from advanced_omi_backend.models.conversation import Conversation
+            from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
             from advanced_omi_backend.models.user import User
             from advanced_omi_backend.models.waveform import WaveformData
 
@@ -61,7 +65,13 @@ async def _ensure_beanie_initialized():
             # Initialize Beanie
             await init_beanie(
                 database=database,
-                document_models=[User, Conversation, AudioChunkDocument, WaveformData],
+                document_models=[
+                    User,
+                    Conversation,
+                    AudioChunkDocument,
+                    WaveformData,
+                    MemoryAuditEntry,
+                ],
             )
 
             _beanie_initialized = True
@@ -273,11 +283,7 @@ def async_job(
 
                         # Create Redis client if requested
                         if redis:
-                            from advanced_omi_backend.controllers.queue_controller import (
-                                REDIS_URL,
-                            )
-
-                            redis_client = redis_async.from_url(REDIS_URL)
+                            redis_client = create_async_redis()
                             kwargs["redis_client"] = redis_client
                             logger.debug(f"Redis client created")
 

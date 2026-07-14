@@ -37,6 +37,8 @@ Base = declarative_base()
 
 def init_db():
     """Initialize the database, creating all tables."""
+    # Lazy import: models.py does `from . import Base`, which would be a
+    # circular import if this were hoisted above the Base definition above.
     from . import models  # Import models to register them
 
     Base.metadata.create_all(bind=engine)

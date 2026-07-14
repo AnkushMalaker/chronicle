@@ -13,13 +13,16 @@ All FFmpeg operations use subprocess with proper error handling and cleanup.
 import asyncio
 import io
 import logging
-import tempfile
 import time
 import wave
 from pathlib import Path
 from typing import List, Optional
 
+from bson import Binary
+
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
+from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.waveform import WaveformData
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +34,7 @@ async def encode_pcm_to_opus(
     bitrate: int = 24,
 ) -> bytes:
     """
-    Encode raw PCM audio to Opus format using FFmpeg.
+    Encode raw PCM audio to Opus format using FFmpeg with stdin/stdout pipes.
 
     Args:
         pcm_data: Raw PCM audio bytes (signed 16-bit little-endian)
@@ -44,86 +47,52 @@ async def encode_pcm_to_opus(
 
     Raises:
         RuntimeError: If FFmpeg encoding fails
-
-    Example:
-        >>> pcm_bytes = b"..."  # 10 seconds of 16kHz mono PCM
-        >>> opus_bytes = await encode_pcm_to_opus(pcm_bytes)
-        >>> # opus_bytes is ~30KB vs 320KB PCM (94% reduction)
     """
-    # Create temporary files for FFmpeg I/O
-    with tempfile.NamedTemporaryFile(
-        suffix=".pcm", delete=False
-    ) as pcm_file, tempfile.NamedTemporaryFile(
-        suffix=".opus", delete=False
-    ) as opus_file:
+    # FFmpeg: read PCM from stdin, write Opus to stdout
+    # -f ogg wraps opus in an ogg container for stdout piping
+    cmd = [
+        "ffmpeg",
+        "-f",
+        "s16le",
+        "-ar",
+        str(sample_rate),
+        "-ac",
+        str(channels),
+        "-i",
+        "pipe:0",
+        "-c:a",
+        "libopus",
+        "-b:a",
+        f"{bitrate}k",
+        "-vbr",
+        "on",
+        "-application",
+        "voip",
+        "-f",
+        "ogg",
+        "pipe:1",
+    ]
 
-        pcm_path = Path(pcm_file.name)
-        opus_path = Path(opus_file.name)
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
 
-        try:
-            # Write PCM data to temp file
-            pcm_file.write(pcm_data)
-            pcm_file.flush()
+    stdout, stderr = await process.communicate(input=pcm_data)
 
-            # FFmpeg command: PCM → Opus
-            # -f s16le: signed 16-bit little-endian PCM
-            # -ar: sample rate
-            # -ac: audio channels
-            # -c:a libopus: Opus encoder
-            # -b:a: bitrate
-            # -vbr on: variable bitrate for better quality
-            # -application voip: optimize for speech
-            cmd = [
-                "ffmpeg",
-                "-f",
-                "s16le",
-                "-ar",
-                str(sample_rate),
-                "-ac",
-                str(channels),
-                "-i",
-                str(pcm_path),
-                "-c:a",
-                "libopus",
-                "-b:a",
-                f"{bitrate}k",
-                "-vbr",
-                "on",
-                "-application",
-                "voip",
-                "-y",  # Overwrite output
-                str(opus_path),
-            ]
+    if process.returncode != 0:
+        error_msg = stderr.decode() if stderr else "Unknown error"
+        logger.error(f"FFmpeg Opus encoding failed: {error_msg}")
+        raise RuntimeError(f"Opus encoding failed: {error_msg}")
 
-            # Run FFmpeg
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+    logger.debug(
+        f"Encoded PCM ({len(pcm_data)} bytes) → Opus ({len(stdout)} bytes), "
+        f"compression ratio: {len(stdout)/len(pcm_data):.3f}"
+    )
 
-            stdout, stderr = await process.communicate()
-
-            if process.returncode != 0:
-                error_msg = stderr.decode() if stderr else "Unknown error"
-                logger.error(f"FFmpeg Opus encoding failed: {error_msg}")
-                raise RuntimeError(f"Opus encoding failed: {error_msg}")
-
-            # Read Opus output
-            with open(opus_path, "rb") as f:
-                opus_data = f.read()
-
-            logger.debug(
-                f"Encoded PCM ({len(pcm_data)} bytes) → Opus ({len(opus_data)} bytes), "
-                f"compression ratio: {len(opus_data)/len(pcm_data):.3f}"
-            )
-
-            return opus_data
-
-        finally:
-            # Cleanup temporary files
-            pcm_path.unlink(missing_ok=True)
-            opus_path.unlink(missing_ok=True)
+    return stdout
 
 
 async def decode_opus_to_pcm(
@@ -132,10 +101,10 @@ async def decode_opus_to_pcm(
     channels: int = 1,
 ) -> bytes:
     """
-    Decode Opus audio to raw PCM format using FFmpeg.
+    Decode Opus audio to raw PCM format using FFmpeg with stdin/stdout pipes.
 
     Args:
-        opus_data: Opus-encoded audio bytes
+        opus_data: Opus-encoded audio bytes (ogg/opus container)
         sample_rate: Target sample rate in Hz (default: 16000)
         channels: Target number of channels (default: 1 for mono)
 
@@ -144,74 +113,38 @@ async def decode_opus_to_pcm(
 
     Raises:
         RuntimeError: If FFmpeg decoding fails
-
-    Example:
-        >>> opus_bytes = b"..."  # Opus-encoded audio
-        >>> pcm_bytes = await decode_opus_to_pcm(opus_bytes)
-        >>> # pcm_bytes can be played or concatenated
     """
-    # Create temporary files for FFmpeg I/O
-    with tempfile.NamedTemporaryFile(
-        suffix=".opus", delete=False
-    ) as opus_file, tempfile.NamedTemporaryFile(
-        suffix=".pcm", delete=False
-    ) as pcm_file:
+    # FFmpeg: read Opus from stdin, write PCM to stdout
+    cmd = [
+        "ffmpeg",
+        "-i",
+        "pipe:0",
+        "-f",
+        "s16le",
+        "-ar",
+        str(sample_rate),
+        "-ac",
+        str(channels),
+        "pipe:1",
+    ]
 
-        opus_path = Path(opus_file.name)
-        pcm_path = Path(pcm_file.name)
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
 
-        try:
-            # Write Opus data to temp file
-            opus_file.write(opus_data)
-            opus_file.flush()
+    stdout, stderr = await process.communicate(input=opus_data)
 
-            # FFmpeg command: Opus → PCM
-            # -i: input Opus file
-            # -f s16le: output as signed 16-bit little-endian PCM
-            # -ar: resample to target sample rate
-            # -ac: convert to target channel count
-            cmd = [
-                "ffmpeg",
-                "-i",
-                str(opus_path),
-                "-f",
-                "s16le",
-                "-ar",
-                str(sample_rate),
-                "-ac",
-                str(channels),
-                "-y",  # Overwrite output
-                str(pcm_path),
-            ]
+    if process.returncode != 0:
+        error_msg = stderr.decode() if stderr else "Unknown error"
+        logger.error(f"FFmpeg Opus decoding failed: {error_msg}")
+        raise RuntimeError(f"Opus decoding failed: {error_msg}")
 
-            # Run FFmpeg
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+    logger.debug(f"Decoded Opus ({len(opus_data)} bytes) → PCM ({len(stdout)} bytes)")
 
-            stdout, stderr = await process.communicate()
-
-            if process.returncode != 0:
-                error_msg = stderr.decode() if stderr else "Unknown error"
-                logger.error(f"FFmpeg Opus decoding failed: {error_msg}")
-                raise RuntimeError(f"Opus decoding failed: {error_msg}")
-
-            # Read PCM output
-            with open(pcm_path, "rb") as f:
-                pcm_data = f.read()
-
-            logger.debug(
-                f"Decoded Opus ({len(opus_data)} bytes) → PCM ({len(pcm_data)} bytes)"
-            )
-
-            return pcm_data
-
-        finally:
-            # Cleanup temporary files
-            opus_path.unlink(missing_ok=True)
-            pcm_path.unlink(missing_ok=True)
+    return stdout
 
 
 async def build_wav_from_pcm(
@@ -286,10 +219,13 @@ async def retrieve_audio_chunks(
         >>> # Get chunks 5-14 (10 chunks starting at index 5)
         >>> chunks = await retrieve_audio_chunks("550e8400-e29b-41d4...", start_index=5, limit=10)
     """
-    # Build query
+    # Build query. Exclude soft-deleted chunks: a soft-delete (conversation
+    # delete, or the de-duplication repair for overlapping reconnect cycles)
+    # must not resurface in reconstructed audio.
     query = AudioChunkDocument.find(
         AudioChunkDocument.conversation_id == conversation_id,
         AudioChunkDocument.chunk_index >= start_index,
+        AudioChunkDocument.deleted == False,  # noqa: E712 (Beanie needs ==)
     )
 
     # Apply limit if specified
@@ -307,42 +243,198 @@ async def retrieve_audio_chunks(
     return chunks
 
 
+def audio_cache_duration_matches(cached_seconds: float, current_seconds: float) -> bool:
+    """Whether a cache built for ``cached_seconds`` still matches the conversation's
+    current audio duration (within a small tolerance for partial final chunks).
+
+    Caches derived from the audio-chunk set (waveform, vad_analysis) become stale
+    when the chunk set changes in place (e.g. the reconnect-duplicate dedup). The
+    serving paths use this to validate the cache against the source of truth
+    (``Conversation.audio_total_duration``) and regenerate/ignore it when stale.
+    """
+    tolerance = max(2.0, 0.02 * max(cached_seconds, current_seconds))
+    return abs((cached_seconds or 0.0) - (current_seconds or 0.0)) <= tolerance
+
+
+async def invalidate_conversation_audio_caches(conversation_id: str) -> dict:
+    """Drop caches derived from a conversation's audio chunks (waveform + the
+    vad_analysis summary) so they regenerate from the current chunk set.
+
+    Call this whenever a conversation's chunk set changes IN PLACE (same
+    conversation_id) — e.g. a re-chunk/trim or a manual dedup repair. Split/merge
+    move chunks to fresh conversation_ids, so children regenerate naturally and
+    don't need this. Lazy regeneration happens on next read.
+    """
+    waveforms_deleted = (
+        await WaveformData.find(
+            WaveformData.conversation_id == conversation_id
+        ).delete()
+    ).deleted_count
+
+    vad_cleared = False
+    conv = await Conversation.find_one(Conversation.conversation_id == conversation_id)
+    if conv is not None and conv.vad_analysis is not None:
+        conv.vad_analysis = None
+        await conv.save()
+        vad_cleared = True
+
+    return {"waveforms_deleted": waveforms_deleted, "vad_cleared": vad_cleared}
+
+
+async def get_resume_position(conversation_id: str) -> tuple[int, float]:
+    """Next (chunk_index, start_time) for appending audio to a conversation.
+
+    Returns (0, 0.0) when the conversation has no audio yet. When it already has
+    chunks — e.g. a WebSocket reconnect re-attaches a persistence cycle to an
+    ``always_persist`` placeholder a previous cycle already wrote to — resume from
+    the end so new chunks APPEND with a continuous chunk_index/timeline instead of
+    restarting at 0. Restarting at 0 produced overlapping duplicate chunks under
+    one conversation_id, which corrupts reconstruction (chunks are read sorted by
+    chunk_index, so duplicates interleave) and silently truncates playback. The
+    ``conversation.audio_chunks_count`` ``max()`` guard only masked the count; this
+    fixes the underlying data.
+    """
+    last = (
+        await AudioChunkDocument.find(
+            AudioChunkDocument.conversation_id == conversation_id,
+            AudioChunkDocument.deleted == False,  # noqa: E712 (Beanie needs ==)
+        )
+        .sort("-chunk_index")
+        .first_or_none()
+    )
+    if last is None:
+        return 0, 0.0
+    return last.chunk_index + 1, last.end_time
+
+
 async def concatenate_chunks_to_pcm(
     chunks: List[AudioChunkDocument],
 ) -> bytes:
     """
     Decode and concatenate multiple audio chunks into a single PCM buffer.
 
+    Concatenates ogg/opus data from all chunks and decodes in a single ffmpeg
+    call, avoiding per-chunk subprocess overhead.
+
     Args:
         chunks: List of AudioChunkDocument instances (should be pre-sorted)
 
     Returns:
         Concatenated PCM audio bytes
-
-    Example:
-        >>> chunks = await retrieve_audio_chunks(conversation_id)
-        >>> pcm_data = await concatenate_chunks_to_pcm(chunks)
-        >>> wav_data = await build_wav_from_pcm(pcm_data)
     """
     if not chunks:
         return b""
 
-    pcm_buffer = bytearray()
-
-    for chunk in chunks:
-        # Decode Opus → PCM
-        pcm_data = await decode_opus_to_pcm(
-            opus_data=chunk.audio_data,
-            sample_rate=chunk.sample_rate,
-            channels=chunk.channels,
+    if len(chunks) == 1:
+        return await decode_opus_to_pcm(
+            opus_data=chunks[0].audio_data,
+            sample_rate=chunks[0].sample_rate,
+            channels=chunks[0].channels,
         )
 
-        # Append to buffer
-        pcm_buffer.extend(pcm_data)
+    # Concatenate ogg/opus containers into a chained ogg stream.
+    # ffmpeg handles chained ogg streams natively — one decode call for all chunks.
+    combined_opus = b"".join(bytes(chunk.audio_data) for chunk in chunks)
 
-    logger.debug(f"Concatenated {len(chunks)} chunks → {len(pcm_buffer)} bytes PCM")
+    pcm_data = await decode_opus_to_pcm(
+        opus_data=combined_opus,
+        sample_rate=chunks[0].sample_rate,
+        channels=chunks[0].channels,
+    )
 
-    return bytes(pcm_buffer)
+    logger.debug(f"Batch decoded {len(chunks)} chunks → {len(pcm_data)} bytes PCM")
+
+    return pcm_data
+
+
+async def get_trimmed_opus_for_time_range(
+    conversation_id: str, start_time: float, end_time: float
+) -> bytes:
+    """
+    Get exact-trimmed ogg/opus audio for a time range.
+
+    Decodes the stored chunks overlapping the range, clips the PCM to the
+    exact boundaries, and re-encodes as a single ogg/opus stream. Raw chunk
+    concatenation is not usable here: it is chunk-aligned (~10s granularity)
+    and produces a chained ogg stream, which browsers stop playing after the
+    first link.
+
+    Args:
+        conversation_id: Conversation ID
+        start_time: Start time in seconds
+        end_time: End time in seconds
+
+    Returns:
+        Ogg/opus bytes covering exactly start_time..end_time
+
+    Raises:
+        ValueError: If the conversation or range has no audio
+    """
+    start_timer = time.time()
+
+    clipped_pcm, sample_rate, channels = await get_clipped_pcm_for_time_range(
+        conversation_id, start_time, end_time
+    )
+
+    if not clipped_pcm:
+        raise ValueError(
+            f"No audio chunks found for {conversation_id} "
+            f"in range {start_time:.1f}s-{end_time:.1f}s"
+        )
+
+    opus_data = await encode_pcm_to_opus(
+        pcm_data=clipped_pcm,
+        sample_rate=sample_rate,
+        channels=channels,
+    )
+
+    logger.info(
+        f"Trimmed opus for {conversation_id[:8]}...: "
+        f"{start_time:.1f}s - {end_time:.1f}s "
+        f"({len(opus_data)} bytes, {time.time() - start_timer:.2f}s)"
+    )
+
+    return opus_data
+
+
+async def get_opus_for_conversation(
+    conversation_id: str,
+    start_index: int = 0,
+    limit: Optional[int] = None,
+) -> bytes:
+    """
+    Get raw ogg/opus audio for a full conversation by concatenating stored chunks.
+
+    No decoding — returns the original compressed data directly.
+
+    Args:
+        conversation_id: Conversation ID
+        start_index: First chunk index (default: 0)
+        limit: Max chunks (default: all)
+
+    Returns:
+        Concatenated ogg/opus bytes
+
+    Raises:
+        ValueError: If no chunks found
+    """
+    chunks = await retrieve_audio_chunks(
+        conversation_id=conversation_id,
+        start_index=start_index,
+        limit=limit,
+    )
+
+    if not chunks:
+        raise ValueError(f"No audio chunks found for conversation {conversation_id}")
+
+    opus_data = b"".join(bytes(chunk.audio_data) for chunk in chunks)
+
+    logger.info(
+        f"Serving {len(chunks)} raw opus chunks for {conversation_id[:8]}... "
+        f"({len(opus_data)} bytes)"
+    )
+
+    return opus_data
 
 
 async def reconstruct_wav_from_conversation(
@@ -440,8 +532,6 @@ async def reconstruct_audio_segments(
         speaker continuity across segment boundaries. Overlapping regions
         should be merged during post-processing.
     """
-    from advanced_omi_backend.models.conversation import Conversation
-
     # Get conversation metadata
     conversation = await Conversation.find_one(
         Conversation.conversation_id == conversation_id
@@ -520,15 +610,15 @@ async def reconstruct_audio_segments(
         start_time += segment_duration
 
 
-async def reconstruct_audio_segment(
+async def get_clipped_pcm_for_time_range(
     conversation_id: str, start_time: float, end_time: float
-) -> bytes:
+) -> tuple[bytes, int, int]:
     """
-    Reconstruct audio for a specific time range from MongoDB chunks.
+    Decode conversation audio and clip it to an exact time range.
 
-    This function returns a single audio segment for the specified time range,
-    enabling on-demand access to conversation audio without loading the entire
-    file into memory. Used by the audio segment API endpoint.
+    Fetches the MongoDB chunks overlapping the range, batch-decodes them in
+    a single ffmpeg call, and clips the PCM to the exact requested
+    boundaries (chunk boundaries are ~10s, so decoding alone is not enough).
 
     Args:
         conversation_id: Conversation ID
@@ -536,22 +626,12 @@ async def reconstruct_audio_segment(
         end_time: End time in seconds
 
     Returns:
-        WAV audio bytes (16kHz mono or original format)
+        Tuple of (pcm_data, sample_rate, channels). pcm_data is empty when
+        no chunks overlap the range.
 
     Raises:
-        ValueError: If conversation not found or has no audio
-        Exception: If audio reconstruction fails
-
-    Example:
-        >>> # Get first 60 seconds of audio
-        >>> wav_bytes = await reconstruct_audio_segment(conv_id, 0.0, 60.0)
-        >>> # Save to file
-        >>> with open("segment.wav", "wb") as f:
-        ...     f.write(wav_bytes)
+        ValueError: If conversation not found, has no audio, or range is invalid
     """
-    start_timer = time.time()
-    from advanced_omi_backend.models.conversation import Conversation
-
     # Validate start_time
     if start_time < 0:
         raise ValueError(f"start_time must be >= 0, got {start_time}")
@@ -607,71 +687,72 @@ async def reconstruct_audio_segment(
             f"No chunks found for time range {start_time:.1f}s - {end_time:.1f}s "
             f"in conversation {conversation_id[:8]}..."
         )
-        # Return silence for empty range
-        return await build_wav_from_pcm(
-            pcm_data=b"",
-            sample_rate=sample_rate,
-            channels=channels,
-        )
+        return b"", sample_rate, channels
 
-    # Decode each chunk and clip to exact time boundaries for precise segment extraction
-    pcm_buffer = bytearray()
+    # Batch decode all chunks in a single ffmpeg call (concatenated ogg stream)
+    pcm_data = await concatenate_chunks_to_pcm(chunks)
+
+    # Clip decoded PCM to the exact requested time range.
+    # The full PCM covers chunks[0].start_time .. chunks[-1].end_time.
     bytes_per_second = sample_rate * channels * 2  # 16-bit = 2 bytes per sample
+    chunk_range_start = chunks[0].start_time
 
-    for chunk in chunks:
-        # Decode this chunk to PCM
-        pcm_data = await decode_opus_to_pcm(
-            opus_data=chunk.audio_data,
-            sample_rate=chunk.sample_rate,
-            channels=chunk.channels,
-        )
+    clip_start_byte = int((start_time - chunk_range_start) * bytes_per_second)
+    clip_start_byte = max(0, (clip_start_byte // 2) * 2)  # align to sample boundary
 
-        # Calculate clip boundaries for this chunk
-        clip_start_byte = 0
-        clip_end_byte = len(pcm_data)
+    clip_end_byte = int((end_time - chunk_range_start) * bytes_per_second)
+    clip_end_byte = min(len(pcm_data), (clip_end_byte // 2) * 2)
 
-        # Trim start if chunk begins before requested start_time
-        if chunk.start_time < start_time:
-            offset_seconds = start_time - chunk.start_time
-            offset_bytes = int(offset_seconds * bytes_per_second)
-            # Align to sample boundary (2 bytes for 16-bit audio)
-            clip_start_byte = (offset_bytes // 2) * 2
+    return pcm_data[clip_start_byte:clip_end_byte], sample_rate, channels
 
-        # Trim end if chunk extends past requested end_time
-        if chunk.end_time > end_time:
-            # Calculate duration from chunk start to requested end
-            duration_seconds = end_time - chunk.start_time
-            duration_bytes = int(duration_seconds * bytes_per_second)
-            # Align to sample boundary
-            clip_end_byte = (duration_bytes // 2) * 2
 
-        # Append only the clipped portion to buffer
-        if clip_start_byte < clip_end_byte:
-            clipped_pcm = pcm_data[clip_start_byte:clip_end_byte]
-            pcm_buffer.extend(clipped_pcm)
+async def reconstruct_audio_segment(
+    conversation_id: str, start_time: float, end_time: float
+) -> bytes:
+    """
+    Reconstruct audio for a specific time range from MongoDB chunks.
 
-            logger.debug(
-                f"Chunk {chunk.chunk_index}: [{chunk.start_time:.1f}s - {chunk.end_time:.1f}s] "
-                f"→ clipped [{max(chunk.start_time, start_time):.1f}s - {min(chunk.end_time, end_time):.1f}s] "
-                f"({len(clipped_pcm)} bytes)"
-            )
+    This function returns a single audio segment for the specified time range,
+    enabling on-demand access to conversation audio without loading the entire
+    file into memory. Used by the audio segment API endpoint.
 
-    # Build WAV file from precisely trimmed PCM data
+    Args:
+        conversation_id: Conversation ID
+        start_time: Start time in seconds
+        end_time: End time in seconds
+
+    Returns:
+        WAV audio bytes (16kHz mono or original format)
+
+    Raises:
+        ValueError: If conversation not found or has no audio
+        Exception: If audio reconstruction fails
+
+    Example:
+        >>> # Get first 60 seconds of audio
+        >>> wav_bytes = await reconstruct_audio_segment(conv_id, 0.0, 60.0)
+        >>> # Save to file
+        >>> with open("segment.wav", "wb") as f:
+        ...     f.write(wav_bytes)
+    """
+    start_timer = time.time()
+
+    clipped_pcm, sample_rate, channels = await get_clipped_pcm_for_time_range(
+        conversation_id, start_time, end_time
+    )
+
     wav_bytes = await build_wav_from_pcm(
-        pcm_data=bytes(pcm_buffer),
+        pcm_data=clipped_pcm,
         sample_rate=sample_rate,
         channels=channels,
     )
 
-    actual_duration = len(pcm_buffer) / bytes_per_second
-    expected_duration = end_time - start_time
     processing_time = time.time() - start_timer
 
     logger.info(
         f"Reconstructed audio segment for {conversation_id[:8]}...: "
         f"{start_time:.1f}s - {end_time:.1f}s "
-        f"({len(chunks)} chunks, {len(wav_bytes)} bytes WAV, "
-        f"actual duration: {actual_duration:.2f}s, expected: {expected_duration:.2f}s, "
+        f"({len(wav_bytes)} bytes WAV, "
         f"processing time: {processing_time:.2f}s)"
     )
 
@@ -757,10 +838,6 @@ async def convert_audio_to_chunks(
         ... )
         >>> print(f"Created {num_chunks} chunks")
     """
-    from bson import Binary
-
-    from advanced_omi_backend.models.conversation import Conversation
-
     logger.info(f"📦 Converting audio to MongoDB chunks: {len(audio_data)} bytes PCM")
 
     # Calculate audio duration
@@ -921,15 +998,9 @@ async def convert_wav_to_chunks(
     if not wav_file_path.exists():
         raise FileNotFoundError(f"WAV file not found: {wav_file_path}")
 
-    from bson import Binary
-
-    from advanced_omi_backend.models.conversation import Conversation
-
     logger.info(f"📦 Converting WAV file to MongoDB chunks: {wav_file_path}")
 
     # Read WAV file
-    import wave
-
     with wave.open(str(wav_file_path), "rb") as wav:
         sample_rate = wav.getframerate()
         channels = wav.getnchannels()
@@ -1092,9 +1163,6 @@ async def wait_for_audio_chunks(
         ... else:
         ...     logger.error("No audio chunks available")
     """
-    import asyncio
-    import time
-
     wait_start = time.time()
 
     while time.time() - wait_start < max_wait_seconds:
@@ -1123,8 +1191,13 @@ async def wait_for_audio_chunks(
 
         await asyncio.sleep(0.5)  # Check every 500ms
 
-    logger.error(
-        f"❌ Audio chunks not found after {max_wait_seconds}s "
-        f"(conversation: {conversation_id[:12]})"
+    # Log at WARNING (not ERROR): this generic util doesn't know *why* the session
+    # ended. A benign client disconnect (device walked out of range — no audio ever
+    # persisted) and a genuine persistence failure both land here. The caller knows
+    # the end reason and emits the severity-appropriate line, so emitting ERROR here
+    # would raise a spurious system event for every dead-zone reconnect.
+    logger.warning(
+        f"⏱️ Audio chunks not found after {max_wait_seconds}s "
+        f"(conversation: {conversation_id[:12]}) — caller decides how to handle"
     )
     return False

@@ -91,6 +91,22 @@ class HavpeRelaySetup:
                 f"[blue][INFO][/blue] Backed up existing .env file to {backup_path}"
             )
 
+    def _try_discover_backend(self) -> str | None:
+        """Try to auto-discover the Chronicle backend via minidisc on Tailnet."""
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+            # Lazy import: sys.path-dependent (repo-root discovery.py, inserted above)
+            from discovery import CHRONICLE_BACKEND, discover_service
+
+            url = discover_service(CHRONICLE_BACKEND)
+            if url:
+                self.console.print(
+                    f"[green][SUCCESS][/green] Auto-discovered backend on Tailnet: {url}"
+                )
+            return url
+        except Exception:
+            return None
+
     def setup_backend_urls(self):
         """Configure backend URL and WebSocket URL"""
         self.print_section("Backend Connection")
@@ -99,6 +115,11 @@ class HavpeRelaySetup:
 
         default_http = "http://host.docker.internal:8000"
         default_ws = "ws://host.docker.internal:8000"
+
+        # Try auto-discovery via minidisc first
+        discovered = self._try_discover_backend()
+        if discovered:
+            default_http = discovered
 
         # Check CLI args first
         if hasattr(self.args, "backend_url") and self.args.backend_url:
@@ -208,6 +229,25 @@ class HavpeRelaySetup:
             tcp_port = self.prompt_value("TCP listen port", existing or "8989")
 
         self.config["TCP_PORT"] = tcp_port
+
+    def setup_esphome_config(self):
+        """Configure optional static ESPHome device IP"""
+        self.print_section("ESPHome Device IP (Optional)")
+        self.console.print(
+            "If set, the relay always connects ESPHome API to this IP instead of"
+        )
+        self.console.print(
+            "the TCP client's IP. Recommended when non-ESP32 clients also connect."
+        )
+        self.console.print()
+
+        existing = self.read_existing_env_value("ESPHOME_DEVICE_IP")
+        esphome_ip = self.prompt_value(
+            "ESPHome device IP (leave blank to auto-detect from TCP client)",
+            existing or "",
+        )
+        if esphome_ip:
+            self.config["ESPHOME_DEVICE_IP"] = esphome_ip
 
     def setup_firmware_secrets(self):
         """Optionally configure ESP32 firmware secrets"""
@@ -332,6 +372,10 @@ class HavpeRelaySetup:
         )
         self.console.print(f"  Device Name:    {self.config.get('DEVICE_NAME', '')}")
         self.console.print(f"  TCP Port:       {self.config.get('TCP_PORT', '')}")
+        esphome_ip = self.config.get("ESPHOME_DEVICE_IP", "")
+        self.console.print(
+            f"  ESPHome IP:     {esphome_ip or '(auto-detect from TCP client)'}"
+        )
 
     def show_next_steps(self):
         """Show next steps"""
@@ -359,6 +403,7 @@ class HavpeRelaySetup:
             self.setup_backend_urls()
             self.setup_auth_credentials()
             self.setup_device_config()
+            self.setup_esphome_config()
             self.setup_firmware_secrets()
 
             # Generate files

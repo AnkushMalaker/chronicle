@@ -11,7 +11,9 @@ import os
 import tempfile
 from typing import Optional
 
+import numpy as np
 import uvicorn
+from common.audio_utils import save_to_temp_wav
 from common.base_service import BaseASRService, create_asr_app
 from common.response_models import TranscriptionResult
 from providers.transformers.transcriber import TransformersTranscriber
@@ -60,9 +62,6 @@ class TransformersService(BaseASRService):
         # Warm up with short audio
         logger.info("Warming up model...")
         try:
-            import numpy as np
-            from common.audio_utils import save_to_temp_wav
-
             # Create 0.5s silence for warmup
             silence = np.zeros(8000, dtype=np.float32)  # 0.5s at 16kHz
             tmp_path = save_to_temp_wav(silence)
@@ -85,6 +84,7 @@ class TransformersService(BaseASRService):
         self,
         audio_file_path: str,
         context_info: Optional[str] = None,
+        prompt: Optional[str] = None,
     ) -> TranscriptionResult:
         """Transcribe audio file. context_info is not used by this provider."""
         if self.transcriber is None:
@@ -97,6 +97,7 @@ class TransformersService(BaseASRService):
                 audio_file_path,
                 language=self.language,
                 return_timestamps=True,
+                word_timestamps=self.transcriber.supports_word_timestamps(),
             ),
         )
         return result

@@ -23,9 +23,13 @@ from rich.text import Text
 # Add repo root to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from config_manager import ConfigManager
-from setup_utils import detect_tailscale_info, mask_value
+from setup_utils import decide_cert_mode, detect_tailscale_info, mask_value
 from setup_utils import prompt_password as util_prompt_password
-from setup_utils import prompt_with_existing_masked, read_env_value
+from setup_utils import (
+    prompt_with_existing_masked,
+    read_env_value,
+    tailscale_socket_path,
+)
 
 
 class ChronicleSetup:
@@ -226,6 +230,28 @@ class ChronicleSetup:
 
         self.console.print("[green][SUCCESS][/green] Admin account configured")
 
+    def _asr_url_for(
+        self, env_key: str, default: str = "http://host.docker.internal:8767"
+    ):
+        """Resolve an offline ASR provider's URL env value from the wizard's source choice.
+
+        - --asr-discover  → '' (left empty so the backend discovers chronicle-asr on
+          the Tailnet live — 'configure from the Tailnet later')
+        - --asr-url <url> → that URL (own / picked-from-Tailnet endpoint)
+        - otherwise       → prompt (interactive standalone run), defaulting to local
+        """
+        if getattr(self.args, "asr_discover", False):
+            self.console.print(
+                f"[blue][INFO][/blue] {env_key} left empty — backend will discover "
+                "chronicle-asr on the Tailnet at runtime"
+            )
+            return ""
+        if getattr(self.args, "asr_url", None):
+            self.console.print(f"[green]✅[/green] {env_key} = {self.args.asr_url}")
+            return self.args.asr_url
+        existing = read_env_value(".env", env_key) or default
+        return self.prompt_value(f"{env_key}", existing)
+
     def setup_transcription(self):
         """Configure transcription provider - updates config.yml and .env"""
         # Check if transcription provider was provided via command line
@@ -249,8 +275,14 @@ class ChronicleSetup:
                 choice = "4"
             elif provider == "smallest":
                 choice = "5"
-            elif provider == "none":
+            elif provider == "gemma4":
                 choice = "6"
+            elif provider == "af-next":
+                choice = "7"
+            elif provider == "granite":
+                choice = "8"
+            elif provider == "none":
+                choice = "9"
             else:
                 choice = "1"  # Default to Deepgram
         else:
@@ -280,13 +312,30 @@ class ChronicleSetup:
 
             smallest_desc = "Smallest.ai Pulse (cloud-based, fast, requires API key)"
 
+            gemma4_desc = (
+                "Offline (Gemma 4 E2B-it - GPU required, prompt-based diarization)"
+            )
+
+            af_next_desc = (
+                "Offline (Audio Flamingo Next - GPU required, timestamped diarization; "
+                "NONCOMMERCIAL license)"
+            )
+
+            granite_desc = (
+                "Offline (IBM Granite Speech - GPU recommended, LLM-backbone; "
+                "en/fr/de/es/pt)"
+            )
+
             choices = {
                 "1": "Deepgram (recommended - high quality, cloud-based)",
                 "2": parakeet_desc,
                 "3": vibevoice_desc,
                 "4": qwen3_desc,
                 "5": smallest_desc,
-                "6": "None (skip transcription setup)",
+                "6": gemma4_desc,
+                "7": af_next_desc,
+                "8": granite_desc,
+                "9": "None (skip transcription setup)",
             }
 
             choice = self.prompt_choice(
@@ -324,14 +373,9 @@ class ChronicleSetup:
 
         elif choice == "2":
             self.console.print("[blue][INFO][/blue] Offline Parakeet ASR selected")
-            existing_parakeet_url = (
-                read_env_value(".env", "PARAKEET_ASR_URL")
-                or "http://host.docker.internal:8767"
-            )
-            parakeet_url = self.prompt_value("Parakeet ASR URL", existing_parakeet_url)
-
-            # Write URL to .env for ${PARAKEET_ASR_URL} placeholder in config.yml
-            self.config["PARAKEET_ASR_URL"] = parakeet_url
+            # Write URL to .env for ${PARAKEET_ASR_URL} placeholder in config.yml.
+            # Empty ("" from --asr-discover) → runtime Tailnet discovery.
+            self.config["PARAKEET_ASR_URL"] = self._asr_url_for("PARAKEET_ASR_URL")
 
             # Update config.yml to use Parakeet
             self.config_manager.update_config_defaults({"stt": "stt-parakeet-batch"})
@@ -379,20 +423,17 @@ class ChronicleSetup:
             self.console.print(
                 "[blue][INFO][/blue] Qwen3-ASR selected (52 languages, streaming + batch via vLLM)"
             )
-            existing_qwen3_url_raw = read_env_value(".env", "QWEN3_ASR_URL")
-            existing_qwen3_url = (
-                f"http://{existing_qwen3_url_raw}"
-                if existing_qwen3_url_raw
-                else "http://host.docker.internal:8767"
+            qwen3_url = self._asr_url_for("QWEN3_ASR_URL")
+            # Stored without scheme (resolved_url re-adds it); empty → Tailnet discovery.
+            self.config["QWEN3_ASR_URL"] = (
+                qwen3_url.replace("http://", "").rstrip("/") if qwen3_url else ""
             )
-            qwen3_url = self.prompt_value("Qwen3-ASR URL", existing_qwen3_url)
-
-            # Write URL to .env for ${QWEN3_ASR_URL} placeholder in config.yml
-            self.config["QWEN3_ASR_URL"] = qwen3_url.replace("http://", "").rstrip("/")
-
-            # Also set streaming URL (same host, port 8769)
-            stream_host = qwen3_url.replace("http://", "").split(":")[0]
-            self.config["QWEN3_ASR_STREAM_URL"] = f"{stream_host}:8769"
+            # Streaming companion (same host, port 8769); empty when discovering.
+            if qwen3_url:
+                stream_host = qwen3_url.replace("http://", "").split(":")[0]
+                self.config["QWEN3_ASR_STREAM_URL"] = f"{stream_host}:8769"
+            else:
+                self.config["QWEN3_ASR_STREAM_URL"] = ""
 
             # Update config.yml to use Qwen3-ASR
             self.config_manager.update_config_defaults({"stt": "stt-qwen3-asr"})
@@ -440,6 +481,116 @@ class ChronicleSetup:
                 )
 
         elif choice == "6":
+            self.console.print(
+                "[blue][INFO][/blue] Gemma 4 E2B-it selected (prompt-based diarization, batch + streaming)"
+            )
+            self.config["GEMMA4_ASR_URL"] = self._asr_url_for("GEMMA4_ASR_URL")
+
+            # The same gemma4-asr service serves both batch (/transcribe) and
+            # streaming (/stream), so enable both defaults at once.
+            self.config_manager.update_config_defaults(
+                {"stt": "stt-gemma4", "stt_stream": "stt-gemma4-stream"}
+            )
+
+            # Gemma 4 is an LLM-backbone ASR (capability "context_prompt"): it takes
+            # free-form context, NOT acoustic keyword boosting. Unlike VibeVoice/
+            # Deepgram, it would echo a wake-word boost list into the transcript, so
+            # the backend withholds that list and uses this context string instead.
+            existing_gemma4_context = (
+                self.config_manager.get_full_config()
+                .get("backend", {})
+                .get("asr", {})
+                .get("context", {})
+                .get("stt-gemma4", "")
+            )
+            self.console.print(
+                "[blue][INFO][/blue] Gemma 4 takes free-form context (domain, names, "
+                "jargon) to disambiguate recognition. It informs transcription but is "
+                "never transcribed. Leave blank to skip."
+            )
+            gemma4_context = self.prompt_value(
+                "Gemma 4 ASR context (optional)", existing_gemma4_context
+            )
+            self.config_manager.update_backend_config(
+                {"asr": {"context": {"stt-gemma4": gemma4_context.strip()}}}
+            )
+
+            self.console.print(
+                "[green][SUCCESS][/green] Gemma 4 configured in config.yml and .env"
+            )
+            self.console.print("[blue][INFO][/blue] Set defaults.stt: stt-gemma4")
+            self.console.print(
+                "[blue][INFO][/blue] Set defaults.stt_stream: stt-gemma4-stream"
+            )
+            self.console.print(
+                "[yellow][WARNING][/yellow] Remember to start Gemma 4 ASR: cd ../../extras/asr-services && docker compose up gemma4-asr -d"
+            )
+
+        elif choice == "7":
+            self.console.print(
+                "[blue][INFO][/blue] Audio Flamingo Next selected "
+                "(timestamped diarization, prompt-driven)"
+            )
+            self.console.print(
+                "[yellow][WARNING][/yellow] AF-Next is licensed under the NVIDIA OneWay "
+                "Noncommercial License — research use only. Do not deploy in commercial "
+                "products."
+            )
+            self.config["AF_NEXT_ASR_URL"] = self._asr_url_for("AF_NEXT_ASR_URL")
+
+            self.config_manager.update_config_defaults({"stt": "stt-af-next"})
+
+            self.console.print(
+                "[green][SUCCESS][/green] Audio Flamingo Next configured in config.yml and .env"
+            )
+            self.console.print("[blue][INFO][/blue] Set defaults.stt: stt-af-next")
+            self.console.print(
+                "[yellow][WARNING][/yellow] Remember to start AF-Next: "
+                "cd ../../extras/asr-services && docker compose up af-next-asr -d"
+            )
+
+        elif choice == "8":
+            self.console.print(
+                "[blue][INFO][/blue] IBM Granite Speech selected "
+                "(LLM-backbone ASR; en/fr/de/es/pt)"
+            )
+            self.config["GRANITE_ASR_URL"] = self._asr_url_for("GRANITE_ASR_URL")
+
+            self.config_manager.update_config_defaults({"stt": "stt-granite"})
+
+            # Granite is an LLM-backbone ASR (capability "context_prompt"): it takes
+            # free-form context, NOT acoustic keyword boosting. Like Gemma 4 it would
+            # echo a wake-word boost list into the transcript, so the backend
+            # withholds that list and uses this context string instead.
+            existing_granite_context = (
+                self.config_manager.get_full_config()
+                .get("backend", {})
+                .get("asr", {})
+                .get("context", {})
+                .get("stt-granite", "")
+            )
+            self.console.print(
+                "[blue][INFO][/blue] Granite Speech takes free-form context (domain, "
+                "names, jargon) to disambiguate recognition. It informs transcription "
+                "but is never transcribed. Leave blank to skip."
+            )
+            granite_context = self.prompt_value(
+                "Granite ASR context (optional)", existing_granite_context
+            )
+            self.config_manager.update_backend_config(
+                {"asr": {"context": {"stt-granite": granite_context.strip()}}}
+            )
+
+            self.console.print(
+                "[green][SUCCESS][/green] Granite Speech configured in config.yml and .env"
+            )
+            self.console.print("[blue][INFO][/blue] Set defaults.stt: stt-granite")
+            self.console.print(
+                "[yellow][WARNING][/yellow] Remember to start Granite ASR: "
+                "cd ../../extras/asr-services && docker compose up granite-asr -d"
+            )
+
+        elif choice == "9":
             self.console.print("[blue][INFO][/blue] Skipping transcription setup")
 
     def setup_streaming_provider(self):
@@ -464,6 +615,8 @@ class ChronicleSetup:
             "deepgram": "stt-deepgram-stream",
             "smallest": "stt-smallest-stream",
             "qwen3-asr": "stt-qwen3-asr",
+            "gemma4": "stt-gemma4-stream",
+            "nemotron": "stt-nemotron-stream",
         }
 
         stream_stt = provider_to_stt_stream.get(streaming_provider)
@@ -539,6 +692,47 @@ class ChronicleSetup:
                 )
                 stream_host = qwen3_url.replace("http://", "").rstrip("/")
                 self.config["QWEN3_ASR_STREAM_URL"] = stream_host
+        elif streaming_provider == "gemma4":
+            # Streaming shares the gemma4-asr service (the /stream WS endpoint).
+            existing_url = read_env_value(".env", "GEMMA4_ASR_URL")
+            if not existing_url:
+                gemma4_url = self.prompt_value(
+                    "Gemma 4 ASR URL", "host.docker.internal:8767"
+                )
+                self.config["GEMMA4_ASR_URL"] = gemma4_url.replace(
+                    "http://", ""
+                ).rstrip("/")
+        elif streaming_provider == "nemotron":
+            # Nemotron serves batch + streaming from one container on 8772.
+            existing_url = read_env_value(".env", "NEMOTRON_ASR_STREAM_URL")
+            if not existing_url:
+                nemotron_url = self.prompt_value(
+                    "Nemotron ASR URL", "host.docker.internal:8772"
+                )
+                self.config["NEMOTRON_ASR_STREAM_URL"] = nemotron_url.replace(
+                    "http://", ""
+                ).rstrip("/")
+
+    def setup_live_segmentation(self):
+        """Configure the live transcription path (defaults.live_segmentation).
+
+        Writes "windowed_batch" when the wizard selected it (no streaming ASR), so the
+        windowed-batch worker transcribes fixed windows of streamed audio. Defaults to
+        "streaming_stt" otherwise.
+        """
+        mode = getattr(self.args, "live_segmentation", None)
+        if not mode:
+            return
+
+        self.config_manager.update_config_defaults({"live_segmentation": mode})
+        self.console.print(
+            f"[blue][INFO][/blue] Set defaults.live_segmentation: {mode}"
+        )
+        if mode == "windowed_batch":
+            self.console.print(
+                "[blue][INFO][/blue] Continuous audio will be transcribed in windows "
+                "(no streaming ASR required)"
+            )
 
     def setup_llm(self):
         """Configure LLM provider - updates config.yml and .env"""
@@ -554,6 +748,7 @@ class ChronicleSetup:
                 "none": "4",
                 "llamacpp": "5",
                 "custom": "3",
+                "gemma4-unified": "6",
             }.get(provider, "1")
         else:
             # Standalone init.py run — read existing config as default
@@ -765,89 +960,292 @@ class ChronicleSetup:
             self.config_manager.update_config_defaults(
                 {"llm": "llamacpp-llm", "embedding": "llamacpp-embed"}
             )
-            self.console.print(
-                "[green][SUCCESS][/green] llama.cpp configured in config.yml"
+            # Re-sync the llamacpp-llm/-embed entries from defaults.yml. config.yml
+            # model entries override defaults *by name*, so a stale copy (e.g. one
+            # predating the LLM_BASE_URL templating) would shadow the default and
+            # silently ignore the endpoint chosen below. Re-syncing guarantees
+            # model_url follows LLM_BASE_URL (and restores the discovery_* keys).
+            synced = self.config_manager.sync_models_from_defaults(
+                ["llamacpp-llm", "llamacpp-embed"]
             )
+            if synced:
+                self.console.print(
+                    "[blue][INFO][/blue] Re-synced model entries from defaults.yml: "
+                    f"{', '.join(synced)} (model_url now follows LLM_BASE_URL)"
+                )
+            # Source of the llama.cpp endpoint (the llamacpp-llm entry reads LLM_BASE_URL):
+            #   --llm-discover     → '' (backend discovers chronicle-llm on the Tailnet)
+            #   --llm-base-url URL → pin a remote/own endpoint
+            #   otherwise          → leave LLM_BASE_URL alone (host-local default applies)
+            if getattr(self.args, "llm_discover", False):
+                self.config["LLM_BASE_URL"] = ""
+                self.console.print(
+                    "[blue][INFO][/blue] LLM_BASE_URL left empty — backend will discover "
+                    "chronicle-llm on the Tailnet at runtime"
+                )
+            elif getattr(self.args, "llm_base_url", None):
+                self.config["LLM_BASE_URL"] = self.args.llm_base_url
+                self.console.print(
+                    f"[green]✅[/green] LLM_BASE_URL = {self.args.llm_base_url}"
+                )
             self.console.print("[blue][INFO][/blue] Set defaults.llm: llamacpp-llm")
             self.console.print(
                 "[blue][INFO][/blue] Set defaults.embedding: llamacpp-embed"
             )
+
+        elif choice == "6":
             self.console.print(
-                "[blue][INFO][/blue] LLM services will be configured via extras/llm-services"
+                "[blue][INFO][/blue] Gemma 4 unified STT+LLM mode selected"
             )
-
-    def setup_memory(self):
-        """Configure memory provider - updates config.yml"""
-        # Check if memory provider was provided via command line (from wizard.py)
-        if hasattr(self.args, "memory_provider") and self.args.memory_provider:
-            provider = self.args.memory_provider
             self.console.print(
-                f"[green]✅[/green] Memory provider: {provider} (configured via wizard)"
+                "[blue][INFO][/blue] LLM requests will use the same Gemma 4 ASR service"
             )
-            choice = {"chronicle": "1", "openmemory_mcp": "2"}.get(provider, "1")
-        else:
-            # Standalone init.py run — read existing config as default
-            existing_choice = "1"
-            full_config = self.config_manager.get_full_config()
-            existing_provider = full_config.get("memory", {}).get(
-                "provider", "chronicle"
+            # gemma4-llm model definition exists in defaults.yml, pointing to GEMMA4_ASR_URL
+            self.config_manager.update_config_defaults(
+                {"llm": "gemma4-llm", "embedding": "local-embed"}
             )
-            if existing_provider == "openmemory_mcp":
-                existing_choice = "2"
-
-            self.print_section("Memory Storage Configuration")
-
-            choices = {
-                "1": "Chronicle Native (Qdrant + custom extraction)",
-                "2": "OpenMemory MCP (cross-client compatible, external server)",
-            }
-
-            choice = self.prompt_choice(
-                "Choose your memory storage backend:", choices, existing_choice
+            self.console.print(
+                "[green][SUCCESS][/green] Gemma 4 unified mode configured in config.yml"
             )
+            self.console.print("[blue][INFO][/blue] Set defaults.llm: gemma4-llm")
+            self.console.print(
+                "[blue][INFO][/blue] Set defaults.embedding: local-embed (Ollama)"
+            )
+            self.console.print(
+                "[yellow][WARNING][/yellow] Embeddings require Ollama running with nomic-embed-text model"
+            )
+
+    def setup_fast_llm(self):
+        """Optionally configure a separate fast LLM for quick, latency-sensitive
+        tasks (wake-word follow-ups). Default: reuse the main LLM."""
+        self.print_section("Fast LLM (optional)")
+        self.console.print(
+            "[blue][INFO][/blue] A 'fast LLM' handles quick tasks like wake-word "
+            "follow-up commands (e.g. saying 'warmer' after an action runs)."
+        )
+        self.console.print(
+            "By default this reuses your main LLM. You can point it at a faster/cheaper "
+            "model instead (e.g. an 'instant' hosted model or a small local one)."
+        )
+        self.console.print()
+
+        full_config = self.config_manager.get_full_config()
+        existing_fast = full_config.get("defaults", {}).get("fast_llm", "")
+
+        choices = {
+            "1": "Reuse my main LLM (recommended)",
+            "2": "Use a separate fast LLM (OpenAI-compatible endpoint)",
+        }
+        choice = self.prompt_choice(
+            "Fast LLM for quick tasks?", choices, "2" if existing_fast else "1"
+        )
 
         if choice == "1":
+            # Empty default -> followup_resolution falls back to defaults.llm.
+            self.config_manager.update_config_defaults({"fast_llm": ""})
             self.console.print(
-                "[blue][INFO][/blue] Chronicle Native memory provider selected"
+                "[blue][INFO][/blue] Fast LLM = main LLM (defaults.fast_llm cleared)"
             )
+            return
 
-            qdrant_url = self.prompt_value("Qdrant URL", "qdrant")
-            self.config["QDRANT_BASE_URL"] = qdrant_url
+        existing_model = next(
+            (m for m in full_config.get("models", []) if m.get("name") == "fast-llm"),
+            {},
+        )
 
-            # Update config.yml (also updates .env automatically)
-            self.config_manager.update_memory_config({"provider": "chronicle"})
+        base_url = self.prompt_value(
+            "Fast LLM API Base URL",
+            existing_model.get("model_url", "https://api.openai.com/v1"),
+        )
+        if not base_url:
             self.console.print(
-                "[green][SUCCESS][/green] Chronicle memory provider configured in config.yml and .env"
+                "[yellow][WARNING][/yellow] No base URL - keeping main LLM for fast tasks"
             )
+            self.config_manager.update_config_defaults({"fast_llm": ""})
+            return
 
-        elif choice == "2":
-            self.console.print("[blue][INFO][/blue] OpenMemory MCP selected")
+        api_key = self.prompt_with_existing_masked(
+            prompt_text="Fast LLM API Key (leave empty if not required)",
+            env_key="FAST_LLM_API_KEY",
+            placeholders=["your_fast_llm_api_key_here"],
+            is_password=True,
+            default="",
+        )
+        if api_key:
+            self.config["FAST_LLM_API_KEY"] = api_key
 
-            mcp_url = self.prompt_value(
-                "OpenMemory MCP server URL", "http://host.docker.internal:8765"
-            )
-            client_name = self.prompt_value("OpenMemory client name", "chronicle")
-            user_id = self.prompt_value("OpenMemory user ID", "openmemory")
-            timeout = self.prompt_value("OpenMemory timeout (seconds)", "30")
-
-            # Update config.yml with OpenMemory MCP settings (also updates .env automatically)
-            self.config_manager.update_memory_config(
-                {
-                    "provider": "openmemory_mcp",
-                    "openmemory_mcp": {
-                        "server_url": mcp_url,
-                        "client_name": client_name,
-                        "user_id": user_id,
-                        "timeout": int(timeout),
-                    },
-                }
-            )
+        model_name = self.prompt_value(
+            "Fast LLM model name (e.g., gpt-5.5, gpt-4o-mini, llama-3.1-8b-instant)",
+            existing_model.get("model_name", "gpt-5.5"),
+        )
+        if not model_name:
             self.console.print(
-                "[green][SUCCESS][/green] OpenMemory MCP configured in config.yml and .env"
+                "[yellow][WARNING][/yellow] No model name - keeping main LLM for fast tasks"
             )
+            self.config_manager.update_config_defaults({"fast_llm": ""})
+            return
+
+        fast_model = {
+            "name": "fast-llm",
+            "description": "Fast LLM for quick tasks (wake-word follow-ups)",
+            "model_type": "llm",
+            "model_provider": "openai",
+            "api_family": "openai",
+            "model_name": model_name,
+            "model_url": base_url,
+            "api_key": "${oc.env:FAST_LLM_API_KEY,''}",
+            "model_params": {"temperature": 0.1, "max_tokens": 200},
+            "model_output": "json",
+        }
+        self.config_manager.add_or_update_model(fast_model)
+        self.config_manager.update_config_defaults({"fast_llm": "fast-llm"})
+        self.console.print(
+            "[green][SUCCESS][/green] Separate fast LLM configured "
+            "(defaults.fast_llm: fast-llm)"
+        )
+
+    def setup_fallback_llm(self):
+        """Configure a fallback LLM that calls retry against when the primary
+        LLM is unreachable (connection failure, timeout, 5xx).
+        Default: OpenAI gpt-5-nano."""
+        self.print_section("Fallback LLM (recommended)")
+        self.console.print(
+            "[blue][INFO][/blue] If your main LLM is unreachable (e.g. a local "
+            "model is down), LLM calls are retried once against a fallback model."
+        )
+        self.console.print(
+            "The default fallback is OpenAI gpt-5-nano (cheap, always available). "
+            "It uses your OPENAI_API_KEY."
+        )
+        self.console.print()
+
+        full_config = self.config_manager.get_full_config()
+        defaults_cfg = full_config.get("defaults", {})
+        existing_fb = defaults_cfg.get("fallback_llm") or ""
+        explicitly_disabled = "fallback_llm" in defaults_cfg and not existing_fb
+        existing_model = next(
+            (
+                m
+                for m in full_config.get("models", [])
+                if m.get("name") == "fallback-llm"
+            ),
+            {},
+        )
+        is_custom = bool(existing_fb) and (
+            existing_fb != "fallback-llm"
+            or (
+                existing_model
+                and existing_model.get("model_name") not in ("", "gpt-5-nano")
+            )
+        )
+
+        choices = {
+            "1": "OpenAI gpt-5-nano (recommended)",
+            "2": "Custom OpenAI-compatible endpoint",
+            "3": "No fallback",
+        }
+        default_choice = "3" if explicitly_disabled else ("2" if is_custom else "1")
+        choice = self.prompt_choice(
+            "Fallback LLM when the main LLM is down?", choices, default_choice
+        )
+
+        if choice == "3":
+            self.config_manager.update_config_defaults({"fallback_llm": ""})
             self.console.print(
-                "[yellow][WARNING][/yellow] Remember to start OpenMemory: cd ../../extras/openmemory-mcp && docker compose up -d"
+                "[blue][INFO][/blue] No fallback LLM — calls fail if the main "
+                "LLM is unreachable (defaults.fallback_llm cleared)"
             )
+            return
+
+        if choice == "1":
+            # Stock gpt-5-nano entry ships in defaults.yml; re-sync a stale
+            # customized copy in config.yml so it doesn't shadow the default.
+            if existing_model:
+                self.config_manager.sync_models_from_defaults(["fallback-llm"])
+            api_key = self.prompt_with_existing_masked(
+                prompt_text="OpenAI API key for the fallback (leave empty to keep existing)",
+                env_key="OPENAI_API_KEY",
+                placeholders=["your_openai_api_key_here", "your-openai-key-here"],
+                is_password=True,
+                default="",
+            )
+            if api_key:
+                self.config["OPENAI_API_KEY"] = api_key
+            else:
+                self.console.print(
+                    "[yellow][WARNING][/yellow] No OPENAI_API_KEY — the fallback "
+                    "will not work until one is set in .env"
+                )
+            self.config_manager.update_config_defaults({"fallback_llm": "fallback-llm"})
+            self.console.print(
+                "[green][SUCCESS][/green] Fallback LLM: OpenAI gpt-5-nano "
+                "(defaults.fallback_llm: fallback-llm)"
+            )
+            return
+
+        # Custom OpenAI-compatible fallback endpoint
+        base_url = self.prompt_value(
+            "Fallback LLM API Base URL",
+            existing_model.get("model_url", "https://api.openai.com/v1"),
+        )
+        if not base_url:
+            self.console.print(
+                "[yellow][WARNING][/yellow] No base URL - fallback disabled"
+            )
+            self.config_manager.update_config_defaults({"fallback_llm": ""})
+            return
+
+        api_key = self.prompt_with_existing_masked(
+            prompt_text="Fallback LLM API Key (leave empty if not required)",
+            env_key="FALLBACK_LLM_API_KEY",
+            placeholders=["your_fallback_llm_api_key_here"],
+            is_password=True,
+            default="",
+        )
+        if api_key:
+            self.config["FALLBACK_LLM_API_KEY"] = api_key
+
+        model_name = self.prompt_value(
+            "Fallback LLM model name (e.g., gpt-5-nano, llama-3.1-8b-instant)",
+            existing_model.get("model_name", "gpt-5-nano"),
+        )
+        if not model_name:
+            self.console.print(
+                "[yellow][WARNING][/yellow] No model name - fallback disabled"
+            )
+            self.config_manager.update_config_defaults({"fallback_llm": ""})
+            return
+
+        fallback_model = {
+            "name": "fallback-llm",
+            "description": "Fallback LLM used when the primary LLM is unreachable",
+            "model_type": "llm",
+            "model_provider": "openai",
+            "api_family": "openai",
+            "model_name": model_name,
+            "model_url": base_url,
+            "api_key": "${oc.env:FALLBACK_LLM_API_KEY,''}",
+            "model_params": {"temperature": 0.2, "max_tokens": 4000},
+            "model_output": "json",
+        }
+        self.config_manager.add_or_update_model(fallback_model)
+        self.config_manager.update_config_defaults({"fallback_llm": "fallback-llm"})
+        self.console.print(
+            "[green][SUCCESS][/green] Custom fallback LLM configured "
+            "(defaults.fallback_llm: fallback-llm)"
+        )
+
+    def setup_memory(self):
+        """Configure memory provider - updates config.yml.
+
+        Chronicle's agentic Markdown vault is currently the only memory provider,
+        so there is no provider choice to make — we just ensure config.yml/.env
+        record it.
+        """
+        self.config_manager.update_memory_config({"provider": "chronicle"})
+        self.console.print(
+            "[green][SUCCESS][/green] Memory: Chronicle agentic vault (config.yml + .env)"
+        )
 
     def setup_optional_services(self):
         """Configure optional services"""
@@ -871,8 +1269,30 @@ class ChronicleSetup:
                 f"[green]✅[/green] Parakeet ASR: {self.args.parakeet_asr_url} (configured via wizard)"
             )
 
+        # Speaker / TTS source = "configure from the Tailnet later": leave the URL
+        # empty so the backend discovers chronicle-speaker / chronicle-tts at runtime.
+        speaker_discover = getattr(self.args, "speaker_discover", False)
+        if speaker_discover:
+            self.config["SPEAKER_SERVICE_URL"] = ""
+            self.console.print(
+                "[blue][INFO][/blue] SPEAKER_SERVICE_URL left empty — backend will "
+                "discover chronicle-speaker on the Tailnet at runtime"
+            )
+
+        if getattr(self.args, "tts_discover", False):
+            self.config["CHRONICLE_TTS_URL"] = ""
+            self.console.print(
+                "[blue][INFO][/blue] CHRONICLE_TTS_URL left empty — backend will "
+                "discover chronicle-tts on the Tailnet at runtime"
+            )
+        elif getattr(self.args, "tts_url", None):
+            self.config["CHRONICLE_TTS_URL"] = self.args.tts_url
+            self.console.print(
+                f"[green]✅[/green] TTS: {self.args.tts_url} (configured via wizard)"
+            )
+
         # Only show interactive section if not all configured via args
-        if not has_speaker_arg:
+        if not has_speaker_arg and not speaker_discover:
             try:
                 enable_speaker = Confirm.ask(
                     "Enable Speaker Recognition?", default=False
@@ -900,101 +1320,6 @@ class ChronicleSetup:
             self.console.print(
                 f"[green][SUCCESS][/green] Tailscale auth key configured (Docker integration enabled)"
             )
-
-    def setup_neo4j(self):
-        """Configure Neo4j credentials (always required - used by Knowledge Graph)"""
-        neo4j_password = getattr(self.args, "neo4j_password", None)
-
-        if neo4j_password:
-            self.console.print(
-                f"[green]✅[/green] Neo4j: password configured via wizard"
-            )
-        else:
-            # Interactive prompt (standalone init.py run)
-            self.console.print()
-            self.console.print("[bold cyan]Neo4j Configuration[/bold cyan]")
-            self.console.print(
-                "Neo4j is used for Knowledge Graph (entity/relationship extraction)"
-            )
-            self.console.print()
-            neo4j_password = self.prompt_with_existing_masked(
-                "Neo4j password (min 8 chars)",
-                env_key="NEO4J_PASSWORD",
-                placeholders=["", "your-neo4j-password"],
-                is_password=True,
-                default="neo4jpassword",
-            )
-
-        self.config["NEO4J_HOST"] = "neo4j"
-        self.config["NEO4J_USER"] = "neo4j"
-        self.config["NEO4J_PASSWORD"] = neo4j_password
-        self.console.print("[green][SUCCESS][/green] Neo4j credentials configured")
-
-    def setup_obsidian(self):
-        """Configure Obsidian integration (optional feature flag only - Neo4j credentials handled by setup_neo4j)"""
-        has_enable = hasattr(self.args, "enable_obsidian") and self.args.enable_obsidian
-        has_disable = hasattr(self.args, "no_obsidian") and self.args.no_obsidian
-
-        if has_enable:
-            enable_obsidian = True
-            self.console.print(
-                f"[green]✅[/green] Obsidian: enabled (configured via wizard)"
-            )
-        elif has_disable:
-            enable_obsidian = False
-            self.console.print(
-                f"[blue][INFO][/blue] Obsidian: disabled (configured via wizard)"
-            )
-        else:
-            # Standalone init.py run — read existing config as default
-            full_config = self.config_manager.get_full_config()
-            existing_enabled = (
-                full_config.get("memory", {}).get("obsidian", {}).get("enabled", False)
-            )
-
-            self.console.print()
-            self.console.print("[bold cyan]Obsidian Integration (Optional)[/bold cyan]")
-            self.console.print(
-                "Enable graph-based knowledge management for Obsidian vault notes"
-            )
-            self.console.print()
-
-            try:
-                enable_obsidian = Confirm.ask(
-                    "Enable Obsidian integration?", default=existing_enabled
-                )
-            except EOFError:
-                self.console.print(
-                    f"Using default: {'Yes' if existing_enabled else 'No'}"
-                )
-                enable_obsidian = existing_enabled
-
-        if enable_obsidian:
-            self.config_manager.update_memory_config(
-                {"obsidian": {"enabled": True, "neo4j_host": "neo4j", "timeout": 30}}
-            )
-            self.console.print("[green][SUCCESS][/green] Obsidian integration enabled")
-        else:
-            self.config_manager.update_memory_config(
-                {"obsidian": {"enabled": False, "neo4j_host": "neo4j", "timeout": 30}}
-            )
-            self.console.print("[blue][INFO][/blue] Obsidian integration disabled")
-
-    def setup_knowledge_graph(self):
-        """Configure Knowledge Graph (Neo4j-based entity/relationship extraction - always enabled)"""
-        self.config_manager.update_memory_config(
-            {
-                "knowledge_graph": {
-                    "enabled": True,
-                    "neo4j_host": "neo4j",
-                    "timeout": 30,
-                }
-            }
-        )
-        self.console.print("[green][SUCCESS][/green] Knowledge Graph enabled")
-        self.console.print(
-            "[blue][INFO][/blue] Entities and relationships will be extracted from conversations"
-        )
 
     def setup_langfuse(self):
         """Configure LangFuse observability and prompt management"""
@@ -1176,17 +1501,19 @@ class ChronicleSetup:
         if enable_https:
             script_dir = Path(__file__).parent
 
-            # Check for centralized certs (generated by wizard.py)
-            certs_dir = script_dir / ".." / ".." / "certs"
-            cert_file = certs_dir / "server.crt"
-            if not cert_file.exists():
-                self.console.print(
-                    "[yellow][WARNING][/yellow] No certificates found in certs/ directory"
-                )
-                self.console.print(
-                    "[yellow][WARNING][/yellow] Run ./wizard.sh to generate certificates, "
-                    "or: cd certs && ./generate-ssl.sh <address>"
-                )
+            # Decide how the TLS cert is managed (same logic the wizard uses).
+            cert_mode = decide_cert_mode(server_ip)
+
+            if cert_mode == "static":
+                # Host-issued cert file (e.g. Docker Desktop on macOS, where Caddy can't
+                # reach the tailscaled socket). Warn if it's missing; the wizard normally
+                # generates it and the services.py startup hook keeps it fresh on restart.
+                cert_file = script_dir / ".." / ".." / "certs" / "server.crt"
+                if not cert_file.exists():
+                    self.console.print(
+                        "[yellow][WARNING][/yellow] No certificate found in certs/; "
+                        "run ./wizard.sh, or it will be generated on first start."
+                    )
 
             # Generate Caddyfile from template
             self.console.print(
@@ -1221,6 +1548,16 @@ class ChronicleSetup:
                             "TAILSCALE_IP", server_ip
                         )
 
+                        # Static mode serves a host-issued cert file; caddy mode lets
+                        # Caddy obtain/renew the cert itself (no tls directive).
+                        if cert_mode == "static":
+                            caddyfile_content = caddyfile_content.replace(
+                                f"localhost {server_ip} {{",
+                                f"localhost {server_ip} {{\n"
+                                "    tls /certs/server.crt /certs/server.key",
+                                1,
+                            )
+
                         with open(caddyfile_path, "w") as f:
                             f.write(caddyfile_content)
 
@@ -1229,6 +1566,20 @@ class ChronicleSetup:
                         )
                         self.config["HTTPS_ENABLED"] = "true"
                         self.config["SERVER_IP"] = server_ip
+                        self.config["HTTPS_CERT_MODE"] = cert_mode
+
+                        # Caddy-managed certs on a Tailscale address need the tailscaled
+                        # socket mounted in; write/remove the compose override to match.
+                        self._write_caddy_socket_override(
+                            script_dir, cert_mode, server_ip
+                        )
+
+                        # Configure webui-dev for same-origin API calls through Caddy
+                        self.config["VITE_BACKEND_URL"] = ""
+                        self.config["VITE_HMR_PORT"] = "443"
+                        self.config["VITE_ALLOWED_HOSTS"] = (
+                            f"localhost 127.0.0.1 {server_ip}"
+                        )
 
                 except Exception as e:
                     self.console.print(
@@ -1246,6 +1597,29 @@ class ChronicleSetup:
                 self.config["HTTPS_ENABLED"] = "false"
         else:
             self.config["HTTPS_ENABLED"] = "false"
+
+    def _write_caddy_socket_override(self, service_dir, cert_mode, server_address):
+        """Write or remove the compose override that mounts the tailscaled socket into
+        Caddy. Needed only for Caddy-managed certs on a *.ts.net address; removed
+        otherwise so a re-run can't leave a stale mount behind."""
+        override_path = service_dir / "docker-compose.override.yml"
+        socket = tailscale_socket_path()
+        if cert_mode == "caddy" and server_address.endswith(".ts.net") and socket:
+            override_path.write_text(
+                "# Generated by init.py for HTTPS_CERT_MODE=caddy on a Tailscale address.\n"
+                "# Mounts the host tailscaled socket so Caddy fetches and auto-renews the\n"
+                "# Tailscale TLS certificate itself (no host cert file, no renewal cron).\n"
+                "services:\n"
+                "  caddy:\n"
+                "    volumes:\n"
+                f"      - {socket}:/var/run/tailscale/tailscaled.sock\n"
+            )
+            self.console.print(
+                "[green][SUCCESS][/green] Caddy will auto-manage the Tailscale "
+                "certificate (tailscaled socket mounted)"
+            )
+        elif override_path.exists():
+            override_path.unlink()
 
     def generate_env_file(self):
         """Generate .env file from template and update with configuration.
@@ -1283,7 +1657,7 @@ class ChronicleSetup:
         merged = {**preserved_values, **self.config}
 
         for key, value in merged.items():
-            if value:  # Only set non-empty values
+            if value is not None:  # Only set values that were explicitly configured
                 set_key(env_path_str, key, value)
 
         # Ensure secure permissions
@@ -1341,22 +1715,15 @@ class ChronicleSetup:
         llm_default = config_yml.get("defaults", {}).get("llm", "not set")
         embedding_default = config_yml.get("defaults", {}).get("embedding", "not set")
         self.console.print(f"✅ LLM: {llm_default} (config.yml)")
+        if llm_default == "gemma4-llm" and stt_default == "stt-gemma4":
+            self.console.print(
+                "   [dim](unified: STT and LLM share the same Gemma 4 model)[/dim]"
+            )
         self.console.print(f"✅ Embedding: {embedding_default} (config.yml)")
 
         # Show memory provider from config.yml
         memory_provider = config_yml.get("memory", {}).get("provider", "chronicle")
         self.console.print(f"✅ Memory Provider: {memory_provider} (config.yml)")
-
-        # Show Obsidian/Neo4j status (read from config.yml)
-        obsidian_config = config_yml.get("memory", {}).get("obsidian", {})
-        if obsidian_config.get("enabled", False):
-            neo4j_host = obsidian_config.get("neo4j_host", "not set")
-            self.console.print(f"✅ Obsidian/Neo4j: Enabled ({neo4j_host})")
-
-        # Show Knowledge Graph status (always enabled)
-        kg_config = config_yml.get("memory", {}).get("knowledge_graph", {})
-        neo4j_host = kg_config.get("neo4j_host", "neo4j")
-        self.console.print(f"✅ Knowledge Graph: Enabled ({neo4j_host})")
 
         # Auto-determine URLs based on HTTPS configuration
         if self.config.get("HTTPS_ENABLED") == "true":
@@ -1400,13 +1767,6 @@ class ChronicleSetup:
                 f"   [cyan]curl http://localhost:{backend_port}/health[/cyan]"
             )
 
-        if self.config.get("MEMORY_PROVIDER") == "openmemory_mcp":
-            self.console.print()
-            self.console.print("4. Start OpenMemory MCP:")
-            self.console.print(
-                "   [cyan]cd ../../extras/openmemory-mcp && docker compose up -d[/cyan]"
-            )
-
         if self.config.get("TRANSCRIPTION_PROVIDER") == "offline":
             self.console.print()
             self.console.print("5. Start Parakeet ASR:")
@@ -1436,12 +1796,12 @@ class ChronicleSetup:
             self.setup_authentication()
             self.setup_transcription()
             self.setup_streaming_provider()
+            self.setup_live_segmentation()
             self.setup_llm()
+            self.setup_fast_llm()
+            self.setup_fallback_llm()
             self.setup_memory()
             self.setup_optional_services()
-            self.setup_neo4j()
-            self.setup_obsidian()
-            self.setup_knowledge_graph()
             self.setup_langfuse()
             self.setup_network()
             self.setup_https()
@@ -1486,12 +1846,58 @@ def main():
         help="Speaker Recognition service URL (default: prompt user)",
     )
     parser.add_argument(
+        "--speaker-discover",
+        action="store_true",
+        help="Leave SPEAKER_SERVICE_URL empty so the backend discovers "
+        "chronicle-speaker on the Tailnet at runtime.",
+    )
+    parser.add_argument(
+        "--tts-url",
+        help="Text-to-speech endpoint URL (own/remote/Tailnet-picked) → CHRONICLE_TTS_URL.",
+    )
+    parser.add_argument(
+        "--tts-discover",
+        action="store_true",
+        help="Leave CHRONICLE_TTS_URL empty so the backend discovers chronicle-tts "
+        "on the Tailnet at runtime.",
+    )
+    parser.add_argument(
         "--parakeet-asr-url", help="Parakeet ASR service URL (default: prompt user)"
     )
     parser.add_argument(
         "--transcription-provider",
-        choices=["deepgram", "parakeet", "vibevoice", "qwen3-asr", "smallest", "none"],
+        choices=[
+            "deepgram",
+            "parakeet",
+            "vibevoice",
+            "qwen3-asr",
+            "smallest",
+            "gemma4",
+            "af-next",
+            "none",
+        ],
         help="Transcription provider (default: prompt user)",
+    )
+    parser.add_argument(
+        "--asr-url",
+        help="Offline ASR endpoint URL (own/remote/Tailnet-picked). Written to the "
+        "selected provider's *_ASR_URL env var.",
+    )
+    parser.add_argument(
+        "--asr-discover",
+        action="store_true",
+        help="Leave the ASR URL empty so the backend discovers chronicle-asr on the "
+        "Tailnet at runtime ('configure from the Tailnet later').",
+    )
+    parser.add_argument(
+        "--llm-base-url",
+        help="Pin the llama.cpp LLM endpoint (own/remote/Tailnet-picked) via LLM_BASE_URL.",
+    )
+    parser.add_argument(
+        "--llm-discover",
+        action="store_true",
+        help="Leave LLM_BASE_URL empty so the backend discovers chronicle-llm on the "
+        "Tailnet at runtime.",
     )
     parser.add_argument(
         "--enable-https",
@@ -1501,14 +1907,6 @@ def main():
     parser.add_argument(
         "--server-ip",
         help="Server IP/domain for SSL certificate (default: prompt user)",
-    )
-    parser.add_argument(
-        "--enable-obsidian",
-        action="store_true",
-        help="Enable Obsidian/Neo4j integration (default: prompt user)",
-    )
-    parser.add_argument(
-        "--neo4j-password", help="Neo4j password (default: prompt user)"
     )
     parser.add_argument(
         "--ts-authkey",
@@ -1527,24 +1925,25 @@ def main():
         help="LangFuse host URL (default: http://langfuse-web:3000 for local)",
     )
     parser.add_argument(
+        "--langfuse-public-url",
+        help="Browser-accessible LangFuse URL for dashboard deep-links "
+        "(e.g. http://my-host:3002). Stored in config.yml as observability.langfuse.public_url",
+    )
+    parser.add_argument(
         "--streaming-provider",
         choices=["deepgram", "smallest", "qwen3-asr"],
         help="Streaming provider when different from batch (enables batch re-transcription)",
     )
     parser.add_argument(
+        "--live-segmentation",
+        choices=["streaming_stt", "windowed_batch"],
+        help="Live transcription path: streaming_stt (default) or windowed_batch "
+        "(batch-transcribe fixed windows when no streaming ASR)",
+    )
+    parser.add_argument(
         "--llm-provider",
-        choices=["openai", "ollama", "llamacpp", "custom", "none"],
+        choices=["openai", "ollama", "llamacpp", "custom", "gemma4-unified", "none"],
         help="LLM provider for memory extraction (default: prompt user)",
-    )
-    parser.add_argument(
-        "--memory-provider",
-        choices=["chronicle", "openmemory_mcp"],
-        help="Memory storage backend (default: prompt user)",
-    )
-    parser.add_argument(
-        "--no-obsidian",
-        action="store_true",
-        help="Explicitly disable Obsidian integration (complementary to --enable-obsidian)",
     )
 
     args = parser.parse_args()

@@ -20,9 +20,10 @@ class AnnotationType(str, Enum):
     MEMORY = "memory"
     TRANSCRIPT = "transcript"
     DIARIZATION = "diarization"  # Speaker identification corrections
-    ENTITY = "entity"  # Knowledge graph entity corrections (name/details edits)
     TITLE = "title"  # Conversation title corrections
     INSERT = "insert"  # Insert new segment between existing segments
+    TIMING = "timing"  # Adjust an existing segment's start/end (waveform region edit)
+    DELETION = "deletion"  # Remove an existing segment from the transcript
     SPEECH_SUGGESTION_CORRECTION = "speech_suggestion_correction"  # User-refined model suggestion (training signal triple)
 
 
@@ -77,12 +78,6 @@ class Annotation(Document):
     corrected_speaker: Optional[str] = None  # Speaker label after correction
     segment_start_time: Optional[float] = None  # Time offset for reference
 
-    # For ENTITY annotations:
-    # Dual purpose: feeds both the jargon pipeline (entity name corrections = domain vocabulary
-    # the ASR should know) and the entity extraction pipeline (corrections improve future accuracy).
-    entity_id: Optional[str] = None  # Neo4j entity ID
-    entity_field: Optional[str] = None  # Which field was changed ("name" or "details")
-
     # For SPEECH_SUGGESTION_CORRECTION annotations:
     model_suggested_text: Optional[str] = (
         None  # What AI originally suggested before user edited
@@ -93,6 +88,12 @@ class Annotation(Document):
     insert_text: Optional[str] = None  # e.g., "[laughter]" or "wife laughed"
     insert_segment_type: Optional[str] = None  # "event", "note", or "speech"
     insert_speaker: Optional[str] = None  # Speaker label for "speech" type inserts
+    insert_start: Optional[float] = None  # Explicit span start (waveform-drawn region)
+    insert_end: Optional[float] = None  # Explicit span end; None → zero-duration marker
+
+    # For TIMING annotations (adjust an existing segment's span on the waveform):
+    new_start: Optional[float] = None
+    new_end: Optional[float] = None
 
     # Processed tracking (applies to ALL annotation types)
     processed: bool = Field(
@@ -102,6 +103,14 @@ class Annotation(Document):
     processed_by: Optional[str] = (
         None  # What processed it (manual, cron, apply, training, etc.)
     )
+
+    # Fine-tuning failure tracking (diarization annotations sent to speaker training)
+    # When training an annotation fails (corrupt segment times, missing audio,
+    # speaker-service error) it is NOT silently dropped: the attempt count and last
+    # error are recorded so the Fine-tuning page can surface the stuck annotation and
+    # let an admin retry or discard it (instead of it re-failing on every run).
+    training_attempts: int = 0  # Number of failed training attempts (0 = never failed)
+    training_error: Optional[str] = None  # Reason for the last training failure
 
     # Timestamps (Python 3.12+ compatible)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -117,7 +126,6 @@ class Annotation(Document):
             "status",  # Filter by status (pending/accepted/rejected)
             "memory_id",  # Lookup annotations for specific memory
             "conversation_id",  # Lookup annotations for specific conversation
-            "entity_id",  # Lookup annotations for specific entity
             "processed",  # Query unprocessed annotations
         ]
 
@@ -132,10 +140,6 @@ class Annotation(Document):
     def is_diarization_annotation(self) -> bool:
         """Check if this is a diarization annotation."""
         return self.annotation_type == AnnotationType.DIARIZATION
-
-    def is_entity_annotation(self) -> bool:
-        """Check if this is an entity annotation."""
-        return self.annotation_type == AnnotationType.ENTITY
 
     def is_title_annotation(self) -> bool:
         """Check if this is a title annotation."""
@@ -192,19 +196,6 @@ class DiarizationAnnotationCreate(BaseModel):
     status: AnnotationStatus = AnnotationStatus.ACCEPTED
 
 
-class EntityAnnotationCreate(BaseModel):
-    """Create entity annotation request.
-
-    Dual purpose: feeds both the jargon pipeline (entity name corrections = domain vocabulary
-    the ASR should know) and the entity extraction pipeline (corrections improve future accuracy).
-    """
-
-    entity_id: str
-    entity_field: str  # "name" or "details"
-    original_text: str
-    corrected_text: str
-
-
 class TitleAnnotationCreate(AnnotationCreateBase):
     """Create title annotation request."""
 
@@ -221,6 +212,26 @@ class InsertAnnotationCreate(BaseModel):
     insert_text: str
     insert_segment_type: str  # "event", "note", or "speech"
     insert_speaker: Optional[str] = None  # Speaker label for "speech" type inserts
+    insert_start: Optional[float] = None  # Explicit span start (waveform-drawn region)
+    insert_end: Optional[float] = None  # Explicit span end; None → zero-duration marker
+
+
+class TimingAnnotationCreate(BaseModel):
+    """Adjust an existing segment's start/end times (waveform region edit)."""
+
+    conversation_id: str
+    segment_index: int
+    new_start: float
+    new_end: float
+    status: AnnotationStatus = AnnotationStatus.ACCEPTED
+
+
+class DeletionAnnotationCreate(BaseModel):
+    """Remove an existing segment from the transcript (waveform/segment editor)."""
+
+    conversation_id: str
+    segment_index: int
+    status: AnnotationStatus = AnnotationStatus.ACCEPTED
 
 
 class AnnotationUpdate(BaseModel):
@@ -248,16 +259,20 @@ class AnnotationResponse(BaseModel):
     original_speaker: Optional[str] = None
     corrected_speaker: Optional[str] = None
     segment_start_time: Optional[float] = None
-    entity_id: Optional[str] = None
-    entity_field: Optional[str] = None
     model_suggested_text: Optional[str] = None
     insert_after_index: Optional[int] = None
     insert_text: Optional[str] = None
     insert_segment_type: Optional[str] = None
     insert_speaker: Optional[str] = None
+    insert_start: Optional[float] = None
+    insert_end: Optional[float] = None
+    new_start: Optional[float] = None
+    new_end: Optional[float] = None
     processed: bool = False
     processed_at: Optional[datetime] = None
     processed_by: Optional[str] = None
+    training_attempts: int = 0
+    training_error: Optional[str] = None
     status: AnnotationStatus
     source: AnnotationSource
     created_at: datetime

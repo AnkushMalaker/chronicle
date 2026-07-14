@@ -3,13 +3,11 @@ Conversation controller for handling conversation-related business logic.
 """
 
 import logging
-import os
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
-import redis.asyncio as aioredis
 from fastapi.responses import JSONResponse
 from pymongo.errors import OperationFailure
 
@@ -20,19 +18,30 @@ from advanced_omi_backend.client_manager import (
 from advanced_omi_backend.config_loader import get_service_config
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
+    conversation_edit_chain_in_flight,
     default_queue,
     memory_queue,
+    post_conv_enqueue_kwargs,
     start_post_conversation_jobs,
     transcription_queue,
-)
-from advanced_omi_backend.controllers.session_controller import (
-    request_conversation_close,
 )
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import JobPriority
+from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
+from advanced_omi_backend.models.waveform import WaveformData
 from advanced_omi_backend.plugins.events import ConversationCloseReason, PluginEvent
+from advanced_omi_backend.redis_factory import create_async_redis
+from advanced_omi_backend.services.audio_stream.session_store import SessionStore
 from advanced_omi_backend.services.memory import get_memory_service
+from advanced_omi_backend.services.memory.audit import (
+    MemoryCause,
+    UpdateStrategy,
+    actor_for,
+    source_kind_for,
+    source_label_for,
+)
+from advanced_omi_backend.services.plugin_service import get_plugin_router
 from advanced_omi_backend.users import User
 from advanced_omi_backend.workers.conversation_jobs import generate_title_summary_job
 from advanced_omi_backend.workers.memory_jobs import (
@@ -40,6 +49,7 @@ from advanced_omi_backend.workers.memory_jobs import (
     process_memory_job,
 )
 from advanced_omi_backend.workers.speaker_jobs import recognise_speakers_job
+from advanced_omi_backend.workers.transcription_jobs import transcribe_full_audio_job
 
 logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
@@ -91,7 +101,7 @@ async def close_current_conversation(client_id: str, user: User):
             status_code=404,
         )
 
-    session_id = getattr(client_state, "stream_session_id", None)
+    session_id = client_state.stream_session_id
     if not session_id:
         return JSONResponse(
             content={"error": "No active session"},
@@ -99,11 +109,10 @@ async def close_current_conversation(client_id: str, user: User):
         )
 
     # Signal the conversation job to close and trigger post-processing
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-    r = aioredis.from_url(redis_url)
+    r = create_async_redis()
     try:
-        success = await request_conversation_close(
-            r, session_id, reason=ConversationCloseReason.USER_REQUESTED.value
+        success = await SessionStore(r).request_close(
+            session_id, ConversationCloseReason.USER_REQUESTED.value
         )
     finally:
         await r.aclose()
@@ -151,6 +160,7 @@ async def get_conversation(conversation_id: str, user: User):
                 conversation.deleted_at.isoformat() if conversation.deleted_at else None
             ),
             "processing_status": conversation.processing_status,
+            "failure_stage": conversation.failure_stage,
             "always_persist": conversation.always_persist,
             "end_reason": (
                 conversation.end_reason.value if conversation.end_reason else None
@@ -167,14 +177,9 @@ async def get_conversation(conversation_id: str, user: User):
             "transcript": conversation.transcript,
             "segments": [s.model_dump() for s in conversation.segments],
             "segment_count": conversation.segment_count,
-            "memory_count": conversation.memory_count,
-            "has_memory": conversation.has_memory,
             "active_transcript_version": conversation.active_transcript_version,
-            "active_memory_version": conversation.active_memory_version,
             "transcript_version_count": conversation.transcript_version_count,
-            "memory_version_count": conversation.memory_version_count,
             "active_transcript_version_number": conversation.active_transcript_version_number,
-            "active_memory_version_number": conversation.active_memory_version_number,
             "starred": conversation.starred,
             "starred_at": (
                 conversation.starred_at.isoformat() if conversation.starred_at else None
@@ -229,20 +234,18 @@ def _conversation_to_list_dict(conv: Conversation) -> dict:
         "deleted": conv.deleted,
         "deletion_reason": conv.deletion_reason,
         "deleted_at": conv.deleted_at.isoformat() if conv.deleted_at else None,
+        "audio_archived": conv.audio_archived,
+        "archive_reason": conv.archive_reason,
         "processing_status": conv.processing_status,
+        "failure_stage": conv.failure_stage,
         "always_persist": conv.always_persist,
         "title": conv.title,
         "summary": conv.summary,
         "detailed_summary": conv.detailed_summary,
         "active_transcript_version": conv.active_transcript_version,
-        "active_memory_version": conv.active_memory_version,
         "segment_count": conv.segment_count,
-        "has_memory": conv.has_memory,
-        "memory_count": conv.memory_count,
         "transcript_version_count": conv.transcript_version_count,
-        "memory_version_count": conv.memory_version_count,
         "active_transcript_version_number": conv.active_transcript_version_number,
-        "active_memory_version_number": conv.active_memory_version_number,
         "starred": conv.starred,
         "starred_at": conv.starred_at.isoformat() if conv.starred_at else None,
     }
@@ -251,39 +254,34 @@ def _conversation_to_list_dict(conv: Conversation) -> dict:
 def _raw_doc_to_list_dict(doc: dict) -> dict:
     """Convert a raw pymongo document (projected) to a list-view dict.
 
-    Computes segment_count, memory_count etc. from the lightweight projected
-    version arrays without loading full transcript/word data.
+    Computes segment_count and the active version number from the lightweight
+    projected version arrays without loading full transcript/word data.
     """
     active_tv = doc.get("active_transcript_version")
-    active_mv = doc.get("active_memory_version")
 
-    # Compute segment_count from projected transcript_versions
+    # Compute segment_count + the unique speaker list from the active version's segments
+    # (segments are already projected for the count — deriving speakers here is free and
+    # lets the list show "who's in this conversation" at a glance without expanding).
     segment_count = 0
+    speakers: list[str] = []
     transcript_versions = doc.get("transcript_versions") or []
     for tv in transcript_versions:
         if tv.get("version_id") == active_tv:
-            segment_count = len(tv.get("segments", []))
+            segs = tv.get("segments", [])
+            segment_count = len(segs)
+            seen: set[str] = set()
+            for seg in segs:
+                sp = (seg.get("speaker") or "").strip()
+                if sp and sp not in seen:
+                    seen.add(sp)
+                    speakers.append(sp)
             break
 
-    # Compute memory_count from projected memory_versions
-    memory_count = 0
-    memory_versions = doc.get("memory_versions") or []
-    for mv in memory_versions:
-        if mv.get("version_id") == active_mv:
-            memory_count = mv.get("memory_count", 0)
-            break
-
-    # Compute active version numbers (1-based)
+    # Compute active version number (1-based)
     active_transcript_version_number = None
     for i, tv in enumerate(transcript_versions):
         if tv.get("version_id") == active_tv:
             active_transcript_version_number = i + 1
-            break
-
-    active_memory_version_number = None
-    for i, mv in enumerate(memory_versions):
-        if mv.get("version_id") == active_mv:
-            active_memory_version_number = i + 1
             break
 
     created_at = doc.get("created_at")
@@ -302,20 +300,19 @@ def _raw_doc_to_list_dict(doc: dict) -> dict:
         "deleted": doc.get("deleted", False),
         "deletion_reason": doc.get("deletion_reason"),
         "deleted_at": deleted_at.isoformat() if deleted_at else None,
+        "audio_archived": doc.get("audio_archived", False),
+        "archive_reason": doc.get("archive_reason"),
         "processing_status": doc.get("processing_status"),
+        "failure_stage": doc.get("failure_stage"),
         "always_persist": doc.get("always_persist", False),
         "title": doc.get("title"),
         "summary": doc.get("summary"),
         "detailed_summary": doc.get("detailed_summary"),
         "active_transcript_version": active_tv,
-        "active_memory_version": active_mv,
         "segment_count": segment_count,
-        "has_memory": len(memory_versions) > 0,
-        "memory_count": memory_count,
+        "speakers": speakers,
         "transcript_version_count": len(transcript_versions),
-        "memory_version_count": len(memory_versions),
         "active_transcript_version_number": active_transcript_version_number,
-        "active_memory_version_number": active_memory_version_number,
         "starred": doc.get("starred", False),
         "starred_at": starred_at.isoformat() if starred_at else None,
     }
@@ -333,7 +330,10 @@ _LIST_PROJECTION = {
     "deleted": 1,
     "deletion_reason": 1,
     "deleted_at": 1,
+    "audio_archived": 1,
+    "archive_reason": 1,
     "processing_status": 1,
+    "failure_stage": 1,
     "always_persist": 1,
     "title": 1,
     "summary": 1,
@@ -341,12 +341,9 @@ _LIST_PROJECTION = {
     "starred": 1,
     "starred_at": 1,
     "active_transcript_version": 1,
-    "active_memory_version": 1,
     # Lightweight version metadata (exclude transcript, words, segment text)
     "transcript_versions.version_id": 1,
     "transcript_versions.segments": 1,
-    "memory_versions.version_id": 1,
-    "memory_versions.memory_count": 1,
 }
 
 
@@ -385,13 +382,13 @@ async def get_conversations(
             conditions.append({"deleted": False})
 
         if include_unprocessed:
-            # Orphan type 1: always_persist stuck in pending/failed (not deleted)
+            # Orphan type 1: always_persist that ended up failed (not deleted).
+            # "active" = still in-flight (don't flag); stale-active crashes are
+            # reconciled to "failed" by the reconciler, so they show up here too.
             conditions.append(
                 {
                     "always_persist": True,
-                    "processing_status": {
-                        "$in": ["pending_transcription", "transcription_failed"]
-                    },
+                    "processing_status": Conversation.ConversationStatus.FAILED.value,
                     "deleted": False,
                 }
             )
@@ -437,7 +434,7 @@ async def get_conversations(
                 is_orphan_type1 = (
                     doc.get("always_persist")
                     and doc.get("processing_status")
-                    in ("pending_transcription", "transcription_failed")
+                    == Conversation.ConversationStatus.FAILED.value
                     and not doc.get("deleted")
                 )
                 is_orphan_type2 = (
@@ -562,7 +559,7 @@ async def _soft_delete_conversation(
     where a retry will complete the operation.
     """
     conversation_id = conversation.conversation_id
-    deleted_at = datetime.utcnow()
+    deleted_at = datetime.now(timezone.utc)
 
     # 1. Soft delete audio chunks FIRST (safe failure mode: orphaned-deleted chunks)
     result = await AudioChunkDocument.find(
@@ -696,6 +693,112 @@ async def delete_conversation(
         )
 
 
+async def archive_conversation_audio_doc(
+    conversation: Conversation, reason: str = "manual_cleanup"
+) -> int:
+    """Archive a conversation document's audio (no permission check).
+
+    Hard-deletes the audio chunks and marks the conversation archived + soft-
+    deleted, keeping duration as the stub metadata. Returns the number of audio
+    chunks deleted. Idempotent: a re-run on an already-archived conversation
+    backfills the soft-delete flags and deletes 0 chunks.
+
+    This is the shared core used by both the user-facing endpoint (after a
+    permission check) and the system auto-clean sweep. Archiving is a
+    specialization of soft-delete: ``deleted=True`` hides it from the normal
+    list and surfaces it in the Archive tab; ``audio_archived``/``archive_reason``
+    record that the audio bytes were permanently purged. ``deletion_reason
+    ="audio_archived"`` is intentionally distinct from the no-speech/orphan
+    reasons so it isn't treated as a reprocessable orphan.
+    """
+    conversation_id = conversation.conversation_id
+    archived_at = datetime.now(timezone.utc)
+
+    if conversation.audio_archived:
+        # Idempotent backfill of soft-delete flags for items archived before
+        # archiving was unified with soft-delete.
+        if not conversation.deleted:
+            conversation.deleted = True
+            conversation.deletion_reason = "audio_archived"
+            conversation.deleted_at = conversation.audio_archived_at or archived_at
+            await conversation.save()
+        return 0
+
+    # 1. Hard delete audio chunks FIRST (no rollback for hard deletes; if the
+    #    metadata write fails afterwards a re-run completes — chunks are gone).
+    result = await AudioChunkDocument.find(
+        AudioChunkDocument.conversation_id == conversation_id
+    ).delete()
+    deleted_chunks = result.deleted_count
+
+    # 2. Mark the conversation as archived (+ soft-deleted), keeping duration.
+    conversation.audio_archived = True
+    conversation.audio_archived_at = archived_at
+    conversation.archive_reason = reason
+    conversation.audio_chunks_count = 0
+    conversation.audio_compression_ratio = None
+    conversation.vad_analysis = None  # derived from chunks that no longer exist
+    conversation.deleted = True
+    conversation.deletion_reason = "audio_archived"
+    conversation.deleted_at = archived_at
+    await conversation.save()
+
+    # Drop any cached waveform — it points at audio that no longer exists.
+    try:
+        await WaveformData.find(
+            WaveformData.conversation_id == conversation_id
+        ).delete()
+    except Exception as e:
+        logger.warning(f"Failed to delete waveform for {conversation_id}: {e}")
+
+    logger.info(
+        f"Archived audio for conversation {conversation_id} "
+        f"(reason={reason}, deleted {deleted_chunks} chunks)"
+    )
+    return deleted_chunks
+
+
+async def archive_conversation_audio(
+    conversation_id: str, user: User, reason: str = "manual_cleanup"
+) -> JSONResponse:
+    """Archive a conversation's audio: permanently delete the audio bytes from
+    MongoDB while keeping the conversation document as a lightweight metadata
+    stub (date, duration, reason).
+
+    Used by the Data Audit feature to reclaim storage for speech-free or
+    bad-speaker recordings. Unlike soft delete, this is irreversible for the
+    audio — the transcript/segment metadata is retained.
+    """
+    conversation, error = await _get_conversation_or_error(conversation_id, user)
+    if error:
+        return error
+
+    already_archived = conversation.audio_archived
+    deleted_chunks = await archive_conversation_audio_doc(conversation, reason)
+
+    if already_archived:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "message": "Conversation audio already archived",
+                "conversation_id": conversation_id,
+                "already_archived": True,
+                "deleted_chunks": 0,
+            },
+        )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "message": f"Successfully archived audio for conversation '{conversation_id}'",
+            "conversation_id": conversation_id,
+            "archive_reason": reason,
+            "deleted_chunks": deleted_chunks,
+            "duration_seconds": conversation.audio_total_duration,
+        },
+    )
+
+
 async def restore_conversation(conversation_id: str, user: User) -> JSONResponse:
     """
     Restore a soft-deleted conversation.
@@ -768,7 +871,7 @@ async def restore_conversation(conversation_id: str, user: User) -> JSONResponse
 async def _restore_if_deleted_and_prepare(
     conversation: Conversation,
     conversation_id: str,
-    processing_status: str | None = "reprocessing",
+    processing_status: str | None = Conversation.ConversationStatus.ACTIVE.value,
 ) -> None:
     """Restore soft-deleted conversation/chunks and optionally set processing_status."""
     changed = False
@@ -805,10 +908,6 @@ def _enqueue_transcript_reprocessing(
 
     Returns (version_id, transcript_job, post_jobs dict).
     """
-    from advanced_omi_backend.workers.transcription_jobs import (
-        transcribe_full_audio_job,
-    )
-
     version_id = str(uuid.uuid4())
 
     transcript_job = transcription_queue.enqueue(
@@ -829,6 +928,7 @@ def _enqueue_transcript_reprocessing(
         transcript_version_id=version_id,
         depends_on_job=transcript_job,
         end_reason=end_reason,
+        memory_cause=MemoryCause.TRANSCRIPT_REPROCESS,
     )
 
     return version_id, transcript_job, post_jobs
@@ -854,12 +954,7 @@ def _resolve_transcript_version(conversation: Conversation, version_id: str) -> 
             )
         resolved_id = active_id
 
-    version_obj = None
-    for v in conversation.transcript_versions:
-        if v.version_id == resolved_id:
-            version_obj = v
-            break
-
+    version_obj = conversation.get_transcript_version(resolved_id)
     if not version_obj:
         return (
             JSONResponse(
@@ -886,16 +981,22 @@ def _enqueue_speaker_reprocessing_chain(
         recognise_speakers_job,
         conversation_id,
         version_id,
+        "",  # transcript_text: read from source version
+        None,  # words: read from source version
+        source_version_id,  # create-on-success: read from this version, create version_id
         job_timeout=1200,
         result_ttl=JOB_RESULT_TTL,
         job_id=f"reprocess_speaker_{conversation_id[:12]}",
         description=f"Re-diarize speakers for {conversation_id[:8]}",
-        meta={
-            "conversation_id": conversation_id,
-            "version_id": version_id,
-            "source_version_id": source_version_id,
-            "trigger": "reprocess",
-        },
+        **post_conv_enqueue_kwargs(
+            "speaker",
+            {
+                "conversation_id": conversation_id,
+                "version_id": version_id,
+                "source_version_id": source_version_id,
+                "trigger": "reprocess",
+            },
+        ),
     )
     logger.info(
         f"Enqueued speaker reprocessing job {speaker_job.id} for version {version_id}"
@@ -904,12 +1005,19 @@ def _enqueue_speaker_reprocessing_chain(
     memory_job = memory_queue.enqueue(
         process_memory_job,
         conversation_id,
-        depends_on=speaker_job,
         job_timeout=1800,
         result_ttl=JOB_RESULT_TTL,
         job_id=f"memory_{conversation_id[:12]}",
         description=f"Extract memories for {conversation_id[:8]}",
-        meta={"conversation_id": conversation_id, "trigger": "reprocess_after_speaker"},
+        **post_conv_enqueue_kwargs(
+            "memory",
+            {
+                "conversation_id": conversation_id,
+                "cause": MemoryCause.SPEAKER_REPROCESS.value,
+                "strategy": UpdateStrategy.SPEAKER_DIFF.value,
+            },
+            depends_on=speaker_job,
+        ),
     )
     logger.info(
         f"Chained memory job {memory_job.id} after speaker job {speaker_job.id}"
@@ -920,10 +1028,13 @@ def _enqueue_speaker_reprocessing_chain(
         conversation_id,
         job_timeout=300,
         result_ttl=JOB_RESULT_TTL,
-        depends_on=memory_job,
         job_id=f"title_summary_{conversation_id[:12]}",
         description=f"Regenerate title/summary for {conversation_id[:8]}",
-        meta={"conversation_id": conversation_id, "trigger": "reprocess_after_speaker"},
+        **post_conv_enqueue_kwargs(
+            "title_summary",
+            {"conversation_id": conversation_id},
+            depends_on=memory_job,
+        ),
     )
     logger.info(
         f"Chained title/summary job {title_summary_job.id} after memory job {memory_job.id}"
@@ -945,7 +1056,9 @@ async def toggle_star(conversation_id: str, user: User):
 
         # Toggle
         conversation.starred = not conversation.starred
-        conversation.starred_at = datetime.utcnow() if conversation.starred else None
+        conversation.starred_at = (
+            datetime.now(timezone.utc) if conversation.starred else None
+        )
         await conversation.save()
 
         logger.info(
@@ -955,8 +1068,6 @@ async def toggle_star(conversation_id: str, user: User):
 
         # Dispatch plugin event (fire-and-forget)
         try:
-            from advanced_omi_backend.services.plugin_service import get_plugin_router
-
             plugin_router = get_plugin_router()
             if plugin_router:
                 await plugin_router.dispatch_event(
@@ -1018,8 +1129,10 @@ async def reprocess_orphan(conversation_id: str, user: User):
             conversation.deletion_reason = None
             conversation.deleted_at = None
 
-        # Set processing status and update title
-        conversation.processing_status = "reprocessing"
+        # Back to in-flight; the finalizer reconciles the terminal status when the
+        # reprocess chain completes.
+        conversation.processing_status = Conversation.ConversationStatus.ACTIVE.value
+        conversation.failure_stage = None
         conversation.title = "Reprocessing..."
         conversation.summary = None
         conversation.detailed_summary = None
@@ -1143,6 +1256,8 @@ async def reprocess_memory(
         job = enqueue_memory_processing(
             conversation_id=conversation_id,
             priority=JobPriority.NORMAL,
+            cause=MemoryCause.MEMORY_REPLAY,
+            strategy=UpdateStrategy.FULL,
         )
 
         logger.info(
@@ -1184,7 +1299,36 @@ async def reprocess_speakers(
         if error:
             return error
 
-        await _restore_if_deleted_and_prepare(conversation_model, conversation_id)
+        # Re-diarization operates on an existing transcript (text is copied to the
+        # new version), so the conversation stays "completed" throughout. Don't flip
+        # it to "active": the speaker-reprocess chain (speaker->memory->title_summary)
+        # has no finalizer, so an "active" flip would never settle back. Restore from
+        # soft-delete but keep the fact-derived status, then settle it explicitly.
+        await _restore_if_deleted_and_prepare(
+            conversation_model, conversation_id, processing_status=None
+        )
+        if conversation_model.apply_status(settled=True):
+            await conversation_model.save()
+
+        # Single-flight: reject if a reprocess chain is already running for this
+        # conversation. Overlapping chains (e.g. rapid repeat clicks) race on the
+        # conversation's full-document save() and a stale chain can clobber the newer
+        # speaker write — leaving an orphan version with empty speaker metadata and
+        # unchanged labels. Bail before creating a new version so we don't pile up
+        # dead versions either.
+        in_flight = conversation_edit_chain_in_flight(conversation_id)
+        if in_flight:
+            logger.info(
+                f"Reprocess already in flight for {conversation_id[:8]} "
+                f"(job {in_flight}); skipping duplicate request"
+            )
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "Speaker reprocessing is already in progress for this conversation.",
+                    "in_flight_job_id": in_flight,
+                },
+            )
 
         # 2-3. Resolve source transcript version ID and find version object
         error, source_version_id, source_version = _resolve_transcript_version(
@@ -1237,51 +1381,14 @@ async def reprocess_speakers(
                 },
             )
 
-        # 6. Create NEW transcript version (copy text/words, segments for provider-diarized)
+        # 6. Pre-allocate the new version id but DON'T create it yet. The speaker job
+        #    reads from the source version and creates this version only once it has a
+        #    usable result — mirroring transcript reprocess (transcribe_full_audio_job).
+        #    A failed/empty reprocess therefore leaves NO new version behind and surfaces
+        #    an error, instead of a degraded no-op version with unchanged labels.
         new_version_id = str(uuid.uuid4())
 
-        # For provider-diarized transcripts, copy segments so the speaker job can
-        # identify speakers per-segment. For word-based transcripts, leave segments
-        # empty so pyannote can re-diarize.
-        new_metadata = {
-            "reprocessing_type": "speaker_diarization",
-            "source_version_id": source_version_id,
-            "trigger": "manual_reprocess",
-            "provider_capabilities": provider_capabilities,
-        }
-        use_segments = provider_has_diarization or not has_words
-        if use_segments:
-            new_segments = source_version.segments  # COPY provider segments
-            if not has_words and not provider_has_diarization:
-                new_metadata["segments_only"] = True
-        else:
-            new_segments = []  # Empty - will be populated by speaker job
-
-        new_version = conversation_model.add_transcript_version(
-            version_id=new_version_id,
-            transcript=source_version.transcript,  # COPY transcript text
-            words=source_version.words,  # COPY word timings
-            segments=new_segments,
-            provider=source_version.provider,
-            model=source_version.model,
-            processing_time_seconds=None,  # Will be updated by job
-            metadata=new_metadata,
-            set_as_active=True,  # Set new version as active
-        )
-
-        # Carry over diarization_source so speaker job knows to use segment identification
-        if provider_has_diarization or (not has_words and has_segments):
-            new_version.diarization_source = "provider"
-
-        # Save conversation with new version
-        await conversation_model.save()
-
-        logger.info(
-            f"Created new transcript version {new_version_id} from source {source_version_id} "
-            f"for conversation {conversation_id}"
-        )
-
-        # 7-8. Enqueue speaker → memory → title/summary chain
+        # 7-8. Enqueue speaker → memory → title/summary chain (create-on-success).
         job_ids = _enqueue_speaker_reprocessing_chain(
             conversation_id,
             new_version_id,
@@ -1350,44 +1457,12 @@ async def activate_transcript_version(
         )
 
 
-async def activate_memory_version(conversation_id: str, version_id: str, user: User):
-    """Activate a specific memory version. Users can only modify their own conversations."""
-    try:
-        conversation_model, error = await _get_conversation_or_error(
-            conversation_id, user
-        )
-        if error:
-            return error
-
-        # Activate the memory version using Beanie model method
-        success = conversation_model.set_active_memory_version(version_id)
-        if not success:
-            return JSONResponse(
-                status_code=400, content={"error": "Failed to activate memory version"}
-            )
-
-        await conversation_model.save()
-
-        logger.info(
-            f"Activated memory version {version_id} for conversation {conversation_id} by user {user.user_id}"
-        )
-
-        return JSONResponse(
-            content={
-                "message": f"Memory version {version_id} activated successfully",
-                "active_memory_version": version_id,
-            }
-        )
-
-    except Exception as e:
-        logger.error(f"Error activating memory version: {e}")
-        return JSONResponse(
-            status_code=500, content={"error": "Error activating memory version"}
-        )
-
-
 async def get_conversation_version_history(conversation_id: str, user: User):
-    """Get version history for a conversation. Users can only access their own conversations."""
+    """Get transcript version history for a conversation. Users can only access their own conversations.
+
+    Memory is no longer versioned (the vault is the system of record); see the
+    memory audit ledger (``get_conversation_memory_audit``) for memory change history.
+    """
     try:
         conversation_model, error = await _get_conversation_or_error(
             conversation_id, user
@@ -1404,19 +1479,10 @@ async def get_conversation_version_history(conversation_id: str, user: User):
                 version_dict["created_at"] = version_dict["created_at"].isoformat()
             transcript_versions.append(version_dict)
 
-        memory_versions = []
-        for v in conversation_model.memory_versions:
-            version_dict = v.model_dump()
-            if version_dict.get("created_at"):
-                version_dict["created_at"] = version_dict["created_at"].isoformat()
-            memory_versions.append(version_dict)
-
         history = {
             "conversation_id": conversation_id,
             "active_transcript_version": conversation_model.active_transcript_version,
-            "active_memory_version": conversation_model.active_memory_version,
             "transcript_versions": transcript_versions,
-            "memory_versions": memory_versions,
         }
 
         return JSONResponse(content=history)
@@ -1426,3 +1492,77 @@ async def get_conversation_version_history(conversation_id: str, user: User):
         return JSONResponse(
             status_code=500, content={"error": "Error fetching version history"}
         )
+
+
+async def get_conversation_memory_audit(
+    conversation_id: str, user: User, limit: int = 100
+):
+    """Get the memory vault change history (audit ledger) for a conversation.
+
+    Replaces the old per-conversation "memory versions": memory is a vault that is
+    overwritten in place, so instead we return the recorded changes (which notes
+    were created/updated/deleted, when, and what triggered each).
+    """
+    try:
+        _, error = await _get_conversation_or_error(conversation_id, user)
+        if error:
+            return error
+
+        entries = (
+            await MemoryAuditEntry.find(
+                MemoryAuditEntry.conversation_id == conversation_id
+            )
+            .sort(-MemoryAuditEntry.created_at)
+            .limit(limit)
+            .to_list()
+        )
+
+        return JSONResponse(
+            content={
+                "conversation_id": conversation_id,
+                "count": len(entries),
+                "entries": [_memory_audit_to_dict(e) for e in entries],
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Error fetching memory audit for {conversation_id}: {e}")
+        return JSONResponse(
+            status_code=500, content={"error": "Error fetching memory audit"}
+        )
+
+
+def _memory_audit_to_dict(entry) -> dict:
+    """Serialize a MemoryAuditEntry for API responses.
+
+    Provenance is exposed both raw (``cause``/``strategy``) and pre-classified
+    (``source_kind``/``source_label``/``actor``) so the WebUI renders an honest
+    label without re-deriving the taxonomy from magic strings.
+    """
+    return {
+        "id": str(entry.id),
+        "user_id": entry.user_id,
+        "conversation_id": entry.conversation_id,
+        "operation": entry.operation,
+        "note_path": entry.note_path,
+        "cause": entry.cause,
+        "strategy": entry.strategy,
+        "source_kind": source_kind_for(entry.cause, entry.agent_mode, entry.operation),
+        "source_label": source_label_for(
+            entry.cause, entry.agent_mode, entry.operation
+        ),
+        "actor": actor_for(entry.cause, entry.agent_mode, entry.operation),
+        "provider": entry.provider,
+        "agent_mode": entry.agent_mode,
+        "before_hash": entry.before_hash,
+        "after_hash": entry.after_hash,
+        "after_bytes": entry.after_bytes,
+        "summary": entry.summary,
+        "extra": entry.extra,
+        "created_at": entry.created_at.isoformat() if entry.created_at else None,
+        # Whether a before→after diff can be fetched for this entry. True when the
+        # post-change content was retained, or for deletes (the prior recorded
+        # change supplies the removed content). False for legacy entries written
+        # before content was retained and for note-less delete_all operations.
+        "has_diff": entry.after_text is not None or entry.operation == "delete",
+    }

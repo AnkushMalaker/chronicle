@@ -315,84 +315,35 @@ Do not output any text outside the JSON object.
     )
 
     # ------------------------------------------------------------------
-    # memory.temporal_extraction
+    # chat.system.tool_mode
     # ------------------------------------------------------------------
     registry.register_default(
-        "memory.temporal_extraction",
+        "chat.system.tool_mode",
         template="""\
-You are an expert at extracting temporal and entity information from memory facts.
+You are Chronicle, a helpful assistant with access to the user's personal memory: an
+Obsidian-style vault of notes about the people, topics, places, and conversations in
+their life.
 
-Your task is to analyze a memory fact and extract structured information in JSON format:
-1. **Entity Types**: Determine if the memory is about events, people, places, promises, or relationships
-2. **Temporal Information**: Extract and resolve any time references to actual ISO 8601 timestamps
-3. **Named Entities**: List all people, places, and things mentioned
-4. **Representation**: Choose a single emoji that captures the essence of the memory
+You have one tool, `search_memories`. It runs an agentic search over that vault and
+returns a synthesized `answer` plus the `sources` (note paths) it drew from.
 
-You must return a valid JSON object with the following structure.
+When to search:
+- Search whenever the question touches anything personal — people the user knows, past
+  conversations, their preferences, plans, things they've mentioned, or any "what do you
+  know about X / who is X / when did I…" question.
+- Do NOT search for general knowledge, definitions, math, coding, or casual chit-chat
+  ("hi", "thanks"). Just answer those directly.
+- You may search more than once if the first query was too narrow or returned nothing
+  useful.
 
-**Current Date Context:**
-- Today's date: {{current_date}}
-- Current time: {{current_time}}
-- Day of week: {{day_of_week}}
-
-**Time Resolution Guidelines:**
-
-Relative Time References:
-- "tomorrow" -> Add 1 day to current date
-- "next week" -> Add 7 days to current date
-- "in X days/weeks/months" -> Add X time units to current date
-- "yesterday" -> Subtract 1 day from current date
-
-Time of Day:
-- "4pm" or "16:00" -> Use current date with that time
-- "tomorrow at 4pm" -> Use tomorrow's date at 16:00
-- "morning" -> 09:00 on the referenced day
-- "afternoon" -> 14:00 on the referenced day
-- "evening" -> 18:00 on the referenced day
-- "night" -> 21:00 on the referenced day
-
-Duration Estimation (when only start time is mentioned):
-- Events like "wedding", "meeting", "party" -> Default 2 hours duration
-- "lunch", "dinner", "breakfast" -> Default 1 hour duration
-- "class", "workshop" -> Default 1.5 hours duration
-- "appointment", "call" -> Default 30 minutes duration
-
-**Entity Type Guidelines:**
-
-- **isEvent**: True for scheduled activities, appointments, meetings, parties, ceremonies, classes, etc.
-- **isPerson**: True when the primary focus is on a person (e.g., "Met John", "Sarah is my friend")
-- **isPlace**: True when the primary focus is a location (e.g., "Botanical Gardens is beautiful", "Favorite restaurant is...")
-- **isPromise**: True for commitments, promises, or agreements (e.g., "I'll call you tomorrow", "We agreed to meet")
-- **isRelationship**: True for statements about relationships (e.g., "John is my brother", "We're getting married")
-
-**Instructions:**
-- Return structured data following the TemporalEntity schema
-- Convert all temporal references to ISO 8601 format
-- Be conservative: if there's no temporal information, leave timeRanges empty
-- Multiple tags can be true (e.g., isEvent and isPerson both true for "meeting with John")
-- Extract all meaningful entities (people, places, things) mentioned in the fact
-- Choose an emoji that best represents the core meaning of the memory
-""",
-        name="Temporal Extraction",
-        description="Extracts temporal and entity information from memory facts with date resolution.",
-        category="memory",
-        variables=["current_date", "current_time", "day_of_week"],
-        is_dynamic=True,
-    )
-
-    # ------------------------------------------------------------------
-    # chat.system
-    # ------------------------------------------------------------------
-    registry.register_default(
-        "chat.system",
-        template="""\
-You are a helpful AI assistant with access to the user's personal memories and conversation history.
-
-Use the provided memories and conversation context to give personalized, contextual responses. If memories are relevant, reference them naturally in your response. Be conversational and helpful.
-
-If no relevant memories are available, respond normally based on the conversation context.""",
-        name="Chat System Prompt",
-        description="Default system prompt for the chat assistant.",
+Using results:
+- Treat the returned `answer` as your retrieved knowledge and weave it naturally into
+  your reply. Mention which note it came from only when it genuinely helps; never dump
+  raw paths or list memories mechanically.
+- If the search returns no answer (nothing in the vault), say you don't have that in
+  memory rather than guessing. Never invent personal facts about the user.""",
+        name="Chat System Prompt (Tool Mode)",
+        description="System prompt for the chat assistant. The assistant decides when to call the search_memories tool, which runs the agentic vault search.",
         category="chat",
     )
 
@@ -425,98 +376,30 @@ Rules:
     registry.register_default(
         "conversation.detailed_summary",
         template="""\
-Generate a comprehensive, detailed summary of this conversation transcript.
+Summarize this conversation transcript, accurately and in proportion to how much was actually said.
 
 {{memory_section}}INSTRUCTIONS:
-Your task is to create a high-quality, detailed summary of a conversation transcription that captures the full information and context of what was discussed. This is NOT a brief summary - provide comprehensive coverage.
+Write a clear summary of the conversation. Match the length to the content: a long, substantive conversation deserves a thorough multi-paragraph summary; a short or trivial exchange (a single question, a quick command, a few words) deserves only a sentence or two. Do not pad.
 
 Rules:
 - We know it's a conversation, so no need to say "This conversation involved..."
-- Provide complete coverage of all topics, points, and important details discussed
-- Correct obvious transcription errors and remove filler words (um, uh, like, you know)
-- Organize information logically by topic or chronologically as appropriate
-- Use clear, well-structured paragraphs or bullet points, but make the length relative to the amound of content.
-- Maintain the meaning and intent of what was said, but improve clarity and coherence
-- Include relevant context, decisions made, action items mentioned, and conclusions reached
-{{speaker_instruction}}- Write in a natural, flowing narrative style
-- Only include word-for-word quotes if it's more efficiency than rephrasing
-- Focus on substantive content - what was actually discussed and decided
+- Ground everything strictly in the transcript. Do NOT invent or infer details, decisions, action items, plans, names, dates, or next steps that were not actually said.
+- Only mention decisions, action items, or conclusions if they were explicitly stated in the transcript.
+- Correct obvious transcription errors and remove filler words (um, uh, like, you know), but never change the meaning.
+- Organize information logically by topic or chronologically as appropriate.
+- Use clear, well-structured prose or bullet points; keep the length proportional to the amount of content.
+- If the transcript is trivial or says very little, summarize it in a sentence or two rather than elaborating.
+{{speaker_instruction}}- Write in a natural, flowing style.
+- Only include word-for-word quotes when a quote is clearer than rephrasing.
 
-Think of this as creating a high-quality information set that someone could use to understand everything important that happened in this conversation without reading the full transcript.
+Any "CONTEXT ABOUT THE USER" shown above is background only — use it to interpret what was said, never as material to add. Do not summarize the context; only summarize the transcript.
 
-DETAILED SUMMARY:""",
+SUMMARY:""",
         name="Conversation Detailed Summary",
-        description="Generates a comprehensive multi-paragraph summary of a conversation.",
+        description="Generates a proportional-length summary of a conversation, grounded strictly in the transcript.",
         category="conversation",
         variables=["speaker_instruction", "memory_section"],
         is_dynamic=True,
-    )
-
-    # ------------------------------------------------------------------
-    # knowledge_graph.entity_extraction
-    # ------------------------------------------------------------------
-    registry.register_default(
-        "knowledge_graph.entity_extraction",
-        template="""\
-You are an entity extraction system. Extract entities, relationships, and promises from conversation transcripts.
-
-ENTITY TYPES:
-- person: Named individuals (not generic roles)
-- organization: Companies, institutions, groups
-- place: Locations, addresses, venues
-- event: Meetings, appointments, activities with time
-- thing: Products, objects, concepts mentioned
-
-RELATIONSHIP TYPES:
-- works_at: Employment relationship
-- lives_in: Residence
-- knows: Personal connection
-- attended: Participated in event
-- located_at: Place within place
-- part_of: Membership or inclusion
-- related_to: General association
-
-EXTRACTION RULES:
-1. Only extract NAMED entities (not "my friend" but "John")
-2. Use "speaker" as the subject when the user mentions themselves
-3. Extract temporal info for events (dates, times)
-4. Capture promises/commitments with deadlines
-5. Skip filler words, small talk, and vague references
-6. Normalize names (capitalize properly)
-7. Assign appropriate emoji icons to entities
-
-Return a JSON object with this structure:
-{
-  "entities": [
-    {
-      "name": "Entity Name",
-      "type": "person|organization|place|event|thing",
-      "details": "Brief description or context",
-      "icon": "Appropriate emoji",
-      "when": "Time reference for events (optional)"
-    }
-  ],
-  "relationships": [
-    {
-      "subject": "Entity name or 'speaker'",
-      "relation": "works_at|lives_in|knows|attended|located_at|part_of|related_to",
-      "object": "Target entity name"
-    }
-  ],
-  "promises": [
-    {
-      "action": "What was promised",
-      "to": "Person promised to (optional)",
-      "deadline": "When it should be done (optional)"
-    }
-  ]
-}
-
-If no entities, relationships, or promises are found, return empty arrays.
-Only return valid JSON, no additional text.""",
-        name="Entity Extraction",
-        description="Extracts entities, relationships, and promises from conversation transcripts.",
-        category="knowledge_graph",
     )
 
     # ------------------------------------------------------------------
@@ -524,7 +407,7 @@ Only return valid JSON, no additional text.""",
     # ------------------------------------------------------------------
     registry.register_default(
         "asr.hot_words",
-        template="vivi, chronicle, omi",
+        template="hermes, chronicle, omi",
         name="ASR Hot Words",
         description="Comma-separated hot words for speech recognition. "
         "For Deepgram: boosts keyword recognition via keyterm. "
@@ -590,7 +473,7 @@ When creating plugins, generate complete plugin.py code based on the user's desc
   - **hourly_recap**: button events + email sending
   - **email_summarizer**: conversation.complete events
   - **homeassistant**: wake word condition + cross-plugin calls
-  - **test_button_actions**: button action routing
+  - **button_control**: button press → action routing (stop playback, close/star conversation)
 
 ## Rules
 - Describe proposed changes before applying; the system handles user confirmation
@@ -716,42 +599,106 @@ REVISED_PROMPT:
     )
 
     # ------------------------------------------------------------------
-    # memory.consolidate_basic_memory
+    # memory.generate_conversation_doc
     # ------------------------------------------------------------------
     registry.register_default(
-        "memory.consolidate_basic_memory",
+        "memory.generate_conversation_doc",
         template="""\
-You are building a personal knowledge base document for an AI assistant.
+You are generating a structured conversation document from a transcript.
 
-You will receive two inputs:
-1. **Existing MEMORY.md** — the current knowledge base (may be empty on first run)
-2. **Extracted memories** — individual facts extracted from the user's conversations
+Given a transcript with speaker labels, produce a markdown document with this EXACT structure:
 
-Your job is to produce an updated MEMORY.md that merges the new facts into the \
-existing document. The result should be a well-organized markdown document that \
-an AI can use as context about this user.
+---
+conversation_id: {{conversation_id}}
+date: {{date}}
+speakers: [{{speakers}}]
+duration_minutes: {{duration}}
+---
 
-## Guidelines
+## {Title - descriptive, 3-8 words}
 
-- **Organize by topic**: Group facts under clear headings (e.g., ## People, \
-## Work, ## Preferences, ## Health, ## Plans, ## Locations)
-- **Merge, don't duplicate**: If a new fact updates or contradicts an existing \
-entry, replace the old one
-- **Be concise**: Each fact should be 1-2 lines. No filler, no prose
-- **Preserve existing structure**: Keep the heading hierarchy from the existing \
-MEMORY.md if present; add new sections as needed
-- **Use bullet points**: Facts under each heading should be bulleted
-- **Include attribution where useful**: "John (coworker)" not just "John" \
-if context helps
-- **Drop noise**: Skip facts that are too vague or ephemeral to be useful \
-long-term (e.g., "had a meeting today" without specifics)
-- **Date-stamp where relevant**: If a fact has a clear date, include it \
-(e.g., "Starting new role at Acme Corp (March 2026)")
+### Summary
+{2-3 sentence summary of what was discussed}
 
-## Output
+### Key Facts
+{Bulleted list. CRITICAL — preserve every concrete detail VERBATIM. For each fact in the transcript, capture all WH-details that appear:
+  - WHO: people, friends, colleagues, family, by name.
+  - WHAT: titles (books / plays / movies / songs / games / podcasts / playlists),
+          products, brands, dishes, model numbers, job titles, occupations.
+  - WHERE: stores, retailers (e.g. "Target", "Trader Joe's"), restaurants,
+           cities, parks, venues, addresses, websites.
+  - WHEN: full date and/or time. If the transcript prefix has one, use it verbatim.
+  - HOW MUCH / HOW MANY: prices, distances, durations, quantities, speeds,
+           personal-best times — keep them exact.
 
-Return ONLY the updated markdown document. No preamble, no explanation.""",
-        name="Consolidate Basic Memory",
-        description="Merges extracted memory facts into a structured MEMORY.md knowledge base document.",
+Distinguish current vs. previous state explicitly when the user says so
+("previous job was X", "used to be Y", "no longer Z").
+
+Examples of BAD vs. GOOD facts:
+  BAD:  Attended a play at the local community theater.
+  GOOD: Attended The Glass Menagerie at the local community theater on 2023-05-26.
+  BAD:  Bought a new tennis racket recently.
+  GOOD: Bought a new tennis racket from the sports store downtown.
+  BAD:  Made a Spotify playlist.
+  GOOD: Created a Spotify playlist named "Summer Vibes".
+  BAD:  Previous job was in marketing.
+  GOOD: Previous occupation: marketing specialist at a small startup.
+  BAD:  Upgraded internet plan.
+  GOOD: New internet plan: 500 Mbps.
+  BAD:  Improved 5K time.
+  GOOD: Personal best in the charity 5K: 25:50 (previous PB was 27:12).}
+
+### People
+{Bulleted list in format: - Name (role/relationship, context)}
+Include ALL named individuals — speakers, people mentioned, people referenced.
+If a speaker is identified by name (e.g., "John" not "Speaker 0"), they MUST appear here.
+Do not include unnamed roles or generic labels like "Speaker 0".
+
+### Action Items
+{Bulleted list in format: - [ ] Action item description}
+Use [x] for items already completed in the conversation.
+
+Rules:
+- Every ### section MUST be present, even if empty (use "- None" for empty sections)
+- People section: ONLY named individuals, format MUST be "- Name (description)"
+- Key Facts: keep every WH-detail verbatim — never paraphrase a name, title,
+  store, date, or number into a generic word like "a play" / "a store" / "recently"
+- Action Items: use checkbox format [ ] or [x]
+- Do NOT add any sections beyond the four listed above
+""",
+        name="Conversation Document Generator",
+        description="Generates a structured markdown conversation document from a transcript with frontmatter, summary, key facts, people, and action items.",
         category="memory",
+        variables=["conversation_id", "date", "speakers", "duration"],
+        is_dynamic=True,
+    )
+
+    # ------------------------------------------------------------------
+    # memory.agent_system  (Chronicle memory agent — vault-editing system prompt)
+    # ------------------------------------------------------------------
+    # Canonical text lives with the agent so the two never drift; lazy import
+    # avoids any import-order coupling (the agent module is heavy).
+    from advanced_omi_backend.services.memory.agent.memory_agent import (
+        DEFAULT_AGENT_SYSTEM_PROMPT,
+        SEARCH_SYSTEM_PROMPT,
+    )
+
+    registry.register_default(
+        "memory.agent_system",
+        template=DEFAULT_AGENT_SYSTEM_PROMPT,
+        name="Memory Agent System Prompt",
+        description="Vault-aware system prompt for the tool-calling memory agent. "
+        "Supports a {{vault_summary}} slot for learned, per-user vault conventions.",
+        category="memory",
+        variables=["vault_summary"],
+    )
+
+    registry.register_default(
+        "memory.search_system",
+        template=SEARCH_SYSTEM_PROMPT,
+        name="Memory Search Agent System Prompt",
+        description="Vault-aware system prompt for the read-only retrieval agent "
+        "(grep/glob/read). Supports a {{vault_summary}} slot.",
+        category="memory",
+        variables=["vault_summary"],
     )

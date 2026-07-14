@@ -16,7 +16,6 @@ from advanced_omi_backend.controllers.queue_controller import (
     DEFAULT_QUEUE,
     JOB_RESULT_TTL,
     MEMORY_QUEUE,
-    REDIS_URL,
     TRANSCRIPTION_QUEUE,
     default_queue,
     get_job_stats,
@@ -30,6 +29,7 @@ from advanced_omi_backend.controllers.queue_controller import (
 
 # Import from job models
 from advanced_omi_backend.models.job import _ensure_beanie_initialized
+from advanced_omi_backend.redis_factory import REDIS_URL
 
 # Import from audio_jobs
 from .audio_jobs import audio_streaming_persistence_job

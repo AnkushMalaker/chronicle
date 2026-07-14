@@ -12,13 +12,14 @@ import wave
 from pathlib import Path
 
 # Type import to avoid circular imports
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 import numpy as np
+from easy_audio_interfaces.filesystem.filesystem_interfaces import LocalFileSink
 from wyoming.audio import AudioChunk
 
-if TYPE_CHECKING:
-    from advanced_omi_backend.client import ClientState
+from advanced_omi_backend.config import CHUNK_DIR
+from advanced_omi_backend.services.audio_service import get_audio_stream_service
 
 logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
@@ -312,10 +313,6 @@ async def write_audio_file(
     Raises:
         AudioValidationError: If validation fails (when validate=True)
     """
-    from easy_audio_interfaces.filesystem.filesystem_interfaces import LocalFileSink
-
-    from advanced_omi_backend.config import CHUNK_DIR
-
     # Validate and prepare audio if needed
     if validate:
         audio_data, sample_rate, sample_width, channels, duration = (
@@ -379,14 +376,12 @@ async def process_audio_chunk(
     user_id: str,
     user_email: str,
     audio_format: dict,
-    client_state: Optional["ClientState"] = None,
 ) -> None:
     """Process a single audio chunk through Redis Streams pipeline.
 
     This function encapsulates the common pattern used across all audio input sources:
     1. Create AudioChunk with format details
     2. Publish to Redis Streams for distributed processing
-    3. Update client state if provided
 
     Args:
         audio_data: Raw audio bytes
@@ -394,11 +389,7 @@ async def process_audio_chunk(
         user_id: User identifier
         user_email: User email
         audio_format: Dict containing {rate, width, channels, timestamp}
-        client_state: Optional ClientState for state updates
     """
-
-    from advanced_omi_backend.services.audio_service import get_audio_stream_service
-
     # Extract format details
     rate = audio_format.get("rate", 16000)
     width = audio_format.get("width", 2)
@@ -425,10 +416,6 @@ async def process_audio_chunk(
         timestamp=timestamp,
     )
 
-    # Update client state if provided
-    if client_state is not None:
-        client_state.update_audio_received(chunk)
-
 
 def pcm_to_wav_bytes(
     pcm_data: bytes, sample_rate: int = 16000, channels: int = 1, sample_width: int = 2
@@ -445,9 +432,6 @@ def pcm_to_wav_bytes(
     Returns:
         WAV file data as bytes
     """
-    import io
-    import wave
-
     logger.debug(
         f"Converting PCM to WAV in memory: {len(pcm_data)} bytes "
         f"(rate={sample_rate}, channels={channels}, width={sample_width})"
@@ -487,8 +471,6 @@ def write_pcm_to_wav(
         channels: Number of audio channels (default: 1 for mono)
         sample_width: Sample width in bytes (default: 2 for 16-bit)
     """
-    import wave
-
     logger.info(
         f"Writing PCM to WAV: {len(pcm_data)} bytes -> {output_path} "
         f"(rate={sample_rate}, channels={channels}, width={sample_width})"

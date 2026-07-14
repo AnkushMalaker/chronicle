@@ -20,6 +20,10 @@ from advanced_omi_backend.controllers import (
 )
 from advanced_omi_backend.models.user import User
 from advanced_omi_backend.services import plugin_assistant
+from advanced_omi_backend.services.plugin_service import get_plugin_router
+from advanced_omi_backend.services.status_reconciler import (
+    reconcile_conversation_statuses,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +35,25 @@ class MemoryConfigRequest(BaseModel):
     """Request model for memory configuration validation and updates."""
 
     config_yaml: str
+
+
+class WakewordSpeakerGateRequest(BaseModel):
+    """Request model for the wake-word speaker gate configuration.
+
+    ``speakers`` are the allowed enrolled speakers ({speaker_id, name}); the gate
+    only fires for these when ``enabled``.
+    """
+
+    enabled: bool
+    speakers: list[dict] = []
+
+
+@router.get("/system/network")
+async def get_network_discovery(
+    request: Request, current_user: User = Depends(current_superuser)
+):
+    """Get Tailscale and minidisc service discovery status. Admin only."""
+    return await system_controller.get_network_discovery(request.app, current_user)
 
 
 @router.get("/config/diagnostics")
@@ -73,6 +96,20 @@ async def save_diarization_settings(
 ):
     """Save diarization settings. Admin only."""
     return await system_controller.save_diarization_settings_controller(settings)
+
+
+@router.get("/asr-context")
+async def get_asr_context_config(current_user: User = Depends(current_superuser)):
+    """Get the active STT providers' hint mechanism + context. Admin only."""
+    return await system_controller.get_asr_context_config()
+
+
+@router.post("/asr-context")
+async def save_asr_context(
+    payload: dict, current_user: User = Depends(current_superuser)
+):
+    """Save a context string for a context_prompt STT provider. Admin only."""
+    return await system_controller.save_asr_context_controller(payload)
 
 
 @router.get("/misc-settings")
@@ -132,6 +169,25 @@ async def update_speaker_configuration(
     )
 
 
+@router.get("/wakeword-speaker-gate")
+async def get_wakeword_speaker_gate(
+    current_user: User = Depends(current_active_user),
+):
+    """Get current user's wake-word speaker gate configuration."""
+    return await system_controller.get_wakeword_speaker_gate(current_user)
+
+
+@router.post("/wakeword-speaker-gate")
+async def update_wakeword_speaker_gate(
+    payload: WakewordSpeakerGateRequest,
+    current_user: User = Depends(current_active_user),
+):
+    """Update current user's wake-word speaker gate configuration."""
+    return await system_controller.update_wakeword_speaker_gate(
+        current_user, payload.enabled, payload.speakers
+    )
+
+
 @router.get("/enrolled-speakers")
 async def get_enrolled_speakers(current_user: User = Depends(current_active_user)):
     """Get enrolled speakers from speaker recognition service."""
@@ -145,6 +201,17 @@ async def get_speaker_service_status(current_user: User = Depends(current_superu
 
 
 # LLM Operations Configuration Endpoints
+
+
+@router.post("/admin/conversations/reconcile-status")
+async def reconcile_conversation_status(
+    dry_run: bool = Body(False, embed=True),
+    current_user: User = Depends(current_superuser),
+):
+    """Recompute conversation processing_status from facts (transcript present =>
+    completed; none, once settled => failed). Self-heals drift left by crashed or
+    timed-out jobs. Pass dry_run=true to preview without writing. Admin only."""
+    return await reconcile_conversation_statuses(dry_run=dry_run)
 
 
 @router.get("/admin/llm-operations")
@@ -168,6 +235,44 @@ async def test_llm_model(
 ):
     """Test an LLM model connection with a trivial prompt. Admin only."""
     return await system_controller.test_llm_model(model_name)
+
+
+# Model Registry Management Endpoints
+
+
+@router.get("/admin/models")
+async def get_models(current_user: User = Depends(current_superuser)):
+    """List all registry models grouped by type + active defaults. Admin only."""
+    return await system_controller.get_models()
+
+
+@router.post("/admin/defaults")
+async def set_active_defaults(
+    defaults: dict, current_user: User = Depends(current_superuser)
+):
+    """Repoint active-model defaults (llm/stt/stt_stream/...). Admin only."""
+    return await system_controller.set_active_defaults(defaults)
+
+
+@router.post("/admin/models")
+async def upsert_model(model: dict, current_user: User = Depends(current_superuser)):
+    """Add or update a model definition (incl. api key/url). Admin only."""
+    return await system_controller.upsert_model(model)
+
+
+@router.delete("/admin/models/{name}")
+async def delete_model(name: str, current_user: User = Depends(current_superuser)):
+    """Delete a config.yml model (not if it's an active default). Admin only."""
+    return await system_controller.delete_model(name)
+
+
+@router.post("/admin/models/test")
+async def test_model(
+    model_name: Optional[str] = Body(None, embed=True),
+    current_user: User = Depends(current_superuser),
+):
+    """Connectivity test for a registry model (llm/embedding). Admin only."""
+    return await system_controller.test_model(model_name)
 
 
 # Memory Configuration Management Endpoints Removed - Project uses config.yml exclusively
@@ -213,52 +318,6 @@ async def reload_memory_config(current_user: User = Depends(current_superuser)):
 async def delete_all_user_memories(current_user: User = Depends(current_active_user)):
     """Delete all memories for the current user."""
     return await system_controller.delete_all_user_memories(current_user)
-
-
-# Chat Configuration Management Endpoints
-
-
-@router.get("/admin/chat/config", response_class=Response)
-async def get_chat_config(current_user: User = Depends(current_superuser)):
-    """Get chat configuration as YAML. Admin only."""
-    try:
-        yaml_content = await system_controller.get_chat_config_yaml()
-        return Response(content=yaml_content, media_type="text/plain")
-    except Exception as e:
-        logger.error(f"Failed to get chat config: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/admin/chat/config")
-async def save_chat_config(
-    request: Request, current_user: User = Depends(current_superuser)
-):
-    """Save chat configuration from YAML. Admin only."""
-    try:
-        yaml_content = await request.body()
-        yaml_str = yaml_content.decode("utf-8")
-        result = await system_controller.save_chat_config_yaml(yaml_str)
-        return JSONResponse(content=result)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to save chat config: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/admin/chat/config/validate")
-async def validate_chat_config(
-    request: Request, current_user: User = Depends(current_superuser)
-):
-    """Validate chat configuration YAML. Admin only."""
-    try:
-        yaml_content = await request.body()
-        yaml_str = yaml_content.decode("utf-8")
-        result = await system_controller.validate_chat_config_yaml(yaml_str)
-        return JSONResponse(content=result)
-    except Exception as e:
-        logger.error(f"Failed to validate chat config: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # Plugin Configuration Management Endpoints
@@ -363,8 +422,6 @@ async def restart_backend(current_user: User = Depends(current_superuser)):
 async def get_plugins_health(current_user: User = Depends(current_superuser)):
     """Get plugin health status for all registered plugins. Admin only."""
     try:
-        from advanced_omi_backend.services.plugin_service import get_plugin_router
-
         plugin_router = get_plugin_router()
         if not plugin_router:
             return {
@@ -387,8 +444,6 @@ async def get_plugins_connectivity(current_user: User = Depends(current_superuse
     Runs each plugin's health_check() with a 10s timeout and returns results.
     """
     try:
-        from advanced_omi_backend.services.plugin_service import get_plugin_router
-
         plugin_router = get_plugin_router()
         if not plugin_router:
             return {"plugins": {}}
@@ -619,6 +674,98 @@ async def cleanup_old_sessions(
 ):
     """Clean up old session tracking metadata. Admin only."""
     return await session_controller.cleanup_old_sessions(request, max_age_seconds)
+
+
+# External Service Management Endpoints (proxied to host service-manager agent)
+
+
+class ServiceActionRequest(BaseModel):
+    """Options for start/stop/restart of a host-managed service."""
+
+    build: bool = False
+    recreate: bool = False
+    force: bool = False
+    # Owning node host (from the merged service list). Omitted / local host → local
+    # agent; another host → that node's agent over the Tailnet.
+    node: str | None = None
+
+
+class ServiceProviderRequest(BaseModel):
+    """Switch the active provider (e.g. ASR model service) for a service."""
+
+    provider: str
+    build: bool = False
+    # "batch" (default) switches the stt provider; "streaming" switches stt_stream.
+    lane: str = "batch"
+    # Owning node host (see ServiceActionRequest.node).
+    node: str | None = None
+
+
+@router.get("/admin/services")
+async def list_external_services(current_user: User = Depends(current_superuser)):
+    """List host-managed services (ASR, TTS, speaker recognition, ...). Admin only.
+
+    Returns available=False when no service manager agent is configured/reachable.
+    """
+    return await system_controller.get_external_services()
+
+
+@router.get("/admin/services/operations/{operation_id}")
+async def get_external_service_operation(
+    operation_id: str,
+    node: str | None = None,
+    current_user: User = Depends(current_superuser),
+):
+    """Poll a long-running service start/stop/build operation. Admin only.
+
+    ``node`` routes the poll to the agent that owns the operation (remote ops live
+    on the remote node's agent).
+    """
+    return await system_controller.get_external_service_operation(operation_id, node)
+
+
+@router.post("/admin/services/{name}/provider")
+async def set_external_service_provider(
+    name: str,
+    body: ServiceProviderRequest,
+    current_user: User = Depends(current_superuser),
+):
+    """Switch the active provider for a service (e.g. ASR model). Admin only."""
+    return await system_controller.set_external_service_provider(name, body.dict())
+
+
+@router.post("/admin/services/{name}/{action}")
+async def external_service_action(
+    name: str,
+    action: str,
+    body: ServiceActionRequest | None = None,
+    current_user: User = Depends(current_superuser),
+):
+    """Start/stop/restart a host-managed service via the agent. Admin only."""
+    if action not in ("start", "stop", "restart"):
+        raise HTTPException(status_code=404, detail=f"Unknown action: {action}")
+    return await system_controller.external_service_action(
+        name, action, (body or ServiceActionRequest()).dict()
+    )
+
+
+@router.get("/admin/remote-control")
+async def get_remote_control_status(current_user: User = Depends(current_superuser)):
+    """Status of the host's Claude remote-control session. Admin only.
+
+    Returns available=False when no service manager agent is configured/reachable.
+    """
+    return await system_controller.get_remote_control_status()
+
+
+@router.post("/admin/remote-control/{action}")
+async def remote_control_action(
+    action: str, current_user: User = Depends(current_superuser)
+):
+    """Start/stop/restart the host's Claude remote-control session. Admin only."""
+    if action not in ("start", "stop", "restart"):
+        raise HTTPException(status_code=404, detail=f"Unknown action: {action}")
+    return await system_controller.remote_control_action(action)
 
 
 # Memory Provider Configuration Endpoints

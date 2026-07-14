@@ -11,14 +11,16 @@ Triggers plugins on final results only.
 
 import asyncio
 import logging
-import os
 import signal
 import sys
 
-import redis.asyncio as redis
-
 from advanced_omi_backend.client_manager import initialize_redis_for_client_manager
-from advanced_omi_backend.services.plugin_service import init_plugin_router
+from advanced_omi_backend.redis_factory import REDIS_URL, create_async_redis
+from advanced_omi_backend.services.plugin_service import (
+    init_plugin_router,
+    initialize_plugins,
+    run_plugin_recovery,
+)
 from advanced_omi_backend.services.transcription.streaming_consumer import (
     StreamingTranscriptionConsumer,
 )
@@ -30,6 +32,15 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+try:
+    from advanced_omi_backend.services.observability.log_handler import (
+        install_system_event_log_handler,
+    )
+
+    install_system_event_log_handler()
+except Exception:  # noqa: BLE001 — never block worker startup on observability
+    pass
+
 
 async def main():
     """Main worker entry point."""
@@ -38,23 +49,20 @@ async def main():
         "📋 Provider configuration loaded from config.yml (defaults.stt_stream)"
     )
 
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-
     # Create Redis client
     try:
-        redis_client = await redis.from_url(
-            redis_url, encoding="utf-8", decode_responses=False
-        )
-        logger.info(f"✅ Connected to Redis: {redis_url}")
+        redis_client = create_async_redis(decode_responses=False)
+        logger.info(f"✅ Connected to Redis: {REDIS_URL}")
 
         # Initialize ClientManager Redis for cross-container client→user mapping
-        initialize_redis_for_client_manager(redis_url)
+        initialize_redis_for_client_manager()
 
     except Exception as e:
         logger.error(f"Failed to connect to Redis: {e}", exc_info=True)
         sys.exit(1)
 
     # Initialize plugin router
+    recovery_task = None
     try:
         plugin_router = init_plugin_router()
         if plugin_router:
@@ -62,17 +70,10 @@ async def main():
                 f"✅ Plugin router initialized with {len(plugin_router.plugins)} plugins"
             )
 
-            # Initialize async plugins
-            for plugin_id, plugin in plugin_router.plugins.items():
-                try:
-                    await plugin.initialize()
-                    logger.info(
-                        f"✅ Plugin '{plugin_id}' initialized in streaming worker"
-                    )
-                except Exception as e:
-                    logger.exception(
-                        f"Failed to initialize plugin '{plugin_id}' in streaming worker: {e}"
-                    )
+            await initialize_plugins(plugin_router)
+            # Background recovery for plugins whose external dependency was
+            # unreachable at boot (e.g. Home Assistant on a server that's off).
+            recovery_task = asyncio.create_task(run_plugin_recovery(plugin_router))
         else:
             logger.warning("No plugin router available - plugins will not be triggered")
     except Exception as e:
@@ -113,6 +114,10 @@ async def main():
         await redis_client.aclose()
         sys.exit(1)
 
+    # The wake-word dispatcher runs as its own worker (wakeword_dispatch_worker),
+    # decoupled from the live-transcription mode so the acoustic wake-word path keeps
+    # working under windowed_batch too.
+
     # Setup signal handlers for graceful shutdown
     def signal_handler(signum, frame):
         logger.info(f"Received signal {signum}, shutting down...")
@@ -129,8 +134,10 @@ async def main():
         )
         logger.info("💾 Publishing final results to transcription:results:{session_id}")
 
-        # This blocks until consumer is stopped
-        await consumer.start_consuming()
+        # The streaming consumer is the only task here; the wake-word dispatcher
+        # runs as its own worker (wakeword_dispatch_worker).
+        # heartbeat_name lets the workers healthcheck detect a wedged loop.
+        await consumer.start_consuming(heartbeat_name="streaming-stt")
 
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received, shutting down...")
@@ -138,6 +145,8 @@ async def main():
         logger.error(f"Worker error: {e}", exc_info=True)
         sys.exit(1)
     finally:
+        if recovery_task is not None:
+            recovery_task.cancel()
         await redis_client.aclose()
         logger.info("👋 Streaming transcription worker stopped")
 

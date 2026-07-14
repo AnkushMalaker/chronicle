@@ -1,0 +1,19 @@
+services:
+  vibevoice-vllm:
+    build:
+      context: .
+      dockerfile: providers/vibevoice/Dockerfile.vllm
+    image: chronicle-asr-vibevoice-vllm:latest
+    ports:
+      - "${ASR_PORT:-8767}:8000"
+    volumes:
+      - /tmp/chronicle-debug:/tmp/chronicle-debug
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: on-failure:3

@@ -15,7 +15,7 @@ from rich.console import Console
 from rich.table import Table
 
 # Import service definitions from services.py
-from services import SERVICES, check_service_configured
+from services import SERVICES, check_service_enabled, compose_ps_json, container_engine
 
 console = Console()
 
@@ -23,7 +23,6 @@ console = Console()
 HEALTH_ENDPOINTS = {
     "backend": "http://localhost:8000/health",
     "speaker-recognition": "http://localhost:8085/health",
-    "openmemory-mcp": "http://localhost:8765/docs",  # No health endpoint, check docs
 }
 
 
@@ -33,7 +32,7 @@ def get_restart_counts(container_names: List[str]) -> Dict[str, int]:
         return {}
     try:
         result = subprocess.run(
-            ["docker", "inspect", "--format", "{{.Name}} {{.RestartCount}}"]
+            [container_engine(), "inspect", "--format", "{{.Name}} {{.RestartCount}}"]
             + container_names,
             capture_output=True,
             text=True,
@@ -63,39 +62,16 @@ def get_container_status(service_name: str) -> Dict[str, Any]:
         return {"status": "not_found", "containers": []}
 
     try:
-        # Get container status using docker compose ps
-        # Only check containers from active profiles (excludes inactive profile services)
-        cmd = ["docker", "compose", "ps", "--format", "json"]
+        # Get container status (engine-aware: docker compose ps vs podman ps by
+        # compose project label). Only active-profile containers are reported.
+        raw_containers = compose_ps_json(service_path)
 
-        result = subprocess.run(
-            cmd, cwd=service_path, capture_output=True, text=True, timeout=10
-        )
-
-        if result.returncode != 0:
-            return {"status": "error", "containers": [], "error": result.stderr}
-
-        # Parse JSON output (one JSON object per line)
         containers = []
-        for line in result.stdout.strip().split("\n"):
-            if line:
-                try:
-                    container = json.loads(line)
-                    container_name = container.get("Name", "unknown")
-
-                    # Skip test containers - they're not part of production services
-                    if "-test-" in container_name.lower():
-                        continue
-
-                    containers.append(
-                        {
-                            "name": container_name,
-                            "state": container.get("State", "unknown"),
-                            "status": container.get("Status", "unknown"),
-                            "health": container.get("Health", "none"),
-                        }
-                    )
-                except json.JSONDecodeError:
-                    continue
+        for container in raw_containers:
+            # Skip test containers - they're not part of production services
+            if "-test-" in container["name"].lower():
+                continue
+            containers.append(container)
 
         if not containers:
             return {"status": "stopped", "containers": []}
@@ -151,7 +127,7 @@ def check_http_health(url: str, timeout: int = 5) -> Dict[str, Any]:
 def get_service_health(service_name: str) -> Dict[str, Any]:
     """Get comprehensive health status for a service"""
     # Check if configured
-    if not check_service_configured(service_name):
+    if not check_service_enabled(service_name):
         return {
             "configured": False,
             "container_status": "not_configured",
@@ -387,7 +363,6 @@ def show_detailed_status():
                         "memory_service",
                         "speech_to_text",
                         "speaker_recognition",
-                        "openmemory_mcp",
                     ]
                     for svc_name in optional_services:
                         if svc_name in services:

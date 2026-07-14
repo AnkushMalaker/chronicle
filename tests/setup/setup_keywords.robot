@@ -85,7 +85,7 @@ Prod Mode Setup
     Log To Console    Tearing down existing containers and volumes...
 
     Stop Docker Services    remove_volumes=${True}
-    Run Process    rm    -rf    data/test_mongo_data    data/test_qdrant_data    data/test_audio_chunks    cwd=${BACKEND_DIR}    shell=True
+    Run Process    rm    -rf    data/test_mongo_data    data/test_audio_chunks    cwd=${BACKEND_DIR}    shell=True
 
     Log To Console    Building and starting fresh containers...
     Start Docker Services    build=${True}
@@ -109,7 +109,7 @@ Start Docker Services
 
     # Clean up any stopped/stuck containers first
     Run Process    docker    compose    -f    ${compose_file}    down    -v    cwd=${working_dir}    shell=True
-    Run Process    docker    rm    -f    ${MONGO_CONTAINER}    ${REDIS_CONTAINER}    ${QDRANT_CONTAINER}    ${BACKEND_CONTAINER}    ${WORKERS_CONTAINER}    ${WEBUI_CONTAINER}    shell=True
+    Run Process    docker    rm    -f    ${MONGO_CONTAINER}    ${REDIS_CONTAINER}    ${BACKEND_CONTAINER}    ${WORKERS_CONTAINER}    ${WEBUI_CONTAINER}    shell=True
 
     # Start containers with HF_TOKEN passed through if available
     IF    ${build}

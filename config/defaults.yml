@@ -8,7 +8,6 @@ defaults:
   stt: stt-deepgram
   stt_stream: stt-deepgram-stream
   tts: tts-http
-  vector_store: vs-qdrant
 
 models:
   # ===========================
@@ -25,6 +24,22 @@ models:
     model_params:
       temperature: 0.2
       max_tokens: 2000
+    model_output: json
+
+  # Fallback LLM: retried once when the main LLM is unreachable (connection
+  # failure/timeout/5xx). Enabled by setting defaults.fallback_llm: fallback-llm
+  # (the wizard asks). gpt-5-nano = cheapest OpenAI reasoning-class model.
+  - name: fallback-llm
+    description: Fallback LLM used when the primary LLM is unreachable
+    model_type: llm
+    model_provider: openai
+    api_family: openai
+    model_name: gpt-5-nano
+    model_url: https://api.openai.com/v1
+    api_key: ${oc.env:OPENAI_API_KEY,''}
+    model_params:
+      temperature: 0.2
+      max_tokens: 4000
     model_output: json
 
   - name: local-llm
@@ -58,8 +73,27 @@ models:
     model_type: llm
     model_provider: llamacpp
     api_family: openai
+    thinking: true  # gemma/qwen-class thinking model — controls thinking via chat template
     model_name: glm-4.7-flash
-    model_url: http://host.docker.internal:8083/v1
+    # Empty LLM_BASE_URL → resolve a tailnet-advertised chronicle-llm live (with /v1
+    # appended); else the host-local default. An explicit URL always wins.
+    model_url: ${oc.env:LLM_BASE_URL,''}
+    discovery_service: chronicle-llm
+    discovery_path: /v1
+    discovery_default: http://host.docker.internal:8083/v1
+    api_key: no-key
+    model_params:
+      temperature: 0.2
+      max_tokens: 2000
+    model_output: json
+
+  - name: gemma4-llm
+    description: Gemma 4 E2B-it (unified model, reuses ASR service)
+    model_type: llm
+    model_provider: gemma4
+    api_family: openai
+    model_name: gemma-4-E2B-it
+    model_url: http://${oc.env:GEMMA4_ASR_URL,host.docker.internal:8767}/v1
     api_key: no-key
     model_params:
       temperature: 0.2
@@ -112,6 +146,10 @@ models:
     api_family: http
     model_url: https://api.deepgram.com/v1
     api_key: ${oc.env:DEEPGRAM_API_KEY,''}
+    # keyword_boosting: hot words sent as the `keyterm` query param (acoustic bias,
+    # never echoed into output).
+    capabilities:
+      - keyword_boosting
     operations:
       stt_transcribe:
         method: POST
@@ -140,8 +178,17 @@ models:
     model_type: stt
     model_provider: parakeet
     api_family: http
-    model_url: http://${oc.env:PARAKEET_ASR_URL,172.17.0.1:8767}
+    # Empty PARAKEET_ASR_URL → resolve a tailnet-advertised chronicle-asr live
+    # (config-from-tailnet-later); else fall back to the host-local default. An
+    # explicit URL (own/remote endpoint) always wins. Scheme is added if missing.
+    model_url: ${oc.env:PARAKEET_ASR_URL,''}
+    discovery_service: chronicle-asr
+    discovery_default: http://172.17.0.1:8767
     api_key: ''
+    # keyword_boosting: hot words sent as the `context_info` form field (acoustic
+    # recognition hint, never echoed into output).
+    capabilities:
+      - keyword_boosting
     operations:
       stt_transcribe:
         method: POST
@@ -154,16 +201,129 @@ models:
             words: words
             segments: segments
 
+  - name: stt-nemotron-batch
+    description: Nemotron 3.5 ASR (batch lane of the same NeMo service that streams)
+    model_type: stt
+    model_provider: nemo
+    api_family: http
+    # Nemotron serves batch + streaming from one container on 8772 (not 8767).
+    model_url: http://${oc.env:NEMOTRON_ASR_STREAM_URL,host.docker.internal:8772}
+    api_key: ''
+    capabilities:
+      - word_timestamps
+      - segments
+      - keyword_boosting
+    operations:
+      stt_transcribe:
+        method: POST
+        path: /transcribe
+        content_type: multipart/form-data
+        timeout: 600
+        response:
+          type: json
+          extract:
+            text: text
+            words: words
+            segments: segments
+
+  - name: stt-gemma4
+    description: Google Gemma 4 E2B-it (batch, LLM-backbone, MTP)
+    model_type: stt
+    model_provider: gemma4
+    api_family: http
+    model_url: ${oc.env:GEMMA4_ASR_URL,''}
+    discovery_service: chronicle-asr
+    discovery_default: http://host.docker.internal:8767
+    api_key: ''
+    # context_prompt: Gemma 4 is an LLM and consumes context as prompt text, so it
+    # is given the user-authored asr_context only — NOT the plugin wake-word boost
+    # list, which it would echo into the transcript. (No diarization: E2B collapses
+    # multi-speaker audio to one speaker; see gemma4/service.py get_capabilities.)
+    capabilities:
+      - context_prompt
+    asr_context: ''
+    operations:
+      stt_transcribe:
+        method: POST
+        path: /transcribe
+        content_type: multipart/form-data
+        response:
+          type: json
+          extract:
+            text: text
+            words: words
+            segments: segments
+
+  - name: stt-granite
+    description: IBM Granite Speech 4.1 (batch, LLM-backbone; en/fr/de/es/pt)
+    model_type: stt
+    model_provider: granite
+    api_family: http
+    model_url: ${oc.env:GRANITE_ASR_URL,''}
+    discovery_service: chronicle-asr
+    discovery_default: http://host.docker.internal:8767
+    api_key: ''
+    # context_prompt: Granite is an LLM-backbone ASR and consumes context as prompt
+    # text, so it is given the user-authored asr_context only — NOT the plugin
+    # wake-word boost list, which it would echo into the transcript.
+    # diarization + segments: Granite emits speaker-attributed segments with real
+    # model timestamps (two-pass: timestamps + speaker attribution), so the backend
+    # uses these for speaker turns and skips pyannote (GRANITE_DIARIZE=0 to disable).
+    capabilities:
+      - context_prompt
+      - diarization
+      - segments
+    asr_context: ''
+    operations:
+      stt_transcribe:
+        method: POST
+        path: /transcribe
+        content_type: multipart/form-data
+        response:
+          type: json
+          extract:
+            text: text
+            words: words
+            segments: segments
+
+  - name: stt-af-next
+    description: NVIDIA Audio Flamingo Next (batch, prompt-based diarization with timestamps; noncommercial license)
+    model_type: stt
+    model_provider: af_next
+    api_family: http
+    model_url: ${oc.env:AF_NEXT_ASR_URL,''}
+    discovery_service: chronicle-asr
+    discovery_default: http://host.docker.internal:8767
+    api_key: ''
+    capabilities:
+      - segments
+      - diarization
+      - keyword_boosting
+    operations:
+      stt_transcribe:
+        method: POST
+        path: /transcribe
+        content_type: multipart/form-data
+        timeout: 3600
+        response:
+          type: json
+          extract:
+            text: text
+            segments: segments
+
   - name: stt-qwen3-asr
     description: Qwen3-ASR via vLLM (batch, 52 languages)
     model_type: stt
     model_provider: qwen3-asr
     api_family: http
-    model_url: http://${oc.env:QWEN3_ASR_URL,host.docker.internal:8767}
+    model_url: ${oc.env:QWEN3_ASR_URL,''}
+    discovery_service: chronicle-asr
+    discovery_default: http://host.docker.internal:8767
     api_key: ''
     capabilities:
       - multilingual
       - language_detection
+      - keyword_boosting
     operations:
       stt_transcribe:
         method: POST
@@ -199,7 +359,7 @@ models:
     model_type: stt
     model_provider: smallest
     api_family: http
-    model_url: https://waves-api.smallest.ai/api/v1/pulse
+    model_url: https://api.smallest.ai/waves/v1/pulse
     api_key: ${oc.env:SMALLEST_API_KEY,''}
     capabilities:
       - word_timestamps
@@ -212,7 +372,9 @@ models:
           Authorization: Bearer ${oc.env:SMALLEST_API_KEY,''}
         query:
           model: pulse
-          language: en
+          # hi natively covers Hindi-English code-switching; en hallucinates massive
+          # insertions on Hindi speech (158% corpus WER vs 12.9% with hi on CoSHE-100)
+          language: hi
           word_timestamps: 'true'
         response:
           type: json
@@ -233,6 +395,7 @@ models:
     api_key: ${oc.env:DEEPGRAM_API_KEY,''}
     capabilities:
       - diarization
+      - keyword_boosting
     operations:
       query:
         model: nova-3
@@ -307,12 +470,58 @@ models:
           words: words
           segments: segments
 
+  - name: stt-nemotron-stream
+    description: Nemotron 3.5 cache-aware streaming ASR (NeMo, ~100ms latency)
+    model_type: stt_stream
+    model_provider: nemotron
+    api_family: websocket
+    model_url: ws://${oc.env:NEMOTRON_ASR_STREAM_URL,host.docker.internal:8772}/stream
+    api_key: ''
+    capabilities:
+      - multilingual
+    operations:
+      query: {}
+      end:
+        message:
+          type: CloseStream
+      expect:
+        interim_type: interim
+        final_type: final
+        extract:
+          text: text
+          words: words
+          segments: segments
+
+  - name: stt-gemma4-stream
+    description: Google Gemma 4 E2B-it (streaming-ish, bounded rolling window + MTP)
+    model_type: stt_stream
+    model_provider: gemma4
+    api_family: websocket
+    # Same gemma4-asr service as the batch entry; the /stream path is the WS endpoint.
+    model_url: ws://${oc.env:GEMMA4_ASR_URL,host.docker.internal:8767}/stream
+    api_key: ''
+    # No diarization (E2B collapses speakers). The /stream endpoint does not accept
+    # context, so no keyword_boosting/context_prompt — it gets no ASR hints.
+    capabilities: []
+    operations:
+      query: {}
+      end:
+        message:
+          type: CloseStream
+      expect:
+        interim_type: interim
+        final_type: final
+        extract:
+          text: text
+          words: words
+          segments: segments
+
   - name: stt-smallest-stream
     description: Smallest.ai Pulse streaming transcription over WebSocket
     model_type: stt_stream
     model_provider: smallest
     api_family: websocket
-    model_url: wss://waves-api.smallest.ai/api/v1/pulse/get_text
+    model_url: wss://api.smallest.ai/waves/v1/pulse/get_text
     api_key: ${oc.env:SMALLEST_API_KEY,''}
     capabilities:
       - word_timestamps
@@ -320,7 +529,8 @@ models:
     operations:
       auth_prefix: Bearer
       query:
-        language: en
+        # hi natively covers Hindi-English code-switching (see stt-smallest note)
+        language: hi
         encoding: linear16
         sample_rate: 16000
         word_timestamps: 'true'
@@ -337,24 +547,11 @@ models:
           words: words
           segments: utterances
 
-  # ===========================
-  # Vector Store
-  # ===========================
-  - name: vs-qdrant
-    description: Qdrant vector database
-    model_type: vector_store
-    model_provider: qdrant
-    api_family: qdrant
-    model_url: http://${oc.env:QDRANT_BASE_URL,qdrant}:${oc.env:QDRANT_PORT,6333}
-    model_params:
-      host: ${oc.env:QDRANT_BASE_URL,qdrant}
-      port: ${oc.env:QDRANT_PORT,6333}
-      collection_name: omi_memories
-
 # ===========================
 # Memory Configuration
 # ===========================
 memory:
+  # Chronicle's agentic Markdown vault is the only memory provider.
   provider: chronicle
   timeout_seconds: 1200
   extraction:
@@ -363,19 +560,6 @@ memory:
       Extract important information from this conversation and return a JSON object with an array named "facts".
       Include personal preferences, plans, names, dates, locations, numbers, and key details.
       Keep items concise and useful.
-
-  # OpenMemory MCP provider settings (used when provider: openmemory_mcp)
-  openmemory_mcp:
-    server_url: http://localhost:8765
-    client_name: chronicle
-    user_id: default
-    timeout: 30
-
-  # Obsidian Neo4j provider settings (legacy)
-  obsidian:
-    enabled: false
-    neo4j_host: neo4j-mem0
-    timeout: 30
 
 # ===========================
 # Speaker Recognition
@@ -414,6 +598,14 @@ asr_services:
     batch_threshold_seconds: 300    # Audio longer than this triggers batching
     batch_duration_seconds: 240     # Non-overlapping window size
     batch_overlap_seconds: 30       # Overlap between windows
+    # Silence gate — VibeVoice echoes the context_info prompt back as a phantom
+    # transcript on near-silent windows. Windows with < silence_min_voiced_ms of
+    # voiced audio (frame RMS > silence_energy_floor on a [-1,1] signal) skip the
+    # model and emit nothing. Validated: echo windows have 0-60ms voiced, real
+    # speech 510ms+. Set silence_gate_enabled: false to disable.
+    silence_gate_enabled: true
+    silence_energy_floor: 0.01      # Per-frame RMS floor for a "voiced" frame
+    silence_min_voiced_ms: 200      # Min voiced audio for a window to be transcribed
 
 # ===========================
 # Chat Configuration
@@ -443,10 +635,20 @@ llm_operations:
     temperature: 0.1
     max_tokens: 2000
     response_format: json
+  # Vault memory agent (tool-calling loop that writes notes). Reasoning models
+  # spend completion tokens on reasoning before emitting any tool call or text,
+  # so the budget must cover reasoning + a full note body — too small a cap
+  # returns an empty message (finish_reason=length) and no vault writes.
+  memory_agent:
+    reasoning_effort: low
+    max_tokens: 8000
   title_summary:
     temperature: 0.3
   detailed_summary:
     temperature: 0.3
+    # Reasoning models spend completion tokens on reasoning before any output;
+    # long transcripts overflow small model-level caps and return empty content.
+    max_tokens: 8000
   entity_extraction:
     temperature: 0.1
     max_tokens: 2000
@@ -457,6 +659,12 @@ llm_operations:
     temperature: 0.3
     max_tokens: 4000
   plugin_assistant: {}
+  # Privacy screen for annotation exports: flag segments too personal to
+  # share with an outside annotator. JSON output (list of flagged indices).
+  sensitivity_screening:
+    temperature: 0.0
+    max_tokens: 2000
+    response_format: json
 
 # ===========================
 # Backend Configuration
@@ -487,10 +695,6 @@ backend:
     provider: deepgram  # or parakeet
     api_key: ${oc.env:DEEPGRAM_API_KEY,''}
     base_url: https://api.deepgram.com
-    # Fallback to provider segments when speaker service unavailable
-    # When true: Use segments from transcription provider (e.g., mock provider in tests)
-    # When false: Expect speaker service to create segments via diarization (default production behavior)
-    use_provider_segments: false
     # Transcription job timeout in seconds (how long to wait for batch transcription)
     job_timeout_seconds: 900
     # When enabled, automatically re-transcribe every streaming conversation with the batch provider
@@ -498,14 +702,27 @@ backend:
     always_batch_retranscribe: false
 
   # Diarization settings
+  # diarization_source: "provider" trusts diarized segments from the transcription
+  # provider when available (falls back to pyannote otherwise);
+  # "pyannote" always re-diarizes via the speaker service
   diarization:
-    diarization_source: pyannote
+    diarization_source: provider
     similarity_threshold: 0.15
     min_duration: 0.5
     collar: 2.0
     min_duration_off: 1.5
     min_speakers: 2
     max_speakers: 6
+    # Cross-chunk speaker reconciliation (links per-chunk centroids into global
+    # speakers when long audio is chunked). Minimum cosine similarity to merge two
+    # chunk-local speaker centroids — lower merges more aggressively. max_speakers
+    # also caps the resulting global speaker count.
+    reconciliation_threshold: 0.4
+    # Open-set identification: a diarized speaker is only named if the best gallery
+    # match beats the runner-up by at least this cosine margin (else "unknown").
+    identify_margin: 0.1
+    # Prevent one enrolled speaker from being assigned to two diarized speakers.
+    exclusive: true
 
   # Cleanup settings for soft-deleted conversations
   cleanup:
@@ -561,3 +778,38 @@ cron_jobs:
     description: "Use LLM to surface potential transcript errors for user review"
     enabled: false
     schedule: "0 5 * * *"
+  auto_clean:
+    description: "Auto-archive speech-free conversations (deletes audio, keeps metadata)"
+    enabled: false
+    schedule: "0 3 * * *"
+
+# Data Audit / auto-clean "level" (thresholds for the auto_clean cron job).
+# Kept separate from cron_jobs.auto_clean so toggling the schedule in the UI
+# does not overwrite these values. Conservative by default: only essentially
+# speech-free recordings are archived.
+data_audit:
+  vad_provider: ten_vad             # swappable VAD backend for audio analysis
+  auto_clean:
+    speech_prob_threshold: 0.5      # VAD frame prob at/above this counts as speech
+    max_speech_fraction: 0.03       # archive only if <= 3% of frames are speech
+    min_duration: 30.0              # ignore clips shorter than this (seconds)
+    max_archive_per_run: 100        # safety cap on archives per sweep
+  export:
+    # Privacy screen for annotation exports. The policy is user-editable per
+    # export in the UI; this is the default prefill. It targets personally
+    # sensitive content (comfort, not a strict PII definition) — names and
+    # identifiers are intentionally kept so annotators can label speakers.
+    sensitivity:
+      policy: |
+        Flag segments I would not be comfortable sharing with an outside
+        annotator because they are personally sensitive. In particular:
+        - my family, household, or living situation
+        - health (physical or mental), medical or therapy details
+        - personal finances, income, debts, or specific expenses
+        - romantic relationships or sex life
+        - religious or political beliefs stated as personal conviction
+        - confidential business deals: named counterparties, terms, or
+          unreleased plans
+        Do NOT flag general technical discussion, abstract product/business
+        strategy, publicly-known facts, or people's names used only for
+        context (annotators need names for speaker labels).

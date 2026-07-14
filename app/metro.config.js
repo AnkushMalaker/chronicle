@@ -16,10 +16,7 @@ config.resolver.nodeModulesPaths = [
   path.resolve(workspaceRoot, 'node_modules'),
 ];
 
-// 3. Force Metro to resolve (sub)dependencies only from the `nodeModulesPaths`
-config.resolver.disableHierarchicalLookup = true;
-
-// 4. Extra modules to include in the bundle
+// 3. Extra modules to include in the bundle
 // config.resolver.extraNodeModules = {
   // '@omiai/omi-react-native': path.resolve(workspaceRoot),
   // 'base-64': path.resolve(projectRoot, 'node_modules/base-64'),

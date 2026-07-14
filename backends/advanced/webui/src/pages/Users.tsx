@@ -118,14 +118,14 @@ export default function Users() {
   return (
     <div>
       {/* Header */}
-      <div className="flex justify-between items-center mb-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center mb-6">
         <div className="flex items-center space-x-2">
-          <UsersIcon className="h-6 w-6 text-blue-600" />
+          <UsersIcon className="h-6 w-6 text-blue-600 flex-shrink-0" />
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
             User Management
           </h1>
         </div>
-        <div className="flex items-center space-x-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => refetch()}
             className="flex items-center space-x-2 px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
@@ -250,7 +250,7 @@ export default function Users() {
           <span className="ml-2 text-gray-600 dark:text-gray-400">Loading users...</span>
         </div>
       ) : (
-        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
+        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
             <thead className="bg-gray-50 dark:bg-gray-700">
               <tr>

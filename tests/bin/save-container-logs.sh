@@ -1,6 +1,7 @@
 #!/bin/bash
+source "$(dirname "$0")/_engine.sh"
 # tests/bin/save-container-logs.sh
-# CRITICAL: Always called before docker compose down -v
+# CRITICAL: Always called before $COMPOSE down -v
 # Saves all container logs to timestamped directory
 
 set -e
@@ -18,22 +19,22 @@ echo "📝 Saving container logs to logs/$TIMESTAMP/"
 PROJECT_NAME="backend-test"
 
 # Service list (based on docker-compose-test.yml)
-SERVICES="chronicle-backend-test workers-test mongo-test redis-test qdrant-test speaker-service-test"
+SERVICES="chronicle-backend-test workers-test mongo-test redis-test speaker-service-test"
 
 # Save logs for each service
 for service in $SERVICES; do
     CONTAINER="${PROJECT_NAME}-${service}-1"
     echo "  - Saving $service logs..."
-    docker logs "$CONTAINER" > "$LOG_DIR/$service.log" 2>&1 || echo "    Warning: Could not save logs for $CONTAINER"
+    $ENGINE logs "$CONTAINER" > "$LOG_DIR/$service.log" 2>&1 || echo "    Warning: Could not save logs for $CONTAINER"
 done
 
 # Save container status
 echo "  - Saving container status..."
-docker ps -a --filter "name=$PROJECT_NAME" > "$LOG_DIR/container-status.txt" 2>&1 || true
+$ENGINE ps -a --filter "name=$PROJECT_NAME" > "$LOG_DIR/container-status.txt" 2>&1 || true
 
 # Save container stats (resource usage)
 echo "  - Saving container stats..."
-docker stats --no-stream --no-trunc --filter "name=$PROJECT_NAME" > "$LOG_DIR/container-stats.txt" 2>&1 || true
+$ENGINE stats --no-stream --no-trunc --filter "name=$PROJECT_NAME" > "$LOG_DIR/container-stats.txt" 2>&1 || true
 
 # Copy test results if they exist
 if [ -d "$SCRIPT_DIR/../results" ]; then

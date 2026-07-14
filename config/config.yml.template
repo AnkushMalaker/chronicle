@@ -1,12 +1,19 @@
 defaults:
   llm: openai-llm
+  # Optional separate fast LLM for quick, latency-sensitive tasks (wake-word
+  # follow-ups). Empty -> reuse defaults.llm. Configure via the wizard (writes a
+  # 'fast-llm' model entry keyed off FAST_LLM_API_KEY) or set the model name here.
+  fast_llm: ''
   embedding: openai-embed
   stt: stt-deepgram
   # Transcription provider selection:
   # - stt-deepgram: Cloud-based (requires DEEPGRAM_API_KEY in .env)
   # - stt-parakeet-batch: Local ASR (requires Parakeet service running)
   tts: tts-http
-  vector_store: vs-qdrant
+  # Live transcription path: "streaming_stt" (uses stt_stream) or "windowed_batch"
+  # (batch-transcribes fixed ~windowed_batch_seconds windows using stt; for setups
+  # with no streaming ASR). Defaults to streaming_stt.
+  live_segmentation: streaming_stt
 models:
 - name: emberfang-llm
   description: Emberfang One LLM
@@ -84,16 +91,6 @@ models:
     temperature: 0.2
     max_tokens: 2000
   model_output: json
-- name: vs-qdrant
-  description: Qdrant vector database
-  model_type: vector_store
-  model_provider: qdrant
-  api_family: qdrant
-  model_url: http://${oc.env:QDRANT_BASE_URL,qdrant}:${oc.env:QDRANT_PORT,6333}
-  model_params:
-    host: ${oc.env:QDRANT_BASE_URL,qdrant}
-    port: ${oc.env:QDRANT_PORT,6333}
-    collection_name: omi_memories
 - name: stt-parakeet-batch
   description: Parakeet NeMo ASR (batch)
   model_type: stt
@@ -282,7 +279,7 @@ models:
   model_type: stt
   model_provider: smallest
   api_family: http
-  model_url: https://waves-api.smallest.ai/api/v1/pulse
+  model_url: https://api.smallest.ai/waves/v1/pulse
   api_key: ${oc.env:SMALLEST_API_KEY,''}
   capabilities:
     - word_timestamps
@@ -295,7 +292,9 @@ models:
         Authorization: Bearer ${oc.env:SMALLEST_API_KEY,''}
       query:
         model: pulse
-        language: en
+        # hi natively covers Hindi-English code-switching; en hallucinates massive
+        # insertions on Hindi speech (158% corpus WER vs 12.9% with hi on CoSHE-100)
+        language: hi
         word_timestamps: 'true'
       response:
         type: json
@@ -363,12 +362,33 @@ models:
       final_type: final
       extract:
         text: text
+- name: stt-gemma4-stream
+  description: Google Gemma 4 E2B-it (streaming-ish, bounded rolling window + MTP)
+  model_type: stt_stream
+  model_provider: gemma4
+  api_family: websocket
+  model_url: ws://${oc.env:GEMMA4_ASR_URL,host.docker.internal:8767}/stream
+  api_key: ''
+  capabilities:
+    - diarization
+  operations:
+    query: {}
+    end:
+      message:
+        type: CloseStream
+    expect:
+      interim_type: interim
+      final_type: final
+      extract:
+        text: text
+        words: words
+        segments: segments
 - name: stt-smallest-stream
   description: Smallest.ai Pulse streaming transcription over WebSocket
   model_type: stt_stream
   model_provider: smallest
   api_family: websocket
-  model_url: wss://waves-api.smallest.ai/api/v1/pulse/get_text
+  model_url: wss://api.smallest.ai/waves/v1/pulse/get_text
   api_key: ${oc.env:SMALLEST_API_KEY,''}
   capabilities:
     - word_timestamps
@@ -376,7 +396,8 @@ models:
   operations:
     auth_prefix: Bearer
     query:
-      language: en
+      # hi natively covers Hindi-English code-switching (see stt-smallest note)
+      language: hi
       encoding: linear16
       sample_rate: 16000
       word_timestamps: 'true'
@@ -401,19 +422,6 @@ memory:
       dates, locations, numbers, and key details. Keep items concise and useful.
 
       '
-  openmemory_mcp:
-    server_url: http://localhost:8765
-    client_name: chronicle
-    user_id: default
-    timeout: 30
-  obsidian:
-    enabled: false
-    neo4j_host: neo4j
-    timeout: 30
-  knowledge_graph:
-    enabled: false
-    neo4j_host: neo4j
-    timeout: 30
 
 speaker_recognition:
   # Enable/disable speaker recognition (overrides DISABLE_SPEAKER_RECOGNITION env var)

@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "$0")/_engine.sh"
 # tests/bin/logs-containers.sh
 # View logs for specific service
 
@@ -14,7 +15,6 @@ if [ -z "$SERVICE" ]; then
     echo "   - workers-test"
     echo "   - mongo-test"
     echo "   - redis-test"
-    echo "   - qdrant-test"
     echo "   - speaker-service-test"
     echo ""
     echo "Usage: make containers-logs SERVICE=<service-name>"
@@ -28,4 +28,4 @@ echo "📜 Viewing logs for: $SERVICE"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-docker compose -f docker-compose-test.yml logs --tail=100 -f "$SERVICE"
+$COMPOSE -f docker-compose-test.yml logs --tail=100 -f "$SERVICE"

@@ -10,21 +10,28 @@ import json
 import logging
 import os
 import time
+import traceback
 import wave
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from beanie.operators import In
 from rq import get_current_job
 from rq.exceptions import NoSuchJobError
-from rq.job import Job
+from rq.job import Dependency, Job
 
-from advanced_omi_backend.config import get_streaming_fallback_timeout
+from advanced_omi_backend.config import (
+    get_live_segmentation,
+    get_streaming_fallback_timeout,
+)
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
+    enqueue_speech_detection,
+    redis_conn,
     start_post_conversation_jobs,
     transcription_queue,
 )
+from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import async_job
@@ -36,14 +43,23 @@ from advanced_omi_backend.observability.otel_setup import (
 )
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggregator
+from advanced_omi_backend.services.audio_stream.session_store import (
+    SessionStatus,
+    SessionStore,
+    SpeakerCheckStatus,
+)
 from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
 from advanced_omi_backend.services.sse_publisher import publish_sse_event_throttled
 from advanced_omi_backend.services.transcription import (
     get_transcription_provider,
     is_transcription_available,
 )
+from advanced_omi_backend.services.transcription.context import (
+    gather_transcription_context,
+    get_asr_context,
+)
+from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 from advanced_omi_backend.utils.audio_chunk_utils import (
-    convert_audio_to_chunks,
     reconstruct_audio_segment,
     reconstruct_wav_from_conversation,
 )
@@ -51,7 +67,8 @@ from advanced_omi_backend.utils.conversation_utils import (
     analyze_speech,
     mark_conversation_deleted,
 )
-from advanced_omi_backend.utils.job_utils import update_job_meta
+from advanced_omi_backend.utils.job_utils import check_job_alive, update_job_meta
+from advanced_omi_backend.utils.segment_utils import classify_segment_text
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +79,7 @@ async def apply_speaker_recognition(
     words: list,
     segments: list,
     user_id: str,
-    conversation_id: str = None,
+    conversation_id: str | None = None,
 ) -> list:
     """
     Apply speaker recognition to segments using the speaker recognition service.
@@ -81,10 +98,6 @@ async def apply_speaker_recognition(
         Updated list of segments with identified speakers
     """
     try:
-        from advanced_omi_backend.speaker_recognition_client import (
-            SpeakerRecognitionClient,
-        )
-
         speaker_client = SpeakerRecognitionClient()
         if not speaker_client.enabled:
             logger.info(
@@ -153,13 +166,18 @@ async def apply_speaker_recognition(
     except Exception as speaker_error:
         logger.warning(f"⚠️ Speaker recognition failed: {speaker_error}")
         logger.warning(f"Continuing with original transcription speaker labels")
-        import traceback
-
         logger.debug(traceback.format_exc())
         return segments
 
 
 BATCH_CHUNK_SECONDS = 3600  # Never send more than 1h to ASR at once
+
+# No-activity watchdog: only treat "zero transcription results" as a provider failure
+# when audio is actually flowing in. A connected-but-quiet device (common right after a
+# conversation ends and speech detection re-arms) produces no audio chunks, so zero
+# results is expected, not a fault. If the last audio chunk arrived more than this many
+# seconds ago the inflow is considered idle and the watchdog stays its hand.
+AUDIO_INFLOW_IDLE_SECONDS = 30
 
 
 def _build_wav(
@@ -384,6 +402,37 @@ async def process_transcription_result(
             conversation.client_id if hasattr(conversation, "client_id") else None
         )
 
+    # Guard: a batch / re-transcription that comes back without usable structure
+    # (no words AND no segments) must NOT replace a good existing transcript.
+    # nemo batch occasionally returns bare text with no word/segment timing; promoting
+    # it as the active version silently drops diarization and playback alignment from
+    # the streaming version that was already there. Skip instead of clobbering — only
+    # real content (with timing) should become the active version. An actual provider
+    # error is a different path (it raises upstream); an empty result is not an error.
+    new_has_text = bool((transcript_text or "").strip())
+    new_has_structure = bool(words) or bool(segments)
+    existing = conversation.active_transcript
+    existing_is_populated = bool(
+        existing
+        and (existing.words or existing.segments)
+        and (existing.transcript or "").strip()
+    )
+    if (not new_has_text or not new_has_structure) and existing_is_populated:
+        logger.warning(
+            f"⚠️ {provider_name} '{trigger}' for {conversation_id} returned an empty/"
+            f"contentless transcript (text={new_has_text}, words={len(words)}, "
+            f"segments={len(segments)}); keeping existing active version "
+            f"'{existing.version_id}' instead of replacing it."
+        )
+        return {
+            "success": False,
+            "skipped": True,
+            "reason": "empty_or_contentless_transcription",
+            "conversation_id": conversation_id,
+            "version_id": version_id,
+            "kept_active_version": existing.version_id,
+        }
+
     # Trigger transcript-level plugins BEFORE speech validation
     if transcript_text:
         try:
@@ -422,13 +471,16 @@ async def process_transcription_result(
         # Cancel dependent jobs
         current_job = get_current_job()
         if current_job:
-            from advanced_omi_backend.controllers.queue_controller import redis_conn
-
+            # Include event_complete: it depends on memory/title_summary, and
+            # cancelling those (enqueue_dependents=False) would otherwise strand the
+            # finalizer in the deferred registry forever. mark_conversation_deleted
+            # already settled the status, so the finalizer is redundant here.
             job_patterns = [
                 f"crop_{conversation_id[:12]}",
                 f"speaker_{conversation_id[:12]}",
                 f"memory_{conversation_id[:12]}",
                 f"title_summary_{conversation_id[:12]}",
+                f"event_complete_{conversation_id[:12]}",
             ]
             cancelled_jobs = []
             for job_id in job_patterns:
@@ -473,20 +525,12 @@ async def process_transcription_result(
     # Get provider capabilities for downstream processing decisions
     provider_has_diarization = provider_capabilities.get("diarization", False)
 
-    # Check speaker recognition configuration
-    from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
-
-    speaker_client = SpeakerRecognitionClient()
-    speaker_recognition_enabled = speaker_client.enabled
-
     # Build speaker segments
     speaker_segments = []
     diarization_source = None
     segments_created_by = "speaker_service"
 
     if segments:
-        from advanced_omi_backend.utils.segment_utils import classify_segment_text
-
         speaker_segments = []
         for seg in segments:
             raw_speaker = seg.get("speaker")
@@ -519,7 +563,13 @@ async def process_transcription_result(
             segments_created_by = "provider_diarization"
         else:
             segments_created_by = "provider"
-    elif not speaker_recognition_enabled and words:
+    elif transcript_text and transcript_text.strip():
+        # No provider segments: emit a single Speaker 0 segment spanning the whole
+        # transcript so any non-empty result is always renderable in the UI (mirrors
+        # the streaming path). Use word timings when present, else span 0..end. If
+        # speaker recognition is enabled, recognize_speakers_job refines this later —
+        # but we no longer *rely* on it (a word-less batch result, e.g. nemotron's
+        # prompt-model decode, used to leave the conversation with 0 segments).
         start_time_audio = words[0].get("start", 0.0) if words else 0.0
         end_time_audio = words[-1].get("end", 0.0) if words else 0.0
         speaker_segments = [
@@ -670,10 +720,6 @@ async def transcribe_full_audio_job(
     # Build ASR context
     context_info = None
     try:
-        from advanced_omi_backend.services.transcription.context import (
-            gather_transcription_context,
-        )
-
         asr_ctx = await gather_transcription_context(user_id=user_id)
         context_info = asr_ctx.combined
 
@@ -771,7 +817,11 @@ async def create_audio_only_conversation(
         Conversation.always_persist == True,
         In(
             Conversation.processing_status,
-            ["pending_transcription", "transcription_failed"],
+            # active = in-flight placeholder, failed = prior failure to retry/attach
+            [
+                Conversation.ConversationStatus.ACTIVE.value,
+                Conversation.ConversationStatus.FAILED.value,
+            ],
         ),
     )
 
@@ -780,8 +830,10 @@ async def create_audio_only_conversation(
             f"✅ Found always_persist placeholder conversation {placeholder_conversation.conversation_id[:12]} "
             f"for session {session_id[:12]}, reusing for batch transcription"
         )
-        # Update status to show batch transcription is starting
-        placeholder_conversation.processing_status = "batch_transcription"
+        # In-flight; the finalizer/reconciler owns the terminal status.
+        placeholder_conversation.processing_status = (
+            Conversation.ConversationStatus.ACTIVE.value
+        )
         placeholder_conversation.title = "Audio Recording (Batch Transcription...)"
         placeholder_conversation.summary = (
             "Processing audio with offline transcription..."
@@ -792,23 +844,22 @@ async def create_audio_only_conversation(
         # (stored by audio_streaming_persistence_job)
         return placeholder_conversation
 
-    # CASE 2: No placeholder exists - create new conversation using session_id
-    # This happens when always_persist=False or audio_persistence_job didn't run
-    # We reuse session_id as conversation_id to avoid unnecessary UUID generation
+    # CASE 2: No placeholder exists - create a new conversation.
+    # This happens when always_persist=False or audio_persistence_job didn't run.
+    # The conversation_id is auto-generated (unique): a session rotates into many
+    # conversations, so it must NOT be reused as the conversation_id.
     logger.info(
-        f"✅ No placeholder found, creating new conversation for session {session_id[:12]} "
-        f"using session_id as conversation_id"
+        f"✅ No placeholder found, creating new conversation for session {session_id[:12]}"
     )
 
     conversation = Conversation(
-        conversation_id=session_id,
         user_id=user_id,
         client_id=client_id,
         title="Audio Recording (Batch Transcription...)",
         summary="Processing audio with offline transcription...",
-        processing_status="batch_transcription",
+        processing_status=Conversation.ConversationStatus.ACTIVE.value,
         always_persist=False,  # Mark as False since this is fallback
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     await conversation.insert()
 
@@ -823,8 +874,8 @@ async def transcription_fallback_check_job(
     session_id: str,
     user_id: str,
     client_id: str,
-    conversation_id: str = None,
-    timeout_seconds: int = None,
+    conversation_id: str | None = None,
+    timeout_seconds: int | None = None,
     *,
     redis_client=None,
 ) -> Dict[str, Any]:
@@ -862,7 +913,11 @@ async def transcription_fallback_check_job(
             Conversation.always_persist == True,
             In(
                 Conversation.processing_status,
-                ["pending_transcription", "transcription_failed"],
+                # active = in-flight placeholder, failed = prior failure to retry/attach
+                [
+                    Conversation.ConversationStatus.ACTIVE.value,
+                    Conversation.ConversationStatus.FAILED.value,
+                ],
             ),
         )
 
@@ -891,152 +946,54 @@ async def transcription_fallback_check_job(
             "Configure a batch STT provider (e.g., Parakeet) or fix streaming provider."
         )
 
-    # If no conversation exists, check if we have audio chunks to transcribe
+    # Ensure a conversation exists to attach the batch transcript to.
     if not conversation:
-        chunks_count = await AudioChunkDocument.find(
-            AudioChunkDocument.conversation_id == session_id
-        ).count()
+        conversation = await create_audio_only_conversation(
+            session_id, user_id, client_id
+        )
 
-        if chunks_count == 0:
-            # No MongoDB chunks - check if Redis stream has unprocessed audio
-            logger.info(
-                f"📦 No MongoDB chunks found for session {session_id[:12]}, "
-                f"checking Redis stream for unprocessed audio..."
-            )
+    conv_id = conversation.conversation_id
 
-            stream_name = f"audio:stream:{client_id}"
+    # Ensure audio chunks exist for THIS conversation before transcribing. The
+    # streaming persistence job stores chunks under the conversation_id as audio
+    # arrives, so by the time we get here they should be in MongoDB. Zero chunks
+    # means no audio was captured for this conversation — skip gracefully instead of
+    # crashing on "No audio chunks found" (which would fail the RQ job and leave its
+    # dependents deferred forever).
+    chunks_count = await AudioChunkDocument.find(
+        AudioChunkDocument.conversation_id == conv_id
+    ).count()
 
-            # Check if stream exists and has messages
-            try:
-                stream_length = await redis_client.xlen(stream_name)
+    if chunks_count == 0:
+        logger.info(
+            f"ℹ️ No audio chunks for conversation {conv_id[:12]} "
+            f"(session {session_id[:12]}). Session ended without usable audio. "
+            f"Skipping batch fallback."
+        )
+        # Terminal dead-end: no audio and no transcript will ever exist. This is the
+        # one place no post-conversation chain (and thus no finalizer) runs, so settle
+        # the status here.
+        if conversation.apply_status(settled=True):
+            await conversation.save()
+        return {
+            "status": "skipped",
+            "reason": "no_audio",
+            "message": "No audio available for batch transcription",
+            "session_id": session_id,
+            "conversation_id": conv_id,
+        }
 
-                if stream_length == 0:
-                    logger.info(
-                        f"ℹ️ No audio found in Redis stream {stream_name}. "
-                        f"Session ended without audio capture. Skipping fallback."
-                    )
-                    return {
-                        "status": "skipped",
-                        "reason": "no_audio",
-                        "message": "No audio was captured for this session",
-                        "session_id": session_id,
-                    }
-
-                logger.info(
-                    f"📡 Found {stream_length} messages in Redis stream {stream_name}, "
-                    f"extracting audio for batch transcription..."
-                )
-
-                # Read all audio messages from stream
-                messages = await redis_client.xrange(stream_name)
-
-                # Collect PCM audio chunks in order
-                audio_chunks = {}  # {chunk_num: audio_data}
-
-                for msg_id, fields in messages:
-                    # Check if this message belongs to our session
-                    msg_session_id = fields.get(b"session_id", b"").decode()
-                    if msg_session_id != session_id:
-                        continue
-
-                    # Get chunk ID
-                    msg_chunk_id = fields.get(b"chunk_id", b"").decode()
-                    if not msg_chunk_id or msg_chunk_id == "END":
-                        continue
-
-                    try:
-                        chunk_num = int(msg_chunk_id)
-                    except ValueError:
-                        continue
-
-                    # Get PCM audio data
-                    audio_data = fields.get(b"audio_data", b"")
-                    if audio_data:
-                        audio_chunks[chunk_num] = audio_data
-
-                if not audio_chunks:
-                    logger.warning(
-                        f"⚠️ Redis stream has {stream_length} messages but no audio chunks "
-                        f"matched session {session_id[:12]}. Skipping fallback."
-                    )
-                    return {
-                        "status": "skipped",
-                        "reason": "no_matching_audio",
-                        "message": "No audio matched this session in Redis stream",
-                        "session_id": session_id,
-                    }
-
-                # Combine audio chunks in order
-                sorted_chunks = sorted(audio_chunks.items())
-                combined_audio = b"".join(data for _, data in sorted_chunks)
-
-                # Read audio format from Redis session metadata
-                sample_rate, channels, sample_width = 16000, 1, 2
-                session_key = f"audio:session:{session_id}"
-                try:
-                    audio_format_raw = await redis_client.hget(
-                        session_key, "audio_format"
-                    )
-                    if audio_format_raw:
-                        audio_format = json.loads(audio_format_raw)
-                        sample_rate = int(audio_format.get("rate", 16000))
-                        channels = int(audio_format.get("channels", 1))
-                        sample_width = int(audio_format.get("width", 2))
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to read audio_format from Redis for {session_id}: {e}"
-                    )
-
-                bytes_per_second = sample_rate * channels * sample_width
-                logger.info(
-                    f"✅ Extracted {len(sorted_chunks)} audio chunks from Redis stream "
-                    f"({len(combined_audio)} bytes, ~{len(combined_audio)/bytes_per_second:.1f}s)"
-                )
-
-                # Create conversation placeholder
-                conversation = await create_audio_only_conversation(
-                    session_id, user_id, client_id
-                )
-
-                # Save audio to MongoDB chunks for batch transcription
-                num_chunks = await convert_audio_to_chunks(
-                    conversation_id=conversation.conversation_id,
-                    audio_data=combined_audio,
-                    sample_rate=sample_rate,
-                    channels=channels,
-                    sample_width=sample_width,
-                )
-
-                logger.info(
-                    f"💾 Persisted {num_chunks} MongoDB chunks for batch transcription "
-                    f"(conversation {conversation.conversation_id[:12]})"
-                )
-
-            except Exception as e:
-                logger.error(
-                    f"❌ Failed to extract audio from Redis stream: {e}", exc_info=True
-                )
-                raise
-        else:
-            logger.info(
-                f"✅ Found {chunks_count} MongoDB chunks for session {session_id[:12]}, "
-                f"creating conversation placeholder"
-            )
-
-            # Create conversation placeholder for batch transcription
-            conversation = await create_audio_only_conversation(
-                session_id, user_id, client_id
-            )
+    logger.info(
+        f"✅ Found {chunks_count} MongoDB chunks for conversation {conv_id[:12]}, "
+        f"proceeding with batch transcription"
+    )
 
     # Transcribe directly — transcribe_audio_range handles chunking internally
-    conv_id = conversation.conversation_id
     version_id = f"batch_fallback_{session_id[:12]}"
 
     # Build ASR context
     context_info = None
     try:
-        from advanced_omi_backend.services.transcription.context import get_asr_context
-
         context_info = await get_asr_context(user_id=user_id)
     except Exception as e:
         logger.warning(f"Failed to build ASR context: {e}")
@@ -1049,7 +1006,7 @@ async def transcription_fallback_check_job(
 
     processing_time = time.time() - start_time_wall
 
-    await process_transcription_result(
+    processing_result = await process_transcription_result(
         conversation_id=conv_id,
         version_id=version_id,
         trigger="batch_fallback",
@@ -1064,6 +1021,31 @@ async def transcription_fallback_check_job(
         client_id=client_id,
     )
 
+    # If no meaningful speech, conversation was marked deleted — skip post-processing
+    if processing_result.get("deleted"):
+        logger.info(
+            f"🗑️ Batch fallback found no meaningful speech for {conv_id[:12]}, "
+            f"skipping post-conversation jobs"
+        )
+        return {
+            "status": "batch_fallback_no_speech",
+            "transcript_source": "batch",
+            "conversation_id": conv_id,
+            "reason": processing_result.get("reason"),
+        }
+
+    # Trim leading silence before post-processing. This is the batch-fallback
+    # finalization path (no streaming speech was detected mid-session, so
+    # open_conversation_job's Phase 6b never ran); the same trim must happen here so an
+    # always_persist conversation that recorded a long pause before speech still gets
+    # the silence split off. Best-effort — never blocks the chain.
+    # Lazy import: circular dependency — conversation_jobs imports transcription_jobs.
+    from advanced_omi_backend.workers.conversation_jobs import (
+        maybe_trim_leading_silence,
+    )
+
+    await maybe_trim_leading_silence(conv_id)
+
     # Enqueue post-conversation jobs
     post_jobs = start_post_conversation_jobs(
         conversation_id=conv_id,
@@ -1071,7 +1053,7 @@ async def transcription_fallback_check_job(
         transcript_version_id=version_id,
         depends_on_job=None,
         client_id=client_id,
-        end_reason="batch_fallback",
+        end_reason="websocket_disconnect",
     )
 
     logger.info(
@@ -1085,6 +1067,70 @@ async def transcription_fallback_check_job(
         "conversation_id": conv_id,
         "post_job_ids": post_jobs,
     }
+
+
+async def _transcription_failure_context(
+    store: "SessionStore",
+    aggregator: "TranscriptionResultsAggregator",
+    session_id: str,
+    client_id: str,
+) -> str:
+    """Gather actionable diagnostics for a transcription-failure system event.
+
+    The bare failure logs (e.g. "no transcription activity") are symptoms; the real
+    cause usually lives in the streaming consumer's ``transcription_error`` flag (the
+    provider exception), or — when the provider connected but produced nothing — in
+    the configured provider name and chunk count. Returning all of it as a multi-line
+    block means the System Errors page row carries the cause, not just the symptom.
+    """
+    lines: list[str] = []
+
+    # The real upstream exception, if the streaming consumer recorded one.
+    try:
+        upstream = await store.get_transcription_error(session_id)
+    except Exception:  # noqa: BLE001 — diagnostics must never raise
+        upstream = None
+    if upstream:
+        lines.append(f"   Provider error: {upstream}")
+
+    # Which streaming provider was configured (so it's clear what to check).
+    try:
+        registry = get_models_registry()
+        stream_model = registry.get_default("stt_stream") if registry else None
+        provider_name = stream_model.name if stream_model else "none configured"
+    except Exception:  # noqa: BLE001
+        provider_name = "unknown"
+    lines.append(f"   Streaming provider: {provider_name}")
+
+    # Whether any audio was actually transcribed.
+    try:
+        combined = await aggregator.get_combined_results(session_id)
+        chunk_count = combined.get("chunk_count", 0)
+    except Exception:  # noqa: BLE001
+        chunk_count = "unknown"
+    lines.append(f"   Transcribed chunks: {chunk_count}")
+
+    lines.append(f"   session={session_id} client={client_id}")
+    return "\n".join(lines)
+
+
+async def _session_ended_by_disconnect(store: "SessionStore", session_id: str) -> bool:
+    """True when a zero-transcription session ended because the client dropped its
+    WebSocket (e.g. the device walked out of network range) rather than because the
+    transcription provider failed.
+
+    A provider exception recorded on the session always wins — that is a genuine
+    service fault regardless of how the socket closed. Only a clean
+    ``websocket_disconnect`` with no recorded provider error is treated as benign, so
+    it is logged at WARNING (not ERROR) and never raises a system-error event — a user
+    walking through a dead zone shouldn't fill the System Errors page.
+    """
+    try:
+        if await store.get_transcription_error(session_id):
+            return False
+        return (await store.get_completion_reason(session_id)) == "websocket_disconnect"
+    except Exception:  # noqa: BLE001 — diagnostics must never raise
+        return False
 
 
 @async_job(redis=True, beanie=True)
@@ -1119,16 +1165,12 @@ async def stream_speech_detection_job(
     # Setup
     aggregator = TranscriptionResultsAggregator(redis_client)
     current_job = get_current_job()
-    session_key = f"audio:session:{session_id}"
+    store = SessionStore(redis_client)
     start_time = time.time()
     max_runtime = 7200  # 2 hours — sufficient gap between conversations; fresh job re-enqueued after each
 
     # Get conversation count
-    conversation_count_key = f"session:conversation_count:{session_id}"
-    conversation_count_bytes = await redis_client.get(conversation_count_key)
-    conversation_count = (
-        int(conversation_count_bytes) if conversation_count_bytes else 0
-    )
+    conversation_count = await store.get_conversation_count(session_id)
 
     # Check if speaker filtering is enabled
     speaker_filter_enabled = (
@@ -1146,44 +1188,71 @@ async def stream_speech_detection_job(
         session_level=True,  # Mark as session-level job
     )
 
+    # Live-transcription mode. In "off" mode there is no streaming/windowed worker
+    # filling the aggregator, so zero results is the expected steady state — not a
+    # failure. The final transcript is produced by batch transcription when the
+    # session ends (the "session ended without speech" path enqueues the fallback
+    # on the full audio). Disable the no-activity watchdog in that case so it does
+    # not abort a still-recording session at the 60s mark.
+    live_segmentation = get_live_segmentation()
+    expects_live_results = live_segmentation != "off"
+
     # Track when session closes for graceful shutdown
     session_closed_at = None
     final_check_grace_period = (
         15  # Wait up to 15 seconds for final transcription after session closes
     )
     last_speech_analysis = None  # Track last analysis for detailed logging
+    max_runtime_reached = False  # Distinguish the max-runtime exit from session close
 
     # Main loop: Listen for speech
     while True:
         # Check if job still exists in Redis (detect zombie state)
-        from advanced_omi_backend.utils.job_utils import check_job_alive
-
         if not await check_job_alive(redis_client, current_job, session_id):
             break
 
         # Early transcription failure detection — check every iteration, not just grace period
-        error_status = await redis_client.hget(session_key, "transcription_error")
+        error_status = await store.get_transcription_error(session_id)
         if error_status:
-            logger.error(f"❌ Transcription error detected: {error_status.decode()}")
+            logger.error(f"❌ Transcription error detected: {error_status}")
             break
 
-        # No-activity watchdog: if 60s elapsed with zero transcription results, provider is down
+        # No-activity watchdog: if 60s elapsed with zero transcription results, the
+        # live provider is down. Only meaningful when we actually expect live results
+        # — in "off" mode nothing fills the aggregator by design, so skip it and let
+        # the loop run until the session closes (full-audio batch fallback then runs).
         elapsed = time.time() - start_time
-        if elapsed > 60 and not session_closed_at:
+        if expects_live_results and elapsed > 60 and not session_closed_at:
             watchdog_combined = await aggregator.get_combined_results(session_id)
             if not watchdog_combined.get("chunk_count", 0):
-                logger.error(
-                    f"❌ No transcription activity after {elapsed:.0f}s — "
-                    f"check provider config (API key, connectivity, consumer running)"
+                # Only a real provider fault when audio is flowing in but the streaming
+                # consumer produces nothing. A connected-but-quiet device (e.g. speech
+                # detection just re-armed after a conversation ended and the user hasn't
+                # spoken again) sends no audio, so zero results is expected — firing here
+                # mislabels idle as "transcription service did not respond". When idle,
+                # fall through and keep listening until audio resumes or the session
+                # closes (the grace-period / disconnect handling below then applies).
+                last_chunk_at = await store.get_last_chunk_at(session_id)
+                audio_idle = (
+                    last_chunk_at is None
+                    or (time.time() - last_chunk_at) > AUDIO_INFLOW_IDLE_SECONDS
                 )
-                break
+                if not audio_idle:
+                    diag = await _transcription_failure_context(
+                        store, aggregator, session_id, client_id
+                    )
+                    logger.error(
+                        f"❌ No transcription activity after {elapsed:.0f}s — "
+                        f"check provider config (API key, connectivity, consumer running)\n"
+                        f"{diag}"
+                    )
+                    break
 
         # Check if session has closed
-        session_status = await redis_client.hget(session_key, "status")
-        session_closed = session_status and session_status.decode() in [
-            "finalizing",
-            "finished",
-        ]
+        session_closed = await store.get_status(session_id) in (
+            SessionStatus.FINALIZING,
+            SessionStatus.FINISHED,
+        )
 
         if session_closed and session_closed_at is None:
             # Session just closed - start grace period for final transcription
@@ -1202,16 +1271,8 @@ async def stream_speech_detection_job(
 
         # Consume any stale conversation close request (defensive — shouldn't normally
         # appear since services.py gates on conversation:current, but handles race conditions)
-        close_reason = await redis_client.hget(
-            session_key, "conversation_close_requested"
-        )
-        if close_reason:
-            await redis_client.hdel(session_key, "conversation_close_requested")
-            close_reason_str = (
-                close_reason.decode()
-                if isinstance(close_reason, bytes)
-                else close_reason
-            )
+        close_reason_str = await store.take_close_request(session_id)
+        if close_reason_str:
             logger.info(
                 f"🔒 Conversation close requested ({close_reason_str}) during speech detection — "
                 f"no open conversation to close, flag consumed"
@@ -1219,6 +1280,7 @@ async def stream_speech_detection_job(
 
         if time.time() - start_time > max_runtime:
             logger.warning(f"⏱️ Max runtime reached, exiting")
+            max_runtime_reached = True
             break
 
         # Get transcription results
@@ -1227,27 +1289,42 @@ async def stream_speech_detection_job(
             # Health check: detect transcription errors early during grace period
             if session_closed_at:
                 # Check for streaming consumer errors in session metadata
-                error_status = await redis_client.hget(
-                    session_key, "transcription_error"
-                )
+                error_status = await store.get_transcription_error(session_id)
                 if error_status:
-                    error_msg = error_status.decode()
+                    error_msg = error_status
                     logger.error(f"❌ Transcription service error: {error_msg}")
                     logger.error(
                         f"❌ Session failed - transcription service unavailable"
                     )
                     break
 
-                # Check if we've been waiting too long with no results at all
+                # Check if we've been waiting too long with no results at all.
+                # Only an error when we expect live results — in "off" mode no live
+                # activity is expected, so fall through to the normal grace-period
+                # exit and let the batch fallback transcribe the full audio.
                 grace_elapsed = time.time() - session_closed_at
-                if grace_elapsed > 5 and not combined.get("chunk_count", 0):
+                if (
+                    expects_live_results
+                    and grace_elapsed > 5
+                    and not combined.get("chunk_count", 0)
+                ):
                     # 5+ seconds with no transcription activity at all - likely API key issue
-                    logger.error(
-                        f"❌ No transcription activity after {grace_elapsed:.1f}s - possible API key or connectivity issue"
+                    diag = await _transcription_failure_context(
+                        store, aggregator, session_id, client_id
                     )
-                    logger.error(
-                        f"❌ Session failed - check transcription service configuration"
-                    )
+                    if await _session_ended_by_disconnect(store, session_id):
+                        logger.warning(
+                            f"⚠️ Session ended by client disconnect before any "
+                            f"transcription (after {grace_elapsed:.1f}s) — likely a "
+                            f"network drop, not a service fault\n{diag}"
+                        )
+                    else:
+                        logger.error(
+                            f"❌ Session failed - check transcription service configuration\n"
+                            f"   No transcription activity after {grace_elapsed:.1f}s "
+                            f"(possible API key or connectivity issue)\n"
+                            f"{diag}"
+                        )
                     break
 
             await asyncio.sleep(2)
@@ -1280,16 +1357,8 @@ async def stream_speech_detection_job(
         logger.info(f"💬 Meaningful speech detected!")
 
         # Add session event for speech detected
-        from datetime import datetime
-
-        await redis_client.hset(
-            session_key,
-            "last_event",
-            f"speech_detected:{datetime.utcnow().isoformat()}",
-        )
-        await redis_client.hset(
-            session_key, "speech_detected_at", datetime.utcnow().isoformat()
-        )
+        await store.record_event(session_id, "speech_detected")
+        await store.set_speech_detected_at(session_id)
 
         # Step 2: If speaker filter enabled, check for enrolled speakers
         identified_speakers = []
@@ -1298,12 +1367,8 @@ async def stream_speech_detection_job(
             logger.info(f"🎤 Enqueuing speaker check job...")
 
             # Add session event for speaker check starting
-            await redis_client.hset(
-                session_key,
-                "last_event",
-                f"speaker_check_starting:{datetime.utcnow().isoformat()}",
-            )
-            await redis_client.hset(session_key, "speaker_check_status", "checking")
+            await store.record_event(session_id, "speaker_check_starting")
+            await store.set_speaker_check(session_id, SpeakerCheckStatus.CHECKING)
             from .speaker_jobs import check_enrolled_speakers_job
 
             # Enqueue speaker check as a separate trackable job
@@ -1346,35 +1411,26 @@ async def stream_speech_detection_job(
                     )
 
                     # Update session event for speaker check complete
-                    await redis_client.hset(
-                        session_key,
-                        "last_event",
-                        f"speaker_check_complete:{datetime.utcnow().isoformat()}",
-                    )
-                    await redis_client.hset(
-                        session_key,
-                        "speaker_check_status",
-                        "enrolled" if enrolled_present else "not_enrolled",
+                    await store.record_event(session_id, "speaker_check_complete")
+                    await store.set_speaker_check(
+                        session_id,
+                        (
+                            SpeakerCheckStatus.ENROLLED
+                            if enrolled_present
+                            else SpeakerCheckStatus.NOT_ENROLLED
+                        ),
                     )
                     if identified_speakers:
-                        await redis_client.hset(
-                            session_key,
-                            "identified_speakers",
-                            ",".join(identified_speakers),
+                        await store.set_identified_speakers(
+                            session_id, identified_speakers
                         )
                     break
                 elif speaker_check_job.is_failed:
                     logger.warning(f"⚠️ Speaker check job failed, assuming not enrolled")
 
                     # Update session event for speaker check failed
-                    await redis_client.hset(
-                        session_key,
-                        "last_event",
-                        f"speaker_check_failed:{datetime.utcnow().isoformat()}",
-                    )
-                    await redis_client.hset(
-                        session_key, "speaker_check_status", "failed"
-                    )
+                    await store.record_event(session_id, "speaker_check_failed")
+                    await store.set_speaker_check(session_id, SpeakerCheckStatus.FAILED)
                     break
                 await asyncio.sleep(poll_interval)
                 waited += poll_interval
@@ -1386,12 +1442,8 @@ async def stream_speech_detection_job(
                 enrolled_present = False
 
                 # Update session event for speaker check timeout
-                await redis_client.hset(
-                    session_key,
-                    "last_event",
-                    f"speaker_check_timeout:{datetime.utcnow().isoformat()}",
-                )
-                await redis_client.hset(session_key, "speaker_check_status", "timeout")
+                await store.record_event(session_id, "speaker_check_timeout")
+                await store.set_speaker_check(session_id, SpeakerCheckStatus.TIMEOUT)
 
             # Log speaker check result but proceed with conversation regardless
             if enrolled_present:
@@ -1405,11 +1457,8 @@ async def stream_speech_detection_job(
 
         # Step 3: Start conversation and EXIT
         speech_detected_at = time.time()
-        open_job_key = f"open_conversation:session:{session_id}"
 
         # Enqueue conversation job with speech detection job ID
-        from datetime import datetime
-
         speech_job_id = current_job.id if current_job else None
 
         open_job = transcription_queue.enqueue(
@@ -1425,11 +1474,6 @@ async def stream_speech_detection_job(
             description=f"Conversation #{conversation_count+1} for {session_id}",
             meta={"client_id": client_id},
         )
-
-        # Track the job
-        await redis_client.set(
-            open_job_key, open_job.id, ex=10800
-        )  # 3 hours to match job timeout
 
         # Store metadata in speech detection job
         if current_job:
@@ -1471,25 +1515,80 @@ async def stream_speech_detection_job(
         }
 
     # Session ended without speech
-    reason = (
-        last_speech_analysis.get("reason", "No transcription received")
-        if last_speech_analysis
-        else "No transcription received"
-    )
+    if last_speech_analysis:
+        reason = last_speech_analysis.get("reason", "No transcription received")
+    elif not expects_live_results:
+        # "off" mode: no live transcription by design — the batch fallback below
+        # transcribes the full audio. This is the normal path, not a failure.
+        reason = "Live transcription disabled (off mode) — batch transcription pending"
+    else:
+        reason = "No transcription received"
 
     # Distinguish between transcription failures (error) vs legitimate no speech (info)
     if reason == "No transcription received":
-        logger.error(
-            f"❌ Session failed - transcription service did not respond\n"
-            f"   Reason: {reason}\n"
-            f"   Runtime: {time.time() - start_time:.1f}s"
+        diag = await _transcription_failure_context(
+            store, aggregator, session_id, client_id
         )
+        if await _session_ended_by_disconnect(store, session_id):
+            logger.warning(
+                f"⚠️ Session ended by client disconnect with no transcription "
+                f"(runtime {time.time() - start_time:.1f}s) — likely a network drop, "
+                f"not a service fault\n{diag}"
+            )
+        else:
+            logger.error(
+                f"❌ Session failed - transcription service did not respond\n"
+                f"   Reason: {reason}\n"
+                f"   Runtime: {time.time() - start_time:.1f}s\n"
+                f"{diag}"
+            )
     else:
         logger.info(
-            f"✅ Session ended without meaningful speech\n"
+            f"✅ Session ended, deferring to batch transcription\n"
             f"   Reason: {reason}\n"
             f"   Runtime: {time.time() - start_time:.1f}s"
         )
+
+    # Guard: never fail a conversation that is still being recorded.
+    #
+    # If we reached this exit while the session is still ACTIVE (e.g. the
+    # no-activity watchdog or a transcription-error break fired mid-session, or a
+    # duplicate/stale detector lost the race), the always_persist placeholder
+    # found below may be the *currently-recording* conversation. Marking it
+    # transcription_failed here — and batch-transcribing only the partial audio
+    # captured so far — orphans the rest of the audio that is still streaming in.
+    # This was the root cause of conversations being marked failed ~2 minutes in
+    # while 10+ more minutes of audio kept arriving.
+    #
+    # Instead, leave the placeholder untouched and re-arm a single listener
+    # (single-flight). When the session genuinely closes, the listener exits via
+    # the session-closed path (status FINALIZING/FINISHED) and the failure +
+    # full-audio batch fallback below run correctly on the complete recording.
+    #
+    # Off-mode (expects_live_results=False) is excluded: it has no live worker, so
+    # zero results is normal and its window-rotation logic below must still run.
+    if expects_live_results and not max_runtime_reached:
+        session_status = await store.get_status(session_id)
+        if session_status == SessionStatus.ACTIVE:
+            logger.warning(
+                f"⚠️ Speech detection for {session_id[:12]} exited while session "
+                f"still ACTIVE (reason: {reason}). Not failing the live placeholder; "
+                f"re-arming listener and deferring to session-close handling."
+            )
+            # Brief backoff so a persistent provider error can't spin a tight
+            # re-arm loop; single-flight keeps this to one listener regardless.
+            await asyncio.sleep(5)
+            enqueue_speech_detection(
+                session_id, user_id, client_id, reason="active_rearm"
+            )
+            return {
+                "session_id": session_id,
+                "user_id": user_id,
+                "client_id": client_id,
+                "status": "rearmed_session_active",
+                "reason": reason,
+                "runtime_seconds": time.time() - start_time,
+            }
 
     # Check if this is an always_persist conversation that needs to be marked as failed
     # NOTE: We check MongoDB directly because the conversation:current Redis key might have been
@@ -1503,23 +1602,19 @@ async def stream_speech_detection_job(
     conversation = await Conversation.find_one(
         Conversation.client_id == session_id,
         Conversation.always_persist == True,
-        Conversation.processing_status == "pending_transcription",
+        Conversation.processing_status == Conversation.ConversationStatus.ACTIVE.value,
     )
 
     if conversation:
+        # Do NOT mark failed here: the batch fallback enqueued below may still
+        # recover a transcript. Stamping "failed" pre-emptively is exactly the bug
+        # that left recovered conversations stuck. The status is owned by the
+        # finalizer (post-conv chain) and the fallback's no-audio dead-end; both
+        # call apply_status(), so a real failure still settles to "failed".
         logger.info(
-            f"🔴 Found always_persist placeholder conversation {conversation.conversation_id} for failed session {session_id[:12]}"
-        )
-
-        # Update conversation with failure status
-        conversation.processing_status = "transcription_failed"
-        conversation.title = "Audio Recording (Transcription Failed)"
-        conversation.summary = f"Transcription failed: {reason}"
-
-        await conversation.save()
-
-        logger.warning(
-            f"🔴 Marked conversation {conversation.conversation_id} as transcription_failed"
+            f"🔎 Found always_persist placeholder {conversation.conversation_id} for "
+            f"session {session_id[:12]} with no live transcript; deferring status to "
+            f"batch fallback (reason so far: {reason})"
         )
     else:
         logger.info(
@@ -1530,6 +1625,41 @@ async def stream_speech_detection_job(
     # This will attempt batch transcription as a fallback
     config_timeout = get_streaming_fallback_timeout()
     conversation_id = conversation.conversation_id if conversation else None
+
+    # The fallback reads audio chunks the audio-persistence job writes to MongoDB.
+    # Those are separate jobs reacting to session-end independently, so the fallback
+    # can race ahead and read 0 chunks before persistence has flushed them. Make the
+    # ordering explicit via the RQ dependency graph instead of a tuned wait: the
+    # fallback cannot start until the persistence job reaches a terminal state (its
+    # final flush is durable). allow_failure=True so a persistence failure degrades to
+    # the fallback's graceful "no audio → skip" path rather than deferring forever.
+    #
+    # Two guards:
+    #   - Only depend on the persistence job while it's still live. If it already
+    #     finished (or its key expired), the chunks are durable — depending on a
+    #     missing job id would defer the fallback forever.
+    #   - Skip the dependency in the off-mode rotation path (below), where the
+    #     persistence job keeps running for the next window and would block for hours.
+    fallback_depends_on = None
+    is_rotation = max_runtime_reached and not expects_live_results
+    if not is_rotation:
+        try:
+            persistence_job = Job.fetch(
+                f"audio-persist_{session_id}",
+                connection=transcription_queue.connection,
+            )
+            if persistence_job.get_status(refresh=True) not in (
+                "finished",
+                "failed",
+                "stopped",
+                "canceled",
+            ):
+                fallback_depends_on = Dependency(
+                    jobs=[persistence_job], allow_failure=True
+                )
+        except NoSuchJobError:
+            fallback_depends_on = None  # persistence done & expired — chunks durable
+
     fallback_job = transcription_queue.enqueue(
         transcription_fallback_check_job,
         session_id,
@@ -1538,7 +1668,13 @@ async def stream_speech_detection_job(
         conversation_id=conversation_id,
         timeout_seconds=config_timeout,
         job_timeout=config_timeout + 120,  # 2 min overhead for fallback check
-        job_id=f"fallback_check_{session_id}",
+        # Key the job per-conversation, not per-session. A shared
+        # fallback_check_{session_id} id meant that when several conversations in
+        # one session ended close together, RQ kept only one and silently dropped
+        # the rest — so most failed placeholders never got a batch-transcription
+        # fallback. Per-conversation ids let every conversation get its own.
+        job_id=f"fallback_check_{conversation_id or session_id}",
+        depends_on=fallback_depends_on,
         description=f"Transcription fallback check for {session_id[:8]} (no speech)",
         meta={"session_id": session_id, "client_id": client_id, "no_speech": True},
     )
@@ -1554,12 +1690,52 @@ async def stream_speech_detection_job(
     # 3. Wait for batch completion and enqueue post-conversation jobs
     # 4. If no placeholder or no audio chunks, fail gracefully with clear error
 
+    # Off-mode long-session rotation. We exited on the 2h max-runtime cap (not session
+    # close), and "off" mode has no live worker to rotate conversations the way
+    # streaming/windowed modes do. The fallback above transcribes the window we just
+    # closed; if the session is still active, rotate to a fresh placeholder and
+    # re-enqueue speech detection so the next window is transcribed too (otherwise
+    # everything past 2h would never be transcribed).
+    rotated_job_id = None
+    if max_runtime_reached and not expects_live_results:
+        status = await store.get_status(session_id)
+        if status == SessionStatus.ACTIVE:
+            next_count = await store.increment_conversation_count(session_id)
+
+            # Clear conversation:current so audio_streaming_persistence_job opens a
+            # fresh placeholder for the continuing audio (its rotation path). The
+            # fallback above keeps the previous conversation_id, so the window we just
+            # closed and the next window stay separate conversations.
+            await redis_client.delete(f"conversation:current:{session_id}")
+
+            # replaces_current=True: this job IS the tracked live detector and is
+            # deliberately handing off to its successor, so skip the single-flight
+            # liveness check (which would otherwise see this still-running job).
+            rotated_job_id = enqueue_speech_detection(
+                session_id,
+                user_id,
+                client_id,
+                reason=f"offmode_rotation_window_{next_count + 1}",
+                replaces_current=True,
+            )
+            logger.info(
+                f"🔄 off-mode: hit {max_runtime}s cap — rotated placeholder and "
+                f"re-enqueued speech detection {rotated_job_id} for active session "
+                f"{session_id[:12]} (window #{next_count + 1})"
+            )
+        else:
+            logger.info(
+                f"⏱️ off-mode: hit {max_runtime}s cap but session "
+                f"status={status.value if status else None} — not re-enqueueing"
+            )
+
     return {
         "session_id": session_id,
         "user_id": user_id,
         "client_id": client_id,
         "no_speech_detected": True,
         "fallback_job_id": fallback_job.id,
+        "rotated_speech_detection_job_id": rotated_job_id,
         "reason": reason,
         "runtime_seconds": time.time() - start_time,
     }

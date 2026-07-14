@@ -11,9 +11,10 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from pymongo.errors import ConnectionFailure, PyMongoError
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 from advanced_omi_backend.app_config import get_app_config
 
@@ -44,11 +45,12 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """
     Middleware to log API requests and JSON responses.
 
-    Excludes:
-    - Authentication endpoints (login, logout)
-    - WebSocket connections
-    - Binary file responses (audio, images)
-    - Streaming responses
+    Only small ``application/json`` bodies are buffered for pretty-printing.
+    Everything else (file downloads, audio, SSE, huge JSON) gets a status
+    line only — buffering a large body here happens ON the event loop and
+    has frozen the whole backend before (163MB zip → minutes at 100% CPU).
+    Note: ``call_next`` always returns a streaming wrapper, so response
+    *type* can't be used to detect file responses — only headers can.
     """
 
     # Paths to exclude from logging
@@ -66,13 +68,8 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         "/api/events/stream",  # SSE endpoint — BaseHTTPMiddleware breaks streaming
     }
 
-    # Binary content types to exclude
-    BINARY_CONTENT_TYPES = {
-        "audio/",
-        "image/",
-        "video/",
-        "application/octet-stream",
-    }
+    # Bodies larger than this are never buffered/logged, even JSON.
+    MAX_LOGGED_BODY_BYTES = 256 * 1024
 
     def should_log_request(self, path: str) -> bool:
         """Determine if request should be logged."""
@@ -91,16 +88,18 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
         return True
 
-    def should_log_response_body(self, content_type: str) -> bool:
-        """Determine if response body should be logged."""
-        if not content_type:
-            return True
-
-        # Exclude binary content types
-        for binary_type in self.BINARY_CONTENT_TYPES:
-            if content_type.startswith(binary_type):
-                return False
-
+    def should_log_response_body(
+        self, content_type: str, content_length: Optional[str]
+    ) -> bool:
+        """Buffer-and-log only small JSON bodies."""
+        if not content_type.startswith("application/json"):
+            return False
+        if content_length:
+            try:
+                if int(content_length) > self.MAX_LOGGED_BODY_BYTES:
+                    return False
+            except ValueError:
+                pass
         return True
 
     async def dispatch(self, request: Request, call_next):
@@ -123,44 +122,46 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         # Calculate duration
         duration_ms = (time.time() - start_time) * 1000
 
-        # Check if we should log response body
-        content_type = response.headers.get("content-type", "")
-        should_log_body = self.should_log_response_body(content_type)
+        should_log_body = self.should_log_response_body(
+            response.headers.get("content-type", ""),
+            response.headers.get("content-length"),
+        )
 
-        # Skip body logging for streaming responses
-        if isinstance(response, StreamingResponse):
-            request_logger.info(
-                f"← {request.method} {path} - {response.status_code} "
-                f"(streaming response) - {duration_ms:.2f}ms"
-            )
-            return response
-
-        # For non-streaming responses, try to extract and log JSON body
         if should_log_body and response.status_code != 204:  # No content
             try:
-                # Read response body
-                response_body = b""
+                # Read response body (bytearray: linear-time accumulation)
+                buffer = bytearray()
                 async for chunk in response.body_iterator:
-                    response_body += chunk
+                    buffer.extend(chunk)
+                    if len(buffer) > self.MAX_LOGGED_BODY_BYTES:
+                        # Mis-declared content-length; stop pretty-printing but
+                        # keep consuming so the response can be re-emitted.
+                        async for chunk in response.body_iterator:
+                            buffer.extend(chunk)
+                        break
+                response_body = bytes(buffer)
 
-                # Try to parse as JSON for pretty printing
-                try:
-                    json_body = json.loads(response_body)
-                    formatted_json = json.dumps(json_body, indent=2)
-                    request_logger.info(
-                        f"← {request.method} {path} - {response.status_code} - {duration_ms:.2f}ms\n"
-                        f"Response body:\n{formatted_json}"
-                    )
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    # Not JSON or not UTF-8, just log the status
+                if len(response_body) > self.MAX_LOGGED_BODY_BYTES:
                     request_logger.info(
                         f"← {request.method} {path} - {response.status_code} - {duration_ms:.2f}ms "
-                        f"(non-JSON response)"
+                        f"(json body too large to log: {len(response_body)} bytes)"
                     )
+                else:
+                    # Try to parse as JSON for pretty printing
+                    try:
+                        json_body = json.loads(response_body)
+                        formatted_json = json.dumps(json_body, indent=2)
+                        request_logger.info(
+                            f"← {request.method} {path} - {response.status_code} - {duration_ms:.2f}ms\n"
+                            f"Response body:\n{formatted_json}"
+                        )
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        request_logger.info(
+                            f"← {request.method} {path} - {response.status_code} - {duration_ms:.2f}ms "
+                            f"(non-JSON response)"
+                        )
 
                 # Recreate response with the body we consumed
-                from starlette.responses import Response
-
                 return Response(
                     content=response_body,
                     status_code=response.status_code,
@@ -175,7 +176,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 )
                 return response
         else:
-            # Just log status for responses without body
+            # Status line only — body passes through untouched (streaming).
             request_logger.info(
                 f"← {request.method} {path} - {response.status_code} - {duration_ms:.2f}ms"
             )
@@ -230,11 +231,14 @@ def setup_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
-def setup_middleware(app: FastAPI) -> None:
+def setup_middleware(app: FastAPI, *, disable_request_logging: bool = False) -> None:
     """Set up all middleware for the FastAPI application."""
     # Add request logging middleware
-    app.add_middleware(RequestLoggingMiddleware)
-    logger.info("📝 Request logging middleware enabled")
+    if not disable_request_logging:
+        app.add_middleware(RequestLoggingMiddleware)
+        logger.info("📝 Request logging middleware enabled")
+    else:
+        logger.info("📝 Request logging middleware DISABLED (profiling)")
 
     setup_cors_middleware(app)
     setup_exception_handlers(app)

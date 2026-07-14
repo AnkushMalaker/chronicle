@@ -1,0 +1,44 @@
+name: iOS TestFlight Deploy
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    paths: ['app/**']
+  workflow_dispatch:
+
+jobs:
+  build-and-submit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./app
+
+    steps:
+      - name: Setup repo
+        uses: actions/checkout@v4
+
+      - name: Setup node
+        uses: actions/setup-node@v4.0.2
+        with:
+          node-version: 20.x
+          cache: 'npm'
+          cache-dependency-path: ./app/package-lock.json
+
+      - name: Setup Expo
+        uses: expo/expo-github-action@v8
+        with:
+          expo-version: latest
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Write ASC API Key
+        run: echo "${{ secrets.ASC_API_KEY_P8 }}" > asc-api-key.p8
+
+      - name: Build and submit to TestFlight
+        run: eas build --platform ios --profile testflight --auto-submit --non-interactive

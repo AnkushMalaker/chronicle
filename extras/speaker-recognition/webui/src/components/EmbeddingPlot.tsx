@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { RefreshCw, Download, Settings, Info } from 'lucide-react'
+import { RefreshCw, Download, Settings, Info, Search, X, Eye, EyeOff } from 'lucide-react'
 
 // Import Plotly dynamically to avoid SSR issues
 let Plotly: any = null;
@@ -79,6 +79,24 @@ interface EmbeddingPlotProps {
   onAnalysisComplete?: (analysis: AnalysisData) => void
 }
 
+// Fuzzy match: case-insensitive substring, falling back to an in-order subsequence match
+// (e.g. "alc" matches "Alice"). Returns false for an empty query.
+function fuzzyMatch(query: string, target: string): boolean {
+  const q = query.trim().toLowerCase()
+  if (!q) return false
+  const t = target.toLowerCase()
+  if (t.includes(q)) return true
+  let qi = 0
+  for (let i = 0; i < t.length && qi < q.length; i++) {
+    if (t[i] === q[qi]) qi++
+  }
+  return qi === q.length
+}
+
+function getDisplayName(speaker: string, speakerNames?: { [key: string]: string }): string {
+  return speakerNames?.[speaker] || speaker.split('_').pop() || speaker
+}
+
 export default function EmbeddingPlot({
   dataSource,
   compact = false,
@@ -88,11 +106,42 @@ export default function EmbeddingPlot({
   onAnalysisComplete
 }: EmbeddingPlotProps) {
   const plotRef = useRef<HTMLDivElement>(null)
+  // Bumped on each new analysis; feeds the plot's uirevision so the camera/zoom only
+  // resets on a genuine new analysis (or 2D↔3D switch), not on search/eye toggles.
+  const [plotRevision, setPlotRevision] = useState(0)
   const [analysisData, setAnalysisData] = useState<AnalysisData | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [view3D, setView3D] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [lockedQueries, setLockedQueries] = useState<string[]>([])
+  const [showOthers, setShowOthers] = useState(true)
+
+  // Every active search term: the locked chips plus whatever is currently typed
+  const activeTerms = React.useMemo(() => {
+    const terms = [...lockedQueries]
+    if (searchQuery.trim()) terms.push(searchQuery.trim())
+    return terms
+  }, [lockedQueries, searchQuery])
+
+  const lockQuery = () => {
+    const q = searchQuery.trim()
+    if (!q) return
+    setLockedQueries(prev => (prev.some(t => t.toLowerCase() === q.toLowerCase()) ? prev : [...prev, q]))
+    setSearchQuery('')
+  }
+
+  // Number of points whose name fuzzy-matches any active term (null when not searching)
+  const searchMatchCount = React.useMemo(() => {
+    if (!analysisData || activeTerms.length === 0) return null
+    const { speakers, speaker_names } = analysisData.visualization
+    return speakers.reduce((count, speaker) => {
+      const name = getDisplayName(speaker, speaker_names)
+      const matched = activeTerms.some(t => fuzzyMatch(t, name) || fuzzyMatch(t, speaker))
+      return matched ? count + 1 : count
+    }, 0)
+  }, [analysisData, activeTerms])
   const [settings, setSettings] = useState({
     method: 'umap',
     clusterMethod: 'dbscan',
@@ -214,8 +263,9 @@ export default function EmbeddingPlot({
         throw new Error(errorMessage)
       }
 
+      setPlotRevision(r => r + 1)
       setAnalysisData(data)
-      createPlot(data)
+      // Plotting is handled by the effect below (keyed on analysisData)
 
       // Call completion callback if provided
       if (onAnalysisComplete) {
@@ -237,6 +287,64 @@ export default function EmbeddingPlot({
     const embeddings = view3D ? visualization.embeddings_3d : visualization.embeddings_2d
 
     if (!embeddings.length) return
+
+    // Search highlighting: when a query is active, matched points pop (larger, gold
+    // outline, labelled) while non-matched points either fade into the background (to
+    // keep matches in context) or hide entirely, per the "show others" eye toggle.
+    // Driven by per-point size/color/outline arrays so it works identically in 2D and
+    // 3D (scatter3d does not support per-point opacity).
+    const searching = activeTerms.length > 0
+    const isMatch = (globalIndex: number): boolean => {
+      const speaker = visualization.speakers[globalIndex]
+      const name = getDisplayName(speaker, visualization.speaker_names)
+      return activeTerms.some(t => fuzzyMatch(t, name) || fuzzyMatch(t, speaker))
+    }
+
+    const HIGHLIGHT_OUTLINE = '#FACC15'
+    // Dimmed context color for non-matches. Solid (not rgba) because scatter3d ignores
+    // per-point alpha — a light solid gray reads as "dimmed" in both 2D and 3D.
+    const FADE_COLOR = '#cbd5e1'
+
+    // Labels: all when idle. When searching, always label matches; also label the
+    // dimmed others while "show others" is on (hidden when the eye is off).
+    const buildText = (globalIndices: number[]): string[] => {
+      const names = globalIndices.map(i =>
+        getDisplayName(visualization.speakers[i], visualization.speaker_names)
+      )
+      if (!searching) return names
+      return globalIndices.map((i, k) => (isMatch(i) || showOthers ? names[k] : ''))
+    }
+
+    const buildTextFont = (globalIndices: number[]): any => {
+      if (!searching) return { size: 10 }
+      return {
+        size: globalIndices.map(i => (isMatch(i) ? 11 : 9)),
+        color: globalIndices.map(i => (isMatch(i) ? '#111827' : '#94a3b8')),
+      }
+    }
+
+    const buildMarker = (
+      globalIndices: number[],
+      baseColor: string | string[],
+      baseSize: number,
+      baseLine: { width: number; color: string }
+    ): any => {
+      if (!searching) {
+        return { size: baseSize, color: baseColor, line: { ...baseLine } }
+      }
+      const colorAt = (k: number) => (Array.isArray(baseColor) ? baseColor[k] : baseColor)
+      const matched = globalIndices.map(i => isMatch(i))
+      return {
+        // size 0 reliably hides non-matches in BOTH 2D and 3D when the eye is off
+        // (scatter3d won't honor a transparent fill color, but it does honor size 0)
+        size: matched.map(m => (m ? baseSize + 6 : showOthers ? Math.max(4, baseSize - 4) : 0)),
+        color: matched.map((m, k) => (m ? colorAt(k) : FADE_COLOR)),
+        line: {
+          width: matched.map(m => (m ? 3 : showOthers ? baseLine.width : 0)),
+          color: matched.map(m => (m ? HIGHLIGHT_OUTLINE : FADE_COLOR)),
+        },
+      }
+    }
 
     // Check if this is a combined analysis with dual-color visualization
     const hasDualColors = data.embedding_types && dataSource.type === 'combined'
@@ -266,18 +374,12 @@ export default function EmbeddingPlot({
           mode: 'markers+text',
           type: view3D ? 'scatter3d' : 'scatter',
           name: 'Annotation Segments',
-          text: segmentIndices.map(i =>
-            visualization.speaker_names?.[visualization.speakers[i]] ||
-            visualization.speakers[i].split('_').pop() ||
-            visualization.speakers[i]
-          ),
+          text: buildText(segmentIndices),
           textposition: 'top center',
-          textfont: { size: 10 },
+          textfont: buildTextFont(segmentIndices),
           marker: {
-            size: 12,
-            color: '#3B82F6', // Blue for segments
-            line: { width: 2, color: '#1E40AF' },
-            opacity: 0.8,
+            ...buildMarker(segmentIndices, '#3B82F6', 12, { width: 2, color: '#1E40AF' }),
+            opacity: 0.85,
             symbol: 'circle'
           },
           hovertemplate:
@@ -299,18 +401,12 @@ export default function EmbeddingPlot({
           mode: 'markers+text',
           type: view3D ? 'scatter3d' : 'scatter',
           name: 'Enrolled Speakers',
-          text: enrolledIndices.map(i =>
-            visualization.speaker_names?.[visualization.speakers[i]] ||
-            visualization.speakers[i].split('_').pop() ||
-            visualization.speakers[i]
-          ),
+          text: buildText(enrolledIndices),
           textposition: 'top center',
-          textfont: { size: 10 },
+          textfont: buildTextFont(enrolledIndices),
           marker: {
-            size: 12,
-            color: '#EF4444', // Red for enrolled speakers
-            line: { width: 2, color: '#DC2626' },
-            opacity: 0.8,
+            ...buildMarker(enrolledIndices, '#EF4444', 12, { width: 2, color: '#DC2626' }),
+            opacity: 0.85,
             symbol: 'diamond'
           },
           hovertemplate:
@@ -334,22 +430,21 @@ export default function EmbeddingPlot({
         }
       })
 
+      const allIndices = embeddings.map((_, i) => i)
+      const clusterColorArray = visualization.cluster_labels.map(label => clusterColors[label])
+
       traces.push({
         x: embeddings.map(point => point[0]),
         y: embeddings.map(point => point[1]),
         z: view3D ? embeddings.map(point => point[2]) : undefined,
         mode: 'markers+text',
         type: view3D ? 'scatter3d' : 'scatter',
-        text: visualization.speakers.map(speaker =>
-          visualization.speaker_names?.[speaker] || speaker.split('_').pop() || speaker
-        ),
+        text: buildText(allIndices),
         textposition: 'top center',
-        textfont: { size: 10 },
+        textfont: buildTextFont(allIndices),
         marker: {
-          size: 10,
-          color: visualization.cluster_labels.map(label => clusterColors[label]),
-          line: { width: 1, color: '#000' },
-          opacity: 0.8
+          ...buildMarker(allIndices, clusterColorArray, 10, { width: 1, color: '#000' }),
+          opacity: 0.85
         },
         hovertemplate:
           '<b>%{text}</b><br>' +
@@ -377,6 +472,9 @@ export default function EmbeddingPlot({
         text: plotTitle,
         font: { size: compact ? 14 : 16 }
       },
+      // Stable across search/eye toggles → Plotly keeps zoom/camera; changes on new
+      // analysis or 2D↔3D switch → view resets to fit.
+      uirevision: `${view3D ? '3d' : '2d'}-${plotRevision}`,
       showlegend: hasDualColors,
       legend: hasDualColors ? {
         x: 1.02,
@@ -404,7 +502,10 @@ export default function EmbeddingPlot({
       displaylogo: false
     }
 
-    Plotly.newPlot(plotRef.current, traces, layout, config)
+    // react() does an in-place diff update; combined with a stable uirevision (set on
+    // the layout above) Plotly preserves the user's zoom/camera across data-only updates
+    // (search/eye). uirevision changes on a new analysis or 2D↔3D switch → view resets.
+    Plotly.react(plotRef.current, traces, layout, config)
   }
 
   const downloadPlot = () => {
@@ -448,7 +549,7 @@ export default function EmbeddingPlot({
     if (analysisData) {
       createPlot(analysisData)
     }
-  }, [view3D, analysisData])
+  }, [view3D, analysisData, activeTerms, showOthers])
 
   return (
     <div className={compact ? "space-y-4" : "space-y-6"}>
@@ -554,7 +655,7 @@ export default function EmbeddingPlot({
 
       {/* Plot Controls */}
       {analysisData && (
-        <div className="flex items-center space-x-4">
+        <div className="flex flex-wrap items-center gap-4">
           <div className="flex items-center space-x-2">
             <button
               onClick={() => setView3D(false)}
@@ -576,6 +677,72 @@ export default function EmbeddingPlot({
             >
               3D View
             </button>
+          </div>
+
+          {/* Speaker name search — highlights matching points; Enter locks a term */}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <Search className="h-4 w-4 text-gray-400 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    lockQuery()
+                  }
+                }}
+                placeholder="Search speaker name…"
+                title="Type to highlight matches, press Enter to lock the term"
+                className="pl-8 pr-8 py-1 text-sm border border-gray-300 rounded-md w-56"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                  title="Clear search"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+
+            {/* Locked search terms */}
+            {lockedQueries.map((term) => (
+              <span
+                key={term}
+                className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-full bg-yellow-100 text-yellow-800 border border-yellow-300"
+              >
+                {term}
+                <button
+                  onClick={() => setLockedQueries(prev => prev.filter(t => t !== term))}
+                  className="hover:text-yellow-900"
+                  title="Remove locked term"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            ))}
+
+            {/* Eye toggle — show/hide the non-matching points (for context) */}
+            {(activeTerms.length > 0) && (
+              <button
+                onClick={() => setShowOthers(!showOthers)}
+                className={`p-1.5 border rounded-md ${
+                  showOthers ? 'text-blue-600 border-blue-300 bg-blue-50' : 'text-gray-400 border-gray-300'
+                }`}
+                title={showOthers ? 'Hide other speakers' : 'Show other speakers (dimmed)'}
+              >
+                {showOthers ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+              </button>
+            )}
+
+            {searchMatchCount !== null && (
+              <span className="text-xs text-gray-500">
+                {searchMatchCount} match{searchMatchCount === 1 ? '' : 'es'}
+              </span>
+            )}
           </div>
         </div>
       )}

@@ -59,11 +59,11 @@ Get Conversation Versions
     ${response}=    GET On Session    api    /api/conversations/${conversation_id}/versions
     RETURN    ${response.json()}[transcript_versions]
 
-Get conversation memory versions
-    [Documentation]    Get memory version history for a conversation
+Get Conversation Memory Audit
+    [Documentation]    Get the memory vault change ledger (audit history) for a conversation
     [Arguments]    ${conversation_id}
-    ${response}=    GET On Session    api    /api/conversations/${conversation_id}/versions/memory
-    RETURN    ${response.json()}[memory_versions]
+    ${response}=    GET On Session    api    /api/conversations/${conversation_id}/memory-audit
+    RETURN    ${response.json()}[entries]
 
 Reprocess Transcript
     [Documentation]    Trigger transcript reprocessing for a conversation
@@ -96,13 +96,6 @@ Activate Transcript Version
     [Arguments]    ${conversation_id}    ${version_id}
 
     ${response}=    POST On Session    api    /api/conversations/${conversation_id}/activate-transcript/${version_id}
-    RETURN    ${response.json()}
-
-Activate Memory Version
-    [Documentation]    Activate a specific memory version
-    [Arguments]     ${conversation_id}    ${version_id}
-
-    ${response}=    POST On Session    api    /api/conversations/${conversation_id}/activate-memory/${version_id}
     RETURN    ${response.json()}
 
 Delete Conversation
@@ -220,7 +213,17 @@ Verify Conversation Processing Status
     Should Be Equal As Strings    ${conversation}[processing_status]    ${expected_status}
     ...    Expected processing_status='${expected_status}', got '${conversation}[processing_status]'
 
-    Log    ✅ Conversation ${conversation_id} has processing_status='${expected_status}'
+    Log    ��� Conversation ${conversation_id} has processing_status='${expected_status}'
+
+Conversation Should Have Live Transcript
+    [Documentation]    Verify conversation has active live-v0 transcript version with content.
+    ...                Returns the conversation dict if successful.
+    [Arguments]    ${conversation_id}
+
+    ${conversation}=    Get Conversation By ID    ${conversation_id}
+    Should Be Equal As Strings    ${conversation}[active_transcript_version]    live-v0
+    ...    msg=Expected active_transcript_version='live-v0', got '${conversation}[active_transcript_version]'
+    RETURN    ${conversation}
 
 Verify Conversation Always Persist Flag
     [Documentation]    Verify conversation has always_persist=True

@@ -3,18 +3,20 @@ import { Text, View, SafeAreaView, ScrollView, Platform, FlatList, ActivityIndic
 import { OmiConnection } from 'friend-lite-react-native';
 import { State as BluetoothState } from 'react-native-ble-plx';
 import { Link } from 'expo-router';
+import Constants from 'expo-constants';
 import { useTheme, ThemeColors } from '@/theme';
 
 // Hooks
 import { useBluetoothManager } from '@/hooks/useBluetoothManager';
 import { useDeviceScanning } from '@/hooks/useDeviceScanning';
 import { useDeviceConnection } from '@/hooks/useDeviceConnection';
-import { useAppSettings } from '@/hooks/useAppSettings';
+import { useSharedAppSettings } from '@/contexts/AppSettingsContext';
 import { useAutoReconnect } from '@/hooks/useAutoReconnect';
 import { useAudioStreamingOrchestrator } from '@/hooks/useAudioStreamingOrchestrator';
 import { useAudioListener } from '@/hooks/useAudioListener';
 import { useAudioStreamer } from '@/hooks/useAudioStreamer';
 import { usePhoneAudioRecorder } from '@/hooks/usePhoneAudioRecorder';
+import { usePhoneAudioDevices } from '@/hooks/usePhoneAudioDevices';
 import { useBatteryMonitor } from '@/hooks/useBatteryMonitor';
 import { saveLastConnectedDeviceId } from '@/utils/storage';
 
@@ -23,51 +25,106 @@ import BluetoothStatusBanner from '@/components/BluetoothStatusBanner';
 import ScanControls from '@/components/ScanControls';
 import DeviceListItem from '@/components/DeviceListItem';
 import DeviceDetails from '@/components/DeviceDetails';
-import AuthSection from '@/components/AuthSection';
-import BackendStatus from '@/components/BackendStatus';
-import ObsidianIngest from '@/components/ObsidianIngest';
 import PhoneAudioButton from '@/components/PhoneAudioButton';
+import PhoneAudioMicPicker from '@/components/PhoneAudioMicPicker';
+
+// True once the app is pointed at a real backend (not empty and not the
+// localhost placeholder a fresh install ships with). Mirrors the
+// "not configured" logic in BackendStatus.
+function isBackendConfigured(url: string | undefined): boolean {
+  const trimmed = (url || '').trim();
+  if (!trimmed) return false;
+  try {
+    const base = trimmed.replace('ws://', 'http://').replace('wss://', 'https://').split('/ws')[0];
+    const host = new URL(base).hostname;
+    return host !== 'localhost' && host !== '127.0.0.1' && host !== '::1';
+  } catch {
+    return true;
+  }
+}
 
 export default function App() {
   const { colors } = useTheme();
   const s = createStyles(colors);
   const omiConnection = useRef(new OmiConnection()).current;
   const [showOnlyOmi, setShowOnlyOmi] = useState(false);
+  const [activeTab, setActiveTab] = useState<'backend' | 'connection'>('backend');
 
   // Bluetooth
   const { bleManager, bluetoothState, permissionGranted, requestBluetoothPermission, isPermissionsLoading } = useBluetoothManager();
 
+  // Settings (must be before audioStreamer so the token refresh callback can reference it)
+  const settings = useSharedAppSettings();
+
   // Audio
-  const audioStreamer = useAudioStreamer();
+  const audioStreamer = useAudioStreamer({
+    autoReconnectEnabled: settings.autoReconnectEnabled,
+    onTokenRefreshed: (newToken) => {
+      // Update app-level auth state when auto-re-login refreshes the token
+      if (settings.currentUserEmail) {
+        settings.handleAuthStatusChange(true, settings.currentUserEmail, newToken);
+      }
+    },
+  });
   const phoneAudioRecorder = usePhoneAudioRecorder();
+  const phoneAudioDevices = usePhoneAudioDevices();
 
   const { isListeningAudio: isOmiAudioListenerActive, audioPacketsReceived, startAudioListener: originalStartAudioListener, stopAudioListener: originalStopAudioListener, isRetrying: isAudioListenerRetrying, retryAttempts: audioListenerRetryAttempts } = useAudioListener(omiConnection, () => !!deviceConnection.connectedDeviceId);
 
   // Refs for disconnect cleanup
   const isOmiAudioListenerActiveRef = useRef(isOmiAudioListenerActive);
   const isAudioStreamingRef = useRef(audioStreamer.isStreaming);
+  // Track if audio pipeline was active before BLE disconnect (for auto-restart on reconnect)
+  const wasStreamingBeforeDisconnectRef = useRef(false);
   useEffect(() => { isOmiAudioListenerActiveRef.current = isOmiAudioListenerActive; }, [isOmiAudioListenerActive]);
   useEffect(() => { isAudioStreamingRef.current = audioStreamer.isStreaming; }, [audioStreamer.isStreaming]);
 
-  // Settings
-  const settings = useAppSettings();
+  // Refs to break the declaration-order cycle:
+  // onDeviceConnect/onDeviceDisconnect need orchestrator + autoReconnect,
+  // but deviceConnection (which needs those callbacks) must be declared
+  // before orchestrator and autoReconnect.
+  type OrchestratorHandle = ReturnType<typeof useAudioStreamingOrchestrator>;
+  type AutoReconnectHandle = ReturnType<typeof useAutoReconnect>;
+  const orchestratorRef = useRef<OrchestratorHandle | null>(null);
+  const autoReconnectRef = useRef<AutoReconnectHandle | null>(null);
 
   // Device callbacks
   const onDeviceConnect = useCallback(async () => {
     const deviceIdToSave = omiConnection.connectedDeviceId;
     if (deviceIdToSave) {
       await saveLastConnectedDeviceId(deviceIdToSave);
-      autoReconnect.setLastKnownDeviceId(deviceIdToSave);
-      autoReconnect.setTriedAutoReconnectForCurrentId(false);
+      autoReconnectRef.current?.setLastKnownDeviceId(deviceIdToSave);
+      autoReconnectRef.current?.setTriedAutoReconnectForCurrentId(false);
+    }
+
+    // Auto-restart audio pipeline if it was active before BLE disconnect
+    if (wasStreamingBeforeDisconnectRef.current) {
+      wasStreamingBeforeDisconnectRef.current = false;
+      console.log('[App] BLE reconnected — auto-restarting audio pipeline');
+      // Short delay to let BLE connection stabilize
+      setTimeout(() => {
+        orchestratorRef.current?.handleStartAudioListeningAndStreaming().catch(err => {
+          console.error('[App] Failed to auto-restart audio pipeline:', err);
+        });
+      }, 1000);
     }
   }, [omiConnection]);
 
   const onDeviceDisconnect = useCallback(async () => {
+    // Remember if audio was active so we can auto-restart on reconnect
+    if (isOmiAudioListenerActiveRef.current || isAudioStreamingRef.current) {
+      wasStreamingBeforeDisconnectRef.current = true;
+    }
+
+    // Stop audio listener (BLE is gone, can't read audio)
     if (isOmiAudioListenerActiveRef.current) await originalStopAudioListener();
-    if (isAudioStreamingRef.current) audioStreamer.stopStreaming();
+
+    // Keep WebSocket alive — it will reconnect or idle until BLE comes back.
+    // Only stop WebSocket for phone audio mode (no BLE needed there).
     if (phoneAudioRecorder.isRecording) {
+      audioStreamer.stopStreaming();
       await phoneAudioRecorder.stopRecording();
-      orchestrator.setIsPhoneAudioMode(false);
+      orchestratorRef.current?.setIsPhoneAudioMode(false);
     }
   }, [originalStopAudioListener, audioStreamer.stopStreaming, phoneAudioRecorder.stopRecording, phoneAudioRecorder.isRecording]);
 
@@ -86,6 +143,7 @@ export default function App() {
     permissionGranted,
     deviceConnection,
     scanning: false,
+    autoReconnectEnabled: settings.autoReconnectEnabled,
   });
 
   // Scanning
@@ -99,8 +157,13 @@ export default function App() {
     phoneAudioRecorder,
     originalStartAudioListener,
     originalStopAudioListener,
+    resolvePhoneInputDeviceId: phoneAudioDevices.resolveEffectiveDeviceId,
     settings,
   });
+
+  // Keep forward-declared refs in sync so device callbacks can call through.
+  orchestratorRef.current = orchestrator;
+  autoReconnectRef.current = autoReconnect;
 
   // Cleanup
   const cleanupRefs = useRef({ omiConnection, bleManager, disconnectFromDevice: deviceConnection.disconnectFromDevice, stopAudioStreaming: audioStreamer.stopStreaming, stopPhoneAudio: phoneAudioRecorder.stopRecording });
@@ -127,9 +190,26 @@ export default function App() {
     if (!showOnlyOmi) return scannedDevices;
     return scannedDevices.filter(d => {
       const name = d.name?.toLowerCase() || '';
-      return name.includes('omi') || name.includes('friend') || name.includes('neo');
+      return name.includes('omi') || name.includes('friend') || name.includes('neo') || name.includes('elato');
     });
   }, [scannedDevices, showOnlyOmi]);
+
+  const bluetoothReady = bluetoothState === BluetoothState.PoweredOn && permissionGranted;
+  // A fresh install points at localhost (the phone itself), which can never be a
+  // real backend — treat that (and empty) as "not paired yet" so the setup card
+  // and health pill reflect reality.
+  const backendConfigured = isBackendConfigured(settings.webSocketUrl);
+  const isOperational = bluetoothReady && backendConfigured;
+  const healthLabel = isOperational ? 'System Operational' : 'Action Needed';
+  const healthTone = isOperational ? colors.success : colors.warning;
+  const batteryDisplay = deviceConnection.connectedDeviceId
+    ? batteryMonitor.batteryLevel >= 0 ? `${batteryMonitor.batteryLevel}%` : '...'
+    : '--';
+  const streamDisplay = audioStreamer.isStreaming
+    ? 'Streaming'
+    : (phoneAudioRecorder.isRecording || orchestrator.isPhoneAudioMode)
+      ? 'Phone Mic'
+      : 'Idle';
 
   // Loading / auto-reconnect screens
   if (isPermissionsLoading && bluetoothState === BluetoothState.Unknown) {
@@ -145,57 +225,117 @@ export default function App() {
     );
   }
 
-  if (autoReconnect.isAttemptingAutoReconnect) {
-    return (
-      <SafeAreaView style={s.container}>
-        <View style={s.centeredMessageContainer}>
-          <ActivityIndicator size="large" color={colors.primary} />
-          <Text style={s.centeredMessageText}>
-            Reconnecting to {autoReconnect.lastKnownDeviceId?.substring(0, 10)}...
-          </Text>
-          <TouchableOpacity style={[s.button, { backgroundColor: colors.danger, marginTop: 20 }]} onPress={autoReconnect.handleCancelAutoReconnect}>
-            <Text style={s.buttonText}>Cancel</Text>
-          </TouchableOpacity>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
   return (
     <SafeAreaView style={s.container}>
+      <View style={s.pulseBackground} />
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={Platform.OS === 'ios' ? 100 : 0}>
         <ScrollView contentContainerStyle={s.content} keyboardShouldPersistTaps="handled">
-          <View style={s.titleRow}>
-            <Text style={s.title}>Chronicle</Text>
-            <Link href="/diagnostics" asChild>
-              <TouchableOpacity style={s.diagButton}>
-                <Text style={s.diagButtonText}>Logs</Text>
-              </TouchableOpacity>
-            </Link>
+          <View style={s.headerCard}>
+            <View style={s.titleRow}>
+              <View style={s.brandRow}>
+                <Text style={s.title}>Chronicle</Text>
+                <Text style={s.versionText}>v{Constants.expoConfig?.version ?? ''}</Text>
+              </View>
+              <View style={s.headerActions}>
+                <Link href="/diagnostics" asChild>
+                  <TouchableOpacity style={s.diagButton}>
+                    <Text style={s.diagButtonText}>Diagnostics</Text>
+                  </TouchableOpacity>
+                </Link>
+                <Link href="/settings" asChild>
+                  <TouchableOpacity style={s.gearButton} accessibilityLabel="Settings">
+                    <Text style={s.gearButtonText}>⚙</Text>
+                  </TouchableOpacity>
+                </Link>
+              </View>
+            </View>
+
+            <View style={[s.healthPill, { borderColor: healthTone }]}>
+              <View style={[s.healthDot, { backgroundColor: healthTone }]} />
+              <Text style={[s.healthText, { color: healthTone }]}>{healthLabel}</Text>
+            </View>
           </View>
 
-          <BackendStatus backendUrl={settings.webSocketUrl} onBackendUrlChange={settings.handleSetAndSaveWebSocketUrl} jwtToken={settings.jwtToken} />
-          <AuthSection backendUrl={settings.webSocketUrl} isAuthenticated={settings.isAuthenticated} currentUserEmail={settings.currentUserEmail} onAuthStatusChange={settings.handleAuthStatusChange} />
+          <View style={s.heroCard}>
+            <Text style={s.heroTitle}>{activeTab === 'backend' ? 'Backend Dashboard' : 'Connection Center'}</Text>
+            <Text style={s.heroSubtitle}>
+              {activeTab === 'backend'
+                ? 'Control center for backend, audio streaming, and wakeword behavior.'
+                : 'Manage Bluetooth pairing, reconnect flow, and device audio routing.'}
+            </Text>
+            <View style={s.heroMetricsRow}>
+              <View style={s.metricBlock}>
+                <Text style={s.metricValue}>{streamDisplay}</Text>
+                <Text style={s.metricLabel}>Audio State</Text>
+              </View>
+              <View style={s.metricDivider} />
+              <View style={s.metricBlock}>
+                <Text style={s.metricValue}>{batteryDisplay}</Text>
+                <Text style={s.metricLabel}>Battery</Text>
+              </View>
+              <View style={s.metricDivider} />
+              <View style={s.metricBlock}>
+                <Text style={s.metricValue}>{deviceConnection.connectedDeviceId ? 'Connected' : 'Idle'}</Text>
+                <Text style={s.metricLabel}>Device</Text>
+              </View>
+            </View>
+          </View>
 
-          {settings.isAuthenticated && <ObsidianIngest backendUrl={settings.webSocketUrl} jwtToken={settings.jwtToken} />}
+          {activeTab === 'backend' && (
+            <>
+              {(!backendConfigured || !settings.isAuthenticated) && (
+                <Link href="/settings" asChild>
+                  <TouchableOpacity style={s.setupCard}>
+                    <Text style={s.setupTitle}>
+                      {!backendConfigured ? 'Connect to your backend' : 'Sign in to your backend'}
+                    </Text>
+                    <Text style={s.setupSubtitle}>
+                      {!backendConfigured
+                        ? 'Scan the QR code from your Chronicle dashboard to pair this app.'
+                        : 'Log in to access advanced backend features.'}
+                    </Text>
+                    <Text style={s.setupCta}>Open Settings ⚙</Text>
+                  </TouchableOpacity>
+                </Link>
+              )}
 
-          <PhoneAudioButton
-            isRecording={phoneAudioRecorder.isRecording || orchestrator.isPhoneAudioMode}
-            isInitializing={phoneAudioRecorder.isInitializing}
-            isDisabled={!!deviceConnection.connectedDeviceId || deviceConnection.isConnecting}
-            audioLevel={phoneAudioRecorder.audioLevel}
-            error={phoneAudioRecorder.error}
-            onPress={orchestrator.handleTogglePhoneAudio}
-          />
+              <Text style={s.sectionLabel}>Audio Deck</Text>
+              <PhoneAudioButton
+                isRecording={phoneAudioRecorder.isRecording || orchestrator.isPhoneAudioMode}
+                isInitializing={phoneAudioRecorder.isInitializing}
+                isDisabled={!!deviceConnection.connectedDeviceId || deviceConnection.isConnecting}
+                audioLevel={phoneAudioRecorder.audioLevel}
+                error={phoneAudioRecorder.error}
+                onPress={orchestrator.handleTogglePhoneAudio}
+              />
 
-          <BluetoothStatusBanner bluetoothState={bluetoothState} isPermissionsLoading={isPermissionsLoading} permissionGranted={permissionGranted} onRequestPermission={requestBluetoothPermission} />
-          <ScanControls scanning={scanning} onScanPress={startScan} onStopScanPress={stopDeviceScanAction} canScan={canScan} />
+              {!deviceConnection.connectedDeviceId && !deviceConnection.isConnecting && (
+                <PhoneAudioMicPicker
+                  devices={phoneAudioDevices.devices}
+                  selectedDeviceId={phoneAudioDevices.selectedDeviceId}
+                  effectiveDevice={phoneAudioDevices.effectiveDevice}
+                  loading={phoneAudioDevices.loading}
+                  disabled={phoneAudioRecorder.isRecording || orchestrator.isPhoneAudioMode}
+                  onSelect={phoneAudioDevices.setSelectedDeviceId}
+                  onRefresh={phoneAudioDevices.refresh}
+                />
+              )}
+            </>
+          )}
 
-          {autoReconnect.isRetryingConnection && (
+          {activeTab === 'connection' && (
+            <>
+              <Text style={s.sectionLabel}>Bluetooth</Text>
+              <BluetoothStatusBanner bluetoothState={bluetoothState} isPermissionsLoading={isPermissionsLoading} permissionGranted={permissionGranted} onRequestPermission={requestBluetoothPermission} />
+              <ScanControls scanning={scanning} onScanPress={startScan} onStopScanPress={stopDeviceScanAction} canScan={canScan} />
+
+          {(autoReconnect.isAttemptingAutoReconnect || autoReconnect.isRetryingConnection) && (
             <View style={s.retryBanner}>
               <ActivityIndicator size="small" color={colors.warning} />
               <Text style={s.retryBannerText}>
-                Reconnecting in {autoReconnect.retryBackoffSeconds}s... (attempt {autoReconnect.connectionRetryCount})
+                {autoReconnect.isRetryingConnection
+                  ? `Reconnecting in ${autoReconnect.retryBackoffSeconds}s... (attempt ${autoReconnect.connectionRetryCount})`
+                  : `Reconnecting to ${autoReconnect.lastKnownDeviceId?.substring(0, 10) ?? 'device'}...`}
               </Text>
               <TouchableOpacity
                 style={[s.button, { backgroundColor: colors.danger, paddingVertical: 6, paddingHorizontal: 10 }]}
@@ -217,7 +357,7 @@ export default function App() {
               <View style={s.sectionHeaderWithFilter}>
                 <Text style={s.sectionTitle}>Found Devices</Text>
                 <View style={s.filterContainer}>
-                  <Text style={s.filterText}>Show only OMI/Friend/Neo</Text>
+                  <Text style={s.filterText}>Show only OMI/Friend/Neo/Elato</Text>
                   <Switch
                     trackColor={{ false: colors.disabled, true: colors.primary }}
                     thumbColor={showOnlyOmi ? colors.warning : colors.card}
@@ -238,7 +378,7 @@ export default function App() {
               ) : (
                 <View style={s.noDevicesContainer}>
                   <Text style={s.noDevicesText}>
-                    {showOnlyOmi ? `No OMI/Friend/Neo devices found. ${scannedDevices.length} other device(s) hidden by filter.` : 'No devices found.'}
+                    {showOnlyOmi ? `No OMI/Friend/Neo/Elato devices found. ${scannedDevices.length} other device(s) hidden by filter.` : 'No devices found.'}
                   </Text>
                 </View>
               )}
@@ -283,31 +423,49 @@ export default function App() {
             </View>
           )}
 
-          {deviceConnection.connectedDeviceId && (
-            <DeviceDetails
-              connectedDeviceId={deviceConnection.connectedDeviceId}
-              onGetAudioCodec={deviceConnection.getAudioCodec}
-              currentCodec={deviceConnection.currentCodec}
-              batteryLevel={batteryMonitor.batteryLevel}
-              isLowBattery={batteryMonitor.isLowBattery}
-              onRefreshBattery={batteryMonitor.refreshBattery}
-              isListeningAudio={isOmiAudioListenerActive}
-              onStartAudioListener={orchestrator.handleStartAudioListeningAndStreaming}
-              onStopAudioListener={orchestrator.handleStopAudioListeningAndStreaming}
-              audioPacketsReceived={audioPacketsReceived}
-              webSocketUrl={settings.webSocketUrl}
-              onSetWebSocketUrl={settings.handleSetAndSaveWebSocketUrl}
-              isAudioStreaming={audioStreamer.isStreaming}
-              isConnectingAudioStreamer={audioStreamer.isConnecting}
-              audioStreamerError={audioStreamer.error}
-              userId={settings.userId}
-              onSetUserId={settings.handleSetAndSaveUserId}
-              isAudioListenerRetrying={isAudioListenerRetrying}
-              audioListenerRetryAttempts={audioListenerRetryAttempts}
-            />
+              {deviceConnection.connectedDeviceId && (
+                <DeviceDetails
+                  connectedDeviceId={deviceConnection.connectedDeviceId}
+                  onGetAudioCodec={deviceConnection.getAudioCodec}
+                  currentCodec={deviceConnection.currentCodec}
+                  batteryLevel={batteryMonitor.batteryLevel}
+                  isLowBattery={batteryMonitor.isLowBattery}
+                  onRefreshBattery={batteryMonitor.refreshBattery}
+                  isListeningAudio={isOmiAudioListenerActive}
+                  onStartAudioListener={orchestrator.handleStartAudioListeningAndStreaming}
+                  onStopAudioListener={orchestrator.handleStopAudioListeningAndStreaming}
+                  audioPacketsReceived={audioPacketsReceived}
+                  webSocketUrl={settings.webSocketUrl}
+                  onSetWebSocketUrl={settings.handleSetAndSaveWebSocketUrl}
+                  isAudioStreaming={audioStreamer.isStreaming}
+                  isConnectingAudioStreamer={audioStreamer.isConnecting}
+                  audioStreamerError={audioStreamer.error}
+                  userId={settings.userId}
+                  onSetUserId={settings.handleSetAndSaveUserId}
+                  isAudioListenerRetrying={isAudioListenerRetrying}
+                  audioListenerRetryAttempts={audioListenerRetryAttempts}
+                  autoReconnectEnabled={settings.autoReconnectEnabled}
+                  onToggleAutoReconnect={settings.handleToggleAutoReconnect}
+                />
+              )}
+            </>
           )}
         </ScrollView>
       </KeyboardAvoidingView>
+      <View style={s.bottomNav}>
+        <TouchableOpacity
+          style={activeTab === 'connection' ? s.navItemActive : s.navItem}
+          onPress={() => setActiveTab('connection')}
+        >
+          <Text style={activeTab === 'connection' ? s.navItemActiveText : s.navItemText}>Connection</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={activeTab === 'backend' ? s.navItemActive : s.navItem}
+          onPress={() => setActiveTab('backend')}
+        >
+          <Text style={activeTab === 'backend' ? s.navItemActiveText : s.navItemText}>Backend</Text>
+        </TouchableOpacity>
+      </View>
     </SafeAreaView>
   );
 }
@@ -317,34 +475,181 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     flex: 1,
     backgroundColor: colors.background,
   },
+  pulseBackground: {
+    position: 'absolute',
+    width: 440,
+    height: 440,
+    borderRadius: 220,
+    backgroundColor: colors.primary,
+    opacity: 0.05,
+    top: -140,
+    right: -140,
+  },
   content: {
-    padding: 20,
+    padding: 16,
     paddingTop: Platform.OS === 'android' ? 30 : 10,
-    paddingBottom: 50,
+    paddingBottom: 110,
+  },
+  headerCard: {
+    marginBottom: 14,
+    padding: 14,
+    borderRadius: 14,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
   },
   titleRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: 10,
+  },
+  brandRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
   },
   title: {
-    fontSize: 24,
+    fontSize: 26,
     fontWeight: 'bold',
     color: colors.text,
+  },
+  versionText: {
+    fontSize: 12,
+    color: colors.textTertiary,
+    marginLeft: 8,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
   diagButton: {
     paddingVertical: 6,
     paddingHorizontal: 12,
-    borderRadius: 6,
+    borderRadius: 10,
     backgroundColor: colors.inputBackground,
     borderWidth: 1,
     borderColor: colors.inputBorder,
   },
   diagButtonText: {
-    fontSize: 14,
+    fontSize: 12,
+    color: colors.primary,
+    fontWeight: '700',
+  },
+  gearButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    backgroundColor: colors.inputBackground,
+    borderWidth: 1,
+    borderColor: colors.inputBorder,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  gearButtonText: {
+    fontSize: 16,
+    color: colors.primary,
+    fontWeight: '700',
+  },
+  setupCard: {
+    marginBottom: 20,
+    padding: 16,
+    borderRadius: 12,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.primary,
+  },
+  setupTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  setupSubtitle: {
+    marginTop: 6,
+    fontSize: 13,
     color: colors.textSecondary,
-    fontWeight: '500',
+  },
+  setupCta: {
+    marginTop: 12,
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.primary,
+  },
+  healthPill: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderRadius: 16,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  healthDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 8,
+  },
+  healthText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  heroCard: {
+    marginBottom: 16,
+    padding: 14,
+    borderRadius: 14,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+  },
+  heroTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  heroSubtitle: {
+    marginTop: 4,
+    fontSize: 13,
+    color: colors.textSecondary,
+  },
+  heroMetricsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 14,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: colors.separator,
+  },
+  metricBlock: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  metricValue: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  metricLabel: {
+    marginTop: 4,
+    fontSize: 11,
+    color: colors.textTertiary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  metricDivider: {
+    width: 1,
+    height: 28,
+    backgroundColor: colors.separator,
+    marginHorizontal: 4,
+  },
+  sectionLabel: {
+    fontSize: 12,
+    color: colors.textTertiary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: 8,
+    marginTop: 2,
+    fontWeight: '700',
   },
   section: {
     marginBottom: 25,
@@ -454,5 +759,43 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     color: colors.warning,
     textAlign: 'center',
     fontWeight: '500',
+  },
+  bottomNav: {
+    position: 'absolute',
+    left: 14,
+    right: 14,
+    bottom: 14,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    borderRadius: 14,
+    padding: 8,
+  },
+  navItem: {
+    flex: 1,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+  },
+  navItemText: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    fontWeight: '700',
+  },
+  navItemActive: {
+    flex: 1,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    backgroundColor: colors.primary,
+  },
+  navItemActiveText: {
+    fontSize: 12,
+    color: 'white',
+    fontWeight: '700',
   },
 });

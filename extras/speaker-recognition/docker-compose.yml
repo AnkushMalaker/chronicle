@@ -28,6 +28,14 @@ services:
       - SPEAKER_SERVICE_HOST=${SPEAKER_SERVICE_HOST:-0.0.0.0}
       - SPEAKER_SERVICE_PORT=${SPEAKER_SERVICE_PORT:-8085}
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+      # Cross-service error reporting → backend "System Errors" page (opt-in).
+      - CHRONICLE_INGEST_URL=${CHRONICLE_INGEST_URL:-}
+      - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
+      - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
+    # So CHRONICLE_INGEST_URL=http://host.docker.internal:8000/... resolves to the
+    # backend host on Linux/Podman.
+    extra_hosts:
+      - host.docker.internal:host-gateway
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
@@ -111,6 +119,7 @@ services:
       - REACT_UI_HOST=${REACT_UI_HOST}
       - REACT_UI_PORT=${REACT_UI_PORT}
       - REACT_UI_HTTPS=${REACT_UI_HTTPS}
+      - VITE_ALLOWED_HOSTS=${VITE_ALLOWED_HOSTS:-localhost 127.0.0.1}
       - SPEAKER_SERVICE_HOST=${SPEAKER_SERVICE_HOST}
       - SPEAKER_SERVICE_PORT=${SPEAKER_SERVICE_PORT}
     restart: unless-stopped
@@ -132,10 +141,24 @@ services:
       - ../../certs:/certs:ro
       - caddy_speaker_data:/data
       - caddy_speaker_config:/config
-    depends_on:
-      web-ui:
-        condition: service_healthy
+    # No depends_on the web-ui: caddy resolves upstreams lazily per-request, so a
+    # not-yet-ready UI just 502s briefly instead of blocking the stack `up` (which,
+    # gated on health, used to trip services.py's 120s start timeout). Mirrors the
+    # advanced backend's caddy, which doesn't gate on webui-dev either.
     restart: unless-stopped
+
+  # Edge agent sidecar — advertises this service on the Tailnet
+  edge-agent:
+    build:
+      context: ../../edge
+    network_mode: host
+    environment:
+      - ADVERTISE=chronicle-speaker:8085
+    volumes:
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock:ro
+    restart: unless-stopped
+    profiles:
+      - edge
 
 # Shared network for cross-project communication
 networks:

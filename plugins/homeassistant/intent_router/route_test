@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Wrapper: run the end-to-end router + HA cascade harness with deps via uv.
+#   ./route_test "make it more soothing for my eyes"
+#   ./route_test "what's the meaning of life"
+cd "$(dirname "$0")" || exit 1
+exec uv run --with openai --with httpx --with python-dotenv \
+  python3 route_test.py "$@"

@@ -1,17 +1,16 @@
-"""Memory service factory for creating appropriate memory service instances.
+"""Memory service factory for creating the memory service instance.
 
-This module provides a factory pattern for instantiating memory services
-based on configuration. It supports both the sophisticated Chronicle
-implementation and the OpenMemory MCP backend.
+Chronicle has a single memory provider: the agentic Markdown vault
+(``providers/chronicle.py``).
 """
 
-import asyncio
 import logging
 import threading
 from typing import Optional
 
 from .base import MemoryServiceBase
 from .config import MemoryConfig, MemoryProvider, build_memory_config_from_env
+from .providers.chronicle import MemoryService as ChronicleMemoryService
 
 memory_logger = logging.getLogger("memory_service")
 
@@ -39,27 +38,9 @@ def create_memory_service(config: MemoryConfig) -> MemoryServiceBase:
     )
 
     if config.memory_provider == MemoryProvider.CHRONICLE:
-        # Use the sophisticated Chronicle implementation
-        from .providers.chronicle import MemoryService as ChronicleMemoryService
-
         return ChronicleMemoryService(config)
 
-    elif config.memory_provider == MemoryProvider.OPENMEMORY_MCP:
-        # Use OpenMemory MCP implementation
-        try:
-            from .providers.openmemory_mcp import OpenMemoryMCPService
-        except ImportError as e:
-            raise RuntimeError(f"OpenMemory MCP service not available: {e}")
-
-        if not config.openmemory_config:
-            raise ValueError(
-                "OpenMemory configuration is required for OPENMEMORY_MCP provider"
-            )
-
-        return OpenMemoryMCPService(**config.openmemory_config)
-
-    else:
-        raise ValueError(f"Unsupported memory provider: {config.memory_provider}")
+    raise ValueError(f"Unsupported memory provider: {config.memory_provider}")
 
 
 def get_memory_service() -> MemoryServiceBase:

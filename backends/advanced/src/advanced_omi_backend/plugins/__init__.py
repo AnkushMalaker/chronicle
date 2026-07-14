@@ -14,7 +14,7 @@ Trigger types control when plugins execute:
 - conditional: Execute based on custom condition (future)
 """
 
-from .base import BasePlugin, PluginContext, PluginResult
+from .base import BasePlugin, PluginConnectivityError, PluginContext, PluginResult
 from .events import ButtonActionType, ButtonState, ConversationCloseReason, PluginEvent
 from .router import PluginRouter
 from .services import PluginServices
@@ -22,6 +22,7 @@ from .services import PluginServices
 __all__ = [
     "BasePlugin",
     "ButtonActionType",
+    "PluginConnectivityError",
     "ButtonState",
     "ConversationCloseReason",
     "PluginContext",

@@ -8,7 +8,8 @@ Features:
 - Strict backup verification before cleanup proceeds
 - Conversation-filtered audio export (only conversations with transcripts)
 - Comprehensive backup manifest with checksums
-- MongoDB, Qdrant, Neo4j, Redis cleanup
+- Per-user vault backup (conversation_docs + memory_md tarred into vault.tar.gz)
+- MongoDB, Redis, and vault cleanup (Syncthing markers preserved)
 """
 
 import argparse
@@ -17,8 +18,12 @@ import hashlib
 import json
 import logging
 import os
+import re
+import shutil
 import struct
 import sys
+import tarfile
+import wave
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -30,9 +35,6 @@ try:
     import redis
     from beanie import init_beanie
     from motor.motor_asyncio import AsyncIOMotorClient
-    from neo4j import GraphDatabase
-    from qdrant_client import AsyncQdrantClient
-    from qdrant_client.models import Distance, VectorParams
     from rich.console import Console
     from rich.panel import Panel
     from rich.progress import (
@@ -52,7 +54,7 @@ try:
     from advanced_omi_backend.models.conversation import Conversation
     from advanced_omi_backend.models.user import User
     from advanced_omi_backend.models.waveform import WaveformData
-    from advanced_omi_backend.services.memory.config import build_memory_config_from_env
+    from advanced_omi_backend.utils.audio_chunk_utils import decode_opus_to_pcm
 except ImportError as e:
     print(f"Error: Missing required dependency: {e}")
     print("This script must be run inside the chronicle-backend container")
@@ -67,22 +69,6 @@ console = Console()
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def get_qdrant_collection_name() -> str:
-    """Get Qdrant collection name from memory service configuration."""
-    try:
-        memory_config = build_memory_config_from_env()
-        if (
-            hasattr(memory_config, "vector_store_config")
-            and memory_config.vector_store_config
-        ):
-            return memory_config.vector_store_config.get(
-                "collection_name", "chronicle_memories"
-            )
-    except Exception:
-        pass
-    return "chronicle_memories"
 
 
 def _file_sha256(path: Path) -> str:
@@ -101,6 +87,41 @@ def _human_size(nbytes: int) -> str:
     return f"{nbytes:.1f} TB"
 
 
+# Per-user markdown vaults on disk. Dirs are named by the user's 24-hex
+# Mongo ObjectId; anything else (bench-*, agenttest, ...) is test data
+# that backup/cleanup must not touch.
+DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
+VAULT_BASE_DIRS = ("conversation_docs", "memory_md")
+_USER_ID_RE = re.compile(r"^[0-9a-f]{24}$")
+# Syncthing folder markers — deleting these breaks the sync pairing
+_SYNCTHING_MARKERS = (".stfolder", ".stignore")
+
+
+def _iter_user_vaults():
+    """Yield per-user vault directories under conversation_docs/ and memory_md/."""
+    for base_name in VAULT_BASE_DIRS:
+        base = DATA_DIR / base_name
+        if not base.is_dir():
+            continue
+        for d in sorted(base.iterdir()):
+            if d.is_dir() and _USER_ID_RE.fullmatch(d.name):
+                yield d
+
+
+def _count_vault_files() -> int:
+    """Count vault content files, excluding Syncthing markers."""
+    count = 0
+    for vault in _iter_user_vaults():
+        for f in vault.rglob("*"):
+            if not f.is_file():
+                continue
+            rel_top = f.relative_to(vault).parts[0]
+            if rel_top in _SYNCTHING_MARKERS:
+                continue
+            count += 1
+    return count
+
+
 # ---------------------------------------------------------------------------
 # Stats
 # ---------------------------------------------------------------------------
@@ -117,12 +138,9 @@ class Stats:
         self.chat_sessions = 0
         self.chat_messages = 0
         self.annotations = 0
-        self.memories = 0
-        self.neo4j_nodes = 0
-        self.neo4j_relationships = 0
-        self.neo4j_promises = 0
         self.redis_jobs = 0
         self.legacy_wav = 0
+        self.vault_files = 0
         self.users = 0
         self.langfuse_prompts = 0
 
@@ -130,8 +148,6 @@ class Stats:
 async def gather_stats(
     mongo_db: Any,
     redis_conn: Any,
-    qdrant_client: Optional[AsyncQdrantClient],
-    neo4j_driver: Any = None,
     langfuse_client: Any = None,
 ) -> Stats:
     """Gather current system statistics."""
@@ -148,27 +164,6 @@ async def gather_stats(
     s.chat_messages = await mongo_db["chat_messages"].count_documents({})
     s.annotations = await Annotation.find_all().count()
     s.users = await User.find_all().count()
-
-    # Qdrant
-    if qdrant_client:
-        try:
-            info = await qdrant_client.get_collection(get_qdrant_collection_name())
-            s.memories = info.points_count
-        except Exception:
-            pass
-
-    # Neo4j
-    if neo4j_driver:
-        try:
-            with neo4j_driver.session() as session:
-                r = session.run("MATCH (n) RETURN count(n) AS c").single()
-                s.neo4j_nodes = r["c"] if r else 0
-                r = session.run("MATCH ()-[r]->() RETURN count(r) AS c").single()
-                s.neo4j_relationships = r["c"] if r else 0
-                r = session.run("MATCH (p:Promise) RETURN count(p) AS c").single()
-                s.neo4j_promises = r["c"] if r else 0
-        except Exception:
-            pass
 
     # Redis
     try:
@@ -200,6 +195,9 @@ async def gather_stats(
     wav_dir = Path("/app/data/audio_chunks")
     if wav_dir.exists():
         s.legacy_wav = len(list(wav_dir.glob("*.wav")))
+
+    # Vault (per-user markdown)
+    s.vault_files = _count_vault_files()
 
     return s
 
@@ -240,9 +238,6 @@ def render_stats_table(stats: Stats, title: str = "Current State") -> Table:
     row("Chat Messages", str(stats.chat_messages), "dim")
     row("Annotations", str(stats.annotations), "green" if stats.annotations else "dim")
     table.add_section()
-    row("Memories (Qdrant)", str(stats.memories), "yellow" if stats.memories else "dim")
-    row("Neo4j Nodes", str(stats.neo4j_nodes), "dim")
-    row("Neo4j Relationships", str(stats.neo4j_relationships), "dim")
     row(
         "LangFuse Prompts",
         str(stats.langfuse_prompts),
@@ -251,6 +246,7 @@ def render_stats_table(stats: Stats, title: str = "Current State") -> Table:
     table.add_section()
     row("Redis Jobs", str(stats.redis_jobs), "dim")
     row("Legacy WAV Files", str(stats.legacy_wav), "dim")
+    row("Vault Files", str(stats.vault_files), "green" if stats.vault_files else "dim")
     table.add_section()
     row("Users", str(stats.users), "cyan")
 
@@ -277,8 +273,14 @@ class BackupResult:
             "sha256": "",
         }
         if ok and path and path.exists():
-            entry["size"] = path.stat().st_size
-            entry["sha256"] = _file_sha256(path)
+            if path.is_dir():
+                # Directory export (e.g. audio WAVs): total size, no checksum
+                entry["size"] = sum(
+                    f.stat().st_size for f in path.rglob("*") if f.is_file()
+                )
+            else:
+                entry["size"] = path.stat().st_size
+                entry["sha256"] = _file_sha256(path)
         self.exports[name] = entry
 
     @property
@@ -287,8 +289,8 @@ class BackupResult:
 
     @property
     def critical_ok(self) -> bool:
-        """conversations, audio_metadata, and annotations are critical."""
-        critical = ("conversations", "audio_metadata", "annotations")
+        """conversations, audio_metadata, annotations, and vault are critical."""
+        critical = ("conversations", "audio_metadata", "annotations", "vault")
         return all(
             self.exports.get(n, {}).get("ok", False)
             for n in critical
@@ -330,20 +332,19 @@ class BackupManager:
         backup_dir: str,
         export_audio: bool,
         mongo_db: Any,
-        neo4j_driver: Any = None,
         langfuse_client: Any = None,
+        skip_existing_audio: bool = False,
     ):
         self.backup_dir = Path(backup_dir)
         self.export_audio = export_audio
+        self.skip_existing_audio = skip_existing_audio
         self.mongo_db = mongo_db
-        self.neo4j_driver = neo4j_driver
         self.langfuse_client = langfuse_client
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.backup_path = self.backup_dir / f"backup_{self.timestamp}"
 
     async def run(
         self,
-        qdrant_client: Optional[AsyncQdrantClient],
         stats: Stats,
     ) -> BackupResult:
         """Run all backup exports, return a BackupResult for verification."""
@@ -364,18 +365,11 @@ class BackupManager:
                 ("chat_sessions", self._export_chat_sessions),
                 ("chat_messages", self._export_chat_messages),
                 ("annotations", self._export_annotations),
+                ("vault", self._export_vault),
             ]
 
             if self.export_audio:
                 steps.append(("audio_wav", self._export_audio_wav))
-
-            if qdrant_client:
-                steps.append(
-                    ("memories", lambda r: self._export_memories(qdrant_client, r))
-                )
-
-            if self.neo4j_driver:
-                steps.append(("neo4j_graph", self._export_neo4j))
 
             if self.langfuse_client:
                 steps.append(("langfuse_prompts", self._export_langfuse_prompts))
@@ -407,7 +401,7 @@ class BackupManager:
                 "conversations_with_transcript": stats.conversations_with_transcript,
                 "audio_chunks": stats.audio_chunks,
                 "annotations": stats.annotations,
-                "memories": stats.memories,
+                "vault_files": stats.vault_files,
                 "langfuse_prompts": stats.langfuse_prompts,
                 "users": stats.users,
             },
@@ -517,6 +511,27 @@ class BackupManager:
         result.record("annotations", path, True)
         return path
 
+    def _export_vault(self, result: BackupResult) -> Path:
+        """Tar per-user markdown vaults (conversation_docs + memory_md)."""
+        path = self.backup_path / "vault.tar.gz"
+        with tarfile.open(path, "w:gz") as tar:
+            for vault in _iter_user_vaults():
+                tar.add(vault, arcname=str(vault.relative_to(DATA_DIR)))
+        result.record("vault", path, True)
+        return path
+
+    def _find_previously_exported_audio(self) -> set[str]:
+        """Conversation IDs whose audio already exists in a prior backup dir."""
+        existing: set[str] = set()
+        for conv_dir in self.backup_dir.glob("backup_*/audio/*"):
+            if (
+                conv_dir.is_dir()
+                and conv_dir.parent.parent != self.backup_path
+                and any(conv_dir.glob("*.wav"))
+            ):
+                existing.add(conv_dir.name)
+        return existing
+
     async def _export_audio_wav(self, result: BackupResult) -> Optional[Path]:
         """Export audio WAV files for conversations that have transcripts."""
         # Only export audio for conversations with actual transcripts
@@ -528,12 +543,20 @@ class BackupManager:
             result.record("audio_wav", None, True)
             return None
 
+        skip_ids: set[str] = set()
+        if self.skip_existing_audio:
+            skip_ids = self._find_previously_exported_audio()
+
         audio_dir = self.backup_path / "audio"
         audio_dir.mkdir(parents=True, exist_ok=True)
         exported = 0
+        skipped = 0
         failed = 0
 
         for conv in conversations:
+            if conv.conversation_id in skip_ids:
+                skipped += 1
+                continue
             try:
                 ok = await self._export_conversation_audio(
                     conv.conversation_id, audio_dir
@@ -544,37 +567,56 @@ class BackupManager:
                 logger.warning(f"Audio export failed for {conv.conversation_id}: {e}")
                 failed += 1
 
-        ok = exported > 0 or (len(conversations) == 0)
-        error = f"{failed} failed" if failed else ""
-        result.record("audio_wav", audio_dir, ok, error)
+        ok = exported > 0 or skipped > 0 or (len(conversations) == 0)
+        notes = []
+        if skipped:
+            notes.append(f"{skipped} skipped (in prior backups)")
+        if failed:
+            notes.append(f"{failed} failed")
+        result.record("audio_wav", audio_dir, ok, ", ".join(notes))
         return audio_dir
 
     async def _export_conversation_audio(
         self, conversation_id: str, audio_dir: Path
     ) -> bool:
-        """Decode Opus chunks to WAV for a single conversation. Returns True if audio was exported."""
-        from advanced_omi_backend.utils.audio_chunk_utils import decode_opus_to_pcm
+        """Decode Opus chunks to 1-minute WAV files for a single conversation.
 
-        chunks = (
-            await AudioChunkDocument.find(
-                AudioChunkDocument.conversation_id == conversation_id
-            )
-            .sort("+chunk_index")
-            .to_list()
-        )
+        Streams chunk-by-chunk so memory stays bounded (one opus chunk plus at
+        most one minute of PCM), even for multi-hour conversations.
+        Returns True if audio was exported.
+        """
+        cursor = AudioChunkDocument.find(
+            AudioChunkDocument.conversation_id == conversation_id
+        ).sort("+chunk_index")
 
-        if not chunks:
-            return False
-
-        conv_dir = audio_dir / conversation_id
-        conv_dir.mkdir(parents=True, exist_ok=True)
-
-        sample_rate = chunks[0].sample_rate
-        channels = chunks[0].channels
-
-        # Decode all chunks using FFmpeg (same path as UI playback)
+        final_dir = audio_dir / conversation_id
+        # Write into a temp dir and rename on completion, so an interrupted
+        # export never leaves a partial dir that --skip-existing-audio would skip
+        conv_dir = audio_dir / f"{conversation_id}.partial"
+        sample_rate = None
+        channels = None
+        bytes_per_minute = 0
         pcm_buffer = bytearray()
-        for chunk in chunks:
+        chunk_num = 1
+
+        def _write_segment(segment_pcm: bytes):
+            nonlocal chunk_num
+            wav_path = conv_dir / f"chunk_{chunk_num:03d}.wav"
+            with wave.open(str(wav_path), "wb") as wf:
+                wf.setnchannels(channels)
+                wf.setsampwidth(2)
+                wf.setframerate(sample_rate)
+                wf.writeframes(segment_pcm)
+            chunk_num += 1
+
+        async for chunk in cursor:
+            if sample_rate is None:
+                sample_rate = chunk.sample_rate
+                channels = chunk.channels
+                bytes_per_minute = (
+                    sample_rate * channels * 2 * 60
+                )  # 16-bit = 2 bytes per sample
+                conv_dir.mkdir(parents=True, exist_ok=True)
             try:
                 pcm_data = await decode_opus_to_pcm(
                     opus_data=bytes(chunk.audio_data),
@@ -588,110 +630,19 @@ class BackupManager:
                 )
                 continue
 
-        if not pcm_buffer:
-            return False
+            while len(pcm_buffer) >= bytes_per_minute:
+                _write_segment(bytes(pcm_buffer[:bytes_per_minute]))
+                del pcm_buffer[:bytes_per_minute]
 
-        # Split into 1-minute WAV files
-        import wave
+        if pcm_buffer:
+            _write_segment(bytes(pcm_buffer))
 
-        bytes_per_minute = (
-            sample_rate * channels * 2 * 60
-        )  # 16-bit = 2 bytes per sample
-        all_pcm = bytes(pcm_buffer)
-        chunk_num = 1
-
-        for start in range(0, len(all_pcm), bytes_per_minute):
-            wav_path = conv_dir / f"chunk_{chunk_num:03d}.wav"
-            segment_pcm = all_pcm[start : start + bytes_per_minute]
-            with wave.open(str(wav_path), "wb") as wf:
-                wf.setnchannels(channels)
-                wf.setsampwidth(2)
-                wf.setframerate(sample_rate)
-                wf.writeframes(segment_pcm)
-            chunk_num += 1
-
-        return True
-
-    async def _export_memories(
-        self, qdrant_client: AsyncQdrantClient, result: BackupResult
-    ) -> Path:
-        collection_name = get_qdrant_collection_name()
-        collections = await qdrant_client.get_collections()
-        exists = any(c.name == collection_name for c in collections.collections)
-
-        path = self.backup_path / "memories.json"
-        if not exists:
-            with open(path, "w") as f:
-                json.dump([], f)
-            result.record("memories", path, True)
-            return path
-
-        data = []
-        offset = None
-        while True:
-            points, next_offset = await qdrant_client.scroll(
-                collection_name=collection_name,
-                limit=100,
-                offset=offset,
-                with_payload=True,
-                with_vectors=True,
-            )
-            if not points:
-                break
-            for pt in points:
-                data.append(
-                    {"id": str(pt.id), "vector": pt.vector, "payload": pt.payload}
-                )
-            if next_offset is None:
-                break
-            offset = next_offset
-
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
-        result.record("memories", path, True)
-        return path
-
-    def _export_neo4j(self, result: BackupResult) -> Path:
-        path = self.backup_path / "neo4j_graph.json"
-        try:
-            with self.neo4j_driver.session() as session:
-                nodes_data = []
-                for record in session.run(
-                    "MATCH (n) RETURN n, labels(n) AS labels, elementId(n) AS eid"
-                ):
-                    node = dict(record["n"])
-                    node["_labels"] = record["labels"]
-                    node["_element_id"] = record["eid"]
-                    nodes_data.append(node)
-
-                rels_data = []
-                for record in session.run(
-                    "MATCH (a)-[r]->(b) RETURN elementId(a) AS src, type(r) AS rel_type, "
-                    "properties(r) AS props, elementId(b) AS dst"
-                ):
-                    rels_data.append(
-                        {
-                            "source": record["src"],
-                            "type": record["rel_type"],
-                            "properties": (
-                                dict(record["props"]) if record["props"] else {}
-                            ),
-                            "target": record["dst"],
-                        }
-                    )
-
-            with open(path, "w") as f:
-                json.dump(
-                    {"nodes": nodes_data, "relationships": rels_data},
-                    f,
-                    indent=2,
-                    default=str,
-                )
-            result.record("neo4j_graph", path, True)
-        except Exception as e:
-            result.record("neo4j_graph", None, False, str(e))
-
-        return path
+        if chunk_num > 1:
+            conv_dir.rename(final_dir)
+            return True
+        if conv_dir.exists():
+            conv_dir.rmdir()
+        return False
 
     def _export_langfuse_prompts(self, result: BackupResult) -> Path:
         """Export all LangFuse prompts (production versions) including admin edits."""
@@ -746,28 +697,21 @@ class CleanupManager:
         self,
         mongo_db: Any,
         redis_conn: Any,
-        qdrant_client: Optional[AsyncQdrantClient],
         include_wav: bool,
         delete_users: bool,
-        neo4j_driver: Any = None,
     ):
         self.mongo_db = mongo_db
         self.redis_conn = redis_conn
-        self.qdrant_client = qdrant_client
         self.include_wav = include_wav
         self.delete_users = delete_users
-        self.neo4j_driver = neo4j_driver
 
     async def run(self, stats: Stats) -> bool:
         """Perform cleanup with progress display."""
         steps = [
             ("MongoDB collections", self._cleanup_mongodb),
         ]
-        if self.qdrant_client:
-            steps.append(("Qdrant memories", self._cleanup_qdrant))
-        if self.neo4j_driver:
-            steps.append(("Neo4j graph", self._cleanup_neo4j))
         steps.append(("Redis queues", self._cleanup_redis))
+        steps.append(("Vault markdown", self._cleanup_vault))
         if self.include_wav:
             steps.append(("Legacy WAV files", self._cleanup_legacy_wav))
 
@@ -804,25 +748,6 @@ class CleanupManager:
         if self.delete_users:
             await User.find_all().delete()
 
-    async def _cleanup_qdrant(self, stats: Stats):
-        collection_name = get_qdrant_collection_name()
-        collections = await self.qdrant_client.get_collections()
-        exists = any(c.name == collection_name for c in collections.collections)
-        if not exists:
-            return
-        await self.qdrant_client.delete_collection(collection_name)
-        await self.qdrant_client.create_collection(
-            collection_name=collection_name,
-            vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
-        )
-
-    def _cleanup_neo4j(self, stats: Stats):
-        try:
-            with self.neo4j_driver.session() as session:
-                session.run("MATCH (n) DETACH DELETE n")
-        except Exception as e:
-            logger.warning(f"Neo4j cleanup failed: {e}")
-
     def _cleanup_redis(self, stats: Stats):
         for qname in ("transcription", "memory", "audio", "default"):
             try:
@@ -841,6 +766,21 @@ class CleanupManager:
             except Exception as e:
                 logger.warning(f"Redis queue {qname} cleanup failed: {e}")
 
+    def _cleanup_vault(self, stats: Stats):
+        """Clear per-user vault contents, preserving Syncthing markers.
+
+        Keeping .stfolder/.stignore keeps the Syncthing pairing intact;
+        the deletions propagate to paired remote vaults (e.g. Obsidian).
+        """
+        for vault in _iter_user_vaults():
+            for entry in vault.iterdir():
+                if entry.name in _SYNCTHING_MARKERS:
+                    continue
+                if entry.is_dir():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+
     def _cleanup_legacy_wav(self, stats: Stats):
         wav_dir = Path("/app/data/audio_chunks")
         if not wav_dir.exists():
@@ -855,7 +795,7 @@ class CleanupManager:
 
 
 async def connect_services():
-    """Initialize all service connections. Returns (mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client)."""
+    """Initialize all service connections. Returns (mongo_db, redis_conn, langfuse_client)."""
     # MongoDB
     mongodb_uri = os.getenv("MONGODB_URI", "mongodb://mongo:27017")
     mongodb_database = os.getenv("MONGODB_DATABASE", "chronicle")
@@ -876,29 +816,6 @@ async def connect_services():
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
     redis_conn = redis.from_url(redis_url)
 
-    # Qdrant
-    qdrant_client = None
-    try:
-        qdrant_host = os.getenv("QDRANT_BASE_URL", "qdrant")
-        qdrant_port = int(os.getenv("QDRANT_PORT", "6333"))
-        qdrant_client = AsyncQdrantClient(host=qdrant_host, port=qdrant_port)
-    except Exception:
-        pass
-
-    # Neo4j
-    neo4j_driver = None
-    neo4j_host = os.getenv("NEO4J_HOST")
-    if neo4j_host:
-        try:
-            neo4j_user = os.getenv("NEO4J_USER", "neo4j")
-            neo4j_password = os.getenv("NEO4J_PASSWORD", "password")
-            neo4j_driver = GraphDatabase.driver(
-                f"bolt://{neo4j_host}:7687", auth=(neo4j_user, neo4j_password)
-            )
-            neo4j_driver.verify_connectivity()
-        except Exception:
-            neo4j_driver = None
-
     # LangFuse
     langfuse_client = None
     langfuse_host = os.getenv("LANGFUSE_HOST")
@@ -912,7 +829,7 @@ async def connect_services():
         except Exception:
             langfuse_client = None
 
-    return mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client
+    return mongo_db, redis_conn, langfuse_client
 
 
 # ---------------------------------------------------------------------------
@@ -963,11 +880,8 @@ def print_dry_run(stats: Stats, args):
         table.add_row("Chat Sessions", str(stats.chat_sessions))
         table.add_row("Chat Messages", str(stats.chat_messages))
         table.add_row("Annotations", str(stats.annotations))
-        table.add_row("Memories (Qdrant)", str(stats.memories))
-        if stats.neo4j_nodes:
-            table.add_row("Neo4j Nodes", str(stats.neo4j_nodes))
-            table.add_row("Neo4j Relationships", str(stats.neo4j_relationships))
         table.add_row("Redis Jobs", str(stats.redis_jobs))
+        table.add_row("Vault Files", str(stats.vault_files))
         if args.include_wav:
             table.add_row("Legacy WAV Files", str(stats.legacy_wav))
         if args.delete_users:
@@ -1017,13 +931,11 @@ def print_confirmation(stats: Stats, args) -> bool:
             f"  {stats.chat_sessions} chat sessions",
             f"  {stats.chat_messages} chat messages",
             f"  {stats.annotations} annotations",
-            f"  {stats.memories} memories",
         ]
-        if stats.neo4j_nodes:
-            items.append(
-                f"  {stats.neo4j_nodes} Neo4j nodes + {stats.neo4j_relationships} relationships"
-            )
         items.append(f"  {stats.redis_jobs} Redis jobs")
+        items.append(
+            f"  {stats.vault_files} vault files (deletions sync to paired Obsidian vaults)"
+        )
         if args.include_wav:
             items.append(f"  {stats.legacy_wav} legacy WAV files")
         if args.delete_users:
@@ -1075,6 +987,11 @@ Examples:
         help="Include audio WAV export in backup (conversations with transcripts only)",
     )
     parser.add_argument(
+        "--skip-existing-audio",
+        action="store_true",
+        help="Skip audio export for conversations already present in prior backups",
+    )
+    parser.add_argument(
         "--include-wav", action="store_true", help="Include legacy WAV file cleanup"
     )
     parser.add_argument(
@@ -1105,15 +1022,11 @@ Examples:
 
     # Connect
     with console.status("[bold cyan]Connecting to services...", spinner="dots"):
-        mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client = (
-            await connect_services()
-        )
+        mongo_db, redis_conn, langfuse_client = await connect_services()
 
     # Gather stats
     with console.status("[bold cyan]Gathering statistics...", spinner="dots"):
-        stats = await gather_stats(
-            mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client
-        )
+        stats = await gather_stats(mongo_db, redis_conn, langfuse_client)
 
     console.print()
     console.print(render_stats_table(stats, "Current Backend State"))
@@ -1135,9 +1048,13 @@ Examples:
     if do_backup:
         console.print()
         backup_mgr = BackupManager(
-            args.backup_dir, args.export_audio, mongo_db, neo4j_driver, langfuse_client
+            args.backup_dir,
+            args.export_audio,
+            mongo_db,
+            langfuse_client,
+            skip_existing_audio=args.skip_existing_audio,
         )
-        result = await backup_mgr.run(qdrant_client, stats)
+        result = await backup_mgr.run(stats)
 
         console.print()
         console.print(result.render_table())
@@ -1183,10 +1100,8 @@ Examples:
     cleanup_mgr = CleanupManager(
         mongo_db,
         redis_conn,
-        qdrant_client,
         args.include_wav,
         args.delete_users,
-        neo4j_driver,
     )
     success = await cleanup_mgr.run(stats)
 
@@ -1201,9 +1116,7 @@ Examples:
     # Verify
     console.print()
     with console.status("[bold cyan]Verifying cleanup...", spinner="dots"):
-        final_stats = await gather_stats(
-            mongo_db, redis_conn, qdrant_client, neo4j_driver, langfuse_client
-        )
+        final_stats = await gather_stats(mongo_db, redis_conn, langfuse_client)
 
     console.print(render_stats_table(final_stats, "After Cleanup"))
 
@@ -1212,10 +1125,6 @@ Examples:
     if do_backup:
         msg += f"\n[green]Backup saved to:[/green] {backup_mgr.backup_path}"
     console.print(Panel(msg, border_style="green"))
-
-    # Cleanup Neo4j driver
-    if neo4j_driver:
-        neo4j_driver.close()
 
 
 if __name__ == "__main__":

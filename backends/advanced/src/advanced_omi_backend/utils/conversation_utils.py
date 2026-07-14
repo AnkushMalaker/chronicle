@@ -7,12 +7,13 @@ Extracted from legacy TranscriptionService to be reusable across V2 architecture
 import asyncio
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.config import get_speech_detection_settings
 from advanced_omi_backend.llm_client import async_generate
+from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.prompt_optimizer import get_user_prompt
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 
@@ -523,8 +524,6 @@ async def mark_conversation_deleted(conversation_id: str, deletion_reason: str) 
         conversation_id: Conversation ID to mark as deleted
         deletion_reason: Reason for deletion (e.g., "no_meaningful_speech", "audio_file_not_ready")
     """
-    from advanced_omi_backend.models.conversation import Conversation
-
     logger.warning(
         f"🗑️ Marking conversation {conversation_id} as deleted - reason: {deletion_reason}"
     )
@@ -535,6 +534,21 @@ async def mark_conversation_deleted(conversation_id: str, deletion_reason: str) 
     if conversation:
         conversation.deleted = True
         conversation.deletion_reason = deletion_reason
-        conversation.deleted_at = datetime.utcnow()
+        conversation.deleted_at = datetime.now(timezone.utc)
+        # These are no-transcript dead-ends (no meaningful speech / audio never
+        # arrived). Settle the status from facts so the conversation doesn't stay
+        # stuck at "active": the finalizer that normally owns the status is skipped
+        # or stranded on this path, and the status reconciler ignores deleted rows.
+        conversation.apply_status(settled=True)
+        # Clear any in-flight placeholder title left by the reprocess/recording entry
+        # points (e.g. "Reprocessing...", "Audio Recording (...)") — these convs never
+        # get a real LLM title since title_summary doesn't run without a transcript.
+        title = conversation.title or ""
+        if "Audio Recording (" in title or title in (
+            "Reprocessing...",
+            "Recording...",
+            "Transcribing...",
+        ):
+            conversation.title = None
         await conversation.save()
         logger.info(f"✅ Marked conversation {conversation_id} as deleted")

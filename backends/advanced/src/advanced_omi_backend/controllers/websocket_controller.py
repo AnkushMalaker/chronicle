@@ -10,28 +10,57 @@ import json
 import logging
 import os
 import time
+import traceback
 import uuid
 from functools import partial
 from typing import Optional
 
-import redis.asyncio as redis
 from fastapi import Query, WebSocket, WebSocketDisconnect
 from friend_lite.decoder import OmiOpusDecoder
 from starlette.websockets import WebSocketState
 
 from advanced_omi_backend.auth import websocket_auth
-from advanced_omi_backend.client_manager import generate_client_id, get_client_manager
+from advanced_omi_backend.client_manager import (
+    generate_client_id,
+    get_client_manager,
+    track_client_user_relationship_async,
+)
+from advanced_omi_backend.config import WS_IDLE_TIMEOUT_SECS
 from advanced_omi_backend.constants import (
     OMI_CHANNELS,
     OMI_SAMPLE_RATE,
     OMI_SAMPLE_WIDTH,
 )
-from advanced_omi_backend.controllers.session_controller import mark_session_complete
-from advanced_omi_backend.services.audio_stream import AudioStreamProducer
+from advanced_omi_backend.controllers.queue_controller import (
+    JOB_RESULT_TTL,
+    start_post_conversation_jobs,
+    start_streaming_jobs,
+    transcription_queue,
+)
+from advanced_omi_backend.model_registry import get_models_registry
+from advanced_omi_backend.models.conversation import create_conversation
+from advanced_omi_backend.plugins.events import BUTTON_STATE_TO_EVENT, ButtonState
+from advanced_omi_backend.redis_factory import create_async_redis
 from advanced_omi_backend.services.audio_stream.producer import (
     get_audio_stream_producer,
 )
+from advanced_omi_backend.services.audio_stream.session_store import (
+    SessionStatus,
+    SessionStore,
+)
+from advanced_omi_backend.services.device_audio import (
+    is_opus_streaming_client,
+    stop_play_audio,
+    stream_play_audio_as_opus,
+)
+from advanced_omi_backend.services.observability import record_event_sync
+from advanced_omi_backend.services.plugin_service import get_plugin_router
 from advanced_omi_backend.services.sse_publisher import publish_sse_event
+from advanced_omi_backend.services.transcription import is_transcription_available
+from advanced_omi_backend.services.wakeword.followup import handle_dial_followup
+from advanced_omi_backend.users import register_client_to_user, touch_client_last_seen
+from advanced_omi_backend.utils.audio_chunk_utils import convert_audio_to_chunks
+from advanced_omi_backend.workers.transcription_jobs import transcribe_full_audio_job
 
 # Thread pool executors for audio decoding
 _DEC_IO_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
@@ -45,6 +74,19 @@ application_logger = logging.getLogger("audio_processing")
 
 # Track pending WebSocket connections to prevent race conditions
 pending_connections: set[str] = set()
+
+# Per-client_id locks serializing connection setup. A reconnecting device (same
+# client_id) must evict its stale connection and create a fresh ClientState as one
+# atomic step, so two concurrent connections can't interleave and orphan state.
+_client_setup_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_client_setup_lock(client_id: str) -> asyncio.Lock:
+    lock = _client_setup_locks.get(client_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _client_setup_locks[client_id] = lock
+    return lock
 
 
 async def subscribe_to_interim_results(websocket: WebSocket, session_id: str) -> None:
@@ -63,11 +105,9 @@ async def subscribe_to_interim_results(websocket: WebSocket, session_id: str) ->
         This task runs continuously until the WebSocket disconnects or the task is cancelled.
         Results are published to Redis Pub/Sub channel: transcription:interim:{session_id}
     """
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-
     try:
         # Create Redis client for Pub/Sub
-        redis_client = await redis.from_url(redis_url, decode_responses=True)
+        redis_client = create_async_redis(decode_responses=True)
 
         # Create Pub/Sub instance
         pubsub = redis_client.pubsub()
@@ -89,6 +129,12 @@ async def subscribe_to_interim_results(websocket: WebSocket, session_id: str) ->
                     # Parse result data
                     try:
                         result_data = json.loads(message["data"])
+
+                        # Stop if the socket closed: a result can race the close, and
+                        # send_json after close raises the ASGI "websocket.send after
+                        # websocket.close" error. Guard instead of catching post-hoc.
+                        if websocket.client_state != WebSocketState.CONNECTED:
+                            break
 
                         # Forward to client WebSocket
                         await websocket.send_json(
@@ -145,6 +191,145 @@ async def subscribe_to_interim_results(websocket: WebSocket, session_id: str) ->
             )
 
 
+async def subscribe_to_device_downlink(websocket: WebSocket, client_id: str) -> None:
+    """Forward backend→device control messages from Redis Pub/Sub to the device WebSocket.
+
+    Any backend component (wake-word service, plugins) can push a message to a
+    specific device by publishing to ``device:downlink:{client_id}``. Each message
+    is a Wyoming-style control frame (e.g. ``{"type": "play-audio", "data": {...}}``)
+    which the HAVPE relay's ``handle_backend_messages`` dispatches to the device.
+
+    Runs as a background task for the lifetime of the WebSocket connection.
+    """
+    channel = f"device:downlink:{client_id}"
+    redis_client = None
+    pubsub = None
+    opus_stream = is_opus_streaming_client(client_id)
+
+    try:
+        redis_client = create_async_redis(decode_responses=True)
+        pubsub = redis_client.pubsub()
+        await pubsub.subscribe(channel)
+        logger.info(
+            f"🔊 Subscribed to device downlink channel: {channel}"
+            f"{' (opus streaming)' if opus_stream else ''}"
+        )
+
+        while True:
+            try:
+                message = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=1.0
+                )
+                if not message or message["type"] != "message":
+                    continue
+
+                try:
+                    payload = json.loads(message["data"])
+                except json.JSONDecodeError as e:
+                    logger.error(f"Invalid device downlink message on {channel}: {e}")
+                    continue
+
+                msg_type = payload.get("type")
+                if not msg_type:
+                    logger.warning(f"Device downlink message missing 'type': {payload}")
+                    continue
+
+                try:
+                    # Skip if the device socket already closed (a downlink can race the
+                    # disconnect); sending after close raises the ASGI websocket.send error.
+                    if websocket.client_state != WebSocketState.CONNECTED:
+                        break
+                    if msg_type == "stop-audio":
+                        # Barge-in: stop whatever TTS is playing on the device. For
+                        # Opus clients this cancels the in-flight stream + flushes the
+                        # device; for others there's nothing streaming to cancel, so
+                        # just forward the control frame best-effort.
+                        if opus_stream:
+                            await stop_play_audio(websocket, client_id)
+                        else:
+                            await websocket.send_json(payload)
+                    elif opus_stream and msg_type == "play-audio":
+                        # RAM-limited devices can't take a big base64 WAV frame;
+                        # transcode + stream it as small Opus packets instead.
+                        streamed = await stream_play_audio_as_opus(
+                            websocket, payload.get("data") or {}, client_id
+                        )
+                        if not streamed:
+                            await websocket.send_json(payload)  # fallback
+                    else:
+                        await websocket.send_json(payload)
+                    data = payload.get("data")
+                    # Summarize so large fields (e.g. base64 TTS audio) don't flood logs.
+                    summary = (
+                        {
+                            k: (
+                                f"<{len(v)} chars>"
+                                if isinstance(v, str) and len(v) > 80
+                                else v
+                            )
+                            for k, v in data.items()
+                        }
+                        if isinstance(data, dict)
+                        else data
+                    )
+                    logger.info(
+                        f"📤 Forwarded '{msg_type}' to device {client_id}: {summary}"
+                    )
+                except Exception as send_error:
+                    logger.warning(
+                        f"Failed to send downlink to device {client_id}: {send_error}"
+                    )
+                    break
+
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                logger.info(f"Device downlink subscriber cancelled for {client_id}")
+                break
+            except Exception as e:
+                logger.error(
+                    f"Error in device downlink subscriber for {client_id}: {e}",
+                    exc_info=True,
+                )
+                break
+
+    except Exception as e:
+        logger.error(
+            f"Failed to initialize device downlink subscriber for {client_id}: {e}",
+            exc_info=True,
+        )
+    finally:
+        if pubsub is not None:
+            try:
+                await pubsub.unsubscribe(channel)
+                await pubsub.close()
+            except Exception as cleanup_error:
+                logger.error(f"Error cleaning up downlink subscriber: {cleanup_error}")
+        if redis_client is not None:
+            try:
+                await redis_client.aclose()
+            except Exception:
+                pass
+
+
+async def receive_with_idle_timeout(ws: WebSocket) -> dict:
+    """`ws.receive()` with a liveness deadline.
+
+    A live device streams audio every ~0.25s, so if nothing arrives for
+    WS_IDLE_TIMEOUT_SECS the peer is dead (or a relay is holding the socket open
+    after its device vanished). We raise WebSocketDisconnect so the handler's
+    `finally` runs the same full cleanup as a clean close, reaping the zombie.
+    """
+    try:
+        return dict(await asyncio.wait_for(ws.receive(), timeout=WS_IDLE_TIMEOUT_SECS))
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"⏰ WebSocket idle for {WS_IDLE_TIMEOUT_SECS:.0f}s with no data — "
+            f"treating peer as disconnected"
+        )
+        raise WebSocketDisconnect(code=1001, reason="idle timeout")
+
+
 async def parse_wyoming_protocol(ws: WebSocket) -> tuple[dict, Optional[bytes]]:
     """Parse Wyoming protocol: JSON header line followed by optional binary payload.
 
@@ -153,7 +338,7 @@ async def parse_wyoming_protocol(ws: WebSocket) -> tuple[dict, Optional[bytes]]:
     """
     # Read data from WebSocket
     logger.debug(f"parse_wyoming_protocol: About to call ws.receive()")
-    message = await ws.receive()
+    message = await receive_with_idle_timeout(ws)
     logger.debug(
         f"parse_wyoming_protocol: Received message with keys: {message.keys() if message else 'None'}"
     )
@@ -161,7 +346,7 @@ async def parse_wyoming_protocol(ws: WebSocket) -> tuple[dict, Optional[bytes]]:
     # Handle WebSocket close frame
     if "type" in message and message["type"] == "websocket.disconnect":
         # This is a normal WebSocket close event
-        code = message.get("code", 1000)
+        code = message.get("code")
         reason = message.get("reason", "")
         logger.info(
             f"📴 WebSocket disconnect received in parse_wyoming_protocol. Code: {code}, Reason: {reason}"
@@ -183,7 +368,7 @@ async def parse_wyoming_protocol(ws: WebSocket) -> tuple[dict, Optional[bytes]]:
         payload = None
         payload_length = header.get("payload_length")
         if payload_length is not None and payload_length > 0:
-            payload_msg = await ws.receive()
+            payload_msg = await receive_with_idle_timeout(ws)
             if "bytes" in payload_msg:
                 payload = payload_msg["bytes"]
             else:
@@ -202,30 +387,33 @@ async def parse_wyoming_protocol(ws: WebSocket) -> tuple[dict, Optional[bytes]]:
 
 
 async def create_client_state(client_id: str, user, device_name: Optional[str] = None):
-    """Create and register a new client state."""
+    """Create and register a new client state.
+
+    If a connection with the same client_id already exists (a reconnecting device
+    whose previous connection is still lingering — e.g. a relay-held zombie), the
+    stale connection is evicted first so the newest connection always wins. The
+    per-client lock makes evict+create atomic against concurrent reconnects.
+    """
     # Get client manager
     client_manager = get_client_manager()
 
-    # Directory where WAV chunks are written
-    from pathlib import Path
+    async with _get_client_setup_lock(client_id):
+        # Newest-wins: tear down any stale connection holding this client_id. This
+        # finalizes its sessions and removes it so create_client below won't raise.
+        if client_manager.has_client(client_id):
+            logger.warning(
+                f"♻️ Client {client_id} reconnecting while a previous connection is "
+                f"still registered — evicting the stale connection (newest wins)"
+            )
+            await cleanup_client_state(client_id)
 
-    CHUNK_DIR = Path(
-        "./audio_chunks"
-    )  # This will be mounted to ./data/audio_chunks by Docker
-
-    # Use ClientManager for atomic client creation and registration
-    client_state = client_manager.create_client(
-        client_id, CHUNK_DIR, user.user_id, user.email
-    )
+        # Use ClientManager for atomic client creation and registration
+        client_state = client_manager.create_client(client_id, user.user_id, user.email)
 
     # Also track in persistent mapping (for database queries + cross-container Redis)
-    from advanced_omi_backend.client_manager import track_client_user_relationship_async
-
     await track_client_user_relationship_async(client_id, user.user_id)
 
     # Register client in user model (persistent)
-    from advanced_omi_backend.users import register_client_to_user
-
     await register_client_to_user(user, client_id, device_name)
 
     return client_state
@@ -245,8 +433,6 @@ async def cleanup_client_state(client_id: str):
     # Note: Previously we cancelled the speech detection job here, but this prevented
     # conversations from being created when WebSocket disconnects mid-recording.
     # The speech detection job now monitors session status and completes naturally.
-    import redis.asyncio as redis
-
     logger.info(
         f"🔄 Letting speech detection job complete naturally for client {client_id} (if running)"
     )
@@ -254,73 +440,56 @@ async def cleanup_client_state(client_id: str):
     # Mark all active sessions for this client as complete AND delete Redis streams
     try:
         # Get async Redis client
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        async_redis = redis.from_url(redis_url, decode_responses=False)
+        async_redis = create_async_redis(decode_responses=False)
 
         # Get audio stream producer for finalization
-        from advanced_omi_backend.services.audio_stream.producer import (
-            get_audio_stream_producer,
-        )
-
         audio_stream_producer = get_audio_stream_producer()
 
-        # Find all session keys for this client and mark them complete
-        pattern = f"audio:session:*"
-        cursor = 0
+        # Find all sessions for this client and mark them complete
+        store = SessionStore(async_redis)
         sessions_closed = 0
+        session_ids: list[str] = []
 
-        while True:
-            cursor, keys = await async_redis.scan(cursor, match=pattern, count=100)
+        async for view in store.iter_views():
+            is_match = view.client_id == client_id
+            if not is_match and view.session_id.startswith(client_id):
+                # Fallback: session hash may have lost client_id (e.g., partial resurrection).
+                # Session IDs are formatted as "{client_id}-{uuid}", so check prefix.
+                is_match = True
+                logger.warning(
+                    f"⚠️ Session {view.session_id[:12]} missing client_id field — "
+                    f"matched via session_id prefix fallback"
+                )
+            if not is_match:
+                continue
 
-            for key in keys:
-                # Check if this session belongs to this client
-                client_id_bytes = await async_redis.hget(key, "client_id")
-                is_match = client_id_bytes and client_id_bytes.decode() == client_id
-                if not is_match:
-                    # Fallback: session hash may have lost client_id (e.g., partial resurrection).
-                    # Session IDs are formatted as "{client_id}-{uuid}", so check prefix.
-                    session_id_from_key = key.decode().replace("audio:session:", "")
-                    if session_id_from_key.startswith(client_id):
-                        is_match = True
-                        logger.warning(
-                            f"⚠️ Session {session_id_from_key[:12]} missing client_id field — "
-                            f"matched via session_id prefix fallback"
-                        )
-                if is_match:
-                    session_id = key.decode().replace("audio:session:", "")
+            session_id = view.session_id
+            session_ids.append(session_id)
 
-                    # Check session status
-                    status_bytes = await async_redis.hget(key, "status")
-                    status = status_bytes.decode() if status_bytes else None
+            # If session is still active, finalize it first (sets status + completion_reason atomically)
+            if view.status in (SessionStatus.ACTIVE, None):
+                logger.info(
+                    f"📊 Finalizing active session {session_id[:12]} due to WebSocket disconnect"
+                )
+                await audio_stream_producer.finalize_session(
+                    session_id, completion_reason="websocket_disconnect"
+                )
 
-                    # If session is still active, finalize it first (sets status + completion_reason atomically)
-                    if status in ["active", None]:
-                        logger.info(
-                            f"📊 Finalizing active session {session_id[:12]} due to WebSocket disconnect"
-                        )
-                        await audio_stream_producer.finalize_session(
-                            session_id, completion_reason="websocket_disconnect"
-                        )
+            # Mark session as complete (WebSocket disconnected)
+            await store.mark_complete(session_id, "websocket_disconnect")
+            sessions_closed += 1
 
-                    # Mark session as complete (WebSocket disconnected)
-                    await mark_session_complete(
-                        async_redis, session_id, "websocket_disconnect"
-                    )
-                    sessions_closed += 1
-
-                    # Notify frontend that session ended
-                    publish_sse_event(
-                        user_id,
-                        "session.ended",
-                        {
-                            "session_id": session_id,
-                            "client_id": client_id,
-                            "reason": "websocket_disconnect",
-                        },
-                    )
-
-            if cursor == 0:
-                break
+            # Notify frontend that session ended
+            if view.user_id:
+                publish_sse_event(
+                    view.user_id,
+                    "session.ended",
+                    {
+                        "session_id": session_id,
+                        "client_id": client_id,
+                        "reason": "websocket_disconnect",
+                    },
+                )
 
         if sessions_closed > 0:
             logger.info(
@@ -360,6 +529,36 @@ async def cleanup_client_state(client_id: str):
         else:
             logger.debug(f"No Redis stream found for client {client_id}")
 
+        # Hygiene: bound per-session keys that otherwise leak when a session ends
+        # without a conversation ever opening (no speech) or via graceless disconnect.
+        # We set TTLs rather than hard-delete so the speech-detection job keeps its
+        # grace window to read final results and open a conversation from buffered audio.
+        for session_id in session_ids:
+            for key, ttl in (
+                (
+                    f"transcription:results:{session_id}",
+                    300,
+                ),  # backstop for no-speech sessions
+                (
+                    f"conversation:current:{session_id}",
+                    3600,
+                ),  # backstop for always_persist
+            ):
+                try:
+                    if await async_redis.exists(key):
+                        await async_redis.expire(key, ttl)
+                except Exception as ttl_error:
+                    logger.debug(f"Could not set TTL on {key}: {ttl_error}")
+
+        # The speech_detection_job pointer is a stale 24h key once the session ends;
+        # shorten it so it can't mislead later lookups (the job itself exits naturally).
+        try:
+            await async_redis.expire(f"speech_detection_job:{client_id}", 3600)
+        except Exception as ttl_error:
+            logger.debug(
+                f"Could not shorten speech_detection_job TTL for {client_id}: {ttl_error}"
+            )
+
         await async_redis.close()
 
     except Exception as session_error:
@@ -375,6 +574,13 @@ async def cleanup_client_state(client_id: str):
         logger.info(f"Client {client_id} cleaned up successfully")
     else:
         logger.warning(f"Client {client_id} was not found for cleanup")
+
+    # Stamp the device's last_seen in the registry so the Network page shows an
+    # accurate "last seen" once it's offline (the live ClientState is now gone).
+    try:
+        await touch_client_last_seen(client_id)
+    except Exception as e:
+        logger.debug(f"Could not stamp last_seen for {client_id}: {e}")
 
 
 # Shared helper functions for WebSocket handlers
@@ -402,28 +608,44 @@ async def _setup_websocket_connection(
     await ws.accept()
 
     # Authenticate user after accepting connection
-    user = await websocket_auth(ws, token)
+    user, auth_failure_reason = await websocket_auth(ws, token)
     if not user:
+        # Build specific error message based on failure reason
+        if auth_failure_reason == "token_expired":
+            error_type = "token_expired"
+            message = "Your session has expired. Please log in again."
+            close_reason = "Token expired"
+        elif auth_failure_reason == "user_not_found":
+            error_type = "user_not_found"
+            message = "User account not found or inactive. Please log in again."
+            close_reason = "User not found"
+        else:
+            error_type = "authentication_failed"
+            message = "Authentication failed. Please log in again and ensure your token is valid."
+            close_reason = "Authentication failed"
+
         # Send error message to client before closing
         try:
             error_msg = (
                 json.dumps(
                     {
                         "type": "error",
-                        "error": "authentication_failed",
-                        "message": "Authentication failed. Please log in again and ensure your token is valid.",
+                        "error": error_type,
+                        "message": message,
                         "code": 1008,
                     }
                 )
                 + "\n"
             )
             await ws.send_text(error_msg)
-            application_logger.info("Sent authentication error message to client")
+            application_logger.info(
+                f"Sent auth error to client: {error_type} ({close_reason})"
+            )
         except Exception as send_error:
             application_logger.warning(f"Failed to send error message: {send_error}")
 
         # Close connection with appropriate code
-        await ws.close(code=1008, reason="Authentication failed")
+        await ws.close(code=1008, reason=close_reason)
         return None, None, None
 
     # Generate proper client_id using user and device_name
@@ -438,7 +660,15 @@ async def _setup_websocket_connection(
     # Send ready message to confirm connection is established
     try:
         ready_msg = (
-            json.dumps({"type": "ready", "message": "WebSocket connection established"})
+            json.dumps(
+                {
+                    "type": "ready",
+                    "message": "WebSocket connection established",
+                    # The resolved client_id lets the client scope per-client signals
+                    # (wake-word SSE feedback) to its own device — see webui useSSE.
+                    "client_id": client_id,
+                }
+            )
             + "\n"
         )
         await ws.send_text(ready_msg)
@@ -480,7 +710,7 @@ async def _initialize_streaming_session(
         f"🔴 BACKEND: _initialize_streaming_session called for {client_id}"
     )
 
-    if hasattr(client_state, "stream_session_id"):
+    if client_state.stream_session_id is not None:
         application_logger.debug(f"Session already initialized for {client_id}")
         return None
 
@@ -492,8 +722,6 @@ async def _initialize_streaming_session(
     )
 
     # Determine transcription provider from config.yml
-    from advanced_omi_backend.model_registry import get_models_registry
-
     registry = get_models_registry()
     if not registry:
         raise ValueError(
@@ -527,19 +755,11 @@ async def _initialize_streaming_session(
     )
 
     # Store audio format in Redis session (not in ClientState)
-    import json
-
-    from advanced_omi_backend.services.audio_stream.producer import (
-        get_audio_stream_producer,
+    await audio_stream_producer.store.set_audio_format(
+        client_state.stream_session_id, audio_format
     )
 
-    session_key = f"audio:session:{client_state.stream_session_id}"
-    redis_client = audio_stream_producer.redis_client
-    await redis_client.hset(session_key, "audio_format", json.dumps(audio_format))
-
     # Enqueue streaming jobs (speech detection + audio persistence)
-    from advanced_omi_backend.controllers.queue_controller import start_streaming_jobs
-
     job_ids = start_streaming_jobs(
         session_id=client_state.stream_session_id, user_id=user_id, client_id=client_id
     )
@@ -590,7 +810,7 @@ async def _finalize_streaming_session(
         user_email: User email
         client_id: Client ID
     """
-    if not hasattr(client_state, "stream_session_id"):
+    if client_state.stream_session_id is None:
         application_logger.debug(f"No active session to finalize for {client_id}")
         return
 
@@ -598,7 +818,7 @@ async def _finalize_streaming_session(
 
     try:
         # Flush any remaining buffered audio
-        audio_format = getattr(client_state, "stream_audio_format", {})
+        audio_format = client_state.stream_audio_format
         await audio_stream_producer.flush_session_buffer(
             session_id=session_id,
             sample_rate=audio_format.get("rate", 16000),
@@ -616,9 +836,8 @@ async def _finalize_streaming_session(
 
         # Store markers in Redis so open_conversation_job can persist them
         if client_state.markers:
-            session_key = f"audio:session:{session_id}"
-            await audio_stream_producer.redis_client.hset(
-                session_key, "markers", json.dumps(client_state.markers)
+            await audio_stream_producer.store.set_markers(
+                session_id, client_state.markers
             )
             client_state.markers.clear()
 
@@ -643,8 +862,7 @@ async def _finalize_streaming_session(
 
         # Clear session state from ClientState (only stream_session_id is stored there now)
         # All other session metadata lives in Redis (single source of truth)
-        if hasattr(client_state, "stream_session_id"):
-            delattr(client_state, "stream_session_id")
+        client_state.stream_session_id = None
 
     except Exception as finalize_error:
         application_logger.error(
@@ -675,7 +893,7 @@ async def _publish_audio_to_stream(
         channels: Number of channels
         sample_width: Bytes per sample
     """
-    if not hasattr(client_state, "stream_session_id"):
+    if client_state.stream_session_id is None:
         application_logger.warning(
             f"⚠️ Received audio chunk before session initialized for {client_id}"
         )
@@ -778,7 +996,7 @@ async def _handle_streaming_mode_audio(
     """
     # Initialize session if needed
     subscriber_task = None
-    if not hasattr(client_state, "stream_session_id"):
+    if client_state.stream_session_id is None:
         subscriber_task = await _initialize_streaming_session(
             client_state,
             audio_stream_producer,
@@ -816,12 +1034,10 @@ async def _handle_batch_mode_audio(
         audio_format: Audio format dict
         client_id: Client ID
     """
-    # Initialize batch accumulator if needed
-    if not hasattr(client_state, "batch_audio_chunks"):
-        client_state.batch_audio_chunks = []
+    # Capture the audio format on the first chunk of the connection's first batch
+    if not client_state.batch_started:
+        client_state.batch_started = True
         client_state.batch_audio_format = audio_format
-        client_state.batch_audio_bytes = 0  # Track total bytes
-        client_state.batch_chunks_processed = 0  # Track how many batches processed
         application_logger.info(f"📦 Started batch audio accumulation for {client_id}")
 
     # Accumulate audio
@@ -894,7 +1110,7 @@ async def _handle_audio_chunk(
     Returns:
         Interim results subscriber task if websocket provided and streaming mode, None otherwise
     """
-    recording_mode = getattr(client_state, "recording_mode", "batch")
+    recording_mode = client_state.recording_mode
 
     if recording_mode == "streaming":
         return await _handle_streaming_mode_audio(
@@ -932,8 +1148,6 @@ async def _handle_audio_session_start(
     Returns:
         (audio_streaming_flag, recording_mode)
     """
-    from advanced_omi_backend.services.transcription import is_transcription_available
-
     recording_mode = audio_format.get("mode", "batch")
 
     application_logger.info(
@@ -1023,7 +1237,7 @@ async def _handle_audio_session_stop(
     Returns:
         False to switch back to control mode
     """
-    recording_mode = getattr(client_state, "recording_mode", "batch")
+    recording_mode = client_state.recording_mode
     application_logger.info(
         f"🛑 Audio session stopped for {client_id} (mode: {recording_mode})"
     )
@@ -1057,15 +1271,14 @@ async def _handle_button_event(
         user_id: User ID
         client_id: Client ID
     """
-    from advanced_omi_backend.plugins.events import BUTTON_STATE_TO_EVENT, ButtonState
-    from advanced_omi_backend.services.plugin_service import get_plugin_router
-
     timestamp = time.time()
-    audio_uuid = client_state.current_audio_uuid
+    # The live conversation id is assigned later in the RQ pipeline and is not
+    # tracked on ClientState; markers carry the session id instead.
+    session_id = client_state.stream_session_id
 
     application_logger.info(
         f"🔘 Button event from {client_id}: {button_state} "
-        f"(audio_uuid={audio_uuid})"
+        f"(session_id={session_id})"
     )
 
     # Store marker on client state for later persistence to conversation
@@ -1073,7 +1286,8 @@ async def _handle_button_event(
         "type": "button_event",
         "state": button_state,
         "timestamp": timestamp,
-        "audio_uuid": audio_uuid,
+        "audio_uuid": None,  # assigned later in the pipeline, not on ClientState
+        "session_id": session_id,
         "client_id": client_id,
     }
     client_state.add_marker(marker)
@@ -1099,11 +1313,48 @@ async def _handle_button_event(
             data={
                 "state": button_state_enum.value,
                 "timestamp": timestamp,
-                "audio_uuid": audio_uuid,
-                "session_id": getattr(client_state, "stream_session_id", None),
+                "audio_uuid": None,  # assigned later in the pipeline, not on ClientState
+                "session_id": session_id,
                 "client_id": client_id,
             },
         )
+
+
+async def _handle_dial_event(
+    client_state,
+    direction: str,
+    user_id: str,
+    client_id: str,
+) -> None:
+    """Handle a rotary-dial event (CW/CCW) from the device.
+
+    During an open wake follow-up window, a detent is a *physical* follow-up that
+    nudges the just-controlled lights (warmer/cooler or brighter/dimmer). Outside a
+    window it's a no-op here — the device may still use the dial locally (e.g. for
+    volume). Best-effort: never breaks the audio loop.
+    """
+    session_id = client_state.stream_session_id
+    router = get_plugin_router()
+    if not router or not session_id:
+        return
+
+    redis_client = create_async_redis(decode_responses=True)
+    try:
+        result = await handle_dial_followup(
+            redis_client,
+            router,
+            user_id=user_id,
+            session_id=session_id,
+            client_id=client_id,
+            direction=direction,
+        )
+        application_logger.info(
+            f"🎛️ Dial event from {client_id}: {direction} (session={session_id}) -> {result}"
+        )
+    except Exception as e:  # noqa: BLE001 - dial feedback must never break the loop
+        application_logger.warning(f"Dial event handling failed for {client_id}: {e}")
+    finally:
+        await redis_client.aclose()
 
 
 async def _create_batch_conversation_and_enqueue(
@@ -1131,18 +1382,8 @@ async def _create_batch_conversation_and_enqueue(
     Returns:
         conversation_id on success, None on failure.
     """
-    from advanced_omi_backend.controllers.queue_controller import (
-        JOB_RESULT_TTL,
-        transcription_queue,
-    )
-    from advanced_omi_backend.models.conversation import create_conversation
-    from advanced_omi_backend.utils.audio_chunk_utils import convert_audio_to_chunks
-    from advanced_omi_backend.workers.transcription_jobs import (
-        transcribe_full_audio_job,
-    )
-
     complete_audio = b"".join(client_state.batch_audio_chunks)
-    audio_format = getattr(client_state, "batch_audio_format", {})
+    audio_format = client_state.batch_audio_format
     sample_rate = audio_format.get("rate", 16000)
     sample_width = audio_format.get("width", 2)
     channels = audio_format.get("channels", 1)
@@ -1202,10 +1443,6 @@ async def _create_batch_conversation_and_enqueue(
 
     # Optionally chain post-conversation jobs
     if enqueue_post_jobs:
-        from advanced_omi_backend.controllers.queue_controller import (
-            start_post_conversation_jobs,
-        )
-
         job_ids = start_post_conversation_jobs(
             conversation_id=conversation_id,
             user_id=None,
@@ -1226,10 +1463,7 @@ async def _process_rolling_batch(
     client_state, user_id: str, user_email: str, client_id: str, batch_number: int
 ) -> None:
     """Process accumulated batch audio as a rolling segment."""
-    if (
-        not hasattr(client_state, "batch_audio_chunks")
-        or not client_state.batch_audio_chunks
-    ):
+    if not client_state.batch_audio_chunks:
         application_logger.warning(f"⚠️ No audio chunks to process for rolling batch")
         return
 
@@ -1252,10 +1486,7 @@ async def _process_batch_audio_complete(
     client_state, user_id: str, user_email: str, client_id: str
 ) -> None:
     """Process completed batch audio: create conversation, enqueue full job chain."""
-    if (
-        not hasattr(client_state, "batch_audio_chunks")
-        or not client_state.batch_audio_chunks
-    ):
+    if not client_state.batch_audio_chunks:
         application_logger.warning(
             f"⚠️ Batch mode: No audio chunks accumulated for {client_id}"
         )
@@ -1339,6 +1570,7 @@ async def _websocket_session(ws, token, device_name, connection_type):
 
     client_id = None
     interim_holder = [None]  # mutable so inner loop can update
+    downlink_task = None
 
     try:
         client_id, client_state, user = await _setup_websocket_connection(
@@ -1348,12 +1580,12 @@ async def _websocket_session(ws, token, device_name, connection_type):
             yield None
             return
 
-        # Store user context on client state up front (shared by all handlers)
-        client_state.user_id = user.user_id
-        client_state.user_email = user.email
-        client_state.client_id = client_id
-
+        # user_id / user_email / client_id are already set on client_state by
+        # create_client_state() during connection setup.
         audio_stream_producer = get_audio_stream_producer()
+
+        # Forward backend→device control messages (tones, TTS) for this device.
+        downlink_task = asyncio.create_task(subscribe_to_device_downlink(ws, client_id))
 
         yield (client_id, client_state, user, audio_stream_producer, interim_holder)
 
@@ -1366,7 +1598,29 @@ async def _websocket_session(ws, token, device_name, connection_type):
             f"❌ {connection_type} WebSocket error for client {client_id}: {e}",
             exc_info=True,
         )
+        # Surface error-disconnects as a first-class client event (the catch-all log
+        # handler also captures the line above, but without client_id / category).
+        record_event_sync(
+            severity="error",
+            category="client",
+            source=client_id or "unknown",
+            title=f"{connection_type} client disconnected on error",
+            detail=str(e),
+            traceback=traceback.format_exc(),
+            client_id=client_id,
+            metadata={"connection_type": connection_type},
+        )
     finally:
+        if downlink_task and not downlink_task.done():
+            downlink_task.cancel()
+            try:
+                await downlink_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as task_error:
+                application_logger.error(
+                    f"Error cancelling downlink task for {client_id}: {task_error}"
+                )
         await _cleanup_websocket_connection(
             client_id, pending_client_id, interim_holder[0]
         )
@@ -1393,6 +1647,7 @@ async def handle_omi_websocket(
         while True:
             # Parse Wyoming protocol
             header, payload = await parse_wyoming_protocol(ws)
+            client_state.touch()  # liveness: inbound activity keeps this client fresh
 
             if header["type"] == "audio-start":
                 application_logger.info(
@@ -1458,11 +1713,30 @@ async def handle_omi_websocket(
                 packet_count = 0
                 total_bytes = 0
 
+            elif header["type"] == "ping":
+                # App-level heartbeat. The mobile client (useAudioStreamer) pings every
+                # 25s and closes the socket as a half-open "zombie" if it gets no pong
+                # within 2 heartbeats (~50s). The OMI/opus path previously had no pong
+                # reply (only the PCM handler did), so opus clients dropped + reconnected
+                # every ~50s — churning the streaming-transcription provider connection
+                # and stranding real speech as "transcription service did not respond".
+                application_logger.debug(
+                    f"🏓 Received ping from OMI client {client_id}"
+                )
+                await ws.send_json({"type": "pong"})
+
             elif header["type"] == "button-event":
                 button_data = header.get("data", {})
                 button_state = button_data.get("state", "unknown")
                 await _handle_button_event(
                     client_state, button_state, user.user_id, client_id
+                )
+
+            elif header["type"] == "dial-event":
+                dial_data = header.get("data", {})
+                direction = dial_data.get("direction", "")
+                await _handle_dial_event(
+                    client_state, direction, user.user_id, client_id
                 )
 
             else:
@@ -1495,6 +1769,7 @@ async def handle_pcm_websocket(
                         f"📨 About to receive control message for {client_id}"
                     )
                     header, payload = await parse_wyoming_protocol(ws)
+                    client_state.touch()  # liveness: inbound activity keeps this client fresh
                     application_logger.debug(
                         f"✅ Received message type: {header.get('type')} for {client_id}"
                     )
@@ -1536,6 +1811,8 @@ async def handle_pcm_websocket(
 
                     elif header["type"] == "ping":
                         application_logger.debug(f"🏓 Received ping from {client_id}")
+                        # Reply so the client can detect a half-open (zombie) socket.
+                        await ws.send_json({"type": "pong"})
                         continue
 
                     elif header["type"] == "button-event":
@@ -1543,6 +1820,14 @@ async def handle_pcm_websocket(
                         button_state = button_data.get("state", "unknown")
                         await _handle_button_event(
                             client_state, button_state, user.user_id, client_id
+                        )
+                        continue
+
+                    elif header["type"] == "dial-event":
+                        dial_data = header.get("data", {})
+                        direction = dial_data.get("direction", "")
+                        await _handle_dial_event(
+                            client_state, direction, user.user_id, client_id
                         )
                         continue
 
@@ -1559,13 +1844,14 @@ async def handle_pcm_websocket(
                     )
 
                     try:
-                        message = await ws.receive()
+                        message = await receive_with_idle_timeout(ws)
+                        client_state.touch()  # liveness: inbound activity keeps this client fresh
 
                         if (
                             "type" in message
                             and message["type"] == "websocket.disconnect"
                         ):
-                            code = message.get("code", 1000)
+                            code = message.get("code")
                             reason = message.get("reason", "")
                             application_logger.info(
                                 f"🔌 WebSocket disconnect during audio streaming for {client_id}. Code: {code}, Reason: {reason}"
@@ -1590,6 +1876,8 @@ async def handle_pcm_websocket(
                                     application_logger.debug(
                                         f"🏓 Received ping during streaming from {client_id}"
                                     )
+                                    # Reply so the client can detect a half-open (zombie) socket.
+                                    await ws.send_json({"type": "pong"})
                                     continue
                                 elif control_header.get("type") == "audio-start":
                                     application_logger.info(
@@ -1601,7 +1889,9 @@ async def handle_pcm_websocket(
                                         "payload_length"
                                     )
                                     if payload_length and payload_length > 0:
-                                        payload_msg = await ws.receive()
+                                        payload_msg = await receive_with_idle_timeout(
+                                            ws
+                                        )
                                         if "bytes" in payload_msg:
                                             audio_data = payload_msg["bytes"]
                                             packet_count += 1
@@ -1641,6 +1931,16 @@ async def handle_pcm_websocket(
                                     await _handle_button_event(
                                         client_state,
                                         button_state,
+                                        user.user_id,
+                                        client_id,
+                                    )
+                                    continue
+                                elif control_header.get("type") == "dial-event":
+                                    dial_data = control_header.get("data", {})
+                                    direction = dial_data.get("direction", "")
+                                    await _handle_dial_event(
+                                        client_state,
+                                        direction,
                                         user.user_id,
                                         client_id,
                                     )
@@ -1686,11 +1986,28 @@ async def handle_pcm_websocket(
                             )
                             continue
 
+                    except WebSocketDisconnect as disconnect:
+                        # Expected: clean close, or an idle/zombie socket reaped by
+                        # receive_with_idle_timeout. Not an error — exit so `finally`
+                        # runs the normal cleanup. (WebSocketDisconnect subclasses
+                        # Exception, so it must be caught before the generic handler.)
+                        application_logger.info(
+                            f"🔌 WebSocket disconnect during audio streaming for "
+                            f"{client_id}. Code: {disconnect.code}, Reason: {disconnect.reason}"
+                        )
+                        break
                     except Exception as streaming_error:
                         application_logger.error(
-                            f"Error in audio streaming mode: {streaming_error}"
+                            f"Error in audio streaming mode for {client_id}: "
+                            f"{type(streaming_error).__name__}: {streaming_error}",
+                            exc_info=True,
                         )
-                        if "disconnect" in str(streaming_error).lower():
+                        error_text = f"{type(streaming_error).__name__} {streaming_error}".lower()
+                        if (
+                            "disconnect" in error_text
+                            or "closed" in error_text
+                            or "receive" in error_text
+                        ):
                             break
                         continue
 

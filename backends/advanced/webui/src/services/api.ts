@@ -104,6 +104,8 @@ export const authApi = {
     return jwtResponse
   },
   getMe: () => api.get('/users/me'),
+  updateMe: (data: { display_name?: string; assistant_name?: string }) =>
+    api.patch('/users/me', data),
 }
 
 export const conversationsApi = {
@@ -128,8 +130,6 @@ export const conversationsApi = {
     params: { permanent: true }
   }),
 
-  getMemories: (id: string) => api.get(`/api/conversations/${id}/memories`),
-
   // Reprocessing endpoints
   reprocessOrphan: (conversationId: string) => api.post(`/api/conversations/${conversationId}/reprocess-orphan`),
   reprocessTranscript: (conversationId: string) => api.post(`/api/conversations/${conversationId}/reprocess-transcript`),
@@ -146,29 +146,70 @@ export const conversationsApi = {
       }
     }),
 
-  // Version management
+  // Conversations whose speaker labels would change under the current gallery (admin).
+  getDrift: () => api.get('/api/conversations/drift'),
+
+  // Version management (transcript only — memory is no longer versioned)
   activateTranscriptVersion: (conversationId: string, versionId: string) => api.post(`/api/conversations/${conversationId}/activate-transcript/${versionId}`),
-  activateMemoryVersion: (conversationId: string, versionId: string) => api.post(`/api/conversations/${conversationId}/activate-memory/${versionId}`),
   getVersionHistory: (conversationId: string) => api.get(`/api/conversations/${conversationId}/versions`),
+
+  // Memory vault change history (audit ledger)
+  getMemoryAudit: (conversationId: string, limit: number = 100) => api.get(`/api/conversations/${conversationId}/memory-audit`, { params: { limit } }),
 
   // Active conversation management
   closeActiveConversation: (clientId: string) => api.post(`/api/conversations/${clientId}/close`),
 }
 
-export const memoriesApi = {
-  getAll: (userId?: string) => api.get('/api/memories', { params: userId ? { user_id: userId } : {} }),
-  getById: (id: string, userId?: string) => api.get(`/api/memories/${id}`, { params: userId ? { user_id: userId } : {} }),
-  search: (query: string, userId?: string, limit: number = 20, scoreThreshold?: number) =>
-    api.get('/api/memories/search', {
-      params: {
-        query,
-        ...(userId && { user_id: userId }),
-        limit,
-        ...(scoreThreshold !== undefined && { score_threshold: scoreThreshold / 100 }) // Convert percentage to decimal
-      }
-    }),
-  delete: (id: string) => api.delete(`/api/memories/${id}`),
-  deleteAll: () => api.delete('/api/admin/memory/delete-all'),
+// One recorded change to the memory vault (the audit ledger). Content lives in
+// the per-entry diff endpoint, not the list, so the list stays light.
+export interface MemoryAuditEntry {
+  id: string
+  user_id: string
+  conversation_id: string | null
+  operation: 'create' | 'update' | 'delete' | 'rename' | 'delete_all'
+  note_path: string | null
+  // Provenance: `cause` is why the memory changed, `strategy` is how the vault
+  // was updated (control flow). `source_kind`/`source_label`/`actor` are the
+  // backend-classified taxonomy the UI renders directly.
+  cause: string | null
+  strategy: string | null
+  source_kind: 'extraction' | 'reprocess' | 'human' | 'agent' | 'bulk' | 'other'
+  source_label: string
+  actor: 'system' | 'user' | 'human_external' | 'agent'
+  provider: string
+  agent_mode: boolean
+  before_hash: string | null
+  after_hash: string | null
+  after_bytes: number | null
+  summary: string | null
+  extra: Record<string, unknown>
+  created_at: string | null
+  has_diff: boolean
+}
+
+export interface MemoryAuditDiff {
+  id: string
+  note_path: string | null
+  operation: string
+  cause: string | null
+  created_at: string | null
+  before_text: string | null
+  after_text: string | null
+  diff: string
+  diff_available: boolean
+  reason?: string
+}
+
+export const memoryApi = {
+  // Memory vault change ledger (newest first). `user_id` honored for admins only.
+  getAudit: (params?: { limit?: number; conversation_id?: string; user_id?: string }) =>
+    api.get<{ user_id: string; count: number; entries: MemoryAuditEntry[] }>(
+      '/api/memories/audit',
+      { params }
+    ),
+  // Lazily-fetched before→after diff for one ledger entry.
+  getAuditDiff: (entryId: string) =>
+    api.get<MemoryAuditDiff>(`/api/memories/audit/${entryId}/diff`),
 }
 
 export const annotationsApi = {
@@ -249,10 +290,32 @@ export const annotationsApi = {
     insert_text: string
     insert_segment_type: string
     insert_speaker?: string
+    insert_start?: number
+    insert_end?: number
   }) => api.post('/api/annotations/insert', data),
 
   getInsertAnnotations: (conversation_id: string) =>
     api.get(`/api/annotations/insert/${conversation_id}`),
+
+  // Timing annotations (waveform region move/resize of an existing segment)
+  createTimingAnnotation: (data: {
+    conversation_id: string
+    segment_index: number
+    new_start: number
+    new_end: number
+  }) => api.post('/api/annotations/timing', data),
+
+  getTimingAnnotations: (conversation_id: string) =>
+    api.get(`/api/annotations/timing/${conversation_id}`),
+
+  // Deletion annotations (remove an existing segment)
+  createDeletionAnnotation: (data: {
+    conversation_id: string
+    segment_index: number
+  }) => api.post('/api/annotations/deletion', data),
+
+  getDeletionAnnotations: (conversation_id: string) =>
+    api.get(`/api/annotations/deletion/${conversation_id}`),
 }
 
 export const finetuningApi = {
@@ -265,6 +328,19 @@ export const finetuningApi = {
   // Get fine-tuning status
   getStatus: () => api.get('/api/finetuning/status'),
 
+  // Curated enrollment: quality-gated candidate clips + enroll only selected
+  getEnrollmentCandidates: (minDuration?: number) =>
+    api.get('/api/finetuning/enrollment-candidates', {
+      params: minDuration != null ? { min_duration: minDuration } : {},
+    }),
+  enrollSelectedClips: (clips: Array<{
+    conversation_id: string
+    segment_index: number
+    start: number
+    end: number
+    speaker: string
+  }>) => api.post('/api/finetuning/enroll-selected', { clips }),
+
   // Orphaned annotation management
   deleteOrphanedAnnotations: (annotationType?: string) =>
     api.delete('/api/finetuning/orphaned-annotations', {
@@ -272,6 +348,16 @@ export const finetuningApi = {
     }),
   reattachOrphanedAnnotations: () =>
     api.post('/api/finetuning/orphaned-annotations/reattach'),
+
+  // Failed (stuck) annotation management
+  retryFailedAnnotations: (annotationType?: string) =>
+    api.post('/api/finetuning/failed-annotations/retry', null, {
+      params: annotationType ? { annotation_type: annotationType } : {}
+    }),
+  deleteFailedAnnotations: (annotationType?: string) =>
+    api.delete('/api/finetuning/failed-annotations', {
+      params: annotationType ? { annotation_type: annotationType } : {}
+    }),
 
   // Cron job management
   getCronJobs: () => api.get('/api/finetuning/cron-jobs'),
@@ -288,6 +374,12 @@ export const usersApi = {
   delete: (id: string) => api.delete(`/api/users/${id}`),
 }
 
+export const clientsApi = {
+  list: () => api.get('/api/clients'),
+  rename: (clientId: string, name: string) => api.patch(`/api/clients/${clientId}`, { name }),
+  forget: (clientId: string) => api.delete(`/api/clients/${clientId}`),
+}
+
 export const systemApi = {
   getHealth: () => api.get('/health'),
   getReadiness: () => api.get('/readiness'),
@@ -299,14 +391,19 @@ export const systemApi = {
   getDiarizationSettings: () => api.get('/api/diarization-settings'),
   saveDiarizationSettings: (settings: any) => api.post('/api/diarization-settings', settings),
 
+  // ASR hint mechanism (keyword boosting vs LLM context prompt) + per-provider context
+  getAsrContext: () => api.get('/api/asr-context'),
+  saveAsrContext: (model_name: string, context: string) =>
+    api.post('/api/asr-context', { model_name, context }),
+
   // Miscellaneous Configuration Settings
   getMiscSettings: () => api.get('/api/misc-settings'),
   saveMiscSettings: (settings: {
     always_persist_enabled?: boolean;
-    use_provider_segments?: boolean;
     per_segment_speaker_id?: boolean;
     streaming_fallback_timeout_seconds?: number;
     always_batch_retranscribe?: boolean;
+    live_segmentation?: 'streaming_stt' | 'windowed_batch' | 'off';
   }) => api.post('/api/misc-settings', settings),
 
   // Plugin Configuration Management (YAML-based)
@@ -326,7 +423,7 @@ export const systemApi = {
     orchestration?: {
       enabled: boolean
       events: string[]
-      condition: { type: string; wake_words?: string[]; keywords?: string[] }
+      condition: { type: string; wake_words?: string[]; keywords?: string[]; threshold?: number }
     }
     settings?: Record<string, any>
     env_vars?: Record<string, string>
@@ -335,7 +432,7 @@ export const systemApi = {
     orchestration?: {
       enabled: boolean
       events: string[]
-      condition: { type: string; wake_words?: string[]; keywords?: string[] }
+      condition: { type: string; wake_words?: string[]; keywords?: string[]; threshold?: number }
     }
     settings?: Record<string, any>
     env_vars?: Record<string, string>
@@ -375,12 +472,115 @@ export const systemApi = {
   testLLMModel: (modelName: string | null) =>
     api.post('/api/admin/llm-operations/test', { model_name: modelName }),
 
+  // Model registry + active defaults (Chronicle model configuration)
+  getModels: () => api.get('/api/admin/models'),
+  setActiveDefaults: (defaults: Record<string, string>) =>
+    api.post('/api/admin/defaults', defaults),
+  upsertModel: (model: Record<string, any>) => api.post('/api/admin/models', model),
+  deleteModel: (name: string) =>
+    api.delete(`/api/admin/models/${encodeURIComponent(name)}`),
+  testModel: (modelName: string | null) =>
+    api.post('/api/admin/models/test', { model_name: modelName }),
+
+  // Network discovery
+  getNetworkDiscovery: () => api.get('/api/system/network'),
+
   // System restart operations
   restartWorkers: () => api.post('/api/admin/system/restart-workers'),
   restartBackend: () => api.post('/api/admin/system/restart-backend'),
 
+  // External service management (host service-manager agent)
+  getExternalServices: () => api.get('/api/admin/services'),
+  externalServiceAction: (
+    name: string,
+    action: 'start' | 'stop' | 'restart',
+    options?: { build?: boolean; force?: boolean; node?: string | null },
+  ) =>
+    api.post(`/api/admin/services/${name}/${action}`, options ?? {}),
+  setExternalServiceProvider: (
+    name: string,
+    provider: string,
+    build: boolean = false,
+    lane: 'batch' | 'streaming' = 'batch',
+    node?: string | null,
+  ) =>
+    api.post(`/api/admin/services/${name}/provider`, { provider, build, lane, node }),
+  getExternalServiceOperation: (operationId: string, node?: string | null) =>
+    api.get(`/api/admin/services/operations/${operationId}`, { params: node ? { node } : undefined }),
+
+  // Claude remote-control session (control Claude Code from your phone)
+  getRemoteControl: () => api.get('/api/admin/remote-control'),
+  remoteControlAction: (action: 'start' | 'stop' | 'restart') =>
+    api.post(`/api/admin/remote-control/${action}`),
+
   // Observability
   getObservabilityConfig: () => api.get('/api/observability'),
+}
+
+// ---- System events (admin "System Errors" page) ---------------------------
+
+export interface SystemEvent {
+  id: string
+  severity: 'info' | 'warning' | 'error' | 'critical'
+  category: string
+  source: string
+  title: string
+  detail: string | null
+  traceback: string | null
+  user_id: string | null
+  client_id: string | null
+  conversation_id: string | null
+  count: number
+  acked: boolean
+  metadata: Record<string, unknown>
+  created_at: string | null
+  last_seen_at: string | null
+}
+
+export interface SystemEventsList {
+  events: SystemEvent[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface SystemEventsSummary {
+  window_hours: number
+  total: number
+  unacked: number
+  by_severity: Record<string, number>
+  by_category: Record<string, number>
+  by_source: Record<string, number>
+}
+
+export interface SystemEventsFilter {
+  severity?: string
+  category?: string
+  source?: string
+  client_id?: string
+  user_id?: string
+  acked?: boolean
+  since_hours?: number
+  limit?: number
+  offset?: number
+}
+
+export const systemEventsApi = {
+  list: (params: SystemEventsFilter = {}) =>
+    api.get<SystemEventsList>('/api/admin/system-events', { params }),
+  summary: (windowHours = 24) =>
+    api.get<SystemEventsSummary>('/api/admin/system-events/summary', {
+      params: { window_hours: windowHours },
+    }),
+  ack: (id: string) => api.post(`/api/admin/system-events/${id}/ack`),
+  ackSelected: (eventIds: string[]) =>
+    api.post('/api/admin/system-events/ack-selected', { event_ids: eventIds }),
+  ackAll: (params: Omit<SystemEventsFilter, 'acked' | 'limit' | 'offset'> = {}) =>
+    api.post('/api/admin/system-events/ack-all', null, { params }),
+  clear: (ackedOnly = false) =>
+    api.post('/api/admin/system-events/clear', null, {
+      params: { acked_only: ackedOnly },
+    }),
 }
 
 export const queueApi = {
@@ -445,24 +645,6 @@ export const uploadApi = {
     }),
 }
 
-export const obsidianApi = {
-  uploadZip: (file: File, onProgress?: (progress: number) => void) => {
-    const form = new FormData()
-    form.append('file', file)
-    return api.post('/api/obsidian/upload_zip', form, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-      onUploadProgress: (e) => {
-        if (onProgress && e.total) {
-          onProgress(Math.round((e.loaded * 100) / e.total))
-        }
-      },
-      timeout: 300000,
-    })
-  },
-  start: (jobId: string) => api.post('/api/obsidian/start', { job_id: jobId }),
-  status: (jobId: string) => api.get('/api/obsidian/status', { params: { job_id: jobId } }),
-  cancel: (jobId: string) => api.post('/api/obsidian/cancel', { job_id: jobId }),
-}
 
 
 export const chatApi = {
@@ -485,8 +667,10 @@ export const chatApi = {
   // Health check
   getHealth: () => api.get('/api/chat/health'),
 
-  // Streaming chat — OpenAI-compatible completions endpoint
-  sendMessage: (message: string, sessionId?: string, includeObsidianMemory?: boolean, memoryLimit?: number, memoryMode?: string) => {
+  // Streaming chat — OpenAI-compatible completions endpoint.
+  // Memory is always agentic: the backend's chat agent calls the search_memories
+  // tool (which runs the agentic vault search) when a question needs context.
+  sendMessage: (message: string, sessionId?: string, memoryLimit?: number) => {
     const requestBody: Record<string, unknown> = {
       messages: [{ role: 'user', content: message }],
       stream: true,
@@ -494,14 +678,8 @@ export const chatApi = {
     if (sessionId) {
       requestBody.session_id = sessionId
     }
-    if (includeObsidianMemory) {
-      requestBody.include_obsidian_memory = includeObsidianMemory
-    }
     if (memoryLimit !== undefined) {
       requestBody.memory_limit = memoryLimit
-    }
-    if (memoryMode) {
-      requestBody.memory_mode = memoryMode
     }
 
     return fetch(`${BACKEND_URL}/api/chat/completions`, {
@@ -528,57 +706,505 @@ export const speakerApi = {
 
   // Check speaker service status (admin only)
   getSpeakerServiceStatus: () => api.get('/api/speaker-service-status'),
+
+  // Get current user's wake-word speaker gate (only fire for selected speakers)
+  getWakewordSpeakerGate: () => api.get('/api/wakeword-speaker-gate'),
+
+  // Update the wake-word speaker gate
+  updateWakewordSpeakerGate: (
+    enabled: boolean,
+    speakers: Array<{ speaker_id: string; name: string }>
+  ) => api.post('/api/wakeword-speaker-gate', { enabled, speakers }),
 }
 
-export const knowledgeGraphApi = {
-  // Entity operations
-  getEntities: (entityType?: string, limit: number = 100) =>
-    api.get('/api/knowledge-graph/entities', {
-      params: {
-        ...(entityType && { entity_type: entityType }),
-        limit
-      }
+export interface AuditConversation {
+  conversation_id: string
+  title: string | null
+  client_id: string
+  created_at: string | null
+  duration_seconds: number
+  speakers: string[]
+  // Speech segments not matched to an enrolled speaker — the "needs triage" count.
+  unknown_speech_segments: number
+  // Speech segments identified as a speaker but at low confidence (within the
+  // margin of the match threshold) — likely-wrong labels to review.
+  marginal_identified_segments: number
+  // Pipeline processing status: 'active' | 'completed' | 'failed' | null (legacy).
+  processing_status: string | null
+  failure_stage: string | null
+  analyzed: boolean
+  speech_fraction: number | null
+  derived_operation: 'split' | 'merge' | null
+  audio_archived: boolean
+  audio_archived_at: string | null
+  archive_reason: string | null
+}
+
+export interface AuditSegment {
+  index: number
+  start: number
+  end: number
+  segment_start_time: number
+  text: string
+  speaker: string
+  identified_as: string | null
+  confidence: number | null
+  segment_type: string
+}
+
+export interface AuditSegmentsResponse {
+  conversation_id: string
+  duration_seconds: number
+  audio_available: boolean
+  segments: AuditSegment[]
+}
+
+export interface SegmentIdentifyResponse {
+  found: boolean
+  speaker_id: string | null
+  speaker_name: string | null
+  confidence: number | null
+  threshold?: number
+  status: string | null
+}
+
+export interface TriageApplyResponse {
+  applied_count: number
+  conversation_count: number
+  apply_errors?: string[]
+  enrolled: boolean | null
+}
+
+export interface AuditListResponse {
+  conversations: AuditConversation[]
+  total: number
+  limit: number
+  offset: number
+  scan_capped: boolean
+  speech_threshold: number
+  // Live speaker-match threshold + comfort margin used to compute the
+  // per-conversation "low-confidence" review counts.
+  similarity_threshold: number
+  marginal_margin: number
+  // Conversations the Analyze button would process (user's own live audio
+  // without cached VAD analysis) — 0 means there is nothing to analyze.
+  unanalyzed_count: number
+  // Distinct speaker labels present in the scanned working set, so the
+  // speaker filter offers only labels that exist in the current view.
+  speakers: string[]
+}
+
+export interface SpeakerConfidenceRow {
+  name: string
+  nseg: number
+  nconv: number
+  mean: number
+  median: number
+  min: number
+  max: number
+  // % of this speaker's identifications below threshold+margin (noise-magnet signal).
+  marginal_pct: number
+  // % that would still clear the live threshold.
+  keep_pct: number
+}
+
+export interface SpeakerConfidenceOverview {
+  threshold: number
+  margin: number
+  total_identified: number
+  conversations_with_ids: number
+  conversations_scanned: number
+  scan_capped: boolean
+  marginal_count: number
+  marginal_fraction: number
+  histogram: { start: number; bin_width: number; counts: number[] }
+  survival: { threshold: number; keep: number; drop: number }[]
+  recommended_threshold: number | null
+  speakers: SpeakerConfidenceRow[]
+}
+
+// In-flight progress published by batch jobs via job.meta "batch_progress".
+export interface BatchProgress {
+  percent?: number
+  message?: string
+  done?: number
+  total?: number
+}
+
+export interface SilenceGap {
+  start_seconds: number
+  end_seconds: number
+  duration_seconds: number
+  start_chunk: number
+  end_chunk: number
+  split_point_seconds: number
+}
+
+export interface SilenceGapsResponse {
+  analyzed: boolean
+  needs_analysis: boolean
+  duration_seconds: number
+  chunk_duration_seconds: number
+  speech_threshold: number
+  min_gap_seconds: number
+  gaps: SilenceGap[]
+}
+
+export interface SpeechRegion {
+  start: number
+  end: number
+}
+
+export interface SpeechRegionsResponse {
+  analyzed: boolean
+  needs_analysis: boolean
+  duration_seconds: number
+  speech_seconds: number
+  speakers?: string[]
+  regions: SpeechRegion[]
+}
+
+export interface SplitChild {
+  conversation_id: string
+  start_seconds: number
+  end_seconds: number
+  duration_seconds: number
+  chunk_count: number
+  has_transcript: boolean
+  jobs: Record<string, string> | null
+}
+
+export interface SplitResponse {
+  parent_conversation_id: string
+  children: SplitChild[]
+}
+
+export interface MergeResponse {
+  merged_conversation_id: string
+  source_conversation_ids: string[]
+  duration_seconds: number
+  chunk_count: number
+  has_transcript: boolean
+  jobs: Record<string, string> | null
+}
+
+export interface ExportConversationSummary {
+  conversation_id: string
+  title: string | null
+  client_id: string | null
+  clip_count?: number
+  clip_seconds?: number
+  skipped_reason?: string
+}
+
+export interface ExportRecord {
+  export_id: string
+  created_at: string
+  created_by: string
+  params: {
+    mode?: 'clips' | 'full'
+    pad_seconds: number
+    speech_threshold: number
+    merge_gap_seconds: number
+    screened?: boolean
+    sensitivity_policy?: string | null
+  }
+  conversations: ExportConversationSummary[]
+  totals: {
+    conversation_count: number
+    exported_conversations: number
+    clip_count: number
+    total_clip_seconds: number
+    excluded_seconds?: number
+    zip_bytes?: number
+  }
+  zip_ready: boolean
+}
+
+// One transcript segment flagged by the privacy screen as too sensitive to share.
+export interface ScreenFlaggedSegment {
+  index: number
+  start: number
+  end: number
+  category: string
+  reason: string
+  speaker?: string | null
+  text?: string | null
+}
+
+export interface ScreenConversationReport {
+  conversation_id: string
+  title?: string | null
+  client_id?: string | null
+  segment_count?: number
+  flagged?: ScreenFlaggedSegment[]
+  flagged_seconds?: number
+  skipped_reason?: string
+  error?: string
+}
+
+export interface ScreenResult {
+  success: boolean
+  policy: string
+  conversations: ScreenConversationReport[]
+  totals: { conversation_count: number; flagged_segments: number }
+}
+
+export const dataAuditApi = {
+  // Enqueue batch VAD analysis. Returns { job_id, status }.
+  analyze: (conversationIds?: string[], force: boolean = false) =>
+    api.post('/api/data-audit/analyze', {
+      conversation_ids: conversationIds ?? null,
+      force,
     }),
 
-  getEntity: (entityId: string) =>
-    api.get(`/api/knowledge-graph/entities/${entityId}`),
+  // Per-speaker identification-confidence overview (histogram, baselines,
+  // noise magnets, recommended threshold). Computed from stored confidence.
+  getSpeakerConfidence: () =>
+    api.get<SpeakerConfidenceOverview>('/api/data-audit/speakers/confidence'),
 
-  getEntityRelationships: (entityId: string) =>
-    api.get(`/api/knowledge-graph/entities/${entityId}/relationships`),
+  // Poll an analysis job's status (includes in-flight batch progress)
+  getJobStatus: (jobId: string) =>
+    api.get<{ job_id: string; status: string; batch_progress?: BatchProgress }>(
+      `/api/queue/jobs/${jobId}/status`
+    ),
 
-  updateEntity: (entityId: string, data: { name?: string; details?: string; icon?: string }) =>
-    api.patch(`/api/knowledge-graph/entities/${entityId}`, data),
+  // Fetch a job's full record (status + meta progress + result)
+  getJobResult: <T = unknown>(jobId: string) =>
+    api.get<{
+      status: string
+      result: T | null
+      meta?: { batch_progress?: BatchProgress }
+    }>(`/api/queue/jobs/${jobId}`),
 
-  deleteEntity: (entityId: string) =>
-    api.delete(`/api/knowledge-graph/entities/${entityId}`),
-
-  // Search
-  searchEntities: (query: string, limit: number = 20) =>
-    api.get('/api/knowledge-graph/search', {
-      params: { query, limit }
+  // Filtered listing with VAD speech metrics + speaker labels.
+  // Generic param handling so registry filters (filters.tsx) can contribute
+  // params without touching this function: undefined/null and empty arrays
+  // are dropped, arrays become comma-separated values.
+  getConversations: (params: {
+    speech_threshold?: number
+    min_speech_fraction?: number
+    max_speech_fraction?: number
+    min_duration?: number
+    max_duration?: number
+    created_after?: string
+    created_before?: string
+    include_speakers?: string[]
+    exclude_speakers?: string[]
+    archived_only?: boolean
+    limit?: number
+    offset?: number
+    [key: string]: unknown
+  }) =>
+    api.get<AuditListResponse>('/api/data-audit/conversations', {
+      params: Object.fromEntries(
+        Object.entries(params)
+          .filter(([, v]) => v !== undefined && v !== null && !(Array.isArray(v) && v.length === 0))
+          .map(([k, v]) => [k, Array.isArray(v) ? v.join(',') : v])
+      ),
     }),
 
-  // Promise operations
-  getPromises: (status?: string, limit: number = 50) =>
-    api.get('/api/knowledge-graph/promises', {
-      params: {
-        ...(status && { status }),
-        limit
-      }
+  // Archive (hard-delete audio, keep metadata stub)
+  archive: (conversationIds: string[], reason: string) =>
+    api.post('/api/data-audit/archive', {
+      conversation_ids: conversationIds,
+      reason,
     }),
 
-  updatePromiseStatus: (promiseId: string, status: string) =>
-    api.patch(`/api/knowledge-graph/promises/${promiseId}`, { status }),
+  // Detected silence gaps (candidate split points) from cached chunk VAD scores
+  getSilenceGaps: (conversationId: string, params?: { speech_threshold?: number; min_gap_seconds?: number }) =>
+    api.get<SilenceGapsResponse>(`/api/data-audit/conversations/${conversationId}/silence-gaps`, { params }),
 
-  deletePromise: (promiseId: string) =>
-    api.delete(`/api/knowledge-graph/promises/${promiseId}`),
+  // Merged speech intervals for speech-skip playback
+  getSpeechRegions: (conversationId: string, speakers?: string[]) =>
+    api.get<SpeechRegionsResponse>(
+      `/api/data-audit/conversations/${conversationId}/speech-regions`,
+      { params: speakers?.length ? { speakers: speakers.join(',') } : undefined }
+    ),
 
-  // Timeline
-  getTimeline: (start: string, end: string, limit: number = 100) =>
-    api.get('/api/knowledge-graph/timeline', {
-      params: { start, end, limit }
+  // Active-version transcript segments (with speaker-recognition confidence)
+  // for the speaker-triage panel.
+  getSegments: (conversationId: string) =>
+    api.get<AuditSegmentsResponse>(
+      `/api/data-audit/conversations/${conversationId}/segments`
+    ),
+
+  // Live speaker suggestion for one segment: closest enrolled speaker + cosine.
+  identifySegment: (conversationId: string, start: number, end: number) =>
+    api.post<SegmentIdentifyResponse>(
+      `/api/data-audit/conversations/${conversationId}/segments/identify`,
+      { start, end }
+    ),
+
+  // Count of unapplied triage decisions and conversations they span.
+  getTriagePending: () =>
+    api.get<{ pending_count: number; conversation_count: number }>(
+      '/api/data-audit/triage/pending'
+    ),
+
+  // Bulk-apply all pending speaker-triage decisions across every conversation.
+  applyTriage: () =>
+    api.post<TriageApplyResponse>('/api/data-audit/triage/apply'),
+
+  // Split a conversation at the given time points (seconds)
+  split: (conversationId: string, splitPoints: number[]) =>
+    api.post<SplitResponse>(`/api/data-audit/conversations/${conversationId}/split`, {
+      split_points: splitPoints,
     }),
 
-  // Health check
-  getHealth: () => api.get('/api/knowledge-graph/health'),
+  // Merge adjacent conversations into a new one
+  merge: (conversationIds: string[]) =>
+    api.post<MergeResponse>('/api/data-audit/merge', {
+      conversation_ids: conversationIds,
+    }),
+
+  // Default shareability policy (prefill for the privacy-screen editor)
+  getSensitivityPolicy: () =>
+    api.get<{ policy: string }>('/api/data-audit/sensitivity-policy'),
+
+  // Enqueue a privacy screen over the selected conversations.
+  // Returns { job_id, status }; fetch the result via getJobResult<ScreenResult>.
+  screenExport: (conversationIds: string[], policy?: string) =>
+    api.post<{ job_id: string; status: string }>('/api/data-audit/export/screen', {
+      conversation_ids: conversationIds,
+      policy: policy ?? null,
+    }),
+
+  // Enqueue an annotation-dataset export (speech-cropped clips + manifest).
+  // `excluded_ranges` (conversation_id → withheld [start,end] ranges from the
+  // privacy screen) are carved out of the exported audio + transcript.
+  // Returns { job_id, export_id, status }.
+  startExport: (
+    conversationIds: string[],
+    params?: {
+      mode?: 'clips' | 'full'
+      pad_seconds?: number
+      speech_threshold?: number
+      merge_gap_seconds?: number
+      excluded_ranges?: Record<string, number[][]>
+      sensitivity_policy?: string | null
+    }
+  ) =>
+    api.post<{ job_id: string; export_id: string; status: string }>('/api/data-audit/export', {
+      conversation_ids: conversationIds,
+      ...params,
+    }),
+
+  // List completed annotation exports
+  listExports: () => api.get<{ exports: ExportRecord[] }>('/api/data-audit/exports'),
+
+  // Direct download URL (token as query param so the browser streams to disk)
+  exportDownloadUrl: (exportId: string) => {
+    const token = localStorage.getItem(getStorageKey('token')) || ''
+    return `${BACKEND_URL}/api/data-audit/exports/${exportId}/download?token=${token}`
+  },
+
+  // Delete an export (zip + metadata) from the server
+  deleteExport: (exportId: string) => api.delete(`/api/data-audit/exports/${exportId}`),
+}
+
+// Wake-word data-collection (the "Hermes" training flywheel). Proxied through
+// the backend to the standalone wakeword-service.
+export interface WakeStream {
+  client_id: string
+  priming: boolean
+  prime_wakeword?: string | null
+  armed: boolean
+}
+
+// Per-word config the service runs (one section per word in the Wake-Word Lab).
+export interface WakeWordConfig {
+  name: string
+  model: string
+  verifier: boolean          // a verifier file is loaded for this word (capability)
+  verifier_enabled: boolean  // and it is currently consulted (the runtime toggle)
+  threshold: number
+  patience: number
+  collect_only: boolean
+}
+
+export interface WakeStats {
+  pending: number
+  positive: number
+  negative: number
+  false_negatives: number
+}
+
+export interface WakeSample {
+  id: string
+  wakeword: string
+  bucket: string
+  client_id: string
+  session_id: string
+  score: number
+  reason: string
+  kind: string
+  source: string
+  also_fired?: string[]
+  sample_rate: number
+  created_at_ms: number
+  duration_secs: number
+  label?: string
+  false_negative?: boolean
+}
+
+export const wakewordApi = {
+  // Configured wake words (+ per-word config). available/active kept for the
+  // acoustic-condition picker; wakewords drives the Lab's per-word sections.
+  getModels: () =>
+    api.get<{ available: string[]; active: string | null; wakewords: WakeWordConfig[] }>(
+      '/api/wakeword/models'
+    ),
+  getStreams: () => api.get<{ streams: WakeStream[] }>('/api/wakeword/streams'),
+  // Toggle a word between normal dispatch and collect-only (shadow) mode. Admin
+  // only; effective live and persisted across restarts. Returns refreshed config.
+  setCollectOnly: (wakeword: string, collect_only: boolean) =>
+    api.post<{ wakewords: WakeWordConfig[] }>('/api/wakeword/collect_only', {
+      wakeword,
+      collect_only,
+    }),
+  // Toggle a word's second-stage verifier on/off. Admin only; the verifier stays
+  // loaded (disabling falls back to stage-1). Effective live and persisted.
+  setVerifierEnabled: (wakeword: string, enabled: boolean) =>
+    api.post<{ wakewords: WakeWordConfig[] }>('/api/wakeword/verifier_enabled', {
+      wakeword,
+      enabled,
+    }),
+  // Enroll a specific word. No client_id -> backend primes the caller's recorder.
+  prime: (wakeword: string, client_id?: string) =>
+    api.post('/api/wakeword/prime', { wakeword, ...(client_id ? { client_id } : {}) }),
+  // Manually end an in-progress prime; the captured attempt is saved to pending.
+  unprime: (client_id?: string) =>
+    api.post('/api/wakeword/unprime', client_id ? { client_id } : {}),
+  getSamples: (wakeword: string, bucket: 'pending' | 'positive' | 'negative') =>
+    api.get<{ wakeword: string; bucket: string; samples: WakeSample[] }>(
+      '/api/wakeword/samples',
+      { params: { wakeword, bucket } }
+    ),
+  // Per-word stats: { "hey_hermes": {pending, positive, negative, false_negatives}, ... }
+  getStats: () => api.get<Record<string, WakeStats>>('/api/wakeword/samples/stats'),
+  // Remove exact-duplicate clips within a wake word (keeps one per group).
+  dedupe: (wakeword: string) =>
+    api.post<Record<string, { duplicate_groups: number; removed: number; removed_by_bucket: Record<string, number>; kept_unique: number; conflicts: number }>>(
+      '/api/wakeword/samples/dedupe', null, { params: { wakeword } }
+    ),
+  getAudioBlob: (id: string) =>
+    api.get(`/api/wakeword/samples/${encodeURIComponent(id)}/audio`, {
+      responseType: 'blob',
+    }),
+  label: (id: string, label: 'wake' | 'not_wake') =>
+    api.post(`/api/wakeword/samples/${encodeURIComponent(id)}/label`, { label }),
+  // Move a clip to a different wake word's bucket (default pending) — for the
+  // overlap case (a bare "hermes" that armed hey_hermes by priority).
+  move: (id: string, wakeword: string, bucket: 'pending' | 'positive' | 'negative' = 'pending') =>
+    api.post(`/api/wakeword/samples/${encodeURIComponent(id)}/move`, null, {
+      params: { wakeword, bucket },
+    }),
+  // Copy a clip into another word's bucket (source stays) — a shared FP that fired
+  // multiple words is a hard negative for each.
+  copy: (id: string, wakeword: string, bucket: 'pending' | 'positive' | 'negative' = 'pending') =>
+    api.post(`/api/wakeword/samples/${encodeURIComponent(id)}/copy`, null, {
+      params: { wakeword, bucket },
+    }),
+  remove: (id: string) => api.delete(`/api/wakeword/samples/${encodeURIComponent(id)}`),
 }

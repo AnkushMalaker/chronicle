@@ -98,7 +98,7 @@ cd tests/
 
 This script will:
 1. Check for required API keys
-2. Start all required services (MongoDB, Redis, Qdrant, Backend)
+2. Start all required services (MongoDB, Redis, FalkorDB, Backend)
 3. Run all Robot Framework tests
 4. Generate test reports
 5. Clean up (by default)

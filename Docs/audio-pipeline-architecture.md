@@ -70,7 +70,8 @@ Chronicle's audio pipeline is built on:
           ├───────────────────────┤
           │ MongoDB: conversations│
           │ Disk: WAV files       │
-          │ Qdrant: Memories      │
+          │ FalkorDB: Memories +  │
+          │   Knowledge Graph     │
           └───────────────────────┘
 ```
 
@@ -213,7 +214,7 @@ Polls `TranscriptionResultsAggregator` at 1s intervals. Speech criteria: word co
 |-----|-------------|------------|
 | `transcribe_full_audio_job` | Batch transcribes full audio (file uploads only). Dispatches `transcript.batch` plugin event. | **Raises** → blocks entire chain |
 | `recognize_speakers_job` | Sends audio + segments to speaker service, updates speaker labels | Returns dict → chain continues |
-| `memory_extraction_job` | LLM extracts facts, stores in Qdrant/OpenMemory. Dispatches `memory.processed` plugin event | Returns dict → chain continues |
+| `memory_extraction_job` | LLM extracts facts, stores in FalkorDB (Chronicle native) or OpenMemory. Dispatches `memory.processed` plugin event | Returns dict → chain continues |
 | `generate_title_summary_job` | LLM generates title/summary, updates MongoDB | Returns dict → chain continues |
 | `dispatch_conversation_complete_event_job` | Dispatches `conversation.complete` plugin event | Returns dict |
 
@@ -257,10 +258,10 @@ Location: `backends/advanced/data/chunks/` (volume-mounted)
 Format: `{timestamp_ms}_{client_id}_{conversation_id}.wav`
 Created by `audio_streaming_persistence_job()`, read by post-conversation jobs. Manual cleanup only.
 
-### Vector Storage
+### Memory Storage
 
-- **Qdrant** (Chronicle native): Container `qdrant`, ports 6333/6334, user-specific collections
-- **OpenMemory MCP**: Container `openmemory-mcp`, port 8765, cross-client storage
+- **FalkorDB** (Chronicle native): Container `falkordb`, port 6379. Graph (ConvDoc/ConvChunk/ConvEntity + Entity/Relationship KG) with embedded vector + BM25 indexes. Hybrid search.
+- **OpenMemory MCP**: Container `openmemory-mcp`, port 8765, cross-client storage (uses its own internal Qdrant).
 
 Both written by `memory_extraction_job()`, read by `/api/memories/search`.
 

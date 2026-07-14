@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "$0")/_engine.sh"
 # tests/bin/status-containers.sh
 # Show container health and status
 
@@ -16,7 +17,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 
 # Show container status
-docker ps -a --filter "name=$PROJECT_NAME" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+$ENGINE ps -a --filter "name=$PROJECT_NAME" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -25,9 +26,9 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 echo "🔄 Restart Counts:"
 HAS_RESTARTS=false
-for CONTAINER_ID in $(docker ps -q --filter "name=$PROJECT_NAME" 2>/dev/null); do
-    NAME=$(docker inspect --format '{{.Name}}' "$CONTAINER_ID" | sed 's/^\///')
-    RESTART_COUNT=$(docker inspect --format '{{.RestartCount}}' "$CONTAINER_ID")
+for CONTAINER_ID in $($ENGINE ps -q --filter "name=$PROJECT_NAME" 2>/dev/null); do
+    NAME=$($ENGINE inspect --format '{{.Name}}' "$CONTAINER_ID" | sed 's/^\///')
+    RESTART_COUNT=$($ENGINE inspect --format '{{.RestartCount}}' "$CONTAINER_ID")
     if [ "$RESTART_COUNT" -gt 0 ]; then
         echo "   ⚠️  ${NAME}: ${RESTART_COUNT} restarts"
         HAS_RESTARTS=true

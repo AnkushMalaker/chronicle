@@ -23,6 +23,7 @@ from simple_speaker_recognition.api.core.utils import (
     safe_format_confidence,
     validate_confidence,
 )
+from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
 from simple_speaker_recognition.core.models import DiarizationConfig, SpeakerStatus
 from simple_speaker_recognition.core.unified_speaker_db import UnifiedSpeakerDB
 from simple_speaker_recognition.utils.audio_processing import get_audio_info
@@ -37,6 +38,8 @@ log = logging.getLogger("speaker_service")
 # Dependency functions - will be resolved during integration
 async def get_db():
     """Get speaker database dependency."""
+    # Lazy import: `service` imports this routers package at module load time,
+    # so importing it at module level here would create a circular import.
     from .. import service
 
     return await service.get_db()
@@ -44,6 +47,8 @@ async def get_db():
 
 def get_audio_backend():
     """Get audio backend."""
+    # Lazy import: `service` imports this routers package at module load time,
+    # so importing it at module level here would create a circular import.
     from .. import service
 
     return service.audio_backend
@@ -51,6 +56,8 @@ def get_audio_backend():
 
 def get_speaker_db():
     """Get speaker database."""
+    # Lazy import: `service` imports this routers package at module load time,
+    # so importing it at module level here would create a circular import.
     from .. import service
 
     return service.speaker_db
@@ -58,6 +65,8 @@ def get_speaker_db():
 
 def get_auth():
     """Get auth settings."""
+    # Lazy import: `service` imports this routers package at module load time,
+    # so importing it at module level here would create a circular import.
     from .. import service
 
     return service.auth
@@ -281,7 +290,7 @@ async def enhance_deepgram_response_with_speaker_id(
     audio_data: bytes,
     deepgram_response: Dict[str, Any],
     user_id: Optional[int],
-    confidence_threshold: float = 0.15,
+    confidence_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
 ) -> Dict[str, Any]:
     """Extract speaker segments and identify speakers from Deepgram response."""
     enhanced_response = deepgram_response.copy()
@@ -582,7 +591,8 @@ async def deepgram_compatible_transcription(
         default=None, description="User ID for speaker identification"
     ),
     speaker_confidence_threshold: float = Query(
-        default=0.15, description="Minimum confidence for speaker identification"
+        default=DEFAULT_SIMILARITY_THRESHOLD,
+        description="Minimum confidence for speaker identification",
     ),
     # Authentication
     authorization: Optional[str] = Header(

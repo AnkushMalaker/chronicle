@@ -1,0 +1,7 @@
+*
+!pyproject*.toml
+!uv.lock
+!common/
+!common/**
+!providers/
+!providers/**

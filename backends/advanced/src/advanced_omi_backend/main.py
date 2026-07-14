@@ -25,6 +25,13 @@ from advanced_omi_backend.app_factory import create_app
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("advanced-backend")
 
+# Catch-all: record every ERROR/CRITICAL log as a system event (best-effort).
+from advanced_omi_backend.services.observability.log_handler import (  # noqa: E402
+    install_system_event_log_handler,
+)
+
+install_system_event_log_handler()
+
 # Create FastAPI application using the app factory pattern
 app = create_app()
 

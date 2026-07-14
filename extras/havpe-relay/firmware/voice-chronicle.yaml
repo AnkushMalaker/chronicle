@@ -137,6 +137,14 @@ globals:
   - id: status_led_update
     type: bool
     initial_value: 'false'
+  # Rotating index shared by the addressable LED animations (spin/pulse effects).
+  - id: global_led_animation_index
+    type: int
+    initial_value: '0'
+  # True while the dial is being turned (drives the Volume Display animation).
+  - id: dial_touched
+    type: bool
+    initial_value: 'false'
 
 # ─────────── LED Ring (12x WS2812 on GPIO21, power on GPIO45) ───────────
 power_supply:
@@ -155,6 +163,134 @@ light:
     rmt_symbols: 192
     default_transition_length: 0ms
     power_supply: led_power
+    # Addressable animations ported from the official HA Voice PE firmware
+    # (home-assistant-voice.yaml). They read the ring's current colour as the
+    # base and override pixels each frame. Driven either locally (Volume Display
+    # from the dial) or remotely (the relay sets an effect on a wake event).
+    effects:
+      - addressable_lambda:
+          name: "Listening For Command"
+          update_interval: 50ms
+          lambda: |-
+            auto light_color = id(led_ring).current_values;
+            Color color(light_color.get_red() * 255, light_color.get_green() * 255,
+                  light_color.get_blue() * 255);
+            for (uint8_t i = 0; i < 12; i++) {
+              if (i == id(global_led_animation_index) % 12) {
+                it[i] = color;
+              } else if (i == (id(global_led_animation_index) + 11) % 12) {
+                it[i] = color * 192;
+              } else if (i == (id(global_led_animation_index) + 10) % 12) {
+                it[i] = color * 128;
+              } else if (i == (id(global_led_animation_index) + 6) % 12) {
+                it[i] = color;
+              } else if (i == (id(global_led_animation_index) + 5) % 12) {
+                it[i] = color * 192;
+              } else if (i == (id(global_led_animation_index) + 4) % 12) {
+                it[i] = color * 128;
+              } else {
+                it[i] = Color::BLACK;
+              }
+            }
+            id(global_led_animation_index) = (id(global_led_animation_index) + 1) % 12;
+      - addressable_lambda:
+          name: "Thinking"
+          update_interval: 10ms
+          lambda: |-
+            static uint8_t brightness_step = 0;
+            static bool brightness_decreasing = true;
+            static uint8_t brightness_step_number = 10;
+            if (initial_run) {
+              brightness_step = 0;
+              brightness_decreasing = true;
+            }
+            auto light_color = id(led_ring).current_values;
+            Color color(light_color.get_red() * 255, light_color.get_green() * 255,
+                  light_color.get_blue() * 255);
+            for (uint8_t i = 0; i < 12; i++) {
+              if (i == id(global_led_animation_index) % 12) {
+                it[i] = color * uint8_t(255/brightness_step_number*(brightness_step_number-brightness_step));
+              } else if (i == (id(global_led_animation_index) + 6) % 12) {
+                it[i] = color * uint8_t(255/brightness_step_number*(brightness_step_number-brightness_step));
+              } else {
+                it[i] = Color::BLACK;
+              }
+            }
+            if (brightness_decreasing) {
+              brightness_step++;
+            } else {
+              brightness_step--;
+            }
+            if (brightness_step == 0 || brightness_step == brightness_step_number) {
+              brightness_decreasing = !brightness_decreasing;
+            }
+      - addressable_lambda:
+          name: "Replying"
+          update_interval: 50ms
+          lambda: |-
+            id(global_led_animation_index) = (12 + id(global_led_animation_index) - 1) % 12;
+            auto light_color = id(led_ring).current_values;
+            Color color(light_color.get_red() * 255, light_color.get_green() * 255,
+                  light_color.get_blue() * 255);
+            for (uint8_t i = 0; i < 12; i++) {
+              if (i == (id(global_led_animation_index)) % 12) {
+                it[i] = color;
+              } else if (i == (id(global_led_animation_index) + 1) % 12) {
+                it[i] = color * 192;
+              } else if (i == (id(global_led_animation_index) + 2) % 12) {
+                it[i] = color * 128;
+              } else if (i == (id(global_led_animation_index) + 6) % 12) {
+                it[i] = color;
+              } else if (i == (id(global_led_animation_index) + 7) % 12) {
+                it[i] = color * 192;
+              } else if (i == (id(global_led_animation_index) + 8) % 12) {
+                it[i] = color * 128;
+              } else {
+                it[i] = Color::BLACK;
+              }
+            }
+      - addressable_lambda:
+          name: "Error"
+          update_interval: 10ms
+          lambda: |-
+            static uint8_t brightness_step = 0;
+            static bool brightness_decreasing = true;
+            static uint8_t brightness_step_number = 10;
+            if (initial_run) {
+              brightness_step = 0;
+              brightness_decreasing = true;
+            }
+            Color error_color(255, 0, 0);
+            for (uint8_t i = 0; i < 12; i++) {
+              it[i] = error_color * uint8_t(255/brightness_step_number*(brightness_step_number-brightness_step));
+            }
+            if (brightness_decreasing) {
+              brightness_step++;
+            } else {
+              brightness_step--;
+            }
+            if (brightness_step == 0 || brightness_step == brightness_step_number) {
+              brightness_decreasing = !brightness_decreasing;
+            }
+      - addressable_lambda:
+          name: "Volume Display"
+          update_interval: 50ms
+          lambda: |-
+            auto light_color = id(led_ring).current_values;
+            Color color(light_color.get_red() * 255, light_color.get_green() * 255,
+                  light_color.get_blue() * 255);
+            Color silenced_color(255, 0, 0);
+            auto volume_ratio = 12.0f * id(chronicle_media_player).volume;
+            for (uint8_t i = 0; i < 12; i++) {
+              if (i <= volume_ratio) {
+                it[(6+i)%12] = color * min( 255.0f * (volume_ratio - i) , 255.0f ) ;
+              } else {
+                it[(6+i)%12] = Color::BLACK;
+              }
+            }
+            if (id(chronicle_media_player).volume == 0.0f) {
+              it[6] = silenced_color;
+            }
     on_state:
       then:
         - lambda: |-
@@ -167,6 +303,75 @@ light:
               }
               id(api_led_override_until) = millis() + hold_ms;
             }
+
+# ─────────── Scripts ───────────
+script:
+  # Paint the ring with the current connectivity colour (red = no Wi-Fi,
+  # orange = Wi-Fi but relay down, blue = streaming). status_led_update guards the
+  # on_state override hook so this never arms a hold against itself. Called by the
+  # 2 s status interval and by effect scripts when they revert.
+  - id: apply_status_led
+    then:
+      - lambda: 'id(status_led_update) = true;'
+      - if:
+          condition:
+            not:
+              wifi.connected:
+          then:
+            - light.turn_on:
+                id: led_ring
+                red: 100%
+                green: 0%
+                blue: 0%
+                brightness: 30%
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(tcp_ok);'
+                then:
+                  - light.turn_on:
+                      id: led_ring
+                      red: 0%
+                      green: 0%
+                      blue: 100%
+                      brightness: 30%
+                else:
+                  - light.turn_on:
+                      id: led_ring
+                      red: 100%
+                      green: 50%
+                      blue: 0%
+                      brightness: 30%
+      - lambda: 'id(status_led_update) = false;'
+
+  # Turn the dial → change media-player volume and show the Volume Display ring.
+  # mode: restart so each detent keeps the ring up; 2 s after the last turn it
+  # reverts to the connectivity colour.
+  - id: control_volume
+    mode: restart
+    parameters:
+      increase: bool
+    then:
+      - if:
+          condition:
+            lambda: 'return increase;'
+          then:
+            - media_player.volume_up: chronicle_media_player
+          else:
+            - media_player.volume_down: chronicle_media_player
+      - lambda: 'id(dial_touched) = true;'
+      - light.turn_on:
+          id: led_ring
+          red: 9%
+          green: 73%
+          blue: 95%
+          brightness: 40%
+          effect: "Volume Display"
+      - delay: 2s
+      - lambda: |-
+          id(dial_touched) = false;
+          id(api_led_override_until) = 0;
+      - script.execute: apply_status_led
 
 # ─────────── Status intervals ───────────
 interval:
@@ -190,42 +395,8 @@ interval:
                 level: DEBUG
                 format: "LED status interval skipped (API override active)"
           else:
-            - lambda: |-
-                id(api_led_override_until) = 0;
-                id(status_led_update) = true;
-            - if:
-                condition:
-                  not:
-                    wifi.connected:
-                then:
-                  # Red - no Wi-Fi
-                  - light.turn_on:
-                      id: led_ring
-                      red: 100%
-                      green: 0%
-                      blue: 0%
-                      brightness: 30%
-                else:
-                  - if:
-                      condition:
-                        lambda: 'return id(tcp_ok);'
-                      then:
-                        # Blue - Wi-Fi + TCP streaming
-                        - light.turn_on:
-                            id: led_ring
-                            red: 0%
-                            green: 0%
-                            blue: 100%
-                            brightness: 30%
-                      else:
-                        # Orange - Wi-Fi up, TCP disconnected
-                        - light.turn_on:
-                            id: led_ring
-                            red: 100%
-                            green: 50%
-                            blue: 0%
-                            brightness: 30%
-            - lambda: 'id(status_led_update) = false;'
+            - lambda: 'id(api_led_override_until) = 0;'
+            - script.execute: apply_status_led
 
 # ─────────── Text Sensors (bridge on-device events to ESPHome API) ───────────
 text_sensor:
@@ -304,10 +475,16 @@ sensor:
       - text_sensor.template.publish:
           id: dial_action
           state: "CW"
+      - script.execute:
+          id: control_volume
+          increase: true
     on_anticlockwise:
       - text_sensor.template.publish:
           id: dial_action
           state: "CCW"
+      - script.execute:
+          id: control_volume
+          increase: false
 
 # ─────────── I2C Bus (DAC + XMOS Control) ───────────
 i2c:

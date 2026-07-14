@@ -189,7 +189,7 @@ async def on_conversation_complete(self, context: PluginContext):
 
 **Use Cases**:
 - Memory indexing
-- Knowledge graph updates
+- Vault note post-processing
 - Memory notifications
 - Analytics
 

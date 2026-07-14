@@ -10,8 +10,13 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
+import openai
+
 from advanced_omi_backend.model_registry import get_models_registry
-from advanced_omi_backend.openai_factory import create_openai_client
+from advanced_omi_backend.openai_factory import (
+    create_openai_client,
+    model_supports_temperature,
+)
 from advanced_omi_backend.services.memory.config import (
     load_config_yml as _load_root_config,
 )
@@ -92,11 +97,13 @@ class OpenAILLMClient(LLMClient):
             model_name = model or self.model
             temp = temperature if temperature is not None else self.temperature
 
-            response = self.client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temp,
-            )
+            params: dict[str, Any] = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            if model_supports_temperature(model_name):
+                params["temperature"] = temp
+            response = self.client.chat.completions.create(**params)
             return response.choices[0].message.content.strip()
         except Exception as e:
             self.logger.error(f"Error generating completion: {e}")
@@ -111,19 +118,20 @@ class OpenAILLMClient(LLMClient):
     ):
         """Chat completion with tool/function calling support. Returns raw response object."""
         model_name = model or self.model
-        params = {
+        params: dict[str, Any] = {
             "model": model_name,
             "messages": messages,
-            "temperature": temperature if temperature is not None else self.temperature,
         }
+        if model_supports_temperature(model_name):
+            params["temperature"] = (
+                temperature if temperature is not None else self.temperature
+            )
         if tools:
             params["tools"] = tools
         return self.client.chat.completions.create(**params)
 
     async def health_check(self) -> Dict:
         """Check OpenAI-compatible service health by calling models.list()."""
-        import openai as _openai
-
         if not self.api_key or not self.base_url or not self.model:
             return {
                 "status": "⚠️ Configuration incomplete",
@@ -143,7 +151,7 @@ class OpenAILLMClient(LLMClient):
                 "base_url": self.base_url,
                 "default_model": self.model,
             }
-        except _openai.AuthenticationError:
+        except openai.AuthenticationError:
             return {
                 "status": "❌ Auth Failed — check API key",
                 "healthy": False,
@@ -157,7 +165,7 @@ class OpenAILLMClient(LLMClient):
                 "base_url": self.base_url,
                 "default_model": self.model,
             }
-        except _openai.APIConnectionError:
+        except openai.APIConnectionError:
             return {
                 "status": "❌ Connection Failed — service unreachable",
                 "healthy": False,
@@ -195,7 +203,7 @@ class LLMClientFactory:
                 params = llm_def.model_params or {}
                 return OpenAILLMClient(
                     api_key=llm_def.api_key,
-                    base_url=llm_def.model_url,
+                    base_url=llm_def.resolved_url(),
                     model=llm_def.model_name,
                     temperature=params.get("temperature", 0.1),
                 )
@@ -226,12 +234,88 @@ def reset_llm_client():
     _llm_client = None
 
 
+# Transport-level failures that warrant one retry against defaults.fallback_llm.
+# APITimeoutError subclasses APIConnectionError; InternalServerError covers 5xx.
+# Auth/4xx errors are config problems the fallback would not fix.
+_FALLBACK_EXCEPTIONS = (
+    openai.APIConnectionError,
+    openai.InternalServerError,
+    asyncio.TimeoutError,
+)
+
+
+def _get_fallback_model_def():
+    """ModelDef named by defaults.fallback_llm, or None when unset/invalid or
+    identical to defaults.llm (retrying the same model is pointless)."""
+    registry = get_models_registry()
+    if not registry:
+        return None
+    fb_name = registry.defaults.get("fallback_llm")
+    if not fb_name or fb_name == registry.defaults.get("llm"):
+        return None
+    fb = registry.get_by_name(fb_name)
+    if not fb or fb.model_type != "llm":
+        return None
+    return fb
+
+
+def _create_fallback_client() -> Optional[OpenAILLMClient]:
+    """Build a one-off client for the fallback LLM (singleton-path retries)."""
+    fb = _get_fallback_model_def()
+    if not fb:
+        return None
+    try:
+        params = fb.model_params or {}
+        return OpenAILLMClient(
+            api_key=fb.api_key,
+            base_url=fb.resolved_url(),
+            model=fb.model_name,
+            temperature=params.get("temperature", 0.1),
+        )
+    except Exception as e:  # noqa: BLE001 - fallback must never mask the original error
+        logger.error(f"Failed to create fallback LLM client: {e}")
+        return None
+
+
+async def _generate_with_op(
+    op,
+    prompt: str,
+    model: str | None,
+    temperature: float | None,
+    operation: str,
+) -> str:
+    """One generation attempt against a ResolvedLLMOperation."""
+    client = op.get_client(is_async=True)
+    api_params = op.to_api_params()
+    if temperature is not None:
+        api_params["temperature"] = temperature
+    if model is not None:
+        api_params["model"] = model
+    if not model_supports_temperature(api_params.get("model")):
+        api_params.pop("temperature", None)
+    api_params["messages"] = [{"role": "user", "content": prompt}]
+    response = await client.chat.completions.create(**api_params)
+    choice = response.choices[0]
+    content = (choice.message.content or "").strip()
+    if not content:
+        # Reasoning models can consume the whole completion budget on
+        # reasoning and return empty content with finish_reason=length.
+        raise RuntimeError(
+            f"LLM returned empty content for operation {operation!r} "
+            f"(model={api_params.get('model')}, "
+            f"finish_reason={choice.finish_reason}) — if 'length', "
+            f"raise the operation's max_tokens"
+        )
+    return content
+
+
 # Async wrapper for blocking LLM operations
 async def async_generate(
     prompt: str,
     model: str | None = None,
     temperature: float | None = None,
     operation: str | None = None,
+    default_model_type: str = "llm",
 ) -> str:
     """Async wrapper for LLM text generation.
 
@@ -240,29 +324,58 @@ async def async_generate(
     The resolved config determines model, temperature, max_tokens, etc.
     Explicit ``model``/``temperature`` kwargs still override the resolved values.
 
+    If the primary model is unreachable (connection failure, timeout, 5xx) and
+    ``defaults.fallback_llm`` names a different model, the call is retried once
+    against the fallback.
+
     Tracing is handled automatically by the OTEL instrumentor; use
     ``set_otel_session()`` at job boundaries to group calls by session.
     """
     if operation:
         registry = get_models_registry()
         if registry:
-            op = registry.get_llm_operation(operation)
-            client = op.get_client(is_async=True)
-            api_params = op.to_api_params()
-            if temperature is not None:
-                api_params["temperature"] = temperature
-            if model is not None:
-                api_params["model"] = model
-            api_params["messages"] = [{"role": "user", "content": prompt}]
-            response = await client.chat.completions.create(**api_params)
-            return response.choices[0].message.content.strip()
+            op = registry.get_llm_operation(
+                operation, default_model_type=default_model_type
+            )
+            try:
+                return await _generate_with_op(
+                    op, prompt, model, temperature, operation
+                )
+            except _FALLBACK_EXCEPTIONS as e:
+                fb_op = registry.get_fallback_llm_operation(
+                    operation, primary=op, default_model_type=default_model_type
+                )
+                if fb_op is None:
+                    raise
+                logger.warning(
+                    f"Primary LLM {op.model_name!r} failed for operation "
+                    f"{operation!r} ({e}); retrying with fallback LLM "
+                    f"{fb_op.model_name!r}"
+                )
+                # No explicit model override on the retry — it would repoint
+                # the fallback endpoint back at the (dead) primary model.
+                return await _generate_with_op(
+                    fb_op, prompt, None, temperature, operation
+                )
 
     # Fallback: use singleton client
     client = get_llm_client()
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None, lambda: client.generate(prompt, model, temperature)
-    )
+    try:
+        return await loop.run_in_executor(
+            None, lambda: client.generate(prompt, model, temperature)
+        )
+    except _FALLBACK_EXCEPTIONS as e:
+        fb_client = _create_fallback_client()
+        if fb_client is None:
+            raise
+        logger.warning(
+            f"Primary LLM failed ({e}); retrying with fallback LLM "
+            f"{fb_client.model!r}"
+        )
+        return await loop.run_in_executor(
+            None, lambda: fb_client.generate(prompt, None, temperature)
+        )
 
 
 async def async_chat_with_tools(
@@ -275,32 +388,114 @@ async def async_chat_with_tools(
     """Async wrapper for chat completion with tool calling.
 
     When ``operation`` is provided, parameters are resolved from config.
+    Unreachable-primary calls retry once against ``defaults.fallback_llm``
+    (see :func:`async_generate`).
     Tracing is handled automatically by the OTEL instrumentor.
     """
+
+    async def _chat_once(op, model_override):
+        client = op.get_client(is_async=True)
+        api_params = op.to_api_params()
+        if temperature is not None:
+            api_params["temperature"] = temperature
+        if model_override is not None:
+            api_params["model"] = model_override
+        api_params["messages"] = messages
+        if tools:
+            api_params["tools"] = tools
+        return await client.chat.completions.create(**api_params)
+
     if operation:
         registry = get_models_registry()
         if registry:
             op = registry.get_llm_operation(operation)
-            client = op.get_client(is_async=True)
-            api_params = op.to_api_params()
-            if temperature is not None:
-                api_params["temperature"] = temperature
-            if model is not None:
-                api_params["model"] = model
-            api_params["messages"] = messages
-            if tools:
-                api_params["tools"] = tools
-            return await client.chat.completions.create(**api_params)
+            try:
+                return await _chat_once(op, model)
+            except _FALLBACK_EXCEPTIONS as e:
+                fb_op = registry.get_fallback_llm_operation(operation, primary=op)
+                if fb_op is None:
+                    raise
+                logger.warning(
+                    f"Primary LLM {op.model_name!r} failed for operation "
+                    f"{operation!r} ({e}); retrying with fallback LLM "
+                    f"{fb_op.model_name!r}"
+                )
+                return await _chat_once(fb_op, None)
 
     # Fallback: use singleton client
     client = get_llm_client()
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None, lambda: client.chat_with_tools(messages, tools, model, temperature)
-    )
+    try:
+        return await loop.run_in_executor(
+            None, lambda: client.chat_with_tools(messages, tools, model, temperature)
+        )
+    except _FALLBACK_EXCEPTIONS as e:
+        fb_client = _create_fallback_client()
+        if fb_client is None:
+            raise
+        logger.warning(
+            f"Primary LLM failed ({e}); retrying with fallback LLM "
+            f"{fb_client.model!r}"
+        )
+        return await loop.run_in_executor(
+            None, lambda: fb_client.chat_with_tools(messages, tools, None, temperature)
+        )
 
 
 async def async_health_check() -> Dict:
     """Async LLM health check."""
     client = get_llm_client()
     return await client.health_check()
+
+
+async def _async_health_check_named_default(
+    defaults_key: str, label: str
+) -> Optional[Dict]:
+    """Health check for a SEPARATE LLM named by ``defaults[defaults_key]``.
+
+    Returns None when the key is unset or points at the same model as
+    ``defaults.llm`` (that model is already covered by :func:`async_health_check`).
+    """
+    registry = get_models_registry()
+    if not registry:
+        return None
+    name = registry.defaults.get(defaults_key)
+    if not name or name == registry.defaults.get("llm"):
+        return None
+    model_def = registry.get_by_name(name)
+    if not model_def:
+        return None
+
+    url = model_def.resolved_url()
+    result = {"base_url": url, "default_model": model_def.model_name}
+    if not model_def.api_key or not url or not model_def.model_name:
+        return {**result, "status": "⚠️ Configuration incomplete", "healthy": False}
+    try:
+        client = create_openai_client(
+            api_key=model_def.api_key, base_url=url, is_async=True
+        )
+        await asyncio.wait_for(client.models.list(), timeout=5.0)
+        return {**result, "status": "✅ Connected", "healthy": True}
+    except openai.AuthenticationError:
+        return {**result, "status": "❌ Auth Failed — check API key", "healthy": False}
+    except asyncio.TimeoutError:
+        return {**result, "status": "❌ Connection Timeout", "healthy": False}
+    except openai.APIConnectionError:
+        return {
+            **result,
+            "status": "❌ Connection Failed — service unreachable",
+            "healthy": False,
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"{label} health check failed: {e}")
+        return {**result, "status": f"❌ Error: {e}", "healthy": False}
+
+
+async def async_health_check_fast() -> Optional[Dict]:
+    """Health check for a SEPARATE fast LLM, or None if none is configured."""
+    return await _async_health_check_named_default("fast_llm", "Fast LLM")
+
+
+async def async_health_check_fallback() -> Optional[Dict]:
+    """Health check for a SEPARATE fallback LLM, or None if none is configured."""
+    return await _async_health_check_named_default("fallback_llm", "Fallback LLM")

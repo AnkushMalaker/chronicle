@@ -1,7 +1,8 @@
 import React from 'react';
-import { View, Text, FlatList, TouchableOpacity, StyleSheet, SafeAreaView } from 'react-native';
+import { View, Text, FlatList, TouchableOpacity, StyleSheet, SafeAreaView, Share, Platform, Alert } from 'react-native';
 import { useTheme, ThemeColors } from '@/theme';
 import { useConnectionLog, ConnectionEvent, ConnectionEventType } from '@/contexts/ConnectionLogContext';
+import { getLogPath, readLog, clearLog } from '@/utils/logger';
 
 const EVENT_BADGE_COLORS: Record<ConnectionEventType, string> = {
   scan_start: '#007AFF',
@@ -19,6 +20,13 @@ const EVENT_BADGE_COLORS: Record<ConnectionEventType, string> = {
   reconnect_attempt: '#FF9500',
   reconnect_backoff: '#FF9500',
   bt_state_change: '#5856D6',
+  ws_connecting: '#FF9500',
+  ws_open: '#34C759',
+  ws_close: '#FF3B30',
+  ws_error: '#FF3B30',
+  ws_reconnect: '#FF9500',
+  ws_reauth: '#AF52DE',
+  net_change: '#5856D6',
 };
 
 function formatTime(date: Date): string {
@@ -87,8 +95,44 @@ export default function DiagnosticsScreen() {
   const { colors } = useTheme();
   const { events, clearEvents } = useConnectionLog();
 
+  const shareLogFile = async () => {
+    try {
+      const contents = await readLog();
+      if (!contents) {
+        Alert.alert('No log yet', 'The crash log file is empty.');
+        return;
+      }
+      if (Platform.OS === 'ios') {
+        await Share.share({ url: `file://${getLogPath()}`, message: contents.slice(-4000) });
+      } else {
+        await Share.share({ message: contents.slice(-4000) });
+      }
+    } catch (err) {
+      Alert.alert('Share failed', String(err));
+    }
+  };
+
+  const wipeLogFile = async () => {
+    Alert.alert('Clear crash log?', 'Removes the on-device crash log file.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Clear', style: 'destructive', onPress: async () => { await clearLog(); } },
+    ]);
+  };
+
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
+      <View style={[screenStyles.logBar, { borderBottomColor: colors.separator, backgroundColor: colors.card }]}>
+        <Text style={[screenStyles.logBarTitle, { color: colors.text }]}>Crash Log</Text>
+        <Text style={[screenStyles.logBarPath, { color: colors.textTertiary }]} numberOfLines={1}>{getLogPath()}</Text>
+        <View style={screenStyles.logBarRow}>
+          <TouchableOpacity onPress={shareLogFile} style={[screenStyles.logBtn, { backgroundColor: colors.inputBackground }]}>
+            <Text style={[screenStyles.logBtnText, { color: colors.text }]}>Share Log File</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={wipeLogFile} style={[screenStyles.logBtn, { backgroundColor: colors.inputBackground }]}>
+            <Text style={[screenStyles.logBtnText, { color: colors.danger }]}>Clear File</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
       <View style={[screenStyles.header, { borderBottomColor: colors.separator }]}>
         <Text style={[screenStyles.title, { color: colors.text }]}>Connection Log ({events.length})</Text>
         <TouchableOpacity onPress={clearEvents} style={[screenStyles.clearButton, { backgroundColor: colors.inputBackground }]}>
@@ -143,5 +187,35 @@ const screenStyles = StyleSheet.create({
   emptyText: {
     fontSize: 15,
     textAlign: 'center',
+  },
+  logBar: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+  },
+  logBarTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  logBarPath: {
+    fontSize: 10,
+    fontFamily: 'monospace',
+    marginTop: 2,
+    marginBottom: 8,
+  },
+  logBarRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  logBtn: {
+    flex: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 6,
+    alignItems: 'center',
+  },
+  logBtnText: {
+    fontSize: 13,
+    fontWeight: '500',
   },
 });

@@ -1,0 +1,15 @@
+*
+!app.py
+!consumer.py
+!detector.py
+!hubert_detector.py
+!samples.py
+!verifier.py
+!pyproject.toml
+!README.md
+!models/
+!models/**
+!vendor/
+!vendor/**
+!tones/
+!tones/**

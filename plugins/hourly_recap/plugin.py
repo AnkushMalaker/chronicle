@@ -7,16 +7,20 @@ generates a consolidated LLM recap, and emails it to the user.
 
 import html
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
+
+from bson import ObjectId
+from email_summarizer.email_service import SMTPEmailService
 
 from advanced_omi_backend.database import get_database
 from advanced_omi_backend.llm_client import async_generate
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
 from advanced_omi_backend.plugins.events import PluginEvent
+from advanced_omi_backend.prompt_registry import get_prompt_registry
 from advanced_omi_backend.utils.logging_utils import mask_dict
-from email_summarizer.email_service import SMTPEmailService
 
 logger = logging.getLogger(__name__)
 
@@ -115,8 +119,6 @@ class HourlyRecapPlugin(BasePlugin):
 
     async def health_check(self) -> dict:
         """Test SMTP connectivity using the initialized email service."""
-        import time
-
         if not self.email_service:
             return {"ok": False, "message": "Email service not initialized"}
 
@@ -266,8 +268,6 @@ class HourlyRecapPlugin(BasePlugin):
     async def _generate_recap(self, conversations_block: str) -> str:
         """Generate consolidated recap via LLM."""
         try:
-            from advanced_omi_backend.prompt_registry import get_prompt_registry
-
             registry = get_prompt_registry()
             instruction = await registry.get_prompt(
                 "plugin.hourly_recap.summary",
@@ -292,8 +292,6 @@ class HourlyRecapPlugin(BasePlugin):
     async def _get_user_email(self, user_id: str) -> Optional[str]:
         """Get notification email for a user."""
         try:
-            from bson import ObjectId
-
             user = await self.db["users"].find_one({"_id": ObjectId(user_id)})
             if not user:
                 logger.warning(f"User {user_id} not found")
@@ -469,8 +467,6 @@ https://github.com/chronicle-ai/chronicle
     @staticmethod
     async def test_connection(config: Dict[str, Any]) -> Dict[str, Any]:
         """Test SMTP connection with provided configuration."""
-        import time
-
         try:
             required_fields = [
                 "smtp_host",

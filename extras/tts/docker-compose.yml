@@ -1,0 +1,151 @@
+# TTS Services Docker Compose
+# Provider-based architecture: Run ONE provider at a time with configurable models
+#
+# Usage:
+#   # Start TADA provider (default: tada-1b English)
+#   docker compose up tada-tts -d
+#
+#   # Start TADA multilingual
+#   TTS_MODEL=HumeAI/tada-3b-ml docker compose up tada-tts -d
+#
+#   # Start Fish Speech provider
+#   docker compose up fish-tts -d
+
+services:
+  # ============================================================================
+  # TADA Provider (HumeAI TADA - zero-shot voice cloning TTS)
+  # ============================================================================
+  tada-tts:
+    build:
+      context: .
+      dockerfile: providers/tada/Dockerfile
+      args:
+        PYTORCH_CUDA_VERSION: ${PYTORCH_CUDA_VERSION:-cu126}
+    image: ${CHRONICLE_REGISTRY:-}chronicle-tts-tada:${CHRONICLE_TAG:-latest}
+    ports:
+      - "${TTS_PORT:-8770}:8770"
+    volumes:
+      - ./model_cache:/models
+      - ./reference_audio:/app/reference_audio
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
+      - TTS_MODEL=${TTS_MODEL:-HumeAI/tada-1b}
+      - TTS_LANGUAGE=${TTS_LANGUAGE:-}
+    restart: unless-stopped
+
+  # ============================================================================
+  # Fish Speech Provider (Fish Audio - multilingual with emotion control)
+  # ============================================================================
+  fish-tts:
+    build:
+      context: .
+      dockerfile: providers/fish_speech/Dockerfile
+      args:
+        PYTORCH_CUDA_VERSION: ${PYTORCH_CUDA_VERSION:-cu126}
+    image: ${CHRONICLE_REGISTRY:-}chronicle-tts-fish:${CHRONICLE_TAG:-latest}
+    ports:
+      - "${TTS_PORT:-8770}:8770"
+    volumes:
+      - ./model_cache:/models
+      - ./reference_audio:/app/reference_audio
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
+      - TTS_MODEL=${TTS_MODEL:-fishaudio/s2-pro}
+      - TTS_COMPILE=${TTS_COMPILE:-false}
+      - TTS_HALF=${TTS_HALF:-true}
+    restart: unless-stopped
+
+  # ============================================================================
+  # KittenTTS Provider (ultra-light ~25MB CPU ONNX TTS — no GPU)
+  # ============================================================================
+  # Uses dedicated KITTEN_TTS_* env vars (not the shared TTS_MODEL) so the heavy
+  # Fish/TADA settings in .env don't bleed into this CPU service.
+  kittentts-tts:
+    build:
+      context: .
+      dockerfile: providers/kittentts/Dockerfile
+    image: ${CHRONICLE_REGISTRY:-}chronicle-tts-kittentts:${CHRONICLE_TAG:-latest}
+    ports:
+      - "${KITTEN_TTS_PORT:-8770}:8770"
+    volumes:
+      - ./model_cache:/models
+    environment:
+      - HF_HOME=/models
+      - TTS_MODEL=${KITTEN_TTS_MODEL:-KittenML/kitten-tts-mini-0.8}
+      - TTS_VOICE=${KITTEN_TTS_VOICE:-Jasper}
+      - TTS_SPEED=${KITTEN_TTS_SPEED:-1.0}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8770/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    restart: unless-stopped
+
+  # ============================================================================
+  # Kokoro Provider (Kokoro-82M — low-VRAM GPU/CPU TTS with preset voices)
+  # ============================================================================
+  # ~82M params, fits comfortably under ~1GB VRAM. Fixed preset voices (no
+  # cloning). Uses dedicated KOKORO_* env vars so the heavy Fish/TADA settings
+  # in .env don't bleed into it.
+  kokoro-tts:
+    build:
+      context: .
+      dockerfile: providers/kokoro/Dockerfile
+      args:
+        PYTORCH_CUDA_VERSION: ${PYTORCH_CUDA_VERSION:-cu126}
+    image: ${CHRONICLE_REGISTRY:-}chronicle-tts-kokoro:${CHRONICLE_TAG:-latest}
+    ports:
+      - "${KOKORO_TTS_PORT:-8770}:8770"
+    volumes:
+      - ./model_cache:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
+      - TTS_MODEL=${KOKORO_TTS_MODEL:-hexgrad/Kokoro-82M}
+      - TTS_VOICE=${KOKORO_TTS_VOICE:-af_heart}
+      - TTS_LANG_CODE=${KOKORO_TTS_LANG_CODE:-a}
+      - TTS_SPEED=${KOKORO_TTS_SPEED:-1.0}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8770/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    restart: unless-stopped
+
+  # Edge agent sidecar — advertises this service on the Tailnet
+  edge-agent:
+    build:
+      context: ../../edge
+    network_mode: host
+    environment:
+      - ADVERTISE=chronicle-tts:8770
+    volumes:
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock:ro
+    restart: unless-stopped
+    profiles:
+      - edge

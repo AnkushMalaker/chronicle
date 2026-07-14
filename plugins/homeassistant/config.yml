@@ -9,7 +9,7 @@ ha_url: ${HA_URL}
 ha_token: ${HA_TOKEN}
 
 # Command configuration
-wake_word: ${HA_WAKE_WORD:-vivi}
+wake_word: ${HA_WAKE_WORD:-hermes}
 timeout: ${HA_TIMEOUT:-30}
 
 # Button action mappings

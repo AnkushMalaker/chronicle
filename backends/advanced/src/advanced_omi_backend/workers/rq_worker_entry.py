@@ -7,7 +7,6 @@ ensuring that application-level logs from job functions are visible.
 """
 
 import logging
-import os
 import sys
 
 # Configure logging BEFORE importing any application modules
@@ -18,6 +17,17 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# Catch-all: record every ERROR/CRITICAL log in this worker as a system event
+# (enqueue-only; the FastAPI-process drain persists it).
+try:
+    from advanced_omi_backend.services.observability.log_handler import (
+        install_system_event_log_handler,
+    )
+
+    install_system_event_log_handler()
+except Exception:  # noqa: BLE001 — never block worker startup on observability
+    pass
 
 
 def main():
@@ -30,11 +40,11 @@ def main():
     except Exception:
         pass  # Optional — don't block workers
 
-    from redis import Redis
+    # Kept local (not hoisted): these must load AFTER init_otel() above, which
+    # patches OpenAI/instrumentation before any application module is imported.
     from rq import Worker
 
-    # Get Redis URL from environment
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    from advanced_omi_backend.redis_factory import REDIS_URL, create_sync_redis
 
     # Get queue names from command line arguments
     queue_names = (
@@ -42,13 +52,23 @@ def main():
     )
 
     logger.info(f"🚀 Starting RQ worker for queues: {', '.join(queue_names)}")
-    logger.info(f"📡 Redis URL: {redis_url}")
+    logger.info(f"📡 Redis URL: {REDIS_URL}")
 
     # Create Redis connection
-    redis_conn = Redis.from_url(redis_url)
+    redis_conn = create_sync_redis()
 
-    # Create and start worker
-    worker = Worker(queue_names, connection=redis_conn, log_job_description=True)
+    # Create and start worker.
+    # maintenance_interval (default 600s) is how often the worker reaps abandoned jobs
+    # (worker-died) from StartedJobRegistry → fires their on_failure callback + retries
+    # / promotes dependents. Lowered to 120s so the event-driven recovery of a killed
+    # job kicks in within ~2 min instead of ~10 (any process viewing the Jobs page also
+    # triggers a reap immediately).
+    worker = Worker(
+        queue_names,
+        connection=redis_conn,
+        log_job_description=True,
+        maintenance_interval=120,
+    )
 
     logger.info("✅ RQ worker ready")
 

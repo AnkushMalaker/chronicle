@@ -4,7 +4,7 @@ Pydantic response models for ASR services.
 These models provide a standardized API response format across all providers.
 """
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -59,10 +59,17 @@ class TranscriptionResult(BaseModel):
     duration: Optional[float] = Field(
         default=None, description="Audio duration in seconds"
     )
+    metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Provider-specific extras (e.g. reasoning trace from think models, "
+            "raw model output). Not consumed by the main pipeline."
+        ),
+    )
 
     def to_dict(self) -> dict:
         """Convert to dictionary, excluding None values."""
-        result = {
+        result: Dict[str, Any] = {
             "text": self.text,
             "words": [w.model_dump() for w in self.words],
             "segments": [s.model_dump() for s in self.segments],
@@ -73,6 +80,8 @@ class TranscriptionResult(BaseModel):
             result["language"] = self.language
         if self.duration is not None:
             result["duration"] = self.duration
+        if self.metadata is not None:
+            result["metadata"] = self.metadata
         return result
 
 

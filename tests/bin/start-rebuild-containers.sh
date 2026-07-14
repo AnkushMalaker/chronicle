@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$(dirname "$0")/_engine.sh"
 # tests/bin/start-rebuild-containers.sh
 # Stop, rebuild, and start containers (full sequence for code changes)
 
@@ -27,11 +28,11 @@ fi
 
 # Stop containers
 echo "🛑 Stopping containers..."
-docker compose -f docker-compose-test.yml stop
+$COMPOSE -f docker-compose-test.yml stop
 
 # Rebuild and start
 echo "🏗️  Rebuilding images..."
-docker compose -f docker-compose-test.yml up -d --build
+$COMPOSE -f docker-compose-test.yml up -d --build
 
 # Flush Redis to clear stale keys from previous test runs.
 # Redis uses appendonly persistence with a bind mount, so data survives
@@ -39,7 +40,7 @@ docker compose -f docker-compose-test.yml up -d --build
 # failures when the audio persistence job finds a Redis key pointing to
 # a MongoDB document that no longer exists.
 echo "🗑️  Flushing Redis for clean test state..."
-docker compose -f docker-compose-test.yml exec -T redis-test redis-cli FLUSHALL > /dev/null 2>&1 || true
+$COMPOSE -f docker-compose-test.yml exec -T redis-test redis-cli FLUSHALL > /dev/null 2>&1 || true
 
 # Wait for services
 echo "⏳ Waiting for services to be ready..."

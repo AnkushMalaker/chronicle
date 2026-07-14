@@ -28,11 +28,6 @@ wyoming = [
 ]
 
 # CUDA versions for PyTorch
-cu121 = [
-  "torch>=2.3",
-  "torchaudio>=2.3",
-]
-
 cu126 = [
   "torch>=2.3",
   "torchaudio>=2.3",
@@ -63,9 +58,12 @@ conflicts = [
     { group = "vibevoice" },
     { group = "qwen3-asr" },
     { group = "qwen3-asr-full" },
+    { group = "gemma4" },
+    { group = "af-next" },
+    { group = "granite" },
+    { group = "parakeet" },
   ],
   [
-    { extra = "cu121" },
     { extra = "cu126" },
     { extra = "cu128" },
     { extra = "strixhalo" },
@@ -74,20 +72,13 @@ conflicts = [
 
 [tool.uv.sources]
 torch = [
-    { index = "pytorch-cu121", extra = "cu121" },
     { index = "pytorch-cu126", extra = "cu126" },
     { index = "pytorch-cu128", extra = "cu128" },
 ]
 torchaudio = [
-    { index = "pytorch-cu121", extra = "cu121" },
     { index = "pytorch-cu126", extra = "cu126" },
     { index = "pytorch-cu128", extra = "cu128" },
 ]
-
-[[tool.uv.index]]
-name = "pytorch-cu121"
-url = "https://download.pytorch.org/whl/cu121"
-explicit = true
 
 [[tool.uv.index]]
 name = "pytorch-cu126"
@@ -129,17 +120,59 @@ nemo-rocm = [
 ]
 
 vibevoice = [
-    "transformers>=4.51.0,<5.0.0",
+    "transformers>=5.3.0,<6.0.0",
     "accelerate>=0.30.0",
-    "diffusers>=0.30.0",
+    "librosa>=0.10.0",
     "torch>=2.3",
     "torchaudio>=2.3",
-    "einops>=0.7.0",
-    "librosa>=0.10.0",
-    "bitsandbytes>=0.43.0",
+    "bitsandbytes>=0.46.1",
     "peft>=0.17.0",
     "omegaconf>=2.3.0",
     "wandb>=0.18.0",
+]
+
+gemma4 = [
+    # 5.10+ ships Gemma4AssistantForCausalLM (MTP drafter) and fixes the 5.5.0
+    # audio-conditioned use_cache logits bug that speculative decoding depends on.
+    "transformers>=5.10.0,<6.0.0",
+    "accelerate>=0.30.0",
+    "librosa>=0.10.0",
+    "torch>=2.3",
+    "torchaudio>=2.3",
+    "torchvision>=0.18",
+    "pillow>=10.0.0",
+    "soundfile>=0.12",
+    # 4-bit/8-bit quantization for running Gemma 4 on smaller GPUs.
+    "bitsandbytes>=0.46.1",
+    # WebSocket backend for the /stream streaming endpoint (uvicorn needs a ws impl).
+    "websockets>=13.0",
+]
+
+# NVIDIA Audio Flamingo Next (Think variant by default).
+# License: NVIDIA OneWay Noncommercial — research use only.
+# AF-Next's `audioflamingonext` model_type is not in upstream transformers yet,
+# so we install from the in-flight PR fork referenced by the model card.
+# Switch to a stable transformers version once the PR lands.
+af-next = [
+    "transformers @ git+https://github.com/lashahub/transformers.git@205f8c852db63e03c4d05a0e28ceee25f80806da",
+    "accelerate>=0.30.0",
+    "librosa>=0.10.0",
+    "torch>=2.3",
+    "torchaudio>=2.3",
+    "soundfile>=0.12",
+]
+
+# IBM Granite Speech (Granite LLM backbone + conformer speech encoder + LoRA).
+# Granite Speech 4.1 requires transformers>=5.8; the built-in LoRA adapter is
+# applied via peft at load time.
+granite = [
+    "transformers>=5.8.0,<6.0.0",
+    "accelerate>=0.30.0",
+    "peft>=0.17.0",
+    "librosa>=0.10.0",
+    "soundfile>=0.12",
+    "torch>=2.3",
+    "torchaudio>=2.3",
 ]
 
 qwen3-asr = [
@@ -180,4 +213,4 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["common", "providers", "providers.faster_whisper", "providers.transformers", "providers.nemo", "providers.vibevoice", "providers.qwen3_asr"]
+packages = ["common", "providers", "providers.faster_whisper", "providers.transformers", "providers.nemo", "providers.vibevoice", "providers.qwen3_asr", "providers.gemma4", "providers.af_next", "providers.granite"]

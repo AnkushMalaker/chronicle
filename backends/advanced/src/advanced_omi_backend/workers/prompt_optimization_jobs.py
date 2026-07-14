@@ -16,7 +16,13 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from advanced_omi_backend.llm_client import async_generate
+from advanced_omi_backend.models.annotation import (
+    Annotation,
+    AnnotationStatus,
+    AnnotationType,
+)
 from advanced_omi_backend.prompt_optimizer import ANNOTATION_PROMPT_MAP, get_user_prompt
+from advanced_omi_backend.prompt_registry import get_prompt_registry
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +47,6 @@ async def run_prompt_optimization_job() -> dict:
     Returns:
         Summary dict with counts of users/annotations processed.
     """
-    from advanced_omi_backend.models.annotation import (
-        Annotation,
-        AnnotationStatus,
-        AnnotationType,
-    )
-    from advanced_omi_backend.prompt_registry import get_prompt_registry
-
     registry = get_prompt_registry()
     langfuse_client = registry._get_client()
 

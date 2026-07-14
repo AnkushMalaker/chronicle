@@ -16,6 +16,9 @@ from simple_speaker_recognition.api.core.utils import (
     secure_temp_file,
     validate_confidence,
 )
+from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
+from simple_speaker_recognition.core.backend_client import BackendClient
+from simple_speaker_recognition.core.cluster_identify import assign_clusters_to_speakers
 from simple_speaker_recognition.core.models import (
     DiarizeAndIdentifyRequest,
     IdentifyResponse,
@@ -36,6 +39,8 @@ log = logging.getLogger("speaker_service")
 # Dependency functions - will be resolved during integration
 async def get_db():
     """Get speaker database dependency."""
+    # Lazy import: `service` imports this routers package at module load time,
+    # so importing it at module level here would create a circular import.
     from .. import service
 
     return await service.get_db()
@@ -43,6 +48,8 @@ async def get_db():
 
 def get_audio_backend():
     """Get audio backend."""
+    # Lazy import: `service` imports this routers package at module load time,
+    # so importing it at module level here would create a circular import.
     from .. import service
 
     return service.audio_backend
@@ -63,7 +70,7 @@ class AnalyzeSegmentsRequest(BaseModel):
     segments: List[AnnotationSegment]
     method: str = "umap"
     cluster_method: str = "dbscan"
-    similarity_threshold: float = 0.8
+    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD
 
 
 class CombinedAnalysisRequest(BaseModel):
@@ -73,7 +80,7 @@ class CombinedAnalysisRequest(BaseModel):
     expected_speakers: int = 2
     method: str = "umap"
     cluster_method: str = "dbscan"
-    similarity_threshold: float = 0.8
+    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD
 
 
 @router.post("/diarize-and-identify")
@@ -173,8 +180,6 @@ async def diarize_and_identify(
         tmp_path = Path(tmp.name)
 
     # Save audio to debug directory for analysis
-    from datetime import datetime
-
     debug_dir = Path("/app/debug")
     if debug_dir.exists():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -385,7 +390,7 @@ async def diarize_identify_match(
         default=0.5, description="Minimum segment duration in seconds"
     ),
     similarity_threshold: float = Form(
-        default=0.45, description="Speaker similarity threshold"
+        default=DEFAULT_SIMILARITY_THRESHOLD, description="Speaker similarity threshold"
     ),
     min_speakers: Optional[int] = Form(
         default=None, description="Minimum number of speakers to detect"
@@ -400,6 +405,21 @@ async def diarize_identify_match(
     min_duration_off: float = Form(
         default=1.5,
         description="Minimum silence duration (seconds) before treating it as a segment boundary",
+    ),
+    reconciliation_threshold: float = Form(
+        default=0.4,
+        description="Minimum cosine similarity to merge two chunk-local speaker "
+        "centroids into one global speaker during cross-chunk reconciliation",
+    ),
+    identify_margin: float = Form(
+        default=0.1,
+        description="Minimum cosine gap between the best and runner-up enrolled speaker "
+        "for a cluster to be confidently identified (open-set ambiguity guard)",
+    ),
+    exclusive: bool = Form(
+        default=True,
+        description="Prevent one enrolled speaker from being assigned to two different "
+        "diarized speakers in the same conversation",
     ),
     db: UnifiedSpeakerDB = Depends(get_db),
 ):
@@ -486,6 +506,8 @@ async def diarize_identify_match(
         )
 
     # Get settings for chunking configuration
+    # Lazy import: api.service imports this routers package at module load
+    # time, so importing it at module level here would create a circular import.
     from simple_speaker_recognition.api.service import auth as settings
 
     max_diarize_duration = settings.max_diarize_duration  # Default 60 seconds
@@ -494,8 +516,6 @@ async def diarize_identify_match(
 
     # Mode 1: Conversation mode - fetch audio from backend
     if conversation_id:
-        from simple_speaker_recognition.core.backend_client import BackendClient
-
         backend_client = BackendClient(settings.backend_api_url)
         try:
             # Get conversation metadata
@@ -540,8 +560,6 @@ async def diarize_identify_match(
             tmp_path = Path(tmp_file.name)
 
         # Get audio duration for validation
-        from simple_speaker_recognition.utils.audio_processing import get_audio_info
-
         audio_info = get_audio_info(str(tmp_path))
         total_duration = audio_info.get("duration_seconds", 0)
 
@@ -572,6 +590,7 @@ async def diarize_identify_match(
             min_duration_off=min_duration_off,
             max_duration=max_diarize_duration,
             chunk_overlap=diarize_chunk_overlap,
+            reconciliation_threshold=reconciliation_threshold,
         )
 
         # Apply minimum duration filter
@@ -585,60 +604,66 @@ async def diarize_identify_match(
                     f"Filtered out {original_count - len(diarization_segments)} segments shorter than {min_duration}s"
                 )
 
-        # Step 2: Identify speakers for each segment
+        # Step 2: Identify speakers — ONE decision per diarized speaker, not per
+        # segment. We pool a single centroid embedding per (globally-reconciled)
+        # speaker label and identify that against the gallery. This is far more robust
+        # than per-segment argmax: short noisy segments no longer flip identities or
+        # each spawn their own "Unknown Speaker N". (cluster-then-identify)
+        label_assignment: Dict[str, Dict] = {}
+        label_centroids: Dict[str, Any] = {}
+        if user_id:
+            # Pool one centroid per diarized speaker from its longest segments, then
+            # greedily assign each to an enrolled speaker (threshold + margin + exclusive).
+            label_centroids = await audio_backend._embed_local_speakers(
+                tmp_path, diarization_segments
+            )
+            label_assignment = await assign_clusters_to_speakers(
+                db,
+                label_centroids,
+                user_id,
+                similarity_threshold,
+                identify_margin=identify_margin,
+                exclusive=exclusive,
+            )
+            for label, a in label_assignment.items():
+                log.info(
+                    f"Cluster {label} -> {a['name']} (confidence {a['confidence']:.3f})"
+                )
+
+        # Step 3: Build per-segment output, applying each cluster's single decision and
+        # matching transcript words to segments by word-midpoint overlap.
         enhanced_segments = []
         for segment in diarization_segments:
             speaker_label = segment["speaker"]
             start_time = segment["start"]
             end_time = segment["end"]
 
-            # Extract audio for this segment using correct method
-            segment_audio = audio_backend.load_wave(tmp_path, start_time, end_time)
-
-            # Check if we can identify this speaker
-            speaker_info = None
-            confidence = 0.0
-            found = False
-            if user_id:
-                # Generate embedding for this segment
-                emb = await audio_backend.async_embed(segment_audio)
-
-                # Identify speaker using the database
-                found, speaker_info, confidence = await db.identify(
-                    emb, user_id=user_id
-                )
-
-            # Step 3: Match transcript words to this segment
             segment_words = []
             for word in words:
                 word_start = word.get("start", 0.0)
                 word_end = word.get("end", 0.0)
                 word_mid = (word_start + word_end) / 2
-
-                # Word belongs to this segment if its midpoint is within range
                 if start_time <= word_mid <= end_time:
                     segment_words.append(word)  # Keep full word object with timestamps
 
-            # Create segment with matched text
             segment_text = " ".join(w.get("word", "") for w in segment_words).strip()
 
-            if speaker_info and confidence >= similarity_threshold:
-                # Identified speaker
+            assignment = label_assignment.get(speaker_label)
+            if assignment:
                 enhanced_segments.append(
                     {
                         "text": segment_text,
                         "start": round(start_time, 3),
                         "end": round(end_time, 3),
                         "speaker": speaker_label,
-                        "identified_as": speaker_info["name"],
-                        "speaker_id": speaker_info["id"],
-                        "confidence": round(float(confidence), 3),
+                        "identified_as": assignment["name"],
+                        "speaker_id": assignment["id"],
+                        "confidence": round(float(assignment["confidence"]), 3),
                         "status": "identified",
                         "words": segment_words,  # Include word-level timestamps
                     }
                 )
             else:
-                # Unknown speaker
                 enhanced_segments.append(
                     {
                         "text": segment_text,
@@ -647,9 +672,7 @@ async def diarize_identify_match(
                         "speaker": speaker_label,
                         "identified_as": None,
                         "speaker_id": None,
-                        "confidence": (
-                            round(float(confidence), 3) if confidence else 0.0
-                        ),
+                        "confidence": 0.0,
                         "status": "unknown",
                         "words": segment_words,  # Include word-level timestamps
                     }
@@ -672,6 +695,13 @@ async def diarize_identify_match(
                 "similarity_threshold": similarity_threshold,
                 "processing_mode": "diarize_identify_match",
             },
+            # Per-diarized-speaker pooled centroids — stored by the backend so a future
+            # "reprocess impact" check can re-identify against the updated gallery without
+            # re-embedding (see /v1/reidentify-clusters).
+            "cluster_centroids": {
+                label: np.asarray(c, dtype=np.float32).tolist()
+                for label, c in label_centroids.items()
+            },
         }
 
         log.info(
@@ -682,6 +712,120 @@ async def diarize_identify_match(
 
     finally:
         # Clean up temporary file
+        tmp_path.unlink(missing_ok=True)
+
+
+class ReidentifyClustersRequest(BaseModel):
+    """Replay cluster→speaker assignment against the current gallery (no audio)."""
+
+    clusters: Dict[str, List[float]]
+    user_id: int
+    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD
+    identify_margin: float = 0.1
+    exclusive: bool = True
+
+
+@router.post("/v1/reidentify-clusters")
+async def reidentify_clusters(
+    req: ReidentifyClustersRequest, db: UnifiedSpeakerDB = Depends(get_db)
+):
+    """Re-identify stored per-cluster centroids against the CURRENT gallery.
+
+    Pure vector math (no GPU, no audio) — powers the "reprocess impact" check: feed a
+    past conversation's stored cluster centroids and get what the speaker labels would
+    be now, after voiceprint cleanup. Returns ``{label: {name, id, confidence}}`` for
+    clusters that resolve to an enrolled speaker.
+    """
+    centroids = {
+        label: np.asarray(vec, dtype=np.float32) for label, vec in req.clusters.items()
+    }
+    assignments = await assign_clusters_to_speakers(
+        db,
+        centroids,
+        req.user_id,
+        req.similarity_threshold,
+        identify_margin=req.identify_margin,
+        exclusive=req.exclusive,
+    )
+    return {"assignments": assignments}
+
+
+@router.post("/v1/embed-clusters")
+async def embed_clusters(
+    segments_data: str = Form(
+        ..., description='JSON list of {"speaker","start","end"} diarized segments'
+    ),
+    conversation_id: Optional[str] = Form(
+        None, description="Fetch audio from the backend for this conversation"
+    ),
+    backend_token: Optional[str] = Form(
+        None, description="JWT for backend audio fetch (required with conversation_id)"
+    ),
+    file: UploadFile = File(None, description="Or upload the audio directly"),
+):
+    """Pool one centroid per diarized speaker for an EXISTING segmentation.
+
+    Used by the one-time backlog backfill: it embeds a past conversation's clusters from
+    its already-stored segment boundaries (no re-diarization), so the stored centroids
+    match what production identification used. Returns ``{label: centroid}``.
+    """
+    audio_backend = get_audio_backend()
+    if not audio_backend:
+        raise HTTPException(503, "Audio backend not initialized")
+    if not conversation_id and not file:
+        raise HTTPException(
+            400, "Provide either conversation_id+backend_token or a file"
+        )
+    if conversation_id and not backend_token:
+        raise HTTPException(400, "backend_token required with conversation_id")
+
+    try:
+        raw_segments = json.loads(segments_data)
+    except json.JSONDecodeError as e:
+        raise HTTPException(400, f"Invalid segments_data JSON: {e}") from e
+
+    diar_segments = [
+        {
+            "speaker": s.get("speaker") or s.get("label"),
+            "start": float(s["start"]),
+            "end": float(s["end"]),
+        }
+        for s in raw_segments
+        if (s.get("speaker") or s.get("label")) is not None
+    ]
+    if not diar_segments:
+        raise HTTPException(400, "No usable segments (need speaker + start + end)")
+
+    if conversation_id:
+        # Lazy import: api.service imports this routers package at module load
+        # time, so importing it at module level here would create a circular import.
+        from simple_speaker_recognition.api.service import auth as settings
+
+        backend_client = BackendClient(settings.backend_api_url)
+        try:
+            total = max(s["end"] for s in diar_segments)
+            wav_bytes = await backend_client.get_audio_segment(
+                conversation_id, backend_token, start=0.0, duration=total
+            )
+        finally:
+            await backend_client.close()
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+            tmp_file.write(wav_bytes)
+            tmp_path = Path(tmp_file.name)
+    else:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+            tmp_file.write(await file.read())
+            tmp_path = Path(tmp_file.name)
+
+    try:
+        centroids = await audio_backend._embed_local_speakers(tmp_path, diar_segments)
+        return {
+            "clusters": {
+                label: np.asarray(c, dtype=np.float32).tolist()
+                for label, c in centroids.items()
+            }
+        }
+    finally:
         tmp_path.unlink(missing_ok=True)
 
 
@@ -882,7 +1026,9 @@ async def analyze_annotation_segments(
     segments: str = Form(..., description="JSON string of segments to analyze"),
     method: str = Form(default="umap", description="Dimensionality reduction method"),
     cluster_method: str = Form(default="dbscan", description="Clustering method"),
-    similarity_threshold: float = Form(default=0.8, description="Similarity threshold"),
+    similarity_threshold: float = Form(
+        default=DEFAULT_SIMILARITY_THRESHOLD, description="Similarity threshold"
+    ),
     db: UnifiedSpeakerDB = Depends(get_db),
 ):
     """
@@ -891,8 +1037,6 @@ async def analyze_annotation_segments(
     This endpoint extracts embeddings from specific segments in an audio file
     and performs clustering analysis to help visualize speaker separation.
     """
-    import json
-
     # Parse segments JSON
     try:
         segments_data = json.loads(segments)
@@ -1029,7 +1173,9 @@ async def analyze_segments_with_enrolled_speakers(
     ),
     method: str = Form(default="umap", description="Dimensionality reduction method"),
     cluster_method: str = Form(default="dbscan", description="Clustering method"),
-    similarity_threshold: float = Form(default=0.8, description="Similarity threshold"),
+    similarity_threshold: float = Form(
+        default=DEFAULT_SIMILARITY_THRESHOLD, description="Similarity threshold"
+    ),
     db: UnifiedSpeakerDB = Depends(get_db),
 ):
     """
@@ -1041,8 +1187,6 @@ async def analyze_segments_with_enrolled_speakers(
     3. Combines both in unified visualization
     4. Suggests optimal threshold based on separation
     """
-    import json
-
     # Parse segments JSON
     try:
         segments_data = json.loads(segments)

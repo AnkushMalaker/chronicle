@@ -6,7 +6,7 @@ Auto-cleanup is controlled via admin API settings (stored in /app/data/cleanup_c
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from advanced_omi_backend.config import CleanupSettings, get_cleanup_settings
@@ -37,7 +37,7 @@ async def purge_old_deleted_conversations(
         settings_dict = get_cleanup_settings()
         retention_days = settings_dict["retention_days"]
 
-    cutoff_date = datetime.utcnow() - timedelta(days=retention_days)
+    cutoff_date = datetime.now(timezone.utc) - timedelta(days=retention_days)
 
     logger.info(
         f"{'[DRY RUN] ' if dry_run else ''}Purging conversations deleted before {cutoff_date.isoformat()}"
@@ -135,6 +135,8 @@ def schedule_cleanup_job(retention_days: Optional[int] = None) -> Optional[str]:
         return None
 
     try:
+        # Lazy import: circular dependency with queue_controller (the workers
+        # package __init__ imports queue_controller, which lazily imports workers).
         from advanced_omi_backend.controllers.queue_controller import get_queue
 
         if retention_days is None:

@@ -25,8 +25,6 @@ services:
     environment:
       # Override with test-specific settings
       - MONGODB_URI=mongodb://mongo-test:27017/test_db
-      - QDRANT_BASE_URL=qdrant-test
-      - QDRANT_PORT=6333
       - REDIS_URL=redis://redis-test:6379/0
       - DEBUG_DIR=/app/debug  # Fixed: match plugin database mount path
       # Test configuration file
@@ -34,6 +32,7 @@ services:
       # Import API keys from environment
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SMALLEST_API_KEY=${SMALLEST_API_KEY}
       - GROQ_API_KEY=${GROQ_API_KEY}
       # Authentication (test-specific)
       - AUTH_SECRET_KEY=test-jwt-signing-key-for-integration-tests
@@ -44,8 +43,6 @@ services:
       - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
       # Memory provider configuration
       - MEMORY_PROVIDER=${MEMORY_PROVIDER:-chronicle}
-      - OPENMEMORY_MCP_URL=${OPENMEMORY_MCP_URL:-http://host.docker.internal:8765}
-      - OPENMEMORY_USER_ID=${OPENMEMORY_USER_ID:-openmemory}
       # Speaker recognition controlled by config.yml (disabled in test config for CI performance)
       - SPEAKER_SERVICE_URL=http://speaker-service-test:8085
       - CORS_ORIGINS=http://localhost:3001,http://localhost:8001,https://localhost:3001,https://localhost:8001
@@ -66,23 +63,24 @@ services:
       - LANGFUSE_PUBLIC_KEY=pk-lf-test-public-key
       - LANGFUSE_SECRET_KEY=sk-lf-test-secret-key
     depends_on:
-      qdrant-test:
-        condition: service_started
       mongo-test:
         condition: service_healthy
       redis-test:
         condition: service_started
-      langfuse-web-test:
-        condition: service_healthy
+      # langfuse-web-test removed from the gate: langfuse is optional observability and
+      # the backend degrades gracefully without it. Requiring it pulled in the whole
+      # langfuse stack (postgres/clickhouse/minio) — unnecessary for the e2e and heavy.
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/readiness"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 60s
-    restart: unless-stopped
 
   webui-test:
+    # Gated behind a profile: the static webui Dockerfile was removed (webui is now
+    # dev-mode only) and the API/e2e tests don't need a UI. Nothing depends on it.
+    profiles: ["webui"]
     build:
       context: ./webui
       dockerfile: Dockerfile
@@ -98,18 +96,8 @@ services:
         condition: service_healthy
       mongo-test:
         condition: service_healthy
-      qdrant-test:
-        condition: service_started
       redis-test:
         condition: service_started
-
-  qdrant-test:
-    image: qdrant/qdrant:latest
-    ports:
-      - "6337:6333"  # gRPC - avoid conflict with dev 6333
-      - "6338:6334"  # HTTP - avoid conflict with dev 6334
-    volumes:
-      - ./data/test_qdrant_data:/qdrant/storage
 
   mongo-test:
     image: mongo:8.0.14
@@ -167,7 +155,6 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
-    restart: unless-stopped
     profiles:
       - speaker  # Optional service - only start when explicitly enabled
 
@@ -182,7 +169,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-    restart: unless-stopped
 
   mock-llm:
     build:
@@ -195,7 +181,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-    restart: unless-stopped
 
   mock-asr:
     build:
@@ -212,14 +197,12 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-    restart: unless-stopped
 
   # --- Langfuse observability stack (test) ---
   # Without this, Langfuse SDK defaults to cloud.langfuse.com and each
   # get_prompt() call blocks ~12s on DNS timeout, adding ~39s to title/summary jobs.
   langfuse-postgres-test:
     image: docker.io/postgres:16
-    restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -234,7 +217,6 @@ services:
 
   clickhouse-test:
     image: docker.io/clickhouse/clickhouse-server:24.12
-    restart: unless-stopped
     environment:
       CLICKHOUSE_DB: default
       CLICKHOUSE_USER: clickhouse
@@ -251,7 +233,6 @@ services:
 
   minio-test:
     image: docker.io/minio/minio:RELEASE.2025-01-20T14-49-07Z
-    restart: unless-stopped
     entrypoint: sh
     command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
     environment:
@@ -268,7 +249,6 @@ services:
 
   langfuse-redis-test:
     image: docker.io/redis:7
-    restart: unless-stopped
     command: >
       --requirepass myredissecret
     healthcheck:
@@ -279,7 +259,6 @@ services:
 
   langfuse-worker-test:
     image: docker.io/langfuse/langfuse-worker:3
-    restart: unless-stopped
     depends_on:
       langfuse-postgres-test:
         condition: service_healthy
@@ -323,7 +302,6 @@ services:
 
   langfuse-web-test:
     image: docker.io/langfuse/langfuse:3
-    restart: unless-stopped
     depends_on:
       langfuse-postgres-test:
         condition: service_healthy
@@ -373,14 +351,13 @@ services:
     environment:
       # Same environment as backend
       - MONGODB_URI=mongodb://mongo-test:27017/test_db
-      - QDRANT_BASE_URL=qdrant-test
-      - QDRANT_PORT=6333
       - REDIS_URL=redis://redis-test:6379/0
       - DEBUG_DIR=/app/debug  # Fixed: match plugin database mount path
       # Test configuration file
       - CONFIG_FILE=${TEST_CONFIG_FILE:-/app/test-configs/deepgram-openai.yml}
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SMALLEST_API_KEY=${SMALLEST_API_KEY}
       - GROQ_API_KEY=${GROQ_API_KEY}
       - AUTH_SECRET_KEY=test-jwt-signing-key-for-integration-tests
       - ADMIN_PASSWORD=test-admin-password-123
@@ -388,8 +365,6 @@ services:
       - TRANSCRIPTION_PROVIDER=${TRANSCRIPTION_PROVIDER:-deepgram}
       - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
       - MEMORY_PROVIDER=${MEMORY_PROVIDER:-chronicle}
-      - OPENMEMORY_MCP_URL=${OPENMEMORY_MCP_URL:-http://host.docker.internal:8765}
-      - OPENMEMORY_USER_ID=${OPENMEMORY_USER_ID:-openmemory}
       # Speaker recognition controlled by config.yml (disabled in test config for CI performance)
       - SPEAKER_SERVICE_URL=http://speaker-service-test:8085
       # Set inactivity timeout for tests (20 seconds of audio time)
@@ -415,9 +390,8 @@ services:
         condition: service_healthy
       redis-test:
         condition: service_started
-      qdrant-test:
-        condition: service_started
-    restart: unless-stopped
+      # falkordb-test removed: it's no longer defined (FalkorDB was dropped when memory
+      # moved to the Markdown vault); this was a stale depends_on that blocks startup.
 
   # caddy:
   #   image: caddy:2-alpine

@@ -15,7 +15,6 @@ This package contains organized router modules for different functional areas:
 - health_routes: Health check endpoints
 - websocket_routes: WebSocket connection handling
 - admin_routes: Admin-only system management endpoints
-- knowledge_graph_routes: Knowledge graph entities, relationships, and promises
 - sse_routes: Server-Sent Events for real-time UI updates
 """
 
@@ -25,15 +24,17 @@ from .audio_routes import router as audio_router
 from .chat_routes import router as chat_router
 from .client_routes import router as client_router
 from .conversation_routes import router as conversation_router
+from .data_audit_routes import router as data_audit_router
 from .finetuning_routes import router as finetuning_router
 from .health_routes import router as health_router
-from .knowledge_graph_routes import router as knowledge_graph_router
 from .memory_routes import router as memory_router
-from .obsidian_routes import router as obsidian_router
 from .queue_routes import router as queue_router
 from .sse_routes import router as sse_router
+from .system_events_routes import router as system_events_router
 from .system_routes import router as system_router
 from .user_routes import router as user_router
+from .vault_sync_routes import router as vault_sync_router
+from .wakeword_routes import router as wakeword_router
 from .websocket_routes import router as websocket_router
 
 __all__ = [
@@ -43,14 +44,16 @@ __all__ = [
     "chat_router",
     "client_router",
     "conversation_router",
+    "data_audit_router",
     "finetuning_router",
     "health_router",
-    "knowledge_graph_router",
     "memory_router",
-    "obsidian_router",
     "queue_router",
     "sse_router",
+    "system_events_router",
     "system_router",
     "user_router",
+    "vault_sync_router",
+    "wakeword_router",
     "websocket_router",
 ]

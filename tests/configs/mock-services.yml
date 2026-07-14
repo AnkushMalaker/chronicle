@@ -6,7 +6,6 @@ defaults:
   llm: mock-llm
   stt: mock-stt
   stt_stream: mock-stt-stream
-  vector_store: vs-qdrant
 memory:
   extraction:
     enabled: true
@@ -36,16 +35,6 @@ models:
   model_type: embedding
   model_url: http://host.docker.internal:11435/v1
   name: mock-embed
-- api_family: qdrant
-  description: Qdrant vector database (local)
-  model_params:
-    collection_name: omi_memories
-    host: ${oc.env:QDRANT_BASE_URL,qdrant}
-    port: ${oc.env:QDRANT_PORT,6333}
-  model_provider: qdrant
-  model_type: vector_store
-  model_url: http://${oc.env:QDRANT_BASE_URL,qdrant}:${oc.env:QDRANT_PORT,6333}
-  name: vs-qdrant
 - api_family: mock
   api_key: mock-key-not-used
   description: Mock STT for testing (batch)
@@ -91,8 +80,9 @@ backend:
   audio:
     # Enable always_persist for testing - creates placeholder conversations immediately
     always_persist_enabled: true
-  transcription:
-    use_provider_segments: true
+  diarization:
+    # Trust provider segments (mock provider returns pre-built segments)
+    diarization_source: provider
 speaker_recognition:
   enabled: false
   timeout: 60

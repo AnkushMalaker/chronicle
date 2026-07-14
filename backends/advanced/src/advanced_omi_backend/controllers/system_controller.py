@@ -4,6 +4,7 @@ System controller for handling system-related business logic.
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 import re
@@ -15,29 +16,163 @@ from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
+import httpx
 from dotenv import set_key as dotenv_set_key
 from fastapi import HTTPException
 from ruamel.yaml import YAML
 
+from advanced_omi_backend.client_manager import get_client_manager
+from advanced_omi_backend.config import CleanupSettings, get_cleanup_settings
 from advanced_omi_backend.config import (
     get_diarization_settings as load_diarization_settings,
 )
 from advanced_omi_backend.config import get_misc_settings as load_misc_settings
-from advanced_omi_backend.config import save_diarization_settings, save_misc_settings
-from advanced_omi_backend.config_loader import get_plugins_yml_path, save_config_section
+from advanced_omi_backend.config import (
+    save_cleanup_settings,
+    save_diarization_settings,
+    save_misc_settings,
+)
+from advanced_omi_backend.config_loader import (
+    get_backend_config,
+    get_plugins_yml_path,
+    get_raw_models,
+    load_config,
+    save_config_section,
+    save_models_list,
+)
+from advanced_omi_backend.controllers import client_controller
 from advanced_omi_backend.model_registry import (
+    ModelDef,
     _find_config_path,
     get_models_registry,
     load_models_config,
 )
 from advanced_omi_backend.models.user import User
+from advanced_omi_backend.observability.otel_setup import is_langfuse_enabled
+from advanced_omi_backend.openai_factory import create_openai_client
+from advanced_omi_backend.services.memory import get_memory_service
+from advanced_omi_backend.services.plugin_service import (
+    _get_plugins_dir,
+    discover_plugins,
+    expand_env_vars,
+    get_plugin_metadata,
+    load_plugin_env,
+    reload_plugins,
+    save_plugin_env,
+    signal_worker_restart,
+)
+from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 
 logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
 
+
+async def get_network_discovery(app, current_user=None):
+    """Return Tailscale status and discovered minidisc services.
+
+    The *app* parameter is the FastAPI application instance (kept for API
+    compatibility but no longer used — the node agent handles advertising).
+    """
+
+    result = {
+        "tailscale_available": False,
+        "advertising": [],
+        "discovered_services": [],
+    }
+
+    try:
+        # Lazy import: optional external module (edge/discovery, resolved via a
+        # sys.path arrangement) that may be absent; guarded by the ImportError below.
+        from discovery import is_tailscale_available, list_all_services
+    except ImportError:
+        result["error"] = "discovery module not available"
+        return result
+
+    result["tailscale_available"] = is_tailscale_available()
+
+    # Read advertised services written by the node agent (edge/service_manager.py).
+    # The file is at config/advertised-services.json (volume-mounted from repo root).
+    _advertised_path = Path("/app/config/advertised-services.json")
+    if _advertised_path.exists():
+        try:
+            result["advertising"] = json.loads(_advertised_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Could not read advertised-services.json: %s", exc)
+
+    if not result["tailscale_available"]:
+        return result
+
+    # Discover all chronicle-* services on the Tailnet via list_all_services()
+    loop = asyncio.get_running_loop()
+    all_services = await loop.run_in_executor(None, list_all_services)
+
+    async def _health_check(svc: dict):
+        name = svc["name"]
+        address = svc.get("address", "")
+        port = svc.get("port", 0)
+        labels = svc.get("labels", {})
+        host = labels.get("host", address)
+
+        url = f"http://{address}:{port}" if address and port else None
+        reachable = False
+        if url:
+            try:
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    resp = await client.get(f"{url}/health")
+                    reachable = resp.status_code < 500
+            except Exception:
+                pass
+        return {
+            "name": name,
+            "url": url,
+            "reachable": reachable,
+            "labels": labels,
+            "host": host,
+        }
+
+    if all_services:
+        discovered = await asyncio.gather(*[_health_check(svc) for svc in all_services])
+        result["discovered_services"] = list(discovered)
+    else:
+        result["discovered_services"] = []
+
+    # Connected WebSocket clients (phones, relays, etc.)
+    # Devices are the user's *remembered* devices (the registry) joined with live
+    # connection state — so a known device shows whether it's online now or when it was
+    # last seen, with its editable friendly name. "connected" is derived from real
+    # activity (the live ClientState's last_activity), never a persisted flag.
+    mgr = get_client_manager()
+    if current_user is not None:
+        devices = (await client_controller.list_devices(current_user, mgr))["devices"]
+    else:
+        devices = []
+    result["connected_devices"] = devices
+
+    return result
+
+
 _yaml = YAML()
 _yaml.preserve_quotes = True
+
+
+def _is_self_hosted_model(model) -> bool:
+    """Whether a model entry points at a self-hosted service (no API key needed).
+
+    Cloud providers (Deepgram, OpenAI, smallest.ai, ...) live on public domains;
+    self-hosted services are reached via localhost, docker hostnames, private/
+    tailnet IPs, or tailnet DNS names.
+    """
+    host = urlparse(str(getattr(model, "model_url", "") or "")).hostname or ""
+    if not host:
+        return False
+    if host in ("localhost", "host.docker.internal"):
+        return True
+    if re.match(r"^(127\.|10\.|172\.|192\.168\.|100\.)", host):
+        return True
+    # Tailnet DNS names, or bare docker-compose service names (no dots)
+    return host.endswith(".ts.net") or "." not in host
 
 
 async def get_config_diagnostics():
@@ -57,8 +192,6 @@ async def get_config_diagnostics():
 
     # Test OmegaConf configuration loading
     try:
-        from advanced_omi_backend.config_loader import load_config
-
         # Capture warnings during config load
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
@@ -101,8 +234,6 @@ async def get_config_diagnostics():
 
     # Test model registry
     try:
-        from advanced_omi_backend.model_registry import get_models_registry
-
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             registry = get_models_registry()
@@ -143,6 +274,13 @@ async def get_config_diagnostics():
                             "message": f"Configured: {stt.name} ({stt.model_provider}) - API key present",
                         }
                     )
+                elif _is_self_hosted_model(stt):
+                    diagnostics["info"].append(
+                        {
+                            "component": "STT (Batch)",
+                            "message": f"Configured: {stt.name} ({stt.model_provider}) - local service, no API key required",
+                        }
+                    )
                 else:
                     diagnostics["warnings"].append(
                         {
@@ -172,6 +310,13 @@ async def get_config_diagnostics():
                             "message": f"Configured: {stt_stream.name} ({stt_stream.model_provider}) - API key present",
                         }
                     )
+                elif _is_self_hosted_model(stt_stream):
+                    diagnostics["info"].append(
+                        {
+                            "component": "STT (Streaming)",
+                            "message": f"Configured: {stt_stream.name} ({stt_stream.model_provider}) - local service, no API key required",
+                        }
+                    )
                 else:
                     diagnostics["warnings"].append(
                         {
@@ -198,6 +343,13 @@ async def get_config_diagnostics():
                         {
                             "component": "LLM",
                             "message": f"Configured: {llm.name} ({llm.model_provider}) - API key present",
+                        }
+                    )
+                elif _is_self_hosted_model(llm):
+                    diagnostics["info"].append(
+                        {
+                            "component": "LLM",
+                            "message": f"Configured: {llm.name} ({llm.model_provider}) - local service, no API key required",
                         }
                     )
                 else:
@@ -322,14 +474,10 @@ async def get_observability_config():
 
     Returns non-secret data only (enabled status and browser URL).
     """
-    from advanced_omi_backend.observability.otel_setup import is_langfuse_enabled
-
     enabled = is_langfuse_enabled()
     session_base_url = None
 
     if enabled:
-        from advanced_omi_backend.config_loader import load_config
-
         cfg = load_config()
         public_url = (
             cfg.get("observability", {}).get("langfuse", {}).get("public_url", "")
@@ -391,10 +539,10 @@ async def save_diarization_settings_controller(settings: dict):
                         detail=f"Invalid value for {key}: must be integer 1-20",
                     )
             elif key == "diarization_source":
-                if not isinstance(value, str) or value not in ["pyannote", "deepgram"]:
+                if not isinstance(value, str) or value not in ["pyannote", "provider"]:
                     raise HTTPException(
                         status_code=400,
-                        detail=f"Invalid value for {key}: must be 'pyannote' or 'deepgram'",
+                        detail=f"Invalid value for {key}: must be 'pyannote' or 'provider'",
                     )
             else:
                 if not isinstance(value, (int, float)) or value < 0:
@@ -437,6 +585,98 @@ async def save_diarization_settings_controller(settings: dict):
         raise e
 
 
+# ---------------------------------------------------------------------------
+# ASR context / hint-mechanism settings
+#
+# Each STT provider consumes recognition hints in exactly one way (see
+# ModelDef.capabilities): "keyword_boosting" (acoustic hot-word boost, never
+# echoed) or "context_prompt" (LLM context that informs but must not be echoed).
+# context_prompt providers (e.g. Gemma 4) are NOT given the wake-word boost list;
+# instead the user authors a free-form context string, stored per-model under
+# backend.asr.context.<model_name> in config.yml.
+# ---------------------------------------------------------------------------
+
+
+def _asr_hint_type(capabilities) -> str:
+    caps = set(capabilities or [])
+    if "context_prompt" in caps:
+        return "context_prompt"
+    if "keyword_boosting" in caps:
+        return "keyword_boosting"
+    return "none"
+
+
+def _asr_model_info(model) -> Optional[dict]:
+    """Summarise an STT model's hint mechanism + resolved context for the UI."""
+    if not model:
+        return None
+    asr_cfg = get_backend_config("asr") or {}
+    ctx_map = asr_cfg.get("context", {}) or {}
+    override = ctx_map.get(model.name)
+    inline = getattr(model, "asr_context", None)
+    context = override if override is not None else (inline or "")
+    return {
+        "name": model.name,
+        "provider": model.model_provider,
+        "description": model.description,
+        "capabilities": list(model.capabilities or []),
+        "hint_type": _asr_hint_type(model.capabilities),
+        "context": context or "",
+    }
+
+
+async def get_asr_context_config():
+    """Return the active batch + streaming STT provider hint mechanisms."""
+    registry = get_models_registry()
+    if not registry:
+        raise HTTPException(status_code=503, detail="Model registry unavailable")
+    return {
+        "batch": _asr_model_info(registry.get_default("stt")),
+        "stream": _asr_model_info(registry.get_default("stt_stream")),
+        "status": "success",
+    }
+
+
+async def save_asr_context_controller(payload: dict):
+    """Persist a context string for a context_prompt STT provider."""
+    model_name = (payload.get("model_name") or "").strip()
+    context = payload.get("context", "")
+    if not model_name:
+        raise HTTPException(status_code=400, detail="model_name is required")
+    if not isinstance(context, str):
+        raise HTTPException(status_code=400, detail="context must be a string")
+
+    registry = get_models_registry()
+    model = registry.get_by_name(model_name) if registry else None
+    if not model:
+        raise HTTPException(status_code=404, detail=f"Unknown model '{model_name}'")
+    if "context_prompt" not in set(model.capabilities or []):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model '{model_name}' does not use a context prompt; ASR context "
+                "only applies to context_prompt providers."
+            ),
+        )
+
+    if not save_config_section("backend.asr.context", {model_name: context.strip()}):
+        raise HTTPException(status_code=500, detail="Failed to save ASR context")
+
+    # Refresh the in-process registry and signal workers so the new context is
+    # picked up on the next transcription (same pattern as a provider switch).
+    load_models_config(force_reload=True)
+    try:
+        signal_worker_restart()
+    except Exception as e:
+        logger.warning(f"Could not signal worker restart after ASR context save: {e}")
+
+    return {
+        "status": "success",
+        "model_name": model_name,
+        "context": context.strip(),
+    }
+
+
 async def get_misc_settings():
     """Get current miscellaneous settings."""
     try:
@@ -454,7 +694,6 @@ async def save_misc_settings_controller(settings: dict):
         # Validate settings
         boolean_keys = {
             "always_persist_enabled",
-            "use_provider_segments",
             "per_segment_speaker_id",
             "always_batch_retranscribe",
         }
@@ -462,7 +701,13 @@ async def save_misc_settings_controller(settings: dict):
             "streaming_fallback_timeout_seconds",
             "max_conversation_duration_seconds",
         }
-        valid_keys = boolean_keys | integer_keys
+        # Live-transcription mode selector (top-level defaults.live_segmentation).
+        # "windowed_batch" = pseudo-streaming via batch preview; "off" disables the
+        # live preview; "streaming_stt" uses a real streaming ASR provider.
+        enum_keys = {
+            "live_segmentation": {"streaming_stt", "windowed_batch", "off"},
+        }
+        valid_keys = boolean_keys | integer_keys | set(enum_keys)
 
         # Filter to only valid keys
         filtered_settings = {}
@@ -476,6 +721,13 @@ async def save_misc_settings_controller(settings: dict):
                     raise HTTPException(
                         status_code=400,
                         detail=f"Invalid value for {key}: must be boolean",
+                    )
+            elif key in enum_keys:
+                if value not in enum_keys[key]:
+                    allowed = ", ".join(sorted(enum_keys[key]))
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid value for {key}: must be one of {allowed}",
                     )
             elif key == "streaming_fallback_timeout_seconds":
                 if not isinstance(value, int) or value < 60 or value > 7200:
@@ -534,8 +786,6 @@ async def get_cleanup_settings_controller(user: User) -> dict:
     Returns:
         Dict with cleanup settings
     """
-    from advanced_omi_backend.config import get_cleanup_settings
-
     return get_cleanup_settings()
 
 
@@ -556,8 +806,6 @@ async def save_cleanup_settings_controller(
     Raises:
         ValueError: If validation fails
     """
-    from advanced_omi_backend.config import CleanupSettings, save_cleanup_settings
-
     # Validation
     if not isinstance(auto_cleanup_enabled, bool):
         raise ValueError("auto_cleanup_enabled must be a boolean")
@@ -640,13 +888,64 @@ async def update_speaker_configuration(user: User, primary_speakers: list[dict])
         raise e
 
 
+async def get_wakeword_speaker_gate(user: User):
+    """Get current user's wake-word speaker gate configuration."""
+    try:
+        return {
+            "enabled": user.wakeword_gate_enabled,
+            "speakers": user.wakeword_allowed_speakers,
+            "user_id": user.user_id,
+            "status": "success",
+        }
+    except Exception:
+        logger.exception(
+            f"Error getting wake-word speaker gate for user {user.user_id}"
+        )
+        raise
+
+
+async def update_wakeword_speaker_gate(user: User, enabled: bool, speakers: list[dict]):
+    """Update current user's wake-word speaker gate configuration.
+
+    When ``enabled`` and at least one speaker is selected, an acoustic wake word
+    only dispatches a command if one of these speakers is recognized in the
+    captured turn (see the wake-word dispatcher's speaker gate).
+    """
+    try:
+        # Keep only the fields we rely on for matching, mirroring primary_speakers.
+        for speaker in speakers:
+            if not isinstance(speaker, dict):
+                raise ValueError("Each speaker must be a dictionary")
+            if "speaker_id" not in speaker or "name" not in speaker:
+                raise ValueError("Each speaker needs 'speaker_id' and 'name'")
+
+        cleaned = [{"speaker_id": s["speaker_id"], "name": s["name"]} for s in speakers]
+        user.wakeword_gate_enabled = bool(enabled)
+        user.wakeword_allowed_speakers = cleaned
+        await user.save()
+
+        logger.info(
+            f"Updated wake-word speaker gate for user {user.user_id}: "
+            f"enabled={enabled}, speakers={len(cleaned)}"
+        )
+
+        return {
+            "message": "Wake-word speaker gate updated successfully",
+            "enabled": user.wakeword_gate_enabled,
+            "speakers": cleaned,
+            "count": len(cleaned),
+            "status": "success",
+        }
+    except Exception:
+        logger.exception(
+            f"Error updating wake-word speaker gate for user {user.user_id}"
+        )
+        raise
+
+
 async def get_enrolled_speakers(user: User):
     """Get enrolled speakers from speaker recognition service."""
     try:
-        from advanced_omi_backend.speaker_recognition_client import (
-            SpeakerRecognitionClient,
-        )
-
         # Initialize speaker recognition client
         speaker_client = SpeakerRecognitionClient()
 
@@ -676,10 +975,6 @@ async def get_enrolled_speakers(user: User):
 async def get_speaker_service_status():
     """Check speaker recognition service health status."""
     try:
-        from advanced_omi_backend.speaker_recognition_client import (
-            SpeakerRecognitionClient,
-        )
-
         # Initialize speaker recognition client
         speaker_client = SpeakerRecognitionClient()
 
@@ -826,8 +1121,6 @@ async def reload_memory_config():
 async def delete_all_user_memories(user: User):
     """Delete all memories for the current user."""
     try:
-        from advanced_omi_backend.services.memory import get_memory_service
-
         memory_service = get_memory_service()
 
         # Delete all memories for the user
@@ -858,8 +1151,8 @@ async def get_memory_provider():
         if current_provider in ("friend-lite", "friend_lite"):
             current_provider = "chronicle"
 
-        # Get available providers
-        available_providers = ["chronicle", "openmemory_mcp"]
+        # Chronicle (agentic vault) is currently the only provider.
+        available_providers = ["chronicle"]
 
         return {
             "current_provider": current_provider,
@@ -875,9 +1168,9 @@ async def get_memory_provider():
 async def set_memory_provider(provider: str):
     """Set memory provider and update .env file."""
     try:
-        # Validate provider
+        # Validate provider. Chronicle (agentic vault) is currently the only provider.
         provider = provider.lower().strip()
-        valid_providers = ["chronicle", "openmemory_mcp"]
+        valid_providers = ["chronicle"]
 
         if provider not in valid_providers:
             raise ValueError(
@@ -1034,8 +1327,6 @@ async def save_llm_operations(operations: dict):
 async def test_llm_model(model_name: Optional[str]):
     """Test an LLM model connection with a trivial prompt."""
     try:
-        from advanced_omi_backend.openai_factory import create_openai_client
-
         registry = get_models_registry()
         if not registry:
             raise RuntimeError("Model registry not loaded")
@@ -1061,7 +1352,7 @@ async def test_llm_model(model_name: Optional[str]):
 
         client = create_openai_client(
             api_key=model_def.api_key or "",
-            base_url=model_def.model_url,
+            base_url=model_def.resolved_url(),
             is_async=True,
         )
 
@@ -1091,108 +1382,320 @@ async def test_llm_model(model_name: Optional[str]):
         }
 
 
-# Chat Configuration Management Functions
+# Model Registry Management Functions
+
+# Default-pointer keys exposed for editing → the model_type a chosen model must
+# have. ``llm`` and ``fast_llm`` both point at LLMs. ``live_segmentation`` is a
+# mode string (owned by misc-settings), not a model, so it's intentionally absent.
+_DEFAULT_KEY_TO_MODEL_TYPE = {
+    "llm": "llm",
+    "fast_llm": "llm",
+    "fallback_llm": "llm",
+    "embedding": "embedding",
+    "stt": "stt",
+    "stt_stream": "stt_stream",
+    "tts": "tts",
+}
+
+# Model types editable from the registry UI (must be routable by the pipeline).
+_EDITABLE_MODEL_TYPES = ["llm", "embedding", "stt", "stt_stream", "tts"]
+
+# Sentinel sent to the browser instead of an inline secret, and recognised on the
+# way back in as "keep the stored value".
+_API_KEY_MASK = "••••••••"
+
+# Inline api_key values that aren't real secrets (placeholders) — shown verbatim.
+_NON_SECRET_API_KEYS = {"", "no-key", "dummy", "none", "null"}
 
 
-async def get_chat_config_yaml() -> str:
-    """Get chat system prompt as plain text."""
+def _is_env_ref(value) -> bool:
+    """True if the value is an OmegaConf interpolation like ``${oc.env:VAR}``."""
+    return isinstance(value, str) and value.strip().startswith("${")
+
+
+def _mask_api_key(raw_value):
+    """Mask an inline secret for display; pass through refs/placeholders/None."""
+    if raw_value is None:
+        return ""
+    if _is_env_ref(raw_value):
+        return raw_value
+    if isinstance(raw_value, str) and raw_value.strip().lower() in _NON_SECRET_API_KEYS:
+        return raw_value
+    return _API_KEY_MASK
+
+
+def _model_view(model_def: ModelDef, raw_by_name: dict, default_names: set) -> dict:
+    """Build the UI-facing model dict, zipping registry (resolved/derived) with
+    raw config.yml (source + unmasked secret reference detection)."""
+    raw = raw_by_name.get(model_def.name)
+    raw_api_key = raw.get("api_key") if raw else model_def.api_key
+    return {
+        "name": model_def.name,
+        "model_type": model_def.model_type,
+        "model_provider": model_def.model_provider,
+        "model_name": model_def.model_name,
+        "model_url": model_def.model_url,
+        "api_family": model_def.api_family,
+        "api_key": _mask_api_key(raw_api_key),
+        "api_key_is_set": bool(raw_api_key)
+        and not (
+            isinstance(raw_api_key, str)
+            and raw_api_key.strip().lower() in _NON_SECRET_API_KEYS
+        ),
+        "api_key_is_ref": _is_env_ref(raw_api_key),
+        "description": model_def.description,
+        "model_params": dict(model_def.model_params or {}),
+        "capabilities": list(model_def.capabilities or []),
+        "embedding_dimensions": model_def.embedding_dimensions,
+        "model_output": model_def.model_output,
+        "thinking": model_def.thinking,
+        # 'config' = defined in config.yml (editable/deletable);
+        # 'default' = built-in template from defaults.yml (read-only baseline).
+        "source": "config" if model_def.name in raw_by_name else "default",
+        "is_default": model_def.name in default_names,
+    }
+
+
+async def get_models():
+    """Return all registry models grouped by type plus the active defaults.
+
+    Inline API keys are masked; ``${oc.env:...}`` references are shown verbatim so
+    the operator can see which env var backs a model without leaking the secret.
+    """
+    registry = get_models_registry()
+    if not registry:
+        raise RuntimeError("Model registry not loaded")
+
+    raw_by_name = {
+        m.get("name"): m
+        for m in get_raw_models()
+        if isinstance(m, dict) and m.get("name")
+    }
+    default_names = set(registry.defaults.values())
+
+    grouped = {t: [] for t in _EDITABLE_MODEL_TYPES}
+    for model_def in registry.models.values():
+        if model_def.model_type in grouped:
+            grouped[model_def.model_type].append(
+                _model_view(model_def, raw_by_name, default_names)
+            )
+    for t in grouped:
+        grouped[t].sort(key=lambda v: v["name"])
+
+    defaults = {
+        key: registry.defaults.get(key)
+        for key in (
+            "llm",
+            "fast_llm",
+            "fallback_llm",
+            "embedding",
+            "stt",
+            "stt_stream",
+            "tts",
+            "live_segmentation",
+        )
+    }
+
+    return {"defaults": defaults, "models": grouped, "status": "success"}
+
+
+async def set_active_defaults(body: dict):
+    """Repoint one or more active-model defaults (llm/fast_llm/embedding/stt/
+    stt_stream/tts). Validates the target exists and its model_type matches the
+    key, then hot-reloads the registry and signals workers."""
+    registry = get_models_registry()
+    if not registry:
+        raise RuntimeError("Model registry not loaded")
+
+    updates: dict = {}
+    for key, model_name in (body or {}).items():
+        if key not in _DEFAULT_KEY_TO_MODEL_TYPE:
+            raise HTTPException(status_code=400, detail=f"Unknown default key '{key}'")
+        if not model_name:
+            continue
+        model_def = registry.get_by_name(model_name)
+        if not model_def:
+            raise HTTPException(
+                status_code=400, detail=f"Model '{model_name}' not found in registry"
+            )
+        expected = _DEFAULT_KEY_TO_MODEL_TYPE[key]
+        if model_def.model_type != expected:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Model '{model_name}' is a {model_def.model_type} model; "
+                    f"default '{key}' requires a {expected} model"
+                ),
+            )
+        updates[key] = model_name
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No valid defaults to update")
+
+    if not save_config_section("defaults", updates):
+        return {"status": "error", "message": "Failed to save defaults"}
+
+    load_models_config(force_reload=True)
+    signal_worker_restart()
+    logger.info("Updated active defaults: %s", updates)
+    return {
+        "status": "success",
+        "defaults": updates,
+        "requires_worker_restart": True,
+    }
+
+
+async def upsert_model(body: dict):
+    """Add or update a single model definition in config.yml.
+
+    Validates the def via the ModelDef schema. An incoming api_key equal to the
+    mask sentinel preserves the stored secret. Editing a default-only (defaults.yml)
+    model creates a config.yml override. Hot-reloads the registry afterwards.
+    """
+    if not isinstance(body, dict) or not body.get("name"):
+        raise HTTPException(status_code=400, detail="Model 'name' is required")
+
+    model_type = body.get("model_type")
+    if model_type not in _EDITABLE_MODEL_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"model_type must be one of {_EDITABLE_MODEL_TYPES}",
+        )
+
+    raw_models = get_raw_models()
+    existing = next((m for m in raw_models if m.get("name") == body["name"]), None)
+
+    # Preserve the stored secret when the form sends back the mask sentinel.
+    incoming_key = body.get("api_key")
+    if incoming_key == _API_KEY_MASK:
+        body["api_key"] = existing.get("api_key") if existing else None
+
+    # Validate shape via the single source of truth (raises on bad def).
     try:
-        config_path = _find_config_path()
-
-        default_prompt = """You are a helpful AI assistant with access to the user's personal memories and conversation history.
-
-Use the provided memories and conversation context to give personalized, contextual responses. If memories are relevant, reference them naturally in your response. Be conversational and helpful.
-
-If no relevant memories are available, respond normally based on the conversation context."""
-
-        if not os.path.exists(config_path):
-            return default_prompt
-
-        with open(config_path, "r") as f:
-            full_config = _yaml.load(f) or {}
-
-        chat_config = full_config.get("chat", {})
-        system_prompt = chat_config.get("system_prompt", default_prompt)
-
-        # Return just the prompt text, not the YAML structure
-        return system_prompt
-
+        ModelDef(**body)
     except Exception as e:
-        logger.error(f"Error loading chat config: {e}")
-        raise
+        raise HTTPException(status_code=400, detail=f"Invalid model definition: {e}")
 
+    # Drop None/empty optional keys so we don't litter config.yml with nulls.
+    clean = {k: v for k, v in body.items() if v is not None}
 
-async def save_chat_config_yaml(prompt_text: str) -> dict:
-    """Save chat system prompt from plain text."""
-    try:
-        config_path = _find_config_path()
-
-        # Validate plain text prompt
-        if not prompt_text or not isinstance(prompt_text, str):
-            raise ValueError("Prompt must be a non-empty string")
-
-        prompt_text = prompt_text.strip()
-        if len(prompt_text) < 10:
-            raise ValueError("Prompt too short (minimum 10 characters)")
-        if len(prompt_text) > 10000:
-            raise ValueError("Prompt too long (maximum 10000 characters)")
-
-        # Create chat config dict
-        chat_config = {"system_prompt": prompt_text}
-
-        # Load full config
-        if os.path.exists(config_path):
-            with open(config_path, "r") as f:
-                full_config = _yaml.load(f) or {}
+    new_models = []
+    replaced = False
+    for m in raw_models:
+        if m.get("name") == body["name"]:
+            new_models.append(clean)
+            replaced = True
         else:
-            full_config = {}
+            new_models.append(m)
+    if not replaced:
+        new_models.append(clean)
 
-        # Backup existing config
-        if os.path.exists(config_path):
-            backup_path = str(config_path) + ".backup"
-            shutil.copy2(config_path, backup_path)
-            logger.info(f"Created config backup at {backup_path}")
+    if not save_models_list(new_models):
+        return {"status": "error", "message": "Failed to save model"}
 
-        # Update chat section
-        full_config["chat"] = chat_config
+    load_models_config(force_reload=True)
+    signal_worker_restart()
+    logger.info("%s model '%s'", "Updated" if replaced else "Added", body["name"])
 
-        # Save
-        with open(config_path, "w") as f:
-            _yaml.dump(full_config, f)
-
-        # Reload config in memory (hot-reload)
-        load_models_config(force_reload=True)
-
-        logger.info("Chat configuration updated successfully")
-
-        return {"success": True, "message": "Chat configuration updated successfully"}
-
-    except Exception as e:
-        logger.error(f"Error saving chat config: {e}")
-        raise
+    registry = get_models_registry()
+    raw_by_name = {
+        m.get("name"): m
+        for m in get_raw_models()
+        if isinstance(m, dict) and m.get("name")
+    }
+    model_def = registry.get_by_name(body["name"]) if registry else None
+    view = (
+        _model_view(model_def, raw_by_name, set(registry.defaults.values()))
+        if model_def
+        else None
+    )
+    return {"status": "success", "model": view, "requires_worker_restart": True}
 
 
-async def validate_chat_config_yaml(prompt_text: str) -> dict:
-    """Validate chat system prompt plain text."""
-    try:
-        # Validate plain text prompt
-        if not isinstance(prompt_text, str):
-            return {"valid": False, "error": "Prompt must be a string"}
+async def delete_model(name: str):
+    """Delete a config.yml model. Refuses if it's an active default or a built-in
+    (defaults.yml-only) template."""
+    registry = get_models_registry()
+    if not registry:
+        raise RuntimeError("Model registry not loaded")
 
-        prompt_text = prompt_text.strip()
-        if len(prompt_text) < 10:
-            return {"valid": False, "error": "Prompt too short (minimum 10 characters)"}
-        if len(prompt_text) > 10000:
+    for key, default_name in registry.defaults.items():
+        if default_name == name:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Model '{name}' is the active '{key}'; repoint that default first",
+            )
+
+    raw_models = get_raw_models()
+    if not any(m.get("name") == name for m in raw_models):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Model '{name}' is a built-in template (defaults.yml) and cannot be deleted",
+        )
+
+    new_models = [m for m in raw_models if m.get("name") != name]
+    if not save_models_list(new_models):
+        return {"status": "error", "message": "Failed to delete model"}
+
+    load_models_config(force_reload=True)
+    signal_worker_restart()
+    logger.info("Deleted model '%s'", name)
+    return {"status": "success", "deleted": name}
+
+
+async def test_model(model_name: Optional[str]):
+    """Connectivity test for a registry model. LLMs do a trivial chat round-trip;
+    embedding models do a 1-token embeddings call; STT/TTS have no automated test."""
+    registry = get_models_registry()
+    if not registry:
+        raise RuntimeError("Model registry not loaded")
+
+    if not model_name:
+        return await test_llm_model(None)
+
+    model_def = registry.get_by_name(model_name)
+    if not model_def:
+        return {
+            "success": False,
+            "model_name": model_name,
+            "error": f"Model '{model_name}' not found",
+            "status": "error",
+        }
+
+    if model_def.model_type == "llm":
+        return await test_llm_model(model_name)
+
+    if model_def.model_type == "embedding":
+        try:
+            client = create_openai_client(
+                api_key=model_def.api_key or "",
+                base_url=model_def.resolved_url(),
+                is_async=True,
+            )
+            start = time.time()
+            await client.embeddings.create(model=model_def.model_name, input="ping")
+            latency_ms = int((time.time() - start) * 1000)
             return {
-                "valid": False,
-                "error": "Prompt too long (maximum 10000 characters)",
+                "success": True,
+                "model_name": model_def.name,
+                "model_provider": model_def.model_provider,
+                "latency_ms": latency_ms,
+                "status": "success",
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "model_name": model_name,
+                "error": str(e),
+                "status": "error",
             }
 
-        return {"valid": True, "message": "Configuration is valid"}
-
-    except Exception as e:
-        logger.error(f"Error validating chat config: {e}")
-        return {"valid": False, "error": f"Validation error: {str(e)}"}
+    return {
+        "success": False,
+        "model_name": model_name,
+        "error": f"No automated test for {model_def.model_type} models",
+        "status": "unsupported",
+    }
 
 
 # Plugin Configuration Management Functions
@@ -1212,7 +1715,7 @@ async def get_plugins_config_yaml() -> str:
   #   access_level: transcript
   #   trigger:
   #     type: wake_word
-  #     wake_word: vivi
+  #     wake_word: hermes
   #   ha_url: http://localhost:8123
   #   ha_token: YOUR_TOKEN_HERE
 """
@@ -1364,11 +1867,6 @@ async def _reload_and_signal(app=None) -> tuple[dict, bool]:
     Returns:
         (reload_result, worker_signal_sent) tuple.
     """
-    from advanced_omi_backend.services.plugin_service import (
-        reload_plugins,
-        signal_worker_restart,
-    )
-
     reload_result = await reload_plugins(app=app)
 
     worker_signal_sent = False
@@ -1387,8 +1885,6 @@ async def restart_workers() -> dict:
     Workers finish their current job before restarting.
     Uses the existing plugin-reload worker restart mechanism.
     """
-    from advanced_omi_backend.services.plugin_service import signal_worker_restart
-
     try:
         signal_worker_restart()
         logger.info("Worker restart signaled via Redis")
@@ -1460,11 +1956,6 @@ async def get_plugins_metadata() -> dict:
         Dict with plugins list containing metadata for each plugin
     """
     try:
-        from advanced_omi_backend.services.plugin_service import (
-            discover_plugins,
-            get_plugin_metadata,
-        )
-
         # Discover all available plugins
         discovered_plugins = discover_plugins()
 
@@ -1517,11 +2008,6 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
         Success message with list of updated files
     """
     try:
-        from advanced_omi_backend.services.plugin_service import (
-            _get_plugins_dir,
-            discover_plugins,
-        )
-
         # Validate plugin exists
         discovered_plugins = discover_plugins()
         if plugin_id not in discovered_plugins:
@@ -1598,8 +2084,6 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
 
         # 3. Update per-plugin .env (only changed env vars)
         if "env_vars" in config and config["env_vars"]:
-            from advanced_omi_backend.services.plugin_service import save_plugin_env
-
             # Filter out masked values (unchanged secrets)
             changed_vars = {
                 k: v for k, v in config["env_vars"].items() if v != "••••••••••••"
@@ -1656,12 +2140,6 @@ async def test_plugin_connection(plugin_id: str, config: dict) -> dict:
         Test result with success status and details
     """
     try:
-        from advanced_omi_backend.services.plugin_service import (
-            discover_plugins,
-            expand_env_vars,
-            load_plugin_env,
-        )
-
         # Validate plugin exists
         discovered_plugins = discover_plugins()
         if plugin_id not in discovered_plugins:
@@ -1747,11 +2225,6 @@ async def create_plugin(
     Returns:
         Success dict with plugin_id and created_files list
     """
-    from advanced_omi_backend.services.plugin_service import (
-        _get_plugins_dir,
-        discover_plugins,
-    )
-
     # Validate name
     if not plugin_name.replace("_", "").isalnum():
         return {
@@ -1915,8 +2388,6 @@ async def write_plugin_code(
     Returns:
         Success dict with updated_files list
     """
-    from advanced_omi_backend.services.plugin_service import _get_plugins_dir
-
     plugins_dir = _get_plugins_dir()
     plugin_dir = plugins_dir / plugin_id
 
@@ -1969,8 +2440,6 @@ async def delete_plugin(plugin_id: str, remove_files: bool = False) -> dict:
     Returns:
         Success dict
     """
-    from advanced_omi_backend.services.plugin_service import _get_plugins_dir
-
     plugins_yml_path = get_plugins_yml_path()
 
     # Check plugins.yml
@@ -2021,3 +2490,210 @@ async def delete_plugin(plugin_id: str, remove_files: bool = False) -> dict:
         "removed_from_yml": removed_from_yml,
         "files_removed": files_removed,
     }
+
+
+# ── External Service Management (host service-manager agent proxy) ──────────
+# The service manager agent (edge/service_manager.py) runs natively on the
+# host and wraps services.py — the backend just proxies admin requests to it.
+
+_SERVICE_MANAGER_TIMEOUT = 30.0
+
+
+def _service_manager_config() -> tuple[str, str]:
+    url = (os.getenv("SERVICE_MANAGER_URL") or "").rstrip("/")
+    token = os.getenv("SERVICE_MANAGER_TOKEN") or ""
+    return url, token
+
+
+async def _service_manager_request(
+    method: str, path: str, json_body: dict | None = None, *, params: dict | None = None
+):
+    """Proxy a request to the LOCAL service manager agent. Raises on failure.
+
+    The backend always talks to its local agent — cross-node merge + control
+    forwarding happens inside the agent (a host process with a real Tailnet
+    identity), because a container can't present a Tailnet source IP for the peer
+    agents' tailnet-trust to accept.
+    """
+    url, token = _service_manager_config()
+    if not url or not token:
+        raise HTTPException(
+            status_code=503,
+            detail="Service manager not configured (SERVICE_MANAGER_URL / SERVICE_MANAGER_TOKEN)",
+        )
+    try:
+        async with httpx.AsyncClient(timeout=_SERVICE_MANAGER_TIMEOUT) as client:
+            resp = await client.request(
+                method,
+                f"{url}{path}",
+                json=json_body,
+                params=params,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=502, detail=f"Service manager unreachable at {url}: {e}"
+        )
+    if resp.status_code >= 400:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except ValueError:
+            detail = resp.text
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+    return resp.json()
+
+
+async def _local_node_host() -> str | None:
+    """This node's hostname per the local agent — used to tell whether a provider
+    switch targets the local pipeline (so we repoint hub config.yml) or a remote node.
+    """
+    try:
+        node = await _service_manager_request("GET", "/node")
+    except HTTPException:
+        return None
+    return node.get("host")
+
+
+async def get_external_services():
+    """List host-managed services across the cluster with health and provider info.
+
+    The local agent merges this node's services with peer nodes' (each tagged with a
+    ``node`` host + ``remote`` flag) so the WebUI can group and route control calls.
+    Returns available=False (instead of an error) when the local agent is not
+    configured or unreachable.
+    """
+    url, token = _service_manager_config()
+    if not url or not token:
+        return {"available": False, "reason": "not_configured"}
+    try:
+        data = await _service_manager_request("GET", "/services")
+    except HTTPException as e:
+        if e.status_code in (502, 503):
+            return {"available": False, "reason": "unreachable", "detail": e.detail}
+        raise
+    return {"available": True, **data}
+
+
+async def external_service_action(name: str, action: str, body: dict):
+    """Start/stop/restart a host-managed service. ``body["node"]`` selects the owning
+    node; the local agent forwards to that node when it isn't the local one."""
+    result = await _service_manager_request("POST", f"/services/{name}/{action}", body)
+    # Tag the operation with its node so the WebUI polls the right agent.
+    if isinstance(result.get("operation"), dict):
+        result["operation"]["node"] = body.get("node")
+    return result
+
+
+# ASR_PROVIDER key (extras/asr-services/.env, drives which container runs) →
+# STT model name in the model registry (drives which model entry the pipeline
+# calls). A provider switch must update BOTH, or transcription keeps using the
+# old model entry while a different container serves the port.
+_ASR_PROVIDER_TO_STT_MODEL = {
+    "vibevoice": "stt-vibevoice",
+    "vibevoice-strixhalo": "stt-vibevoice",
+    "faster-whisper": "stt-faster-whisper",
+    "transformers": "stt-transformers",
+    "nemo": "stt-nemo",
+    "nemo-strixhalo": "stt-nemo",
+    "parakeet": "stt-parakeet-batch",
+    "qwen3-asr": "stt-qwen3-asr",
+    "gemma4": "stt-gemma4",
+    "nemotron": "stt-nemotron-batch",
+}
+
+# Streaming ASR provider → stt_stream model name. Mirror of the streaming options
+# in services.py (STREAMING_ASR_PROVIDER_OPTIONS); a streaming switch repoints
+# defaults.stt_stream so live transcription uses the newly selected provider.
+_STREAMING_ASR_PROVIDER_TO_STT_STREAM_MODEL = {
+    "nemotron": "stt-nemotron-stream",
+    "smallest": "stt-smallest-stream",
+    "deepgram": "stt-deepgram-stream",
+    "qwen3-asr": "stt-qwen3-asr-stream",
+}
+
+
+async def set_external_service_provider(name: str, body: dict):
+    """Switch the active provider (ASR/TTS) for a host-managed service.
+
+    For ASR this also repoints config.yml at the matching model registry entry
+    and hot-reloads the registry (+ signals workers), so the pipeline actually
+    uses the newly selected provider. The batch lane drives defaults.stt; the
+    streaming lane (body["lane"] == "streaming") drives defaults.stt_stream.
+
+    ``body["node"]`` selects the owning node (the local agent forwards to a remote
+    node when set). For a *remote* node we skip the hub-side config.yml/registry
+    repoint (that's a local-pipeline concern — the hub operator points defaults at the
+    remote provider separately).
+    """
+    node = body.get("node")
+    result = await _service_manager_request("POST", f"/services/{name}/provider", body)
+    if isinstance(result.get("operation"), dict):
+        result["operation"]["node"] = node
+
+    is_local = not node or node == await _local_node_host()
+    if name == "asr-services" and is_local:
+        streaming = body.get("lane") == "streaming"
+        default_key = "stt_stream" if streaming else "stt"
+        model_map = (
+            _STREAMING_ASR_PROVIDER_TO_STT_STREAM_MODEL
+            if streaming
+            else _ASR_PROVIDER_TO_STT_MODEL
+        )
+        stt_model = model_map.get(body.get("provider", ""))
+        if stt_model:
+            save_config_section("defaults", {default_key: stt_model})
+            load_models_config(force_reload=True)
+            signal_worker_restart()
+            logger.info(
+                "ASR %s provider switched to %s — defaults.%s set to %s, "
+                "registry reloaded, workers signaled",
+                "streaming" if streaming else "batch",
+                body.get("provider"),
+                default_key,
+                stt_model,
+            )
+            result["stt_model"] = stt_model
+        else:
+            logger.warning(
+                "No STT model mapping for ASR provider %r (lane=%s) — defaults.%s unchanged",
+                body.get("provider"),
+                body.get("lane", "batch"),
+                default_key,
+            )
+
+    return result
+
+
+async def get_external_service_operation(operation_id: str, node: str | None = None):
+    """Poll a long-running service operation. ``node`` is forwarded to the local agent,
+    which routes the poll to the remote node that owns the operation."""
+    params = {"node": node} if node else None
+    result = await _service_manager_request(
+        "GET", f"/operations/{operation_id}", params=params
+    )
+    if isinstance(result, dict):
+        result["node"] = node
+    return result
+
+
+async def get_remote_control_status():
+    """Status of the host's Claude remote-control session (for the System page).
+
+    Returns available=False (instead of raising) when the agent is not configured
+    or unreachable, so the WebUI can hide/disable the card.
+    """
+    url, token = _service_manager_config()
+    if not url or not token:
+        return {"available": False, "reason": "not_configured"}
+    try:
+        data = await _service_manager_request("GET", "/remote-control")
+    except HTTPException as e:
+        if e.status_code in (502, 503):
+            return {"available": False, "reason": "unreachable", "detail": e.detail}
+        raise
+    return {"available": True, **data}
+
+
+async def remote_control_action(action: str):
+    """Start/stop/restart the host's Claude remote-control session via the agent."""
+    return await _service_manager_request("POST", f"/remote-control/{action}")

@@ -1,10 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Activity, RefreshCw, CheckCircle, XCircle, AlertCircle, Users, Database, Server, MoreVertical, RotateCcw, Power, Smartphone, Copy, Check } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
+import { Link } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { useSystemData, useRestartWorkers, useRestartBackend } from '../hooks/useSystem'
 import { systemApi } from '../services/api'
+import ExternalServices from '../components/ExternalServices'
+import RemoteControl from '../components/RemoteControl'
 
 function getBackendHttpUrl(): string {
   const { protocol, hostname, port } = window.location
@@ -48,6 +51,21 @@ export default function System() {
   const { isDark } = useTheme()
   const [copied, setCopied] = useState(false)
   const backendUrl = getBackendHttpUrl()
+
+  // QR payload is a JSON bundle the mobile app parses (it also still accepts a
+  // bare URL for backwards compatibility). serviceManagerUrl is the backend host
+  // on :8775 so the app can auto-discover the agent. The SM token is NOT included
+  // — it's a server-side secret and is not exposed to the browser.
+  const qrPayload = (() => {
+    try {
+      const u = new URL(backendUrl)
+      // The service-manager agent serves plain HTTP on the tailnet (no TLS).
+      const serviceManagerUrl = `http://${u.hostname}:8775`
+      return JSON.stringify({ backendUrl, serviceManagerUrl })
+    } catch {
+      return backendUrl
+    }
+  })()
 
   const handleCopyUrl = async () => {
     try {
@@ -193,18 +211,16 @@ export default function System() {
       'mongodb': 'MONGODB',
       'redis': 'REDIS & RQ WORKERS',
       'llm': 'LLM',
+      'fast_llm': 'LLM (FAST)',
       'mem0': 'MEM0',
       'memory_service': 'MEMORY SERVICE',
-      'speech_to_text': 'SPEECH TO TEXT',
-      'speaker_recognition': 'SPEAKER RECOGNITION',
-      'openmemory_mcp': 'OPENMEMORY MCP'
+      'speech_to_text': 'SPEECH TO TEXT (BATCH)',
+      'speech_to_text_streaming': 'SPEECH TO TEXT (STREAMING)',
+      'speaker_recognition': 'SPEAKER RECOGNITION'
     }
     return displayNames[service] || service.replace('_', ' ').toUpperCase()
   }
 
-  const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleString()
-  }
 
   if (!isAdmin) {
     return (
@@ -259,14 +275,14 @@ export default function System() {
       )}
 
       {/* Header */}
-      <div className="flex justify-between items-center mb-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center mb-6">
         <div className="flex items-center space-x-2">
-          <Activity className="h-6 w-6 text-blue-600" />
+          <Activity className="h-6 w-6 text-blue-600 flex-shrink-0" />
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
             System Status
           </h1>
         </div>
-        <div className="flex items-center space-x-4">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-4">
           {lastUpdated && (
             <span className="text-sm text-gray-600 dark:text-gray-400">
               Last updated: {lastUpdated.toLocaleTimeString()}
@@ -562,6 +578,17 @@ export default function System() {
         </div>
       )}
 
+      {/* External Services (host service-manager agent) — lifecycle only.
+          Provider config + ASR context now live on the Settings page. */}
+      <div className="mb-6">
+        <ExternalServices isAdmin={isAdmin} mode="lifecycle" />
+      </div>
+
+      {/* Claude remote-control session (spawn Claude Code sessions from the phone) */}
+      <div className="mb-6">
+        <RemoteControl isAdmin={isAdmin} />
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Services Status */}
         {healthData?.services && (
@@ -593,6 +620,11 @@ export default function System() {
                     {(status as any).provider && (
                       <span className="text-xs text-blue-600 dark:text-blue-400">
                         ({(status as any).provider})
+                      </span>
+                    )}
+                    {(status as any).model && (
+                      <span className="text-xs text-gray-500 dark:text-gray-500 block">
+                        {(status as any).model}
                       </span>
                     )}
                     {service === 'redis' && (status as any).worker_count !== undefined && (
@@ -681,38 +713,22 @@ export default function System() {
           </div>
         )}
 
-        {/* Active Clients */}
+        {/* Active Clients — full device management lives on the Network page (Devices),
+            which is the superset (online + offline, rename/forget, last-seen). Keep a
+            live count here with a link, rather than duplicating the table. */}
         <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
           <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center">
             <Users className="h-5 w-5 mr-2 text-blue-600" />
             Active Clients ({activeClients.length})
           </h3>
-          {activeClients.length > 0 ? (
-            <div className="space-y-2 max-h-48 overflow-y-auto">
-              {activeClients.map((client: any) => (
-                <div key={client.id} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-md">
-                  <div>
-                    <div className="font-medium text-gray-900 dark:text-gray-100">{client.id}</div>
-                    <div className="text-sm text-gray-600 dark:text-gray-400">
-                      User: {client.user_id}
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-sm text-gray-600 dark:text-gray-400">
-                      Connected: {formatDate(client.connected_at)}
-                    </div>
-                    <div className="text-sm text-gray-600 dark:text-gray-400">
-                      Last: {formatDate(client.last_activity)}
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-gray-500 dark:text-gray-400 text-center py-4">
-              No active clients
-            </p>
-          )}
+          <p className="text-sm text-gray-600 dark:text-gray-400">
+            {activeClients.length > 0
+              ? `${activeClients.length} client${activeClients.length !== 1 ? 's' : ''} currently connected.`
+              : 'No clients currently connected.'}{' '}
+            <Link to="/network" className="text-blue-600 dark:text-blue-400 hover:underline">
+              Manage all devices on the Network page →
+            </Link>
+          </p>
         </div>
 
         {/* Debug Metrics */}
@@ -757,7 +773,7 @@ export default function System() {
         <div className="flex flex-col items-center space-y-4">
           <div className="p-4 bg-white rounded-xl shadow-sm border border-gray-200 dark:border-gray-600">
             <QRCodeSVG
-              value={backendUrl}
+              value={qrPayload}
               size={200}
               level="M"
               fgColor={isDark ? '#1f2937' : '#111827'}

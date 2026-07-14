@@ -1,6 +1,6 @@
 import React from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { Mic, Music, FileText, Users, Brain, User, Radio, Wifi } from 'lucide-react'
+import { Mic, Music, FileText, Users, Brain, User, Radio, Wifi, ShieldCheck } from 'lucide-react'
 import UserSelector from '../UserSelector'
 import ConnectionStatus from '../ConnectionStatus'
 import { ThemeSwitcher } from '../ThemeSwitcher'
@@ -16,6 +16,7 @@ export default function Layout({ children }: LayoutProps) {
     { path: '/audio', label: 'Audio Viewer', icon: Music },
     { path: '/annotation', label: 'Annotation', icon: FileText },
     { path: '/enrollment', label: 'Enrollment', icon: User },
+    { path: '/enrollment-health', label: 'Enrollment Health', icon: ShieldCheck },
     { path: '/speakers', label: 'Speakers', icon: Users },
     { path: '/inference', label: 'Inference', icon: Brain },
     { path: '/infer-live', label: 'Live Inference (Complex)', icon: Radio },

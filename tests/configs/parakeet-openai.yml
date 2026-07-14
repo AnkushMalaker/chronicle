@@ -5,7 +5,6 @@ defaults:
   llm: openai-llm
   embedding: openai-embed
   stt: stt-parakeet-batch
-  vector_store: vs-qdrant
 
 models:
   - name: openai-llm
@@ -31,17 +30,6 @@ models:
     api_key: ${oc.env:OPENAI_API_KEY,}
     embedding_dimensions: 1536
     model_output: vector
-
-  - name: vs-qdrant
-    description: Qdrant vector database
-    model_type: vector_store
-    model_provider: qdrant
-    api_family: qdrant
-    model_url: http://${oc.env:QDRANT_BASE_URL,qdrant}:${oc.env:QDRANT_PORT,6333}
-    model_params:
-      host: ${oc.env:QDRANT_BASE_URL,qdrant}
-      port: ${oc.env:QDRANT_PORT,6333}
-      collection_name: omi_memories
 
   - name: stt-parakeet-batch
     description: Parakeet NeMo ASR (batch) - local offline transcription

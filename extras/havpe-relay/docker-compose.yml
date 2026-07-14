@@ -4,23 +4,28 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    ports:
-      - "${TCP_PORT:-8989}:8989"
+    network_mode: host
     env_file: .env
     environment:
       - TCP_PORT=${TCP_PORT:-8989}
+      - ESPHOME_DEVICE_IP=${ESPHOME_DEVICE_IP:-}
       - DEBUG=${DEBUG:-0}
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "netstat", "-an", "|", "grep", "8989"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
     command: ["uv", "run", "python3", "main.py", "-v",
               "--backend-url", "${BACKEND_URL:-http://host.docker.internal:8000}",
               "--backend-ws-url", "${BACKEND_WS_URL:-ws://host.docker.internal:8000}"]
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       - ./audio_chunks:/app/audio_chunks
+
+  # Edge agent sidecar — advertises this service on the Tailnet
+  edge-agent:
+    build:
+      context: ../../edge
+    network_mode: host
+    environment:
+      - ADVERTISE=chronicle-relay:8989
+    volumes:
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock:ro
+    restart: unless-stopped
+    profiles:
+      - edge

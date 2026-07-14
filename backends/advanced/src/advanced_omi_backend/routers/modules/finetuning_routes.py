@@ -14,12 +14,59 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from advanced_omi_backend.auth import current_active_user
+from advanced_omi_backend.constants import is_non_enrollable_speaker
+from advanced_omi_backend.cron_scheduler import get_scheduler
 from advanced_omi_backend.models.annotation import Annotation, AnnotationType
+from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.services.observability.system_events import record_event
+from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 from advanced_omi_backend.users import User
+from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segment
+from advanced_omi_backend.workers.finetuning_jobs import run_asr_finetuning_job
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/finetuning", tags=["finetuning"])
+
+# Segments whose start is within this many seconds of the annotation's recorded
+# start are treated as the same segment when keying by time.
+_SEGMENT_START_TOLERANCE = 0.25
+
+
+def _resolve_annotated_segment(segments, segment_index, segment_start_time):
+    """Find the segment an annotation refers to.
+
+    Prefers matching by ``segment_start_time`` (stable across re-ordering) and
+    falls back to the stored index. Returns the segment or ``None`` if neither
+    locates a valid segment.
+    """
+    if segment_start_time is not None:
+        best = None
+        best_delta = _SEGMENT_START_TOLERANCE
+        for seg in segments:
+            delta = abs(seg.start - segment_start_time)
+            if delta <= best_delta:
+                best = seg
+                best_delta = delta
+        if best is not None:
+            return best
+    if segment_index is not None and 0 <= segment_index < len(segments):
+        return segments[segment_index]
+    return None
+
+
+async def _record_training_failure(annotation: Annotation, reason: str) -> None:
+    """Persist a training failure on the annotation so it can be surfaced/cleared.
+
+    Without this the annotation stays in the "applied, not trained" bucket and
+    re-fails on every run with no visible record — the Fine-tuning page appears
+    stuck. Recording the attempt + reason lets the UI show the failure and offer
+    retry/discard.
+    """
+    annotation.training_attempts = (annotation.training_attempts or 0) + 1
+    annotation.training_error = reason
+    annotation.updated_at = datetime.now(timezone.utc)
+    await annotation.save()
 
 
 @router.post("/process-annotations")
@@ -71,15 +118,6 @@ async def process_annotations_for_training(
                 }
             )
 
-        # Import required modules
-        from advanced_omi_backend.models.conversation import Conversation
-        from advanced_omi_backend.speaker_recognition_client import (
-            SpeakerRecognitionClient,
-        )
-        from advanced_omi_backend.utils.audio_chunk_utils import (
-            reconstruct_audio_segment,
-        )
-
         # Initialize speaker client
         speaker_client = SpeakerRecognitionClient()
 
@@ -101,6 +139,19 @@ async def process_annotations_for_training(
 
         for annotation in ready_for_training:
             try:
+                # Noise and placeholder "Unknown Speaker N" labels are not real
+                # people — never enroll them as voiceprints. Mark trained so they
+                # aren't retried, then skip.
+                if is_non_enrollable_speaker(annotation.corrected_speaker):
+                    annotation.processed_by = (
+                        f"{annotation.processed_by},training"
+                        if annotation.processed_by
+                        else "training"
+                    )
+                    annotation.updated_at = datetime.now(timezone.utc)
+                    await annotation.save()
+                    continue
+
                 # 1. Get conversation and segment timing
                 conversation = await Conversation.find_one(
                     Conversation.conversation_id == annotation.conversation_id
@@ -108,22 +159,72 @@ async def process_annotations_for_training(
 
                 if not conversation or not conversation.active_transcript:
                     failed_count += 1
-                    errors.append(
-                        f"Conversation {annotation.conversation_id[:8]} not found"
-                    )
+                    reason = f"Conversation {annotation.conversation_id[:8]} not found"
+                    errors.append(reason)
+                    await _record_training_failure(annotation, reason)
                     continue
 
-                # Validate segment index
-                if annotation.segment_index >= len(
-                    conversation.active_transcript.segments
+                # Resolve the segment by start-time when recorded (robust to the
+                # segment list being re-ordered/filtered by a reprocess between
+                # annotation and apply); fall back to the stored index.
+                segment = _resolve_annotated_segment(
+                    conversation.active_transcript.segments,
+                    annotation.segment_index,
+                    annotation.segment_start_time,
+                )
+                if segment is None:
+                    failed_count += 1
+                    reason = f"Invalid segment index {annotation.segment_index}"
+                    errors.append(reason)
+                    await _record_training_failure(annotation, reason)
+                    continue
+
+                # Guard corrupt segment times (e.g. start > end, or start beyond
+                # the audio) — reconstruct_audio_segment would raise. Skip the
+                # voiceprint enrollment for this segment; the relabel already
+                # applied (apply doesn't touch audio). Surface it on the System
+                # Errors page as a data-integrity issue (the transcript itself is
+                # corrupt — usually fixable by reprocessing the conversation).
+                # NOTE: reconstruct_audio_segment clamps end_time to the audio
+                # duration but NOT start_time, so a segment starting beyond the audio
+                # (streaming-reconnect timeline inflation) yields end < start and
+                # raises — catch that here too, not just start > end.
+                audio_dur = conversation.audio_total_duration or 0.0
+                if not (segment.end > segment.start >= 0) or (
+                    audio_dur and segment.start >= audio_dur
                 ):
                     failed_count += 1
-                    errors.append(f"Invalid segment index {annotation.segment_index}")
+                    reason = (
+                        f"Segment {annotation.segment_index} has invalid times "
+                        f"({segment.start:.1f}s-{segment.end:.1f}s); skipped enrollment"
+                    )
+                    errors.append(reason)
+                    await _record_training_failure(annotation, reason)
+                    logger.warning(
+                        f"Skipping enrollment for {annotation.conversation_id[:8]} "
+                        f"segment {annotation.segment_index}: invalid times "
+                        f"{segment.start:.1f}-{segment.end:.1f}"
+                    )
+                    await record_event(
+                        severity="warning",
+                        category="data_integrity",
+                        source="speaker_triage_enroll",
+                        title="Transcript segment has invalid times",
+                        detail=(
+                            f"Segment {annotation.segment_index} of conversation "
+                            f"{annotation.conversation_id} has start={segment.start:.2f}s "
+                            f"end={segment.end:.2f}s (start must be < end and within the "
+                            f"audio). Voiceprint enrollment skipped; reprocess the "
+                            f"conversation's transcript to regenerate segment times."
+                        ),
+                        conversation_id=annotation.conversation_id,
+                        metadata={
+                            "segment_index": annotation.segment_index,
+                            "start": segment.start,
+                            "end": segment.end,
+                        },
+                    )
                     continue
-
-                segment = conversation.active_transcript.segments[
-                    annotation.segment_index
-                ]
 
                 # 2. Extract audio segment from MongoDB
                 logger.info(
@@ -140,7 +241,9 @@ async def process_annotations_for_training(
                 if not wav_bytes:
                     logger.warning(f"No audio data for annotation {annotation.id}")
                     failed_count += 1
-                    errors.append(f"No audio for segment {annotation.segment_index}")
+                    reason = f"No audio for segment {annotation.segment_index}"
+                    errors.append(reason)
+                    await _record_training_failure(annotation, reason)
                     continue
 
                 logger.info(f"Extracted {len(wav_bytes) / 1024:.1f} KB of audio")
@@ -163,7 +266,9 @@ async def process_annotations_for_training(
                     if "error" in result:
                         logger.error(f"Failed to append to speaker: {result}")
                         failed_count += 1
-                        errors.append(f"Append failed: {result.get('error')}")
+                        reason = f"Append failed: {result.get('error')}"
+                        errors.append(reason)
+                        await _record_training_failure(annotation, reason)
                         continue
 
                     appended_count += 1
@@ -184,7 +289,9 @@ async def process_annotations_for_training(
                     if "error" in result:
                         logger.error(f"Failed to enroll speaker: {result}")
                         failed_count += 1
-                        errors.append(f"Enroll failed: {result.get('error')}")
+                        reason = f"Enroll failed: {result.get('error')}"
+                        errors.append(reason)
+                        await _record_training_failure(annotation, reason)
                         continue
 
                     enrolled_count += 1
@@ -192,11 +299,12 @@ async def process_annotations_for_training(
                         f"✅ Successfully enrolled new speaker '{annotation.corrected_speaker}'"
                     )
 
-                # 4. Mark annotation as trained
+                # 4. Mark annotation as trained (clear any prior failure record)
                 if annotation.processed_by:
                     annotation.processed_by = f"{annotation.processed_by},training"
                 else:
                     annotation.processed_by = "training"
+                annotation.training_error = None
                 annotation.updated_at = datetime.now(timezone.utc)
                 await annotation.save()
 
@@ -205,7 +313,15 @@ async def process_annotations_for_training(
                     f"Error processing annotation {annotation.id}: {e}", exc_info=True
                 )
                 failed_count += 1
-                errors.append(f"Exception: {str(e)[:50]}")
+                reason = f"Exception: {str(e)[:50]}"
+                errors.append(reason)
+                try:
+                    await _record_training_failure(annotation, reason)
+                except Exception:
+                    logger.error(
+                        f"Failed to record training failure for {annotation.id}",
+                        exc_info=True,
+                    )
                 continue
 
         total_processed = enrolled_count + appended_count
@@ -236,6 +352,335 @@ async def process_annotations_for_training(
         )
 
 
+# ---------------------------------------------------------------------------
+# Curated enrollment: build a quality-gated candidate set from the ACTIVE
+# transcript version (not annotation replay), let the user review/promote, then
+# enroll only the selected clips. This is the safe path that replaces the blunt
+# "process every applied annotation" enrollment which mismatched audio↔label and
+# enrolled cross-talk/short scraps.
+# ---------------------------------------------------------------------------
+
+# Minimum clip duration to allow into enrollment (drops short, low-information
+# scraps that blur a single centroid). User-chosen default.
+ENROLL_MIN_DURATION = 3.0
+# Default-select at most this many (longest) clips per speaker; the rest stay
+# available but unticked so the user can add them deliberately.
+ENROLL_DEFAULT_PER_SPEAKER = 5
+# Two clips whose start AND end match within this are treated as the same span.
+ENROLL_DEDUP_TOLERANCE = 0.20
+
+
+def _overlaps_other_person(segments, idx: int) -> bool:
+    """True if segment ``idx`` time-overlaps a DIFFERENT enrollable person's segment.
+
+    Cross-talk (two real speakers at once) is poison for single-speaker
+    enrollment, so it's excluded. Overlap with non-enrollable background
+    (``Unknown Speaker N`` / noise / TV) is ignored — a clean solo clip spoken
+    over background is still good enrollment audio.
+    """
+    a = segments[idx]
+    for j, b in enumerate(segments):
+        if j == idx:
+            continue
+        if is_non_enrollable_speaker(b.speaker) or b.speaker == a.speaker:
+            continue
+        if b.start < a.end and a.start < b.end:
+            return True
+    return False
+
+
+@router.get("/enrollment-candidates")
+async def get_enrollment_candidates(
+    current_user: User = Depends(current_active_user),
+    min_duration: float = Query(ENROLL_MIN_DURATION, ge=0.0, le=30.0),
+):
+    """Build a quality-gated, per-speaker list of enrollment candidate clips.
+
+    Source: the CURRENT active transcript version of every conversation that has
+    applied-but-untrained diarization annotations (i.e. conversations the user
+    labelled and hasn't enrolled yet). Each real-person segment becomes a
+    candidate; gates flag short / overlapping / invalid clips so the UI can
+    pre-tick only the clean ones. This is preview-only — nothing is enrolled.
+    """
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    annotations = await Annotation.find(
+        Annotation.annotation_type == AnnotationType.DIARIZATION,
+        Annotation.processed == True,
+    ).to_list()
+    untrained = [
+        a for a in annotations if not a.processed_by or "training" not in a.processed_by
+    ]
+    conv_ids = {a.conversation_id for a in untrained if a.conversation_id}
+    if not conv_ids:
+        return JSONResponse(
+            content={
+                "candidates": [],
+                "min_duration": min_duration,
+                "default_per_speaker": ENROLL_DEFAULT_PER_SPEAKER,
+                "conversation_count": 0,
+            }
+        )
+
+    conversations = await Conversation.find(
+        {"conversation_id": {"$in": list(conv_ids)}}
+    ).to_list()
+
+    # speaker -> list of candidate clip dicts
+    by_speaker: dict[str, list] = {}
+    for conv in conversations:
+        tr = conv.active_transcript
+        if not tr or not tr.segments:
+            continue
+        audio_dur = conv.audio_total_duration or 0.0
+        segs = tr.segments
+        for i, s in enumerate(segs):
+            if is_non_enrollable_speaker(s.speaker):
+                continue
+            dur = round(s.end - s.start, 2)
+            reasons = []
+            if not (s.end > s.start >= 0) or (audio_dur and s.start >= audio_dur):
+                reasons.append("invalid times")
+            if dur < min_duration:
+                reasons.append(f"short ({dur:.1f}s < {min_duration:.0f}s)")
+            if _overlaps_other_person(segs, i):
+                reasons.append("overlaps another speaker")
+            by_speaker.setdefault(s.speaker, []).append(
+                {
+                    "conversation_id": conv.conversation_id,
+                    "conversation_title": conv.title or "",
+                    "segment_index": i,
+                    "start": round(s.start, 2),
+                    "end": round(s.end, 2),
+                    "duration": dur,
+                    "text": (s.text or "")[:120],
+                    "gated_in": len(reasons) == 0,
+                    "reasons": reasons,
+                }
+            )
+
+    # Per speaker: default-select the longest N clean (gated_in) clips, after
+    # dropping duplicate spans. Everything is returned (the UI shows gated-out
+    # rows greyed so they can be re-added), only `default_selected` differs.
+    candidates = []
+    for speaker, clips in sorted(by_speaker.items()):
+        clean = [c for c in clips if c["gated_in"]]
+        # dedupe clean clips by near-identical (start,end)
+        deduped = []
+        for c in sorted(clean, key=lambda x: -x["duration"]):
+            if any(
+                abs(c["start"] - d["start"]) <= ENROLL_DEDUP_TOLERANCE
+                and abs(c["end"] - d["end"]) <= ENROLL_DEDUP_TOLERANCE
+                for d in deduped
+            ):
+                continue
+            deduped.append(c)
+        chosen = {
+            (c["conversation_id"], c["segment_index"])
+            for c in deduped[:ENROLL_DEFAULT_PER_SPEAKER]
+        }
+        for c in clips:
+            c["default_selected"] = (
+                c["conversation_id"],
+                c["segment_index"],
+            ) in chosen
+        clips.sort(key=lambda x: (not x["gated_in"], -x["duration"]))
+        candidates.append(
+            {
+                "speaker": speaker,
+                "clips": clips,
+                "selected_count": len(chosen),
+            }
+        )
+
+    return JSONResponse(
+        content={
+            "candidates": candidates,
+            "min_duration": min_duration,
+            "default_per_speaker": ENROLL_DEFAULT_PER_SPEAKER,
+            "conversation_count": len(conversations),
+        }
+    )
+
+
+class SelectedClip(BaseModel):
+    conversation_id: str
+    segment_index: int
+    start: float
+    end: float
+    speaker: str
+
+
+class EnrollSelectedRequest(BaseModel):
+    clips: list[SelectedClip]
+
+
+@router.post("/enroll-selected")
+async def enroll_selected_clips(
+    body: EnrollSelectedRequest,
+    current_user: User = Depends(current_active_user),
+):
+    """Enroll ONLY the explicitly selected clips, carved from the active version.
+
+    Unlike ``process-annotations`` this takes an explicit list of spans the user
+    promoted — no annotation replay, no start-time/index guessing. Each clip is
+    re-validated against the conversation's current active version (guards a
+    version change between review and submit), then enrolled/appended by speaker
+    name. Conversations we enrolled at least one clip from have their
+    applied-but-untrained diarization annotations marked trained (cleared from
+    the queue).
+    """
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    if not body.clips:
+        return JSONResponse(content={"message": "No clips selected", "enrolled": 0})
+
+    speaker_client = SpeakerRecognitionClient()
+    if not speaker_client.enabled:
+        return JSONResponse(
+            status_code=503,
+            content={"message": "Speaker recognition service not enabled"},
+        )
+
+    enrolled = 0
+    appended = 0
+    failed = 0
+    skipped = 0
+    errors: list[str] = []
+    touched_conv_ids: set[str] = set()
+
+    # Cache conversations to avoid refetching per clip
+    conv_cache = {}
+
+    for clip in body.clips:
+        try:
+            if is_non_enrollable_speaker(clip.speaker):
+                skipped += 1
+                continue
+
+            conv = conv_cache.get(clip.conversation_id)
+            if conv is None:
+                conv = await Conversation.find_one(
+                    Conversation.conversation_id == clip.conversation_id
+                )
+                conv_cache[clip.conversation_id] = conv
+            if not conv or not conv.active_transcript:
+                failed += 1
+                errors.append(f"{clip.conversation_id[:8]}: conversation not found")
+                continue
+
+            # Re-validate the span against the current active version (guards a
+            # version change between candidate-fetch and submit).
+            segs = conv.active_transcript.segments
+            seg = None
+            if 0 <= clip.segment_index < len(segs):
+                cand = segs[clip.segment_index]
+                if (
+                    abs(cand.start - clip.start) <= ENROLL_DEDUP_TOLERANCE
+                    and abs(cand.end - clip.end) <= ENROLL_DEDUP_TOLERANCE
+                    and cand.speaker == clip.speaker
+                ):
+                    seg = cand
+            if seg is None:
+                skipped += 1
+                errors.append(
+                    f"{clip.conversation_id[:8]} seg {clip.segment_index}: "
+                    f"segment changed since review; skipped"
+                )
+                continue
+
+            wav_bytes = await reconstruct_audio_segment(
+                conversation_id=clip.conversation_id,
+                start_time=seg.start,
+                end_time=seg.end,
+            )
+            if not wav_bytes:
+                failed += 1
+                errors.append(
+                    f"{clip.conversation_id[:8]} seg {clip.segment_index}: no audio"
+                )
+                continue
+
+            existing = await speaker_client.get_speaker_by_name(
+                speaker_name=clip.speaker, user_id=1
+            )
+            if existing:
+                result = await speaker_client.append_to_speaker(
+                    speaker_id=existing["id"], audio_data=wav_bytes
+                )
+                if "error" in result:
+                    failed += 1
+                    errors.append(
+                        f"{clip.speaker}: append failed ({result.get('error')})"
+                    )
+                    continue
+                appended += 1
+            else:
+                result = await speaker_client.enroll_new_speaker(
+                    speaker_name=clip.speaker, audio_data=wav_bytes, user_id=1
+                )
+                if "error" in result:
+                    failed += 1
+                    errors.append(
+                        f"{clip.speaker}: enroll failed ({result.get('error')})"
+                    )
+                    continue
+                enrolled += 1
+
+            touched_conv_ids.add(clip.conversation_id)
+
+        except Exception as e:
+            failed += 1
+            errors.append(
+                f"{clip.conversation_id[:8]} seg {clip.segment_index}: {str(e)[:50]}"
+            )
+            logger.error(
+                f"enroll_selected: error on {clip.conversation_id} seg {clip.segment_index}: {e}",
+                exc_info=True,
+            )
+
+    # Mark applied-but-untrained diarization annotations of enrolled conversations
+    # as trained so they leave the Finetuning queue.
+    marked = 0
+    if touched_conv_ids:
+        anns = await Annotation.find(
+            Annotation.annotation_type == AnnotationType.DIARIZATION,
+            Annotation.processed == True,
+            {"conversation_id": {"$in": list(touched_conv_ids)}},
+        ).to_list()
+        for a in anns:
+            if a.processed_by and "training" in a.processed_by:
+                continue
+            a.processed_by = (
+                f"{a.processed_by},training" if a.processed_by else "training"
+            )
+            a.training_error = None
+            a.updated_at = datetime.now(timezone.utc)
+            await a.save()
+            marked += 1
+
+    total = enrolled + appended
+    logger.info(
+        f"enroll_selected complete: {total} enrolled ({enrolled} new, {appended} appended), "
+        f"{failed} failed, {skipped} skipped, {marked} annotations marked trained"
+    )
+    return JSONResponse(
+        content={
+            "message": "Enrollment complete",
+            "enrolled_new": enrolled,
+            "appended": appended,
+            "total_enrolled": total,
+            "failed": failed,
+            "skipped": skipped,
+            "annotations_marked_trained": marked,
+            "errors": errors[:10],
+            "status": "success" if total > 0 else "partial_failure",
+        }
+    )
+
+
 @router.post("/export-asr-dataset")
 async def export_asr_dataset(
     current_user: User = Depends(current_active_user),
@@ -255,8 +700,6 @@ async def export_asr_dataset(
         )
 
     try:
-        from advanced_omi_backend.workers.finetuning_jobs import run_asr_finetuning_job
-
         result = await run_asr_finetuning_job()
         return JSONResponse(content=result)
     except Exception as e:
@@ -284,10 +727,9 @@ async def get_finetuning_status(
         # ------------------------------------------------------------------
         # Per-type annotation counts (with orphan detection)
         # ------------------------------------------------------------------
-        from advanced_omi_backend.models.conversation import Conversation
-
         annotation_counts: dict[str, dict] = {}
         trained_diarization_list: list = []
+        failed_diarization_errors: list[str] = []
 
         # Collect all annotations to batch-check for orphans
         all_annotations_by_type: dict[AnnotationType, list] = {}
@@ -344,6 +786,9 @@ async def get_finetuning_status(
                 for a in processed
                 if not a.processed_by or "training" not in a.processed_by
             ]
+            # "Failed" = applied annotations that hit a training error and are still
+            # stuck (not yet trained). Surfaced so an admin can retry or discard them.
+            failed = [a for a in applied_not_trained if (a.training_attempts or 0) > 0]
 
             orphan_count = len(orphaned)
             total_orphaned += orphan_count
@@ -354,7 +799,15 @@ async def get_finetuning_status(
                 "applied": len(applied_not_trained),
                 "trained": len(trained),
                 "orphaned": orphan_count,
+                "failed": len(failed),
             }
+
+            if ann_type == AnnotationType.DIARIZATION and failed:
+                seen_errors: set[str] = set()
+                for a in failed:
+                    if a.training_error and a.training_error not in seen_errors:
+                        seen_errors.add(a.training_error)
+                        failed_diarization_errors.append(a.training_error)
 
             if ann_type == AnnotationType.DIARIZATION:
                 trained_diarization_list = trained
@@ -366,6 +819,7 @@ async def get_finetuning_status(
         pending_count = diarization.get("pending", 0)
         applied_count = diarization.get("applied", 0)
         trained_count = diarization.get("trained", 0)
+        failed_count = diarization.get("failed", 0)
 
         # Get last training run timestamp from diarization annotations
         last_training_run = None
@@ -386,8 +840,6 @@ async def get_finetuning_status(
 
         # Get cron job status from scheduler
         try:
-            from advanced_omi_backend.cron_scheduler import get_scheduler
-
             scheduler = get_scheduler()
             all_jobs = await scheduler.get_all_jobs_status()
             # Find speaker finetuning job for backward compat
@@ -413,6 +865,8 @@ async def get_finetuning_status(
                 "pending_annotation_count": pending_count,
                 "applied_annotation_count": applied_count,
                 "trained_annotation_count": trained_count,
+                "failed_annotation_count": failed_count,
+                "failed_annotation_errors": failed_diarization_errors[:10],
                 "last_training_run": last_training_run,
                 "cron_status": cron_status,
                 "annotation_counts": annotation_counts,
@@ -447,8 +901,6 @@ async def delete_orphaned_annotations(
     """
     if not current_user.is_superuser:
         raise HTTPException(status_code=403, detail="Admin access required")
-
-    from advanced_omi_backend.models.conversation import Conversation
 
     conv_annotation_types = {AnnotationType.DIARIZATION, AnnotationType.TRANSCRIPT}
 
@@ -529,6 +981,87 @@ async def reattach_orphaned_annotations(
 
 
 # ---------------------------------------------------------------------------
+# Failed Annotation Management Endpoints
+# ---------------------------------------------------------------------------
+
+
+async def _find_failed_annotations(annotation_type: Optional[str]) -> list[Annotation]:
+    """Return applied-but-stuck annotations that have a recorded training failure.
+
+    These are ``processed=True`` and not yet trained, with ``training_attempts > 0``.
+    """
+    if annotation_type:
+        try:
+            ann_type = AnnotationType(annotation_type)
+        except ValueError:
+            raise HTTPException(
+                status_code=400, detail=f"Unknown annotation type: {annotation_type}"
+            )
+        candidates = await Annotation.find(
+            Annotation.annotation_type == ann_type,
+            Annotation.processed == True,
+        ).to_list()
+    else:
+        candidates = await Annotation.find(
+            Annotation.annotation_type == AnnotationType.DIARIZATION,
+            Annotation.processed == True,
+        ).to_list()
+
+    return [
+        a
+        for a in candidates
+        if (a.training_attempts or 0) > 0
+        and (not a.processed_by or "training" not in a.processed_by)
+    ]
+
+
+@router.post("/failed-annotations/retry")
+async def retry_failed_annotations(
+    current_user: User = Depends(current_active_user),
+    annotation_type: Optional[str] = Query(
+        None, description="Filter by annotation type (default: diarization)"
+    ),
+):
+    """Clear the recorded failure on stuck annotations so they can be retried.
+
+    Resets ``training_attempts``/``training_error`` (without deleting). The next
+    training run re-attempts them; if the underlying cause is fixed they will
+    succeed, otherwise they re-appear as failed.
+    """
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    failed = await _find_failed_annotations(annotation_type)
+    for a in failed:
+        a.training_attempts = 0
+        a.training_error = None
+        a.updated_at = datetime.now(timezone.utc)
+        await a.save()
+
+    logger.info(f"Reset {len(failed)} failed annotations for retry")
+    return JSONResponse(content={"reset_count": len(failed)})
+
+
+@router.delete("/failed-annotations")
+async def delete_failed_annotations(
+    current_user: User = Depends(current_active_user),
+    annotation_type: Optional[str] = Query(
+        None, description="Filter by annotation type (default: diarization)"
+    ),
+):
+    """Discard stuck annotations that keep failing to train (corrupt/unusable)."""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    failed = await _find_failed_annotations(annotation_type)
+    for a in failed:
+        await a.delete()
+
+    logger.info(f"Deleted {len(failed)} failed annotations")
+    return JSONResponse(content={"deleted_count": len(failed)})
+
+
+# ---------------------------------------------------------------------------
 # Cron Job Management Endpoints
 # ---------------------------------------------------------------------------
 
@@ -544,8 +1077,6 @@ async def get_cron_jobs(current_user: User = Depends(current_active_user)):
     if not current_user.is_superuser:
         raise HTTPException(status_code=403, detail="Admin access required")
 
-    from advanced_omi_backend.cron_scheduler import get_scheduler
-
     scheduler = get_scheduler()
     return await scheduler.get_all_jobs_status()
 
@@ -559,8 +1090,6 @@ async def update_cron_job(
     """Update a cron job's schedule or enabled state."""
     if not current_user.is_superuser:
         raise HTTPException(status_code=403, detail="Admin access required")
-
-    from advanced_omi_backend.cron_scheduler import get_scheduler
 
     scheduler = get_scheduler()
     try:
@@ -579,8 +1108,6 @@ async def run_cron_job_now(
     """Manually trigger a cron job."""
     if not current_user.is_superuser:
         raise HTTPException(status_code=403, detail="Admin access required")
-
-    from advanced_omi_backend.cron_scheduler import get_scheduler
 
     scheduler = get_scheduler()
     try:

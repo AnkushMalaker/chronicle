@@ -10,6 +10,7 @@ Environment variable resolution is handled by OmegaConf in the config module.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -25,7 +26,45 @@ from pydantic import (
 
 # Import config merging for defaults.yml + config.yml integration
 # OmegaConf handles environment variable resolution (${VAR:-default} syntax)
-from advanced_omi_backend.config import get_config
+from advanced_omi_backend.config import get_config, get_config_yml_path
+from advanced_omi_backend.openai_factory import create_openai_client, is_reasoning_model
+
+logger = logging.getLogger(__name__)
+
+# Tailnet service-URL discovery cache. A model whose model_url is empty but which
+# carries a `discovery_service` (e.g. chronicle-asr / chronicle-llm) resolves its URL
+# live from minidisc — so a remote ASR/LLM node coming online is picked up without
+# re-config. Cached briefly so the hot transcription/LLM paths don't do a minidisc
+# lookup on every call.
+_DISCOVERY_TTL_SECS = 30.0
+_discovery_cache: Dict[str, tuple[float, str]] = {}
+
+
+def _with_scheme(url: str) -> str:
+    """Prepend http:// to a scheme-less host:port (env vars often store bare host:port).
+    Leaves '' and already-schemed URLs (http/https/ws/wss) untouched."""
+    if url and "://" not in url:
+        return "http://" + url
+    return url
+
+
+def _discover_service_url(service_name: str) -> str:
+    """Minidisc URL for a chronicle-* service, cached for _DISCOVERY_TTL_SECS. '' if none."""
+    now = time.monotonic()
+    cached = _discovery_cache.get(service_name)
+    if cached and now - cached[0] < _DISCOVERY_TTL_SECS:
+        return cached[1]
+    url = ""
+    try:
+        from discovery import resolve_service_url
+
+        url = resolve_service_url(None, service_name, default="") or ""
+    except Exception:  # noqa: BLE001 - discovery is best-effort
+        url = ""
+    _discovery_cache[service_name] = (now, url)
+    if url:
+        logger.debug("Discovered %s at %s (tailnet)", service_name, url)
+    return url
 
 
 class ModelDef(BaseModel):
@@ -66,6 +105,16 @@ class ModelDef(BaseModel):
     model_output: Optional[str] = Field(
         default=None, description="Output format: json, text, vector, etc."
     )
+    thinking: bool = Field(
+        default=False,
+        description=(
+            "Local thinking/reasoning model whose extended thinking is toggled via the "
+            "chat template (chat_template_kwargs.enable_thinking), NOT the OpenAI "
+            "top-level `reasoning_effort` (which llama.cpp silently ignores). When set, "
+            "an operation's reasoning_effort is translated to enable_thinking for this "
+            "model (e.g. gemma/qwen served by llama.cpp)."
+        ),
+    )
     embedding_dimensions: Optional[int] = Field(
         default=None, ge=1, description="Embedding vector dimensions"
     )
@@ -74,7 +123,48 @@ class ModelDef(BaseModel):
     )
     capabilities: List[str] = Field(
         default_factory=list,
-        description="Provider capabilities: word_timestamps, segments, diarization (for STT providers)",
+        description=(
+            "Provider capabilities. Output capabilities: word_timestamps, segments, "
+            "diarization. ASR hint mechanism (mutually exclusive): "
+            "'keyword_boosting' — accepts a hot-word list as an acoustic recognition "
+            "hint that biases decoding without leaking into the transcript "
+            "(Deepgram keyterm, VibeVoice prompt, Parakeet); 'context_prompt' — an "
+            "LLM-backbone ASR that takes free-form context as prompt text (Gemma 4). "
+            "context_prompt providers are given the user-authored asr_context only, "
+            "never the wake-word boost list (which an LLM would echo into output)."
+        ),
+    )
+    asr_context: Optional[str] = Field(
+        default=None,
+        description=(
+            "Free-form context string for 'context_prompt' STT providers (e.g. a "
+            "domain/topic description). Informs an LLM-backbone ASR without being "
+            "transcribed. User overrides are stored under backend.asr.context.<name>."
+        ),
+    )
+    discovery_service: Optional[str] = Field(
+        default=None,
+        description=(
+            "minidisc service name (e.g. 'chronicle-asr', 'chronicle-llm'). When set "
+            "and model_url is empty, the base URL is resolved live from the Tailnet, so "
+            "a remote ASR/LLM node coming online is used without re-config. An explicit "
+            "model_url (env/config) always takes precedence over discovery."
+        ),
+    )
+    discovery_default: Optional[str] = Field(
+        default=None,
+        description=(
+            "Fallback base URL used when discovery_service is set but nothing is "
+            "advertised yet (e.g. a host-local default)."
+        ),
+    )
+    discovery_path: Optional[str] = Field(
+        default=None,
+        description=(
+            "Path appended to a *discovered* bare host:port (e.g. '/v1' for an "
+            "OpenAI-compatible LLM). Not applied to an explicit model_url or "
+            "discovery_default (those are expected to already be complete)."
+        ),
     )
 
     @field_validator("model_name", mode="before")
@@ -103,6 +193,25 @@ class ModelDef(BaseModel):
                 return None
             return v
         return v
+
+    def resolved_url(self) -> str:
+        """Effective base URL, resolving Tailnet discovery when not explicitly set.
+
+        Order: explicit model_url (env/config) → minidisc discovery_service (with
+        discovery_path appended to the bare host:port) → discovery_default. An
+        advertised remote node is picked up live (cached), so a 'configure from the
+        Tailnet later' setup needs no re-config when the node comes online. URLs
+        without a scheme get http:// prepended. Returns '' when nothing is available.
+        """
+        if self.model_url:
+            return _with_scheme(self.model_url)
+        if self.discovery_service:
+            discovered = _discover_service_url(self.discovery_service)
+            if discovered:
+                if self.discovery_path:
+                    discovered = discovered.rstrip("/") + self.discovery_path
+                return _with_scheme(discovered)
+        return _with_scheme(self.discovery_default or "")
 
     @model_validator(mode="after")
     def validate_model(self) -> ModelDef:
@@ -135,6 +244,9 @@ class LLMOperationConfig(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     response_format: Optional[str] = None  # "json" → {"type": "json_object"}
+    reasoning_effort: Optional[str] = (
+        None  # "minimal"|"low"|... — reasoning models only
+    )
 
 
 class ResolvedLLMOperation(BaseModel):
@@ -150,6 +262,7 @@ class ResolvedLLMOperation(BaseModel):
     temperature: float
     max_tokens: Optional[int] = None
     response_format: Optional[Dict[str, Any]] = None  # {"type": "json_object"} or None
+    reasoning_effort: Optional[str] = None  # OpenAI reasoning models OR thinking models
 
     @property
     def model_name(self) -> str:
@@ -161,21 +274,56 @@ class ResolvedLLMOperation(BaseModel):
 
     @property
     def base_url(self) -> str:
-        return self.model_def.model_url
+        return self.model_def.resolved_url()
 
     def to_api_params(self) -> Dict[str, Any]:
         """Returns kwargs for client.chat.completions.create().
 
-        Works for OpenAI, Ollama, Groq — all OpenAI-compatible.
+        Works for OpenAI, Ollama, Groq — all OpenAI-compatible. For OpenAI
+        reasoning-class models (gpt-5*, o1/o3/o4), `temperature` is omitted,
+        `max_tokens` is renamed to `max_completion_tokens`, and `reasoning_effort`
+        is forwarded as a top-level param — matching OpenAI's stricter API surface.
+
+        Local *thinking* models (``model_def.thinking``, e.g. gemma/qwen served by
+        llama.cpp) silently IGNORE the OpenAI top-level `reasoning_effort`, so an
+        operation's reasoning_effort is instead translated to the chat-template switch
+        the server actually honors (``chat_template_kwargs.enable_thinking``), sent via
+        the OpenAI SDK's ``extra_body``. Extended thinking is bounded server-side by
+        llama.cpp's ``--reasoning-budget``.
         """
-        params: Dict[str, Any] = {
-            "model": self.model_def.model_name,
-            "temperature": self.temperature,
-        }
+        model_name = self.model_def.model_name
+        openai_reasoning = is_reasoning_model(model_name)
+
+        params: Dict[str, Any] = {"model": model_name}
+        if not openai_reasoning:
+            params["temperature"] = self.temperature
         if self.max_tokens is not None:
-            params["max_tokens"] = self.max_tokens
+            key = "max_completion_tokens" if openai_reasoning else "max_tokens"
+            params[key] = self.max_tokens
         if self.response_format is not None:
             params["response_format"] = self.response_format
+
+        if self.reasoning_effort:
+            if openai_reasoning:
+                effort = self.reasoning_effort.strip().lower()
+                # "none" is only accepted from gpt-5.1 on; earlier reasoning
+                # models (gpt-5-nano, o3, …) reject it — "minimal" is their floor.
+                if effort in ("none", "off", "0") and not model_name.lower().startswith(
+                    "gpt-5.1"
+                ):
+                    effort = "minimal"
+                params["reasoning_effort"] = effort
+            elif self.model_def.thinking:
+                # "none"/"minimal"/"off"/"0" → thinking off; any other level → on.
+                enable = self.reasoning_effort.strip().lower() not in (
+                    "none",
+                    "minimal",
+                    "off",
+                    "0",
+                )
+                params["extra_body"] = {
+                    "chat_template_kwargs": {"enable_thinking": enable}
+                }
         return params
 
     def get_client(self, is_async: bool = False):
@@ -183,11 +331,9 @@ class ResolvedLLMOperation(BaseModel):
 
         Uses create_openai_client which handles Langfuse tracing.
         """
-        from advanced_omi_backend.openai_factory import create_openai_client
-
         return create_openai_client(
             api_key=self.model_def.api_key or "",
-            base_url=self.model_def.model_url,
+            base_url=self.model_def.resolved_url(),
             is_async=is_async,
         )
 
@@ -215,10 +361,6 @@ class AppModels(BaseModel):
     )
     speaker_recognition: Dict[str, Any] = Field(
         default_factory=dict, description="Speaker recognition service configuration"
-    )
-    chat: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Chat service configuration including system prompt",
     )
     llm_operations: Dict[str, LLMOperationConfig] = Field(
         default_factory=dict,
@@ -279,17 +421,29 @@ class AppModels(BaseModel):
         """
         return sorted(set(m.model_type for m in self.models.values()))
 
-    def get_llm_operation(self, name: str) -> ResolvedLLMOperation:
+    def get_llm_operation(
+        self,
+        name: str,
+        *,
+        default_model_type: str = "llm",
+        model_override: Optional[str] = None,
+    ) -> ResolvedLLMOperation:
         """Resolve a named LLM operation to a self-contained config.
 
         Resolution:
           1. Look up llm_operations[name] (empty LLMOperationConfig if missing)
-          2. Resolve model_def: op.model → get_by_name, else defaults.llm
+          2. Resolve model_def: model_override → get_by_name, else op.model →
+             get_by_name, else defaults[default_model_type] (falling back to
+             defaults.llm — so e.g. an unset fast_llm reuses the main LLM)
           3. Merge parameters: operation > model_def.model_params > safe fallback
           4. Return ResolvedLLMOperation ready for use
 
         Args:
             name: Operation name (e.g. "memory_extraction", "chat")
+            default_model_type: defaults key to use when the operation pins no model
+                (e.g. "fast_llm"); falls back to "llm" when that default is unset.
+            model_override: pin a specific model by name, overriding both the
+                operation's model and the defaults (used for fallback retries).
 
         Returns:
             ResolvedLLMOperation with model_def, temperature, max_tokens, response_format
@@ -300,7 +454,14 @@ class AppModels(BaseModel):
         op_config = self.llm_operations.get(name, LLMOperationConfig())
 
         # Resolve model definition
-        if op_config.model:
+        if model_override:
+            model_def = self.get_by_name(model_override)
+            if not model_def:
+                raise RuntimeError(
+                    f"LLM operation '{name}' requested override model "
+                    f"'{model_override}' which is not defined in the models list"
+                )
+        elif op_config.model:
             model_def = self.get_by_name(op_config.model)
             if not model_def:
                 raise RuntimeError(
@@ -308,7 +469,9 @@ class AppModels(BaseModel):
                     f"which is not defined in the models list"
                 )
         else:
-            model_def = self.get_default("llm")
+            model_def = self.get_default(default_model_type)
+            if not model_def and default_model_type != "llm":
+                model_def = self.get_default("llm")
             if not model_def:
                 raise RuntimeError(
                     f"No model specified for operation '{name}' and no default LLM defined"
@@ -327,6 +490,11 @@ class AppModels(BaseModel):
             if op_config.max_tokens is not None
             else model_params.get("max_tokens")
         )
+        reasoning_effort = (
+            op_config.reasoning_effort
+            if op_config.reasoning_effort is not None
+            else model_params.get("reasoning_effort")
+        )
 
         # Convert "json" shorthand to OpenAI format
         response_format = None
@@ -338,6 +506,34 @@ class AppModels(BaseModel):
             temperature=float(temperature),
             max_tokens=int(max_tokens) if max_tokens is not None else None,
             response_format=response_format,
+            reasoning_effort=reasoning_effort,
+        )
+
+    def get_fallback_llm_operation(
+        self,
+        name: str,
+        *,
+        primary: ResolvedLLMOperation,
+        default_model_type: str = "llm",
+    ) -> Optional[ResolvedLLMOperation]:
+        """Resolve operation ``name`` against ``defaults.fallback_llm``.
+
+        Returns None when no fallback is configured, when the fallback entry is
+        missing or not an LLM, or when it is the same model the primary attempt
+        already used (retrying it would be pointless).
+        """
+        fb_name = self.defaults.get("fallback_llm")
+        if not fb_name or fb_name == primary.model_def.name:
+            return None
+        fb_def = self.get_by_name(fb_name)
+        if not fb_def or fb_def.model_type != "llm":
+            logger.warning(
+                "defaults.fallback_llm=%r does not name an LLM model — ignoring",
+                fb_name,
+            )
+            return None
+        return self.get_llm_operation(
+            name, default_model_type=default_model_type, model_override=fb_name
         )
 
 
@@ -355,8 +551,6 @@ def _find_config_path() -> Path:
     Returns:
         Path to config.yml
     """
-    from advanced_omi_backend.config import get_config_yml_path
-
     return get_config_yml_path()
 
 
@@ -393,7 +587,6 @@ def load_models_config(force_reload: bool = False) -> Optional[AppModels]:
     model_list = raw.get("models", []) or []
     memory_settings = raw.get("memory", {}) or {}
     speaker_recognition_cfg = raw.get("speaker_recognition", {}) or {}
-    chat_settings = raw.get("chat", {}) or {}
     llm_ops_raw = raw.get("llm_operations", {}) or {}
 
     # Parse and validate models using Pydantic
@@ -422,7 +615,6 @@ def load_models_config(force_reload: bool = False) -> Optional[AppModels]:
         models=models,
         memory=memory_settings,
         speaker_recognition=speaker_recognition_cfg,
-        chat=chat_settings,
         llm_operations=llm_operations,
     )
     return _REGISTRY

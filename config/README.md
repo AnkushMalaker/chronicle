@@ -52,14 +52,13 @@ defaults:
   llm: openai-llm          # Default LLM model
   embedding: openai-embed  # Default embedding model
   stt: stt-deepgram       # Default speech-to-text
-  vector_store: vs-qdrant # Default vector database
 ```
 
 ### Models
 
 Array of model definitions - each model includes:
 - `name`: Unique identifier
-- `model_type`: llm, embedding, stt, tts, vector_store
+- `model_type`: llm, embedding, stt, tts
 - `model_provider`: openai, ollama, deepgram, parakeet, etc.
 - `model_name`: Provider-specific model name
 - `model_url`: API endpoint
@@ -72,7 +71,7 @@ Memory extraction and storage configuration:
 
 ```yaml
 memory:
-  provider: chronicle  # chronicle or openmemory_mcp
+  provider: chronicle  # agentic Markdown vault (the only provider)
   timeout_seconds: 1200
   extraction:
     enabled: true

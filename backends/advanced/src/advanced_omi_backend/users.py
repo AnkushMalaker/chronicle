@@ -10,10 +10,13 @@ from advanced_omi_backend.models.user import (
     UserCreate,
     UserRead,
     UserUpdate,
+    forget_client_for_user,
     get_user_by_client_id,
     get_user_by_id,
     get_user_db,
     register_client_to_user,
+    rename_client_for_user,
+    touch_client_last_seen,
 )
 
 __all__ = [
@@ -25,4 +28,7 @@ __all__ = [
     "get_user_by_id",
     "get_user_by_client_id",
     "register_client_to_user",
+    "rename_client_for_user",
+    "forget_client_for_user",
+    "touch_client_last_seen",
 ]

@@ -56,36 +56,36 @@ Url Parsing Removes Double Slashes
     Should Be Equal  ${parsed_invalid["netloc"]}  http:
     Should Not Be Equal  ${parsed_invalid["netloc"]}  host.docker.internal:8767
 
-Use Provider Segments Default False
-    [Documentation]  Test that use_provider_segments defaults to false.
-    ${transcription}=  Create Dictionary
-    ${backend}=  Create Dictionary  transcription=${transcription}
+Diarization Source Defaults To Provider
+    [Documentation]  Test that diarization_source defaults to provider (trust provider diarization, fall back to pyannote).
+    ${diarization}=  Create Dictionary
+    ${backend}=  Create Dictionary  diarization=${diarization}
     ${config_template}=  Create Dictionary  backend=${backend}
     ${env_vars}=  Create Dictionary
 
     ${resolved}=  Resolve Omega Config  ${config_template}  ${env_vars}
-    ${val}=  Evaluate  $resolved.get('backend', {}).get('transcription', {}).get('use_provider_segments', False)
-    Should Be Equal  ${val}  ${FALSE}
+    ${val}=  Evaluate  $resolved.get('backend', {}).get('diarization', {}).get('diarization_source', 'provider')
+    Should Be Equal  ${val}  provider
 
-Use Provider Segments Explicit True
-    [Documentation]  Test that use_provider_segments can be enabled.
-    ${transcription}=  Create Dictionary  use_provider_segments=${TRUE}
-    ${backend}=  Create Dictionary  transcription=${transcription}
+Diarization Source Explicit Pyannote
+    [Documentation]  Test that diarization_source can be set to pyannote (always re-diarize).
+    ${diarization}=  Create Dictionary  diarization_source=pyannote
+    ${backend}=  Create Dictionary  diarization=${diarization}
     ${config_template}=  Create Dictionary  backend=${backend}
     ${env_vars}=  Create Dictionary
 
     ${resolved}=  Resolve Omega Config  ${config_template}  ${env_vars}
-    ${val}=  Evaluate  $resolved['backend']['transcription']['use_provider_segments']
-    Should Be Equal  ${val}  ${TRUE}
+    ${val}=  Evaluate  $resolved['backend']['diarization']['diarization_source']
+    Should Be Equal  ${val}  pyannote
 
-Vibevoice Should Use Provider Segments
-    [Documentation]  Test that VibeVoice provider should have use_provider_segments=true since it provides diarized segments.
+Vibevoice Provider Diarization Is Trusted
+    [Documentation]  Test that a provider with segments + diarization capabilities qualifies for provider-sourced diarization.
     # Logic simulation
     ${vibevoice_capabilities}=  Create List  segments  diarization
     ${has_diarization}=  Evaluate  "diarization" in $vibevoice_capabilities
     ${has_segments}=  Evaluate  "segments" in $vibevoice_capabilities
-    ${should_use_segments}=  Evaluate  $has_diarization and $has_segments
-    Should Be Equal  ${should_use_segments}  ${TRUE}
+    ${provider_diarized}=  Evaluate  $has_diarization and $has_segments
+    Should Be Equal  ${provider_diarized}  ${TRUE}
 
 Model Registry Url Resolution With Env Var
     [Documentation]  Test that model URLs resolve correctly from environment.

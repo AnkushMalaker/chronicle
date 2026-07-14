@@ -12,9 +12,7 @@ import { ErrorBoundary, PageErrorBoundary } from './components/ErrorBoundary'
 // Lazy-loaded page components (code-split into separate chunks)
 const Chat = lazy(() => import('./pages/Chat'))
 const ConversationsRouter = lazy(() => import('./pages/ConversationsRouter'))
-const MemoriesRouter = lazy(() => import('./pages/MemoriesRouter'))
 const ConversationDetail = lazy(() => import('./pages/ConversationDetail'))
-const MemoryDetail = lazy(() => import('./pages/MemoryDetail'))
 const Users = lazy(() => import('./pages/Users'))
 const System = lazy(() => import('./pages/System'))
 const Settings = lazy(() => import('./pages/Settings'))
@@ -23,6 +21,11 @@ const Queue = lazy(() => import('./pages/Queue'))
 const LiveRecord = lazy(() => import('./pages/LiveRecord'))
 const Plugins = lazy(() => import('./pages/Plugins'))
 const Finetuning = lazy(() => import('./pages/Finetuning'))
+const Network = lazy(() => import('./pages/Network'))
+const DataAudit = lazy(() => import('./pages/DataAudit'))
+const WakeWordLab = lazy(() => import('./pages/WakeWordLab'))
+const MemoryLedger = lazy(() => import('./pages/MemoryLedger'))
+const SystemEvents = lazy(() => import('./pages/SystemEvents'))
 
 
 function PageSkeleton() {
@@ -97,17 +100,10 @@ function App() {
                     </Suspense>
                   </PageErrorBoundary>
                 } />
-                <Route path="memories/:id" element={
+                <Route path="memory-ledger" element={
                   <PageErrorBoundary>
                     <Suspense fallback={<PageSkeleton />}>
-                      <MemoryDetail />
-                    </Suspense>
-                  </PageErrorBoundary>
-                } />
-                <Route path="memories" element={
-                  <PageErrorBoundary>
-                    <Suspense fallback={<PageSkeleton />}>
-                      <MemoriesRouter />
+                      <MemoryLedger />
                     </Suspense>
                   </PageErrorBoundary>
                 } />
@@ -122,6 +118,13 @@ function App() {
                   <PageErrorBoundary>
                     <Suspense fallback={<PageSkeleton />}>
                       <System />
+                    </Suspense>
+                  </PageErrorBoundary>
+                } />
+                <Route path="system-errors" element={
+                  <PageErrorBoundary>
+                    <Suspense fallback={<PageSkeleton />}>
+                      <SystemEvents />
                     </Suspense>
                   </PageErrorBoundary>
                 } />
@@ -157,6 +160,27 @@ function App() {
                   <PageErrorBoundary>
                     <Suspense fallback={<PageSkeleton />}>
                       <Finetuning />
+                    </Suspense>
+                  </PageErrorBoundary>
+                } />
+                <Route path="network" element={
+                  <PageErrorBoundary>
+                    <Suspense fallback={<PageSkeleton />}>
+                      <Network />
+                    </Suspense>
+                  </PageErrorBoundary>
+                } />
+                <Route path="data-audit" element={
+                  <PageErrorBoundary>
+                    <Suspense fallback={<PageSkeleton />}>
+                      <DataAudit />
+                    </Suspense>
+                  </PageErrorBoundary>
+                } />
+                <Route path="wakeword-lab" element={
+                  <PageErrorBoundary>
+                    <Suspense fallback={<PageSkeleton />}>
+                      <WakeWordLab />
                     </Suspense>
                   </PageErrorBoundary>
                 } />

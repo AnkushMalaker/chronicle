@@ -2,17 +2,17 @@
 User controller for handling user-related business logic.
 """
 
-import asyncio
 import logging
+import traceback
 
 from bson import ObjectId
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
 from advanced_omi_backend.auth import ADMIN_EMAIL, UserManager, get_user_db
-from advanced_omi_backend.client_manager import get_user_clients_all
-from advanced_omi_backend.database import db, users_col
+from advanced_omi_backend.database import users_col
 from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.user import UserRead
 from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.users import User, UserCreate, UserUpdate
 
@@ -58,8 +58,6 @@ async def create_user(user_data: UserCreate):
         user = await user_manager.create(user_data)
 
         # Return the full user object (serialized via UserRead schema)
-        from advanced_omi_backend.models.user import UserRead
-
         user_read = UserRead.model_validate(user)
 
         return JSONResponse(
@@ -68,8 +66,6 @@ async def create_user(user_data: UserCreate):
         )
 
     except Exception as e:
-        import traceback
-
         error_details = traceback.format_exc()
         logger.error(f"Error creating user: {e}")
         logger.error(f"Full traceback: {error_details}")
@@ -114,8 +110,6 @@ async def update_user(user_id: str, user_data: UserUpdate):
         updated_user = await user_manager.update(user_data, user_obj)
 
         # Return the full user object (serialized via UserRead schema)
-        from advanced_omi_backend.models.user import UserRead
-
         user_read = UserRead.model_validate(updated_user)
 
         return JSONResponse(
@@ -124,8 +118,6 @@ async def update_user(user_id: str, user_data: UserUpdate):
         )
 
     except Exception as e:
-        import traceback
-
         error_details = traceback.format_exc()
         logger.error(f"Error updating user: {e}")
         logger.error(f"Full traceback: {error_details}")
@@ -190,9 +182,7 @@ async def delete_user(
             # Delete all memories for this user using the memory service
             try:
                 memory_service = get_memory_service()
-                memory_count = await asyncio.get_running_loop().run_in_executor(
-                    None, memory_service.delete_all_user_memories, user_id
-                )
+                memory_count = await memory_service.delete_all_user_memories(user_id)
                 deleted_data["memories_deleted"] = memory_count
             except Exception as mem_error:
                 logger.error(f"Error deleting memories for user {user_id}: {mem_error}")

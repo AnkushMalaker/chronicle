@@ -26,8 +26,6 @@ def extract_xml_from_content(content: str) -> str:
     Looks for content between <result> and </result> tags.
     """
     # Try to find XML block within the content
-    import re
-
     # Look for <result>...</result> block
     xml_match = re.search(r"<result>.*?</result>", content, re.DOTALL)
     if xml_match:

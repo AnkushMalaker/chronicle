@@ -5,11 +5,24 @@ services:
       - "${LLM_PORT:-8083}:8080"
     volumes:
       - ./models:/models:ro
+      - ./cache:/cache
     environment:
-      LLAMA_ARG_MODEL: /models/${LLM_MODEL_FILE:-model.gguf}
+      # HF download mode vs local-file mode are mutually exclusive: passing both
+      # --hf-repo and --model makes llama.cpp use the model basename as the file to
+      # pick from the repo (ignoring the :quant tag), which fails. So the entrypoint
+      # passes --model ONLY when LLM_HF_REPO is empty; otherwise llama.cpp downloads
+      # + caches the GGUF from HuggingFace via LLAMA_ARG_HF_REPO.
+      LLAMA_ARG_HF_REPO: ${LLM_HF_REPO:-}
+      LLM_MODEL_PATH: /models/${LLM_MODEL_FILE:-model.gguf}
+      LLAMA_CACHE: /cache
+      HF_TOKEN: ${HF_TOKEN:-}
       LLAMA_ARG_CTX_SIZE: ${CTX_SIZE:-8192}
       LLAMA_ARG_N_GPU_LAYERS: ${N_GPU_LAYERS:--1}
       LLAMA_ARG_HOST: "0.0.0.0"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - 'if [ -n "$$LLAMA_ARG_HF_REPO" ]; then exec /app/llama-server; else exec /app/llama-server --model "$$LLM_MODEL_PATH"; fi'
     deploy:
       resources:
         reservations:
@@ -27,12 +40,22 @@ services:
       - "${EMBED_PORT:-8082}:8080"
     volumes:
       - ./models:/models:ro
+      - ./cache:/cache
     environment:
-      LLAMA_ARG_MODEL: /models/${EMBED_MODEL_FILE:-embed-model.gguf}
+      # See llama-cpp-llm above: --hf-repo and --model are mutually exclusive, so the
+      # entrypoint passes --model ONLY when EMBED_HF_REPO is empty.
+      LLAMA_ARG_HF_REPO: ${EMBED_HF_REPO:-}
+      LLM_MODEL_PATH: /models/${EMBED_MODEL_FILE:-embed-model.gguf}
+      LLAMA_CACHE: /cache
+      HF_TOKEN: ${HF_TOKEN:-}
       LLAMA_ARG_CTX_SIZE: ${EMBED_CTX_SIZE:-2048}
       LLAMA_ARG_N_GPU_LAYERS: ${N_GPU_LAYERS:--1}
       LLAMA_ARG_EMBEDDINGS: "true"
       LLAMA_ARG_HOST: "0.0.0.0"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - 'if [ -n "$$LLAMA_ARG_HF_REPO" ]; then exec /app/llama-server; else exec /app/llama-server --model "$$LLM_MODEL_PATH"; fi'
     deploy:
       resources:
         reservations:
@@ -43,6 +66,19 @@ services:
     restart: unless-stopped
     networks:
       - chronicle-network
+
+  # Edge agent sidecar — advertises this service on the Tailnet
+  edge-agent:
+    build:
+      context: ../../edge
+    network_mode: host
+    environment:
+      - ADVERTISE=chronicle-llm:8083
+    volumes:
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock:ro
+    restart: unless-stopped
+    profiles:
+      - edge
 
 networks:
   chronicle-network:

@@ -15,7 +15,9 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.model_registry import ModelDef, get_models_registry
+from advanced_omi_backend.observability.otel_setup import set_span_attrs
 from advanced_omi_backend.openai_factory import create_openai_client
+from advanced_omi_backend.prompt_optimizer import get_user_prompt
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 from advanced_omi_backend.utils.text_chunking import semantic_chunk_text
 
@@ -162,7 +164,7 @@ class OpenAIProvider(LLMProviderBase):
 
         # Store parameters for LLM (used by embeddings and connection test)
         self.api_key = self.llm_def.api_key or ""
-        self.base_url = self.llm_def.model_url
+        self.base_url = self.llm_def.resolved_url()
         self.model = self.llm_def.model_name
 
         # Store parameters for embeddings (use separate config if available)
@@ -173,7 +175,7 @@ class OpenAIProvider(LLMProviderBase):
             self.embed_def.api_key if self.embed_def else self.api_key
         )
         self.embedding_base_url = (
-            self.embed_def.model_url if self.embed_def else self.base_url
+            self.embed_def.resolved_url() if self.embed_def else self.base_url
         )
 
         # Validate API keys for cloud providers - local providers (llamacpp, ollama) don't need real keys
@@ -212,39 +214,17 @@ class OpenAIProvider(LLMProviderBase):
         Returns:
             List of extracted memory strings
         """
-        from advanced_omi_backend.observability.otel_setup import set_span_attrs
-
         set_span_attrs(gen_ai_operation="chat", user_id=user_id)
         try:
             # Use the provided prompt or fall back to registry default
             if prompt and prompt.strip():
                 system_prompt = prompt
             else:
-                from advanced_omi_backend.prompt_optimizer import get_user_prompt
-
                 system_prompt = await get_user_prompt(
                     "memory.fact_retrieval",
                     user_id,
                     current_date=datetime.now().strftime("%Y-%m-%d"),
                 )
-
-            # Inject basic memory for contextual extraction
-            if user_id:
-                try:
-                    from advanced_omi_backend.services.knowledge_graph.kb import (
-                        KnowledgeBaseManager,
-                    )
-
-                    basic_memory = KnowledgeBaseManager().get_basic_memory(user_id)
-                    if basic_memory:
-                        system_prompt += (
-                            "\n\n# User Knowledge Base (use for context when extracting facts):\n"
-                            + basic_memory
-                        )
-                except Exception as e:
-                    memory_logger.warning(
-                        f"Failed to load basic memory for extraction: {e}"
-                    )
 
             # Semantic chunking: split dialogue into turns, then group by topic
             async def _embed_for_chunking(texts: List[str]) -> List[List[float]]:
@@ -397,7 +377,6 @@ class OpenAIProvider(LLMProviderBase):
         Returns:
             Dictionary containing proposed memory actions
         """
-        from advanced_omi_backend.observability.otel_setup import set_span_attrs
 
         set_span_attrs(gen_ai_operation="chat")
         try:
@@ -531,7 +510,6 @@ class OllamaProvider(LLMProviderBase):
 
     os.environ["OPENAI_API_KEY"] = "ollama"
     os.environ["OPENAI_BASE_URL"] = "http://localhost:11434/v1"
-    os.environ["QDRANT_BASE_URL"] = "localhost"
     os.environ["OPENAI_EMBEDDER_MODEL"] = "erwan2/DeepSeek-R1-Distill-Qwen-1.5B:latest"
 
     """

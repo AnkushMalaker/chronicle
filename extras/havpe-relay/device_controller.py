@@ -41,7 +41,9 @@ class DeviceController:
                 port=port,
                 password="",
             )
-            await self._client.connect(login=True)
+            # on_stop fires when the API connection drops; flip _connected so the
+            # session's keepalive task notices and re-runs connect() (3D).
+            await self._client.connect(login=True, on_stop=self._on_api_disconnect)
 
             device_info = await self._client.device_info()
             logger.info(
@@ -114,6 +116,17 @@ class DeviceController:
             self._connected = False
             return False
 
+    async def _on_api_disconnect(self, expected_disconnect: bool) -> None:
+        """aioesphomeapi on_stop callback: the API connection dropped.
+
+        Mark ourselves disconnected so the session's keepalive task re-runs the
+        full connect()/discovery. We don't reconnect here to avoid racing an
+        intentional disconnect() during teardown.
+        """
+        self._connected = False
+        if not expected_disconnect:
+            logger.warning("ESPHome API connection lost — will attempt reconnect")
+
     def _on_state_change(self, state) -> None:
         """Sync callback from aioesphomeapi. Enqueues button/dial events."""
         if not isinstance(state, aioesphomeapi.TextSensorState):
@@ -174,6 +187,53 @@ class DeviceController:
             )
         except Exception as e:
             logger.warning("LED command failed: %s", e)
+
+    async def set_led_effect(
+        self,
+        effect: str,
+        r: float = 0.0,
+        g: float = 0.0,
+        b: float = 0.0,
+        brightness: float = 0.4,
+        duration: float = 5.0,
+    ) -> None:
+        """Activate a named addressable LED effect on the ring.
+
+        ``effect`` is one of the firmware effect names (e.g. "Listening For
+        Command", "Thinking", "Replying", "Error"); the rgb values set the base
+        colour the effect tints with. ``effect="None"`` stops any running effect.
+        ``duration`` arms the firmware's status-LED override hold so the ring
+        reverts to the connectivity colour afterwards. No-op if not connected.
+        """
+        key = self._entity_keys.get("_light")
+        if not self._connected or not self._client or key is None:
+            logger.debug("set_led_effect skipped: not connected or no light entity")
+            return
+
+        try:
+            # Set hold duration first (processed before the light command on device)
+            dur_key = self._entity_keys.get("_led_hold_duration")
+            if dur_key is not None:
+                self._client.number_command(key=dur_key, state=duration)
+
+            self._client.light_command(
+                key=key,
+                state=True,
+                rgb=(r, g, b),
+                brightness=brightness,
+                effect=effect,
+            )
+            logger.info(
+                "LED effect: %s rgb=(%.1f, %.1f, %.1f) br=%.1f dur=%.1fs",
+                effect,
+                r,
+                g,
+                b,
+                brightness,
+                duration,
+            )
+        except Exception as e:
+            logger.warning("LED effect command failed: %s", e)
 
     async def play_audio(self, url: str, announcement: bool = True) -> None:
         """Play audio URL via media_player. No-op if not connected."""

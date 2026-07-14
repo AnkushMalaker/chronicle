@@ -8,9 +8,6 @@ dependencies = [
     "easy-audio-interfaces>=0.7.1", # we need to add local-audio for scripts/local-audio.py | If we don't need that, we can remove this, and then remove portaudio19-dev from Dockerfile
     "fastapi>=0.115.12",
     "fastmcp>=0.5.0", # MCP server for conversation access
-    "mem0ai", # Using main branch with PR #3250 AsyncMemory fix
-    "langchain_neo4j",
-    "neo4j>=5.0.0,<6.0.0",
     "motor>=3.7.1",
     "ollama>=0.4.8",
     "friend-lite-sdk",
@@ -38,6 +35,8 @@ dependencies = [
     "websockets>=12.0",
     "croniter>=1.3.0",
     "rich>=13.0.0",
+    "minidisc-python>=0.1.0",
+    "ten-vad @ git+https://github.com/TEN-framework/ten-vad.git@22a3bcd4509d0faaa8eef4881e8af5f39c178950",
 ]
 
 [project.optional-dependencies]
@@ -52,6 +51,10 @@ galileo = [
     "galileo>=1.0",
     "opentelemetry-exporter-otlp>=1.20",
 ]
+benchmark = [
+    "huggingface-hub>=0.23",  # loader.py downloads LongMemEval via hf_hub_download
+    "ijson>=3.2.0",           # streaming JSON parse for the large LongMemEval files
+]
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
@@ -62,9 +65,6 @@ where = ["src"]
 
 [tool.isort]
 profile = "black"
-
-[tool.uv.sources]
-mem0ai = { git = "https://github.com/AnkushMalaker/mem0.git", rev = "main" }
 
 [tool.poetry.dependencies]
 robotframework = "^6.1.1"
@@ -98,6 +98,7 @@ markers = [
     "auth: marks tests that test authentication",
     "database: marks tests that require database access",
 ]
+asyncio_mode = "auto"
 filterwarnings = [
     "error",
     "ignore::UserWarning",

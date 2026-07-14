@@ -23,5 +23,5 @@ RUN chmod +x /app/healthcheck.sh
 # Note: Port is determined at runtime by REACT_UI_PORT env var
 # Actual port binding is configured in docker-compose.yml
 
-# Start development server
+# Start development server (plain HTTP; Caddy fronts it with TLS when HTTPS is on)
 CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]

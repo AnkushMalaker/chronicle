@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1
+#
+# VibeVoice ASR — vLLM backend (DEFAULT for the vibevoice provider).
+#
+# Runs the Chronicle ASR wrapper (providers.vibevoice.vllm_service), which on
+# startup launches a local vLLM OpenAI server (microsoft VibeVoice vllm_plugin)
+# and proxies /transcribe to it SINGLE-PASS (no windowing). vLLM single-pass is
+# ~3x faster than the transformers windowed path and far more robust — see memory
+# vibevoice-vllm-vs-transformers-bench. The standard /align (forced alignment),
+# /health and /info endpoints are served by the same FastAPI app.
+#
+# The model is NOT baked into the image — it is loaded from the mounted HF cache
+# (./model_cache:/models) at runtime, same as every other ASR provider.
+FROM vllm/vllm-openai:v0.14.1
+
+# ffmpeg: vLLM decodes the request audio via an ffmpeg subprocess (missing -> 500
+#   "No such file or directory: 'ffmpeg'"). libsndfile/git: audio + plugin install.
+RUN apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends ffmpeg libsndfile1 git curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# VibeVoice package = the vLLM plugin (registers the model + audio processor via
+# entry points) and the tokenizer-file generator. Plain install (NOT the [vllm]
+# extra): vllm is already in the base image, and the extra would pull a conflicting
+# torch on top of it. Keep the repo at /opt/VibeVoice so the tokenizer-gen SCRIPT is
+# available at runtime (the model is mounted at runtime, so tokenizer files can only
+# be generated then).
+RUN git clone --depth 1 https://github.com/microsoft/VibeVoice.git /opt/VibeVoice && \
+    pip install --no-cache-dir /opt/VibeVoice && \
+    rm -rf /opt/VibeVoice/.git
+ENV VIBEVOICE_TOKENIZER_SCRIPT="/opt/VibeVoice/vllm_plugin/tools/generate_tokenizer_files.py"
+
+# Chronicle wrapper deps: requests (vLLM HTTP client), soundfile/omegaconf (common/),
+# torchaudio (the /align forced aligner — MMS_FA via torchaudio, matched to the base
+# image's torch).
+RUN pip install --no-cache-dir requests "soundfile>=0.12" "omegaconf>=2.3" torchaudio
+
+WORKDIR /app
+COPY common/ ./common/
+COPY providers/vibevoice/ ./providers/vibevoice/
+
+# HF cache (model is mounted here at runtime), model id, and the internal vLLM port.
+ENV HF_HOME="/models"
+ENV ASR_MODEL="microsoft/VibeVoice-ASR"
+ENV VIBEVOICE_VLLM_PORT="18000"
+ENV VIBEVOICE_TORCH_DTYPE="bfloat16"
+ENV VIBEVOICE_FFMPEG_MAX_CONCURRENCY="64"
+ENV PYTORCH_ALLOC_CONF="expandable_segments:True"
+
+EXPOSE 8765
+
+# Override the base image's vllm-server entrypoint: we run the Chronicle wrapper,
+# which launches vLLM itself.
+ENTRYPOINT []
+CMD ["python3", "-m", "providers.vibevoice.vllm_service", "--port", "8765"]

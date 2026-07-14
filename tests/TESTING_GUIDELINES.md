@@ -297,7 +297,7 @@ For tests that don't require API keys, use the mock services config:
 
 **Features**:
 - Disables external transcription and LLM services
-- Keeps core services operational (MongoDB, Redis, Qdrant)
+- Keeps core services operational (MongoDB, Redis, FalkorDB)
 - No API keys required
 - Fast test execution
 

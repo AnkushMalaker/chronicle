@@ -5,15 +5,23 @@ Handles conversation CRUD operations, audio processing, and transcript managemen
 """
 
 import logging
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
-from advanced_omi_backend.auth import current_active_user
+from advanced_omi_backend.auth import current_active_user, current_superuser
 from advanced_omi_backend.controllers import conversation_controller
+from advanced_omi_backend.controllers.drift_controller import find_drift_conversations
 from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.waveform import WaveformData
 from advanced_omi_backend.users import User
-from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segment
+from advanced_omi_backend.utils.audio_chunk_utils import (
+    audio_cache_duration_matches,
+    get_trimmed_opus_for_time_range,
+    reconstruct_audio_segment,
+)
+from advanced_omi_backend.workers.waveform_jobs import generate_waveform_data
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +83,17 @@ async def search_conversations(
     return await conversation_controller.search_conversations(
         q, current_user, limit, offset
     )
+
+
+@router.get("/drift")
+async def identify_drift(current_user: User = Depends(current_superuser)):
+    """Identify drift conversations — whose speaker labels would change under the current gallery.
+
+    Re-identifies each conversation's stored per-cluster centroids against the live
+    voiceprints (no GPU). Use after cleaning enrollment to decide what to reprocess.
+    Declared before ``/{conversation_id}`` so the static path isn't captured as an id.
+    """
+    return await find_drift_conversations()
 
 
 @router.get("/{conversation_id}")
@@ -164,25 +183,25 @@ async def activate_transcript_version(
     )
 
 
-@router.post("/{conversation_id}/activate-memory/{version_id}")
-async def activate_memory_version(
-    conversation_id: str,
-    version_id: str,
-    current_user: User = Depends(current_active_user),
-):
-    """Activate a specific memory version. Users can only modify their own conversations."""
-    return await conversation_controller.activate_memory_version(
-        conversation_id, version_id, current_user
-    )
-
-
 @router.get("/{conversation_id}/versions")
 async def get_conversation_version_history(
     conversation_id: str, current_user: User = Depends(current_active_user)
 ):
-    """Get version history for a conversation. Users can only access their own conversations."""
+    """Get transcript version history for a conversation. Users can only access their own conversations."""
     return await conversation_controller.get_conversation_version_history(
         conversation_id, current_user
+    )
+
+
+@router.get("/{conversation_id}/memory-audit")
+async def get_conversation_memory_audit(
+    conversation_id: str,
+    limit: int = 100,
+    current_user: User = Depends(current_active_user),
+):
+    """Get the memory vault change history (audit ledger) for a conversation."""
+    return await conversation_controller.get_conversation_memory_audit(
+        conversation_id, current_user, limit
     )
 
 
@@ -207,12 +226,6 @@ async def get_conversation_waveform(
         - sample_rate: int - Samples per second (10)
         - duration_seconds: float - Total audio duration
     """
-    from fastapi import HTTPException
-
-    from advanced_omi_backend.models.conversation import Conversation
-    from advanced_omi_backend.models.waveform import WaveformData
-    from advanced_omi_backend.workers.waveform_jobs import generate_waveform_data
-
     # Verify conversation exists and user has access
     conversation = await Conversation.find_one(
         Conversation.conversation_id == conversation_id
@@ -230,7 +243,24 @@ async def get_conversation_waveform(
         WaveformData.conversation_id == conversation_id
     )
 
-    # If waveform exists, return cached version
+    # Return the cache only if it still matches the conversation's current audio.
+    # A waveform is derived from the chunk set; if the chunks changed in place
+    # (e.g. the reconnect-duplicate dedup) the cached duration no longer matches
+    # audio_total_duration — drop the stale doc and regenerate from current chunks.
+    if waveform and not audio_cache_duration_matches(
+        waveform.duration_seconds, conversation.audio_total_duration or 0.0
+    ):
+        logger.info(
+            f"Stale waveform for {conversation_id[:12]} "
+            f"({waveform.duration_seconds:.0f}s cached vs "
+            f"{conversation.audio_total_duration or 0:.0f}s actual); regenerating"
+        )
+        await WaveformData.find(
+            WaveformData.conversation_id == conversation_id
+        ).delete()
+        waveform = None
+
+    # If a fresh waveform exists, return cached version
     if waveform:
         logger.info(
             f"Returning cached waveform for conversation {conversation_id[:12]}"
@@ -306,25 +336,15 @@ async def get_audio_segment(
     duration: Optional[float] = Query(
         None, description="Duration in seconds (omit for full audio)"
     ),
+    format: str = Query(default="opus", description="Audio format: opus or wav"),
     current_user: User = Depends(current_active_user),
 ) -> Response:
     """
     Get audio segment from a conversation.
 
-    This endpoint enables the speaker service to fetch audio in time-bounded
-    segments without loading the entire file into memory. The speaker service
-    controls chunk size based on its own memory constraints.
-
-    Args:
-        conversation_id: Conversation identifier
-        start: Start time in seconds (default: 0.0)
-        duration: Duration in seconds (if None, returns all audio from start)
-
-    Returns:
-        WAV audio bytes (16kHz, mono) for the requested time range
+    With format=opus (default), serves a single ogg/opus stream trimmed to
+    the exact time range. With format=wav, decodes to exact time-clipped WAV.
     """
-    import time
-
     request_start = time.time()
 
     # Verify conversation exists and user has access
@@ -358,7 +378,34 @@ async def get_audio_segment(
             detail=f"Invalid start time: {start}s (max: {total_duration}s)",
         )
 
-    # Get audio chunks for time range
+    if format == "opus":
+        try:
+            opus_data = await get_trimmed_opus_for_time_range(
+                conversation_id=conversation_id, start_time=start, end_time=end
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        request_time = time.time() - request_start
+        logger.info(
+            f"Audio segment (opus) for {conversation_id[:12]}: "
+            f"{start:.1f}s - {end:.1f}s ({len(opus_data)} bytes, "
+            f"{request_time:.3f}s)"
+        )
+
+        return Response(
+            content=opus_data,
+            media_type="audio/ogg",
+            headers={
+                "Content-Disposition": f"inline; filename=segment_{start}_{end}.ogg",
+                "Content-Length": str(len(opus_data)),
+                "X-Audio-Start": str(start),
+                "X-Audio-End": str(end),
+                "X-Audio-Duration": str(end - start),
+            },
+        )
+
+    # format=wav: decode to WAV
     try:
         wav_bytes = await reconstruct_audio_segment(
             conversation_id=conversation_id, start_time=start, end_time=end
@@ -373,10 +420,9 @@ async def get_audio_segment(
 
     request_time = time.time() - request_start
     logger.info(
-        f"Audio segment endpoint completed for {conversation_id[:12]}: "
-        f"{start:.1f}s - {end:.1f}s ({end - start:.1f}s duration, "
-        f"{len(wav_bytes) / 1024 / 1024:.2f} MB, "
-        f"total request time: {request_time:.2f}s)"
+        f"Audio segment (wav) for {conversation_id[:12]}: "
+        f"{start:.1f}s - {end:.1f}s ({len(wav_bytes) / 1024 / 1024:.2f} MB, "
+        f"{request_time:.2f}s)"
     )
 
     return Response(

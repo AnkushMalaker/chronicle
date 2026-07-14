@@ -14,11 +14,13 @@ import argparse
 import asyncio
 import logging
 import os
+import sys
 import time
 import wave
 
 from dotenv import load_dotenv
 from relay_core import RelayConfig, get_jwt_token, run_device_session
+from service import install, kickstart, logs, status, uninstall
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -135,6 +137,12 @@ async def main():
     parser.add_argument(
         "--device-name", type=str, default=os.getenv("DEVICE_NAME", "havpe")
     )
+    parser.add_argument(
+        "--esphome-device-ip",
+        type=str,
+        default=os.getenv("ESPHOME_DEVICE_IP", ""),
+        help="Static ESPHome device IP (default: use TCP client IP)",
+    )
     parser.add_argument("-v", "--verbose", action="count", default=0)
     parser.add_argument(
         "--dump-audio",
@@ -150,6 +158,7 @@ async def main():
         auth_username=args.username or "",
         auth_password=args.password or "",
         device_name=args.device_name,
+        esphome_device_ip=args.esphome_device_ip or "",
     )
 
     level = logging.WARNING - (10 * min(args.verbose, 2))
@@ -200,8 +209,6 @@ async def main():
 
 def cli():
     """Entry point with subcommands for service management."""
-    import sys
-
     parser = argparse.ArgumentParser(description="HAVPE Relay")
     sub = parser.add_subparsers(dest="command")
 
@@ -217,6 +224,7 @@ def cli():
     command = args.command or "menu"
 
     if command == "menu":
+        # Lazy import: macOS-only (rumps, darwin-only per pyproject.toml)
         from menu_relay import main as menu_main
 
         menu_main()
@@ -224,30 +232,18 @@ def cli():
         sys.argv = [sys.argv[0]] + sys.argv[2:]  # strip subcommand
         asyncio.run(main())
     elif command == "install":
-        from service import install
-
         install()
     elif command == "uninstall":
-        from service import uninstall
-
         uninstall()
     elif command == "kickstart":
-        from service import kickstart
-
         kickstart()
     elif command == "status":
-        from service import status
-
         status()
     elif command == "logs":
-        from service import logs
-
         logs()
 
 
 if __name__ == "__main__":
-    import sys
-
     if len(sys.argv) > 1 and sys.argv[1] in (
         "menu",
         "relay",

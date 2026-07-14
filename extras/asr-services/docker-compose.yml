@@ -40,6 +40,7 @@ services:
               capabilities: [gpu]
     environment:
       - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
       - ASR_MODEL=${ASR_MODEL:-nvidia/parakeet-tdt-0.6b-v3}
       # Legacy support
       - PARAKEET_MODEL=${PARAKEET_MODEL:-${ASR_MODEL:-nvidia/parakeet-tdt-0.6b-v3}}
@@ -49,11 +50,70 @@ services:
       - OVERLAP_DURATION_SECONDS=${OVERLAP_DURATION_SECONDS:-5.0}
       - MIN_AUDIO_FOR_CHUNKING=${MIN_AUDIO_FOR_CHUNKING:-60.0}
       - CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD:-0.8}
+      - CHRONICLE_INGEST_URL=${CHRONICLE_INGEST_URL:-}
+      - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
+      - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
+    restart: unless-stopped
+
+  # ============================================================================
+  # Nemotron 3.5 Streaming Provider (NeMo cache-aware FastConformer-RNNT)
+  # Reuses the nemo provider image; exposes /transcribe (offline) and /stream
+  # (true cache-aware low-latency streaming, ~100ms). Runs on its own port so it
+  # can serve stt_stream alongside a different batch stt provider on 8767.
+  # ============================================================================
+    extra_hosts:
+      - host.docker.internal:host-gateway
+  nemotron-stream-asr:
+    build:
+      context: .
+      dockerfile: providers/nemo/Dockerfile
+      args:
+        PYTORCH_CUDA_VERSION: ${PYTORCH_CUDA_VERSION:-cu126}
+        # Nemotron 3.5's prompt-conditioned RNNT class only exists on NeMo main,
+        # overlaid on the stable nemo deps (see providers/nemo/Dockerfile).
+        NEMO_GIT_REF: ${NEMO_GIT_REF:-b7e09985039ada42f40c5f796ef22c711c283c90}
+    image: ${CHRONICLE_REGISTRY:-}chronicle-asr-nemotron:${CHRONICLE_TAG:-latest}
+    ports:
+      - "${NEMOTRON_STREAM_PORT:-8772}:8765"
+    volumes:
+      - ./model_cache:/models
+      - ./debug:/app/debug
+      - ./results:/app/results
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
+      - ASR_MODEL=${NEMOTRON_MODEL:-nvidia/nemotron-3.5-asr-streaming-0.6b}
+      - DEVICE=${DEVICE:-cuda}
+      # Cache-aware streaming attention context "[left,right]" (80ms .. 1.12s
+      # look-ahead). [56,3] = 320ms is the balanced default; [56,0] snappiest,
+      # [56,13] most accurate.
+      - NEMO_ATT_CONTEXT_SIZE=${NEMO_ATT_CONTEXT_SIZE:-[56,3]}
+      # Language prompt key from the model's prompt_dictionary. "auto" is the
+      # language-agnostic prompt (best for code-switched / Hinglish audio);
+      # force one with e.g. en-US, hi-IN, es-ES, zh-CN.
+      - NEMO_TARGET_LANG=${NEMO_TARGET_LANG:-auto}
+      - NEMO_STREAM_INTERVAL_SECONDS=${NEMO_STREAM_INTERVAL_SECONDS:-1.0}
+      - NEMO_FALLBACK_WINDOW_SECONDS=${NEMO_FALLBACK_WINDOW_SECONDS:-30}
+      - CHRONICLE_INGEST_URL=${CHRONICLE_INGEST_URL:-}
+      - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
+      - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     restart: unless-stopped
 
   # ============================================================================
   # Faster-Whisper Provider (4-6x faster Whisper inference)
   # ============================================================================
+    extra_hosts:
+      - host.docker.internal:host-gateway
   faster-whisper-asr:
     build:
       context: .
@@ -74,22 +134,33 @@ services:
               capabilities: [gpu]
     environment:
       - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
       - ASR_MODEL=${ASR_MODEL:-Systran/faster-whisper-large-v3}
       - COMPUTE_TYPE=${COMPUTE_TYPE:-float16}
       - DEVICE=${DEVICE:-cuda}
       - DEVICE_INDEX=${DEVICE_INDEX:-0}
       - VAD_FILTER=${VAD_FILTER:-true}
       - LANGUAGE=${LANGUAGE:-}
+      - CHRONICLE_INGEST_URL=${CHRONICLE_INGEST_URL:-}
+      - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
+      - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
     restart: unless-stopped
 
   # ============================================================================
   # VibeVoice Provider (Microsoft VibeVoice-ASR with speaker diarization)
   # Transformers-based approach with speaker diarization support
   # ============================================================================
+    extra_hosts:
+      - host.docker.internal:host-gateway
   vibevoice-asr:
     build:
       context: .
-      dockerfile: providers/vibevoice/Dockerfile
+      # DEFAULT = transformers backend (bf16). The vLLM single-pass backend
+      # (Dockerfile.vllm) is ~3x faster + more robust but its 18GB footprint needs a
+      # dedicated/40GB+ GPU (it OOMs on a 24GB card shared with other services). To
+      # opt in on a big GPU: VIBEVOICE_DOCKERFILE=providers/vibevoice/Dockerfile.vllm
+      # and ASR_MODEL=microsoft/VibeVoice-ASR. See memory vibevoice-vllm-vs-transformers-bench.
+      dockerfile: ${VIBEVOICE_DOCKERFILE:-providers/vibevoice/Dockerfile}
       args:
         PYTORCH_CUDA_VERSION: ${PYTORCH_CUDA_VERSION:-cu126}
     image: ${CHRONICLE_REGISTRY:-}chronicle-asr-vibevoice:${CHRONICLE_TAG:-latest}
@@ -110,14 +181,51 @@ services:
               capabilities: [gpu]
     environment:
       - HF_HOME=/models
-      - ASR_MODEL=${ASR_MODEL:-microsoft/VibeVoice-ASR}
-      - VIBEVOICE_LLM_MODEL=${VIBEVOICE_LLM_MODEL:-Qwen/Qwen2.5-7B}
-      - VIBEVOICE_ATTN_IMPL=${VIBEVOICE_ATTN_IMPL:-sdpa}
+      - HF_TOKEN=${HF_TOKEN:-}
+      # Transformers backend (default) uses the ...-HF variant. The vLLM backend uses
+      # microsoft/VibeVoice-ASR — set ASR_MODEL=microsoft/VibeVoice-ASR alongside
+      # VIBEVOICE_DOCKERFILE=.../Dockerfile.vllm when opting into vLLM.
+      - ASR_MODEL=${ASR_MODEL:-microsoft/VibeVoice-ASR-HF}
+      # --- vLLM backend (default) ----------------------------------------------
+      - VIBEVOICE_TORCH_DTYPE=${VIBEVOICE_TORCH_DTYPE:-bfloat16}
+      - VIBEVOICE_VLLM_PORT=${VIBEVOICE_VLLM_PORT:-18000}
+      # max-model-len: caps BOTH the audio context AND the startup encoder-profiling
+      # forward (the VRAM peak). The 18GB model leaves ~3GB on a 24GB card, so 16384
+      # is the safe default — it still fits ~18 min of single-pass audio (~7.5 audio
+      # tok/s + the 8192 gen cap). Raise toward 65536 on a 40GB+/dedicated GPU for
+      # longer audio (the model itself supports 61 min).
+      - VIBEVOICE_VLLM_MAX_MODEL_LEN=${VIBEVOICE_VLLM_MAX_MODEL_LEN:-16384}
+      - VIBEVOICE_VLLM_GPU_MEM_UTIL=${VIBEVOICE_VLLM_GPU_MEM_UTIL:-0.9}
+      - VIBEVOICE_VLLM_MAX_NUM_SEQS=${VIBEVOICE_VLLM_MAX_NUM_SEQS:-2}
+      # generation cap — bounds a degenerate request so it can't run away to the model max
+      - VIBEVOICE_VLLM_MAX_TOKENS=${VIBEVOICE_VLLM_MAX_TOKENS:-8192}
+      # enforce-eager (default ON): skip cudagraph/torch.compile so the startup memory
+      # spike doesn't OOM the 18GB model on a 24GB card. Set 0 on a big/dedicated GPU.
+      - VIBEVOICE_VLLM_ENFORCE_EAGER=${VIBEVOICE_VLLM_ENFORCE_EAGER:-1}
+      # Max single-pass audio (minutes*60). Bounds the encoder-cache PROFILING forward
+      # at startup (done at the max feature size) — the main VRAM peak on a 24GB card.
+      # 1200s = 20 min; raise on a bigger GPU. Read by the VibeVoice vLLM plugin.
+      - VIBEVOICE_MAX_AUDIO_DURATION=${VIBEVOICE_MAX_AUDIO_DURATION:-1200}
+      # --- transformers backend (only used when VIBEVOICE_DOCKERFILE=.../Dockerfile) -
+      - VIBEVOICE_ATTN_IMPL=${VIBEVOICE_ATTN_IMPL:-flash_attention_2}
       - DEVICE=${DEVICE:-cuda}
-      - TORCH_DTYPE=${TORCH_DTYPE:-bfloat16}
+      # Dedicated var so vibevoice does NOT inherit a global TORCH_DTYPE=float16 —
+      # fp16 overflows (max ~65504) in long autoregressive decode → Inf/NaN →
+      # repetition/template-leak collapse on hard far-field audio. bf16 (same
+      # exponent range as fp32) is the stable choice; A100/4090 support it natively.
+      # Mirrors the gemma4/granite/af_next dedicated-var treatment.
+      - TORCH_DTYPE=${VIBEVOICE_TORCH_DTYPE:-bfloat16}
       - MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-8192}
-      # Quantization: "4bit", "8bit", or "" (none). 4bit recommended for <=24GB VRAM.
-      - QUANTIZATION=${QUANTIZATION:-4bit}
+      # Decoder runaway guards (far-field collapse mitigation). repetition_penalty>1 and
+      # no_repeat_ngram_size>0 bound the loop/template-leak on noisy audio. Defaults = prod
+      # behavior (1.1 / off).
+      - REPETITION_PENALTY=${REPETITION_PENALTY:-1.1}
+      - NO_REPEAT_NGRAM_SIZE=${NO_REPEAT_NGRAM_SIZE:-0}
+      # Quantization: "none" (default), "8bit", or "4bit". Default is none (full bf16):
+      # 4-bit NF4 causes repetition collapse on hard multi-speaker audio (VibeVoice-ASR-7B is
+      # trained/evaluated unquantized; bf16 is ~10 WER pts better on CoSHE). Use 8bit/4bit
+      # only if VRAM-constrained; the 7B fits in bf16 on a 24GB card.
+      - QUANTIZATION=${QUANTIZATION:-none}
       # LoRA adapter: path to pre-trained adapter to auto-load on startup (optional)
       - LORA_ADAPTER_PATH=${LORA_ADAPTER_PATH:-}
       # Fine-tuning
@@ -126,7 +234,191 @@ services:
       - WANDB_ENABLED=${WANDB_ENABLED:-false}
       - WANDB_API_KEY=${WANDB_API_KEY:-}
       - WANDB_PROJECT=${WANDB_PROJECT:-chronicle-asr-finetuning}
-      # Batching config: managed via config/defaults.yml (asr_services.vibevoice)
+      # Batching config: defaults come from config/defaults.yml (asr_services.vibevoice).
+      # Override here to force smaller batches for testing stitching on short audio.
+      - BATCH_THRESHOLD_SECONDS=${BATCH_THRESHOLD_SECONDS:-}
+      - BATCH_DURATION_SECONDS=${BATCH_DURATION_SECONDS:-}
+      - BATCH_OVERLAP_SECONDS=${BATCH_OVERLAP_SECONDS:-}
+      - CHRONICLE_INGEST_URL=${CHRONICLE_INGEST_URL:-}
+      - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
+      - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    restart: unless-stopped
+
+  # ============================================================================
+  # Gemma 4 Provider (Google Gemma 4 E2B-it with prompt-based diarization)
+  # ============================================================================
+    extra_hosts:
+      - host.docker.internal:host-gateway
+  gemma4-asr:
+    build:
+      context: .
+      dockerfile: providers/gemma4/Dockerfile
+      args:
+        PYTORCH_CUDA_VERSION: ${PYTORCH_CUDA_VERSION:-cu126}
+    image: ${CHRONICLE_REGISTRY:-}chronicle-asr-gemma4:${CHRONICLE_TAG:-latest}
+    ports:
+      - "${ASR_PORT:-8767}:8765"
+    volumes:
+      - ./model_cache:/models
+      - ./debug:/app/debug
+      - ./results:/app/results
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
+      # Once the model is cached, run fully offline so startup never depends on
+      # DNS/HF reachability. huggingface_hub 1.x (httpx) turns a transient name-
+      # resolution failure into a fatal "client has been closed" crash instead of
+      # falling back to the local cache. Default 0 so first-run can still download.
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-0}
+      - ASR_MODEL=${GEMMA4_MODEL:-google/gemma-4-E2B-it}
+      - DEVICE=${DEVICE:-cuda}
+      # Gemma4 bf16 compute dtype (quantization is set by GEMMA4_QUANT below).
+      # Don't inherit the global TORCH_DTYPE — that fp16-overflows on Gemma4 the same
+      # way it did on AF-Next (see asr_provider_landscape memory).
+      - TORCH_DTYPE=${GEMMA4_TORCH_DTYPE:-bfloat16}
+      # E2B is ~10GB in bf16, so default to full precision on a 24GB GPU.
+      # bf16 (default) | 8bit | 4bit (for smaller GPUs).
+      - GEMMA4_QUANT=${GEMMA4_QUANT:-bf16}
+      # Multi-Token Prediction: a small text-only "-assistant" drafter speculatively
+      # decodes (~1.6x on ASR, no quality change). Set 0 to disable; override the
+      # drafter repo with GEMMA4_ASSISTANT_MODEL (default: "${ASR_MODEL}-assistant").
+      - GEMMA4_MTP=${GEMMA4_MTP:-1}
+      - GEMMA4_ASSISTANT_MODEL=${GEMMA4_ASSISTANT_MODEL:-}
+      # Streaming (/stream WS): re-decode the last WINDOW seconds every INTERVAL
+      # seconds for interim previews; one full transcription on stream end.
+      - GEMMA4_STREAM_INTERVAL_SECONDS=${GEMMA4_STREAM_INTERVAL_SECONDS:-4}
+      - GEMMA4_STREAM_WINDOW_SECONDS=${GEMMA4_STREAM_WINDOW_SECONDS:-30}
+      - MAX_NEW_TOKENS=${GEMMA4_MAX_NEW_TOKENS:-512}
+      - BATCH_THRESHOLD_SECONDS=${GEMMA4_BATCH_THRESHOLD_SECONDS:-30}
+      - BATCH_DURATION_SECONDS=${GEMMA4_BATCH_DURATION_SECONDS:-30}
+      - BATCH_OVERLAP_SECONDS=${GEMMA4_BATCH_OVERLAP_SECONDS:-5}
+      - CHRONICLE_INGEST_URL=${CHRONICLE_INGEST_URL:-}
+      - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
+      - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    restart: unless-stopped
+
+  # ============================================================================
+  # Granite Speech Provider (IBM Granite Speech, LLM-backbone batch ASR)
+  # ============================================================================
+    extra_hosts:
+      - host.docker.internal:host-gateway
+  granite-asr:
+    build:
+      context: .
+      dockerfile: providers/granite/Dockerfile
+      args:
+        PYTORCH_CUDA_VERSION: ${PYTORCH_CUDA_VERSION:-cu126}
+    image: ${CHRONICLE_REGISTRY:-}chronicle-asr-granite:${CHRONICLE_TAG:-latest}
+    ports:
+      - "${ASR_PORT:-8767}:8765"
+    volumes:
+      - ./model_cache:/models
+      - ./debug:/app/debug
+      - ./results:/app/results
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
+      # Once the model is cached, run fully offline so startup never depends on
+      # DNS/HF reachability (huggingface_hub 1.x turns a transient name-resolution
+      # failure into a fatal crash). Default 0 so first-run can still download.
+      - HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-0}
+      - TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-0}
+      # MMS_FA forced-alignment model (used for diarization timing) is fetched by
+      # torchaudio from download.pytorch.org into TORCH_HOME — point it at the
+      # mounted cache so it persists across container rebuilds.
+      - TORCH_HOME=${TORCH_HOME:-/models/torch}
+      - ASR_MODEL=${GRANITE_MODEL:-ibm-granite/granite-speech-4.1-2b-plus}
+      - DEVICE=${DEVICE:-cuda}
+      # Granite must run bf16 (don't inherit a global TORCH_DTYPE=float16, which
+      # overflows on LLM-backbone ASR the same way it did on Gemma 4 / AF-Next).
+      - TORCH_DTYPE=${GRANITE_TORCH_DTYPE:-bfloat16}
+      - MAX_NEW_TOKENS=${GRANITE_MAX_NEW_TOKENS:-512}
+      # Provider diarization (default on): two passes per window (the model-card
+      # timestamp + speaker-attribution prompts) → speaker segments with real
+      # timestamps, so the backend skips pyannote. Set 0 for raw transcription only.
+      - GRANITE_DIARIZE=${GRANITE_DIARIZE:-1}
+      - GRANITE_DIARIZE_MAX_NEW_TOKENS=${GRANITE_DIARIZE_MAX_NEW_TOKENS:-1024}
+      - BATCH_THRESHOLD_SECONDS=${GRANITE_BATCH_THRESHOLD_SECONDS:-30}
+      - BATCH_DURATION_SECONDS=${GRANITE_BATCH_DURATION_SECONDS:-30}
+      - BATCH_OVERLAP_SECONDS=${GRANITE_BATCH_OVERLAP_SECONDS:-5}
+      - CHRONICLE_INGEST_URL=${CHRONICLE_INGEST_URL:-}
+      - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
+      - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    restart: unless-stopped
+
+  # ============================================================================
+  # NVIDIA Audio Flamingo Next Provider (Think variant by default)
+  # Promptable audio LM with timestamped multi-talker diarization.
+  # License: NVIDIA OneWay Noncommercial — research use only.
+  # Uses ASR_PORT 8767 — alternate to gemma4-asr / vibevoice-asr.
+  # ============================================================================
+    extra_hosts:
+      - host.docker.internal:host-gateway
+  af-next-asr:
+    build:
+      context: .
+      dockerfile: providers/af_next/Dockerfile
+      args:
+        PYTORCH_CUDA_VERSION: ${PYTORCH_CUDA_VERSION:-cu126}
+    image: ${CHRONICLE_REGISTRY:-}chronicle-asr-af-next:${CHRONICLE_TAG:-latest}
+    ports:
+      - "${ASR_PORT:-8767}:8765"
+    volumes:
+      - ./model_cache:/models
+      - ./debug:/app/debug
+      - ./results:/app/results
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
+      - ASR_MODEL=${AF_NEXT_MODEL:-nvidia/audio-flamingo-next-hf}
+      - DEVICE=${DEVICE:-cuda}
+      # AF-Next must run bf16: at fp16 a ~7B model overflows and on some inputs
+      # the decode collapses into a token-loop ("xtotalzxe xtotaltzxe ..."). The
+      # dedicated var keeps a global TORCH_DTYPE=float16 (set for other providers
+      # in .env) from leaking in here. ~18-24 GB VRAM at bf16.
+      - TORCH_DTYPE=${AF_NEXT_TORCH_DTYPE:-bfloat16}
+      - MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-4096}
+      # 2-min windows: on longer windows AF-Next drops low-priority opening
+      # material (intro montage over music) and slips Devanagari past the
+      # romanize instruction; 2 min stays verbatim + Latin. See
+      # providers/af_next/transcriber.py for the empirical notes.
+      - BATCH_THRESHOLD_SECONDS=${BATCH_THRESHOLD_SECONDS:-120}
+      - BATCH_DURATION_SECONDS=${BATCH_DURATION_SECONDS:-100}
+      - BATCH_OVERLAP_SECONDS=${BATCH_OVERLAP_SECONDS:-20}
+      - CHRONICLE_INGEST_URL=${CHRONICLE_INGEST_URL:-}
+      - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
+      - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
     dns:
       - 8.8.8.8
       - 8.8.4.4
@@ -135,6 +427,8 @@ services:
   # ============================================================================
   # Transformers Provider (Hindi Whisper, HuggingFace models)
   # ============================================================================
+    extra_hosts:
+      - host.docker.internal:host-gateway
   transformers-asr:
     build:
       context: .
@@ -155,16 +449,22 @@ services:
               capabilities: [gpu]
     environment:
       - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
       - ASR_MODEL=${ASR_MODEL:-openai/whisper-large-v3}
       - USE_FLASH_ATTENTION=${USE_FLASH_ATTENTION:-false}
       - DEVICE=${DEVICE:-cuda}
       - TORCH_DTYPE=${TORCH_DTYPE:-float16}
       - LANGUAGE=${LANGUAGE:-}
+      - CHRONICLE_INGEST_URL=${CHRONICLE_INGEST_URL:-}
+      - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
+      - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
     restart: unless-stopped
 
   # ============================================================================
   # Qwen3-ASR vLLM Server (GPU model serving)
   # ============================================================================
+    extra_hosts:
+      - host.docker.internal:host-gateway
   qwen3-asr:
     build:
       context: .
@@ -183,6 +483,10 @@ services:
               capabilities: [gpu]
     environment:
       - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
+      - CHRONICLE_INGEST_URL=${CHRONICLE_INGEST_URL:-}
+      - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
+      - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
     command: >
       ${ASR_MODEL:-Qwen/Qwen3-ASR-1.7B}
       --gpu-memory-utilization ${QWEN3_GPU_MEM:-0.8}
@@ -195,6 +499,8 @@ services:
   # Uses Dockerfile.full with ForcedAligner for word-level timestamps.
   # Without ForcedAligner, the backend has no words to create segments from.
   # ============================================================================
+    extra_hosts:
+      - host.docker.internal:host-gateway
   qwen3-asr-wrapper:
     build:
       context: .
@@ -215,6 +521,9 @@ services:
       - QWEN3_VLLM_URL=http://qwen3-asr:8000
       - ASR_MODEL=${ASR_MODEL:-Qwen/Qwen3-ASR-1.7B}
       - FORCED_ALIGNER_MODEL=${FORCED_ALIGNER_MODEL:-Qwen/Qwen3-ForcedAligner-0.6B}
+      - CHRONICLE_INGEST_URL=${CHRONICLE_INGEST_URL:-}
+      - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
+      - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
     depends_on:
       - qwen3-asr
     restart: unless-stopped
@@ -222,6 +531,8 @@ services:
   # ============================================================================
   # Qwen3-ASR Streaming Bridge (WebSocket → vLLM SSE)
   # ============================================================================
+    extra_hosts:
+      - host.docker.internal:host-gateway
   qwen3-asr-bridge:
     build:
       context: .
@@ -233,6 +544,9 @@ services:
       - QWEN3_VLLM_URL=http://qwen3-asr:8000
       - ASR_MODEL=${ASR_MODEL:-Qwen/Qwen3-ASR-1.7B}
       - STREAM_INTERVAL_SECONDS=${STREAM_INTERVAL_SECONDS:-3}
+      - CHRONICLE_INGEST_URL=${CHRONICLE_INGEST_URL:-}
+      - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
+      - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
     command: ["python", "-m", "providers.qwen3_asr.streaming_bridge", "--port", "8766"]
     depends_on:
       - qwen3-asr
@@ -242,6 +556,8 @@ services:
   # VibeVoice Provider for AMD Strix Halo (gfx1151 / Ryzen AI Max)
   # Uses ROCm nightly torch wheels; requires /dev/kfd and /dev/dri
   # ============================================================================
+    extra_hosts:
+      - host.docker.internal:host-gateway
   vibevoice-asr-strixhalo:
     build:
       context: .
@@ -265,8 +581,8 @@ services:
       - "${RENDER_GID:-989}"  # render group (Arch default; Ubuntu typically 107)
     environment:
       - HF_HOME=/models
-      - ASR_MODEL=${ASR_MODEL:-microsoft/VibeVoice-ASR}
-      - VIBEVOICE_LLM_MODEL=${VIBEVOICE_LLM_MODEL:-Qwen/Qwen2.5-7B}
+      - HF_TOKEN=${HF_TOKEN:-}
+      - ASR_MODEL=${ASR_MODEL:-microsoft/VibeVoice-ASR-HF}
       # sdpa is supported on ROCm; flash_attention_2 requires CUDA
       - VIBEVOICE_ATTN_IMPL=sdpa
       - DEVICE=${VIBEVOICE_DEVICE:-cuda}
@@ -283,6 +599,9 @@ services:
       - WANDB_API_KEY=${WANDB_API_KEY:-}
       - WANDB_PROJECT=${WANDB_PROJECT:-chronicle-asr-finetuning}
       - HSA_OVERRIDE_GFX_VERSION=11.5.1
+      - CHRONICLE_INGEST_URL=${CHRONICLE_INGEST_URL:-}
+      - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
+      - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
     dns:
       - 8.8.8.8
       - 8.8.4.4
@@ -293,6 +612,8 @@ services:
   # Uses ROCm nightly torch wheels; requires /dev/kfd and /dev/dri
   # NeMo without cuda-python (CUDA-only binding); ROCm support is experimental
   # ============================================================================
+    extra_hosts:
+      - host.docker.internal:host-gateway
   nemo-asr-strixhalo:
     build:
       context: .
@@ -314,6 +635,7 @@ services:
       - "${RENDER_GID:-989}"  # render group (Arch default; Ubuntu typically 107)
     environment:
       - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
       - ASR_MODEL=${ASR_MODEL:-nvidia/parakeet-tdt-0.6b-v3}
       # Legacy support
       - PARAKEET_MODEL=${PARAKEET_MODEL:-${ASR_MODEL:-nvidia/parakeet-tdt-0.6b-v3}}
@@ -324,11 +646,16 @@ services:
       - MIN_AUDIO_FOR_CHUNKING=${MIN_AUDIO_FOR_CHUNKING:-60.0}
       - CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD:-0.8}
       - HSA_OVERRIDE_GFX_VERSION=11.5.1
+      - CHRONICLE_INGEST_URL=${CHRONICLE_INGEST_URL:-}
+      - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
+      - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
     restart: unless-stopped
 
   # ============================================================================
   # Legacy Parakeet Service (backward compatibility)
   # ============================================================================
+    extra_hosts:
+      - host.docker.internal:host-gateway
   parakeet-asr:
     build:
       context: .
@@ -351,6 +678,7 @@ services:
               capabilities: [gpu]
     environment:
       - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
       - PARAKEET_MODEL=${PARAKEET_MODEL:-nvidia/parakeet-tdt-0.6b-v3}
       # Enhanced chunking configuration
       - CHUNKING_ENABLED=${CHUNKING_ENABLED:-true}
@@ -358,4 +686,27 @@ services:
       - OVERLAP_DURATION_SECONDS=${OVERLAP_DURATION_SECONDS:-5.0}
       - MIN_AUDIO_FOR_CHUNKING=${MIN_AUDIO_FOR_CHUNKING:-60.0}
       - CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD:-0.8}
+      - CHRONICLE_INGEST_URL=${CHRONICLE_INGEST_URL:-}
+      - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
+      - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
     restart: unless-stopped
+
+  # Edge agent sidecar — advertises this service on the Tailnet
+    extra_hosts:
+      - host.docker.internal:host-gateway
+  edge-agent:
+    build:
+      context: ../../edge
+    network_mode: host
+    environment:
+      - ADVERTISE=chronicle-asr:8767
+      - CHRONICLE_INGEST_URL=${CHRONICLE_INGEST_URL:-}
+      - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
+      - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
+    volumes:
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock:ro
+    restart: unless-stopped
+    profiles:
+      - edge
+    extra_hosts:
+      - host.docker.internal:host-gateway

@@ -4,6 +4,7 @@ import Layout from './components/layout/Layout'
 import AudioViewer from './pages/AudioViewer'
 import Annotation from './pages/Annotation'
 import Enrollment from './pages/Enrollment'
+import EnrollmentHealth from './pages/EnrollmentHealth'
 import Speakers from './pages/Speakers'
 import Inference from './pages/Inference'
 import InferLive from './pages/InferLive'
@@ -22,6 +23,7 @@ function App() {
               <Route path="/audio" element={<AudioViewer />} />
               <Route path="/annotation" element={<Annotation />} />
               <Route path="/enrollment" element={<Enrollment />} />
+              <Route path="/enrollment-health" element={<EnrollmentHealth />} />
               <Route path="/speakers" element={<Speakers />} />
               <Route path="/inference" element={<Inference />} />
               <Route path="/infer-live" element={<InferLive />} />

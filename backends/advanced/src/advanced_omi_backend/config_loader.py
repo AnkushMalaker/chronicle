@@ -205,3 +205,58 @@ def save_config_section(section_path: str, values: dict) -> bool:
     except Exception as e:
         logger.error(f"Error saving config section '{section_path}': {e}")
         return False
+
+
+def _load_raw_config() -> DictConfig:
+    """Load the raw (unmerged, unresolved) config.yml.
+
+    Unlike ``load_config()`` this does NOT merge defaults.yml or resolve
+    ``${oc.env:...}`` interpolations — it returns exactly what is persisted in
+    config.yml. Callers that edit model definitions or want to display the
+    *reference* form of a secret (e.g. ``${oc.env:OPENAI_API_KEY}``) rather than
+    the resolved value must read through here.
+    """
+    config_path = get_config_dir() / "config.yml"
+    if config_path.exists():
+        return OmegaConf.load(config_path)
+    return OmegaConf.create({})
+
+
+def get_raw_models() -> list:
+    """Return the raw ``models`` list from config.yml as plain dicts.
+
+    Values are NOT resolved, so ``${oc.env:...}`` references are preserved. This
+    is the list to mutate-and-write-back when adding/editing/deleting a model;
+    note it excludes default-only models that live solely in defaults.yml.
+    """
+    raw = _load_raw_config()
+    models = raw.get("models", []) or []
+    return OmegaConf.to_container(models, resolve=False)
+
+
+def save_models_list(models: list) -> bool:
+    """Persist the full ``models`` list to config.yml (replace semantics).
+
+    OmegaConf merge replaces lists wholesale, so model add/edit/delete must pass
+    the COMPLETE intended list here (read it via ``get_raw_models()`` first,
+    mutate, then save). After writing, the config cache is invalidated; callers
+    must also ``load_models_config(force_reload=True)`` to refresh the model
+    registry (kept out of here to avoid a config_loader→model_registry import).
+    """
+    try:
+        config_path = get_config_dir() / "config.yml"
+
+        existing_config = OmegaConf.create({})
+        if config_path.exists():
+            existing_config = OmegaConf.load(config_path)
+
+        existing_config["models"] = OmegaConf.create(models)
+        OmegaConf.save(existing_config, config_path)
+
+        reload_config()
+        logger.info(f"Saved {len(models)} models to {config_path}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error saving models list: {e}")
+        return False

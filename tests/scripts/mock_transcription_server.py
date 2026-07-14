@@ -8,6 +8,7 @@ WebSocket connections and returning mock transcription results.
 Usage:
     python mock_transcription_server.py [--port PORT] [--host HOST]
 """
+import argparse
 import asyncio
 import json
 import logging
@@ -265,8 +266,6 @@ class MockTranscriptionServer:
 
 async def main():
     """Main entry point."""
-    import argparse
-
     parser = argparse.ArgumentParser(description="Mock WebSocket Transcription Server")
     parser.add_argument(
         "--host", default="0.0.0.0", help="Host to bind to (default: 0.0.0.0)"

@@ -62,8 +62,6 @@ class AppConfig:
             )
 
         # External Services Configuration
-        self.qdrant_base_url = os.getenv("QDRANT_BASE_URL", "qdrant")
-        self.qdrant_port = os.getenv("QDRANT_PORT", "6333")
         # Memory provider from registry
         _reg = get_models_registry()
         _mem = _reg.memory if _reg else {}
@@ -112,8 +110,3 @@ def get_mongo_collections():
         "users": app_config.users_col,
         "speakers": app_config.speakers_col,
     }
-
-
-def get_redis_config():
-    """Get Redis configuration."""
-    return {"url": app_config.redis_url, "encoding": "utf-8", "decode_responses": False}

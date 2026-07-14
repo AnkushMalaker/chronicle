@@ -5,13 +5,28 @@ Enables control of Home Assistant devices through natural language commands
 triggered by a keyword anywhere in the transcript.
 """
 
+import asyncio
 import json
 import logging
+import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
+from advanced_omi_backend.llm_client import get_llm_client
+from advanced_omi_backend.openai_factory import model_supports_temperature
+from advanced_omi_backend.plugins.base import (
+    BasePlugin,
+    PluginConnectivityError,
+    PluginContext,
+    PluginResult,
+)
+from advanced_omi_backend.plugins.events import PluginEvent
+from advanced_omi_backend.prompt_registry import get_prompt_registry
 
+from .command_parser import COMMAND_PARSER_SYSTEM_PROMPT, ParsedCommand
 from .entity_cache import EntityCache
+from .intent_router import router_client
+from .intent_router.cascade import ConvResult, run_ha_cascade
 from .mcp_client import HAMCPClient, MCPError
 
 logger = logging.getLogger(__name__)
@@ -59,14 +74,12 @@ class HomeAssistantPlugin(BasePlugin):
         # Configuration
         self.ha_url = config.get("ha_url", "http://localhost:8123")
         self.ha_token = config.get("ha_token", "")
-        self.wake_word = config.get("wake_word", "vivi")
+        self.wake_word = config.get("wake_word", "hermes")
         self.timeout = int(config.get("timeout", 30))
         self.button_actions = config.get("button_actions", {})
 
     def register_prompts(self, registry) -> None:
         """Register Home Assistant prompts with the prompt registry."""
-        from .command_parser import COMMAND_PARSER_SYSTEM_PROMPT
-
         registry.register_default(
             "plugin.homeassistant.command_parser",
             template=COMMAND_PARSER_SYSTEM_PROMPT,
@@ -83,7 +96,10 @@ class HomeAssistantPlugin(BasePlugin):
         Connects to Home Assistant MCP server and discovers available tools.
 
         Raises:
-            MCPError: If connection or discovery fails
+            ValueError: If required configuration is missing (not retried)
+            PluginConnectivityError: If HA is unreachable — the plugin system
+                marks the plugin degraded and retries in the background (HA
+                runs on a server that may be off when Chronicle boots)
         """
         if not self.enabled:
             logger.info("Home Assistant plugin is disabled, skipping initialization")
@@ -93,6 +109,13 @@ class HomeAssistantPlugin(BasePlugin):
             raise ValueError("Home Assistant token is required")
 
         logger.info(f"Initializing Home Assistant plugin (URL: {self.ha_url})")
+
+        # Re-init (background recovery) replaces the client; close the old one
+        if self.mcp_client:
+            try:
+                await self.mcp_client.close()
+            except Exception:  # noqa: BLE001 — old client may already be dead
+                pass
 
         # Create MCP client (used for REST API calls, not MCP protocol)
         self.mcp_client = HAMCPClient(
@@ -107,9 +130,113 @@ class HomeAssistantPlugin(BasePlugin):
                 raise ValueError(f"Unexpected template result: {test_result}")
             logger.info("Home Assistant API connection successful")
         except Exception as e:
-            raise MCPError(f"Failed to connect to Home Assistant API: {e}")
+            # Transient by design: the handlers degrade gracefully while HA is
+            # down (mcp_client stays usable once HA returns), so signal
+            # "retry later" instead of a hard init failure.
+            raise PluginConnectivityError(
+                f"Home Assistant unreachable at {self.ha_url}: {e}"
+            ) from e
+
+        # Warm the HA Assist pipeline so the first real command isn't slow.
+        # (The intent-router microservice warms its own model on startup.)
+        try:
+            await self.mcp_client.process_conversation("status")
+            logger.info("HA Assist warmed")
+        except Exception as e:
+            logger.warning(f"Warm-up skipped: {e}")
 
         logger.info("Home Assistant plugin initialized successfully")
+
+    async def on_wake_word_detected(
+        self, context: PluginContext
+    ) -> Optional[PluginResult]:
+        """First handler in the wake-word chain of responsibility.
+
+        Decides "is this command for me (Home Assistant)?":
+          - intent router says 'other'        -> decline (return None) -> next plugin
+          - router says 'home' and HA acts    -> handle, stop the chain
+          - router says 'home' but HA can't   -> decline (return None) -> next plugin
+
+        Returning None passes the command down the priority-ordered plugin chain
+        (the Hermes agent is the catch-all, last). This plugin has NO knowledge of
+        Hermes - the ordering/hierarchy lives in config/plugins.yml (priority).
+        """
+        if context.data.get("asr_status") == "skipped_silence":
+            logger.info("Wake word armed but capture was silent; ignoring")
+            return PluginResult(success=False, message="", should_continue=False)
+
+        command = (
+            context.data.get("command") or context.data.get("transcript") or ""
+        ).strip()
+        if not command or not self.mcp_client:
+            return None  # nothing we can do -> let the next handler try
+
+        route = await router_client.classify(command)
+        if route.route != "home":
+            logger.info(
+                "Router: %r -> %s (P=%.2f); declining",
+                command,
+                route.route,
+                route.p_home,
+            )
+            return None  # not a home command -> pass to next handler (e.g. Hermes)
+
+        async def conversation_fn(text: str) -> ConvResult:
+            d = await self.mcp_client.process_conversation(text)
+            return ConvResult(
+                response_type=d["response_type"],
+                code=d["code"],
+                speech=d["speech"],
+                success_count=d["success_count"],
+            )
+
+        async def llm_complete_fn(system: str, user: str) -> str:
+            llm = get_llm_client()
+
+            def _call():
+                # Don't set max_tokens (reasoning models reject it) and only set
+                # temperature when the model supports it — mirrors LLMClient.generate.
+                params = {
+                    "model": llm.model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                }
+                if model_supports_temperature(llm.model):
+                    params["temperature"] = 0.0
+                resp = llm.client.chat.completions.create(**params)
+                return resp.choices[0].message.content or ""
+
+            return await asyncio.to_thread(_call)
+
+        res = await run_ha_cascade(
+            command,
+            conversation_fn=conversation_fn,
+            llm_complete_fn=llm_complete_fn,
+        )
+        logger.info(
+            "HA cascade: %r -> %s (%.0fms) :: %s",
+            command,
+            res.final_tier,
+            res.total_ms,
+            res.message,
+        )
+        if not res.success:
+            return None  # HA couldn't act -> pass down the chain
+
+        return PluginResult(
+            success=True,
+            message=res.message,
+            data={
+                "final_tier": res.final_tier,
+                "p_home": route.p_home,
+                "traces": [
+                    (t.tier, round(t.latency_ms, 1), t.detail) for t in res.traces
+                ],
+            },
+            should_continue=False,  # handled -> stop the chain
+        )
 
     async def on_transcript(self, context: PluginContext) -> Optional[PluginResult]:
         """
@@ -141,7 +268,7 @@ class HomeAssistantPlugin(BasePlugin):
             Context data:
                 {
                     'command': 'turn off study lights',
-                    'original_transcript': 'vivi turn off study lights',
+                    'original_transcript': 'hermes turn off study lights',
                     'conversation_id': 'conv_123'
                 }
 
@@ -299,8 +426,6 @@ class HomeAssistantPlugin(BasePlugin):
             )
 
         try:
-            from .command_parser import ParsedCommand
-
             # Build a ParsedCommand from the action data
             target_type = context.data.get("target_type", "area")
             target = context.data.get("target", "")
@@ -364,10 +489,6 @@ class HomeAssistantPlugin(BasePlugin):
         using the button_actions config. Reuses the same entity resolution and
         service call logic as on_plugin_action().
         """
-        from advanced_omi_backend.plugins.events import PluginEvent
-
-        from .command_parser import ParsedCommand
-
         # Map event to config key
         if context.event == PluginEvent.BUTTON_DOUBLE_PRESS:
             action_key = "double_press"
@@ -447,8 +568,6 @@ class HomeAssistantPlugin(BasePlugin):
 
     async def health_check(self) -> dict:
         """Ping Home Assistant API using the initialized client."""
-        import time
-
         if not self.mcp_client:
             return {"ok": False, "message": "MCP client not initialized"}
 
@@ -524,8 +643,6 @@ class HomeAssistantPlugin(BasePlugin):
             logger.debug(f"Fetched {len(entity_details)} entity states")
 
             # Create cache
-            from datetime import datetime
-
             self.entity_cache = EntityCache(
                 areas=areas,
                 area_entities=area_entities,
@@ -550,7 +667,7 @@ class HomeAssistantPlugin(BasePlugin):
         Use a lightweight LLM call to extract only the Home Assistant command
         from a transcript that may contain mixed conversation.
 
-        When the keyword (e.g. "vivi") is detected anywhere in a long transcript,
+        When the keyword (e.g. "hermes") is detected anywhere in a long transcript,
         the surrounding text often includes unrelated speech. This method asks the
         LLM to return just the smart-home command portion.
 
@@ -566,8 +683,6 @@ class HomeAssistantPlugin(BasePlugin):
             return None
 
         try:
-            from advanced_omi_backend.llm_client import get_llm_client
-
             llm_client = get_llm_client()
 
             system_prompt = (
@@ -634,11 +749,6 @@ class HomeAssistantPlugin(BasePlugin):
             )
         """
         try:
-            from advanced_omi_backend.llm_client import get_llm_client
-            from advanced_omi_backend.prompt_registry import get_prompt_registry
-
-            from .command_parser import ParsedCommand
-
             llm_client = get_llm_client()
             registry = get_prompt_registry()
             system_prompt = await registry.get_prompt(
@@ -743,8 +853,6 @@ class HomeAssistantPlugin(BasePlugin):
             ... ))
             ["light.tubelight_3"]
         """
-        from .command_parser import ParsedCommand
-
         # Ensure cache is ready
         await self._ensure_cache_initialized()
 
@@ -904,10 +1012,6 @@ class HomeAssistantPlugin(BasePlugin):
             >>> await self._parse_command_hybrid("turn off study lights")
             ParsedCommand(action="turn_off", target_type="area", target="study", ...)
         """
-        import asyncio
-
-        from .command_parser import ParsedCommand
-
         # Try LLM parsing with timeout
         try:
             logger.debug("Attempting LLM-based command parsing...")
@@ -981,8 +1085,6 @@ class HomeAssistantPlugin(BasePlugin):
             >>> result['success']
             True
         """
-        import time
-
         try:
             # Validate required config fields
             required_fields = ["ha_url", "ha_token"]

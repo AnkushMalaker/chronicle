@@ -1,0 +1,9 @@
+# Button Configuration — map device button presses to actions.
+# Each key (single_press / double_press) maps to one typed action. Valid types:
+#   stop_playback | close_conversation | star_conversation | call_plugin
+# call_plugin also needs: plugin_id, action, and optional data.
+actions:
+  single_press:
+    type: stop_playback
+  double_press:
+    type: close_conversation

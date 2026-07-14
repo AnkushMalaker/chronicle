@@ -57,37 +57,34 @@ A modern React-based web interface for the Chronicle AI-powered personal audio s
 4. **Start backend services:**
    ```bash
    cd ../
-   docker compose up chronicle-backend mongo qdrant
+   docker compose up chronicle-backend mongo falkordb redis
    ```
 
 ### Docker Development
 
-Use the development profile to run both frontend and backend in Docker:
+Run frontend and backend in Docker (the webui-dev service starts by default):
 
 ```bash
 cd backends/advanced
-docker compose --profile dev up
+docker compose up
 ```
 
 This starts:
-- Backend services (chronicle-backend, mongo, qdrant)
+- Backend services (chronicle-backend, mongo, falkordb, redis)
 - React dev server with hot reload (http://localhost:5173)
 
-## Production Deployment
+## Deployment
 
-### Docker Compose (Recommended)
+This project runs the Vite dev server (`webui-dev`) as the only webui — there is
+no separate static/nginx production build. The standard stack (`./start.sh`)
+starts it on http://localhost:5173, and Caddy fronts it for HTTPS (microphone
+access, remote/Tailscale). Source is volume-mounted, so changes hot-reload with
+no rebuild.
 
-```bash
-cd backends/advanced
-docker compose up webui chronicle-backend mongo qdrant
-```
-
-The production build will be available at http://localhost:3000
-
-### Manual Build
+### Manual Build (optional)
 
 ```bash
-cd backends/advanced/webui-react
+cd backends/advanced/webui
 npm install
 npm run build
 # Serve the dist/ folder with any web server
@@ -101,8 +98,7 @@ npm run build
 
 ### Docker Compose Variables
 
-- `WEBUI_PORT` - Production webui port (default: 3000)
-- `WEBUI_DEV_PORT` - Development webui port (default: 5173)
+- `WEBUI_DEV_PORT` - Webui (Vite dev server) port (default: 5173)
 - `HOST_IP` - Your host IP for external access
 - `BACKEND_PUBLIC_PORT` - Backend port accessible from browser
 
@@ -153,9 +149,7 @@ webui-react/
 │   ├── App.tsx            # Root component
 │   ├── main.tsx           # Entry point
 │   └── index.css          # Global styles
-├── Dockerfile             # Production build
-├── Dockerfile.dev         # Development build
-├── nginx.conf             # Nginx configuration
+├── Dockerfile.dev         # Vite dev-server image (the only webui)
 └── package.json
 ```
 

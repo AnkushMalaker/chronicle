@@ -77,8 +77,8 @@ graph TB
             CONV_REPO[ConversationRepository<br/>Clean Data Access]
         end
 
-        subgraph "Qdrant"
-            MEM[Memory Vectors]
+        subgraph "Markdown Vault"
+            MEM[conversation_docs<br/>Obsidian-style notes]
         end
     end
 
@@ -140,7 +140,7 @@ graph TB
     CONV_REPO -->|access| AC_COL
     MP --> OAI
     MP --> OLL
-    MP -->|orchestrate by mem0| MEM
+    MP -->|memory agent writes notes| MEM
     MP -->|update via| CONV_REPO
 
     %% Cropping Flow
@@ -194,8 +194,8 @@ graph TB
 
 #### React Dashboard (`webui/`)
 - **Modern Interface**: Complete React/TypeScript web-based management interface
-- **Advanced Memory Search**: Semantic search with relevance threshold filtering and live results
-- **Memory Count Display**: Total count tracking with dual-layer filtering capabilities
+- **Advanced Memory Search**: Agentic vault search (ripgrep over notes, synthesized answer with cited note paths)
+- **Memory Count Display**: Notes/memories surfaced from the vault
 - **Authentication Integration**: Login with backend JWT tokens and user management
 - **Real-Time Monitoring**: Live client status and conversation management
 - **Live Recording**: Real-time audio recording with WebSocket streaming (HTTPS)
@@ -545,11 +545,10 @@ stateDiagram-v2
 
 #### Memory Management (`src/advanced_omi_backend/memory/memory_service.py`)
 - **User-Centric Storage**: All memories keyed by database user_id (not client_id)
-- **Conversation Summarization**: Automatic memory extraction using mem0 framework
-- **Vector Storage**: Semantic memory search with Qdrant embeddings
-- **Client Metadata**: Client information stored in memory metadata for reference
-- **User Isolation**: Complete data separation between users via user_id
-- **Temporal Memory**: Long-term conversation history with semantic retrieval
+- **Agentic Vault Writes**: A tool-calling memory agent records each conversation as `Conversations/<id>.md` and edits `People/<name>.md`, `Topics/<topic>.md`, and `<Category>/<name>.md` notes
+- **Single Source of Truth**: The Markdown vault at `data/conversation_docs/<user_id>/` is the only memory store
+- **Agentic Retrieval**: A read-only retrieval agent drives ripgrep (grep/glob/read_note) over the vault and synthesizes an answer with cited note paths
+- **User Isolation**: Complete data separation between users via per-user vault folders
 - **Processing Trigger**: Conversation end events processed by `src/advanced_omi_backend/controllers/memory_controller.py`
 
 > 📖 **Read more**: [Memory System Documentation](./memories.md) for detailed memory extraction and storage
@@ -589,7 +588,7 @@ graph LR
         WebUI[webui<br/>React Dashboard]
         Proxy[nginx<br/>Load Balancer]
         Mongo[mongo:4.4.18<br/>Primary Database]
-        Qdrant[qdrant<br/>Vector Store]
+        Vault[Markdown Vault<br/>conversation_docs]
     end
 
     subgraph "External Services"
@@ -609,7 +608,7 @@ graph LR
     Proxy --> Backend
     Proxy --> WebUI
     Backend --> Mongo
-    Backend --> Qdrant
+    Backend --> Vault
     Backend -.->|Optional| Ollama
     Backend -.->|Optional| ASRService
 ```
@@ -633,8 +632,8 @@ graph LR
 
 #### Infrastructure Containers
 - **MongoDB 4.4.18**: Primary data storage with persistence
-- **Qdrant Latest**: Vector database for memory embeddings
-- **Neo4j 5.15**: Graph database for memory relationships and entity connections
+- **Redis**: Job queues (RQ workers) and session state
+- **Markdown Vault**: Per-user Obsidian-style notes on disk at `data/conversation_docs/<user_id>/` (the single memory store)
 - **Nginx Alpine**: Reverse proxy and load balancing (serves React app in production, proxies API calls to backend)
 
 ## Detailed Data Flow Architecture
@@ -683,7 +682,7 @@ flowchart TB
             MemoryService[Memory Service<br/>🕐 Init timeout: 60s<br/>🕐 Processing timeout: 20min]
             MemoryValidation[Memory Validation<br/>📏 Min conversation length]
             LLMProcessor[Ollama LLM<br/>🔄 Circuit breaker protection]
-            VectorStore[Qdrant Vector Store<br/>🔍 Semantic search]
+            VaultStore[Markdown Vault<br/>📝 Agent-written notes]
         end
 
     end
@@ -692,7 +691,7 @@ flowchart TB
     %% Data Storage
     subgraph "💾 Data Storage Layer"
         MongoDB[(MongoDB<br/>Users & Conversations<br/>🕐 Health check: 5s)]
-        QdrantDB[(Qdrant<br/>Vector Embeddings<br/>🔍 Semantic memory)]
+        VaultDB[(Markdown Vault<br/>conversation_docs<br/>📝 Memory notes)]
         AudioFiles[Audio Files<br/>📁 Chunk storage + cropping]
     end
 
@@ -725,7 +724,7 @@ flowchart TB
     MemoryService -->|🕐 20min timeout| LLMProcessor
     LLMProcessor -->|❌ Model stopped<br/>🔄 Circuit breaker trip| CircuitBreaker
     LLMProcessor -->|❌ Empty response<br/>🔄 Fallback memory| MemoryService
-    LLMProcessor -->|✅ Memory extracted| VectorStore
+    LLMProcessor -->|✅ Memory extracted| VaultStore
     MemoryService -->|📊 Track processing| QueueTracker
 
 
@@ -737,7 +736,7 @@ flowchart TB
 
     %% Storage Integration
     MemoryService -->|💾 Store memories| MongoDB
-    VectorStore -->|💾 Embeddings| QdrantDB
+    VaultStore -->|💾 Notes| VaultDB
     QueueTracker -->|📊 Metrics & tracking| SQLiteTracking
     ClientState -->|📁 Audio segments| AudioFiles
 
@@ -803,11 +802,11 @@ flowchart TB
 3. **User Resolution**: Client-ID to database user mapping for proper data association
 4. **Versioned Processing**: Multiple transcript and memory versions with provider/model tracking
 5. **LLM Processing**: Ollama-based conversation summarization with user context (only for validated transcripts)
-6. **Vector Storage**: Semantic embeddings stored in Qdrant keyed by user_id
+6. **Vault Storage**: A tool-calling memory agent writes notes into the per-user Markdown vault (`data/conversation_docs/<user_id>/`)
 7. **Metadata Enhancement**: Client information and user email stored in metadata
 8. **Reprocessing Capabilities**: Re-run transcript or memory extraction with different parameters
 9. **Version Management**: Active version pointers with automatic legacy field population
-10. **Search & Retrieval**: User-scoped semantic memory search capabilities
+10. **Search & Retrieval**: User-scoped agentic vault search (ripgrep over notes, synthesized answer with cited paths)
 
 ### User Management & Security
 1. **Registration**: Admin-controlled user creation with email/password and auto-generated user_id
@@ -900,13 +899,8 @@ MONGODB_URI=mongodb://mongo:27017
 # LLM Processing
 OLLAMA_BASE_URL=http://ollama:11434
 
-# Vector Storage
-QDRANT_BASE_URL=qdrant
-
-# Graph Storage for Memory Relationships
-NEO4J_HOST=neo4j-mem0
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=your-neo4j-password
+# Memory Storage: per-user Markdown vault on disk (data/conversation_docs/<user_id>/)
+# No vector/graph database required.
 
 # Transcription Services (Deepgram Primary, Wyoming Fallback)
 DEEPGRAM_API_KEY=your-deepgram-api-key-here
@@ -921,8 +915,6 @@ DEEPGRAM_API_KEY=your-deepgram-api-key-here
 
 #### Enhanced Services (Optional but Recommended)
 - **Ollama**: Memory processing
-- **Qdrant**: Vector storage for semantic memory search
-- **Neo4j**: Graph database for memory relationships and entity connections
 - **Deepgram**: Primary speech-to-text transcription service (WebSocket streaming)
 - **Wyoming ASR**: Fallback transcription service (self-hosted)
 
@@ -975,7 +967,7 @@ src/advanced_omi_backend/
 │   └── /{conversation_id}/activate-memory       # Switch memory version
 ├── /memories               # Memory management and search
 │   ├── /admin              # Admin view (all users)
-│   └── /search             # Semantic memory search
+│   └── /search             # Agentic vault search
 ├── /admin/                 # Admin compatibility endpoints
 │   ├── /memories           # Consolidated admin memory view
 │   └── /memories/debug     # Legacy debug endpoint
@@ -995,7 +987,7 @@ src/advanced_omi_backend/
 #### Memory Management
 - `GET /api/memories` - User memories (with user_id filter for admin)
 - `GET /api/memories/admin` - All memories grouped by user (admin only)
-- `GET /api/memories/search?query=` - Semantic memory search
+- `GET /api/memories/search?query=` - Agentic vault search
 
 #### Audio & Conversations
 - `GET /api/conversations` - User conversations (speech-detected only)

@@ -12,6 +12,8 @@ from abc import ABC, abstractmethod
 import redis.asyncio as redis
 from redis import exceptions as redis_exceptions
 
+from advanced_omi_backend.heartbeat import beat
+
 logger = logging.getLogger(__name__)
 
 
@@ -94,137 +96,6 @@ class BaseAudioStreamConsumer(ABC):
                 f"➡️ Consumer group {self.group_name} already exists for {stream_name}"
             )
 
-    async def cleanup_dead_consumers(self, idle_threshold_ms: int = 30000):
-        """
-        Clean up dead consumers from the consumer group.
-
-        Removes consumers that are idle > threshold (default 30 seconds) and have no pending messages.
-        Claims and ACKs any pending messages from dead consumers first.
-
-        Args:
-            idle_threshold_ms: Idle time threshold in milliseconds (default 30 seconds)
-        """
-        try:
-            # Get all consumers in the group
-            consumers = await self.redis_client.execute_command(
-                "XINFO", "CONSUMERS", self.input_stream, self.group_name
-            )
-
-            if not consumers:
-                return
-
-            deleted_count = 0
-            claimed_count = 0
-
-            # Parse consumer info - each consumer is a nested list
-            for consumer_info in consumers:
-                consumer_dict = {}
-
-                # Parse consumer fields (flat key-value pairs within each consumer)
-                for j in range(0, len(consumer_info), 2):
-                    if j + 1 < len(consumer_info):
-                        key = (
-                            consumer_info[j].decode()
-                            if isinstance(consumer_info[j], bytes)
-                            else str(consumer_info[j])
-                        )
-                        value = consumer_info[j + 1]
-                        if isinstance(value, bytes):
-                            try:
-                                value = value.decode()
-                            except UnicodeDecodeError:
-                                value = str(value)
-                        consumer_dict[key] = value
-
-                consumer_name = consumer_dict.get("name", "")
-                if isinstance(consumer_name, bytes):
-                    consumer_name = consumer_name.decode()
-
-                consumer_pending = int(consumer_dict.get("pending", 0))
-                consumer_idle_ms = int(consumer_dict.get("idle", 0))
-
-                # Skip our own consumer
-                if consumer_name == self.consumer_name:
-                    continue
-
-                # Check if consumer is dead
-                is_dead = consumer_idle_ms > idle_threshold_ms
-
-                if is_dead:
-                    # If consumer has pending messages, claim and ACK them first
-                    if consumer_pending > 0:
-                        logger.info(
-                            f"🔄 Claiming {consumer_pending} pending messages from dead consumer {consumer_name}"
-                        )
-
-                        try:
-                            pending_messages = await self.redis_client.execute_command(
-                                "XPENDING",
-                                self.input_stream,
-                                self.group_name,
-                                "-",
-                                "+",
-                                str(consumer_pending),
-                                consumer_name,
-                            )
-
-                            # Parse pending messages (groups of 4: msg_id, consumer, idle_ms, delivery_count)
-                            for k in range(0, len(pending_messages), 4):
-                                if k < len(pending_messages):
-                                    msg_id = pending_messages[k]
-                                    if isinstance(msg_id, bytes):
-                                        msg_id = msg_id.decode()
-
-                                    # Claim to ourselves and ACK immediately
-                                    try:
-                                        await self.redis_client.execute_command(
-                                            "XCLAIM",
-                                            self.input_stream,
-                                            self.group_name,
-                                            self.consumer_name,
-                                            "0",
-                                            msg_id,
-                                        )
-                                        await self.redis_client.xack(
-                                            self.input_stream, self.group_name, msg_id
-                                        )
-                                        claimed_count += 1
-                                    except Exception as claim_error:
-                                        logger.warning(
-                                            f"Failed to claim/ack message {msg_id}: {claim_error}"
-                                        )
-
-                        except Exception as pending_error:
-                            logger.warning(
-                                f"Failed to process pending messages for {consumer_name}: {pending_error}"
-                            )
-
-                    # Delete the dead consumer
-                    try:
-                        await self.redis_client.execute_command(
-                            "XGROUP",
-                            "DELCONSUMER",
-                            self.input_stream,
-                            self.group_name,
-                            consumer_name,
-                        )
-                        deleted_count += 1
-                        logger.info(
-                            f"🧹 Deleted dead consumer {consumer_name} (idle: {consumer_idle_ms}ms)"
-                        )
-                    except Exception as delete_error:
-                        logger.warning(
-                            f"Failed to delete consumer {consumer_name}: {delete_error}"
-                        )
-
-            if deleted_count > 0 or claimed_count > 0:
-                logger.info(
-                    f"✅ Cleanup complete: deleted {deleted_count} dead consumers, claimed {claimed_count} pending messages"
-                )
-
-        except Exception as e:
-            logger.error(f"❌ Failed to cleanup dead consumers: {e}", exc_info=True)
-
     @abstractmethod
     async def transcribe_audio(self, audio_data: bytes, sample_rate: int) -> dict:
         """
@@ -241,8 +112,14 @@ class BaseAudioStreamConsumer(ABC):
         """
         pass
 
-    async def start_consuming(self):
-        """Discover and consume from multiple streams using Redis consumer groups."""
+    async def start_consuming(self, heartbeat_name: str | None = None):
+        """Discover and consume from multiple streams using Redis consumer groups.
+
+        Args:
+            heartbeat_name: If set, beat ``worker:heartbeat:{name}`` once per loop
+                iteration so the workers healthcheck can tell this consumer's main
+                loop is still turning (not wedged-but-alive).
+        """
         self.running = True
         logger.info(
             f"➡️ Starting dynamic stream consumer: {self.consumer_name} (group: {self.group_name})"
@@ -252,6 +129,8 @@ class BaseAudioStreamConsumer(ABC):
         discovery_interval = 10  # Discover new streams every 10 seconds
 
         while self.running:
+            if heartbeat_name:
+                await beat(self.redis_client, heartbeat_name)
             try:
                 current_time = time.time()
 

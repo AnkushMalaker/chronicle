@@ -5,6 +5,7 @@ import {
   Pause,
   CheckCircle,
   XCircle,
+  MinusCircle,
   RotateCcw,
   StopCircle,
   Eye,
@@ -116,7 +117,7 @@ interface EventRecord {
   event: string;
   user_id: string;
   plugins_subscribed: string[];
-  plugins_executed: Array<{ plugin_id: string; success: boolean; message: string }>;
+  plugins_executed: Array<{ plugin_id: string; success: boolean; message: string; data?: Record<string, any> | null }>;
   metadata: Record<string, any>;
 }
 
@@ -128,6 +129,7 @@ const EVENT_TYPE_COLORS: Record<string, string> = {
   'button.single_press': 'bg-orange-100 text-orange-700',
   'button.double_press': 'bg-orange-100 text-orange-700',
   'plugin_action': 'bg-indigo-100 text-indigo-700',
+  'wake_word.detected': 'bg-teal-100 text-teal-700',
 };
 const DEFAULT_EVENT_COLOR = 'bg-gray-100 text-gray-700';
 const getEventColor = (eventType: string) => EVENT_TYPE_COLORS[eventType] || DEFAULT_EVENT_COLOR;
@@ -155,9 +157,17 @@ const Queue: React.FC = () => {
     statuses: ['finished', 'failed'],  // RQ standard status names
     flush_all: false,
     include_failed: false,  // For flush_all mode
-    include_completed: false  // For flush_all mode (note: API expects include_completed for backward compat)
+    include_finished: false  // For flush_all mode (RQ standard status name)
   });
   const [flushing, setFlushing] = useState(false);
+  // Preview ("dry run") of the jobs a flush would remove, or null when not previewed yet
+  const [flushPreview, setFlushPreview] = useState<{
+    total_matched: number;
+    jobs: any[];
+    redis_keys_matched?: number;
+    skipped_session_level?: number;
+  } | null>(null);
+  const [previewing, setPreviewing] = useState(false);
   const [expandedConversations, setExpandedConversations] = useState<Set<string>>(new Set());
   const [expandedJobs, setExpandedJobs] = useState<Set<string>>(new Set());
   const [selectedEvent, setSelectedEvent] = useState<EventRecord | null>(null);
@@ -220,7 +230,9 @@ const Queue: React.FC = () => {
     const startedJobs = dashboardData.jobs?.started || [];
     const finishedJobs = dashboardData.jobs?.finished || [];
     const failedJobs = dashboardData.jobs?.failed || [];
-    const allFetchedJobs = [...queuedJobs, ...startedJobs, ...finishedJobs, ...failedJobs];
+    const deferredJobs = dashboardData.jobs?.deferred || [];  // chained jobs waiting on a dependency
+    const scheduledJobs = dashboardData.jobs?.scheduled || [];
+    const allFetchedJobs = [...queuedJobs, ...startedJobs, ...finishedJobs, ...failedJobs, ...deferredJobs, ...scheduledJobs];
 
     // Group jobs by conversation_id
     const jobsByConversation: {[conversationId: string]: any[]} = {};
@@ -349,7 +361,7 @@ const Queue: React.FC = () => {
       const response = await queueApi.cleanupOldSessions(3600); // 1 hour
       const data = response.data;
 
-      alert(`✅ Cleanup complete!\n\nRemoved ${data.cleaned_count} old session(s)`);
+      alert(`✅ Cleanup complete!\n\nRemoved ${data.cleaned_sessions} old session(s) and ${data.cleaned_streams} stream(s)`);
 
       invalidateQueue();
     } catch (error: any) {
@@ -475,23 +487,47 @@ const Queue: React.FC = () => {
   };
 
 
+  // A preview reflects a specific set of flush settings; drop it whenever they change
+  useEffect(() => { setFlushPreview(null); }, [flushSettings]);
+
+  const buildFlushBody = (dryRun: boolean) =>
+    flushSettings.flush_all
+      ? {
+          confirm: true,
+          include_failed: flushSettings.include_failed,
+          include_finished: flushSettings.include_finished,
+          dry_run: dryRun,
+        }
+      : {
+          older_than_hours: flushSettings.older_than_hours,
+          statuses: flushSettings.statuses,
+          dry_run: dryRun,
+        };
+
+  const previewFlush = async () => {
+    setPreviewing(true);
+    try {
+      const response = await queueApi.flushJobs(flushSettings.flush_all, buildFlushBody(true));
+      setFlushPreview(response.data);
+    } catch (error: any) {
+      console.error('Error previewing flush:', error);
+      if (error.response?.status === 403) {
+        alert('Admin access required to preview flush');
+      } else {
+        alert(`Failed to preview flush: ${error.response?.data?.detail || error.message}`);
+      }
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
   const flushJobs = async () => {
     setFlushing(true);
     try {
-      const body = flushSettings.flush_all
-        ? {
-            confirm: true,
-            include_failed: flushSettings.include_failed,
-            include_completed: flushSettings.include_completed
-          }
-        : {
-            older_than_hours: flushSettings.older_than_hours,
-            statuses: flushSettings.statuses
-          };
-
-      const response = await queueApi.flushJobs(flushSettings.flush_all, body);
+      const response = await queueApi.flushJobs(flushSettings.flush_all, buildFlushBody(false));
       alert(`Successfully flushed ${response.data.total_removed} jobs!`);
       setShowFlushModal(false);
+      setFlushPreview(null);
       invalidateQueue();
     } catch (error: any) {
       console.error('Error flushing jobs:', error);
@@ -566,7 +602,9 @@ const Queue: React.FC = () => {
     const end = job.completed_at || job.ended_at
       ? new Date((job.completed_at || job.ended_at)!).getTime()
       : (job.status === 'started' ? Date.now() : start); // Don't show increasing time for failed jobs
-    const durationMs = end - start;
+    // RQ's started_at/ended_at can be sub-millisecond out of order for near-instant
+    // jobs, yielding a tiny negative; clamp so we never render e.g. "-27ms".
+    const durationMs = Math.max(0, end - start);
 
     if (durationMs < 1000) return `${durationMs}ms`;
     if (durationMs < 60000) return `${(durationMs / 1000).toFixed(1)}s`;
@@ -609,9 +647,9 @@ const Queue: React.FC = () => {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center">
         <div className="flex items-center space-x-3">
-          <Layers className="w-6 h-6 text-blue-600" />
+          <Layers className="w-6 h-6 text-blue-600 flex-shrink-0" />
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Queue & Events</h1>
             <p className="text-xs text-gray-500">
@@ -619,7 +657,7 @@ const Queue: React.FC = () => {
             </p>
           </div>
         </div>
-        <div className="flex items-center space-x-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => setShowFlushModal(true)}
             className="flex items-center space-x-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
@@ -716,9 +754,9 @@ const Queue: React.FC = () => {
       {/* Streaming Status */}
       {streamingStatus && (
         <div className="bg-white rounded-lg border overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+          <div className="px-4 sm:px-6 py-4 border-b border-gray-200 flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center">
             <h3 className="text-lg font-medium">Audio Streaming & Conversations</h3>
-            <div className="flex items-center space-x-2">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={cleanupOldSessions}
                 className="flex items-center space-x-2 px-4 py-2 bg-orange-600 text-white rounded-md hover:bg-orange-700 transition-colors text-sm"
@@ -736,7 +774,7 @@ const Queue: React.FC = () => {
                     try {
                       const response = await queueApi.cleanupOldSessions(0); // 0 seconds = all sessions
                       const data = response.data;
-                      alert(`✅ Removed ${data.cleaned_count} stream(s)`);
+                      alert(`✅ Removed ${data.cleaned_streams} stream(s)`);
                       invalidateQueue();
                     } catch (error: any) {
                       console.error('❌ Error removing streams:', error);
@@ -1134,7 +1172,7 @@ const Queue: React.FC = () => {
                                         job,
                                         startTime,
                                         endTime,
-                                        duration: (endTime - startTime) / 1000,
+                                        duration: Math.max(0, endTime - startTime) / 1000,
                                         name: getJobDisplayName(job.job_type),
                                         icon: getJobIcon(job.job_type)
                                       };
@@ -1666,7 +1704,7 @@ const Queue: React.FC = () => {
                                           job,
                                           startTime,
                                           endTime,
-                                          duration: (endTime - startTime) / 1000,
+                                          duration: Math.max(0, endTime - startTime) / 1000,
                                           name: getJobDisplayName(job.job_type),
                                           icon: getJobIcon(job.job_type)
                                         };
@@ -2064,8 +2102,13 @@ const Queue: React.FC = () => {
                   <tbody className="divide-y divide-gray-200">
                     {filtered.map((evt, idx) => {
                       const pluginsExecuted = evt.plugins_executed || [];
-                      const allSuccess = pluginsExecuted.length > 0 && pluginsExecuted.every(p => p.success);
-                      const anyFailure = pluginsExecuted.some(p => !p.success);
+                      // A plugin can intentionally no-op (e.g. wake word armed on a
+                      // silent capture). Those carry data.skipped and should read as
+                      // "Skipped", not a failure.
+                      const ranPlugins = pluginsExecuted.filter(p => !p.data?.skipped);
+                      const allSuccess = ranPlugins.length > 0 && ranPlugins.every(p => p.success);
+                      const anyFailure = ranPlugins.some(p => !p.success);
+                      const allSkipped = pluginsExecuted.length > 0 && ranPlugins.length === 0;
 
                       return (
                         <tr key={idx} className="hover:bg-gray-50">
@@ -2090,6 +2133,8 @@ const Queue: React.FC = () => {
                             <div className="flex items-center space-x-2">
                               {pluginsExecuted.length === 0 ? (
                                 <span className="text-xs text-gray-400">no plugins ran</span>
+                              ) : allSkipped ? (
+                                <span className="text-xs text-gray-500">Skipped</span>
                               ) : allSuccess ? (
                                 <span className="flex items-center space-x-1 text-xs text-green-600">
                                   <CheckCircle className="w-3.5 h-3.5" />
@@ -2607,28 +2652,43 @@ const Queue: React.FC = () => {
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Plugin Results</label>
                 <div className="space-y-2">
-                  {(selectedEvent.plugins_executed || []).map((p, i) => (
-                    <div
-                      key={i}
-                      className={`p-3 rounded-lg border ${p.success ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}
-                    >
-                      <div className="flex items-center space-x-2 mb-1">
-                        {p.success
-                          ? <CheckCircle className="w-4 h-4 text-green-600" />
-                          : <XCircle className="w-4 h-4 text-red-600" />
-                        }
-                        <span className="text-sm font-medium">{p.plugin_id}</span>
-                        <span className={`text-xs px-1.5 py-0.5 rounded ${p.success ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-                          {p.success ? 'OK' : 'Error'}
-                        </span>
+                  {(selectedEvent.plugins_executed || []).map((p, i) => {
+                    const skipped = !!p.data?.skipped;
+                    const tone = skipped
+                      ? { card: 'bg-gray-50 border-gray-200', badge: 'bg-gray-100 text-gray-600', text: 'text-gray-700', label: 'Skipped' }
+                      : p.success
+                        ? { card: 'bg-green-50 border-green-200', badge: 'bg-green-100 text-green-700', text: 'text-green-800', label: 'OK' }
+                        : { card: 'bg-red-50 border-red-200', badge: 'bg-red-100 text-red-700', text: 'text-red-800', label: 'Error' };
+                    // Show the plugin's structured output minus the skip flags we
+                    // already render via the badge/detail.
+                    const { skipped: _s, skip_reason: _r, detail, ...restData } = p.data || {};
+                    return (
+                      <div key={i} className={`p-3 rounded-lg border ${tone.card}`}>
+                        <div className="flex items-center space-x-2 mb-1">
+                          {skipped
+                            ? <MinusCircle className="w-4 h-4 text-gray-500" />
+                            : p.success
+                              ? <CheckCircle className="w-4 h-4 text-green-600" />
+                              : <XCircle className="w-4 h-4 text-red-600" />
+                          }
+                          <span className="text-sm font-medium">{p.plugin_id}</span>
+                          <span className={`text-xs px-1.5 py-0.5 rounded ${tone.badge}`}>
+                            {tone.label}
+                          </span>
+                        </div>
+                        {(p.message || detail) && (
+                          <p className={`text-sm ml-6 ${tone.text}`}>
+                            {p.message || detail}
+                          </p>
+                        )}
+                        {Object.keys(restData).length > 0 && (
+                          <pre className="text-xs text-gray-700 bg-white/60 border border-gray-200 rounded p-2 mt-2 ml-6 overflow-auto max-h-40 whitespace-pre-wrap break-words">
+                            {JSON.stringify(restData, null, 2)}
+                          </pre>
+                        )}
                       </div>
-                      {p.message && (
-                        <p className={`text-sm ml-6 ${p.success ? 'text-green-800' : 'text-red-800'}`}>
-                          {p.message}
-                        </p>
-                      )}
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
 
@@ -2749,8 +2809,8 @@ const Queue: React.FC = () => {
                       <div className="bg-red-50 border border-red-200 rounded p-2">
                         <p className="text-xs text-red-800">
                           ⚠️ This will flush queued, started, deferred, scheduled, and canceled jobs.
-                          {!flushSettings.include_failed && !flushSettings.include_completed &&
-                            " Failed and completed jobs preserved for debugging."}
+                          {!flushSettings.include_failed && !flushSettings.include_finished &&
+                            " Failed and finished jobs preserved for debugging."}
                         </p>
                       </div>
 
@@ -2768,11 +2828,11 @@ const Queue: React.FC = () => {
                         <label className="flex items-center space-x-2">
                           <input
                             type="checkbox"
-                            checked={flushSettings.include_completed}
-                            onChange={(e) => setFlushSettings(prev => ({ ...prev, include_completed: e.target.checked }))}
+                            checked={flushSettings.include_finished}
+                            onChange={(e) => setFlushSettings(prev => ({ ...prev, include_finished: e.target.checked }))}
                             className="text-red-600"
                           />
-                          <span className="text-xs text-gray-700">Also flush completed jobs</span>
+                          <span className="text-xs text-gray-700">Also flush finished jobs</span>
                         </label>
                       </div>
                     </div>
@@ -2780,12 +2840,64 @@ const Queue: React.FC = () => {
                 </div>
               </div>
 
+              {/* Preview (dry run) of exactly what this flush would remove */}
+              {flushPreview && (
+                <div className="mt-2 border rounded-lg overflow-hidden">
+                  <div className="px-3 py-2 bg-gray-50 border-b text-xs font-medium text-gray-700 flex justify-between items-center">
+                    <span>
+                      {flushPreview.total_matched} job{flushPreview.total_matched === 1 ? '' : 's'} will be removed
+                      {typeof flushPreview.redis_keys_matched === 'number' &&
+                        ` + ${flushPreview.redis_keys_matched} Redis key${flushPreview.redis_keys_matched === 1 ? '' : 's'}`}
+                    </span>
+                    {!!flushPreview.skipped_session_level && (
+                      <span className="text-gray-500">{flushPreview.skipped_session_level} session-level skipped</span>
+                    )}
+                  </div>
+                  {flushPreview.jobs.length === 0 ? (
+                    <div className="px-3 py-4 text-center text-xs text-gray-500">Nothing matches these settings.</div>
+                  ) : (
+                    <div className="max-h-48 overflow-y-auto divide-y divide-gray-100">
+                      {flushPreview.jobs.map((job: any) => (
+                        <div key={job.job_id} className="px-3 py-1.5 text-xs flex items-center justify-between">
+                          <div className="min-w-0 truncate">
+                            <span className="font-medium text-gray-800">{job.job_type}</span>
+                            <span className="text-gray-400 ml-2 font-mono">{job.job_id?.substring(0, 8)}</span>
+                            {job.client_id && <span className="text-gray-500 ml-2">{job.client_id}</span>}
+                          </div>
+                          <div className="flex items-center space-x-2 flex-shrink-0 ml-2">
+                            <span className={`px-1.5 py-0.5 rounded ${getStatusColor(job.status)}`}>{job.status}</span>
+                            {typeof job.age_hours === 'number' && <span className="text-gray-500">{job.age_hours}h</span>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="flex space-x-2 pt-4 border-t">
                 <button
-                  onClick={() => setShowFlushModal(false)}
+                  onClick={() => { setShowFlushModal(false); setFlushPreview(null); }}
                   className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
                 >
                   Cancel
+                </button>
+                <button
+                  onClick={previewFlush}
+                  disabled={previewing || (!flushSettings.flush_all && flushSettings.statuses.length === 0)}
+                  className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {previewing ? (
+                    <>
+                      <RotateCcw className="w-4 h-4 animate-spin inline mr-2" />
+                      Previewing...
+                    </>
+                  ) : (
+                    <>
+                      <Eye className="w-4 h-4 inline mr-2" />
+                      Preview
+                    </>
+                  )}
                 </button>
                 <button
                   onClick={flushJobs}

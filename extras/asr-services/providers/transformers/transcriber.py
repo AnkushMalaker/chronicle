@@ -73,6 +73,7 @@ class TransformersTranscriber:
 
         logger.info(f"Loading transformers model: {self.model_id}")
 
+        # Lazy import: transformers is heavy and only needed once model loading starts.
         from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 
         # Load processor
@@ -108,11 +109,22 @@ class TransformersTranscriber:
         self._is_loaded = True
         logger.info("Whisper pipeline created and ready")
 
+    def supports_word_timestamps(self) -> bool:
+        """Check if model has alignment heads for word-level timestamps."""
+        if self.model is None:
+            return False
+        config = getattr(self.model, "config", None)
+        if config is None:
+            return False
+        alignment_heads = getattr(config, "alignment_heads", None)
+        return alignment_heads is not None
+
     def transcribe(
         self,
         audio_file_path: str,
         language: Optional[str] = None,
         return_timestamps: bool = True,
+        word_timestamps: bool = True,
     ) -> TranscriptionResult:
         """
         Transcribe audio file.
@@ -120,7 +132,8 @@ class TransformersTranscriber:
         Args:
             audio_file_path: Path to audio file
             language: Language code (None for auto-detect)
-            return_timestamps: Whether to return word timestamps
+            return_timestamps: Whether to return chunk-level timestamps
+            word_timestamps: Whether to return word-level timestamps (requires alignment heads)
 
         Returns:
             TranscriptionResult with text, words, and segments
@@ -135,12 +148,29 @@ class TransformersTranscriber:
         if language:
             generate_kwargs["language"] = language
 
+        # Determine timestamp mode
+        if return_timestamps and word_timestamps:
+            ts_mode = "word"
+        elif return_timestamps:
+            ts_mode = True
+        else:
+            ts_mode = False
+
         # Run transcription
         result = self.pipeline(
             audio_file_path,
-            return_timestamps="word" if return_timestamps else False,
-            generate_kwargs=generate_kwargs if generate_kwargs else None,
+            return_timestamps=ts_mode,
+            generate_kwargs=generate_kwargs or {},
         )
+
+        # Debug: log raw pipeline output structure
+        logger.info(f"Pipeline result keys: {list(result.keys())}")
+        chunks = result.get("chunks", [])
+        logger.info(f"Pipeline returned {len(chunks)} chunks, ts_mode={ts_mode}")
+        if chunks:
+            logger.info(f"First chunk: {chunks[0]}")
+            if len(chunks) > 1:
+                logger.info(f"Second chunk: {chunks[1]}")
 
         # Parse result
         text = result.get("text", "")

@@ -10,18 +10,27 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from omegaconf import OmegaConf
+from rq import get_current_job
 from rq.exceptions import NoSuchJobError
 from rq.job import Job
 
+from advanced_omi_backend.config import get_live_segmentation
+from advanced_omi_backend.config_loader import get_backend_config
 from advanced_omi_backend.controllers.queue_controller import (
+    JOB_RESULT_TTL,
+    enqueue_speech_detection,
     redis_conn,
     start_post_conversation_jobs,
+    transcription_queue,
 )
-from advanced_omi_backend.controllers.session_controller import mark_session_complete
+from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
+from advanced_omi_backend.models.conversation import Conversation, create_conversation
 from advanced_omi_backend.models.job import async_job
+from advanced_omi_backend.models.user import User
 from advanced_omi_backend.observability.otel_setup import (
     set_otel_session,
     set_span_attrs,
@@ -29,6 +38,12 @@ from advanced_omi_backend.observability.otel_setup import (
     traced_job,
 )
 from advanced_omi_backend.plugins.events import PluginEvent
+from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggregator
+from advanced_omi_backend.services.audio_stream.session_store import (
+    SessionStatus,
+    SessionStore,
+)
+from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.services.plugin_service import (
     dispatch_plugin_event,
     get_plugin_router,
@@ -37,17 +52,261 @@ from advanced_omi_backend.services.sse_publisher import (
     publish_sse_event,
     publish_sse_event_throttled,
 )
+from advanced_omi_backend.utils.audio_chunk_utils import wait_for_audio_chunks
 from advanced_omi_backend.utils.conversation_utils import (
     analyze_speech,
     extract_speakers_from_segments,
+    generate_detailed_summary,
+    generate_title_and_summary,
     is_meaningful_speech,
     mark_conversation_deleted,
     track_speech_activity,
     update_job_progress_metadata,
 )
-from advanced_omi_backend.utils.job_utils import update_job_meta
+from advanced_omi_backend.utils.job_utils import check_job_alive, update_job_meta
+from advanced_omi_backend.utils.vad_analysis import analyze_conversation_audio
 
 logger = logging.getLogger(__name__)
+
+
+def leading_silence_trim_index(
+    chunks: list[dict],
+    speech_start_time: float,
+    min_trim_seconds: float,
+) -> int | None:
+    """Chunk index where a conversation's real content begins, or None to skip trimming.
+
+    With always_persist on, the session placeholder records audio from session start,
+    so a long pause before the user speaks lands as leading silence. At finalize we
+    split that silence off into a soft-deleted remnant. This returns the chunk_index of
+    the first chunk that should belong to the trimmed (visible) conversation — the chunk
+    containing ``speech_start_time``.
+
+    Returns None when there is nothing worth trimming: when the leading silence is
+    shorter than ``min_trim_seconds`` (don't churn over a few seconds of pre-roll) or
+    when speech already starts in the first chunk.
+
+    Args:
+        chunks: chunk timeline, dicts with ``chunk_index``/``start_time``/``end_time``,
+            sorted by chunk_index.
+        speech_start_time: time (conversation timeline, seconds) of the first speech.
+        min_trim_seconds: only trim when ``speech_start_time`` is at least this large.
+    """
+    if speech_start_time < min_trim_seconds:
+        return None
+    for chunk in chunks:
+        if chunk["start_time"] <= speech_start_time < chunk["end_time"]:
+            boundary = int(chunk["chunk_index"])
+            return boundary if boundary > 0 else None
+    return None
+
+
+async def trim_leading_silence(
+    conversation_id: str,
+    speech_start_time: float,
+    *,
+    min_trim_seconds: float = 30.0,
+) -> bool:
+    """Split leading silence off a conversation into a soft-deleted remnant.
+
+    With always_persist on, the session placeholder records audio from session start,
+    so a long pause before speech becomes leading silence on the conversation. This
+    moves the pre-speech chunks onto a NEW soft-deleted remnant (the audio is kept in
+    Mongo, just hidden) and re-bases the remaining chunks in place so the visible
+    conversation begins at the first speech. The conversation_id is unchanged, so the
+    post-conversation chain keyed to it is unaffected.
+
+    Returns True if a trim happened, False if there was nothing worth trimming.
+
+    Mirrors the crash-safe ordering of data_audit's split (create remnant first, move
+    chunks, mutate the conversation last) and reuses the same chunk-reassignment shape.
+    """
+    chunks = [
+        {
+            "chunk_index": c.chunk_index,
+            "start_time": c.start_time,
+            "end_time": c.end_time,
+            "duration": c.duration,
+        }
+        for c in await AudioChunkDocument.find(
+            AudioChunkDocument.conversation_id == conversation_id,
+            AudioChunkDocument.deleted == False,  # noqa: E712 — Beanie needs ==
+        )
+        .sort("+chunk_index")
+        .to_list()
+    ]
+    if not chunks:
+        return False
+
+    boundary = leading_silence_trim_index(chunks, speech_start_time, min_trim_seconds)
+    if boundary is None:
+        return False
+
+    chunk_by_index = {int(c["chunk_index"]): c for c in chunks}
+    t0 = float(chunk_by_index[boundary]["start_time"])
+    now = datetime.now(timezone.utc)
+
+    conversation = await Conversation.find_one(
+        Conversation.conversation_id == conversation_id
+    )
+    if conversation is None or conversation.deleted:
+        return False
+
+    # 1) Soft-deleted remnant that will hold the leading-silence chunks.
+    remnant = create_conversation(
+        user_id=conversation.user_id,
+        client_id=conversation.client_id,
+        title="Leading silence",
+    )
+    remnant.deleted = True
+    remnant.deletion_reason = "leading_silence"
+    remnant.deleted_at = now
+    remnant.derived_from = Conversation.DerivedFrom(
+        operation="leading_silence_trim",
+        source_conversation_ids=[conversation_id],
+        time_range=[0.0, t0],
+        performed_at=now,
+        performed_by="system",
+    )
+    remnant.audio_chunks_count = boundary
+    remnant.audio_total_duration = round(
+        float(chunk_by_index[boundary - 1]["end_time"]), 2
+    )
+    await remnant.insert()
+
+    collection = AudioChunkDocument.get_pymongo_collection()
+    # 2) Move the leading-silence chunks (0..boundary-1) onto the remnant, re-indexed
+    #    from 0 (their times already start at 0, so no time shift needed).
+    await collection.update_many(
+        {"conversation_id": conversation_id, "chunk_index": {"$lt": boundary}},
+        {"$set": {"conversation_id": remnant.conversation_id}},
+    )
+    # 3) Re-base the surviving chunks in place: chunk_index -= boundary, times -= t0.
+    await collection.update_many(
+        {"conversation_id": conversation_id, "chunk_index": {"$gte": boundary}},
+        [
+            {
+                "$set": {
+                    "chunk_index": {"$subtract": ["$chunk_index", boundary]},
+                    "start_time": {"$subtract": ["$start_time", t0]},
+                    "end_time": {"$subtract": ["$end_time", t0]},
+                }
+            }
+        ],
+    )
+
+    # 4) Mutate the conversation last (visible content now starts at the first speech).
+    surviving = len(chunks) - boundary
+    conversation.audio_chunks_count = surviving
+    conversation.audio_total_duration = round(float(chunks[-1]["end_time"]) - t0, 2)
+    await conversation.save()
+
+    logger.info(
+        f"✂️ Trimmed {boundary} leading-silence chunks ({t0:.0f}s) off conversation "
+        f"{conversation_id[:12]} → soft-deleted remnant {remnant.conversation_id[:12]} "
+        f"(audio kept in Mongo)"
+    )
+    return True
+
+
+async def _wait_for_chunk_count_stable(
+    conversation_id: str,
+    *,
+    settle_seconds: float = 1.5,
+    timeout_seconds: float = 10.0,
+) -> None:
+    """Block until a conversation's audio-chunk count stops growing.
+
+    The leading-silence trim re-indexes the surviving chunks, so it must run only
+    after the persistence consumer has drained — otherwise a late-arriving chunk
+    (written with its pre-trim index) would corrupt the sequence. By finalize the
+    persistence side has rotated away, but this closes the brief flush-race.
+    """
+    deadline = time.time() + timeout_seconds
+    last = None
+    stable_start = time.time()
+    while time.time() < deadline:
+        count = await AudioChunkDocument.find(
+            AudioChunkDocument.conversation_id == conversation_id,
+            AudioChunkDocument.deleted == False,  # noqa: E712 — Beanie needs ==
+        ).count()
+        if count != last:
+            last = count
+            stable_start = time.time()
+        elif time.time() - stable_start >= settle_seconds:
+            return
+        await asyncio.sleep(0.5)
+
+
+async def maybe_trim_leading_silence(
+    conversation_id: str, *, min_trim_seconds: float = 30.0
+) -> bool:
+    """Trim leading silence off a finalized conversation, best-effort.
+
+    With always_persist on, the session placeholder records audio from session start,
+    so a long pause before the user speaks lands as leading silence on the conversation.
+    This locates where speech actually begins, waits for the audio-chunk count to settle,
+    and splits the silence off onto a soft-deleted remnant (audio kept in Mongo) so the
+    visible conversation begins at the first speech.
+
+    Speech start is derived from VAD over the audio itself (``analyze_conversation_audio``)
+    rather than from transcript word timings: the streaming transcript times words
+    relative to the speech onset (word[0].start == 0.0), so it cannot locate where speech
+    sits in the session timeline — only the batch path produces absolute times. VAD is the
+    one signal that is correct for both finalization paths, and it populates the per-chunk
+    ``vad`` field as a side benefit.
+
+    This is the single entry point shared by BOTH finalization paths — the streaming
+    ``open_conversation_job`` and the batch ``transcription_fallback_check_job`` — since
+    a conversation can be finalized by either (whichever detects the transcript). It
+    never raises: trimming is a cosmetic optimization and must not block finalize.
+
+    Returns True if a trim happened, False otherwise.
+    """
+    try:
+        conversation = await Conversation.find_one(
+            Conversation.conversation_id == conversation_id
+        )
+        if conversation is None or not getattr(conversation, "always_persist", False):
+            # Only always_persist placeholders accumulate leading silence; a
+            # speech-driven conversation begins at the speech by construction.
+            return False
+
+        # Cheap guard: a conversation shorter than the trim threshold cannot have
+        # min_trim_seconds of leading silence — skip the VAD decode entirely.
+        total_duration = float(
+            getattr(conversation, "audio_total_duration", 0.0) or 0.0
+        )
+        if total_duration < min_trim_seconds:
+            return False
+
+        await _wait_for_chunk_count_stable(conversation_id)
+
+        # VAD over the audio gives absolute speech regions in the session timeline.
+        analysis = await analyze_conversation_audio(conversation_id)
+        regions = analysis.get("speech_regions") or []
+        if not regions:
+            return False
+        speech_start = float(regions[0][0])
+
+        return await trim_leading_silence(
+            conversation_id, speech_start, min_trim_seconds=min_trim_seconds
+        )
+    except Exception as e:  # noqa: BLE001 — trimming must never block finalize
+        logger.warning(f"Leading-silence trim skipped for {conversation_id[:12]}: {e}")
+        return False
+
+
+def should_discard_unbacked_conversation(has_meaningful_transcript: bool) -> bool:
+    """Decide whether a conversation with no persisted audio should be discarded.
+
+    A conversation whose audio chunks never landed (e.g. a mid-session reconnect
+    routed the audio to the session's always_persist placeholder under a different
+    conversation_id) is discarded ONLY if it carries no meaningful transcript.
+    Losing a real transcript is worse than keeping an audio-less conversation, so a
+    transcript-bearing conversation is salvaged, not deleted.
+    """
+    return not has_meaningful_transcript
 
 
 async def handle_end_of_conversation(
@@ -84,6 +343,7 @@ async def handle_end_of_conversation(
     Returns:
         Dict with conversation_id, conversation_count, final_result_count, runtime_seconds, timeout_triggered, end_reason
     """
+    store = SessionStore(redis_client)
     # Clean up Redis streams to prevent memory leaks
     try:
         # NOTE: Do NOT delete audio:stream:{client_id} here!
@@ -96,28 +356,21 @@ async def handle_end_of_conversation(
         await redis_client.delete(results_stream_key)
         logger.info(f"🧹 Deleted results stream: {results_stream_key}")
 
-        # Set TTL on session key (expire after 1 hour)
-        session_key = f"audio:session:{session_id}"
-        await redis_client.expire(session_key, 3600)
-        logger.info(f"⏰ Set TTL on session key: {session_key}")
+        # NOTE: session-hash TTL is handled below, gated on whether the session is
+        # ending vs. continuing. Setting it here (unconditionally) would let the hash
+        # expire mid-session for a still-active connection → zombie session.
     except Exception as cleanup_error:
         logger.warning(f"⚠️ Error during stream cleanup: {cleanup_error}")
 
-    # Clean up Redis tracking keys so speech detection job knows conversation is complete
-    open_job_key = f"open_conversation:session:{session_id}"
-    await redis_client.delete(open_job_key)
-    logger.info(f"🧹 Cleaned up tracking key {open_job_key}")
-
-    # Delete the conversation:current signal so audio persistence knows conversation ended
+    # Delete the conversation:current signal so audio persistence knows conversation ended.
+    # May already be deleted by open_conversation_job for close_requested/timeout cases
+    # (early delete to stop audio persistence writing to the closed conversation).
+    # Redis DEL on a non-existent key is a no-op.
     current_conversation_key = f"conversation:current:{session_id}"
     await redis_client.delete(current_conversation_key)
     logger.info(f"🧹 Deleted conversation:current signal for session {session_id[:12]}")
 
     # Update conversation in database with end reason and completion time
-    from datetime import datetime
-
-    from advanced_omi_backend.models.conversation import Conversation
-
     conversation = await Conversation.find_one(
         Conversation.conversation_id == conversation_id
     )
@@ -129,7 +382,7 @@ async def handle_end_of_conversation(
             logger.warning(f"⚠️ Invalid end_reason '{end_reason}', using UNKNOWN")
             conversation.end_reason = Conversation.EndReason.UNKNOWN
 
-        conversation.completed_at = datetime.utcnow()
+        conversation.completed_at = datetime.now(timezone.utc)
         await conversation.save()
         logger.info(
             f"💾 Saved conversation {conversation_id[:12]} end_reason: {conversation.end_reason}"
@@ -140,47 +393,36 @@ async def handle_end_of_conversation(
         )
 
     # Increment conversation count for this session
-    conversation_count_key = f"session:conversation_count:{session_id}"
-    conversation_count = await redis_client.incr(conversation_count_key)
-    await redis_client.expire(conversation_count_key, 3600)  # 1 hour TTL
+    conversation_count = await store.increment_conversation_count(session_id)
     logger.info(f"📊 Conversation count for session {session_id}: {conversation_count}")
 
     # Check if session is still active (user still recording) and restart listening jobs
-    session_key = f"audio:session:{session_id}"
     # Fetch status, websocket_connected, and completion_reason in one Redis call
-    status_raw, ws_connected_raw, cr_raw = await redis_client.hmget(
-        session_key, "status", "websocket_connected", "completion_reason"
+    status, ws_connected, completion_reason = await store.get_status_ws_reason(
+        session_id
     )
 
-    if status_raw:
-        status_str = (
-            status_raw.decode() if isinstance(status_raw, bytes) else status_raw
-        )
-        ws_connected = (
-            ws_connected_raw.decode()
-            if isinstance(ws_connected_raw, bytes)
-            else (ws_connected_raw or "false")
-        ) == "true"
-        completion_reason = (
-            cr_raw.decode() if isinstance(cr_raw, bytes) else (cr_raw or "")
-        )
-
+    if status is not None:
         # Determine if we should restart speech detection
         # Only restart when session is explicitly active.
         # status=finalizing means the session is ending (audio-stop or disconnect),
         # so re-enqueueing speech detection for the same session is always wrong.
         should_restart = False
-        if status_str == "active":
+        if status == SessionStatus.ACTIVE:
             should_restart = True
         else:
             logger.info(
-                f"Session {session_id[:12]}: status={status_str}, "
+                f"Session {session_id[:12]}: status={status.value}, "
                 f"ws_connected={ws_connected}, completion_reason={completion_reason} "
                 f"— not restarting speech detection."
             )
 
         if should_restart:
-            # Session still active - enqueue new speech detection for next conversation
+            # Session still active - enqueue new speech detection for next conversation.
+            # Clear any TTL: the hash must live as long as the connection does, otherwise
+            # a quiet gap > TTL expires it mid-session → next close reads status=None →
+            # speech detection never restarts (deaf connection). See Docs/system-oddities.md #4.
+            await store.persist_session(session_id)
             logger.info(
                 f"🔄 Enqueueing new speech detection (conversation #{conversation_count + 1})"
             )
@@ -191,42 +433,20 @@ async def handle_end_of_conversation(
             await redis_client.delete(completion_key)
             logger.info(f"🧹 Cleared transcription completion flag: {completion_key}")
 
-            from advanced_omi_backend.controllers.queue_controller import (
-                JOB_RESULT_TTL,
-                redis_conn,
-                transcription_queue,
+            # Enqueue speech detection for the next conversation (audio persistence
+            # keeps running). Single-flight: when several conversation-end handlers
+            # fire together for the same session (the old duplicate-job storm), only
+            # one detector is created instead of one per handler.
+            enqueue_speech_detection(
+                session_id, user_id, client_id, reason="conversation_end"
             )
-            from advanced_omi_backend.workers.transcription_jobs import (
-                stream_speech_detection_job,
-            )
-
-            # Enqueue speech detection job for next conversation (audio persistence keeps running)
-            speech_job = transcription_queue.enqueue(
-                stream_speech_detection_job,
-                session_id,
-                user_id,
-                client_id,
-                job_timeout=86400,  # 24 hours to match max_runtime in stream_speech_detection_job
-                result_ttl=JOB_RESULT_TTL,
-                job_id=f"speech-detect_{session_id}_{conversation_count}",
-                description=f"Listening for speech (conversation #{conversation_count + 1})",
-                meta={"client_id": client_id, "session_level": True},
-            )
-
-            # Store job ID for cleanup (keyed by client_id for WebSocket cleanup)
-            try:
-                redis_conn.set(
-                    f"speech_detection_job:{client_id}", speech_job.id, ex=86400
-                )  # 24 hours
-                logger.info(f"📌 Stored speech detection job ID for client {client_id}")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to store job ID for {client_id}: {e}")
-
-            logger.info(f"✅ Enqueued speech detection job {speech_job.id}")
         else:
+            # Session ending (finalizing/finished): set a backstop TTL so the hash
+            # self-cleans if the disconnect path didn't already remove it.
+            await store.expire_session(session_id, 3600)
             logger.info(
-                f"Session {session_id} status={status_str}, ws_connected={ws_connected}, "
-                f"not restarting (user stopped recording)"
+                f"Session {session_id} status={status.value}, ws_connected={ws_connected}, "
+                f"not restarting (user stopped recording) — set 1h cleanup TTL"
             )
     else:
         logger.info(f"Session {session_id} not found, not restarting (session ended)")
@@ -268,6 +488,143 @@ class ConversationState:
     last_meaningful_speech_time: float = 0.0
     last_word_count: int = 0
     end_reason: str = "unknown"
+    live_version_created: bool = False
+    last_live_write_time: float = 0.0
+
+
+@dataclass
+class LiveTranscriptState:
+    """Incremental accumulation of transcription results.
+
+    Instead of re-reading the entire Redis Stream via XRANGE every second,
+    this tracks position in the stream and accumulates only new results.
+    """
+
+    text_parts: list
+    all_words: list
+    all_segments: list
+    chunk_count: int = 0
+    total_confidence: float = 0.0
+    provider: Optional[str] = None
+    last_stream_id: str = "0"
+
+    def add_results(self, new_results: list) -> None:
+        """Incrementally add new transcription results."""
+        for result in new_results:
+            text = result.get("text", "").strip()
+            if text:
+                self.text_parts.append(text)
+            self.all_words.extend(result.get("words", []))
+            self.all_segments.extend(result.get("segments", []))
+            self.total_confidence += result.get("confidence", 0.0)
+            self.chunk_count += 1
+            if self.provider is None:
+                self.provider = result.get("provider")
+
+    def to_combined(self) -> dict:
+        """Return dict matching ``get_combined_results()`` format."""
+        return {
+            "text": " ".join(self.text_parts),
+            "words": self.all_words,
+            "segments": self.all_segments,
+            "chunk_count": self.chunk_count,
+            "total_confidence": (
+                self.total_confidence / self.chunk_count
+                if self.chunk_count > 0
+                else 0.0
+            ),
+            "provider": self.provider,
+            "word_count": len(self.all_words),
+        }
+
+
+async def _wait_for_new_results(
+    redis_client, session_id: str, last_stream_id: str
+) -> tuple:
+    """Block until new transcription results arrive on the Redis Stream.
+
+    Uses XREAD with blocking to avoid polling. Returns only NEW messages
+    since ``last_stream_id``.
+
+    Returns:
+        (parsed_results_list, new_last_id)
+    """
+    stream_name = f"transcription:results:{session_id}"
+    try:
+        messages = await redis_client.xread(
+            {stream_name: last_stream_id}, count=100, block=10000
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error(f"Error in _wait_for_new_results: {e}")
+        return [], last_stream_id
+
+    if not messages:
+        return [], last_stream_id
+
+    results = []
+    new_last_id = last_stream_id
+    for _stream_key, msgs in messages:
+        for message_id, fields in msgs:
+            mid = message_id if isinstance(message_id, str) else message_id.decode()
+            result = {
+                "message_id": mid,
+                "text": (fields[b"text"].decode() if b"text" in fields else ""),
+                "confidence": float(
+                    fields.get(b"confidence", b"0.0").decode()
+                    if isinstance(fields.get(b"confidence", b"0.0"), bytes)
+                    else fields.get(b"confidence", 0.0)
+                ),
+                "provider": (
+                    fields[b"provider"].decode() if b"provider" in fields else "unknown"
+                ),
+                "chunk_id": (
+                    fields.get(b"chunk_id", b"unknown").decode()
+                    if isinstance(fields.get(b"chunk_id", b"unknown"), bytes)
+                    else str(fields.get(b"chunk_id", "unknown"))
+                ),
+                "timestamp": float(
+                    fields.get(b"timestamp", b"0.0").decode()
+                    if isinstance(fields.get(b"timestamp", b"0.0"), bytes)
+                    else fields.get(b"timestamp", 0.0)
+                ),
+            }
+            if b"words" in fields:
+                result["words"] = json.loads(
+                    fields[b"words"].decode()
+                    if isinstance(fields[b"words"], bytes)
+                    else fields[b"words"]
+                )
+            if b"segments" in fields:
+                result["segments"] = json.loads(
+                    fields[b"segments"].decode()
+                    if isinstance(fields[b"segments"], bytes)
+                    else fields[b"segments"]
+                )
+            results.append(result)
+            new_last_id = mid
+
+    return results, new_last_id
+
+
+async def _wait_for_signal(pubsub) -> Optional[dict]:
+    """Block until a session signal arrives via Redis Pub/Sub.
+
+    Returns parsed JSON signal dict, or None on timeout.
+    """
+    try:
+        message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=10.0)
+        if message and message["type"] == "message":
+            data = message["data"]
+            if isinstance(data, bytes):
+                data = data.decode()
+            return json.loads(data)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning(f"Error in _wait_for_signal: {e}")
+    return None
 
 
 def _validate_segments(segments: list) -> list:
@@ -326,11 +683,6 @@ async def _initialize_conversation(
     Returns:
         conversation_id of the created/reused conversation.
     """
-    from advanced_omi_backend.models.conversation import (
-        Conversation,
-        create_conversation,
-    )
-
     # Check if a placeholder conversation already exists for this session
     conversation_key = f"conversation:current:{session_id}"
     existing_conversation_id_bytes = await redis_client.get(conversation_key)
@@ -363,12 +715,16 @@ async def _initialize_conversation(
                 f"⚠️ Conversation {existing_conversation_id} not found in database!"
             )
 
-        # Verify it's a placeholder conversation (always_persist=True, processing_status='pending_transcription')
+        # Verify it's a fresh placeholder to reuse: always_persist, still active
+        # (in-flight), and with no transcript yet. The "no transcript" check is the
+        # precise condition — a placeholder that already has a transcript is a real
+        # conversation, not a reusable slot.
         if (
             conversation
             and getattr(conversation, "always_persist", False)
             and getattr(conversation, "processing_status", None)
-            == "pending_transcription"
+            == Conversation.ConversationStatus.ACTIVE.value
+            and not conversation.has_meaningful_transcript
         ):
             logger.info(
                 f"🔄 Reusing placeholder conversation {conversation.conversation_id} for session {session_id}"
@@ -415,20 +771,13 @@ async def _initialize_conversation(
         )
 
     # Attach markers from Redis session (e.g., button events captured during streaming)
-    session_key = f"audio:session:{session_id}"
-    markers_json = await redis_client.hget(session_key, "markers")
-    if markers_json:
-        try:
-            markers_data = (
-                markers_json if isinstance(markers_json, str) else markers_json.decode()
-            )
-            conversation.markers = json.loads(markers_data)
-            await conversation.save()
-            logger.info(
-                f"📌 Attached {len(conversation.markers)} markers to conversation {conversation_id}"
-            )
-        except Exception as marker_err:
-            logger.warning(f"⚠️ Failed to parse markers from Redis: {marker_err}")
+    markers = await SessionStore(redis_client).get_markers(session_id)
+    if markers:
+        conversation.markers = markers
+        await conversation.save()
+        logger.info(
+            f"📌 Attached {len(conversation.markers)} markers to conversation {conversation_id}"
+        )
 
     # Link job metadata to conversation (cascading updates)
     current_job.meta["conversation_id"] = conversation_id
@@ -483,36 +832,41 @@ async def _monitor_conversation_loop(
     current_job,
     redis_client,
 ) -> None:
-    """Poll transcription results and track conversation activity until exit.
+    """Monitor transcription results and session signals until conversation ends.
 
-    Runs the main monitoring loop that:
-    - Detects zombie jobs (job hash missing from Redis)
-    - Handles session finalize signals (disconnect, user stop)
-    - Handles conversation close requests (API, plugin, button)
-    - Polls the transcription aggregator for new results
-    - Validates segments and tracks speech activity
-    - Detects inactivity timeout and closes conversation
-    - Dispatches transcript.streaming plugin events
+    Event-driven architecture using ``asyncio.wait()`` with:
+    - Redis ``XREAD`` blocking for new transcription results (no full-stream re-read)
+    - Redis Pub/Sub for session signals (finalize, close_requested)
+    - Periodic timeout for housekeeping (zombie detection, inactivity check)
 
     Mutates ``state`` in place with final values for timeout_triggered,
     close_requested_reason, last_result_count, and last_word_count.
     """
-    session_key = f"audio:session:{state.session_id}"
+    store = SessionStore(redis_client)
     max_runtime = 86400  # 24h safety ceiling
-
-    finalize_received = False
 
     # Inactivity timeout configuration
     inactivity_timeout_seconds = float(
         os.getenv("SPEECH_INACTIVITY_THRESHOLD_SECONDS", "60")
     )
     inactivity_timeout_minutes = inactivity_timeout_seconds / 60
-    last_inactivity_log_time = (
-        time.time()
-    )  # Track when we last logged inactivity (wall-clock for logging)
+    last_inactivity_log_time = time.time()
+
+    # Audio-stream idle watchdog (wall-clock). The producer bumps last_chunk_at on
+    # every audio chunk, so it advances continuously while the device streams — even
+    # during silence — and freezes the instant the device disconnects. The
+    # audio-timestamp-based inactivity check below cannot grow without new results,
+    # so on a sudden disconnect it would hang until the 24h ceiling. This watchdog
+    # is the reliable "device stopped streaming" signal, independent of WebSocket
+    # cleanup running. It only applies when live transcription is enabled — in
+    # "off"/batch mode no streaming worker fills the aggregator and chunks may stop
+    # without the conversation being stuck (the batch path closes it).
+    expects_live_results = get_live_segmentation() != "off"
+    stream_idle_timeout_seconds = float(os.getenv("STREAM_IDLE_TIMEOUT_SECONDS", "30"))
+    health_check_interval = 5.0  # wall-clock cadence for status + chunk-idle polling
+    last_health_check_time = time.time()
 
     # Test mode: wait for audio queue to drain before timing out
-    # In real usage, ambient noise keeps connection alive. In tests, chunks arrive in bursts.
     wait_for_queue_drain = (
         os.getenv("WAIT_FOR_AUDIO_QUEUE_DRAIN", "false").lower() == "true"
     )
@@ -523,248 +877,501 @@ async def _monitor_conversation_loop(
     if wait_for_queue_drain:
         logger.info("🧪 Test mode: Waiting for audio queue to drain before timeout")
 
-    while True:
-        # Check if job still exists in Redis (detect zombie state)
-        from advanced_omi_backend.utils.job_utils import check_job_alive
+    # Subscribe to session signals via Pub/Sub
+    pubsub = redis_client.pubsub()
+    await pubsub.subscribe(f"session:signal:{state.session_id}")
 
-        if not await check_job_alive(redis_client, current_job, state.session_id):
-            break
+    # Incremental result accumulation (replaces full XRANGE every second)
+    transcript_state = LiveTranscriptState(text_parts=[], all_words=[], all_segments=[])
 
-        # Check if session is finalizing (set by producer when recording stops)
-        if not finalize_received:
-            # Fetch status, completion_reason, and websocket_connected in one call
-            status_raw, reason_raw, ws_raw = await redis_client.hmget(
-                session_key, "status", "completion_reason", "websocket_connected"
+    # Track inactivity based on accumulated speech data
+    inactivity_duration = 0.0
+
+    try:
+        while True:
+            # Create concurrent event sources
+            results_task = asyncio.create_task(
+                _wait_for_new_results(
+                    redis_client,
+                    state.session_id,
+                    transcript_state.last_stream_id,
+                )
             )
-            status_str = status_raw.decode() if status_raw else None
-            completion_reason_str = reason_raw.decode() if reason_raw else "unknown"
-            ws_connected = (ws_raw.decode() if ws_raw else "false") == "true"
+            signal_task = asyncio.create_task(_wait_for_signal(pubsub))
 
-            if status_str in ["finalizing", "finished"]:
-                # Check for spurious "finished" from status endpoint race condition:
-                # If status is "finished" but WebSocket is still connected and reason
-                # is "all_jobs_complete", this was set during the inter-conversation gap.
-                # Reset to "active" and continue monitoring.
-                if (
-                    status_str == "finished"
-                    and ws_connected
-                    and completion_reason_str == "all_jobs_complete"
-                ):
-                    logger.warning(
-                        f"⚠️ Ignoring spurious 'finished' for session {state.session_id[:12]}: "
-                        f"websocket_connected=true, reason=all_jobs_complete. "
-                        f"Resetting status to 'active' and continuing."
+            # Wait for EITHER new results, a signal, or timeout (housekeeping)
+            done, pending = await asyncio.wait(
+                {results_task, signal_task},
+                timeout=10.0,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # Cancel pending tasks
+            for task in pending:
+                task.cancel()
+            for task in pending:
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            # --- Handle signal ---
+            if signal_task in done:
+                signal = signal_task.result()
+                if signal:
+                    sig_type = signal.get("type")
+                    sig_reason = signal.get("reason", "unknown")
+
+                    if sig_type == "finalize":
+                        if sig_reason == "websocket_disconnect":
+                            logger.warning(
+                                f"🔌 WebSocket disconnected for session {state.session_id[:12]} - "
+                                f"ending conversation early"
+                            )
+                        else:
+                            logger.info(f"🛑 Session finalizing (reason: {sig_reason})")
+                        break
+
+                    elif sig_type == "close_requested":
+                        await store.take_close_request(state.session_id)
+                        state.close_requested_reason = sig_reason
+                        logger.info(f"🔒 Conversation close requested: {sig_reason}")
+                        state.timeout_triggered = True
+                        break
+
+                    elif sig_type == "session_complete":
+                        # Check for spurious "finished" from status endpoint race
+                        if sig_reason == "all_jobs_complete":
+                            if await store.is_websocket_connected(state.session_id):
+                                logger.warning(
+                                    f"⚠️ Ignoring spurious 'finished' for session {state.session_id[:12]}: "
+                                    f"websocket_connected=true, reason=all_jobs_complete. "
+                                    f"Resetting status to 'active'."
+                                )
+                                await store.set_status_active(state.session_id)
+                                # Continue monitoring
+                            else:
+                                break
+                        else:
+                            break
+
+            # --- Handle new transcription results ---
+            if results_task in done:
+                new_results, new_last_id = results_task.result()
+                if new_results:
+                    transcript_state.add_results(new_results)
+                    transcript_state.last_stream_id = new_last_id
+                    combined = transcript_state.to_combined()
+                    current_count = combined["chunk_count"]
+
+                    # Analyze speech content
+                    transcript_data = {
+                        "text": combined["text"],
+                        "words": combined.get("words", []),
+                    }
+                    speech_analysis = analyze_speech(transcript_data)
+
+                    # Validate segments and extract speakers
+                    validated_segments = _validate_segments(
+                        combined.get("segments", [])
                     )
-                    await redis_client.hset(session_key, "status", "active")
-                    # Do NOT break - continue monitoring
-                else:
-                    finalize_received = True
+                    speakers = extract_speakers_from_segments(validated_segments)
 
-                    if completion_reason_str == "websocket_disconnect":
-                        logger.warning(
-                            f"🔌 WebSocket disconnected for session {state.session_id[:12]} - "
-                            f"ending conversation early"
+                    # Track speech activity
+                    new_speech_time, state.last_word_count = (
+                        await track_speech_activity(
+                            speech_analysis=speech_analysis,
+                            last_word_count=state.last_word_count,
+                            conversation_id=state.conversation_id,
+                            redis_client=redis_client,
                         )
-                        state.timeout_triggered = (
-                            False  # This is a disconnect, not a timeout
+                    )
+                    if new_speech_time:
+                        state.last_meaningful_speech_time = new_speech_time
+
+                    # Update job metadata
+                    await update_job_progress_metadata(
+                        current_job=current_job,
+                        conversation_id=state.conversation_id,
+                        session_id=state.session_id,
+                        client_id=state.client_id,
+                        combined=combined,
+                        speech_analysis=speech_analysis,
+                        speakers=speakers,
+                        last_meaningful_speech_time=state.last_meaningful_speech_time,
+                    )
+
+                    # Push live progress via SSE
+                    publish_sse_event_throttled(
+                        state.user_id,
+                        "job.progress",
+                        {
+                            "conversation_id": state.conversation_id,
+                            "job_type": "open_conversation_job",
+                            "word_count": combined.get("word_count", 0),
+                            "duration_seconds": speech_analysis.get("duration", 0),
+                            "speakers": speakers,
+                            "has_speech": speech_analysis.get("has_speech", False),
+                        },
+                    )
+
+                    # Update inactivity tracking
+                    current_audio_time = speech_analysis.get("speech_end", 0.0)
+                    if current_audio_time > 0 and state.last_meaningful_speech_time > 0:
+                        inactivity_duration = (
+                            current_audio_time - state.last_meaningful_speech_time
                         )
                     else:
-                        logger.info(
-                            f"🛑 Session finalizing (reason: {completion_reason_str}), "
-                            f"waiting for audio persistence job to complete..."
-                        )
-                    break  # Exit immediately when finalize signal received
+                        inactivity_duration = 0
 
-        # Check for conversation close request (set by API, plugins, button press)
-        if not finalize_received:
-            close_reason = await redis_client.hget(
-                session_key, "conversation_close_requested"
-            )
-            if close_reason:
-                await redis_client.hdel(session_key, "conversation_close_requested")
-                state.close_requested_reason = (
-                    close_reason.decode()
-                    if isinstance(close_reason, bytes)
-                    else close_reason
-                )
-                logger.info(
-                    f"🔒 Conversation close requested: {state.close_requested_reason}"
-                )
-                state.timeout_triggered = True  # Session stays active (same restart behavior as inactivity timeout)
-                finalize_received = True
+                    # Track results progress
+                    if current_count > state.last_result_count:
+                        logger.info(
+                            f"📊 Conversation {state.conversation_id} progress: "
+                            f"{current_count} results, {len(combined['text'])} chars, "
+                            f"{len(validated_segments)} segments"
+                        )
+                        state.last_result_count = current_count
+
+                        # Update live transcript in MongoDB (throttled to every 5s)
+                        try:
+                            now_live = time.time()
+                            if not state.live_version_created:
+                                provider = combined.get("provider", "deepgram")
+                                await _create_live_transcript_version(
+                                    conversation_id=state.conversation_id,
+                                    combined=combined,
+                                    validated_segments=validated_segments,
+                                    provider=provider,
+                                )
+                                state.live_version_created = True
+                                state.last_live_write_time = now_live
+                                publish_sse_event(
+                                    state.user_id,
+                                    "transcript.live",
+                                    {
+                                        "conversation_id": state.conversation_id,
+                                        "segments": validated_segments,
+                                        "transcript": combined.get("text", ""),
+                                        "word_count": combined.get("word_count", 0),
+                                    },
+                                )
+                            elif now_live - state.last_live_write_time >= 5.0:
+                                await _update_live_transcript(
+                                    conversation_id=state.conversation_id,
+                                    combined=combined,
+                                    validated_segments=validated_segments,
+                                )
+                                state.last_live_write_time = now_live
+                                publish_sse_event(
+                                    state.user_id,
+                                    "transcript.live",
+                                    {
+                                        "conversation_id": state.conversation_id,
+                                        "segments": validated_segments,
+                                        "transcript": combined.get("text", ""),
+                                        "word_count": combined.get("word_count", 0),
+                                    },
+                                )
+                        except Exception as e:
+                            logger.warning(f"⚠️ Error updating live transcript: {e}")
+
+                        # Dispatch transcript.streaming plugin events
+                        try:
+                            plugin_router = get_plugin_router()
+                            if plugin_router:
+                                transcript_text = combined.get("text", "")
+                                if transcript_text:
+                                    plugin_data = {
+                                        "transcript": transcript_text,
+                                        "segment_id": f"{state.session_id}_{current_count}",
+                                        "conversation_id": state.conversation_id,
+                                        "segments": validated_segments,
+                                        "word_count": speech_analysis.get(
+                                            "word_count", 0
+                                        ),
+                                    }
+                                    logger.info(
+                                        f"🔌 DISPATCH: transcript.streaming event "
+                                        f"(conversation={state.conversation_id[:12]}, "
+                                        f"segment_id={state.session_id}_{current_count})"
+                                    )
+                                    plugin_results = await plugin_router.dispatch_event(
+                                        event=PluginEvent.TRANSCRIPT_STREAMING,
+                                        user_id=state.user_id,
+                                        data=plugin_data,
+                                        metadata={"client_id": state.client_id},
+                                    )
+                                    logger.info(
+                                        f"🔌 RESULT: transcript.streaming dispatched to "
+                                        f"{len(plugin_results) if plugin_results else 0} plugins"
+                                    )
+                                    if plugin_results:
+                                        for result in plugin_results:
+                                            if result.message:
+                                                logger.info(
+                                                    f"  Plugin: {result.message}"
+                                                )
+                                            if not result.should_continue:
+                                                logger.info(
+                                                    f"  Plugin stopped normal processing"
+                                                )
+                        except Exception as e:
+                            logger.warning(
+                                f"⚠️ Error triggering transcript-level plugins: {e}"
+                            )
+
+            # --- Housekeeping (runs on timeout or after processing) ---
+            current_time = time.time()
+
+            # Zombie detection
+            if not await check_job_alive(redis_client, current_job, state.session_id):
                 break
 
-        # Check max runtime timeout
-        if time.time() - state.start_time > max_runtime:
-            logger.warning(f"⏱️ Max runtime reached for {state.conversation_id}")
-            break
+            # Max runtime
+            if current_time - state.start_time > max_runtime:
+                logger.warning(f"⏱️ Max runtime reached for {state.conversation_id}")
+                break
 
-        # Get combined results from aggregator
-        combined = await aggregator.get_combined_results(state.session_id)
-        current_count = combined["chunk_count"]
+            # Periodic health check (status + audio-stream liveness). Runs on a
+            # wall-clock cadence regardless of whether results/signals fired this
+            # iteration — so a missed pub/sub finalize signal or a silently
+            # disconnected device is still detected, not just when the loop happens
+            # to time out idle.
+            if current_time - last_health_check_time >= health_check_interval:
+                last_health_check_time = current_time
 
-        # Analyze speech content using detailed analysis
-        transcript_data = {"text": combined["text"], "words": combined.get("words", [])}
-        speech_analysis = analyze_speech(transcript_data)
-
-        # Extract speaker information from segments
-        segments = combined.get("segments", [])
-
-        # Validate and filter segments before processing
-        validated_segments = _validate_segments(segments)
-        speakers = extract_speakers_from_segments(validated_segments)
-
-        # Track new speech activity (word count based)
-        new_speech_time, state.last_word_count = await track_speech_activity(
-            speech_analysis=speech_analysis,
-            last_word_count=state.last_word_count,
-            conversation_id=state.conversation_id,
-            redis_client=redis_client,
-        )
-        if new_speech_time:
-            state.last_meaningful_speech_time = new_speech_time
-
-        # Update job metadata with current progress
-        await update_job_progress_metadata(
-            current_job=current_job,
-            conversation_id=state.conversation_id,
-            session_id=state.session_id,
-            client_id=state.client_id,
-            combined=combined,
-            speech_analysis=speech_analysis,
-            speakers=speakers,
-            last_meaningful_speech_time=state.last_meaningful_speech_time,
-        )
-
-        # Push live progress to frontend via SSE (throttled to every 3s)
-        publish_sse_event_throttled(
-            state.user_id,
-            "job.progress",
-            {
-                "conversation_id": state.conversation_id,
-                "job_type": "open_conversation_job",
-                "word_count": combined.get("word_count", 0) if combined else 0,
-                "duration_seconds": (
-                    speech_analysis.get("duration", 0) if speech_analysis else 0
-                ),
-                "speakers": speakers,
-                "has_speech": (
-                    speech_analysis.get("has_speech", False)
-                    if speech_analysis
-                    else False
-                ),
-            },
-        )
-
-        # Check inactivity timeout using audio time (not wall-clock time)
-        # Get current audio time from latest transcription
-        current_audio_time = speech_analysis.get("speech_end", 0.0)
-
-        # Calculate inactivity based on audio timestamps
-        # Only check if we have valid audio timing data
-        if current_audio_time > 0 and state.last_meaningful_speech_time > 0:
-            inactivity_duration = current_audio_time - state.last_meaningful_speech_time
-        else:
-            # Fallback: No audio timestamps available (text-only transcription)
-            # Can't reliably detect inactivity, so skip timeout check this iteration
-            inactivity_duration = 0
-            if speech_analysis.get("fallback", False):
-                logger.debug(
-                    "⚠️ Skipping inactivity check (no audio timestamps available)"
+                status, ws_connected, reason_str = await store.get_status_ws_reason(
+                    state.session_id
                 )
+                reason_str = reason_str or "unknown"
+                if status in (SessionStatus.FINALIZING, SessionStatus.FINISHED):
+                    if (
+                        status == SessionStatus.FINISHED
+                        and ws_connected
+                        and reason_str == "all_jobs_complete"
+                    ):
+                        await store.set_status_active(state.session_id)
+                    else:
+                        logger.info(
+                            f"🔍 Health check: session {state.session_id[:12]} "
+                            f"status={status.value}, reason={reason_str}"
+                        )
+                        if reason_str == "websocket_disconnect":
+                            state.timeout_triggered = False
+                        break
 
-        current_time = time.time()
-
-        # Log inactivity every 10 seconds
-        if current_time - last_inactivity_log_time >= 10:
-            logger.info(
-                f"⏱️ Time since last speech: {inactivity_duration:.1f}s (timeout: {inactivity_timeout_seconds:.0f}s)"
-            )
-            last_inactivity_log_time = current_time
-
-        if inactivity_duration > inactivity_timeout_seconds:
-            # In test mode, check if there are pending chunks before timing out
-            if wait_for_queue_drain:
-                # Check audio persistence queue length
-                persist_queue_key = f"audio:queue:{state.session_id}"
-                queue_length = await redis_client.llen(persist_queue_key)
-
-                if queue_length > 0:
+                # Catch a missed close_requested signal
+                close_reason = await store.take_close_request(state.session_id)
+                if close_reason:
+                    state.close_requested_reason = close_reason
                     logger.info(
-                        f"🧪 Test mode: Inactivity timeout reached but {queue_length} chunks still in queue, "
-                        f"waiting for processing..."
+                        f"🔍 Health check: conversation close requested: {state.close_requested_reason}"
                     )
-                    await asyncio.sleep(1)
-                    continue
+                    state.timeout_triggered = True
+                    break
 
-            logger.info(
-                f"🕐 Conversation {state.conversation_id} inactive for "
-                f"{inactivity_duration/60:.1f} minutes (threshold: {inactivity_timeout_minutes} min), "
-                f"auto-closing conversation (session remains active for next conversation)..."
-            )
-            # DON'T set session to finalizing - just close this conversation
-            # Session remains "active" so new conversations can be created
-            # Only user manual stop or WebSocket disconnect should finalize the session
-            state.timeout_triggered = True
-            finalize_received = True
-            break
+                # Audio-stream idle watchdog: no audio chunks for too long means the
+                # device stopped streaming (sudden disconnect) even though status may
+                # still read ACTIVE (WebSocket cleanup not yet run). Skipped in
+                # "off"/batch mode, where no streaming worker produces chunks here.
+                if expects_live_results:
+                    last_chunk_at = await store.get_last_chunk_at(state.session_id)
+                    if (
+                        last_chunk_at
+                        and current_time - last_chunk_at > stream_idle_timeout_seconds
+                    ):
+                        logger.warning(
+                            f"🔌 No audio chunks for {current_time - last_chunk_at:.0f}s "
+                            f"(threshold {stream_idle_timeout_seconds:.0f}s) — device "
+                            f"stopped streaming, closing conversation "
+                            f"{state.conversation_id[:12]}"
+                        )
+                        state.timeout_triggered = True
+                        break
 
-        # Track results progress (conversation will get transcript from transcription job)
-        if current_count > state.last_result_count:
-            logger.info(
-                f"📊 Conversation {state.conversation_id} progress: "
-                f"{current_count} results, {len(combined['text'])} chars, {len(validated_segments)} segments"
-            )
-            state.last_result_count = current_count
+            # Inactivity log and check
+            if current_time - last_inactivity_log_time >= 10:
+                logger.info(
+                    f"⏱️ Time since last speech: {inactivity_duration:.1f}s "
+                    f"(timeout: {inactivity_timeout_seconds:.0f}s)"
+                )
+                last_inactivity_log_time = current_time
 
-            # Trigger transcript-level plugins on new transcript segments
-            try:
-                plugin_router = get_plugin_router()
-                if plugin_router:
-                    # Get the latest transcript text for plugin processing
-                    transcript_text = combined.get("text", "")
-
-                    if transcript_text:
-                        plugin_data = {
-                            "transcript": transcript_text,
-                            "segment_id": f"{state.session_id}_{current_count}",
-                            "conversation_id": state.conversation_id,
-                            "segments": validated_segments,
-                            "word_count": speech_analysis.get("word_count", 0),
-                        }
-
+            if inactivity_duration > inactivity_timeout_seconds:
+                if wait_for_queue_drain:
+                    persist_queue_key = f"audio:queue:{state.session_id}"
+                    queue_length = await redis_client.llen(persist_queue_key)
+                    if queue_length > 0:
                         logger.info(
-                            f"🔌 DISPATCH: transcript.streaming event "
-                            f"(conversation={state.conversation_id[:12]}, segment_id={state.session_id}_{current_count})"
+                            f"🧪 Test mode: Inactivity timeout reached but "
+                            f"{queue_length} chunks still in queue, waiting..."
                         )
+                        continue
 
-                        plugin_results = await plugin_router.dispatch_event(
-                            event=PluginEvent.TRANSCRIPT_STREAMING,
-                            user_id=state.user_id,
-                            data=plugin_data,
-                            metadata={"client_id": state.client_id},
-                        )
+                logger.info(
+                    f"🕐 Conversation {state.conversation_id} inactive for "
+                    f"{inactivity_duration / 60:.1f} minutes "
+                    f"(threshold: {inactivity_timeout_minutes} min), "
+                    f"auto-closing conversation..."
+                )
+                state.timeout_triggered = True
+                break
 
-                        logger.info(
-                            f"🔌 RESULT: transcript.streaming dispatched to {len(plugin_results) if plugin_results else 0} plugins"
-                        )
+    finally:
+        await pubsub.unsubscribe(f"session:signal:{state.session_id}")
+        await pubsub.aclose()
 
-                        if plugin_results:
-                            logger.info(
-                                f"📌 Triggered {len(plugin_results)} streaming transcript plugins"
-                            )
-                            for result in plugin_results:
-                                if result.message:
-                                    logger.info(f"  Plugin: {result.message}")
 
-                                # If plugin stopped processing, log it
-                                if not result.should_continue:
-                                    logger.info(f"  Plugin stopped normal processing")
+async def _create_live_transcript_version(
+    conversation_id: str,
+    combined: dict,
+    validated_segments: list,
+    provider: str,
+) -> None:
+    """Create the initial live-v0 transcript version via Beanie update.
 
-            except Exception as e:
-                logger.warning(f"⚠️ Error triggering transcript-level plugins: {e}")
+    Uses a single atomic update to push the version and set it as active,
+    avoiding a full Beanie document load/save cycle.
+    """
+    transcript_text = combined.get("text", "")
+    segments_as_dicts = [
+        {
+            "start": s.get("start", 0.0),
+            "end": s.get("end", 0.0),
+            "text": s.get("text", ""),
+            "speaker": str(s.get("speaker", "SPEAKER_00")),
+            "segment_type": s.get("segment_type", "speech"),
+            "identified_as": s.get("identified_as"),
+            "confidence": s.get("confidence"),
+            "words": [],
+        }
+        for s in validated_segments
+    ]
 
-        await asyncio.sleep(1)  # Check every second for responsiveness
+    version_doc = {
+        "version_id": "live-v0",
+        "transcript": transcript_text,
+        "words": [],
+        "segments": segments_as_dicts,
+        "provider": provider,
+        "model": provider,
+        "created_at": datetime.now(timezone.utc),
+        "processing_time_seconds": None,
+        "diarization_source": "provider" if segments_as_dicts else None,
+        "metadata": {
+            "source": "live_streaming",
+            "word_count": combined.get("word_count", 0),
+        },
+    }
+
+    result = await Conversation.find_one(
+        Conversation.conversation_id == conversation_id
+    ).update(
+        {
+            "$push": {"transcript_versions": version_doc},
+            "$set": {"active_transcript_version": "live-v0"},
+        }
+    )
+
+    logger.info(
+        f"📡 Created live-v0 transcript version for {conversation_id[:12]} "
+        f"({len(transcript_text)} chars, {len(segments_as_dicts)} segments)"
+    )
+
+
+async def _update_live_transcript(
+    conversation_id: str,
+    combined: dict,
+    validated_segments: list,
+) -> None:
+    """Update the live-v0 transcript version in-place via positional $ operator.
+
+    Efficient partial update — only touches the transcript text, segments, and
+    metadata.word_count within the matching array element.
+    Uses PyMongo collection (sync) wrapped in Beanie's find pattern.
+    """
+    transcript_text = combined.get("text", "")
+    segments_as_dicts = [
+        {
+            "start": s.get("start", 0.0),
+            "end": s.get("end", 0.0),
+            "text": s.get("text", ""),
+            "speaker": str(s.get("speaker", "SPEAKER_00")),
+            "segment_type": s.get("segment_type", "speech"),
+            "identified_as": s.get("identified_as"),
+            "confidence": s.get("confidence"),
+            "words": [],
+        }
+        for s in validated_segments
+    ]
+
+    # Use PyMongo collection for positional $ operator (Beanie doesn't support it)
+    collection = Conversation.get_pymongo_collection()
+    collection.update_one(
+        {
+            "conversation_id": conversation_id,
+            "transcript_versions.version_id": "live-v0",
+        },
+        {
+            "$set": {
+                "transcript_versions.$.transcript": transcript_text,
+                "transcript_versions.$.segments": segments_as_dicts,
+                "transcript_versions.$.metadata.word_count": combined.get(
+                    "word_count", 0
+                ),
+            }
+        },
+    )
+
+
+def _rebase_timestamps_to_conversation_start(
+    words_data: list, segments_data: list
+) -> None:
+    """Re-base streaming word/segment timestamps to the conversation's own start.
+
+    Streaming-provider timestamps are relative to the long-lived provider WebSocket
+    session, which spans EVERY conversation in this WS connection (the audio stream
+    and provider stream are per-connection, not per-conversation, and never reset at
+    conversation boundaries). So a conversation opened late in a session gets word
+    and segment timestamps far past its own audio length — e.g. 785s into a 338s
+    conversation — which breaks alignment with the per-conversation WAV (which is
+    always 0-based) and makes playback/speech-region overlays nonsensical.
+
+    Each conversation's transcript should be 0-based, like its WAV. We shift every
+    word/segment so the earliest one starts at 0. Mutates the lists in place. A
+    normal single-conversation session already starts near 0, so the shift there is
+    at most the brief pre-speech lead-in (negligible); the drift case is what this
+    corrects.
+    """
+    starts = []
+    for w in words_data:
+        if isinstance(w.get("start"), (int, float)):
+            starts.append(w["start"])
+    for s in segments_data:
+        if isinstance(s.get("start"), (int, float)):
+            starts.append(s["start"])
+        for sw in s.get("words", []) or []:
+            if isinstance(sw.get("start"), (int, float)):
+                starts.append(sw["start"])
+
+    if not starts:
+        return
+    base = min(starts)
+    if base <= 0:
+        return
+
+    def _shift(item: dict) -> None:
+        for key in ("start", "end"):
+            if isinstance(item.get(key), (int, float)):
+                item[key] = max(0.0, item[key] - base)
+
+    for w in words_data:
+        _shift(w)
+    for s in segments_data:
+        _shift(s)
+        for sw in s.get("words", []) or []:
+            _shift(sw)
 
 
 async def _save_streaming_transcript(
@@ -781,8 +1388,6 @@ async def _save_streaming_transcript(
     Returns:
         version_id of the saved transcript version.
     """
-    from advanced_omi_backend.models.conversation import Conversation
-
     logger.info(
         f"📝 Retrieving final streaming transcript for conversation {conversation_id[:12]}"
     )
@@ -796,10 +1401,31 @@ async def _save_streaming_transcript(
         logger.error(f"❌ Conversation {conversation_id} not found in database")
         raise ValueError(f"Conversation {conversation_id} not found")
 
+    # Remove live-v0 version if it exists (replaced by final streaming version)
+    live_removed = False
+    conversation.transcript_versions = [
+        v for v in conversation.transcript_versions if v.version_id != "live-v0"
+    ]
+    if conversation.active_transcript_version == "live-v0":
+        conversation.active_transcript_version = None
+        live_removed = True
+    if live_removed:
+        logger.info(
+            f"🔄 Removed live-v0 transcript version, replacing with final streaming version"
+        )
+
     # Create transcript version from streaming results
     version_id = f"streaming_{session_id[:12]}"
     transcript_text = final_transcript.get("text", "")
     words_data = final_transcript.get("words", [])  # All words from aggregator
+
+    # Re-base provider timestamps to this conversation's own start so they align with
+    # the per-conversation WAV (0-based). Without this, conversations opened late in a
+    # long-lived WS session carry session-relative timestamps past their own length.
+    # Mutates words_data and the segments list (same object reused below) in place.
+    _rebase_timestamps_to_conversation_start(
+        words_data, final_transcript.get("segments", [])
+    )
 
     # Convert words to Word objects (including per-word speaker labels if present)
     words = [
@@ -814,8 +1440,7 @@ async def _save_streaming_transcript(
         for w in words_data
     ]
 
-    # Use provider-supplied segments if available (from streaming diarization),
-    # otherwise leave empty for speaker recognition service to fill later.
+    # Use provider-supplied segments if available (from streaming diarization).
     segments_data = final_transcript.get("segments", [])
     if segments_data:
         segments = [
@@ -838,14 +1463,34 @@ async def _save_streaming_transcript(
             )
             for s in segments_data
         ]
+        provider_diarized = True
     else:
-        segments = []
+        # Non-diarizing streaming provider returned no segments. Build a single
+        # fallback segment from the transcript text/words so the transcript is always
+        # renderable in the UI (the frontend only shows the segment list). This mirrors
+        # the batch path's fallback. If speaker recognition is enabled, the
+        # post-conversation speaker job replaces this with diarized segments.
+        provider_diarized = False
+        if transcript_text:
+            start_time_audio = words_data[0].get("start", 0.0) if words_data else 0.0
+            end_time_audio = words_data[-1].get("end", 0.0) if words_data else 0.0
+            segments = [
+                Conversation.SpeakerSegment(
+                    speaker="Speaker 0",
+                    start=start_time_audio,
+                    end=end_time_audio,
+                    text=transcript_text,
+                    words=words,
+                )
+            ]
+        else:
+            segments = []
 
     # Determine provider from streaming results
     provider = final_transcript.get("provider", "deepgram")
 
-    # Determine diarization source if provider supplied segments
-    diarization_source = "provider" if segments else None
+    # Diarization source reflects real provider diarization, not the fallback segment
+    diarization_source = "provider" if provider_diarized else None
 
     # Add streaming transcript with words at version level
     version = conversation.add_transcript_version(
@@ -860,7 +1505,7 @@ async def _save_streaming_transcript(
             "source": "streaming",
             "chunk_count": final_transcript.get("chunk_count", 0),
             "word_count": len(words),
-            "provider_capabilities": {"diarization": bool(segments)},
+            "provider_capabilities": {"diarization": provider_diarized},
         },
         set_as_active=True,
     )
@@ -869,9 +1514,11 @@ async def _save_streaming_transcript(
     # Update placeholder conversation if it exists
     if (
         getattr(conversation, "always_persist", False)
-        and getattr(conversation, "processing_status", None) == "pending_transcription"
+        and getattr(conversation, "processing_status", None)
+        == Conversation.ConversationStatus.ACTIVE.value
     ):
-        # Keep placeholder status - will be updated by title_summary_job
+        # Status stays active; the finalizer reconciles it to completed once the
+        # post-conversation chain reaches its terminal job.
         logger.info(
             f"📝 Placeholder conversation {conversation_id} has transcript, "
             f"waiting for title/summary generation"
@@ -879,11 +1526,12 @@ async def _save_streaming_transcript(
 
     # Save conversation with streaming transcript
     await conversation.save()
-    segment_info = (
-        f"{len(segments)} provider segments (diarization_source={diarization_source})"
-        if segments
-        else "0 segments (pending speaker recognition)"
-    )
+    if provider_diarized:
+        segment_info = f"{len(segments)} provider segments (diarization_source={diarization_source})"
+    elif segments:
+        segment_info = f"{len(segments)} fallback segment (pending speaker recognition)"
+    else:
+        segment_info = "0 segments (empty transcript)"
     logger.info(
         f"✅ Saved streaming transcript: {len(transcript_text)} chars, "
         f"{segment_info}, {len(words)} words "
@@ -906,23 +1554,16 @@ async def _enqueue_post_processing(
     a batch transcription job first with post-processing depending on it.
     Otherwise starts post-processing immediately with the streaming transcript.
     """
-    from advanced_omi_backend.config_loader import get_backend_config
-
     transcription_cfg = get_backend_config("transcription")
     batch_retranscribe = False
     if transcription_cfg:
-        from omegaconf import OmegaConf
-
         cfg_dict = OmegaConf.to_container(transcription_cfg, resolve=True)
         batch_retranscribe = cfg_dict.get("always_batch_retranscribe", False)
 
     if batch_retranscribe:
         # BATCH PATH: Streaming transcript saved as preview — user sees it immediately
         # Full post-processing (speaker, memory, title) waits for batch transcript
-        from advanced_omi_backend.controllers.queue_controller import (
-            JOB_RESULT_TTL,
-            transcription_queue,
-        )
+        # Lazy import: circular dependency — transcription_jobs imports conversation_jobs.
         from advanced_omi_backend.workers.transcription_jobs import (
             transcribe_full_audio_job,
         )
@@ -992,7 +1633,7 @@ async def open_conversation_job(
     user_id: str,
     client_id: str,
     speech_detected_at: float,
-    speech_job_id: str = None,
+    speech_job_id: Optional[str] = None,
     *,
     redis_client=None,
 ) -> Dict[str, Any]:
@@ -1014,12 +1655,6 @@ async def open_conversation_job(
 
     Note: user_email is fetched from the database when needed.
     """
-    from rq import get_current_job
-
-    from advanced_omi_backend.services.audio_stream import (
-        TranscriptionResultsAggregator,
-    )
-
     logger.info(
         f"📝 Creating and opening conversation for session {session_id} (speech detected at {speech_detected_at})"
     )
@@ -1050,14 +1685,29 @@ async def open_conversation_job(
 
     await _monitor_conversation_loop(state, aggregator, current_job, redis_client)
 
+    # When session stays active (timeout or close_requested), immediately clear
+    # conversation:current so audio persistence stops writing to this conversation.
+    # Without this, audio persistence keeps adding chunks during phases 4-7
+    # (potentially 30+ seconds), corrupting the closed conversation's data and
+    # delaying the start of the next speech detection cycle.
+    # For session finalization (disconnect), audio persistence exits on its own
+    # via the session status check, so this is not needed.
+    if state.timeout_triggered:
+        current_conversation_key = f"conversation:current:{session_id}"
+        await redis_client.delete(current_conversation_key)
+        logger.info(
+            f"🔄 Cleared conversation:current for {conversation_id[:12]} — "
+            f"audio persistence will flush buffer and wait for next conversation"
+        )
+
     logger.info(
         f"✅ Conversation {conversation_id} updates complete, checking for meaningful speech..."
     )
 
     # Phase 3: Determine end reason
-    session_key = f"audio:session:{session_id}"
-    completion_reason = await redis_client.hget(session_key, "completion_reason")
-    completion_reason_str = completion_reason.decode() if completion_reason else None
+    completion_reason_str = await SessionStore(redis_client).get_completion_reason(
+        session_id
+    )
 
     if completion_reason_str:
         state.end_reason = completion_reason_str
@@ -1122,17 +1772,64 @@ async def open_conversation_job(
                 )
 
         # Phase 5: Wait for audio chunks in MongoDB
-        from advanced_omi_backend.utils.audio_chunk_utils import wait_for_audio_chunks
-
         chunks_ready = await wait_for_audio_chunks(
             conversation_id=conversation_id, max_wait_seconds=30, min_chunks=1
         )
 
         if not chunks_ready:
-            await mark_conversation_deleted(
-                conversation_id=conversation_id,
-                deletion_reason="audio_chunks_not_ready",
+            # The audio chunks never landed under this conversation_id. This is
+            # usually a mid-session reconnect that routed the audio to the session's
+            # always_persist placeholder under a different id. Decide salvage-vs-discard
+            # by whether a real transcript exists: losing a real transcript is worse
+            # than keeping an audio-less conversation.
+            salvage_conv = await Conversation.find_one(
+                Conversation.conversation_id == conversation_id
             )
+            has_transcript = bool(
+                salvage_conv and salvage_conv.has_meaningful_transcript
+            )
+
+            if should_discard_unbacked_conversation(has_transcript):
+                # Genuinely empty (no transcript, no audio). A websocket_disconnect is a
+                # benign network drop (warning, not an error-level system event); a clean
+                # end with nothing captured is more unexpected (error).
+                if state.end_reason == "websocket_disconnect":
+                    logger.warning(
+                        f"⚠️ No audio and no transcript for conversation "
+                        f"{conversation_id[:12]} (client disconnect) — discarding as "
+                        f"audio_chunks_not_ready (likely a network drop, not a fault)"
+                    )
+                else:
+                    logger.error(
+                        f"❌ Audio chunks not found after 30s for conversation "
+                        f"{conversation_id[:12]} (end_reason={state.end_reason}) — "
+                        f"discarding as audio_chunks_not_ready"
+                    )
+                await mark_conversation_deleted(
+                    conversation_id=conversation_id,
+                    deletion_reason="audio_chunks_not_ready",
+                )
+            else:
+                # Salvage: persist the streaming transcript so it survives as a proper
+                # version, and KEEP the conversation. Skip the audio-dependent
+                # post-conversation chain (batch re-transcribe would raise without audio).
+                logger.warning(
+                    f"🛟 No audio persisted for conversation {conversation_id[:12]} but it "
+                    f"has a real transcript — keeping it (audio likely routed to the "
+                    f"session placeholder on reconnect) instead of discarding"
+                )
+                try:
+                    await _save_streaming_transcript(
+                        session_id=session_id,
+                        conversation_id=conversation_id,
+                        aggregator=aggregator,
+                    )
+                except Exception as e:  # noqa: BLE001 — salvage must not raise
+                    logger.warning(
+                        f"Could not persist streaming transcript for salvaged "
+                        f"conversation {conversation_id[:12]}: {e}"
+                    )
+
             end_of_conversation_handled = True
             return await handle_end_of_conversation(
                 session_id=session_id,
@@ -1156,6 +1853,10 @@ async def open_conversation_job(
             conversation_id=conversation_id,
             aggregator=aggregator,
         )
+
+        # Phase 6b: Trim leading silence off the (always_persist) conversation. Shared
+        # with the batch-fallback finalization path — see maybe_trim_leading_silence.
+        await maybe_trim_leading_silence(conversation_id)
 
         # Phase 7: Enqueue post-processing pipeline
         await _enqueue_post_processing(
@@ -1222,12 +1923,6 @@ async def generate_title_summary_job(
     Returns:
         Dict with generated title, summary, and detailed_summary
     """
-    from advanced_omi_backend.models.conversation import Conversation
-    from advanced_omi_backend.utils.conversation_utils import (
-        generate_detailed_summary,
-        generate_title_and_summary,
-    )
-
     set_otel_session(conversation_id)
     logger.info(
         f"📝 Starting title/summary generation for conversation {conversation_id}"
@@ -1272,8 +1967,6 @@ async def generate_title_summary_job(
         # so all key topics/entities in the conversation can find relevant memories
         memory_context = None
         try:
-            from advanced_omi_backend.services.memory import get_memory_service
-
             memory_service = get_memory_service()
             memories = await memory_service.search_memories(
                 transcript_text, conversation.user_id, limit=10
@@ -1291,8 +1984,6 @@ async def generate_title_summary_job(
             )
 
         # Generate title+summary (one call) and detailed summary in parallel
-        import asyncio
-
         (title, short_summary), detailed_summary = await asyncio.gather(
             generate_title_and_summary(
                 transcript_text,
@@ -1316,33 +2007,27 @@ async def generate_title_summary_job(
             f"✅ Generated detailed summary: {len(conversation.detailed_summary)} chars"
         )
 
-        # Update processing status for placeholder/reprocessing conversations
-        if getattr(conversation, "processing_status", None) in [
-            "pending_transcription",
-            "reprocessing",
-        ]:
-            conversation.processing_status = "completed"
-            logger.info(
-                f"✅ Updated placeholder conversation {conversation_id} "
-                f"processing_status to 'completed'"
-            )
+        # Status is owned by the finalizer (dispatch_conversation_complete_event_job),
+        # not stamped here. A transcript exists, so it will reconcile to "completed".
 
     except Exception as gen_error:
         logger.error(f"❌ Title/summary generation failed: {gen_error}")
 
-        # Mark placeholder/reprocessing conversation as failed
-        if getattr(conversation, "processing_status", None) in [
-            "pending_transcription",
-            "reprocessing",
-        ]:
-            conversation.title = "Audio Recording (Transcription Failed)"
-            conversation.summary = f"Title/summary generation failed: {str(gen_error)}"
-            conversation.processing_status = "transcription_failed"
-            await conversation.save()
-            logger.warning(
-                f"⚠️ Marked placeholder conversation {conversation_id} "
-                f"as transcription_failed (title/summary generation error). Audio is still saved."
-            )
+        # A title/summary failure is NOT a transcription failure — the transcript
+        # exists and is usable. Do not downgrade the status (the old code mislabeled
+        # this as transcription_failed). Record the soft failure stage for visibility
+        # and leave the terminal status to the finalizer (which will mark completed).
+        conversation.failure_stage = "summarization"
+        if not conversation.title or conversation.title in (
+            "Recording...",
+            "Reprocessing...",
+        ):
+            conversation.title = "Audio Recording"
+        await conversation.save()
+        logger.warning(
+            f"⚠️ Title/summary generation failed for {conversation_id}; transcript is "
+            f"intact, leaving status to finalizer (failure_stage=summarization)."
+        )
 
         return {
             "success": False,
@@ -1421,8 +2106,6 @@ async def dispatch_conversation_complete_event_job(
     Returns:
         Dict with success status and plugin results
     """
-    from advanced_omi_backend.models.conversation import Conversation
-
     logger.info(
         f"📌 Dispatching conversation.complete event for conversation {conversation_id}"
     )
@@ -1437,26 +2120,41 @@ async def dispatch_conversation_complete_event_job(
         logger.error(f"Conversation {conversation_id} not found")
         return {"success": False, "error": "Conversation not found"}
 
-    # Save end_reason and completed_at to database if not already set
-    # This ensures end_reason is persisted before plugins receive conversation.complete event
+    # This is the terminal job of the post-conversation chain, so it OWNS the
+    # conversation's final state: persist end_reason/completed_at and reconcile
+    # processing_status from facts (transcript present => completed; none =>
+    # failed). Intermediate jobs no longer stamp the status, which is what kept
+    # recovered conversations stuck at "failed". end_reason is persisted before
+    # plugins receive the conversation.complete event.
+    needs_save = False
     if end_reason and conversation.end_reason is None:
         try:
             conversation.end_reason = Conversation.EndReason(end_reason)
         except ValueError:
             logger.warning(f"⚠️ Invalid end_reason '{end_reason}', using UNKNOWN")
             conversation.end_reason = Conversation.EndReason.UNKNOWN
+        needs_save = True
 
-        if conversation.completed_at is None:
-            conversation.completed_at = datetime.utcnow()
+    if conversation.completed_at is None:
+        conversation.completed_at = datetime.now(timezone.utc)
+        needs_save = True
 
-        await conversation.save()
+    if conversation.apply_status(settled=True):
         logger.info(
-            f"💾 Saved end_reason={conversation.end_reason} to conversation {conversation_id[:12]} in event dispatch job"
+            f"🏁 Finalized conversation {conversation_id[:12]} "
+            f"status={conversation.processing_status}"
+            + (
+                f" failure_stage={conversation.failure_stage}"
+                if conversation.failure_stage
+                else ""
+            )
         )
+        needs_save = True
+
+    if needs_save:
+        await conversation.save()
 
     # Get user email for event data
-    from advanced_omi_backend.models.user import User
-
     user = await User.get(user_id)
     user_email = user.email if user else ""
 

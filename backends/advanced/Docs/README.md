@@ -27,10 +27,10 @@ Welcome to chronicle! This guide provides the optimal reading sequence to unders
 ## 🔧 **Core Components Deep Dive**
 
 ### 3. **[Memory System](./memories.md)**
-**Memory extraction and semantic search**
+**Memory extraction and vault retrieval**
 
 - How conversations become memories
-- Mem0 integration and vector storage
+- Agentic Markdown vault (the single source of truth)
 - Configuration and customization options
 - **Code References**:
   - `src/advanced_omi_backend/memory/memory_service.py` (main processing)
@@ -138,7 +138,7 @@ backends/advanced-backend/
 - **Memory Trigger**: Memory processing in `src/advanced_omi_backend/controllers/memory_controller.py`
 
 ### **Data Storage**
-- **Memories**: `src/advanced_omi_backend/memory/memory_service.py` → Mem0 → Qdrant
+- **Memories**: `src/advanced_omi_backend/services/memory/providers/chronicle.py` → agentic Markdown vault at `data/conversation_docs/<user_id>/` (the single source of truth)
 
 ### **Configuration**
 - **Loading**: `src/advanced_omi_backend/model_registry.py`

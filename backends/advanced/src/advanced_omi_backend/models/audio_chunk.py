@@ -6,12 +6,32 @@ audio chunks in MongoDB. Each chunk represents a 10-second segment of audio
 from a conversation.
 """
 
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timezone
+from typing import List, Optional
 
 from beanie import Document, Indexed
 from bson import Binary
-from pydantic import ConfigDict, Field, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
+
+
+class VADResult(BaseModel):
+    """Voice-activity scores for one audio chunk.
+
+    Self-contained: provider/hop/threshold are stored with the scores because
+    chunks (and their VAD data) survive conversation split/merge operations,
+    while the conversation-level ``VadAnalysis`` summary does not travel.
+    """
+
+    provider: str = Field(description="VAD provider that produced the scores")
+    frame_hop_ms: float = Field(description="Milliseconds of audio per score frame")
+    scores: List[float] = Field(
+        description="Per-frame speech probabilities for this chunk (one per frame hop)"
+    )
+    max_score: float = Field(
+        description="Maximum speech probability in this chunk (voice-present score)"
+    )
+    threshold: float = Field(description="Decision threshold used to derive has_speech")
+    has_speech: bool = Field(description="Whether max_score reached the threshold")
 
 
 class AudioChunkDocument(Document):
@@ -74,13 +94,14 @@ class AudioChunkDocument(Document):
     )
 
     # Optional analysis
-    has_speech: Optional[bool] = Field(
-        default=None, description="Voice Activity Detection result (if available)"
+    vad: Optional[VADResult] = Field(
+        default=None, description="Voice-activity scores (set by data-audit analysis)"
     )
 
     # Metadata
     created_at: datetime = Field(
-        default_factory=datetime.utcnow, description="Chunk creation timestamp"
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Chunk creation timestamp",
     )
 
     # Soft delete fields

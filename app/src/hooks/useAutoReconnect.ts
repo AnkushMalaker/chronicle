@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { AppState } from 'react-native';
 import { State as BluetoothState } from 'react-native-ble-plx';
 import { saveLastConnectedDeviceId, getLastConnectedDeviceId } from '../utils/storage';
 import { useConnectionLog } from '../contexts/ConnectionLogContext';
@@ -17,6 +18,8 @@ interface UseAutoReconnectParams {
     disconnectFromDevice: () => Promise<void>;
   };
   scanning: boolean;
+  /** When false, the device connects once and does NOT auto-reconnect on drop/launch. */
+  autoReconnectEnabled?: boolean;
 }
 
 export interface AutoReconnectState {
@@ -36,6 +39,7 @@ export const useAutoReconnect = ({
   permissionGranted,
   deviceConnection,
   scanning,
+  autoReconnectEnabled = true,
 }: UseAutoReconnectParams): AutoReconnectState => {
   const [lastKnownDeviceId, setLastKnownDeviceId] = useState<string | null>(null);
   const [isAttemptingAutoReconnect, setIsAttemptingAutoReconnect] = useState(false);
@@ -51,6 +55,27 @@ export const useAutoReconnect = ({
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const prevConnectedRef = useRef<string | null>(null);
+  // Mirror of lastKnownDeviceId for use inside async timers (avoids stale closures
+  // and lets a scheduled retry detect that the user cleared/changed the device).
+  const lastKnownDeviceIdRef = useRef<string | null>(null);
+  // Self-reference so a failed retry can reschedule itself for persistent retry.
+  const scheduleRetryRef = useRef<((deviceId: string, isQuickFailure: boolean) => void) | null>(null);
+  // User preference mirror for use inside async timers / mount-only listeners.
+  const autoReconnectEnabledRef = useRef<boolean>(autoReconnectEnabled);
+  useEffect(() => {
+    autoReconnectEnabledRef.current = autoReconnectEnabled;
+  }, [autoReconnectEnabled]);
+
+  // Mirror of the connected device id for use inside the (mount-only) AppState listener.
+  const connectedDeviceIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    lastKnownDeviceIdRef.current = lastKnownDeviceId;
+  }, [lastKnownDeviceId]);
+
+  useEffect(() => {
+    connectedDeviceIdRef.current = deviceConnection.connectedDeviceId;
+  }, [deviceConnection.connectedDeviceId]);
 
   const clearRetryTimers = useCallback(() => {
     if (retryTimerRef.current) {
@@ -70,6 +95,102 @@ export const useAutoReconnect = ({
     setConnectionRetryCount(0);
     clearRetryTimers();
   }, [clearRetryTimers]);
+
+  // Schedule a (re)connect attempt with capped backoff. Used by BOTH the
+  // disconnect-recovery path and the launch-reconnect path. On failure it
+  // reschedules itself, so a single failed attempt never permanently gives up
+  // and never forgets the saved device — only explicit user action clears it.
+  const scheduleRetry = useCallback(
+    (deviceId: string, isQuickFailure: boolean) => {
+      if (!deviceId) return;
+      // "Connect once" mode: don't auto-reconnect on drop/launch failure.
+      if (!autoReconnectEnabledRef.current) {
+        clearRetryTimers();
+        return;
+      }
+
+      // Adjust backoff: a quick failure (or a never-connected launch attempt)
+      // grows the delay; a healthy connection that dropped resets it.
+      if (isQuickFailure) {
+        backoffMsRef.current =
+          backoffMsRef.current === 0
+            ? BACKOFF_INITIAL
+            : Math.min(backoffMsRef.current * 2, BACKOFF_MAX);
+      } else {
+        backoffMsRef.current = 0;
+      }
+
+      const delay = backoffMsRef.current;
+      addEvent(
+        'reconnect_backoff',
+        `Scheduling retry in ${delay / 1000}s (device: ${deviceId})`,
+        { deviceId }
+      );
+
+      // Replace any in-flight timers before scheduling a new attempt.
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+      if (countdownTimerRef.current) {
+        clearInterval(countdownTimerRef.current);
+        countdownTimerRef.current = null;
+      }
+
+      setIsRetryingConnection(true);
+      setRetryBackoffSeconds(Math.ceil(delay / 1000));
+      setConnectionRetryCount(c => c + 1);
+
+      // Countdown timer for UI.
+      const countdownEnd = Date.now() + delay;
+      countdownTimerRef.current = setInterval(() => {
+        const remaining = Math.max(0, Math.ceil((countdownEnd - Date.now()) / 1000));
+        setRetryBackoffSeconds(remaining);
+        if (remaining <= 0 && countdownTimerRef.current) {
+          clearInterval(countdownTimerRef.current);
+          countdownTimerRef.current = null;
+        }
+      }, 1000);
+
+      retryTimerRef.current = setTimeout(async () => {
+        retryTimerRef.current = null;
+        if (countdownTimerRef.current) {
+          clearInterval(countdownTimerRef.current);
+          countdownTimerRef.current = null;
+        }
+
+        // Honor cancellation: the user may have cleared/changed the device while
+        // we were waiting (handleCancelAutoReconnect / explicit disconnect).
+        if (lastKnownDeviceIdRef.current !== deviceId) {
+          setIsRetryingConnection(false);
+          setRetryBackoffSeconds(0);
+          return;
+        }
+
+        setIsAttemptingAutoReconnect(true);
+        setIsRetryingConnection(false);
+        setRetryBackoffSeconds(0);
+        addEvent('reconnect_attempt', `Retrying connection to ${deviceId}`, { deviceId });
+
+        try {
+          await deviceConnection.connectToDevice(deviceId);
+        } catch (error) {
+          console.error(`[AutoReconnect] Retry failed for ${deviceId}:`, error);
+          // Persistent retry: reschedule (unless the user cleared the device).
+          if (lastKnownDeviceIdRef.current === deviceId) {
+            scheduleRetryRef.current?.(deviceId, true);
+          }
+        } finally {
+          setIsAttemptingAutoReconnect(false);
+        }
+      }, delay);
+    },
+    [addEvent, deviceConnection]
+  );
+
+  useEffect(() => {
+    scheduleRetryRef.current = scheduleRetry;
+  }, [scheduleRetry]);
 
   // Load last device on mount
   useEffect(() => {
@@ -99,77 +220,21 @@ export const useAutoReconnect = ({
       return;
     }
 
-    // Connection lost (unexpected disconnect)
+    // Connection lost (unexpected disconnect) — schedule a recovery attempt.
+    // scheduleRetry handles backoff growth and persistent self-rescheduling.
     if (!currentConnected && prevConnected && lastKnownDeviceId) {
       const startTime = connectionStartTimeRef.current;
       connectionStartTimeRef.current = null;
       const duration = startTime ? Date.now() - startTime : 0;
-
-      if (duration >= MIN_HEALTHY_DURATION) {
-        // Healthy connection — reset backoff
-        backoffMsRef.current = 0;
-        setConnectionRetryCount(0);
-      } else {
-        // Quick failure — increase backoff
-        if (backoffMsRef.current === 0) {
-          backoffMsRef.current = BACKOFF_INITIAL;
-        } else {
-          backoffMsRef.current = Math.min(backoffMsRef.current * 2, BACKOFF_MAX);
-        }
-      }
-
-      const delay = backoffMsRef.current;
-      const deviceId = lastKnownDeviceId;
-      addEvent('reconnect_backoff', `Scheduling retry in ${delay / 1000}s (device: ${deviceId})`, { deviceId });
-
-      setIsRetryingConnection(true);
-      setRetryBackoffSeconds(Math.ceil(delay / 1000));
-      setConnectionRetryCount(c => c + 1);
-
-      // Countdown timer for UI
-      const countdownEnd = Date.now() + delay;
-      countdownTimerRef.current = setInterval(() => {
-        const remaining = Math.max(0, Math.ceil((countdownEnd - Date.now()) / 1000));
-        setRetryBackoffSeconds(remaining);
-        if (remaining <= 0 && countdownTimerRef.current) {
-          clearInterval(countdownTimerRef.current);
-          countdownTimerRef.current = null;
-        }
-      }, 1000);
-
-      // Schedule reconnect
-      retryTimerRef.current = setTimeout(async () => {
-        retryTimerRef.current = null;
-        if (countdownTimerRef.current) {
-          clearInterval(countdownTimerRef.current);
-          countdownTimerRef.current = null;
-        }
-
-        if (!deviceId) {
-          setIsRetryingConnection(false);
-          return;
-        }
-
-        setIsAttemptingAutoReconnect(true);
-        setIsRetryingConnection(false);
-        setRetryBackoffSeconds(0);
-        addEvent('reconnect_attempt', `Retrying connection to ${deviceId} (attempt ${connectionRetryCount})`, { deviceId });
-
-        try {
-          await deviceConnection.connectToDevice(deviceId);
-        } catch (error) {
-          console.error(`[AutoReconnect] Retry failed for ${deviceId}:`, error);
-          // Let the next disconnect cycle handle further retries
-        } finally {
-          setIsAttemptingAutoReconnect(false);
-        }
-      }, delay);
+      const isQuickFailure = duration < MIN_HEALTHY_DURATION;
+      scheduleRetryRef.current?.(lastKnownDeviceId, isQuickFailure);
     }
   }, [deviceConnection.connectedDeviceId]);
 
   // Auto-reconnect on app launch (existing behavior)
   useEffect(() => {
     if (
+      autoReconnectEnabled &&
       bluetoothState === BluetoothState.PoweredOn &&
       permissionGranted &&
       lastKnownDeviceId &&
@@ -188,8 +253,11 @@ export const useAutoReconnect = ({
           await deviceConnection.connectToDevice(lastKnownDeviceId);
         } catch (error) {
           console.error(`[AutoReconnect] Error reconnecting to ${lastKnownDeviceId}:`, error);
-          await saveLastConnectedDeviceId(null);
-          setLastKnownDeviceId(null);
+          // Persistent retry: do NOT forget the device on a single failure (it may
+          // simply be out of range at launch). Schedule a backoff retry instead;
+          // only explicit user action (handleCancelAutoReconnect / Disconnect)
+          // clears the saved device.
+          scheduleRetryRef.current?.(lastKnownDeviceId, true);
         } finally {
           setIsAttemptingAutoReconnect(false);
         }
@@ -197,6 +265,7 @@ export const useAutoReconnect = ({
       attemptAutoConnect();
     }
   }, [
+    autoReconnectEnabled,
     bluetoothState, permissionGranted, lastKnownDeviceId,
     deviceConnection.connectedDeviceId, deviceConnection.isConnecting,
     scanning, deviceConnection.connectToDevice,
@@ -214,6 +283,22 @@ export const useAutoReconnect = ({
     await deviceConnection.disconnectFromDevice();
     setIsAttemptingAutoReconnect(false);
   }, [deviceConnection, lastKnownDeviceId, resetBackoff]);
+
+  // Reconnect on return to foreground. On iOS the JS runtime suspends in the
+  // background; on resume nothing would otherwise re-establish the BLE link.
+  // Resetting triedAutoReconnectForCurrentId lets the launch-reconnect effect
+  // re-fire for a known-but-disconnected device.
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', nextState => {
+      if (nextState !== 'active') return;
+      if (!autoReconnectEnabledRef.current) return;
+      const deviceId = lastKnownDeviceIdRef.current;
+      if (deviceId && !connectedDeviceIdRef.current) {
+        setTriedAutoReconnectForCurrentId(false);
+      }
+    });
+    return () => subscription.remove();
+  }, []);
 
   // Cleanup timers on unmount
   useEffect(() => {

@@ -1,17 +1,17 @@
 """
 Conversation models for Chronicle backend.
 
-This module contains Beanie Document and Pydantic models for conversations,
-transcript versions, and memory versions.
+This module contains Beanie Document and Pydantic models for conversations
+and transcript versions.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from beanie import Document, Indexed
-from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
+from pydantic import BaseModel, Field, computed_field, model_validator
 from pymongo import IndexModel
 
 
@@ -19,13 +19,6 @@ class Conversation(Document):
     """Complete conversation model with versioned processing."""
 
     # Nested Enums - Note: TranscriptProvider accepts any string value for flexibility
-
-    class MemoryProvider(str, Enum):
-        """Supported memory providers."""
-
-        CHRONICLE = "chronicle"
-        OPENMEMORY_MCP = "openmemory_mcp"
-        FRIEND_LITE = "friend_lite"  # Legacy value
 
     class ConversationStatus(str, Enum):
         """Conversation processing status."""
@@ -49,6 +42,8 @@ class Conversation(Document):
             "close_requested"  # External close signal (API, plugin, button)
         )
         ERROR = "error"  # Processing error forced conversation end
+        SPLIT = "split"  # Created by splitting a longer conversation
+        MERGE = "merge"  # Created by merging adjacent conversations
         UNKNOWN = "unknown"  # Unknown or legacy reason
 
     # Nested Models
@@ -123,27 +118,60 @@ class Conversation(Document):
             default_factory=dict, description="Additional provider-specific metadata"
         )
 
-    class MemoryVersion(BaseModel):
-        """Version of memory extraction with processing metadata."""
+    class VadAnalysis(BaseModel):
+        """Cached VAD summary for a conversation's audio (data-audit feature).
 
-        version_id: str = Field(description="Unique version identifier")
-        memory_count: int = Field(description="Number of memories extracted")
-        transcript_version_id: str = Field(
-            description="Which transcript version was used"
+        Frame-level speech probabilities live on the audio chunk documents
+        (``AudioChunkDocument.vad_scores``); this stores a threshold-independent
+        histogram of those probabilities so the UI can derive the speech
+        fraction for any chosen threshold without touching the chunks.
+        """
+
+        provider: str = Field(description="VAD provider that produced the scores")
+        frame_hop_ms: float = Field(
+            description="Milliseconds of audio per VAD frame/score"
         )
-        provider: "Conversation.MemoryProvider" = Field(
-            description="Memory provider used"
+        frame_count: int = Field(description="Number of frames scored")
+        histogram_bin_width: float = Field(
+            description="Width of each probability histogram bin (bins span [0, 1])"
         )
-        model: Optional[str] = Field(
-            None, description="Model used (e.g., gpt-4o-mini, llama3)"
+        histogram: List[int] = Field(
+            default_factory=list,
+            description="Frame counts per speech-probability bin (low→high)",
         )
-        created_at: datetime = Field(description="When this version was created")
-        processing_time_seconds: Optional[float] = Field(
-            None, description="Time taken to process"
+        chunk_duration_seconds: float = Field(
+            description="Nominal audio chunk duration used during analysis"
         )
-        metadata: Dict[str, Any] = Field(
-            default_factory=dict, description="Additional provider-specific metadata"
+        speech_regions: Optional[List[List[float]]] = Field(
+            None,
+            description="Merged [start, end] speech intervals in seconds, for speech-skip playback",
         )
+        analyzed_at: datetime = Field(description="When this analysis was computed")
+
+        def speech_fraction(self, threshold: float = 0.5) -> float:
+            """Fraction of frames with speech probability >= ``threshold`` (0.0-1.0)."""
+            if self.frame_count <= 0 or not self.histogram:
+                return 0.0
+            speech = 0
+            for i, count in enumerate(self.histogram):
+                bin_lower = i * self.histogram_bin_width
+                if bin_lower >= threshold:
+                    speech += count
+            return speech / self.frame_count
+
+    class DerivedFrom(BaseModel):
+        """Lineage record for conversations produced by split/merge operations."""
+
+        operation: str = Field(description="'split' or 'merge'")
+        source_conversation_ids: List[str] = Field(
+            description="Conversations this one was derived from"
+        )
+        time_range: Optional[List[float]] = Field(
+            None,
+            description="For split children: [start, end] seconds in the parent timeline",
+        )
+        performed_at: datetime = Field(description="When the operation ran")
+        performed_by: str = Field(description="User who performed the operation")
 
     # Core identifiers
     conversation_id: Indexed(str, unique=True) = Field(
@@ -174,6 +202,41 @@ class Conversation(Document):
         description="Compression ratio (compressed_size / original_size), typically ~0.047 for Opus",
     )
 
+    # Cached VAD speech analysis (data-audit feature)
+    vad_analysis: Optional["Conversation.VadAnalysis"] = Field(
+        None,
+        description="Cached VAD speech-probability summary computed from audio chunks",
+    )
+    audio_integrity_error: Optional[str] = Field(
+        None,
+        description="Set when the conversation's audio is internally inconsistent "
+        "(e.g. reconnect-duplication: stored duration/chunk-count disagree with the "
+        "actual chunks). Such conversations are excluded from the data-audit list and "
+        "surfaced on the System Errors page instead of being repeatedly re-analyzed.",
+    )
+
+    # Split/merge lineage (data-audit feature)
+    derived_from: Optional["Conversation.DerivedFrom"] = Field(
+        None, description="Set on conversations created by a split/merge operation"
+    )
+    derived_into: List[str] = Field(
+        default_factory=list,
+        description="Conversation IDs this conversation was split/merged into (set on soft-deleted sources)",
+    )
+
+    # Audio archival (data-audit feature): audio bytes hard-deleted, metadata kept
+    audio_archived: bool = Field(
+        False,
+        description="Whether the audio bytes were permanently deleted while keeping this metadata stub",
+    )
+    audio_archived_at: Optional[datetime] = Field(
+        None, description="When the audio was archived (hard-deleted)"
+    )
+    archive_reason: Optional[str] = Field(
+        None,
+        description="Why audio was archived (near_silent, bad_speaker, manual_cleanup, etc.)",
+    )
+
     # Markers (e.g., button events) captured during the session
     markers: List[Dict[str, Any]] = Field(
         default_factory=list,
@@ -182,7 +245,8 @@ class Conversation(Document):
 
     # Creation metadata
     created_at: Indexed(datetime) = Field(
-        default_factory=datetime.utcnow, description="When the conversation was created"
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="When the conversation was created",
     )
 
     # Processing status tracking
@@ -198,10 +262,20 @@ class Conversation(Document):
         None, description="When the conversation was marked as deleted"
     )
 
-    # Always persist audio flag and processing status
+    # Always persist audio flag and processing status.
+    # Canonical values are the ConversationStatus enum: "active" | "completed" |
+    # "failed". This field is OWNED by apply_status() — derived from facts (does an
+    # active transcript exist?) at terminal points and by the reconciler. Individual
+    # jobs must NOT hand-stamp it; they do their work and let the finalizer reconcile.
     processing_status: Optional[str] = Field(
         None,
-        description="Processing status: pending_transcription, transcription_failed, completed",
+        description="Processing status (ConversationStatus): active, completed, failed",
+    )
+    # When processing_status == "failed", which pipeline stage failed
+    # (e.g. "transcription", "summarization"). Replaces the old overloaded
+    # "transcription_failed" string that conflated distinct failure causes.
+    failure_stage: Optional[str] = Field(
+        None, description="Stage that failed when processing_status == 'failed'"
     )
     always_persist: bool = Field(
         default=False,
@@ -238,20 +312,16 @@ class Conversation(Document):
     transcript_versions: List["Conversation.TranscriptVersion"] = Field(
         default_factory=list, description="All transcript processing attempts"
     )
-    memory_versions: List["Conversation.MemoryVersion"] = Field(
-        default_factory=list, description="All memory extraction attempts"
-    )
 
-    # Active version pointers
+    # Active version pointer
     active_transcript_version: Optional[str] = Field(
         None, description="Version ID of currently active transcript"
     )
-    active_memory_version: Optional[str] = Field(
-        None, description="Version ID of currently active memory extraction"
-    )
 
-    # Legacy fields removed - use transcript_versions[active_transcript_version] and memory_versions[active_memory_version]
-    # Frontend should access: conversation.active_transcript.segments, conversation.active_transcript.transcript
+    # Legacy fields removed - use transcript_versions[active_transcript_version].
+    # Frontend should access: conversation.active_transcript.segments, conversation.active_transcript.transcript.
+    # Memory is no longer versioned (the vault is the system of record); changes are
+    # recorded in the memory_audit ledger (see models/memory_audit.py).
 
     @model_validator(mode="before")
     @classmethod
@@ -291,29 +361,22 @@ class Conversation(Document):
 
         return data
 
+    def get_transcript_version(
+        self, version_id: str
+    ) -> Optional["Conversation.TranscriptVersion"]:
+        """Find a transcript version by id, or None if it doesn't exist."""
+        for version in self.transcript_versions:
+            if version.version_id == version_id:
+                return version
+        return None
+
     @computed_field
     @property
     def active_transcript(self) -> Optional["Conversation.TranscriptVersion"]:
         """Get the currently active transcript version."""
         if not self.active_transcript_version:
             return None
-
-        for version in self.transcript_versions:
-            if version.version_id == self.active_transcript_version:
-                return version
-        return None
-
-    @computed_field
-    @property
-    def active_memory(self) -> Optional["Conversation.MemoryVersion"]:
-        """Get the currently active memory version."""
-        if not self.active_memory_version:
-            return None
-
-        for version in self.memory_versions:
-            if version.version_id == self.active_memory_version:
-                return version
-        return None
+        return self.get_transcript_version(self.active_transcript_version)
 
     # Convenience properties that return data from active transcript version
     @computed_field
@@ -336,27 +399,9 @@ class Conversation(Document):
 
     @computed_field
     @property
-    def memory_count(self) -> int:
-        """Get memory count from active memory version."""
-        return self.active_memory.memory_count if self.active_memory else 0
-
-    @computed_field
-    @property
-    def has_memory(self) -> bool:
-        """Check if conversation has any memory versions."""
-        return len(self.memory_versions) > 0
-
-    @computed_field
-    @property
     def transcript_version_count(self) -> int:
         """Get count of transcript versions."""
         return len(self.transcript_versions)
-
-    @computed_field
-    @property
-    def memory_version_count(self) -> int:
-        """Get count of memory versions."""
-        return len(self.memory_versions)
 
     @computed_field
     @property
@@ -369,24 +414,15 @@ class Conversation(Document):
                 return i + 1
         return None
 
-    @computed_field
-    @property
-    def active_memory_version_number(self) -> Optional[int]:
-        """Get 1-based version number of the active memory version."""
-        if not self.active_memory_version:
-            return None
-        for i, version in enumerate(self.memory_versions):
-            if version.version_id == self.active_memory_version:
-                return i + 1
-        return None
-
     def add_transcript_version(
         self,
         version_id: str,
         transcript: str,
         words: Optional[List["Conversation.Word"]] = None,
         segments: Optional[List["Conversation.SpeakerSegment"]] = None,
-        provider: str = None,  # Provider name from config.yml (deepgram, parakeet, etc.)
+        provider: Optional[
+            str
+        ] = None,  # Provider name from config.yml (deepgram, parakeet, etc.)
         model: Optional[str] = None,
         processing_time_seconds: Optional[float] = None,
         metadata: Optional[Dict[str, Any]] = None,
@@ -412,36 +448,6 @@ class Conversation(Document):
 
         return new_version
 
-    def add_memory_version(
-        self,
-        version_id: str,
-        memory_count: int,
-        transcript_version_id: str,
-        provider: "Conversation.MemoryProvider",
-        model: Optional[str] = None,
-        processing_time_seconds: Optional[float] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        set_as_active: bool = True,
-    ) -> "Conversation.MemoryVersion":
-        """Add a new memory version and optionally set it as active."""
-        new_version = Conversation.MemoryVersion(
-            version_id=version_id,
-            memory_count=memory_count,
-            transcript_version_id=transcript_version_id,
-            provider=provider,
-            model=model,
-            created_at=datetime.now(),
-            processing_time_seconds=processing_time_seconds,
-            metadata=metadata or {},
-        )
-
-        self.memory_versions.append(new_version)
-
-        if set_as_active:
-            self.active_memory_version = version_id
-
-        return new_version
-
     def set_active_transcript_version(self, version_id: str) -> bool:
         """Set a specific transcript version as active."""
         for version in self.transcript_versions:
@@ -450,13 +456,42 @@ class Conversation(Document):
                 return True
         return False
 
-    def set_active_memory_version(self, version_id: str) -> bool:
-        """Set a specific memory version as active."""
-        for version in self.memory_versions:
-            if version.version_id == version_id:
-                self.active_memory_version = version_id
-                return True
-        return False
+    @property
+    def has_meaningful_transcript(self) -> bool:
+        """True when the active transcript version has non-empty text."""
+        av = self.active_transcript
+        return bool(av and (av.transcript or "").strip())
+
+    def apply_status(
+        self, *, settled: bool, failure_stage: str = "transcription"
+    ) -> bool:
+        """Derive and set processing_status from facts. The SINGLE owner of the field.
+
+        The transcript is the conversation's core deliverable, so its presence is the
+        source of truth for success — independent of which jobs ran or what order they
+        ran in. This makes ``failed`` non-absorbing (a later recovery flips it to
+        ``completed``) and removes the need for jobs to hand-stamp the status.
+
+        - has a meaningful transcript            -> COMPLETED
+        - ``settled`` and no transcript          -> FAILED (failure_stage)
+        - otherwise (still in flight)            -> ACTIVE
+
+        ``settled`` means the caller knows the pipeline has reached a terminal point
+        (the finalizer job, a fallback dead-end, or the reconciler's staleness check),
+        so "no transcript" is final rather than "not yet". Returns True if anything
+        changed.
+        """
+        prev = (self.processing_status, self.failure_stage)
+        if self.has_meaningful_transcript:
+            self.processing_status = self.ConversationStatus.COMPLETED.value
+            self.failure_stage = None
+        elif settled:
+            self.processing_status = self.ConversationStatus.FAILED.value
+            self.failure_stage = failure_stage
+        else:
+            self.processing_status = self.ConversationStatus.ACTIVE.value
+            self.failure_stage = None
+        return (self.processing_status, self.failure_stage) != prev
 
     class Settings:
         name = "conversations"
@@ -528,8 +563,6 @@ def create_conversation(
         "summary": summary,
         "transcript_versions": [],
         "active_transcript_version": None,
-        "memory_versions": [],
-        "active_memory_version": None,
         "external_source_id": external_source_id,
         "external_source_type": external_source_type,
     }

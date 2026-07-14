@@ -23,14 +23,13 @@ Usage:
 """
 
 import argparse
-import json
 import logging
 import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import requests
 
@@ -188,6 +187,8 @@ def download_youtube_audio(
 ) -> Optional[str]:
     """Download audio from YouTube video."""
     try:
+        # Lazy import: yt_dlp is an optional heavy dependency only needed for
+        # YouTube enrollment; degrade gracefully if it isn't installed.
         import yt_dlp
     except ImportError:
         logger.error("yt-dlp not installed. Install with: pip install yt-dlp")
@@ -244,10 +245,10 @@ def download_youtube_audio(
         return None
 
 
-def list_speakers() -> bool:
+def list_speakers(service_url: str = SPEAKER_SERVICE_URL) -> bool:
     """List all enrolled speakers."""
     try:
-        response = requests.get(f"{SPEAKER_SERVICE_URL}/speakers")
+        response = requests.get(f"{service_url}/speakers")
         if response.status_code == 200:
             data = response.json()
             speakers = data.get("speakers", {})
@@ -276,10 +277,10 @@ def list_speakers() -> bool:
         return False
 
 
-def delete_speaker(speaker_id: str) -> bool:
+def delete_speaker(speaker_id: str, service_url: str = SPEAKER_SERVICE_URL) -> bool:
     """Delete an enrolled speaker."""
     try:
-        response = requests.delete(f"{SPEAKER_SERVICE_URL}/speakers/{speaker_id}")
+        response = requests.delete(f"{service_url}/speakers/{speaker_id}")
         if response.status_code == 200:
             logger.info(f"✅ Successfully deleted speaker: {speaker_id}")
             return True
@@ -339,10 +340,10 @@ def main():
 
     # Handle actions
     if args.list:
-        return 0 if list_speakers_with_url(service_url) else 1
+        return 0 if list_speakers(service_url) else 1
 
     elif args.delete:
-        return 0 if delete_speaker_with_url(args.delete, service_url) else 1
+        return 0 if delete_speaker(args.delete, service_url) else 1
 
     else:
         # Enrollment actions require ID and name

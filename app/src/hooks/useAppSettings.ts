@@ -6,7 +6,13 @@ import {
   getUserId,
   getAuthEmail,
   getJwtToken,
+  getAutoReconnectEnabled,
+  saveAutoReconnectEnabled,
 } from '../utils/storage';
+import { recoverBackendUrl } from '../services/serviceManager';
+import { httpUrlToWebSocketUrl } from '../utils/urlConversion';
+
+const DEFAULT_WS_URL = 'ws://localhost:8000/ws';
 
 export interface AppSettings {
   webSocketUrl: string;
@@ -14,9 +20,11 @@ export interface AppSettings {
   isAuthenticated: boolean;
   currentUserEmail: string | null;
   jwtToken: string | null;
+  autoReconnectEnabled: boolean;
   handleSetAndSaveWebSocketUrl: (url: string) => Promise<void>;
   handleSetAndSaveUserId: (id: string) => Promise<void>;
   handleAuthStatusChange: (authenticated: boolean, email: string | null, token: string | null) => void;
+  handleToggleAutoReconnect: () => void;
 }
 
 export const useAppSettings = (): AppSettings => {
@@ -25,16 +33,31 @@ export const useAppSettings = (): AppSettings => {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null);
   const [jwtToken, setJwtToken] = useState<string | null>(null);
+  const [autoReconnectEnabled, setAutoReconnectEnabled] = useState<boolean>(true);
 
   useEffect(() => {
     const loadSettings = async () => {
       const storedWsUrl = await getWebSocketUrl();
-      if (storedWsUrl) {
-        setWebSocketUrl(storedWsUrl);
+      const hasRealUrl = !!storedWsUrl && storedWsUrl !== DEFAULT_WS_URL;
+      if (hasRealUrl) {
+        setWebSocketUrl(storedWsUrl as string);
       } else {
-        const defaultUrl = 'ws://localhost:8000/ws';
-        setWebSocketUrl(defaultUrl);
-        await saveWebSocketUrl(defaultUrl);
+        setWebSocketUrl(DEFAULT_WS_URL);
+        await saveWebSocketUrl(DEFAULT_WS_URL);
+        // Backend URL is missing/placeholder — try to recover it from stored
+        // service-manager credentials (the SM host is the backend host). This is
+        // a no-op (returns fast) when no SM URL is stored. Non-blocking so app
+        // startup isn't delayed by network probes.
+        recoverBackendUrl()
+          .then(async recovered => {
+            if (recovered) {
+              const wsUrl = httpUrlToWebSocketUrl(recovered);
+              setWebSocketUrl(wsUrl);
+              await saveWebSocketUrl(wsUrl);
+              console.log('[AppSettings] Recovered backend URL from service-manager creds');
+            }
+          })
+          .catch(() => {});
       }
 
       const storedUserId = await getUserId();
@@ -47,6 +70,8 @@ export const useAppSettings = (): AppSettings => {
         setJwtToken(storedToken);
         setIsAuthenticated(true);
       }
+
+      setAutoReconnectEnabled(await getAutoReconnectEnabled());
     };
     loadSettings();
   }, []);
@@ -67,14 +92,24 @@ export const useAppSettings = (): AppSettings => {
     setJwtToken(token);
   }, []);
 
+  const handleToggleAutoReconnect = useCallback(() => {
+    setAutoReconnectEnabled(prev => {
+      const next = !prev;
+      saveAutoReconnectEnabled(next);
+      return next;
+    });
+  }, []);
+
   return {
     webSocketUrl,
     userId,
     isAuthenticated,
     currentUserEmail,
     jwtToken,
+    autoReconnectEnabled,
     handleSetAndSaveWebSocketUrl,
     handleSetAndSaveUserId,
     handleAuthStatusChange,
+    handleToggleAutoReconnect,
   };
 };

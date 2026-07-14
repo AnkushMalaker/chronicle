@@ -2,6 +2,7 @@ import { useEffect, useRef, useCallback, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '../contexts/AuthContext'
 import { BACKEND_URL } from '../services/api'
+import { emitWakeEvent, getActiveWakeClientId } from './useWakeFeedback'
 
 export type SSEStatus = 'connecting' | 'connected' | 'reconnecting' | 'error'
 
@@ -22,7 +23,7 @@ export function useSSE(): SSEStatus {
 
   const BASE_DELAY = 1000 // 1s, doubles each retry up to 30s
 
-  const handleEvent = useCallback((eventType: string, _data: unknown) => {
+  const handleEvent = useCallback((eventType: string, data: unknown) => {
     switch (eventType) {
       case 'conversation.created':
       case 'conversation.updated':
@@ -40,6 +41,72 @@ export function useSSE(): SSEStatus {
         queryClient.invalidateQueries({ queryKey: ['queue'] })
         break
 
+      case 'transcript.live': {
+        const d = data as { conversation_id?: string; segments?: unknown[]; transcript?: string }
+        if (d.conversation_id) {
+          const patch = {
+            segments: d.segments ?? [],
+            transcript: d.transcript ?? '',
+            segment_count: d.segments?.length ?? 0,
+          }
+          // Patch the conversation detail cache (['conversation', id])
+          queryClient.setQueryData(
+            ['conversation', d.conversation_id],
+            (old: Record<string, unknown> | undefined) => (old ? { ...old, ...patch } : old)
+          )
+          // Patch the matching row in every cached conversations list (['conversations', opts])
+          queryClient.setQueriesData(
+            { queryKey: ['conversations'] },
+            (old: { conversations?: Array<Record<string, unknown>> } | undefined) => {
+              if (!old?.conversations) return old
+              let changed = false
+              const conversations = old.conversations.map((c) => {
+                if (c.conversation_id !== d.conversation_id) return c
+                changed = true
+                return { ...c, ...patch }
+              })
+              return changed ? { ...old, conversations } : old
+            }
+          )
+        }
+        break
+      }
+
+      // Wake events are delivered over the per-user SSE bus but carry the originating
+      // client_id. Only react to wake activity for the device THIS browser is streaming
+      // as — a wake on the user's HAVPE or phone must not light up the web UI.
+      case 'wake.armed':
+      case 'wake.end_of_turn':
+      case 'wake.command':
+      case 'wake.blocked':
+      case 'wake.followup': {
+        const d = data as {
+          client_id?: string
+          score?: number
+          reason?: string
+          duration?: number
+          command?: string
+          reply?: string
+          window_secs?: number
+          identified?: string | null
+        }
+        const myClientId = getActiveWakeClientId()
+        if (!myClientId || d.client_id !== myClientId) break
+
+        if (eventType === 'wake.armed') {
+          emitWakeEvent({ type: 'armed', score: d.score })
+        } else if (eventType === 'wake.end_of_turn') {
+          emitWakeEvent({ type: 'end_of_turn', reason: d.reason, duration: d.duration })
+        } else if (eventType === 'wake.command') {
+          emitWakeEvent({ type: 'command', command: d.command, reply: d.reply })
+        } else if (eventType === 'wake.blocked') {
+          emitWakeEvent({ type: 'blocked', reason: d.reason, identified: d.identified })
+        } else {
+          emitWakeEvent({ type: 'followup', window_secs: d.window_secs })
+        }
+        break
+      }
+
       case 'plugin.event':
       case 'job.progress':
       case 'jobs.queued':
@@ -47,6 +114,13 @@ export function useSSE(): SSEStatus {
       case 'session.ended':
       case 'conversation.closed':
         queryClient.invalidateQueries({ queryKey: ['queue'] })
+        break
+
+      // A new system error/health event — refresh the System Errors page list and
+      // the nav unacked-error badge.
+      case 'system.error':
+        queryClient.invalidateQueries({ queryKey: ['system-events'] })
+        queryClient.invalidateQueries({ queryKey: ['system-events-summary'] })
         break
 
       case 'connected':

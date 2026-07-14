@@ -7,13 +7,14 @@ Routes pipeline events to appropriate plugins based on access level and triggers
 import asyncio
 import json
 import logging
-import os
 import re
 import string
 import time
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Awaitable, Callable, Dict, List, NamedTuple, Optional
 
-import redis
+from advanced_omi_backend.redis_factory import create_sync_redis
+from advanced_omi_backend.services.observability import record_event_sync
+from advanced_omi_backend.services.sse_publisher import publish_sse_event
 
 from .base import BasePlugin, PluginContext, PluginResult
 from .events import PluginEvent
@@ -30,9 +31,9 @@ def normalize_text_for_wake_word(text: str) -> str:
     - Strip leading/trailing whitespace
 
     Example:
-        "Hey, Vivi!" -> "hey vivi"
-        "HEY  VIVI" -> "hey vivi"
-        "Hey-Vivi" -> "hey vivi"
+        "Hey, Hermes!" -> "hey hermes"
+        "HEY  HERMES" -> "hey hermes"
+        "Hey-Hermes" -> "hey hermes"
     """
     # Lowercase
     text = text.lower()
@@ -53,16 +54,16 @@ def extract_command_around_keyword(transcript: str, keyword: str) -> str:
     Handles punctuation and spacing around the keyword gracefully.
 
     Example:
-        transcript: "Turn off the lights, Vivi"
-        keyword: "vivi"
+        transcript: "Turn off the lights, Hermes"
+        keyword: "hermes"
         -> "Turn off the lights"
 
-        transcript: "Vivi, turn off the lights in the hall"
-        keyword: "vivi"
+        transcript: "Hermes, turn off the lights in the hall"
+        keyword: "hermes"
         -> "turn off the lights in the hall"
 
-        transcript: "Turn off the hall lights, Vivi, please"
-        keyword: "vivi"
+        transcript: "Turn off the hall lights, Hermes, please"
+        keyword: "hermes"
         -> "Turn off the hall lights, please"
 
     Args:
@@ -97,8 +98,8 @@ def extract_command_after_wake_word(transcript: str, wake_word: str) -> str:
     Handles punctuation and spacing variations by creating a flexible regex pattern.
 
     Example:
-        transcript: "Hey, Vivi, turn off lights"
-        wake_word: "hey vivi"
+        transcript: "Hey, Hermes, turn off lights"
+        wake_word: "hey hermes"
         -> extracts: "turn off lights"
 
     Args:
@@ -115,7 +116,7 @@ def extract_command_after_wake_word(transcript: str, wake_word: str) -> str:
         return transcript.strip()
 
     # Create regex pattern that allows punctuation/whitespace between parts
-    # Example: "hey" + "vivi" -> r"hey[\s,.\-!?]*vivi[\s,.\-!?]*"
+    # Example: "hey" + "hermes" -> r"hey[\s,.\-!?]*hermes[\s,.\-!?]*"
     # The pattern matches the wake word parts with optional punctuation/whitespace between and after
     pattern_parts = [re.escape(part) for part in wake_word_parts]
     # Allow optional punctuation/whitespace between parts
@@ -151,6 +152,7 @@ class PluginHealth:
     # Possible status values
     REGISTERED = "registered"  # Registered but not yet initialized
     INITIALIZED = "initialized"  # Successfully initialized
+    DEGRADED = "degraded"  # External dependency unreachable; retried in background
     FAILED = "failed"  # initialize() raised an exception
 
     def __init__(self, plugin_id: str):
@@ -182,9 +184,8 @@ class PluginRouter:
         self._services = None
 
         # Sync Redis for event logging (works from both FastAPI and RQ workers)
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
         try:
-            self._event_redis = redis.from_url(redis_url, decode_responses=True)
+            self._event_redis = create_sync_redis(decode_responses=True)
         except Exception:
             logger.warning("Could not connect to Redis for event logging")
             self._event_redis = None
@@ -209,7 +210,9 @@ class PluginRouter:
     def mark_plugin_initialized(self, plugin_id: str) -> None:
         """Mark a plugin as successfully initialized."""
         if plugin_id in self.plugin_health:
-            self.plugin_health[plugin_id].status = PluginHealth.INITIALIZED
+            health = self.plugin_health[plugin_id]
+            health.status = PluginHealth.INITIALIZED
+            health.error = None
 
     def mark_plugin_failed(self, plugin_id: str, error: str) -> None:
         """Mark a plugin as failed during initialization."""
@@ -217,6 +220,37 @@ class PluginRouter:
             health = self.plugin_health[plugin_id]
             health.status = PluginHealth.FAILED
             health.error = error
+        record_event_sync(
+            severity="error",
+            category="plugin",
+            source=plugin_id,
+            title=f"Plugin '{plugin_id}' failed to initialize",
+            detail=error,
+            metadata={"plugin_id": plugin_id},
+        )
+
+    def mark_plugin_degraded(self, plugin_id: str, error: str) -> None:
+        """Mark a plugin as degraded: its external dependency is unreachable.
+
+        Unlike FAILED, degraded plugins are retried in the background (see
+        plugin_service.run_plugin_recovery). The system event is recorded only on
+        the transition into DEGRADED, so retry ticks don't spam the event log.
+        """
+        health = self.plugin_health.get(plugin_id)
+        if health is None:
+            return
+        transition = health.status != PluginHealth.DEGRADED
+        health.status = PluginHealth.DEGRADED
+        health.error = error
+        if transition:
+            record_event_sync(
+                severity="warning",
+                category="plugin",
+                source=plugin_id,
+                title=f"Plugin '{plugin_id}' degraded: dependency unreachable",
+                detail=error,
+                metadata={"plugin_id": plugin_id},
+            )
 
     def get_health_summary(self) -> Dict[str, Any]:
         """Get health summary for all registered plugins."""
@@ -225,13 +259,19 @@ class PluginRouter:
         return {
             "total": len(plugins),
             "initialized": statuses.count(PluginHealth.INITIALIZED),
+            "degraded": statuses.count(PluginHealth.DEGRADED),
             "failed": statuses.count(PluginHealth.FAILED),
             "registered": statuses.count(PluginHealth.REGISTERED),
             "plugins": plugins,
         }
 
     async def dispatch_event(
-        self, event: str, user_id: str, data: Dict, metadata: Optional[Dict] = None
+        self,
+        event: str,
+        user_id: str,
+        data: Dict,
+        metadata: Optional[Dict] = None,
+        on_plugin_done: Optional[Callable[..., Awaitable[None]]] = None,
     ) -> List[PluginResult]:
         """
         Dispatch event to all subscribed plugins.
@@ -241,6 +281,13 @@ class PluginRouter:
             user_id: User ID for context
             data: Event-specific data
             metadata: Optional metadata
+            on_plugin_done: Optional async observer called after each plugin in the
+                chain runs, as ``await on_plugin_done(plugin_id, duration_ms,
+                result, is_last)``. ``result`` is the PluginResult or ``None`` (a
+                decline). Lets callers trace per-plugin latency and react to a
+                handoff (e.g. the voice path plays a "thinking" tone when the fast
+                handler declines and a slower one takes over). Best-effort: an
+                observer exception is logged and never breaks dispatch.
 
         Returns:
             List of plugin results
@@ -251,8 +298,12 @@ class PluginRouter:
         results = []
         executed = []  # Track per-plugin outcomes for event log
 
-        # Get plugins subscribed to this event
-        plugin_ids = self._plugins_by_event.get(event, [])
+        # Get plugins subscribed to this event, ordered by priority (lower first)
+        # so they form a deterministic chain of responsibility.
+        plugin_ids = sorted(
+            self._plugins_by_event.get(event, []),
+            key=lambda pid: getattr(self.plugins[pid], "priority", 100),
+        )
 
         if not plugin_ids:
             logger.info(f"🔌 ROUTER: No plugins subscribed to event '{event}'")
@@ -261,7 +312,8 @@ class PluginRouter:
                 f"🔌 ROUTER: Found {len(plugin_ids)} subscribed plugin(s): {plugin_ids}"
             )
 
-        for plugin_id in plugin_ids:
+        last_index = len(plugin_ids) - 1
+        for index, plugin_id in enumerate(plugin_ids):
             plugin = self.plugins[plugin_id]
 
             if not plugin.enabled:
@@ -289,7 +341,28 @@ class PluginRouter:
                     services=self._services,
                 )
 
+                started = time.perf_counter()
                 result = await self._execute_plugin(plugin, event, context)
+                duration_ms = (time.perf_counter() - started) * 1000.0
+
+                # Notify the observer for every plugin that actually ran — including
+                # declines (result is None), so callers can time a "miss" and react
+                # to the handoff to the next handler in the chain.
+                if on_plugin_done is not None:
+                    try:
+                        await on_plugin_done(
+                            plugin_id,
+                            duration_ms,
+                            result,
+                            is_last=(index == last_index),
+                        )
+                    except (
+                        Exception
+                    ):  # noqa: BLE001 - observer must never break dispatch
+                        logger.debug(
+                            f"on_plugin_done observer failed for '{plugin_id}'",
+                            exc_info=True,
+                        )
 
                 if result:
                     status_icon = "✓" if result.success else "✗"
@@ -303,6 +376,10 @@ class PluginRouter:
                             "plugin_id": plugin_id,
                             "success": result.success,
                             "message": result.message,
+                            # Carry the plugin's structured output (reply, command,
+                            # skip reason, etc.) into the event log so the Events
+                            # page can show *why* a plugin succeeded/failed.
+                            "data": result.data,
                         }
                     )
 
@@ -363,11 +440,32 @@ class PluginRouter:
         if condition_type == "always":
             return self._PASS
 
-        # Button and starred events bypass transcript-based conditions (no transcript to match)
+        # Acoustic wake word: the standalone wakeword-service is the ONLY source of
+        # WAKE_WORD_DETECTED. Fire ONLY on that event, gated by the configured score
+        # threshold, and never on transcript/button events — so a plugin can be
+        # gated EXCLUSIVELY on the acoustic wake word. The command text arrives
+        # pre-resolved in data["command"] (set by the wake-word dispatcher).
+        if condition_type == "acoustic_wake_word":
+            if event == PluginEvent.WAKE_WORD_DETECTED:
+                threshold = float(plugin.condition.get("threshold", 0.0) or 0.0)
+                raw_score = data.get("score")
+                score = float(raw_score) if raw_score is not None else 1.0
+                if score >= threshold:
+                    return self._PASS
+                logger.debug(
+                    f"Acoustic wake below threshold ({score:.3f} < {threshold:.3f}); skipping"
+                )
+            return self._SKIP
+
+        # Button, starred, and acoustic wake-word events bypass transcript-based
+        # conditions (wake_word/keyword_anywhere) — they have no transcript to
+        # match against. The acoustic detector already arms on the wake word, and
+        # the command text arrives pre-resolved in data["command"].
         if event and event in (
             PluginEvent.BUTTON_SINGLE_PRESS,
             PluginEvent.BUTTON_DOUBLE_PRESS,
             PluginEvent.CONVERSATION_STARRED,
+            PluginEvent.WAKE_WORD_DETECTED,
         ):
             return self._PASS
 
@@ -449,6 +547,8 @@ class PluginRouter:
             return await plugin.on_memory_processed(context)
         elif event == PluginEvent.CONVERSATION_STARRED:
             return await plugin.on_conversation_starred(context)
+        elif event == PluginEvent.WAKE_WORD_DETECTED:
+            return await plugin.on_wake_word_detected(context)
         elif event in (
             PluginEvent.BUTTON_SINGLE_PRESS,
             PluginEvent.BUTTON_DOUBLE_PRESS,
@@ -489,8 +589,6 @@ class PluginRouter:
             pipe.execute()
 
             # Publish SSE event for queue page live updates
-            from advanced_omi_backend.services.sse_publisher import publish_sse_event
-
             if user_id:
                 publish_sse_event(
                     user_id,

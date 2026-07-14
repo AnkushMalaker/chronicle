@@ -14,13 +14,16 @@ Supports two processing pathways:
 
 import logging
 import time
-import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
+
+from rq import get_current_job
 
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
     memory_queue,
+    post_conv_enqueue_kwargs,
 )
+from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import JobPriority, async_job
 from advanced_omi_backend.observability.otel_setup import (
     set_otel_session,
@@ -29,8 +32,15 @@ from advanced_omi_backend.observability.otel_setup import (
     traced_job,
 )
 from advanced_omi_backend.plugins.events import PluginEvent
+from advanced_omi_backend.services.memory import get_memory_service
+from advanced_omi_backend.services.memory.audit import (
+    MemoryCause,
+    UpdateStrategy,
+    memory_provenance,
+)
 from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
 from advanced_omi_backend.services.sse_publisher import publish_sse_event
+from advanced_omi_backend.users import get_user_by_id
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +139,7 @@ async def process_memory_job(
     V2 Architecture:
         1. Extracts memories from conversation transcript
         2. Checks primary speakers filter if configured
-        3. Uses configured memory provider (chronicle or openmemory_mcp)
+        3. Uses the Chronicle memory provider (agentic vault)
         4. Stores memory references in conversation document
 
     Note: Listening jobs are restarted by open_conversation_job (not here).
@@ -143,10 +153,6 @@ async def process_memory_job(
     Returns:
         Dict with processing results
     """
-    from advanced_omi_backend.models.conversation import Conversation
-    from advanced_omi_backend.services.memory import get_memory_service
-    from advanced_omi_backend.users import get_user_by_id
-
     set_otel_session(conversation_id)
     start_time = time.time()
     logger.info(f"🔄 Starting memory processing for conversation {conversation_id}")
@@ -234,41 +240,56 @@ async def process_memory_job(
             )
             return {"success": True, "skipped": True, "reason": "No primary speakers"}
 
-    # Detect reprocess trigger from RQ job metadata
-    from rq import get_current_job as _get_current_job
+    # Read provenance from RQ job metadata. `cause` is descriptive (recorded on
+    # the ledger); `strategy` is control flow (which update pathway runs). They
+    # are independent — see services/memory/audit.py.
+    current_rq_job = get_current_job()
+    job_meta = current_rq_job.meta if current_rq_job and current_rq_job.meta else {}
+    cause = job_meta.get("cause") or MemoryCause.AUTO_EXTRACTION.value
+    strategy = job_meta.get("strategy") or UpdateStrategy.FULL.value
 
-    current_rq_job = _get_current_job()
-    trigger = (
-        current_rq_job.meta.get("trigger")
-        if current_rq_job and current_rq_job.meta
-        else None
-    )
-
-    # Process memory — choose pathway based on trigger
     memory_service = get_memory_service()
 
-    if trigger == "reprocess_after_speaker":
-        # === Speaker reprocess pathway ===
-        # Compute diff between old and new transcript versions
-        memory_result = await _process_speaker_reprocess(
-            memory_service=memory_service,
-            conversation_model=conversation_model,
-            full_conversation=full_conversation,
-            client_id=client_id,
-            conversation_id=conversation_id,
-            user_id=user_id,
-            user_email=user_email,
+    # Never let an extraction error escape this job. It sits mid-chain
+    # (recognize_speakers → memory → title_summary → event_complete), and under
+    # RQ a raised exception marks the job failed and leaves every dependent job
+    # DEFERRED FOREVER — so the conversation is stuck in "reprocessing" and never
+    # gets a title/summary. Degrade gracefully (log + return failure dict) so the
+    # chain continues. Common trigger: a long transcript exceeding the memory
+    # LLM's context window (provider HTTP 400).
+    try:
+        with memory_provenance(cause, strategy):
+            if strategy == UpdateStrategy.SPEAKER_DIFF:
+                # === Speaker-diff pathway ===
+                # Targeted update from the speaker-label diff between transcript
+                # versions (used by speaker reprocess and diarization-annotation
+                # apply); falls back to a full extraction if no diff is available.
+                memory_result = await _process_speaker_diff_update(
+                    memory_service=memory_service,
+                    conversation_model=conversation_model,
+                    full_conversation=full_conversation,
+                    client_id=client_id,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    user_email=user_email,
+                )
+            else:
+                # === Normal extraction pathway ===
+                memory_result = await memory_service.add_memory(
+                    full_conversation,
+                    client_id,
+                    conversation_id,
+                    user_id,
+                    user_email,
+                    allow_update=True,
+                )
+    except Exception as e:
+        logger.error(
+            f"❌ Memory extraction failed for conversation {conversation_id} "
+            f"(continuing chain so title/summary still runs): {e}",
+            exc_info=True,
         )
-    else:
-        # === Normal extraction pathway ===
-        memory_result = await memory_service.add_memory(
-            full_conversation,
-            client_id,
-            conversation_id,
-            user_id,
-            user_email,
-            allow_update=True,
-        )
+        return {"success": False, "error": f"Memory extraction error: {e}"}
 
     if memory_result:
         success, created_memory_ids = memory_result
@@ -279,37 +300,9 @@ async def process_memory_job(
             # Determine memory provider from memory service
             memory_provider = memory_service.provider_identifier
 
-            # Only create memory version if new memories were created
+            # Vault changes are recorded in the memory_audit ledger by the provider
+            # itself (see services/memory/audit.py); the job just surfaces the result.
             if created_memory_ids:
-                # Add memory version to conversation
-                conversation_model = await Conversation.find_one(
-                    Conversation.conversation_id == conversation_id
-                )
-                if conversation_model:
-                    # Get active transcript version for reference
-                    transcript_version_id = (
-                        conversation_model.active_transcript_version or "unknown"
-                    )
-
-                    # Create version ID for this memory extraction
-                    version_id = str(uuid.uuid4())
-
-                    # Add memory version with metadata
-                    conversation_model.add_memory_version(
-                        version_id=version_id,
-                        memory_count=len(created_memory_ids),
-                        transcript_version_id=transcript_version_id,
-                        provider=(
-                            conversation_model.MemoryProvider.OPENMEMORY_MCP
-                            if memory_provider == "openmemory_mcp"
-                            else conversation_model.MemoryProvider.CHRONICLE
-                        ),
-                        processing_time_seconds=processing_time,
-                        metadata={"memory_ids": created_memory_ids},
-                        set_as_active=True,
-                    )
-                    await conversation_model.save()
-
                 publish_sse_event(
                     user_id,
                     "memory.processed",
@@ -324,8 +317,6 @@ async def process_memory_job(
                 )
 
                 # Update job metadata with memory information
-                from rq import get_current_job
-
                 current_job = get_current_job()
                 if current_job:
                     if not current_job.meta:
@@ -369,45 +360,6 @@ async def process_memory_job(
             # This allows users to resume talking immediately after conversation closes,
             # without waiting for memory processing to complete.
 
-            # Extract entities and relationships to knowledge graph (if enabled)
-            try:
-                from advanced_omi_backend.model_registry import get_config
-
-                config = get_config()
-                kg_enabled = (
-                    config.get("memory", {})
-                    .get("knowledge_graph", {})
-                    .get("enabled", False)
-                )
-
-                if kg_enabled:
-                    from advanced_omi_backend.services.knowledge_graph import (
-                        get_knowledge_graph_service,
-                    )
-
-                    kg_service = get_knowledge_graph_service()
-                    kg_result = await kg_service.process_conversation(
-                        conversation_id=conversation_id,
-                        transcript=full_conversation,
-                        user_id=user_id,
-                        conversation_name=(
-                            conversation_model.title
-                            if hasattr(conversation_model, "title")
-                            else None
-                        ),
-                    )
-                    if kg_result.get("entities", 0) > 0:
-                        logger.info(
-                            f"🔗 Knowledge graph: extracted {kg_result.get('entities', 0)} entities, "
-                            f"{kg_result.get('relationships', 0)} relationships, "
-                            f"{kg_result.get('promises', 0)} promises from {conversation_id}"
-                        )
-                else:
-                    logger.debug("Knowledge graph extraction disabled in config")
-            except Exception as e:
-                # Knowledge graph extraction is optional - don't fail the job
-                logger.warning(f"⚠️ Knowledge graph extraction failed (non-fatal): {e}")
-
             # Trigger memory-level plugins (ALWAYS dispatch when success, even with 0 new memories)
             memory_count = len(created_memory_ids) if created_memory_ids else 0
             try:
@@ -450,7 +402,7 @@ async def process_memory_job(
         return {"success": False, "error": "Memory service returned False"}
 
 
-async def _process_speaker_reprocess(
+async def _process_speaker_diff_update(
     memory_service,
     conversation_model,
     full_conversation: str,
@@ -582,12 +534,19 @@ async def _process_speaker_reprocess(
 def enqueue_memory_processing(
     conversation_id: str,
     priority: JobPriority = JobPriority.NORMAL,
+    *,
+    cause: MemoryCause = MemoryCause.AUTO_EXTRACTION,
+    strategy: UpdateStrategy = UpdateStrategy.FULL,
 ):
     """
     Enqueue a memory processing job.
 
     The job fetches all needed data (client_id, user_id, user_email) from the
     conversation document internally, so only conversation_id is needed.
+
+    ``cause`` records *why* the memory is being (re)processed on the audit ledger;
+    ``strategy`` selects *how* the vault is updated (full re-extraction vs. a
+    targeted speaker-label diff). See services/memory/audit.py.
 
     Returns RQ Job object for tracking.
     """
@@ -598,13 +557,24 @@ def enqueue_memory_processing(
         JobPriority.LOW: 900,  # 15 minutes
     }
 
+    # job_id uses [:12] to match the deterministic id the post-conversation chain and
+    # _clear_post_conversation_chain use — so a standalone re-enqueue collides with
+    # (replaces) the chain's memory job rather than creating an orphan twin.
     job = memory_queue.enqueue(
         process_memory_job,
         conversation_id,  # Only argument needed - job fetches conversation data internally
         job_timeout=timeout_mapping.get(priority, 1800),
         result_ttl=JOB_RESULT_TTL,
-        job_id=f"memory_{conversation_id[:8]}",
+        job_id=f"memory_{conversation_id[:12]}",
         description=f"Process memory for conversation {conversation_id[:8]}",
+        **post_conv_enqueue_kwargs(
+            "memory",
+            {
+                "conversation_id": conversation_id,
+                "cause": cause.value,
+                "strategy": strategy.value,
+            },
+        ),
     )
 
     logger.info(

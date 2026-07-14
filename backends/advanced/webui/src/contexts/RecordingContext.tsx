@@ -2,11 +2,14 @@ import { createContext, useContext, useState, useRef, useCallback, useEffect, us
 import { BACKEND_URL } from '../services/api'
 import { getStorageKey } from '../utils/storage'
 import { useAuth } from './AuthContext'
+import { playDownlinkAudio } from '../utils/audioPlayback'
+import { setActiveWakeClientId } from '../hooks/useWakeFeedback'
 
 const log = import.meta.env.DEV ? console.log.bind(console) : () => {}
 
-export type RecordingStep = 'idle' | 'mic' | 'websocket' | 'audio-start' | 'streaming' | 'stopping' | 'error'
+export type RecordingStep = 'idle' | 'mic' | 'display-audio' | 'websocket' | 'audio-start' | 'streaming' | 'stopping' | 'error'
 export type RecordingMode = 'batch' | 'streaming'
+export type AudioSource = 'mic' | 'meeting' | 'tab'
 
 export interface DebugStats {
   chunksSent: number
@@ -24,11 +27,14 @@ export interface RecordingContextType {
   recordingDuration: number
   error: string | null
   mode: RecordingMode
+  liveTranscript: string
 
   // Actions
   startRecording: () => Promise<void>
   stopRecording: () => void
   setMode: (mode: RecordingMode) => void
+  audioSource: AudioSource
+  setAudioSource: (source: AudioSource) => void
 
   // Microphone selection
   availableDevices: MediaDeviceInfo[]
@@ -55,7 +61,9 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   const [recordingDuration, setRecordingDuration] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [mode, setMode] = useState<RecordingMode>('streaming')
+  const [liveTranscript, setLiveTranscript] = useState('')
   const [analyserState, setAnalyserState] = useState<AnalyserNode | null>(null)
+  const [audioSource, setAudioSource] = useState<AudioSource>('mic')
 
   // Microphone selection
   const [availableDevices, setAvailableDevices] = useState<MediaDeviceInfo[]>([])
@@ -77,6 +85,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   const audioContextRef = useRef<AudioContext | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
   const processorRef = useRef<ScriptProcessorNode | null>(null)
+  const displayStreamRef = useRef<MediaStream | null>(null)
   const durationIntervalRef = useRef<ReturnType<typeof setInterval>>()
   const keepAliveIntervalRef = useRef<ReturnType<typeof setInterval>>()
   const chunkCountRef = useRef(0)
@@ -123,6 +132,9 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   const cleanup = useCallback(() => {
     log('Cleaning up audio recording resources')
 
+    // No longer streaming as any client — stop reacting to wake-word SSE feedback.
+    setActiveWakeClientId(null)
+
     // Stop audio processing
     audioProcessingStartedRef.current = false
 
@@ -130,6 +142,12 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach(track => track.stop())
       mediaStreamRef.current = null
+    }
+
+    // Clean up display stream (meeting mode)
+    if (displayStreamRef.current) {
+      displayStreamRef.current.getTracks().forEach(track => track.stop())
+      displayStreamRef.current = null
     }
 
     // Clean up audio context
@@ -170,10 +188,13 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       throw new Error('Microphone access requires HTTPS or localhost')
     }
 
+    // In meeting mode, disable echo cancellation so speaker/tab audio
+    // isn't subtracted from the mic signal
+    const disableProcessing = audioSource === 'meeting'
     const audioConstraints: MediaTrackConstraints = {
       channelCount: 1,
-      echoCancellation: true,
-      noiseSuppression: true,
+      echoCancellation: !disableProcessing,
+      noiseSuppression: !disableProcessing,
       autoGainControl: true,
     }
     if (selectedDeviceId) {
@@ -202,7 +223,35 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
 
     log('Microphone access granted')
     return stream
-  }, [canAccessMicrophone, selectedDeviceId, isRecording, cleanup, refreshDevices])
+  }, [canAccessMicrophone, selectedDeviceId, isRecording, cleanup, refreshDevices, audioSource])
+
+  // Step 1b: Get display/tab audio (meeting mode only)
+  const getDisplayAudio = useCallback(async (): Promise<MediaStream> => {
+    log('Step 1b: Requesting display/tab audio')
+
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,   // Required for picker to show
+      audio: true,   // Request audio track
+    })
+
+    // Stop video track — we only need audio. Chrome keeps audio alive.
+    stream.getVideoTracks().forEach(t => t.stop())
+
+    if (stream.getAudioTracks().length === 0) {
+      throw new Error('No audio shared. Please check "Share audio" when selecting a tab or screen.')
+    }
+
+    displayStreamRef.current = stream
+
+    // Handle user clicking "Stop sharing" in browser chrome
+    stream.getAudioTracks()[0].onended = () => {
+      log('Display audio track ended (user stopped sharing)')
+      displayStreamRef.current = null
+    }
+
+    log('Display audio access granted')
+    return stream
+  }, [])
 
   // Step 2: Connect WebSocket
   const connectWebSocket = useCallback(async (): Promise<WebSocket> => {
@@ -312,9 +361,27 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
             setIsRecording(false)
           }
 
+          // The backend confirms the connection with the resolved client_id. Record it
+          // so wake-word SSE feedback can be scoped to this device (see useSSE).
+          else if (message.type === 'ready') {
+            if (message.client_id) setActiveWakeClientId(message.client_id)
+          }
+
+          // Backend→device downlink: wake-word tones and Hermes TTS replies, forwarded
+          // down this device's own WebSocket. Play them out the browser's speaker.
+          else if (message.type === 'play-audio') {
+            playDownlinkAudio(message.data)
+          }
+
           // Handle other message types (interim_transcript, etc.)
           else if (message.type === 'interim_transcript') {
             log('Received interim transcript:', message.data)
+            // Streaming providers send a cumulative transcript that grows over
+            // time, so replace (not append) with the latest text.
+            const text = message.data?.text
+            if (typeof text === 'string' && text.length > 0) {
+              setLiveTranscript(text)
+            }
           }
 
         } catch (e) {
@@ -351,16 +418,13 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   }, [mode])
 
   // Step 4: Start audio streaming
-  const startAudioStreaming = useCallback(async (stream: MediaStream, ws: WebSocket): Promise<void> => {
+  const startAudioStreaming = useCallback(async (micStream: MediaStream | null, ws: WebSocket): Promise<void> => {
     log('Step 4: Starting audio streaming')
 
     // Reuse the AudioContext created in startRecording
     const audioContext = audioContextRef.current!
     const analyser = audioContext.createAnalyser()
-    const source = audioContext.createMediaStreamSource(stream)
-
     analyser.fftSize = 256
-    source.connect(analyser)
 
     log('Audio context state:', audioContext.state, 'Sample rate:', audioContext.sampleRate)
 
@@ -378,7 +442,27 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
 
     // Set up audio processing
     const processor = audioContext.createScriptProcessor(4096, 1, 1)
-    source.connect(processor)
+
+    // Connect mic source if available
+    if (micStream) {
+      const micSource = audioContext.createMediaStreamSource(micStream)
+      micSource.connect(analyser)
+      micSource.connect(processor)
+    }
+
+    // Mix in display/tab audio if available
+    // NOTE: We do NOT connect display audio to audioContext.destination —
+    // the source tab already plays the audio, so replaying it here would cause echo.
+    if (displayStreamRef.current && displayStreamRef.current.getAudioTracks().length > 0) {
+      const displaySource = audioContext.createMediaStreamSource(displayStreamRef.current)
+      displaySource.connect(processor)
+      // Use display audio for visualization when no mic
+      if (!micStream) {
+        displaySource.connect(analyser)
+      }
+      log('Display audio connected to recording pipeline')
+    }
+
     processor.connect(audioContext.destination)
 
     let processCallCount = 0
@@ -469,18 +553,31 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
 
   // Main start recording function - sequential flow
   const startRecording = useCallback(async () => {
+    const needsMic = audioSource !== 'tab'
+    const needsDisplayAudio = audioSource !== 'mic'
+
     try {
       setError(null)
-      setCurrentStep('mic')
+      setLiveTranscript('')
 
-      // Step 1: Get microphone access
-      const stream = await getMicrophoneAccess()
+      // Step 1: Get microphone access (skip for tab-only)
+      let micStream: MediaStream | null = null
+      if (needsMic) {
+        setCurrentStep('mic')
+        micStream = await getMicrophoneAccess()
+      }
 
       // Create AudioContext at 16kHz to match the backend pipeline expectation.
       // The browser will internally resample from the mic's native rate (e.g. 48kHz).
       const audioContext = new AudioContext({ sampleRate: 16000 })
       audioContextRef.current = audioContext
       log(`AudioContext created, sample rate: ${audioContext.sampleRate}Hz`)
+
+      // Step 1b: Get display/tab audio if needed
+      if (needsDisplayAudio) {
+        setCurrentStep('display-audio')
+        await getDisplayAudio()
+      }
 
       setCurrentStep('websocket')
       // Step 2: Connect WebSocket (includes stabilization delay)
@@ -492,7 +589,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
 
       setCurrentStep('streaming')
       // Step 4: Start audio streaming (reuses existing AudioContext)
-      await startAudioStreaming(stream, ws)
+      await startAudioStreaming(micStream, ws)
 
       // All steps complete - mark as recording
       setIsRecording(true)
@@ -516,7 +613,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       }))
       cleanup()
     }
-  }, [getMicrophoneAccess, connectWebSocket, sendAudioStartMessage, startAudioStreaming, cleanup])
+  }, [getMicrophoneAccess, getDisplayAudio, audioSource, connectWebSocket, sendAudioStartMessage, startAudioStreaming, cleanup])
 
   // Stop recording function
   const stopRecording = useCallback(() => {
@@ -585,9 +682,12 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     recordingDuration,
     error,
     mode,
+    liveTranscript,
     startRecording,
     stopRecording,
     setMode,
+    audioSource,
+    setAudioSource,
     availableDevices,
     selectedDeviceId,
     setSelectedDeviceId,
@@ -596,8 +696,9 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     formatDuration,
     canAccessMicrophone
   }), [
-    currentStep, isRecording, recordingDuration, error, mode,
+    currentStep, isRecording, recordingDuration, error, mode, liveTranscript,
     startRecording, stopRecording, setMode,
+    audioSource, setAudioSource,
     availableDevices, selectedDeviceId, setSelectedDeviceId,
     analyserState, debugStats, formatDuration, canAccessMicrophone
   ])

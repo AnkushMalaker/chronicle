@@ -6,7 +6,7 @@ waveform visualization data, enabling UI to display audio waveforms
 without real-time decoding.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from beanie import Document, Indexed
@@ -32,7 +32,8 @@ class WaveformData(Document):
     # Metadata
     duration_seconds: float = Field(description="Total audio duration in seconds")
     created_at: datetime = Field(
-        default_factory=datetime.utcnow, description="When this waveform was generated"
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="When this waveform was generated",
     )
     processing_time_seconds: Optional[float] = Field(
         None, description="Time taken to generate waveform"

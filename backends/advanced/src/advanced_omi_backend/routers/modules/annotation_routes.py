@@ -6,6 +6,7 @@ Supports both user edits and AI-powered suggestions.
 """
 
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import List
 
@@ -13,6 +14,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from advanced_omi_backend.auth import current_active_user
+from advanced_omi_backend.constants import NOISE_LABEL
+from advanced_omi_backend.controllers.queue_controller import (
+    conversation_edit_chain_in_flight,
+)
 from advanced_omi_backend.models.annotation import (
     Annotation,
     AnnotationResponse,
@@ -20,21 +25,39 @@ from advanced_omi_backend.models.annotation import (
     AnnotationStatus,
     AnnotationType,
     AnnotationUpdate,
+    DeletionAnnotationCreate,
     DiarizationAnnotationCreate,
-    EntityAnnotationCreate,
     InsertAnnotationCreate,
     MemoryAnnotationCreate,
+    TimingAnnotationCreate,
     TitleAnnotationCreate,
     TranscriptAnnotationCreate,
 )
 from advanced_omi_backend.models.conversation import Conversation
-from advanced_omi_backend.services.knowledge_graph import get_knowledge_graph_service
+from advanced_omi_backend.models.job import JobPriority
 from advanced_omi_backend.services.memory import get_memory_service
+from advanced_omi_backend.services.memory.audit import MemoryCause, UpdateStrategy
 from advanced_omi_backend.users import User
+from advanced_omi_backend.workers.memory_jobs import enqueue_memory_processing
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/annotations", tags=["annotations"])
+
+
+def _apply_diarization_label(segment, corrected_speaker: str) -> None:
+    """Apply a diarization correction to a copied segment in place.
+
+    The reserved NOISE_LABEL means "this is background/noise, not a person":
+    relabel it, drop any prior identification, and reclassify it to a non-speech
+    (event) segment so it falls out of speech∩speaker overlap and speech-only
+    playback. Any other label is a normal speaker correction.
+    """
+    segment.speaker = corrected_speaker
+    if corrected_speaker == NOISE_LABEL:
+        segment.identified_as = None
+        segment.confidence = None
+        segment.segment_type = Conversation.SegmentType.EVENT.value
 
 
 @router.get("/suggestions")
@@ -393,27 +416,6 @@ async def update_annotation_status(
                 except Exception as e:
                     logger.error(f"Error applying transcript suggestion: {e}")
                     # Don't fail the status update if segment update fails
-            elif annotation.is_entity_annotation():
-                # Update entity in Neo4j
-                try:
-                    kg_service = get_knowledge_graph_service()
-                    update_kwargs = {}
-                    if annotation.entity_field == "name":
-                        update_kwargs["name"] = annotation.corrected_text
-                    elif annotation.entity_field == "details":
-                        update_kwargs["details"] = annotation.corrected_text
-                    if update_kwargs:
-                        await kg_service.update_entity(
-                            entity_id=annotation.entity_id,
-                            user_id=annotation.user_id,
-                            **update_kwargs,
-                        )
-                        logger.info(
-                            f"Applied entity suggestion to entity {annotation.entity_id}"
-                        )
-                except Exception as e:
-                    logger.error(f"Error applying entity suggestion: {e}")
-                    # Don't fail the status update if entity update fails
             elif annotation.is_title_annotation():
                 # Update conversation title
                 try:
@@ -606,6 +608,8 @@ async def create_insert_annotation(
             insert_text=annotation_data.insert_text,
             insert_segment_type=annotation_data.insert_segment_type,
             insert_speaker=annotation_data.insert_speaker,
+            insert_start=annotation_data.insert_start,
+            insert_end=annotation_data.insert_end,
             status=AnnotationStatus.PENDING,
             processed=False,
         )
@@ -647,115 +651,6 @@ async def get_insert_annotations(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to fetch insert annotations: {str(e)}",
-        )
-
-
-# === Entity Annotation Routes ===
-
-
-@router.post("/entity", response_model=AnnotationResponse)
-async def create_entity_annotation(
-    annotation_data: EntityAnnotationCreate,
-    current_user: User = Depends(current_active_user),
-):
-    """
-    Create annotation for entity edit (name or details correction).
-
-    - Validates user owns the entity
-    - Creates annotation record for jargon/finetuning pipeline
-    - Applies correction to Neo4j immediately
-    - Marked as processed=False for downstream cron consumption
-
-    Dual purpose: entity name corrections feed both the jargon pipeline
-    (domain vocabulary for ASR) and the entity extraction pipeline
-    (improving future extraction accuracy).
-    """
-    try:
-        # Validate entity_field
-        if annotation_data.entity_field not in ("name", "details"):
-            raise HTTPException(
-                status_code=400,
-                detail="entity_field must be 'name' or 'details'",
-            )
-
-        # Verify entity exists and belongs to user
-        kg_service = get_knowledge_graph_service()
-        entity = await kg_service.get_entity(
-            entity_id=annotation_data.entity_id,
-            user_id=current_user.user_id,
-        )
-        if not entity:
-            raise HTTPException(status_code=404, detail="Entity not found")
-
-        # Create annotation
-        annotation = Annotation(
-            annotation_type=AnnotationType.ENTITY,
-            user_id=current_user.user_id,
-            entity_id=annotation_data.entity_id,
-            entity_field=annotation_data.entity_field,
-            original_text=annotation_data.original_text,
-            corrected_text=annotation_data.corrected_text,
-            status=AnnotationStatus.ACCEPTED,
-            processed=False,  # Unprocessed — jargon/finetuning cron will consume later
-        )
-        await annotation.save()
-        logger.info(
-            f"Created entity annotation {annotation.id} for entity {annotation_data.entity_id} "
-            f"field={annotation_data.entity_field}"
-        )
-
-        # Apply correction to Neo4j immediately
-        try:
-            update_kwargs = {}
-            if annotation_data.entity_field == "name":
-                update_kwargs["name"] = annotation_data.corrected_text
-            elif annotation_data.entity_field == "details":
-                update_kwargs["details"] = annotation_data.corrected_text
-
-            await kg_service.update_entity(
-                entity_id=annotation_data.entity_id,
-                user_id=current_user.user_id,
-                **update_kwargs,
-            )
-            logger.info(
-                f"Applied entity correction to Neo4j for entity {annotation_data.entity_id}"
-            )
-        except Exception as e:
-            logger.error(f"Error applying entity correction to Neo4j: {e}")
-            # Annotation is saved but Neo4j update failed — log but don't fail the request
-
-        return AnnotationResponse.model_validate(annotation)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error creating entity annotation: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to create entity annotation: {str(e)}",
-        )
-
-
-@router.get("/entity/{entity_id}", response_model=List[AnnotationResponse])
-async def get_entity_annotations(
-    entity_id: str,
-    current_user: User = Depends(current_active_user),
-):
-    """Get all annotations for an entity."""
-    try:
-        annotations = await Annotation.find(
-            Annotation.annotation_type == AnnotationType.ENTITY,
-            Annotation.entity_id == entity_id,
-            Annotation.user_id == current_user.user_id,
-        ).to_list()
-
-        return [AnnotationResponse.model_validate(a) for a in annotations]
-
-    except Exception as e:
-        logger.error(f"Error fetching entity annotations: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch entity annotations: {str(e)}",
         )
 
 
@@ -909,6 +804,147 @@ async def create_diarization_annotation(
         )
 
 
+@router.post("/timing", response_model=AnnotationResponse)
+async def create_timing_annotation(
+    annotation_data: TimingAnnotationCreate,
+    current_user: User = Depends(current_active_user),
+):
+    """
+    Create a TIMING annotation that adjusts an existing segment's start/end.
+
+    Used by the waveform region editor (move/resize a segment's span). Not applied
+    immediately — staged as a pending correction and committed by ``/apply``, which
+    re-derives a new transcript version. Validates ownership, segment index and that
+    end > start.
+    """
+    try:
+        conversation = await Conversation.find_one(
+            Conversation.conversation_id == annotation_data.conversation_id,
+            Conversation.user_id == current_user.user_id,
+        )
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+        active_transcript = conversation.active_transcript
+        if not active_transcript or annotation_data.segment_index >= len(
+            active_transcript.segments
+        ):
+            raise HTTPException(status_code=400, detail="Invalid segment index")
+
+        if annotation_data.new_end <= annotation_data.new_start:
+            raise HTTPException(
+                status_code=400, detail="new_end must be greater than new_start"
+            )
+
+        annotation = Annotation(
+            annotation_type=AnnotationType.TIMING,
+            user_id=current_user.user_id,
+            conversation_id=annotation_data.conversation_id,
+            segment_index=annotation_data.segment_index,
+            new_start=annotation_data.new_start,
+            new_end=annotation_data.new_end,
+            status=annotation_data.status,
+            processed=False,
+        )
+        await annotation.save()
+        logger.info(
+            f"Created timing annotation {annotation.id} for conversation "
+            f"{annotation_data.conversation_id} segment {annotation_data.segment_index} "
+            f"→ [{annotation_data.new_start:.2f}, {annotation_data.new_end:.2f}]"
+        )
+
+        return AnnotationResponse.model_validate(annotation)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating timing annotation: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create timing annotation: {str(e)}",
+        )
+
+
+@router.get("/timing/{conversation_id}", response_model=List[AnnotationResponse])
+async def get_timing_annotations(
+    conversation_id: str,
+    current_user: User = Depends(current_active_user),
+):
+    """Get all TIMING annotations for a conversation."""
+    annotations = await Annotation.find(
+        Annotation.conversation_id == conversation_id,
+        Annotation.user_id == current_user.user_id,
+        Annotation.annotation_type == AnnotationType.TIMING,
+    ).to_list()
+    return [AnnotationResponse.model_validate(a) for a in annotations]
+
+
+@router.post("/deletion", response_model=AnnotationResponse)
+async def create_deletion_annotation(
+    annotation_data: DeletionAnnotationCreate,
+    current_user: User = Depends(current_active_user),
+):
+    """
+    Create a DELETION annotation that removes an existing segment.
+
+    Staged as a pending correction (not applied immediately) and committed by
+    ``/apply``, which re-derives a new transcript version with the segment dropped.
+    Validates ownership and segment index.
+    """
+    try:
+        conversation = await Conversation.find_one(
+            Conversation.conversation_id == annotation_data.conversation_id,
+            Conversation.user_id == current_user.user_id,
+        )
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+        active_transcript = conversation.active_transcript
+        if not active_transcript or annotation_data.segment_index >= len(
+            active_transcript.segments
+        ):
+            raise HTTPException(status_code=400, detail="Invalid segment index")
+
+        annotation = Annotation(
+            annotation_type=AnnotationType.DELETION,
+            user_id=current_user.user_id,
+            conversation_id=annotation_data.conversation_id,
+            segment_index=annotation_data.segment_index,
+            status=annotation_data.status,
+            processed=False,
+        )
+        await annotation.save()
+        logger.info(
+            f"Created deletion annotation {annotation.id} for conversation "
+            f"{annotation_data.conversation_id} segment {annotation_data.segment_index}"
+        )
+
+        return AnnotationResponse.model_validate(annotation)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating deletion annotation: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create deletion annotation: {str(e)}",
+        )
+
+
+@router.get("/deletion/{conversation_id}", response_model=List[AnnotationResponse])
+async def get_deletion_annotations(
+    conversation_id: str,
+    current_user: User = Depends(current_active_user),
+):
+    """Get all DELETION annotations for a conversation."""
+    annotations = await Annotation.find(
+        Annotation.conversation_id == conversation_id,
+        Annotation.user_id == current_user.user_id,
+        Annotation.annotation_type == AnnotationType.DELETION,
+    ).to_list()
+    return [AnnotationResponse.model_validate(a) for a in annotations]
+
+
 @router.get("/diarization/{conversation_id}", response_model=List[AnnotationResponse])
 async def get_diarization_annotations(
     conversation_id: str,
@@ -971,14 +1007,26 @@ async def apply_diarization_annotations(
                 }
             )
 
+        # Single-flight: don't stack a new edit on top of an in-flight one. Apply
+        # creates a new transcript version and enqueues memory under deterministic
+        # job_ids; overlapping with another apply/reprocess races on the
+        # conversation's full-document save() and can clobber it.
+        in_flight = conversation_edit_chain_in_flight(conversation_id)
+        if in_flight:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "This conversation is still processing a previous edit. Try again in a moment.",
+                    "in_flight_job_id": in_flight,
+                },
+            )
+
         # Get active transcript version
         active_transcript = conversation.active_transcript
         if not active_transcript:
             raise HTTPException(status_code=404, detail="No active transcript found")
 
         # Create NEW transcript version with corrected speakers
-        import uuid
-
         new_version_id = str(uuid.uuid4())
 
         # Copy segments and apply corrections (most recent annotation wins)
@@ -997,14 +1045,20 @@ async def apply_diarization_annotations(
             if annotation_for_segment:
                 # Apply correction
                 corrected_segment = segment.model_copy()
-                corrected_segment.speaker = annotation_for_segment.corrected_speaker
+                _apply_diarization_label(
+                    corrected_segment, annotation_for_segment.corrected_speaker
+                )
                 corrected_segments.append(corrected_segment)
             else:
                 # No correction, keep original
                 corrected_segments.append(segment.model_copy())
 
-        # Add new version
-        conversation.add_transcript_version(
+        # Add new version — carry over provider_capabilities so downstream
+        # processing knows the provider's diarization/word_timestamp support.
+        source_capabilities = active_transcript.metadata.get(
+            "provider_capabilities", {}
+        )
+        new_version = conversation.add_transcript_version(
             version_id=new_version_id,
             transcript=active_transcript.transcript,  # Same transcript text
             words=active_transcript.words,  # Same word timings
@@ -1017,9 +1071,12 @@ async def apply_diarization_annotations(
                 "source_version_id": active_transcript.version_id,
                 "trigger": "manual_annotation_apply",
                 "applied_annotation_count": len(annotations),
+                "provider_capabilities": source_capabilities,
             },
             set_as_active=True,
         )
+        if active_transcript.diarization_source:
+            new_version.diarization_source = active_transcript.diarization_source
 
         await conversation.save()
         logger.info(
@@ -1033,13 +1090,14 @@ async def apply_diarization_annotations(
             annotation.processed_by = "apply"
             await annotation.save()
 
-        # Chain memory reprocessing
-        from advanced_omi_backend.models.job import JobPriority
-        from advanced_omi_backend.workers.memory_jobs import enqueue_memory_processing
-
+        # Chain memory reprocessing. Diarization-only edits change speaker
+        # attribution, so use the same speaker-diff strategy as a speaker
+        # reprocess (it falls back to a full re-extraction if no diff applies).
         enqueue_memory_processing(
             conversation_id=conversation_id,
             priority=JobPriority.NORMAL,
+            cause=MemoryCause.ANNOTATION_APPLY,
+            strategy=UpdateStrategy.SPEAKER_DIFF,
         )
 
         return JSONResponse(
@@ -1112,6 +1170,27 @@ async def apply_all_annotations(
         insert_annotations = [
             a for a in annotations if a.annotation_type == AnnotationType.INSERT
         ]
+        timing_annotations = [
+            a for a in annotations if a.annotation_type == AnnotationType.TIMING
+        ]
+        deletion_annotations = [
+            a for a in annotations if a.annotation_type == AnnotationType.DELETION
+        ]
+        deleted_indices = {
+            a.segment_index for a in deletion_annotations if a.segment_index is not None
+        }
+
+        # Single-flight: don't stack a new edit on top of an in-flight one (see
+        # apply_diarization_annotations — same deterministic-job-id save race).
+        in_flight = conversation_edit_chain_in_flight(conversation_id)
+        if in_flight:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "This conversation is still processing a previous edit. Try again in a moment.",
+                    "in_flight_job_id": in_flight,
+                },
+            )
 
         # Get active transcript
         active_transcript = conversation.active_transcript
@@ -1119,15 +1198,19 @@ async def apply_all_annotations(
             raise HTTPException(status_code=404, detail="No active transcript found")
 
         # Create new version with ALL corrections applied
-        import uuid
-
         new_version_id = str(uuid.uuid4())
         corrected_segments = []
+        # Segments marked for deletion are dropped AFTER inserts are positioned, so
+        # insert_after_index (which references original indices) stays valid. Track by
+        # object identity since indices shift once inserts are spliced in.
+        deleted_obj_ids: set[int] = set()
 
         # For diarization/transcript: if multiple annotations exist for same segment,
         # pick the most recently updated one
         for segment_idx, segment in enumerate(active_transcript.segments):
             corrected_segment = segment.model_copy()
+            if segment_idx in deleted_indices:
+                deleted_obj_ids.add(id(corrected_segment))
 
             # Apply diarization correction (most recent wins)
             diar_for_segment = sorted(
@@ -1136,7 +1219,9 @@ async def apply_all_annotations(
                 reverse=True,
             )
             if diar_for_segment:
-                corrected_segment.speaker = diar_for_segment[0].corrected_speaker
+                _apply_diarization_label(
+                    corrected_segment, diar_for_segment[0].corrected_speaker
+                )
 
             # Apply transcript correction (most recent wins)
             transcript_for_segment = sorted(
@@ -1146,6 +1231,16 @@ async def apply_all_annotations(
             )
             if transcript_for_segment:
                 corrected_segment.text = transcript_for_segment[0].corrected_text
+
+            # Apply timing correction (most recent wins) — waveform region move/resize
+            timing_for_segment = sorted(
+                [a for a in timing_annotations if a.segment_index == segment_idx],
+                key=lambda a: a.updated_at,
+                reverse=True,
+            )
+            if timing_for_segment and timing_for_segment[0].new_end is not None:
+                corrected_segment.start = timing_for_segment[0].new_start
+                corrected_segment.end = timing_for_segment[0].new_end
 
             corrected_segments.append(corrected_segment)
 
@@ -1160,25 +1255,48 @@ async def apply_all_annotations(
                 idx = ins.insert_after_index  # -1 = before first
                 insert_pos = idx + 1  # Convert to list insertion position
 
-                # Calculate timing from surrounding segments
-                if insert_pos > 0 and insert_pos <= len(corrected_segments):
-                    boundary_time = corrected_segments[insert_pos - 1].end
-                elif insert_pos == 0 and corrected_segments:
-                    boundary_time = corrected_segments[0].start
+                # Timing: prefer an explicit waveform-drawn span; otherwise fall back to
+                # a zero-duration marker at the neighbouring boundary (legacy inserts).
+                if ins.insert_start is not None and ins.insert_end is not None:
+                    seg_start = ins.insert_start
+                    seg_end = ins.insert_end
                 else:
-                    boundary_time = 0.0
+                    if insert_pos > 0 and insert_pos <= len(corrected_segments):
+                        boundary_time = corrected_segments[insert_pos - 1].end
+                    elif insert_pos == 0 and corrected_segments:
+                        boundary_time = corrected_segments[0].start
+                    else:
+                        boundary_time = 0.0
+                    seg_start = boundary_time
+                    seg_end = boundary_time
 
                 new_segment = Conversation.SpeakerSegment(
-                    start=boundary_time,
-                    end=boundary_time,
+                    start=seg_start,
+                    end=seg_end,
                     text=ins.insert_text or "",
                     speaker=ins.insert_speaker or "",
                     segment_type=ins.insert_segment_type or "event",
                 )
                 corrected_segments.insert(insert_pos, new_segment)
 
-        # Add new version
-        conversation.add_transcript_version(
+        # Drop segments marked for deletion (now that inserts have been positioned
+        # against the original indices).
+        if deleted_obj_ids:
+            corrected_segments = [
+                s for s in corrected_segments if id(s) not in deleted_obj_ids
+            ]
+
+        # Re-order by start time so moved/inserted segments read in chronological order.
+        # Stable sort keeps the original list order for equal starts — important for the
+        # intentional same-time overlapping segments (two speakers at once).
+        corrected_segments.sort(key=lambda s: s.start)
+
+        # Add new version — carry over provider_capabilities so downstream
+        # processing knows the provider's diarization/word_timestamp support.
+        source_capabilities = active_transcript.metadata.get(
+            "provider_capabilities", {}
+        )
+        new_version = conversation.add_transcript_version(
             version_id=new_version_id,
             transcript=active_transcript.transcript,
             words=active_transcript.words,  # Preserved (may be misaligned for text edits)
@@ -1192,16 +1310,23 @@ async def apply_all_annotations(
                 "diarization_count": len(diarization_annotations),
                 "transcript_count": len(transcript_annotations),
                 "insert_count": len(insert_annotations),
+                "timing_count": len(timing_annotations),
+                "deletion_count": len(deletion_annotations),
+                "provider_capabilities": source_capabilities,
             },
             set_as_active=True,
         )
+        if active_transcript.diarization_source:
+            new_version.diarization_source = active_transcript.diarization_source
 
         await conversation.save()
         logger.info(
             f"Applied {len(annotations)} annotations "
             f"(diarization: {len(diarization_annotations)}, "
             f"transcript: {len(transcript_annotations)}, "
-            f"insert: {len(insert_annotations)})"
+            f"insert: {len(insert_annotations)}, "
+            f"timing: {len(timing_annotations)}, "
+            f"deletion: {len(deletion_annotations)})"
         )
 
         # Mark all annotations as processed
@@ -1212,26 +1337,30 @@ async def apply_all_annotations(
             annotation.status = AnnotationStatus.ACCEPTED
             await annotation.save()
 
-        # Trigger memory reprocessing (once for all changes)
-        from advanced_omi_backend.models.job import JobPriority
-        from advanced_omi_backend.workers.memory_jobs import enqueue_memory_processing
-
+        # Trigger memory reprocessing (once for all changes). Combined apply may
+        # change transcript text as well as speakers, so re-extract in full.
         enqueue_memory_processing(
             conversation_id=conversation_id,
             priority=JobPriority.NORMAL,
+            cause=MemoryCause.ANNOTATION_APPLY,
+            strategy=UpdateStrategy.FULL,
         )
 
         return JSONResponse(
             content={
                 "message": (
                     f"Applied {len(diarization_annotations)} diarization, "
-                    f"{len(transcript_annotations)} transcript, and "
-                    f"{len(insert_annotations)} insert annotations"
+                    f"{len(transcript_annotations)} transcript, "
+                    f"{len(insert_annotations)} insert, "
+                    f"{len(timing_annotations)} timing, and "
+                    f"{len(deletion_annotations)} deletion annotations"
                 ),
                 "version_id": new_version_id,
                 "diarization_count": len(diarization_annotations),
                 "transcript_count": len(transcript_annotations),
                 "insert_count": len(insert_annotations),
+                "timing_count": len(timing_annotations),
+                "deletion_count": len(deletion_annotations),
                 "status": "success",
             }
         )

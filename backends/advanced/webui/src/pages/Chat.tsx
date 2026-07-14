@@ -37,9 +37,9 @@ export default function Chat() {
   const [memoryContext, setMemoryContext] = useState<MemoryContext | null>(null)
   const [showMemoryPanel, setShowMemoryPanel] = useState(false)
   const [extractionMessage, setExtractionMessage] = useState('')
-  const [includeObsidian, setIncludeObsidian] = useState(false)
   const [memoryLimit, setMemoryLimit] = useState(5)
-  const [memoryMode, setMemoryMode] = useState<'always' | 'tool' | 'off'>('always')
+  // Sessions sidebar is a slide-over on mobile (static from md up)
+  const [showSessions, setShowSessions] = useState(false)
 
   // Query for messages of current session
   const { data: queryMessages } = useChatMessages(currentSessionId)
@@ -160,7 +160,7 @@ export default function Chat() {
       setLocalMessages(prev => [...(prev ?? []), userMessage])
 
       // Send message and handle streaming response
-      const response = await chatApi.sendMessage(messageText, sessionId!, includeObsidian, memoryLimit, memoryMode)
+      const response = await chatApi.sendMessage(messageText, sessionId!, memoryLimit)
 
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`)
@@ -252,9 +252,19 @@ export default function Chat() {
   }
 
   return (
-    <div className="flex h-full max-h-screen bg-gray-50 dark:bg-gray-900">
-      {/* Sidebar */}
-      <div className="w-80 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 flex flex-col max-h-screen">
+    <div className="flex h-full max-h-screen bg-gray-50 dark:bg-gray-900 relative">
+      {/* Backdrop for the mobile sessions slide-over */}
+      {showSessions && (
+        <div
+          className="md:hidden fixed inset-0 bg-black/50 z-30"
+          onClick={() => setShowSessions(false)}
+          aria-hidden="true"
+        />
+      )}
+      {/* Sidebar — slide-over on mobile, static from md up */}
+      <div className={`${
+        showSessions ? 'flex' : 'hidden'
+      } md:flex fixed md:static inset-y-0 left-0 z-40 w-80 max-w-[85%] bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 flex-col max-h-screen`}>
         {/* Header */}
         <div className="p-4 border-b border-gray-200 dark:border-gray-700">
           <div className="flex items-center justify-between mb-4">
@@ -297,7 +307,7 @@ export default function Chat() {
                       ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-900 dark:text-blue-100'
                       : 'hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300'
                   }`}
-                  onClick={() => setCurrentSessionId(session.session_id)}
+                  onClick={() => { setCurrentSessionId(session.session_id); setShowSessions(false) }}
                 >
                   <div className="flex items-center justify-between">
                     <div className="flex-1 min-w-0">
@@ -330,10 +340,20 @@ export default function Chat() {
           <>
             {/* Chat Header */}
             <div className="p-4 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
-              <div className="flex items-center justify-between">
-                <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-                  {currentSession.title}
-                </h2>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  {/* Open sessions list on mobile */}
+                  <button
+                    onClick={() => setShowSessions(true)}
+                    className="md:hidden p-2 -ml-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 flex-shrink-0"
+                    aria-label="Show chat sessions"
+                  >
+                    <MessageCircle className="h-5 w-5" />
+                  </button>
+                  <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 truncate">
+                    {currentSession.title}
+                  </h2>
+                </div>
                 <div className="flex items-center space-x-2">
                   {/* Remember from Chat Button */}
                   <button
@@ -483,41 +503,13 @@ export default function Chat() {
 
               <div className="mt-2 flex items-center justify-between">
                 <div className="flex items-center space-x-4">
-                  <div className="flex items-center">
-                    <input
-                      type="checkbox"
-                      id="includeObsidian"
-                      checked={includeObsidian}
-                      onChange={(e) => setIncludeObsidian(e.target.checked)}
-                      className="h-4 w-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
-                    />
-                    <label htmlFor="includeObsidian" className="ml-2 text-sm text-gray-700 dark:text-gray-300 cursor-pointer select-none">
-                      Include Obsidian Memory
-                    </label>
-                  </div>
-
-                  <button
-                    onClick={() => setMemoryMode(prev => prev === 'always' ? 'tool' : prev === 'tool' ? 'off' : 'always')}
-                    className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
-                      memoryMode === 'off'
-                        ? 'bg-gray-200 text-gray-500 dark:bg-gray-600 dark:text-gray-400'
-                        : memoryMode === 'tool'
-                          ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300'
-                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-400 dark:hover:bg-gray-600'
-                    }`}
-                    title={memoryMode === 'off'
-                      ? 'Off: no memory search'
-                      : memoryMode === 'tool'
-                        ? 'Auto: LLM decides when to search memories'
-                        : 'Always: memories are always fetched upfront'}
+                  <span
+                    className="flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300"
+                    title="The assistant searches your memory vault automatically when a question needs personal context."
                   >
-                    {memoryMode === 'off'
-                      ? <Brain className="h-3.5 w-3.5 opacity-50" />
-                      : memoryMode === 'tool'
-                        ? <Wrench className="h-3.5 w-3.5" />
-                        : <Brain className="h-3.5 w-3.5" />}
-                    <span>Memory: {memoryMode === 'off' ? 'Off' : memoryMode === 'tool' ? 'Auto' : 'Always'}</span>
-                  </button>
+                    <Wrench className="h-3.5 w-3.5" />
+                    <span>Agentic memory</span>
+                  </span>
                 </div>
 
                 <div className="flex items-center space-x-2">
@@ -561,7 +553,7 @@ export default function Chat() {
 
       {/* Memory Panel (if enabled and has context) */}
       {showMemoryPanel && memoryContext && memoryContext.memory_count > 0 && (
-        <div className="w-80 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 p-4">
+        <div className="w-full max-w-[85%] sm:max-w-none sm:w-80 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 p-4 absolute sm:static inset-y-0 right-0 z-40 sm:z-auto overflow-y-auto">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 flex items-center space-x-2">
               <Brain className="h-5 w-5 text-blue-600" />

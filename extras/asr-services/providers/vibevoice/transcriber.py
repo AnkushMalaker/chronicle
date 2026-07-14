@@ -1,19 +1,17 @@
 """
 VibeVoice ASR transcriber implementation.
 
-Uses Microsoft's VibeVoice-ASR model with speaker diarization capabilities.
-VibeVoice is a speech-to-text model with built-in speaker diarization.
+Uses Microsoft's VibeVoice-ASR-HF model via native transformers (v5.3+).
+Speaker diarization, timestamps, and multi-language support are built in.
 
 For long audio files, automatically batches into overlapping windows and
-stitches results together. Context from each window is passed to the next
-via VibeVoice's native context_info parameter.
+stitches results together.
 
 Batching config is loaded from config/defaults.yml (asr_services.vibevoice section),
 overridden by config/config.yml, and can be further overridden by environment variables.
 
 Environment variables:
-    ASR_MODEL: HuggingFace model ID (default: microsoft/VibeVoice-ASR)
-    VIBEVOICE_LLM_MODEL: LLM backbone for processor (default: Qwen/Qwen2.5-7B)
+    ASR_MODEL: HuggingFace model ID (default: microsoft/VibeVoice-ASR-HF)
     VIBEVOICE_ATTN_IMPL: Attention implementation (default: sdpa)
         - sdpa: Scaled dot product attention (default, most compatible)
         - flash_attention_2: Faster but requires flash-attn package
@@ -29,23 +27,23 @@ Environment variables:
 import json
 import logging
 import os
-import re
-import subprocess
-import sys
 from pathlib import Path
 from typing import Optional
 
 import torch
-from common.audio_utils import STANDARD_SAMPLE_RATE, load_audio_file
-from common.batching import (
-    extract_context_tail,
-    split_audio_file,
-    stitch_transcription_results,
-)
+from common.audio_utils import STANDARD_SAMPLE_RATE, is_silent, load_audio_file
+from common.batching import split_audio_file, stitch_transcription_results
 from common.response_models import Segment, Speaker, TranscriptionResult
 from omegaconf import OmegaConf
 
 logger = logging.getLogger(__name__)
+
+
+def _as_bool(env_val: Optional[str], default: bool) -> bool:
+    """Parse an env override into a bool, falling back to ``default`` when unset."""
+    if env_val is None or env_val == "":
+        return bool(default)
+    return env_val.strip().lower() not in ("0", "false", "no", "off")
 
 
 def load_vibevoice_config() -> dict:
@@ -76,16 +74,15 @@ def load_vibevoice_config() -> dict:
 
 class VibeVoiceTranscriber:
     """
-    Transcriber using Microsoft VibeVoice-ASR.
+    Transcriber using Microsoft VibeVoice-ASR-HF via native transformers.
 
-    VibeVoice provides speech-to-text with speaker diarization.
-    It requires cloning the VibeVoice repository for the model and processor classes.
+    Uses AutoProcessor + VibeVoiceAsrForConditionalGeneration from
+    transformers >= 5.3.0. No external repository clone needed.
 
     Batching config priority: env vars > config/config.yml > config/defaults.yml > hardcoded.
 
     Environment variables:
-        ASR_MODEL: Model identifier (default: microsoft/VibeVoice-ASR)
-        VIBEVOICE_LLM_MODEL: LLM backbone (default: Qwen/Qwen2.5-7B)
+        ASR_MODEL: Model identifier (default: microsoft/VibeVoice-ASR-HF)
         VIBEVOICE_ATTN_IMPL: Attention implementation (default: sdpa)
         DEVICE: Device to use (default: cuda)
         TORCH_DTYPE: Torch dtype (default: bfloat16)
@@ -96,22 +93,12 @@ class VibeVoiceTranscriber:
     """
 
     def __init__(self, model_id: Optional[str] = None):
-        """
-        Initialize the VibeVoice transcriber.
-
-        Args:
-            model_id: Model identifier. If None, reads from ASR_MODEL env var.
-        """
-        self.model_id = model_id or os.getenv("ASR_MODEL", "microsoft/VibeVoice-ASR")
-        self.llm_model = os.getenv("VIBEVOICE_LLM_MODEL", "Qwen/Qwen2.5-7B")
-        self.attn_impl = os.getenv("VIBEVOICE_ATTN_IMPL", "sdpa")
+        self.model_id = model_id or os.getenv("ASR_MODEL", "microsoft/VibeVoice-ASR-HF")
+        self.attn_impl = os.getenv("VIBEVOICE_ATTN_IMPL", "flash_attention_2")
         self.device = os.getenv(
             "DEVICE", "cuda" if torch.cuda.is_available() else "cpu"
         )
 
-        # Fail fast on invalid device configuration.
-        # This avoids confusing runtime failures (e.g., meta tensor device_map issues)
-        # when a CUDA-only wheel is installed or when the GPU is not exposed to Docker.
         if self.device == "cuda" and not torch.cuda.is_available():
             raise RuntimeError(
                 "DEVICE=cuda but torch.cuda.is_available() is False. "
@@ -121,10 +108,19 @@ class VibeVoiceTranscriber:
                 "Fix: install the correct ROCm/CUDA torch wheel for your hardware, "
                 "or set DEVICE=cpu."
             )
-        self.max_new_tokens = int(os.getenv("MAX_NEW_TOKENS", "8192"))
 
-        # Quantization config: "4bit", "8bit", or "" (none)
+        self.max_new_tokens = int(os.getenv("MAX_NEW_TOKENS", "8192"))
+        self.repetition_penalty = float(os.getenv("REPETITION_PENALTY", "1.1"))
+        # n-gram blocking guard against decoder runaway/template-leak collapse on hard
+        # far-field audio. 0 = off (default; preserves prod behavior). 3-4 bounds loops
+        # without hurting normal repeated words ("no no no").
+        self.no_repeat_ngram_size = int(os.getenv("NO_REPEAT_NGRAM_SIZE", "0"))
+
+        # Quantization config: "4bit", "8bit", or none ("" / "none" / "off" -> full precision).
+        # Default is none: 4-bit NF4 causes repetition collapse on hard audio (see compose note).
         self.quantization = os.getenv("QUANTIZATION", "").lower().strip()
+        if self.quantization in ("none", "off", "false", "no"):
+            self.quantization = ""
 
         # Determine torch dtype
         torch_dtype_str = os.getenv("TORCH_DTYPE", "bfloat16")
@@ -150,6 +146,24 @@ class VibeVoiceTranscriber:
             or config.get("batch_overlap_seconds", 30)
         )
 
+        # Silence gate: VibeVoice (a prompt-conditioned LLM-backbone ASR) hallucinates
+        # the context_info prompt back as "transcription" on near-silent windows. Skip
+        # the model on windows carrying < silence_min_voiced_ms of voiced audio and emit
+        # nothing instead. Thresholds validated against real captures (echo windows have
+        # 0-60ms voiced at floor 0.01; real speech windows have 510ms+).
+        self.silence_gate_enabled = _as_bool(
+            os.getenv("SILENCE_GATE_ENABLED"),
+            config.get("silence_gate_enabled", True),
+        )
+        self.silence_energy_floor = float(
+            os.getenv("SILENCE_ENERGY_FLOOR")
+            or config.get("silence_energy_floor", 0.01)
+        )
+        self.silence_min_voiced_ms = float(
+            os.getenv("SILENCE_MIN_VOICED_MS")
+            or config.get("silence_min_voiced_ms", 200)
+        )
+
         # LoRA adapter path (auto-loaded after base model if set)
         self.lora_adapter_path = os.getenv("LORA_ADAPTER_PATH") or None
 
@@ -158,57 +172,21 @@ class VibeVoiceTranscriber:
         self.processor = None
         self._is_loaded = False
         self._has_lora = False
-        self._vibevoice_repo_path: Optional[Path] = None
 
         logger.info(
             f"VibeVoiceTranscriber initialized: "
-            f"model={self.model_id}, llm={self.llm_model}, "
+            f"model={self.model_id}, "
             f"device={self.device}, dtype={torch_dtype_str}, attn={self.attn_impl}, "
             f"quantization={self.quantization or 'none'}, "
             f"batch_threshold={self.batch_threshold}s"
         )
-
-    def _setup_vibevoice(self) -> None:
-        """Set up VibeVoice repository and add to path."""
-        logger.info("Setting up VibeVoice-ASR...")
-
-        # Check for pre-cloned repo in Docker image first
-        hf_home = Path(os.getenv("HF_HOME", "/models"))
-        vibevoice_dir = hf_home / "vibevoice"
-
-        # Fallback to user cache if not in HF_HOME
-        if not vibevoice_dir.exists():
-            cache_dir = Path.home() / ".cache/huggingface"
-            vibevoice_dir = cache_dir / "vibevoice"
-
-        if not vibevoice_dir.exists():
-            logger.info("Cloning VibeVoice repository...")
-            vibevoice_dir.parent.mkdir(parents=True, exist_ok=True)
-            subprocess.run(
-                [
-                    "git",
-                    "clone",
-                    "https://github.com/microsoft/VibeVoice.git",
-                    str(vibevoice_dir),
-                ],
-                check=True,
-            )
-            logger.info(f"VibeVoice repository cloned to {vibevoice_dir}")
-        else:
-            logger.info(f"VibeVoice repository found at {vibevoice_dir}")
-
-        self._vibevoice_repo_path = vibevoice_dir
-
-        # Add to path for imports
-        if str(vibevoice_dir) not in sys.path:
-            sys.path.insert(0, str(vibevoice_dir))
-            logger.info(f"Added {vibevoice_dir} to sys.path")
 
     def _build_quantization_config(self):
         """Build BitsAndBytesConfig for 4-bit or 8-bit quantization."""
         if not self.quantization:
             return None
 
+        # Lazy import: transformers is heavy and only needed when quantization is used.
         from transformers import BitsAndBytesConfig
 
         if self.quantization == "4bit":
@@ -229,50 +207,28 @@ class VibeVoiceTranscriber:
             return None
 
     def load_model(self) -> None:
-        """Load the VibeVoice ASR model."""
+        """Load the VibeVoice ASR model via native transformers."""
         if self._is_loaded:
             logger.info("Model already loaded")
             return
 
         logger.info(f"Loading VibeVoice model: {self.model_id}")
 
-        # Setup repository and imports
-        self._setup_vibevoice()
+        # Lazy import: transformers is heavy and only needed once model loading starts.
+        from transformers import AutoProcessor, VibeVoiceAsrForConditionalGeneration
 
-        # Import VibeVoice components
-        try:
-            from vibevoice.modular.modeling_vibevoice_asr import (
-                VibeVoiceASRForConditionalGeneration,
-            )
-            from vibevoice.processor.vibevoice_asr_processor import (
-                VibeVoiceASRProcessor,
-            )
-
-            logger.info("VibeVoice modules imported successfully")
-        except ImportError as e:
-            logger.error(f"Failed to import VibeVoice modules: {e}")
-            raise RuntimeError(
-                f"Failed to import VibeVoice modules. "
-                f"Ensure the VibeVoice repository is properly cloned. Error: {e}"
-            )
-
-        # Load processor with LLM backbone
-        logger.info(f"Loading processor with LLM backbone: {self.llm_model}")
-        self.processor = VibeVoiceASRProcessor.from_pretrained(
-            self.model_id,
-            language_model_pretrained_name=self.llm_model,
-        )
+        # Load processor
+        logger.info("Loading processor...")
+        self.processor = AutoProcessor.from_pretrained(self.model_id)
 
         # Build quantization config if requested
         quant_config = self._build_quantization_config()
 
-        # Load model
+        # Device mapping
         is_rocm = torch.version.hip is not None
         device_map = None
         if self.device == "cuda":
             if is_rocm:
-                # On Strix Halo/ROCm, avoid model.to("cuda") path which can segfault
-                # for this model; place modules directly on GPU via explicit map.
                 device_map = {"": "cuda:0"}
             else:
                 device_map = "auto"
@@ -280,22 +236,31 @@ class VibeVoiceTranscriber:
         load_kwargs = {
             "torch_dtype": self.torch_dtype,
             "device_map": device_map,
-            "attn_implementation": self.attn_impl,
-            "trust_remote_code": True,
             "low_cpu_mem_usage": False if is_rocm else True,
         }
+        # The acoustic/semantic tokenizer encoders don't support flash_attention_2,
+        # so use a per-submodel dict: flash_attention_2 for the text decoder (Qwen2),
+        # sdpa for the tokenizer encoders.
+        if self.attn_impl == "flash_attention_2":
+            load_kwargs["attn_implementation"] = {
+                "text_config": "flash_attention_2",
+                "acoustic_tokenizer_encoder_config": "eager",
+                "semantic_tokenizer_encoder_config": "eager",
+            }
+        elif self.attn_impl and self.attn_impl != "sdpa":
+            load_kwargs["attn_implementation"] = self.attn_impl
         if quant_config:
             load_kwargs["quantization_config"] = quant_config
             logger.info(f"Loading model with {self.quantization} quantization")
         else:
-            logger.info(f"Loading model with attn_implementation={self.attn_impl}")
+            logger.info("Loading model without quantization")
 
-        self.model = VibeVoiceASRForConditionalGeneration.from_pretrained(
+        self.model = VibeVoiceAsrForConditionalGeneration.from_pretrained(
             self.model_id,
             **load_kwargs,
         )
 
-        # Move to device when not using accelerate device_map (e.g., ROCm).
+        # Move to device when not using accelerate device_map
         if self.device == "cuda" and device_map is None and not quant_config:
             self.model = self.model.to(self.device)
             logger.info(f"Model moved to {self.device}")
@@ -304,6 +269,12 @@ class VibeVoiceTranscriber:
             logger.info(f"Model moved to {self.device}")
 
         self.model.eval()
+
+        # Enable deterministic CUDA operations for reproducible inference
+        torch.backends.cudnn.deterministic = True
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        logger.info("Deterministic CUDA operations enabled")
 
         # Auto-load LoRA adapter if configured
         if self.lora_adapter_path and Path(self.lora_adapter_path).exists():
@@ -314,20 +285,13 @@ class VibeVoiceTranscriber:
         logger.info("VibeVoice model loaded successfully")
 
     def load_lora_adapter(self, adapter_path: str) -> None:
-        """Load or replace a LoRA adapter on the base model.
-
-        If a LoRA adapter is already loaded, it is merged and unloaded first
-        before applying the new adapter.
-
-        Args:
-            adapter_path: Path to the directory containing the LoRA adapter weights.
-        """
+        """Load or replace a LoRA adapter on the base model."""
+        # Lazy import: peft is heavy and only needed when a LoRA adapter is loaded.
         from peft import PeftModel
 
         if self.model is None:
             raise RuntimeError("Base model not loaded. Call load_model() first.")
 
-        # If already has a LoRA adapter, merge it back into base weights first
         if self._has_lora:
             logger.info("Merging existing LoRA adapter before loading new one")
             self.model = self.model.merge_and_unload()
@@ -348,21 +312,18 @@ class VibeVoiceTranscriber:
         Transcribe audio file using VibeVoice with speaker diarization.
 
         For audio longer than batch_threshold, automatically splits into
-        overlapping windows, transcribes each with context from the previous
-        window, and stitches results together.
+        overlapping windows and stitches results together.
 
         Args:
             audio_file_path: Path to audio file
-            context_info: Optional hot words / context string passed to the
-                processor's context_info parameter to guide recognition.
+            context_info: Optional hot words / context string passed as prompt
+                to guide recognition.
 
         Returns:
             TranscriptionResult with text, segments (with speakers), and speaker list
         """
         if not self._is_loaded or self.model is None or self.processor is None:
             raise RuntimeError("Model not loaded. Call load_model() first.")
-
-        # Check duration to decide whether to batch
 
         audio_array, sr = load_audio_file(
             audio_file_path, target_rate=STANDARD_SAMPLE_RATE
@@ -373,10 +334,17 @@ class VibeVoiceTranscriber:
             logger.info(
                 f"Audio is {duration:.1f}s (>{self.batch_threshold}s), using batched transcription"
             )
-            return self._transcribe_batched(
-                audio_file_path,
-                hotwords=context_info,
-            )
+            # Drain the shared progress generator and return its final result.
+            # The generator is also exposed (via the service layer) for NDJSON
+            # progress streaming on long audio.
+            result: Optional[TranscriptionResult] = None
+            for event in self._transcribe_batched_with_progress(
+                audio_file_path, hotwords=context_info
+            ):
+                if event["type"] == "result":
+                    result = event["result"]
+            assert result is not None, "batched transcription yielded no result event"
+            return result
         else:
             logger.info(f"Audio is {duration:.1f}s, using single-shot transcription")
             return self._transcribe_single(audio_file_path, context_info=context_info)
@@ -384,371 +352,218 @@ class VibeVoiceTranscriber:
     def _transcribe_single(
         self,
         audio_file_path: str,
-        context: Optional[str] = None,
         context_info: Optional[str] = None,
+        window_label: str = "",
     ) -> TranscriptionResult:
         """
         Transcribe a single audio file (or batch window).
 
         Args:
             audio_file_path: Path to audio file
-            context: Optional context text from previous batch window
-                (continuity context for batched transcription).
-            context_info: Optional hot words / context string from the caller
-                (e.g. LangFuse asr.hot_words prompt).
+            context_info: Optional hot words / context string passed as prompt.
+            window_label: Human-readable span (e.g. "240-480s") used in degradation
+                logs so the System Errors page can pinpoint the offending audio.
 
         Returns:
             TranscriptionResult with text, segments (with speakers), and speaker list
         """
         logger.info(f"Transcribing: {audio_file_path}")
-        if context:
-            logger.info(
-                f"With batch context ({len(context)} chars): ...{context[-80:]}"
+        if context_info:
+            logger.info(f"With context: {context_info[:120]}")
+
+        # Silence gate: skip the model on near-silent windows. A prompt-conditioned ASR
+        # echoes context_info back as a phantom transcript on silence, so output nothing.
+        if self.silence_gate_enabled:
+            audio_array, sr = load_audio_file(
+                audio_file_path, target_rate=STANDARD_SAMPLE_RATE
             )
+            duration = len(audio_array) / sr
+            if is_silent(
+                audio_array,
+                sr,
+                energy_floor=self.silence_energy_floor,
+                min_voiced_ms=self.silence_min_voiced_ms,
+            ):
+                logger.info(
+                    f"Silence gate: {audio_file_path} has < {self.silence_min_voiced_ms:.0f}ms "
+                    f"voiced audio (floor={self.silence_energy_floor}); skipping ASR, emitting silence"
+                )
+                return TranscriptionResult(
+                    text="",
+                    words=[],
+                    segments=[],
+                    speakers=None,
+                    language=None,
+                    duration=duration,
+                )
+
+        # Build inputs via the native transformers API
+        request_kwargs = {"audio": audio_file_path}
         if context_info:
-            logger.info(f"With hot words context: {context_info[:120]}")
+            request_kwargs["prompt"] = context_info
 
-        # Build combined context_info: hot words + batch continuity context
-        combined_context = None
-        parts = []
-        if context_info:
-            parts.append(context_info.strip())
-        if context:
-            parts.append(context.strip())
-        if parts:
-            combined_context = "\n".join(parts)
+        inputs = self.processor.apply_transcription_request(**request_kwargs)
 
-        # Process audio through processor (can take file paths directly)
-        processor_kwargs = {
-            "audio": [audio_file_path],
-            "sampling_rate": None,
-            "return_tensors": "pt",
-            "padding": True,
-            "add_generation_prompt": True,
-        }
-        if combined_context:
-            processor_kwargs["context_info"] = combined_context
-
-        inputs = self.processor(**processor_kwargs)
-
-        # Move inputs to device
+        # Move to model device and dtype
         model_device = next(self.model.parameters()).device
-        inputs = {
-            k: v.to(model_device) if isinstance(v, torch.Tensor) else v
-            for k, v in inputs.items()
-        }
+        inputs = inputs.to(model_device, self.torch_dtype)
 
         logger.info(f"Input shapes - input_ids: {inputs['input_ids'].shape}")
 
-        # Generation config
-        generation_config = {
+        # Generate transcription
+        # Seed RNG before generate() for deterministic output.
+        # The model's get_audio_features() injects VAE noise via torch.randn()
+        # unconditionally (no training guard), so without a fixed seed the
+        # noise differs each run and eventually flips an argmax in the decoder.
+        logger.info("Generating transcription...")
+        torch.manual_seed(42)
+        torch.cuda.manual_seed_all(42)
+        gen_kwargs = {
             "max_new_tokens": self.max_new_tokens,
-            "pad_token_id": self.processor.pad_id,
-            "eos_token_id": self.processor.tokenizer.eos_token_id,
-            "do_sample": False,  # Greedy decoding for consistency
+            "do_sample": False,
+            "repetition_penalty": self.repetition_penalty,
+        }
+        if self.no_repeat_ngram_size > 0:
+            gen_kwargs["no_repeat_ngram_size"] = self.no_repeat_ngram_size
+        with torch.no_grad():
+            output_ids = self.model.generate(**inputs, **gen_kwargs)
+
+        # Decode: skip input tokens, parse structured output
+        generated_ids = output_ids[:, inputs["input_ids"].shape[1] :]
+        try:
+            parsed_segments = self.processor.decode(
+                generated_ids, return_format="parsed"
+            )[0]
+        except (json.JSONDecodeError, IndexError, ValueError) as e:
+            # Structured decode failed: the window's JSON overflowed max_new_tokens
+            # (decoder degeneration → unterminated array) so the raw output is a
+            # template-leaked `<|im_start|> [{"Start":...` blob, NOT spoken text.
+            # Publishing it poisons the whole conversation, so DROP this window
+            # instead of leaking the template. With overlapping windows the
+            # neighbours cover most of the span; an empty window stitches as a gap.
+            logger.error(
+                f"VibeVoice decoder degeneration: structured decode failed ({e}) "
+                f"on window [{window_label or 'single'}]; dropping window as "
+                f"unintelligible (JSON overflow / template leak). Audio span lost."
+            )
+            audio_array, sr = load_audio_file(
+                audio_file_path, target_rate=STANDARD_SAMPLE_RATE
+            )
+            duration = len(audio_array) / sr
+            return TranscriptionResult(
+                text="",
+                words=[],
+                segments=[],
+                speakers=None,
+                language=None,
+                duration=duration,
+            )
+
+        logger.info(f"Parsed {len(parsed_segments)} segments")
+
+        return self._map_to_result(parsed_segments, window_label=window_label)
+
+    def _transcribe_batched_with_progress(
+        self,
+        audio_file_path: str,
+        hotwords: Optional[str] = None,
+    ):
+        """
+        Transcribe a long audio file by splitting into overlapping windows,
+        reporting progress after each one.
+
+        A progress event is yielded after every window so the HTTP client keeps
+        receiving bytes during a multi-minute transcription (preventing read
+        timeouts on long audio); the final result is yielded last as a
+        ``TranscriptionResult`` object. Both the streaming path (via the service
+        layer) and the plain ``transcribe()`` path drive this generator.
+
+        Yields:
+            {"type": "progress", "current": i, "total": n} after each window
+            {"type": "result", "result": TranscriptionResult} as the final item
+        """
+        windows = split_audio_file(
+            audio_file_path,
+            batch_duration=self.batch_duration,
+            overlap=self.batch_overlap,
+        )
+
+        batch_results = []
+
+        for i, (temp_path, start_time, end_time) in enumerate(windows):
+            try:
+                logger.info(
+                    f"Batch {i + 1}/{len(windows)}: [{start_time:.0f}s - {end_time:.0f}s]"
+                )
+
+                # No inter-window context to avoid repetition loops.
+                # The 30s audio overlap + midpoint stitching handles continuity.
+                result = self._transcribe_single(
+                    temp_path,
+                    context_info=hotwords,
+                    window_label=f"{start_time:.0f}-{end_time:.0f}s",
+                )
+                batch_results.append((result, start_time, end_time))
+                logger.info(
+                    f"Batch {i + 1} done: {len(result.segments)} segments, "
+                    f"{len(result.text)} chars"
+                )
+
+            finally:
+                os.unlink(temp_path)
+
+            yield {"type": "progress", "current": i + 1, "total": len(windows)}
+
+        yield {
+            "type": "result",
+            "result": stitch_transcription_results(
+                batch_results, overlap_seconds=self.batch_overlap
+            ),
         }
 
-        # Generate transcription
-        logger.info("Generating transcription...")
-        with torch.no_grad():
-            output_ids = self.model.generate(**inputs, **generation_config)
+    def supports_batch_progress(self, audio_duration: float) -> bool:
+        """Return True if this audio is long enough to use batched transcription with progress."""
+        return audio_duration > self.batch_threshold
 
-        # Decode output (skip input tokens)
-        input_length = inputs["input_ids"].shape[1]
-        generated_ids = output_ids[0, input_length:]
+    @staticmethod
+    def _collapse_loops(text: str, keep: int = 2) -> tuple[str, int]:
+        """Collapse contiguous repetitions of the same token to at most ``keep`` copies.
 
-        # Remove eos tokens
-        eos_positions = (
-            generated_ids == self.processor.tokenizer.eos_token_id
-        ).nonzero(as_tuple=True)[0]
-        if len(eos_positions) > 0:
-            generated_ids = generated_ids[: eos_positions[0] + 1]
+        Decoder degeneration on hard far-field audio produces runs like
+        "yeah yeah yeah ... (x100)" inside a single segment. Comparison is
+        case/punctuation-insensitive; original tokens are preserved. Natural
+        doubles ("no no") survive (keep=2); only pathological 3+ runs collapse.
 
-        raw_output = self.processor.decode(generated_ids, skip_special_tokens=True)
-        logger.info(f"Raw output length: {len(raw_output)} chars")
+        Returns (collapsed_text, longest_run) so the caller can report degeneration.
+        """
+        if not text:
+            return text, 0
+        tokens = text.split()
+        out: list[str] = []
+        longest = 0
+        i = 0
+        while i < len(tokens):
+            key = tokens[i].lower().strip(".,!?;:")
+            j = i
+            while j < len(tokens) and tokens[j].lower().strip(".,!?;:") == key:
+                j += 1
+            longest = max(longest, j - i)
+            out.extend(tokens[i : i + min(j - i, keep)])
+            i = j
+        return " ".join(out), longest
 
-        # Parse structured output using processor's post-processing
-        try:
-            segments = self.processor.post_process_transcription(raw_output)
-            processed = {"raw_text": raw_output, "segments": segments}
-            logger.info(f"Parsed {len(segments)} segments")
-        except Exception as e:
-            logger.warning(f"Failed to parse with post_process_transcription: {e}")
-            # Fallback to our JSON parsing
-            processed = self._parse_vibevoice_output(raw_output)
+    # A contiguous run of the same token at/above this length is decoder
+    # degeneration worth surfacing on the System Errors page (vs natural emphasis).
+    _LOOP_REPORT_RUN = 8
 
-        # Map to TranscriptionResult
-        return self._map_to_result(processed, raw_output)
-
-    def _transcribe_batched(
-        self,
-        audio_file_path: str,
-        hotwords: Optional[str] = None,
+    def _map_to_result(
+        self, parsed_segments: list[dict], window_label: str = ""
     ) -> TranscriptionResult:
         """
-        Transcribe a long audio file by splitting into overlapping windows.
+        Map native transformers parsed output to TranscriptionResult.
 
-        Each window gets context from the previous window's transcript tail,
-        passed via VibeVoice's native context_info parameter.
-
-        Args:
-            audio_file_path: Path to the full audio file
-            hotwords: Optional hot words string passed through to each window
-
-        Returns:
-            Stitched TranscriptionResult from all windows
-        """
-        windows = split_audio_file(
-            audio_file_path,
-            batch_duration=self.batch_duration,
-            overlap=self.batch_overlap,
-        )
-
-        batch_results = []
-
-        for i, (temp_path, start_time, end_time) in enumerate(windows):
-            try:
-                logger.info(
-                    f"Batch {i + 1}/{len(windows)}: [{start_time:.0f}s - {end_time:.0f}s]"
-                )
-
-                # NOTE: We intentionally do NOT pass prev_context between windows.
-                # Passing transcript tails as context can trigger degenerate
-                # repetition loops in model.generate(). The 30s audio overlap +
-                # midpoint stitching already handles boundary continuity.
-                result = self._transcribe_single(temp_path, context_info=hotwords)
-                batch_results.append((result, start_time, end_time))
-                logger.info(
-                    f"Batch {i + 1} done: {len(result.segments)} segments, "
-                    f"{len(result.text)} chars"
-                )
-
-            finally:
-                os.unlink(temp_path)
-
-        return stitch_transcription_results(
-            batch_results, overlap_seconds=self.batch_overlap
-        )
-
-    def _transcribe_batched_with_progress(
-        self,
-        audio_file_path: str,
-        hotwords: Optional[str] = None,
-    ):
-        """
-        Transcribe a long audio file with progress reporting.
-
-        Same logic as _transcribe_batched() but yields progress counters
-        between windows so callers can report how far along the batch is.
-
-        Yields:
-            {"type": "progress", "current": i, "total": n} after each window
-            {"type": "result", ...} as the final item (TranscriptionResult.to_dict())
-        """
-        windows = split_audio_file(
-            audio_file_path,
-            batch_duration=self.batch_duration,
-            overlap=self.batch_overlap,
-        )
-
-        batch_results = []
-
-        for i, (temp_path, start_time, end_time) in enumerate(windows):
-            try:
-                logger.info(
-                    f"Batch {i + 1}/{len(windows)}: [{start_time:.0f}s - {end_time:.0f}s]"
-                )
-
-                # No inter-window context — see note in _transcribe_batched()
-                result = self._transcribe_single(temp_path, context_info=hotwords)
-                batch_results.append((result, start_time, end_time))
-                logger.info(
-                    f"Batch {i + 1} done: {len(result.segments)} segments, "
-                    f"{len(result.text)} chars"
-                )
-
-            finally:
-                os.unlink(temp_path)
-
-            yield {"type": "progress", "current": i + 1, "total": len(windows)}
-
-        final = stitch_transcription_results(
-            batch_results, overlap_seconds=self.batch_overlap
-        )
-        yield {"type": "result", **final.to_dict()}
-
-    def supports_batch_progress(self, audio_duration: float) -> bool:
-        """Return True if this audio is long enough to use batched transcription with progress."""
-        return audio_duration > self.batch_threshold
-
-    def _transcribe_batched_with_progress(
-        self,
-        audio_file_path: str,
-        hotwords: Optional[str] = None,
-    ):
-        """
-        Transcribe a long audio file with progress reporting.
-
-        Same logic as _transcribe_batched() but yields progress counters
-        between windows so callers can report how far along the batch is.
-
-        Yields:
-            {"type": "progress", "current": i, "total": n} after each window
-            {"type": "result", ...} as the final item (TranscriptionResult.to_dict())
-        """
-        windows = split_audio_file(
-            audio_file_path,
-            batch_duration=self.batch_duration,
-            overlap=self.batch_overlap,
-        )
-
-        batch_results = []
-
-        for i, (temp_path, start_time, end_time) in enumerate(windows):
-            try:
-                logger.info(
-                    f"Batch {i + 1}/{len(windows)}: [{start_time:.0f}s - {end_time:.0f}s]"
-                )
-
-                # No inter-window context — see note in _transcribe_batched()
-                result = self._transcribe_single(temp_path, context_info=hotwords)
-                batch_results.append((result, start_time, end_time))
-                logger.info(
-                    f"Batch {i + 1} done: {len(result.segments)} segments, "
-                    f"{len(result.text)} chars"
-                )
-
-            finally:
-                os.unlink(temp_path)
-
-            yield {"type": "progress", "current": i + 1, "total": len(windows)}
-
-        final = stitch_transcription_results(
-            batch_results, overlap_seconds=self.batch_overlap
-        )
-        yield {"type": "result", **final.to_dict()}
-
-    def supports_batch_progress(self, audio_duration: float) -> bool:
-        """Return True if this audio is long enough to use batched transcription with progress."""
-        return audio_duration > self.batch_threshold
-
-    def _transcribe_batched_with_progress(
-        self,
-        audio_file_path: str,
-        hotwords: Optional[str] = None,
-    ):
-        """
-        Transcribe a long audio file with progress reporting.
-
-        Same logic as _transcribe_batched() but yields progress counters
-        between windows so callers can report how far along the batch is.
-
-        Yields:
-            {"type": "progress", "current": i, "total": n} after each window
-            {"type": "result", ...} as the final item (TranscriptionResult.to_dict())
-        """
-        windows = split_audio_file(
-            audio_file_path,
-            batch_duration=self.batch_duration,
-            overlap=self.batch_overlap,
-        )
-
-        batch_results = []
-
-        for i, (temp_path, start_time, end_time) in enumerate(windows):
-            try:
-                logger.info(
-                    f"Batch {i + 1}/{len(windows)}: [{start_time:.0f}s - {end_time:.0f}s]"
-                )
-
-                # No inter-window context — see note in _transcribe_batched()
-                result = self._transcribe_single(temp_path, context_info=hotwords)
-                batch_results.append((result, start_time, end_time))
-                logger.info(
-                    f"Batch {i + 1} done: {len(result.segments)} segments, "
-                    f"{len(result.text)} chars"
-                )
-
-            finally:
-                os.unlink(temp_path)
-
-            yield {"type": "progress", "current": i + 1, "total": len(windows)}
-
-        final = stitch_transcription_results(
-            batch_results, overlap_seconds=self.batch_overlap
-        )
-        yield {"type": "result", **final.to_dict()}
-
-    def supports_batch_progress(self, audio_duration: float) -> bool:
-        """Return True if this audio is long enough to use batched transcription with progress."""
-        return audio_duration > self.batch_threshold
-
-    def _parse_vibevoice_output(self, raw_output: str) -> dict:
-        """
-        Parse VibeVoice raw output to extract segments with speaker info.
-
-        VibeVoice outputs JSON in the assistant response:
-        <|im_start|>assistant
-        [{"Start":0.0,"End":3.0,"Speaker":0,"Content":"..."}]<|im_end|>
-
-        Args:
-            raw_output: Raw decoded output from model
-
-        Returns:
-            Dict with 'raw_text' and 'segments' list
-        """
-        # DEBUG: Log actual output format for troubleshooting
-        logger.info(f"Raw output preview (first 500 chars): {raw_output[:500]}")
-        logger.info(f"Raw output preview (last 500 chars): {raw_output[-500:]}")
-
-        # Extract JSON array from assistant response
-        # Strategy: Find the outermost [ ] that contains valid JSON
-        # Look for array starting with [{ which indicates segment objects
-        json_match = re.search(r"\[\s*\{.*\}\s*\]", raw_output, re.DOTALL)
-
-        if not json_match:
-            logger.warning(
-                "Could not find JSON array in output, returning raw text only"
-            )
-            logger.warning(
-                f"Output does not match pattern [{{...}}], checking for other formats..."
-            )
-            # Try alternate pattern: just find any array
-            json_match = re.search(r"\[.*\]", raw_output, re.DOTALL)
-
-        if not json_match:
-            logger.warning("No JSON array found in output")
-            return {"raw_text": raw_output, "segments": []}
-
-        try:
-            segments_raw = json.loads(json_match.group(0))
-            logger.info(f"Parsed {len(segments_raw)} segments from JSON")
-
-            # Convert to our expected format
-            segments = []
-            for seg in segments_raw:
-                segments.append(
-                    {
-                        "text": seg.get("Content", ""),
-                        "start": float(seg.get("Start", 0.0)),
-                        "end": float(seg.get("End", 0.0)),
-                        "speaker": seg.get("Speaker", 0),
-                    }
-                )
-
-            return {"raw_text": raw_output, "segments": segments}
-
-        except (json.JSONDecodeError, KeyError, ValueError) as e:
-            logger.error(f"Failed to parse JSON segments: {e}")
-            return {"raw_text": raw_output, "segments": []}
-
-    def _map_to_result(self, processed: dict, raw_output: str) -> TranscriptionResult:
-        """
-        Map VibeVoice output to TranscriptionResult.
-
-        Args:
-            processed: Post-processed output dict with segments
-            raw_output: Raw decoded output
+        parsed_segments is a list of dicts:
+            [{"Start": 0.0, "End": 15.43, "Speaker": 0, "Content": "..."}, ...]
 
         Returns:
             TranscriptionResult with mapped data
@@ -756,19 +571,35 @@ class VibeVoiceTranscriber:
         segments = []
         speakers_map: dict[str, tuple[float, float]] = {}
         text_parts = []
+        # Degradation counters → surfaced as System Errors after the loop.
+        nondict_skipped = 0
+        loops_collapsed = 0
+        worst_run = 0
 
-        for seg_data in processed.get("segments", []):
-            text = seg_data.get("text", "").strip()
-            start = seg_data.get("start_time", seg_data.get("start", 0.0))
-            end = seg_data.get("end_time", seg_data.get("end", 0.0))
-            speaker_raw = seg_data.get("speaker_id", seg_data.get("speaker"))
-            # Convert speaker to string, avoiding double-prefix from fallback parser
-            if speaker_raw is None:
-                speaker_id = None
-            elif isinstance(speaker_raw, str) and speaker_raw.startswith("Speaker "):
-                speaker_id = speaker_raw
-            else:
+        for seg_data in parsed_segments:
+            if not isinstance(seg_data, dict):
+                # Partial parse can leave a stray non-dict element; skip it
+                # rather than crash on .get().
+                nondict_skipped += 1
+                continue
+            # A degenerate window can still parse but contain a contiguous
+            # repetition loop in one Content field (e.g. "yeah" x100). Collapse
+            # such runs losslessly post-decode — the right tool for VibeVoice,
+            # since no_repeat_ngram/repetition_penalty corrupt its structured JSON.
+            text, longest_run = self._collapse_loops(
+                seg_data.get("Content", "").strip()
+            )
+            if longest_run >= self._LOOP_REPORT_RUN:
+                loops_collapsed += 1
+                worst_run = max(worst_run, longest_run)
+            start = float(seg_data.get("Start", 0.0))
+            end = float(seg_data.get("End", 0.0))
+            speaker_raw = seg_data.get("Speaker")
+
+            if speaker_raw is not None:
                 speaker_id = f"Speaker {speaker_raw}"
+            else:
+                speaker_id = None
 
             if text:
                 text_parts.append(text)
@@ -792,20 +623,32 @@ class VibeVoiceTranscriber:
                         max(prev_end, end),
                     )
 
+        # Surface decoder degeneration on the System Errors page. These are
+        # logged at ERROR so the cross-service reporter (root-logger handler in
+        # create_asr_app) ships them to the backend ingest endpoint. They are
+        # recovered-from (not fatal), but indicate the model struggled on this
+        # audio so they must be visible, not buried in container logs.
+        span = window_label or "single"
+        if loops_collapsed:
+            logger.error(
+                f"VibeVoice decoder degeneration: collapsed {loops_collapsed} "
+                f"repetition loop(s) (longest run {worst_run} tokens) on window "
+                f"[{span}]. Output recovered via post-decode loop collapse."
+            )
+        if nondict_skipped:
+            logger.error(
+                f"VibeVoice malformed output: skipped {nondict_skipped} non-dict "
+                f"segment element(s) from a partial JSON parse on window [{span}]."
+            )
+
         # Build speaker list
         speakers = [
             Speaker(id=spk_id, start=times[0], end=times[1])
             for spk_id, times in speakers_map.items()
         ]
 
-        # Use raw text if no segments parsed
-        full_text = (
-            " ".join(text_parts)
-            if text_parts
-            else processed.get("raw_text", raw_output)
-        )
+        full_text = " ".join(text_parts) if text_parts else ""
 
-        # Calculate total duration
         duration = None
         if segments:
             duration = max(s.end for s in segments)
@@ -817,29 +660,12 @@ class VibeVoiceTranscriber:
 
         return TranscriptionResult(
             text=full_text,
-            words=[],  # VibeVoice doesn't provide word-level timestamps
+            words=[],  # VibeVoice provides segment-level, not word-level timestamps
             segments=segments,
             speakers=speakers if speakers else None,
             language=None,  # VibeVoice auto-detects
             duration=duration,
         )
-
-    def _load_audio_fallback(self, audio_path: str):
-        """Fallback audio loading using torchaudio."""
-        import torchaudio
-
-        waveform, sample_rate = torchaudio.load(audio_path)
-
-        # Resample to 16kHz if needed
-        if sample_rate != 16000:
-            resampler = torchaudio.transforms.Resample(sample_rate, 16000)
-            waveform = resampler(waveform)
-
-        # Convert to mono
-        if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
-
-        return waveform.squeeze().numpy()
 
     @property
     def is_loaded(self) -> bool:

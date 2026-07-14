@@ -1,5 +1,6 @@
 """FastAPI service for speaker recognition and diarization - fully refactored."""
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -11,18 +12,29 @@ import uvicorn
 import yaml
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from omegaconf import OmegaConf
 from pydantic import Field
 from pydantic_settings import BaseSettings
 from simple_speaker_recognition.api.core.utils import get_data_directory
+from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
 from simple_speaker_recognition.core.audio_backend import AudioBackend
 from simple_speaker_recognition.core.unified_speaker_db import UnifiedSpeakerDB
 from simple_speaker_recognition.database import init_db
+from simple_speaker_recognition.system_event_reporter import (
+    install_system_event_reporter,
+)
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 log = logging.getLogger("speaker_service")
+
+# Forward ERROR/CRITICAL logs to the backend's system-event ledger so failures
+# inside this service surface on the admin "System Errors" page. No-op unless
+# CHRONICLE_INGEST_URL/CHRONICLE_INGEST_TOKEN are configured.
+install_system_event_reporter(source="speaker-recognition")
 
 
 def load_speaker_config_from_root() -> dict:
@@ -33,8 +45,6 @@ def load_speaker_config_from_root() -> dict:
         Dictionary with speaker_recognition config, or empty dict if not found
     """
     try:
-        from omegaconf import OmegaConf
-
         config_dir = Path(os.getenv("CONFIG_DIR", "/app/config"))
         defaults_path = config_dir / "defaults.yml"
         config_path = config_dir / "config.yml"
@@ -66,7 +76,7 @@ class Settings(BaseSettings):
     """Service configuration settings."""
 
     similarity_threshold: float = Field(
-        default=0.45,
+        default=DEFAULT_SIMILARITY_THRESHOLD,
         description="Cosine similarity threshold for speaker identification",
     )
     data_dir: Path = Field(
@@ -178,6 +188,68 @@ else:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+# --- CUDA health probe + self-heal watchdog ----------------------------------
+# A `cudaErrorLaunchFailure` ("unspecified launch failure") poisons the process's
+# CUDA context: every later kernel launch fails until the process restarts, yet a
+# plain liveness check (return "ok") still looks healthy. So /health silently lied
+# while 100% of /identify calls 500'd. These exercise the GPU for real so the fault
+# is both *reported* (health → 503) and *recovered* (watchdog exits → restart policy
+# brings the service back with a fresh context).
+HEALTH_PROBE_INTERVAL_SECONDS = float(os.getenv("CUDA_PROBE_INTERVAL_SECONDS", "30"))
+HEALTH_MAX_CONSECUTIVE_FAILURES = int(os.getenv("CUDA_PROBE_MAX_FAILURES", "3"))
+
+
+def _probe_cuda() -> Optional[str]:
+    """Launch one tiny GPU kernel and synchronize to detect a corrupted CUDA context.
+
+    Returns None when the GPU is healthy (or the service is CPU-only), or a short error
+    string when a kernel launch/sync fails — which, for a sticky launch failure, it will
+    keep doing until the process restarts.
+    """
+    if device.type != "cuda":
+        return None
+    try:
+        x = torch.ones(64, device=device) * 2.0
+        torch.cuda.synchronize()
+        _ = float(x.sum().item())  # force the result back off the GPU
+        return None
+    except Exception as e:  # noqa: BLE001 — any CUDA fault here means unhealthy
+        return f"{type(e).__name__}: {e}"
+
+
+async def _cuda_watchdog() -> None:
+    """Self-heal a poisoned CUDA context.
+
+    `cudaErrorLaunchFailure` is sticky — only a process restart clears it. Probe the GPU
+    periodically and, after a few *consecutive* failures (to ride out a one-off blip under
+    contention), exit so the container's ``restart: unless-stopped`` policy brings the
+    service back with a fresh context instead of staying silently broken.
+    """
+    if device.type != "cuda":
+        return
+    consecutive = 0
+    while True:
+        await asyncio.sleep(HEALTH_PROBE_INTERVAL_SECONDS)
+        err = await asyncio.to_thread(_probe_cuda)
+        if err is None:
+            consecutive = 0
+            continue
+        consecutive += 1
+        log.error(
+            "CUDA watchdog: GPU probe failed (%d/%d): %s",
+            consecutive,
+            HEALTH_MAX_CONSECUTIVE_FAILURES,
+            err,
+        )
+        if consecutive >= HEALTH_MAX_CONSECUTIVE_FAILURES:
+            log.critical(
+                "CUDA context unrecoverable after %d consecutive probes — exiting so the "
+                "container restarts with a fresh context",
+                consecutive,
+            )
+            os._exit(1)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan event handler for startup and shutdown."""
@@ -208,10 +280,15 @@ async def lifespan(app: FastAPI):
     admin_user_id = speaker_db.ensure_admin_user()
     log.info("Admin user ready ✔ – user_id=%s", admin_user_id)
 
+    # Start the CUDA self-heal watchdog (no-op on CPU).
+    watchdog_task = asyncio.create_task(_cuda_watchdog())
+    log.info("CUDA watchdog started (device=%s)", device)
+
     # Yield control to the application
     yield
 
     # Shutdown: Clean up resources if needed
+    watchdog_task.cancel()
     log.info("Shutting down speaker recognition service")
 
 
@@ -234,6 +311,7 @@ app.add_middleware(
 # Import and include all routers
 from .routers import (
     deepgram_router,
+    enrollment_audit_router,
     enrollment_router,
     identification_router,
     speakers_router,
@@ -245,6 +323,7 @@ from .routers import (
 app.include_router(users_router, tags=["users"])
 app.include_router(speakers_router, tags=["speakers"])
 app.include_router(enrollment_router, tags=["enrollment"])
+app.include_router(enrollment_audit_router, tags=["enrollment-audit"])
 app.include_router(identification_router, tags=["identification"])
 app.include_router(deepgram_router, tags=["deepgram"])
 app.include_router(websocket_router, tags=["websocket"])
@@ -257,14 +336,24 @@ async def get_db() -> UnifiedSpeakerDB:
 
 @app.get("/health")
 async def health(db: UnifiedSpeakerDB = Depends(get_db)):
-    """Health check endpoint."""
-    return {
-        "status": "ok",
+    """Health check — exercises CUDA so a poisoned context reports unhealthy.
+
+    Returns 503 when the GPU probe fails, so the container healthcheck (``curl -f``)
+    flips to ``unhealthy`` instead of reporting green while every /identify 500s.
+    """
+    cuda_error = await asyncio.to_thread(_probe_cuda)
+    body = {
+        "status": "ok" if cuda_error is None else "cuda_error",
         "version": "0.2.0-refactored",
         "device": str(device),
         "speakers": db.get_speaker_count(),
         "architecture": "modular-routers",
     }
+    if cuda_error is not None:
+        body["cuda_error"] = cuda_error
+        log.error("Health probe: CUDA context unhealthy: %s", cuda_error)
+        return JSONResponse(status_code=503, content=body)
+    return body
 
 
 def main():

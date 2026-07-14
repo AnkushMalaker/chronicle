@@ -7,9 +7,12 @@ and environment file handling. Used by wizard.py, init.py scripts, and plugin se
 
 import getpass
 import json
+import os
 import re
 import secrets
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -38,6 +41,48 @@ def read_env_value(env_file_path: str, key: str) -> Optional[str]:
     value = get_key(str(env_path), key)
     # get_key returns None if key doesn't exist or value is empty
     return value if value else None
+
+
+def resolve_ingest_config(
+    search_paths: list,
+    host: str = "host.docker.internal",
+    default_port: str = "8000",
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve the cross-service System-Errors ingest URL + token for a sidecar.
+
+    Sidecar services (ASR, speaker-recognition) push their ERROR/CRITICAL logs to the
+    backend's ``POST /api/admin/system-events/ingest`` so failures surface on the admin
+    "System Errors" page instead of being buried in container logs. This sources the
+    backend address + auth token the same way other shared secrets are sourced: from
+    the backend .env (canonical hub on a main machine) or the repo-root .env (per-node
+    store), in the given order.
+
+    The token prefers a dedicated ``SYSTEM_EVENT_INGEST_TOKEN`` and falls back to
+    ``SERVICE_MANAGER_TOKEN`` (which the backend accepts as the ingest fallback).
+
+    Returns ``(ingest_url, ingest_token)``. Both are ``None`` when no backend config is
+    found locally (e.g. a remote service node with no backend .env) — the reporter is
+    opt-in and stays a no-op until both are set, so callers should only write non-None
+    values and leave the keys untouched otherwise.
+
+    Args:
+        search_paths: .env paths to search, in priority order.
+        host: Hostname the sidecar uses to reach the backend (default reaches the
+            host gateway from inside a container).
+        default_port: Backend HTTP port to use when ``BACKEND_PUBLIC_PORT`` is absent.
+
+    Example:
+        >>> url, token = resolve_ingest_config(["../../backends/advanced/.env", "../../.env"])
+    """
+    for path in search_paths:
+        token = read_env_value(path, "SYSTEM_EVENT_INGEST_TOKEN") or read_env_value(
+            path, "SERVICE_MANAGER_TOKEN"
+        )
+        if token:
+            port = read_env_value(path, "BACKEND_PUBLIC_PORT") or default_port
+            url = f"http://{host}:{port}/api/admin/system-events/ingest"
+            return url, token
+    return None, None
 
 
 def is_placeholder(value: str, *placeholder_variants: str) -> bool:
@@ -377,8 +422,10 @@ def generate_tailscale_certs(certs_dir: str) -> bool:
     """
     Generate trusted TLS certificates via Tailscale.
 
-    Uses `sudo tailscale cert` to obtain certs signed by the Tailscale CA,
-    which are automatically trusted on devices in the same tailnet.
+    Uses `tailscale cert` to obtain certs signed by the Tailscale CA, which are
+    automatically trusted on devices in the same tailnet. Tries without sudo first
+    (works when the Tailscale operator is set to the current user via
+    `tailscale set --operator=$USER`); falls back to `sudo` otherwise.
 
     Args:
         certs_dir: Directory to write server.crt and server.key into.
@@ -396,71 +443,187 @@ def generate_tailscale_certs(certs_dir: str) -> bool:
     cert_file = certs_path / "server.crt"
     key_file = certs_path / "server.key"
 
+    cert_cmd = [
+        "tailscale",
+        "cert",
+        "--cert-file",
+        str(cert_file),
+        "--key-file",
+        str(key_file),
+        dns_name,
+    ]
+
     try:
-        result = subprocess.run(
-            [
-                "sudo",
-                "tailscale",
-                "cert",
-                "--cert-file",
-                str(cert_file),
-                "--key-file",
-                str(key_file),
-                dns_name,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        # Try without sudo first (operator configured). Fall back to non-interactive
+        # sudo (-n avoids hanging on a password prompt in unattended contexts).
+        result = subprocess.run(cert_cmd, capture_output=True, text=True, timeout=30)
+        used_sudo = False
+        if result.returncode != 0:
+            result = subprocess.run(
+                ["sudo", "-n", *cert_cmd], capture_output=True, text=True, timeout=30
+            )
+            used_sudo = True
         if result.returncode != 0:
             return False
 
-        # Fix ownership so Docker can read the files
-        import os
-
-        uid = os.getuid()
-        gid = os.getgid()
-        subprocess.run(
-            ["sudo", "chown", f"{uid}:{gid}", str(cert_file), str(key_file)],
-            capture_output=True,
-            timeout=10,
-        )
+        if used_sudo:
+            # sudo wrote the files as root; fix ownership so Docker (and our user) can read them
+            uid = os.getuid()
+            gid = os.getgid()
+            subprocess.run(
+                ["sudo", "-n", "chown", f"{uid}:{gid}", str(cert_file), str(key_file)],
+                capture_output=True,
+                timeout=10,
+            )
         return True
     except (subprocess.SubprocessError, FileNotFoundError, OSError):
         return False
 
 
-def generate_self_signed_certs(server_address: str, certs_dir: str) -> bool:
+def cert_needs_renewal(certs_dir: str, within_days: int = 21) -> bool:
     """
-    Generate self-signed TLS certificates using the repo's generate-ssl.sh script.
+    Check whether the TLS cert in certs_dir is missing or expiring soon.
+
+    Cheap, local-only check (no network): inspects the cert file's expiry via
+    `openssl x509 -checkend`, which exits 0 if the cert is valid beyond the window
+    and non-zero if it expires within it (or is already expired).
 
     Args:
-        server_address: IP address or domain name for the certificate SAN.
-        certs_dir: Directory to write server.crt and server.key into.
+        certs_dir: Directory containing server.crt.
+        within_days: Treat the cert as needing renewal if it expires within this many days.
 
     Returns:
-        True if certificates were generated successfully, False otherwise.
+        True if the cert is missing or expires within `within_days`, False otherwise.
     """
-    certs_path = Path(certs_dir)
-    certs_path.mkdir(parents=True, exist_ok=True)
-
-    # The generate-ssl.sh script is at certs/generate-ssl.sh relative to repo root
-    # and outputs into the current working directory
-    script = certs_path / "generate-ssl.sh"
-    if not script.exists():
-        return False
+    cert_file = Path(certs_dir) / "server.crt"
+    if not cert_file.exists():
+        return True
 
     try:
         result = subprocess.run(
-            [str(script), server_address],
-            cwd=str(certs_path),
+            [
+                "openssl",
+                "x509",
+                "-checkend",
+                str(within_days * 86400),
+                "-noout",
+                "-in",
+                str(cert_file),
+            ],
+            capture_output=True,
+            timeout=10,
+        )
+        return result.returncode != 0
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        # If expiry can't be determined, err toward renewing.
+        return True
+
+
+def ensure_tailscale_cert(certs_dir: str, within_days: int = 21) -> Optional[bool]:
+    """
+    Renew the Tailscale TLS cert only if it is missing or near expiry.
+
+    No-op in the common case: just checks the local cert file's expiry and returns
+    without contacting Tailscale unless renewal is actually due. This keeps the
+    expensive `tailscale cert` call (and Let's Encrypt issuance) to roughly once
+    per certificate lifetime regardless of how often it is invoked.
+
+    Args:
+        certs_dir: Directory containing/receiving server.crt and server.key.
+        within_days: Renew if the cert expires within this many days.
+
+    Returns:
+        None if no renewal was needed, True if renewed successfully,
+        False if renewal was needed but failed.
+    """
+    if not cert_needs_renewal(certs_dir, within_days):
+        return None
+    return generate_tailscale_certs(certs_dir)
+
+
+def tailscale_socket_path() -> Optional[str]:
+    """
+    Return the path to the local tailscaled Unix socket if present, else None.
+
+    Used to decide whether Caddy can manage the Tailscale TLS cert itself (socket
+    mounted into the container) or whether we must fall back to a host-issued cert
+    file (e.g. Docker Desktop on macOS, where the socket isn't reachable from the VM).
+    """
+    for path in (
+        "/var/run/tailscale/tailscaled.sock",
+        "/run/tailscale/tailscaled.sock",
+    ):
+        if Path(path).exists():
+            return path
+    return None
+
+
+def tailscaled_enabled_at_boot() -> Optional[bool]:
+    """
+    Whether the tailscaled systemd unit is enabled to start on boot.
+
+    Returns:
+        True  — `systemctl is-enabled tailscaled` reports enabled (it'll come back
+                after a reboot).
+        False — the unit exists but is disabled/static (started manually only;
+                won't survive a reboot — the classic "Tailscale gone after reboot").
+        None  — can't tell: not Linux, no systemd/systemctl, or no tailscaled unit
+                (e.g. Tailscale.app on macOS, or a non-systemd init). Nothing to offer.
+    """
+    if sys.platform != "linux" or shutil.which("systemctl") is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-enabled", "tailscaled"],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=5,
         )
-        return result.returncode == 0
-    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+    except (subprocess.SubprocessError, OSError):
+        return None
+    state = result.stdout.strip()
+    if state == "enabled":
+        return True
+    # "disabled" / "static" → won't auto-start. Unknown unit → systemctl prints
+    # nothing to stdout (message goes to stderr, rc=1) → treat as "can't tell".
+    if state in ("disabled", "static"):
         return False
+    return None
+
+
+def enable_tailscaled_at_boot() -> bool:
+    """
+    Enable (and start) the tailscaled unit so it survives reboots.
+
+    Runs `sudo systemctl enable --now tailscaled`. Returns True on success. Uses sudo
+    because enabling a system unit needs root; the user may be prompted for a password.
+    """
+    try:
+        return (
+            subprocess.run(
+                ["sudo", "systemctl", "enable", "--now", "tailscaled"]
+            ).returncode
+            == 0
+        )
+    except OSError:
+        return False
+
+
+def decide_cert_mode(server_address: str) -> str:
+    """
+    Decide how the HTTPS certificate is managed for the given server address.
+
+    Returns:
+        "static" — host issues the cert file and Caddy serves it. Only for a Tailscale
+            (*.ts.net) address when no tailscaled socket is available to mount into
+            Caddy (e.g. Docker Desktop on macOS). Renewed by the services.py startup hook.
+        "caddy"  — Caddy obtains and auto-renews the cert itself: *.ts.net via the
+            mounted tailscaled socket, a real domain via Let's Encrypt, and an IP or
+            localhost via Caddy's internal CA. No host cert file, no renewal cron.
+    """
+    if server_address.endswith(".ts.net") and not tailscale_socket_path():
+        return "static"
+    return "caddy"
 
 
 def detect_cuda_version(default: str = "cu126") -> str:
@@ -473,7 +636,7 @@ def detect_cuda_version(default: str = "cu126") -> str:
         default: Default CUDA version if detection fails (default: "cu126")
 
     Returns:
-        PyTorch CUDA version string: "cu121", "cu126", or "cu128"
+        PyTorch CUDA version string: "cu126" or "cu128"
     """
     try:
         result = subprocess.run(
@@ -485,10 +648,8 @@ def detect_cuda_version(default: str = "cu126") -> str:
                 major, minor = int(match.group(1)), int(match.group(2))
                 if (major, minor) >= (12, 8):
                     return "cu128"
-                elif (major, minor) >= (12, 6):
-                    return "cu126"
-                elif (major, minor) >= (12, 1):
-                    return "cu121"
+                # cu126 is the lowest supported build (torch>=2.7 dropped cu121)
+                return "cu126"
     except (subprocess.SubprocessError, FileNotFoundError):
         pass
     return default

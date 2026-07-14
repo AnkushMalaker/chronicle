@@ -8,16 +8,19 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any, Dict
 
 import aiohttp
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 
 from advanced_omi_backend.client_manager import get_client_manager
-from advanced_omi_backend.controllers.queue_controller import redis_conn
-from advanced_omi_backend.llm_client import async_health_check
+from advanced_omi_backend.controllers.queue_controller import get_queue_health
+from advanced_omi_backend.llm_client import (
+    async_health_check,
+    async_health_check_fallback,
+    async_health_check_fast,
+)
 from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.services.transcription import get_transcription_provider
@@ -33,24 +36,6 @@ application_logger = logging.getLogger("audio_processing")
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://mongo:27017")
 mongo_client = AsyncIOMotorClient(MONGODB_URI)
 
-# Memory service
-memory_service = get_memory_service()
-
-# Transcription provider
-transcription_provider = get_transcription_provider()
-
-# Registry-driven configuration for display
-REGISTRY = get_models_registry()
-if REGISTRY:
-    _llm_def = REGISTRY.get_default("llm")
-    _embed_def = REGISTRY.get_default("embedding")
-    _vs_def = REGISTRY.get_default("vector_store")
-else:
-    _llm_def = _embed_def = _vs_def = None
-
-QDRANT_BASE_URL = _vs_def.model_params.get("host") if _vs_def else "qdrant"
-QDRANT_PORT = str(_vs_def.model_params.get("port") if _vs_def else "6333")
-
 
 @router.get("/auth/health")
 async def auth_health_check():
@@ -59,7 +44,13 @@ async def auth_health_check():
         # Test database connectivity
         await mongo_client.admin.command("ping")
 
-        # Test memory service if available
+        # Test memory service if available (creation itself can fail when the
+        # LLM defaults are unconfigured, so it counts as unavailable, not a 500)
+        try:
+            memory_service = get_memory_service()
+        except Exception as e:
+            logger.warning(f"Memory service unavailable: {e}")
+            memory_service = None
         if memory_service:
             try:
                 await asyncio.wait_for(memory_service.test_connection(), timeout=2.0)
@@ -98,6 +89,8 @@ async def health_check():
     _llm_model = None
     _llm_base_url = None
     _stt_name = None
+    registry = None
+    transcription_provider = get_transcription_provider()
 
     try:
         registry = get_models_registry()
@@ -108,7 +101,7 @@ async def health_check():
             _llm_def = registry.models.get(_llm_name)
             _llm_provider = _llm_def.model_provider if _llm_def else "openai"
             _llm_model = _llm_def.model_name if _llm_def else None
-            _llm_base_url = _llm_def.model_url if _llm_def else None
+            _llm_base_url = _llm_def.resolved_url() if _llm_def else None
     except Exception as e:
         logger.warning(f"Failed to load model config for health check: {e}")
     health_status = {
@@ -117,7 +110,6 @@ async def health_check():
         "services": {},
         "config": {
             "mongodb_uri": MONGODB_URI,
-            "qdrant_url": f"http://{QDRANT_BASE_URL}:{QDRANT_PORT}",
             "transcription_service": (
                 f"Speech to Text ({transcription_provider.name})"
                 if transcription_provider
@@ -129,8 +121,8 @@ async def health_check():
                 else "Not configured"
             ),
             "transcription_provider": (
-                REGISTRY.get_default("stt").name
-                if REGISTRY and REGISTRY.get_default("stt")
+                registry.get_default("stt").name
+                if registry and registry.get_default("stt")
                 else "not configured"
             ),
             "provider_type": (
@@ -143,7 +135,7 @@ async def health_check():
             ),
             "llm_provider": (_llm_def.model_provider if _llm_def else None),
             "llm_model": (_llm_def.model_name if _llm_def else None),
-            "llm_base_url": (_llm_def.model_url if _llm_def else None),
+            "llm_base_url": (_llm_def.resolved_url() if _llm_def else None),
         },
     }
 
@@ -152,11 +144,11 @@ async def health_check():
 
     # Get configuration once at the start
     # Memory provider (registry-based)
-    mem_settings = REGISTRY.memory if REGISTRY else {}
+    mem_settings = registry.memory if registry else {}
     memory_provider = (mem_settings.get("provider") or "chronicle").lower()
 
     speaker_service_url = os.getenv("SPEAKER_SERVICE_URL")
-    openmemory_mcp_url = os.getenv("OPENMEMORY_MCP_URL")
+    wakeword_service_url = os.getenv("WAKEWORD_SERVICE_URL")
 
     # Check MongoDB (critical service)
     try:
@@ -185,8 +177,6 @@ async def health_check():
 
     # Check Redis and RQ Workers (critical for queue processing)
     try:
-        from advanced_omi_backend.controllers.queue_controller import get_queue_health
-
         # Get queue health (includes Redis connection test and worker count)
         queue_health = await asyncio.wait_for(
             asyncio.to_thread(get_queue_health), timeout=5.0
@@ -268,103 +258,147 @@ async def health_check():
         }
         overall_healthy = False
 
-    # Check memory service (provider-dependent)
-    if memory_provider == "chronicle":
-        try:
-            # Test Chronicle memory service connection with timeout
-            test_success = await asyncio.wait_for(
-                memory_service.test_connection(), timeout=8.0
-            )
-            if test_success:
-                health_status["services"]["memory_service"] = {
-                    "status": "✅ Chronicle Memory Connected",
-                    "healthy": True,
-                    "provider": "chronicle",
-                    "critical": False,
-                }
-            else:
-                health_status["services"]["memory_service"] = {
-                    "status": "⚠️ Chronicle Memory Test Failed",
-                    "healthy": False,
-                    "provider": "chronicle",
-                    "critical": False,
-                }
+    # Check separate fast LLM, only when one is configured (defaults.fast_llm set
+    # and distinct from defaults.llm). Reuses the main LLM otherwise.
+    try:
+        fast_health = await asyncio.wait_for(async_health_check_fast(), timeout=8.0)
+        if fast_health is not None:
+            is_healthy = fast_health.get("healthy", False)
+            health_status["services"]["fast_llm"] = {
+                "status": fast_health.get("status", "❌ Unknown"),
+                "healthy": is_healthy,
+                "base_url": fast_health.get("base_url", ""),
+                "model": fast_health.get("default_model", ""),
+                "critical": False,
+            }
+            if not is_healthy:
                 overall_healthy = False
-        except asyncio.TimeoutError:
-            health_status["services"]["memory_service"] = {
-                "status": "⚠️ Chronicle Memory Timeout (8s) - Check Qdrant",
-                "healthy": False,
-                "provider": "chronicle",
-                "critical": False,
-            }
-            overall_healthy = False
-        except Exception as e:
-            health_status["services"]["memory_service"] = {
-                "status": f"⚠️ Chronicle Memory Failed: {str(e)}",
-                "healthy": False,
-                "provider": "chronicle",
-                "critical": False,
-            }
-            overall_healthy = False
-    elif memory_provider == "openmemory_mcp":
-        # OpenMemory MCP check is handled separately above
-        health_status["services"]["memory_service"] = {
-            "status": "✅ Using OpenMemory MCP",
-            "healthy": True,
-            "provider": "openmemory_mcp",
+    except Exception as e:  # noqa: BLE001 - fast LLM is optional/non-critical
+        health_status["services"]["fast_llm"] = {
+            "status": f"⚠️ Connection Failed: {str(e)} - Service may not be running",
+            "healthy": False,
             "critical": False,
         }
-    else:
+        overall_healthy = False
+
+    # Check separate fallback LLM, only when one is configured
+    # (defaults.fallback_llm set and distinct from defaults.llm).
+    try:
+        fb_health = await asyncio.wait_for(async_health_check_fallback(), timeout=8.0)
+        if fb_health is not None:
+            is_healthy = fb_health.get("healthy", False)
+            health_status["services"]["fallback_llm"] = {
+                "status": fb_health.get("status", "❌ Unknown"),
+                "healthy": is_healthy,
+                "base_url": fb_health.get("base_url", ""),
+                "model": fb_health.get("default_model", ""),
+                "critical": False,
+            }
+            if not is_healthy:
+                overall_healthy = False
+    except Exception as e:  # noqa: BLE001 - fallback LLM is optional/non-critical
+        health_status["services"]["fallback_llm"] = {
+            "status": f"⚠️ Connection Failed: {str(e)} - Service may not be running",
+            "healthy": False,
+            "critical": False,
+        }
+        overall_healthy = False
+
+    # Check memory service (Chronicle agentic vault). Created here rather than at
+    # module load — creation raises when LLM defaults are unconfigured, and an
+    # import-time failure would take down every route in this package.
+    try:
+        memory_service = get_memory_service()
+        test_success = await asyncio.wait_for(
+            memory_service.test_connection(), timeout=8.0
+        )
+        if test_success:
+            health_status["services"]["memory_service"] = {
+                "status": "✅ Chronicle Memory Connected",
+                "healthy": True,
+                "provider": memory_provider,
+                "critical": False,
+            }
+        else:
+            health_status["services"]["memory_service"] = {
+                "status": "⚠️ Chronicle Memory Test Failed",
+                "healthy": False,
+                "provider": memory_provider,
+                "critical": False,
+            }
+            overall_healthy = False
+    except Exception as e:
         health_status["services"]["memory_service"] = {
-            "status": f"❌ Unknown memory provider: {memory_provider}",
+            "status": f"⚠️ Chronicle Memory Failed: {str(e)}",
             "healthy": False,
             "provider": memory_provider,
             "critical": False,
         }
         overall_healthy = False
 
-    # Check Speech to Text service based on configured provider
-    if transcription_provider:
-        provider_name = transcription_provider.name
-        provider_type = transcription_provider.mode
-
+    # Check Speech to Text services — both batch (stored transcripts) and
+    # streaming (live, real-time). Each is reported separately so the status
+    # page shows what's configured for each mode, or flags it as unconfigured.
+    async def _check_stt(provider, label):
+        if provider is None:
+            return {
+                "status": "⚠️ Not configured",
+                "healthy": False,
+                "type": label,
+                "provider": "None",
+                "configured": False,
+                "critical": False,
+            }
         try:
-            stt_health = await asyncio.wait_for(
-                transcription_provider.health_check(), timeout=8.0
-            )
-            health_status["services"]["speech_to_text"] = {
-                "status": stt_health.get("status", "❌ Unknown"),
-                "healthy": stt_health.get("healthy", False),
-                "type": provider_type.title(),
-                "provider": provider_name,
+            h = await asyncio.wait_for(provider.health_check(), timeout=8.0)
+            return {
+                "status": h.get("status", "❌ Unknown"),
+                "healthy": h.get("healthy", False),
+                "type": label,
+                "provider": provider.name,
+                "configured": True,
                 "critical": False,
             }
         except asyncio.TimeoutError:
-            health_status["services"]["speech_to_text"] = {
+            return {
                 "status": "⚠️ Connection Timeout (8s)",
                 "healthy": False,
-                "type": provider_type.title(),
-                "provider": provider_name,
+                "type": label,
+                "provider": provider.name,
+                "configured": True,
                 "critical": False,
             }
         except Exception as e:
-            health_status["services"]["speech_to_text"] = {
+            return {
                 "status": f"⚠️ Provider Error: {str(e)}",
                 "healthy": False,
-                "type": provider_type.title(),
-                "provider": provider_name,
+                "type": label,
+                "provider": provider.name,
+                "configured": True,
                 "critical": False,
             }
-    else:
-        # No transcription service configured
-        health_status["services"]["speech_to_text"] = {
-            "status": "❌ No transcription service configured",
-            "healthy": False,
-            "type": "None",
-            "provider": "None",
-            "critical": False,
-        }
+
+    batch_provider = get_transcription_provider(mode="batch")
+    streaming_provider = get_transcription_provider(mode="streaming")
+
+    health_status["services"]["speech_to_text"] = await _check_stt(
+        batch_provider, "Batch"
+    )
+    health_status["services"]["speech_to_text_streaming"] = await _check_stt(
+        streaming_provider, "Streaming"
+    )
+
+    # Batch STT is required for stored transcripts; missing → degraded overall.
+    # Streaming is optional (live preview only), so it stays a non-fatal warning.
+    if batch_provider is None:
+        health_status["services"]["speech_to_text"][
+            "status"
+        ] = "❌ No batch STT configured (set defaults.stt)"
         overall_healthy = False
+    if streaming_provider is None:
+        health_status["services"]["speech_to_text_streaming"][
+            "status"
+        ] = "⚠️ No streaming STT configured (set defaults.stt_stream)"
 
     # Check Speaker Recognition service (non-critical - optional feature)
     if speaker_service_url:
@@ -407,47 +441,45 @@ async def health_check():
             }
             overall_healthy = False
 
-    # Check OpenMemory MCP service (if configured)
-    if memory_provider == "openmemory_mcp" and openmemory_mcp_url:
+    # Check Wake-word service (non-critical - optional feature). Only probed when
+    # WAKEWORD_SERVICE_URL is configured, mirroring the speaker_recognition gate.
+    if wakeword_service_url:
         try:
-            # Make a health check request to the OpenMemory MCP service
             async with aiohttp.ClientSession() as session:
                 async with session.get(
-                    f"{openmemory_mcp_url}/api/v1/apps/",
+                    f"{wakeword_service_url}/health",
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as response:
                     if response.status == 200:
-                        health_status["services"]["openmemory_mcp"] = {
+                        body = await response.json()
+                        health_status["services"]["wakeword"] = {
                             "status": "✅ Connected",
                             "healthy": True,
-                            "url": openmemory_mcp_url,
-                            "provider": "openmemory_mcp",
+                            "url": wakeword_service_url,
+                            "model_loaded": body.get("model_loaded"),
                             "critical": False,
                         }
                     else:
-                        health_status["services"]["openmemory_mcp"] = {
+                        health_status["services"]["wakeword"] = {
                             "status": f"⚠️ Unhealthy: HTTP {response.status}",
                             "healthy": False,
-                            "url": openmemory_mcp_url,
-                            "provider": "openmemory_mcp",
+                            "url": wakeword_service_url,
                             "critical": False,
                         }
                         overall_healthy = False
         except asyncio.TimeoutError:
-            health_status["services"]["openmemory_mcp"] = {
+            health_status["services"]["wakeword"] = {
                 "status": "⚠️ Connection Timeout (5s)",
                 "healthy": False,
-                "url": openmemory_mcp_url,
-                "provider": "openmemory_mcp",
+                "url": wakeword_service_url,
                 "critical": False,
             }
             overall_healthy = False
         except Exception as e:
-            health_status["services"]["openmemory_mcp"] = {
+            health_status["services"]["wakeword"] = {
                 "status": f"⚠️ Connection Failed: {str(e)}",
                 "healthy": False,
-                "url": openmemory_mcp_url,
-                "provider": "openmemory_mcp",
+                "url": wakeword_service_url,
                 "critical": False,
             }
             overall_healthy = False

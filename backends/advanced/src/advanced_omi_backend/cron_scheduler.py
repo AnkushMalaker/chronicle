@@ -21,6 +21,7 @@ import redis.asyncio as aioredis
 from croniter import croniter
 
 from advanced_omi_backend.config_loader import load_config, save_config_section
+from advanced_omi_backend.redis_factory import create_async_redis
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +81,7 @@ class CronScheduler:
 
     async def start(self) -> None:
         """Load config, restore state from Redis, and start the scheduler loop."""
-        import os
-
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        self._redis = aioredis.from_url(redis_url, decode_responses=True)
+        self._redis = create_async_redis(decode_responses=True)
 
         self._load_jobs_from_config()
         await self._restore_state()

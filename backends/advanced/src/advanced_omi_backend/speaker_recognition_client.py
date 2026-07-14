@@ -190,9 +190,11 @@ class SpeakerRecognitionClient:
                 f"🎤 Calling speaker service with conversation_id: {conversation_id[:12]}..."
             )
 
-            # Read diarization source from config system
+            # Pyannote parameters from diarization settings. This path always
+            # diarizes via the speaker service; transcripts whose provider
+            # already diarized are routed to identify_provider_segments()
+            # by the speaker job instead.
             config = get_diarization_settings()
-            diarization_source = config.get("diarization_source", "pyannote")
 
             async with aiohttp.ClientSession() as session:
                 # Prepare form data with conversation_id + backend_token
@@ -200,69 +202,43 @@ class SpeakerRecognitionClient:
                 form_data.add_field("conversation_id", conversation_id)
                 form_data.add_field("backend_token", backend_token)
 
-                if diarization_source == "deepgram":
-                    # DEEPGRAM DIARIZATION PATH: We EXPECT transcript has speaker info from Deepgram
-                    # Only need speaker identification of existing segments
-                    logger.info(
-                        "Using Deepgram diarization path - transcript should have speaker segments, identifying speakers"
-                    )
+                # Send existing transcript for diarization and speaker matching
+                form_data.add_field("transcript_data", json.dumps(transcript_data))
+                form_data.add_field(
+                    "user_id", "1"
+                )  # TODO: Implement proper user mapping
+                form_data.add_field(
+                    "similarity_threshold",
+                    str(config.get("similarity_threshold", 0.45)),
+                )
 
-                    # TODO: Implement proper speaker identification for Deepgram segments
-                    # For now, use diarize-identify-match as fallback until we implement segment identification
-                    logger.warning(
-                        "Deepgram segment identification not yet implemented, using diarize-identify-match as fallback"
-                    )
+                # Add pyannote diarization parameters
+                form_data.add_field(
+                    "min_duration", str(config.get("min_duration", 0.5))
+                )
+                form_data.add_field("collar", str(config.get("collar", 2.0)))
+                form_data.add_field(
+                    "min_duration_off", str(config.get("min_duration_off", 1.5))
+                )
+                if config.get("min_speakers"):
+                    form_data.add_field("min_speakers", str(config.get("min_speakers")))
+                if config.get("max_speakers"):
+                    form_data.add_field("max_speakers", str(config.get("max_speakers")))
 
-                    form_data.add_field("transcript_data", json.dumps(transcript_data))
-                    form_data.add_field(
-                        "user_id", "1"
-                    )  # TODO: Implement proper user mapping
-                    form_data.add_field(
-                        "similarity_threshold",
-                        str(config.get("similarity_threshold", 0.45)),
-                    )
-                    form_data.add_field(
-                        "min_duration", str(config.get("min_duration", 0.5))
-                    )
+                # Cross-chunk reconciliation + open-set identification knobs
+                form_data.add_field(
+                    "reconciliation_threshold",
+                    str(config.get("reconciliation_threshold", 0.4)),
+                )
+                form_data.add_field(
+                    "identify_margin", str(config.get("identify_margin", 0.1))
+                )
+                form_data.add_field(
+                    "exclusive", str(config.get("exclusive", True)).lower()
+                )
 
-                    # Use /v1/diarize-identify-match endpoint as fallback
-                    endpoint = "/v1/diarize-identify-match"
-
-                else:  # pyannote (default)
-                    # PYANNOTE PATH: Backend has transcript, need diarization + speaker identification
-                    logger.info(
-                        "Using Pyannote path - diarizing backend transcript and identifying speakers"
-                    )
-
-                    # Send existing transcript for diarization and speaker matching
-                    form_data.add_field("transcript_data", json.dumps(transcript_data))
-                    form_data.add_field(
-                        "user_id", "1"
-                    )  # TODO: Implement proper user mapping
-                    form_data.add_field(
-                        "similarity_threshold",
-                        str(config.get("similarity_threshold", 0.45)),
-                    )
-
-                    # Add pyannote diarization parameters
-                    form_data.add_field(
-                        "min_duration", str(config.get("min_duration", 0.5))
-                    )
-                    form_data.add_field("collar", str(config.get("collar", 2.0)))
-                    form_data.add_field(
-                        "min_duration_off", str(config.get("min_duration_off", 1.5))
-                    )
-                    if config.get("min_speakers"):
-                        form_data.add_field(
-                            "min_speakers", str(config.get("min_speakers"))
-                        )
-                    if config.get("max_speakers"):
-                        form_data.add_field(
-                            "max_speakers", str(config.get("max_speakers"))
-                        )
-
-                    # Use /v1/diarize-identify-match endpoint for backend integration
-                    endpoint = "/v1/diarize-identify-match"
+                # Use /v1/diarize-identify-match endpoint for backend integration
+                endpoint = "/v1/diarize-identify-match"
 
                 # Make the request to the consolidated endpoint
                 request_url = f"{self.service_url}{endpoint}"
@@ -284,7 +260,14 @@ class SpeakerRecognitionClient:
                         logger.error(
                             f"🎤 ❌ Speaker service returned status {response.status}: {response_text}"
                         )
-                        return {"segments": []}
+                        # An HTTP error is not an empty result — surface it so the
+                        # job's error handling fails the job instead of reporting
+                        # success with no identified speakers.
+                        return {
+                            "error": "server_error",
+                            "message": f"HTTP {response.status}: {response_text[:500]}",
+                            "segments": [],
+                        }
 
                     result = await response.json()
 
@@ -904,7 +887,11 @@ class SpeakerRecognitionClient:
                         logger.warning(
                             f"🎤 [DIARIZE] ❌ Speaker recognition service returned status {response.status}: {response_text}"
                         )
-                        return {"segments": []}
+                        return {
+                            "error": "server_error",
+                            "message": f"HTTP {response.status}: {response_text[:500]}",
+                            "segments": [],
+                        }
 
                     result = await response.json()
                     segments_count = len(result.get("segments", []))
@@ -1324,6 +1311,73 @@ class SpeakerRecognitionClient:
         except Exception as e:
             logger.error(f"🎤 ❌ Error appending to speaker: {e}")
             return {"error": "unknown_error", "message": str(e)}
+
+    async def reidentify_clusters(
+        self,
+        clusters: Dict[str, list],
+        user_id: int = 1,
+        similarity_threshold: Optional[float] = None,
+    ) -> Dict:
+        """Re-identify stored per-cluster centroids against the CURRENT gallery.
+
+        Pure vector math on the speaker service (no audio, no GPU). Used by the reprocess-
+        impact finder to see what a conversation's speaker labels would be now.
+        Returns ``{"assignments": {label: {name, id, confidence}}}``.
+        """
+        if not self.enabled:
+            return {"error": "speaker_recognition_disabled", "assignments": {}}
+        payload: Dict = {"clusters": clusters, "user_id": user_id}
+        if similarity_threshold is not None:
+            payload["similarity_threshold"] = similarity_threshold
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.service_url}/v1/reidentify-clusters",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status != 200:
+                        return {
+                            "error": "reidentify_failed",
+                            "status": response.status,
+                            "assignments": {},
+                        }
+                    return await response.json()
+        except Exception as e:
+            return {"error": "connection_failed", "message": str(e), "assignments": {}}
+
+    async def embed_clusters(self, audio_bytes: bytes, segments: List[dict]) -> Dict:
+        """Pool one centroid per diarized speaker for an EXISTING segmentation.
+
+        Sends conversation audio + its stored segment boundaries to the speaker service
+        (no re-diarization). Used by the one-time backlog backfill.
+        Returns ``{"clusters": {label: centroid}}``.
+        """
+        if not self.enabled:
+            return {"error": "speaker_recognition_disabled", "clusters": {}}
+        try:
+            form_data = aiohttp.FormData()
+            form_data.add_field(
+                "file", audio_bytes, filename="conv.wav", content_type="audio/wav"
+            )
+            form_data.add_field("segments_data", json.dumps(segments))
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.service_url}/v1/embed-clusters",
+                    data=form_data,
+                    timeout=aiohttp.ClientTimeout(total=300),
+                ) as response:
+                    if response.status != 200:
+                        text = await response.text()
+                        return {
+                            "error": "embed_failed",
+                            "status": response.status,
+                            "message": text,
+                            "clusters": {},
+                        }
+                    return await response.json()
+        except Exception as e:
+            return {"error": "connection_failed", "message": str(e), "clusters": {}}
 
     async def check_if_enrolled_speaker_present(
         self,

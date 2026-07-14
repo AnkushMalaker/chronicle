@@ -1,42 +1,38 @@
-"""Main memory service implementation.
+"""Chronicle memory service — agentic Markdown vault.
 
-This module provides the core MemoryService class that orchestrates
-LLM providers and vector stores to provide comprehensive memory management
-functionality.
+This module provides the core MemoryService class that maintains a personal,
+Obsidian-style Markdown vault (``data/conversation_docs/<user>/``) as the single
+source of truth for a user's memory:
+
+- **Write** — a tool-calling memory agent records each conversation and surgically
+  edits the People/Topic/Category notes it touches (``_add_memory_agent``).
+- **Read** — a read-only retrieval agent drives ripgrep over the vault, reads the
+  relevant notes, and synthesises an answer (``_search_vault_grep``).
+
+The vault is the only store; there is no separate search index. All knowledge about
+how the vault is shaped lives in the memory agent's prompts (see ``..agent``).
 """
 
-import asyncio
 import logging
 import time
-import uuid
-from typing import Any, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Iterable, List, Optional, Tuple
 
-from ..base import LLMProviderBase, MemoryEntry, MemoryServiceBase, VectorStoreBase
-from ..config import LLMProvider as LLMProviderEnum
-from ..config import MemoryConfig, VectorStoreProvider
-from .llm_providers import OpenAIProvider
-from .vector_stores import QdrantVectorStore
+from ..audit import record_vault_change
+from ..base import MemoryEntry, MemoryServiceBase
+from ..config import MemoryConfig
+from ..vault_manager import ConvDocVaultManager
+from ..vault_scaffold import is_scaffold_note, seed_vault_scaffold
 
 memory_logger = logging.getLogger("memory_service")
 
 
 class MemoryService(MemoryServiceBase):
-    """Main memory service that orchestrates LLM and vector store operations.
+    """Memory service backed by an agentic Markdown vault (the ground truth).
 
-    This class implements the core memory management functionality including:
-    - Memory extraction from transcripts using LLM providers
-    - Semantic storage and retrieval using vector stores
-    - Memory updates and deduplication
-    - User-scoped memory management
-
-    The service supports multiple LLM providers (OpenAI, Ollama) and vector
-    stores (Qdrant), providing a flexible and extensible architecture.
-
-    Attributes:
-        config: Memory service configuration
-        llm_provider: Active LLM provider instance
-        vector_store: Active vector store instance
-        _initialized: Whether the service has been initialized
+    Each conversation is recorded into the vault by the memory agent, which also
+    updates the person/topic/category notes it mentions. Retrieval is an agentic
+    ripgrep over those notes that returns a synthesised answer plus the notes it read.
     """
 
     @property
@@ -44,78 +40,21 @@ class MemoryService(MemoryServiceBase):
         return "chronicle"
 
     def __init__(self, config: MemoryConfig):
-        """Initialize the memory service with configuration.
-
-        Args:
-            config: MemoryConfig instance with provider settings
-        """
         super().__init__()
         self.config = config
-        self.llm_provider: Optional[LLMProviderBase] = None
-        self.vector_store: Optional[VectorStoreBase] = None
+        self.vault = ConvDocVaultManager()
 
     async def initialize(self) -> None:
-        """Initialize the memory service and all its components.
-
-        Sets up LLM provider and vector store based on configuration,
-        tests connections, and marks the service as ready for use.
-
-        Raises:
-            ValueError: If unsupported provider is configured
-            RuntimeError: If initialization or connection tests fail
-        """
         if self._initialized:
             return
+        # Vault-only: the agent generates + writes notes via its own tool-calling
+        # LLM, and search greps the vault. No external index to connect to.
+        self._initialized = True
+        memory_logger.info("✅ Chronicle memory service initialized (agentic vault).")
 
-        try:
-            # Initialize LLM provider
-            if self.config.llm_provider in [
-                LLMProviderEnum.OPENAI,
-                LLMProviderEnum.OLLAMA,
-                LLMProviderEnum.LLAMACPP,
-            ]:
-                self.llm_provider = OpenAIProvider(self.config.llm_config)
-            else:
-                raise ValueError(
-                    f"Unsupported LLM provider: {self.config.llm_provider}"
-                )
-
-            # Initialize vector store
-            if self.config.vector_store_provider == VectorStoreProvider.QDRANT:
-                self.vector_store = QdrantVectorStore(self.config.vector_store_config)
-            else:
-                raise ValueError(
-                    f"Unsupported vector store provider: {self.config.vector_store_provider}"
-                )
-
-            # Initialize vector store
-            await self.vector_store.initialize()
-
-            # Test connections
-            llm_ok = await self.llm_provider.test_connection()
-            vector_ok = await self.vector_store.test_connection()
-
-            if not llm_ok:
-                raise RuntimeError(
-                    f"LLM provider connection failed for {self.config.llm_provider.value}. "
-                    f"Check API keys, network connectivity, and service availability. "
-                    f"Memory processing cannot proceed without a working LLM connection."
-                )
-            if not vector_ok:
-                raise RuntimeError(
-                    f"Vector store connection failed for {self.config.vector_store_provider.value}. "
-                    f"Check that Qdrant service is running and accessible."
-                )
-
-            self._initialized = True
-            memory_logger.info(
-                f"✅ Memory service initialized successfully with "
-                f"{self.config.llm_provider.value} + {self.config.vector_store_provider.value}"
-            )
-
-        except Exception as e:
-            memory_logger.error(f"Memory service initialization failed: {e}")
-            raise
+    # =========================================================================
+    # ADD MEMORY
+    # =========================================================================
 
     async def add_memory(
         self,
@@ -127,266 +66,352 @@ class MemoryService(MemoryServiceBase):
         allow_update: bool = False,
         db_helper: Any = None,
     ) -> Tuple[bool, List[str]]:
-        """Add memories extracted from a transcript.
-
-        Processes a transcript to extract meaningful memories using the LLM,
-        generates embeddings, and stores them in the vector database. Optionally
-        allows updating existing memories through LLM-driven action proposals.
-
-        Args:
-            transcript: Raw transcript text to extract memories from
-            client_id: Client identifier for tracking
-            source_id: Unique identifier for the source (audio session, chat session, etc.)
-            user_id: User identifier for memory scoping
-            user_email: User email address
-            allow_update: Whether to allow updating existing memories
-            db_helper: Optional database helper for relationship tracking
-
-        Returns:
-            Tuple of (success: bool, created_memory_ids: List[str])
-
-        Raises:
-            asyncio.TimeoutError: If processing exceeds timeout
-        """
         await self._ensure_initialized()
+        return await self._add_memory_agent(transcript, source_id, user_id)
 
-        try:
-            # Skip empty transcripts
-            if not transcript or len(transcript.strip()) < 10:
-                memory_logger.info(f"Skipping empty transcript for {source_id}")
-                return True, []
+    async def _add_memory_agent(
+        self, transcript: str, source_id: str, user_id: str
+    ) -> Tuple[bool, List[str]]:
+        """Write path via the tool-calling memory agent.
 
-            # Extract memories using LLM if enabled
-            fact_memories_text = []
-            if self.config.extraction_enabled and self.config.extraction_prompt:
-                fact_memories_text = await asyncio.wait_for(
-                    self.llm_provider.extract_memories(
-                        transcript,
-                        self.config.extraction_prompt,
-                        user_id=user_id,
-                    ),
-                    timeout=self.config.timeout_seconds,
-                )
-                memory_logger.info(
-                    f"🧠 Extracted {len(fact_memories_text)} memories from transcript for {source_id}"
-                )
+        The agent creates the conversation note and surgically edits person/topic
+        notes in the user's vault. Returns ``(success, touched_paths)`` — the touched
+        vault-relative note paths stand in for the chunk/memory ids the older index
+        path returned, so the existing job bookkeeping (counts, versions) works unchanged.
+        """
+        # Lazy import: circular dependency (agent → memory_agent → llm_client →
+        # services.memory.config → service_factory → this module)
+        from ..agent import MemoryAgent
 
-            # Fallback to storing raw transcript if no memories extracted
-            if not fact_memories_text:
-                fact_memories_text = [transcript]
-                memory_logger.info(
-                    f"💾 No memories extracted, storing raw transcript for {source_id}"
-                )
-
-            memory_logger.debug(f"🧠 fact_memories_text: {fact_memories_text}")
-            # Simple deduplication of extracted memories within the same call
-            fact_memories_text = self._deduplicate_memories(fact_memories_text)
-            memory_logger.debug(
-                f"🧠 fact_memories_text after deduplication: {fact_memories_text}"
-            )
-            # Generate embeddings
-            embeddings = await asyncio.wait_for(
-                self.llm_provider.generate_embeddings(fact_memories_text),
-                timeout=self.config.timeout_seconds,
-            )
-            memory_logger.info(f"embeddings generated")
-            if not embeddings or len(embeddings) != len(fact_memories_text):
-                error_msg = f"❌ Embedding generation failed for {source_id}: got {len(embeddings) if embeddings else 0} embeddings for {len(fact_memories_text)} memories"
-                memory_logger.error(error_msg)
-                raise RuntimeError(error_msg)
-
-            # Create or update memory entries
-            memory_entries = []
-            created_ids: List[str] = []
-
-            # If allow_update, try LLM-driven action proposal
-            if allow_update and fact_memories_text:
-                memory_logger.info(f"🔍 Allowing update for {source_id}")
-                created_ids = await self._process_memory_updates(
-                    fact_memories_text,
-                    embeddings,
-                    user_id,
-                    client_id,
-                    source_id,
-                    user_email,
-                )
-            else:
-                memory_logger.info(f"🔍 Not allowing update for {source_id}")
-                # Add all extracted memories normally
-                memory_entries = self._create_memory_entries(
-                    fact_memories_text,
-                    embeddings,
-                    client_id,
-                    source_id,
-                    user_id,
-                    user_email,
-                )
-
-            # Store new entries in vector database
-            if memory_entries:
-                stored_ids = await self.vector_store.add_memories(memory_entries)
-                created_ids.extend(stored_ids)
-
-            # Update database relationships if helper provided
-            if created_ids and db_helper:
-                await self._update_database_relationships(
-                    db_helper, source_id, created_ids
-                )
-
-            if created_ids:
-                memory_logger.info(
-                    f"✅ Upserted {len(created_ids)} memories for {source_id}"
-                )
-                return True, created_ids
-
-            # No memories created - this is a valid outcome (duplicates, no extractable facts, etc.)
-            memory_logger.info(
-                f"ℹ️  No new memories created for {source_id}: memory_entries={len(memory_entries) if memory_entries else 0}, allow_update={allow_update}"
-            )
+        if not transcript or len(transcript.strip()) < 10:
+            memory_logger.info(f"Skipping empty transcript for {source_id}")
             return True, []
 
-        except asyncio.TimeoutError as e:
-            memory_logger.error(f"⏰ Memory processing timed out for {source_id}")
-            raise e
-        except Exception as e:
-            memory_logger.error(f"❌ Add memory failed for {source_id}: {e}")
-            raise e
+        t0 = time.perf_counter()
+        user_root = self.vault.user_root(user_id)
+        # Concurrent memory jobs for the same user may run on different RQ workers;
+        # each individual vault mutation is serialised inside VaultTools via the
+        # per-user vault_note_lock (lock-write-unlock, never across LLM calls).
+        seed_vault_scaffold(user_root)  # idempotent: .base + hub notes
+        existing_before = self._vault_note_set(user_root)
+        agent = MemoryAgent(user_root)
+        result = await agent.run(transcript, source_id)
+        if (result.truncated or result.stalled) and not result.touched:
+            reason = (
+                "truncated LLM response" if result.truncated else "stalled retry loop"
+            )
+            memory_logger.error(
+                "❌ add_memory(agent) %s: aborted on %s after %d rounds (%d tool "
+                "calls) — nothing recorded (%.2fs)",
+                source_id,
+                reason,
+                result.rounds,
+                result.tool_calls,
+                time.perf_counter() - t0,
+            )
+            return False, []
+        memory_logger.info(
+            "✅ add_memory(agent) %s: touched=%d rounds=%d tools=%d errors=%d (%.2fs) — %s",
+            source_id,
+            len(result.touched),
+            result.rounds,
+            result.tool_calls,
+            len(result.errors),
+            time.perf_counter() - t0,
+            result.summary[:160],
+        )
+        await self._record_agent_touches(
+            user_id, source_id, user_root, result.touched, existing_before
+        )
+        return True, result.touched
+
+    async def _reprocess_memory_agent(
+        self,
+        transcript: str,
+        source_id: str,
+        user_id: str,
+        transcript_diff: Optional[list],
+    ) -> Tuple[bool, List[str]]:
+        """Reprocess path.
+
+        Deletes the stale conversation note so the agent re-records it cleanly, then runs
+        the agent. When the reprocess came from speaker re-identification we hand the agent
+        the old→new speaker map as guidance so it can ``rename_person`` (which rewrites all
+        backlinks) instead of leaving orphaned ``[[Speaker 0]]`` notes. Person/topic notes
+        are kept and surgically updated — only the conversation note is regenerated.
+        """
+        # Lazy import: circular dependency (agent → memory_agent → llm_client →
+        # services.memory.config → service_factory → this module)
+        from ..agent import MemoryAgent
+
+        if not transcript or len(transcript.strip()) < 10:
+            memory_logger.info(f"Skipping empty transcript for {source_id}")
+            return True, []
+
+        user_root = self.vault.user_root(user_id)
+        guidance = self._speaker_rename_guidance(transcript_diff)
+
+        t0 = time.perf_counter()
+        # Per-user serialisation happens per-mutation inside VaultTools (see
+        # _add_memory_agent).
+        seed_vault_scaffold(user_root)
+        existing_before = self._vault_note_set(user_root)
+
+        # Remove the old conversation note (agent writes Conversations/<id>.md and
+        # write_note refuses to clobber). Person/topic notes are preserved.
+        conv_note = user_root / "Conversations" / f"{Path(source_id).name}.md"
+        if conv_note.exists():
+            conv_note.unlink()
+
+        agent = MemoryAgent(user_root)
+        result = await agent.run(transcript, source_id, guidance=guidance)
+        if result.truncated and not result.touched:
+            memory_logger.error(
+                "❌ reprocess_memory(agent) %s: aborted on truncated LLM response after "
+                "%d rounds (%d tool calls) — nothing recorded (%.2fs)",
+                source_id,
+                result.rounds,
+                result.tool_calls,
+                time.perf_counter() - t0,
+            )
+            return False, []
+        memory_logger.info(
+            "✅ reprocess_memory(agent) %s: touched=%d rounds=%d tools=%d errors=%d (%.2fs) — %s",
+            source_id,
+            len(result.touched),
+            result.rounds,
+            result.tool_calls,
+            len(result.errors),
+            time.perf_counter() - t0,
+            result.summary[:160],
+        )
+        await self._record_agent_touches(
+            user_id, source_id, user_root, result.touched, existing_before
+        )
+        return True, result.touched
+
+    def _vault_note_set(self, user_root: Path) -> set:
+        """Vault-relative paths of all notes currently on disk (for create/update audit)."""
+        if not user_root.exists():
+            return set()
+        return {p.relative_to(user_root).as_posix() for p in user_root.rglob("*.md")}
+
+    async def _record_agent_touches(
+        self,
+        user_id: str,
+        source_id: str,
+        user_root: Path,
+        touched: Iterable[str],
+        existing_before: set,
+    ) -> None:
+        """Record one audit-ledger entry per note the memory agent changed."""
+        for rel in sorted(touched):
+            try:
+                after: Optional[str] = (user_root / rel).read_text(encoding="utf-8")
+            except Exception:  # noqa: BLE001 — note may have been renamed away
+                after = None
+            is_new = rel not in existing_before
+            await record_vault_change(
+                user_id=user_id,
+                conversation_id=source_id,
+                operation="create" if is_new else "update",
+                note_path=rel,
+                after=after,
+                agent_mode=True,
+                summary=(
+                    None
+                    if is_new
+                    else (
+                        f"updated ({len(after.splitlines())} lines)"
+                        if after is not None
+                        else "updated"
+                    )
+                ),
+            )
+
+    @staticmethod
+    def _speaker_rename_guidance(transcript_diff: Optional[list]) -> str:
+        """Turn a speaker diff into an instruction to rename the matching person notes."""
+        if not transcript_diff:
+            return ""
+        renames: dict[str, str] = {}
+        for ch in transcript_diff:
+            if isinstance(ch, dict) and ch.get("type") == "speaker_change":
+                old, new = ch.get("old_speaker"), ch.get("new_speaker")
+                if old and new and old != new:
+                    renames[old] = new
+        if not renames:
+            return ""
+        pairs = "; ".join(f"'{o}' is now '{n}'" for o, n in renames.items())
+        return (
+            "This is a REPROCESS after speaker re-identification. Speaker labels changed: "
+            f"{pairs}. For each change, if a People/<old name>.md note exists, call "
+            "rename_person(old, new) FIRST — it renames the note and rewrites every "
+            "[[wikilink]] across the vault — then record the conversation and update the "
+            "renamed person notes. Do not leave notes under the old speaker labels."
+        )
+
+    # =========================================================================
+    # SEARCH
+    # =========================================================================
 
     async def search_memories(
         self, query: str, user_id: str, limit: int = 10, score_threshold: float = 0.0
     ) -> List[MemoryEntry]:
-        """Search memories using semantic similarity.
-
-        Generates an embedding for the query and searches the vector store
-        for similar memories belonging to the specified user.
-
-        Args:
-            query: Search query text
-            user_id: User identifier to filter memories
-            limit: Maximum number of results to return
-            score_threshold: Minimum similarity score (0.0 = no threshold)
-
-        Returns:
-            List of matching MemoryEntry objects ordered by relevance
-        """
         if not self._initialized:
             await self.initialize()
+        return await self._search_vault_grep(query, user_id, limit)
 
+    async def _search_vault_grep(
+        self, query: str, user_id: str, limit: int
+    ) -> List[MemoryEntry]:
+        """Read path: a read-only retrieval agent drives ripgrep over the vault.
+
+        Modelled on Claude Code — the LLM formulates ripgrep patterns (no query
+        preprocessing), reads the relevant notes, and synthesises an answer. We return
+        one MemoryEntry per note the agent read (capped), with the synthesised answer
+        as the top entry so chat gets both the conclusion and the supporting notes.
+        """
+        # Lazy import: circular dependency (agent → memory_agent → llm_client →
+        # services.memory.config → service_factory → this module)
+        from ..agent import search_vault
+
+        result = await search_vault(query, self.vault.user_root(user_id))
+
+        results: List[MemoryEntry] = []
+        if result.answer:
+            results.append(
+                MemoryEntry(
+                    id=f"search:{user_id}",
+                    content=result.answer,
+                    metadata={"user_id": user_id, "kind": "vault_search_answer"},
+                    score=1.0,
+                    created_at=None,
+                )
+            )
+        for note in result.notes[: max(0, limit - len(results))]:
+            path = note["path"]
+            conv_id = ""
+            if path.startswith("Conversations/"):
+                conv_id = path.split("/", 1)[1].rsplit(".md", 1)[0]
+            results.append(
+                MemoryEntry(
+                    id=path,
+                    content=note["content"][:1500],
+                    metadata={
+                        "user_id": user_id,
+                        "note": path,
+                        "conversation_id": conv_id,
+                        "kind": "vault_note",
+                    },
+                    score=0.9,
+                    created_at=None,
+                )
+            )
+        memory_logger.info(
+            f"🔍 vault search: '{query}' -> {len(result.notes)} note(s) read, "
+            f"{result.rounds} round(s) (user: {user_id})"
+        )
+        return results[:limit]
+
+    # =========================================================================
+    # CRUD
+    # =========================================================================
+
+    def _vault_entry_from_path(
+        self, user_id: str, path: Path, root: Path, content_limit: Optional[int] = None
+    ) -> Optional[MemoryEntry]:
+        """Build a MemoryEntry from one vault note (id = vault-relative path)."""
         try:
-            # Generate query embedding
-            query_embeddings = await self.llm_provider.generate_embeddings([query])
-            if not query_embeddings or not query_embeddings[0]:
-                memory_logger.error("Failed to generate query embedding")
-                return []
+            content = path.read_text(encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            return None
+        if content_limit is not None:
+            content = content[:content_limit]
+        rel = path.relative_to(root).as_posix()
+        conv_id = (
+            rel[len("Conversations/") : -3] if rel.startswith("Conversations/") else ""
+        )
+        return MemoryEntry(
+            id=rel,
+            content=content,
+            metadata={
+                "user_id": user_id,
+                "note": rel,
+                "conversation_id": conv_id,
+                "kind": "vault_note",
+            },
+            created_at=None,
+        )
 
-            # Search in vector store
-            results = await self.vector_store.search_memories(
-                query_embeddings[0], user_id, limit, score_threshold
-            )
+    def _vault_entries(
+        self, user_id: str, limit: Optional[int] = None
+    ) -> List[MemoryEntry]:
+        """Enumerate a user's vault notes as MemoryEntry objects (newest first).
 
-            memory_logger.info(
-                f"🔍 Found {len(results)} memories for query '{query}' (user: {user_id})"
-            )
-            return results
-
-        except Exception as e:
-            memory_logger.error(f"Search memories failed: {e}")
+        One entry per note, recursive over Conversations/People/Topics.
+        """
+        root = self.vault.user_root(user_id)
+        if not root.exists():
             return []
+        paths = sorted(
+            (p for p in root.rglob("*.md") if not is_scaffold_note(p, root)),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if limit is not None:
+            paths = paths[:limit]
+        entries: List[MemoryEntry] = []
+        for p in paths:
+            entry = self._vault_entry_from_path(user_id, p, root, content_limit=1500)
+            if entry is not None:
+                entries.append(entry)
+        return entries
 
     async def get_all_memories(
         self, user_id: str, limit: int = 100
     ) -> List[MemoryEntry]:
-        """Get all memories for a specific user.
-
-        Retrieves all stored memories for the given user without
-        similarity filtering.
-
-        Args:
-            user_id: User identifier
-            limit: Maximum number of memories to return
-
-        Returns:
-            List of MemoryEntry objects for the user
-        """
         if not self._initialized:
             await self.initialize()
-
-        try:
-            memories = await self.vector_store.get_memories(user_id, limit)
-            memory_logger.info(
-                f"📚 Retrieved {len(memories)} memories for user {user_id}"
-            )
-            return memories
-        except Exception as e:
-            memory_logger.error(f"Get all memories failed: {e}")
-            return []
+        return self._vault_entries(user_id, limit)
 
     async def count_memories(self, user_id: str) -> Optional[int]:
-        """Count total number of memories for a user.
-
-        Uses the vector store's native count capabilities.
-
-        Args:
-            user_id: User identifier
-
-        Returns:
-            Total count of memories for the user, or None if not supported
-        """
         if not self._initialized:
             await self.initialize()
-
-        try:
-            count = await self.vector_store.count_memories(user_id)
-            memory_logger.info(f"🔢 Total {count} memories for user {user_id}")
-            return count
-        except Exception as e:
-            memory_logger.error(f"Count memories failed: {e}")
-            return None
-
-    async def get_memories_by_source(
-        self, user_id: str, source_id: str, limit: int = 100
-    ) -> List[MemoryEntry]:
-        """Get all memories extracted from a specific source (conversation)."""
-        if not self._initialized:
-            await self.initialize()
-
-        try:
-            memories = await self.vector_store.get_memories_by_source(
-                user_id, source_id, limit
-            )
-            memory_logger.info(
-                f"📚 Retrieved {len(memories)} memories for source {source_id} (user {user_id})"
-            )
-            return memories
-        except Exception as e:
-            memory_logger.error(f"Get memories by source failed: {e}")
-            return []
+        return len(self.vault.list_docs(user_id))
 
     async def get_memory(
         self, memory_id: str, user_id: Optional[str] = None
     ) -> Optional[MemoryEntry]:
-        """Get a specific memory by ID.
-
-        Args:
-            memory_id: Unique identifier of the memory to retrieve
-            user_id: Optional user ID for authentication/filtering
-
-        Returns:
-            MemoryEntry object if found, None otherwise
-        """
         if not self._initialized:
             await self.initialize()
 
-        try:
-            memory = await self.vector_store.get_memory(memory_id, user_id)
-            if memory:
-                memory_logger.info(f"📄 Retrieved memory {memory_id}")
-            else:
-                memory_logger.debug(f"Memory {memory_id} not found")
-            return memory
-        except Exception as e:
-            memory_logger.error(f"Get memory failed: {e}")
+        if not user_id:
+            memory_logger.error(
+                "get_memory called without user_id; the vault is per-user"
+            )
             return None
+
+        # Memory ids are vault-relative note paths (see add_memory).
+        root = self.vault.user_root(user_id)
+        fp = root / memory_id
+        if not fp.is_file():
+            return None
+        return self._vault_entry_from_path(user_id, fp, root)
+
+    async def get_memories_by_source(
+        self, user_id: str, source_id: str, limit: int = 100
+    ) -> List[MemoryEntry]:
+        """Return the conversation note for ``source_id`` (the vault's per-source record)."""
+        if not self._initialized:
+            await self.initialize()
+
+        root = self.vault.user_root(user_id)
+        conv_note = root / "Conversations" / f"{Path(source_id).name}.md"
+        if not conv_note.is_file():
+            return []
+        entry = self._vault_entry_from_path(user_id, conv_note, root)
+        return [entry] if entry is not None else []
 
     async def update_memory(
         self,
@@ -396,74 +421,13 @@ class MemoryService(MemoryServiceBase):
         user_id: Optional[str] = None,
         user_email: Optional[str] = None,
     ) -> bool:
-        """Update a specific memory's content and/or metadata.
-
-        Regenerates embeddings when content is updated.
-
-        Args:
-            memory_id: Unique identifier of the memory to update
-            content: New content for the memory (if None, content is not updated)
-            metadata: New metadata to merge with existing (if None, metadata is not updated)
-            user_id: Optional user ID for authentication
-            user_email: Optional user email for authentication
-
-        Returns:
-            True if update succeeded, False otherwise
-        """
-        if not self._initialized:
-            await self.initialize()
-
-        try:
-            # Get existing memory
-            existing_memory = await self.vector_store.get_memory(memory_id, user_id)
-            if not existing_memory:
-                memory_logger.warning(f"Memory {memory_id} not found for update")
-                return False
-
-            # Determine new content and metadata
-            new_content = content if content is not None else existing_memory.content
-            new_metadata = {**existing_memory.metadata}
-            if metadata:
-                new_metadata.update(metadata)
-
-            # Update timestamps
-            new_metadata["updated_at"] = str(int(time.time()))
-
-            # Generate new embedding if content changed
-            if content is not None:
-                embeddings = await self.llm_provider.generate_embeddings([new_content])
-                new_embedding = embeddings[0]
-            else:
-                # If content didn't change, reuse existing embedding
-                if existing_memory.embedding:
-                    new_embedding = existing_memory.embedding
-                else:
-                    # No existing embedding, generate one
-                    embeddings = await self.llm_provider.generate_embeddings(
-                        [new_content]
-                    )
-                    new_embedding = embeddings[0]
-
-            # Update in vector store
-            success = await self.vector_store.update_memory(
-                memory_id=memory_id,
-                new_content=new_content,
-                new_embedding=new_embedding,
-                new_metadata=new_metadata,
-            )
-
-            if success:
-                memory_logger.info(f"✅ Updated memory {memory_id}")
-            else:
-                memory_logger.error(f"Failed to update memory {memory_id}")
-
-            return success
-
-        except Exception as e:
-            memory_logger.error(
-                f"Error updating memory {memory_id}: {e}", exc_info=True
-            )
-            return False
+        """Notes are edited by the memory agent (or by the user directly in the vault),
+        not through this API."""
+        memory_logger.warning(
+            f"update_memory called for {memory_id} but vault notes are edited via the "
+            "memory agent or directly in the vault. Use reprocess_memory to regenerate."
+        )
+        return False
 
     async def delete_memory(
         self,
@@ -471,66 +435,48 @@ class MemoryService(MemoryServiceBase):
         user_id: Optional[str] = None,
         user_email: Optional[str] = None,
     ) -> bool:
-        """Delete a specific memory by ID.
-
-        Args:
-            memory_id: Unique identifier of the memory to delete
-
-        Returns:
-            True if successfully deleted, False otherwise
-        """
         if not self._initialized:
             await self.initialize()
 
+        if not user_id:
+            memory_logger.error(
+                "delete_memory called without user_id; the vault is per-user"
+            )
+            return False
+
+        # Memory ids are vault-relative note paths.
+        root = self.vault.user_root(user_id)
+        fp = root / memory_id
         try:
-            success = await self.vector_store.delete_memory(memory_id)
-            if success:
-                memory_logger.info(f"🗑️ Deleted memory {memory_id}")
-            return success
+            if not fp.is_file():
+                return False
+            fp.unlink()
+            await record_vault_change(
+                user_id=user_id,
+                operation="delete",
+                note_path=Path(memory_id).as_posix(),
+                agent_mode=False,
+                summary=f"deleted {memory_id}",
+            )
+            memory_logger.info(f"🗑️ Deleted memory note {memory_id}")
+            return True
         except Exception as e:
             memory_logger.error(f"Delete memory failed: {e}")
             return False
 
     async def delete_all_user_memories(self, user_id: str) -> int:
-        """Delete all memories for a specific user.
-
-        Args:
-            user_id: User identifier
-
-        Returns:
-            Number of memories that were deleted
-        """
         if not self._initialized:
             await self.initialize()
 
-        try:
-            count = await self.vector_store.delete_user_memories(user_id)
-            memory_logger.info(f"🗑️ Deleted {count} memories for user {user_id}")
-            return count
-        except Exception as e:
-            memory_logger.error(f"Delete user memories failed: {e}")
-            return 0
-
-    async def test_connection(self) -> bool:
-        """Test if the memory service and its dependencies are working.
-
-        Returns:
-            True if all connections are healthy, False otherwise
-        """
-        try:
-            if not self._initialized:
-                await self.initialize()
-            return True
-        except Exception as e:
-            memory_logger.error(f"Connection test failed: {e}")
-            return False
-
-    def shutdown(self) -> None:
-        """Shutdown the memory service and clean up resources."""
-        self._initialized = False
-        self.llm_provider = None
-        self.vector_store = None
-        memory_logger.info("Memory service shut down")
+        count = self.vault.delete_all_docs(user_id)  # vault is the only store
+        await record_vault_change(
+            user_id=user_id,
+            operation="delete_all",
+            agent_mode=False,
+            summary=f"deleted {count} notes",
+            count=count,
+        )
+        return count
 
     async def reprocess_memory(
         self,
@@ -542,652 +488,15 @@ class MemoryService(MemoryServiceBase):
         transcript_diff: Optional[list] = None,
         previous_transcript: Optional[str] = None,
     ) -> Tuple[bool, List[str]]:
-        """Reprocess memories after speaker re-identification.
-
-        Instead of extracting fresh facts from scratch, this method:
-        1. Fetches existing memories for this specific conversation
-        2. Computes what changed (speaker labels) between old and new transcript
-        3. Asks the LLM to make targeted updates to the existing memories
-
-        Falls back to normal ``add_memory`` when there are no existing
-        memories or no meaningful diff.
-
-        Args:
-            transcript: Updated full transcript (with corrected speakers)
-            client_id: Client identifier
-            source_id: Conversation identifier
-            user_id: User identifier
-            user_email: User email
-            transcript_diff: List of dicts describing speaker changes
-            previous_transcript: Previous transcript text (before changes)
-
-        Returns:
-            Tuple of (success, affected_memory_ids)
-        """
+        """Delete the stale conversation note and re-record from the transcript."""
         await self._ensure_initialized()
-
-        try:
-            # 1. Get existing memories for this conversation
-            existing_memories = await self.vector_store.get_memories_by_source(
-                user_id, source_id
-            )
-
-            # 2. If no existing memories, fall back to normal extraction
-            if not existing_memories:
-                memory_logger.info(
-                    f"🔄 Reprocess: no existing memories for {source_id}, "
-                    f"falling back to normal extraction"
-                )
-                return await self.add_memory(
-                    transcript,
-                    client_id,
-                    source_id,
-                    user_id,
-                    user_email,
-                    allow_update=True,
-                )
-
-            # 3. If no diff provided, fall back to normal extraction
-            if not transcript_diff:
-                memory_logger.info(
-                    f"🔄 Reprocess: no transcript diff for {source_id}, "
-                    f"falling back to normal extraction"
-                )
-                return await self.add_memory(
-                    transcript,
-                    client_id,
-                    source_id,
-                    user_id,
-                    user_email,
-                    allow_update=True,
-                )
-
-            # 4. Format the diff for the LLM
-            diff_text = self._format_speaker_diff(transcript_diff)
-
-            memory_logger.info(
-                f"🔄 Reprocess: {len(existing_memories)} existing memories, "
-                f"{len(transcript_diff)} speaker changes for {source_id}"
-            )
-
-            # 5. Build temp ID mapping (avoid hallucinated UUIDs)
-            temp_uuid_mapping = {}
-            existing_memory_dicts = []
-            for idx, mem in enumerate(existing_memories):
-                temp_uuid_mapping[str(idx)] = mem.id
-                existing_memory_dicts.append({"id": str(idx), "text": mem.content})
-
-            # 6. Ask LLM for targeted update actions
-            try:
-                actions_obj = await self.llm_provider.propose_reprocess_actions(
-                    existing_memories=existing_memory_dicts,
-                    diff_context=diff_text,
-                    new_transcript=transcript,
-                )
-                memory_logger.info(f"🔄 Reprocess LLM returned actions: {actions_obj}")
-            except NotImplementedError:
-                memory_logger.warning(
-                    "LLM provider does not support propose_reprocess_actions, "
-                    "falling back to normal extraction"
-                )
-                return await self.add_memory(
-                    transcript,
-                    client_id,
-                    source_id,
-                    user_id,
-                    user_email,
-                    allow_update=True,
-                )
-            except Exception as e:
-                memory_logger.error(f"Reprocess LLM call failed: {e}")
-                return await self.add_memory(
-                    transcript,
-                    client_id,
-                    source_id,
-                    user_id,
-                    user_email,
-                    allow_update=True,
-                )
-
-            # 7. Normalize and pre-generate embeddings for ADD/UPDATE actions
-            actions_list = self._normalize_actions(actions_obj)
-
-            texts_needing_embeddings = [
-                action.get("text")
-                for action in actions_list
-                if action.get("event") in ("ADD", "UPDATE")
-                and action.get("text")
-                and isinstance(action.get("text"), str)
-            ]
-
-            text_to_embedding = {}
-            if texts_needing_embeddings:
-                try:
-                    embeddings = await asyncio.wait_for(
-                        self.llm_provider.generate_embeddings(texts_needing_embeddings),
-                        timeout=self.config.timeout_seconds,
-                    )
-                    text_to_embedding = dict(
-                        zip(texts_needing_embeddings, embeddings, strict=True)
-                    )
-                except Exception as e:
-                    memory_logger.warning(
-                        f"Batch embedding generation failed for reprocess: {e}"
-                    )
-
-            # 8. Apply the actions (reuses existing infrastructure)
-            created_ids = await self._apply_memory_actions(
-                actions_list,
-                text_to_embedding,
-                temp_uuid_mapping,
-                client_id,
-                source_id,
-                user_id,
-                user_email,
-            )
-
-            memory_logger.info(
-                f"✅ Reprocess complete for {source_id}: "
-                f"{len(created_ids)} memories affected"
-            )
-            return True, created_ids
-
-        except Exception as e:
-            memory_logger.error(f"❌ Reprocess memory failed for {source_id}: {e}")
-            # Fall back to normal extraction on any unexpected error
-            memory_logger.info(
-                f"🔄 Falling back to normal extraction after reprocess error"
-            )
-            return await self.add_memory(
-                transcript,
-                client_id,
-                source_id,
-                user_id,
-                user_email,
-                allow_update=True,
-            )
-
-    @staticmethod
-    def _format_speaker_diff(transcript_diff: list) -> str:
-        """Format a transcript diff into a human-readable string for the LLM.
-
-        Args:
-            transcript_diff: List of change dicts from
-                ``compute_speaker_diff``
-
-        Returns:
-            Formatted multi-line string describing the changes
-        """
-        if not transcript_diff:
-            return "No changes detected."
-
-        lines = []
-        for change in transcript_diff:
-            change_type = change.get("type", "unknown")
-            if change_type == "speaker_change":
-                lines.append(
-                    f"- \"{change.get('text', '')}\" "
-                    f"was spoken by \"{change.get('old_speaker', '?')}\" "
-                    f"but is now identified as \"{change.get('new_speaker', '?')}\""
-                )
-            elif change_type == "text_change":
-                lines.append(
-                    f"- Segment by {change.get('speaker', '?')}: "
-                    f"text changed from \"{change.get('old_text', '')}\" "
-                    f"to \"{change.get('new_text', '')}\""
-                )
-            elif change_type == "new_segment":
-                lines.append(
-                    f"- New segment: {change.get('speaker', '?')}: "
-                    f"\"{change.get('text', '')}\""
-                )
-
-        return "\n".join(lines)
-
-    # Private helper methods
-
-    def _deduplicate_memories(self, memories_text: List[str]) -> List[str]:
-        """Remove near-duplicate memories from the same extraction session.
-
-        Args:
-            memories_text: List of extracted memory strings
-
-        Returns:
-            Deduplicated list of memory strings
-        """
-
-        def _collapse_text_for_dedup(text: str) -> str:
-            """Normalize text for deduplication by removing common words and punctuation."""
-            t = text.lower()
-            # Remove common filler words to collapse near-duplicates
-            stop = {"my", "is", "the", "a", "an", "are", "to", "of", "and"}
-            # Remove basic punctuation
-            for ch in [",", ".", "!", "?", ":", ";"]:
-                t = t.replace(ch, " ")
-            tokens = [tok for tok in t.split() if tok not in stop]
-            return " ".join(tokens)
-
-        seen_collapsed = set()
-        deduped_text: List[str] = []
-
-        for memory_text in memories_text:
-            key = _collapse_text_for_dedup(memory_text)
-            if key not in seen_collapsed:
-                seen_collapsed.add(key)
-                deduped_text.append(memory_text)
-
-        if len(deduped_text) != len(memories_text):
-            memory_logger.info(
-                f"🧹 Deduplicated memories: {len(memories_text)} -> {len(deduped_text)}"
-            )
-
-        return deduped_text
-
-    def _create_memory_entries(
-        self,
-        fact_memories_text: List[str],
-        embeddings: List[List[float]],
-        client_id: str,
-        source_id: str,
-        user_id: str,
-        user_email: str,
-    ) -> List[MemoryEntry]:
-        """Create MemoryEntry objects from extracted memories.
-
-        Args:
-            fact_memories_text: List of factmemory content strings
-            embeddings: Corresponding embedding vectors
-            client_id: Client identifier
-            source_id: Source session identifier
-            user_id: User identifier
-            user_email: User email
-
-        Returns:
-            List of MemoryEntry objects ready for storage
-        """
-        memory_entries = []
-        current_time = str(int(time.time()))
-
-        for memory_text, embedding in zip(fact_memories_text, embeddings):
-            memory_id = str(uuid.uuid4())
-            memory_entries.append(
-                MemoryEntry(
-                    id=memory_id,
-                    content=memory_text,
-                    metadata={
-                        "source": "offline_streaming",
-                        "client_id": client_id,
-                        "source_id": source_id,
-                        "user_id": user_id,
-                        "user_email": user_email,
-                        "timestamp": int(time.time()),
-                        "extraction_enabled": self.config.extraction_enabled,
-                    },
-                    embedding=embedding,
-                    created_at=current_time,
-                    updated_at=current_time,
-                )
-            )
-
-        return memory_entries
-
-    async def _process_memory_updates(
-        self,
-        memories_text: List[str],
-        embeddings: List[List[float]],
-        user_id: str,
-        client_id: str,
-        source_id: str,
-        user_email: str,
-    ) -> List[str]:
-        """Process memory updates using LLM-driven action proposals.
-
-        This method implements the intelligent memory (can be fact or summarized facts) updating logic
-        that decides whether to add, update, or delete memories based
-        on existing context and new information.
-
-        Args:
-            memories_text: List of new memory content
-            embeddings: Corresponding embeddings
-            user_id: User identifier
-            client_id: Client identifier
-            source_id: Source session identifier
-            user_email: User email
-
-        Returns:
-            List of created/updated memory IDs
-        """
-        created_ids: List[str] = []
-
-        # For each new fact, find top-5 existing memories as retrieval set
-        retrieved_old_memory = []
-        new_message_embeddings = {}
-
-        for new_mem, emb in zip(memories_text, embeddings):
-            new_message_embeddings[new_mem] = emb
-            try:
-                candidates = await self.vector_store.search_memories(
-                    query_embedding=emb,
-                    user_id=user_id,
-                    limit=5,
-                )
-                for mem in candidates:
-                    retrieved_old_memory.append({"id": mem.id, "text": mem.content})
-            except Exception as e_search:
-                memory_logger.warning(
-                    f"Search failed while preparing updates: {e_search}"
-                )
-
-        # Dedupe by id and prepare temp mapping
-        uniq = {}
-        for item in retrieved_old_memory:
-            uniq[item["id"]] = item
-        retrieved_old_memory = list(uniq.values())
-
-        # Map to temp IDs to avoid hallucinations
-        temp_uuid_mapping = {}
-        for idx, item in enumerate(retrieved_old_memory):
-            temp_uuid_mapping[str(idx)] = item["id"]
-            retrieved_old_memory[idx]["id"] = str(idx)
-
-        # Ask LLM for actions
-        try:
-            memory_logger.info(
-                f"🔍 Asking LLM for actions with {len(retrieved_old_memory)} old memories "
-                f"and {len(memories_text)} new facts"
-            )
-            memory_logger.debug(
-                f"🧠 Individual facts being sent to LLM: {memories_text}"
-            )
-
-            # add update or delete etc actions using DEFAULT_UPDATE_MEMORY_PROMPT
-            actions_obj = await self.llm_provider.propose_memory_actions(
-                retrieved_old_memory=retrieved_old_memory,
-                new_facts=memories_text,
-                custom_prompt=None,
-            )
-            memory_logger.info(
-                f"📝 UpdateMemory LLM returned: {type(actions_obj)} - {actions_obj}"
-            )
-        except Exception as e_actions:
-            memory_logger.error(f"LLM propose_memory_actions failed: {e_actions}")
-            actions_obj = {}
-
-        # Process the proposed actions
-        actions_list = self._normalize_actions(actions_obj)
-        created_ids = await self._apply_memory_actions(
-            actions_list,
-            new_message_embeddings,
-            temp_uuid_mapping,
-            client_id,
-            source_id,
-            user_id,
-            user_email,
+        return await self._reprocess_memory_agent(
+            transcript, source_id, user_id, transcript_diff
         )
 
-        return created_ids
+    async def test_connection(self) -> bool:
+        return True  # vault-only: nothing external to probe
 
-    def _normalize_actions(self, actions_obj: Any) -> List[dict]:
-        """Normalize LLM response into a list of action dictionaries.
-
-        Args:
-            actions_obj: Raw LLM response object
-
-        Returns:
-            List of normalized action dictionaries
-        """
-        actions_list = []
-
-        try:
-            memory_logger.debug(f"Normalizing actions from: {actions_obj}")
-            if isinstance(actions_obj, dict):
-                memory_field = actions_obj.get("memory")
-                if isinstance(memory_field, list):
-                    actions_list = memory_field
-                elif isinstance(actions_obj.get("facts"), list):
-                    actions_list = [
-                        {"event": "ADD", "text": str(t)} for t in actions_obj["facts"]
-                    ]
-                else:
-                    # Pick first list field found
-                    for v in actions_obj.values():
-                        if isinstance(v, list):
-                            actions_list = v
-                            break
-            elif isinstance(actions_obj, list):
-                actions_list = actions_obj
-
-            memory_logger.info(
-                f"📋 Normalized to {len(actions_list)} actions: {actions_list}"
-            )
-        except Exception as normalize_err:
-            memory_logger.warning(f"Failed to normalize actions: {normalize_err}")
-            actions_list = []
-
-        return actions_list
-
-    async def _apply_memory_actions(
-        self,
-        actions_list: List[dict],
-        new_message_embeddings: dict,
-        temp_uuid_mapping: dict,
-        client_id: str,
-        source_id: str,
-        user_id: str,
-        user_email: str,
-    ) -> List[str]:
-        """Apply the proposed memory actions.
-
-        Args:
-            actions_list: List of action dictionaries
-            new_message_embeddings: Pre-computed embeddings for new content
-            temp_uuid_mapping: Mapping from temporary IDs to real IDs
-            client_id: Client identifier
-            source_id: Source session identifier
-            user_id: User identifier
-            user_email: User email
-
-        Returns:
-            List of created/updated memory IDs
-        """
-        created_ids: List[str] = []
-        memory_entries = []
-
-        memory_logger.info(f"⚡ Processing {len(actions_list)} actions")
-
-        for resp in actions_list:
-            # Allow plain string entries → ADD action
-            if isinstance(resp, str):
-                resp = {"event": "ADD", "text": resp}
-            if not isinstance(resp, dict):
-                continue
-
-            event_type = resp.get("event", "ADD")
-            action_text = resp.get("text") or resp.get("memory")
-
-            if not action_text or not isinstance(action_text, str):
-                memory_logger.warning(f"Skipping action with no text: {resp}")
-                continue
-
-            memory_logger.debug(
-                f"Processing action: {event_type} - {action_text[:50]}..."
-            )
-
-            base_metadata = {
-                "source": "offline_streaming",
-                "client_id": client_id,
-                "source_id": source_id,
-                "user_id": user_id,
-                "user_email": user_email,
-                "timestamp": int(time.time()),
-                "extraction_enabled": self.config.extraction_enabled,
-            }
-
-            # Get embedding (use precomputed if available, otherwise generate)
-            emb = new_message_embeddings.get(action_text)
-            if emb is None:
-                try:
-                    gen = await asyncio.wait_for(
-                        self.llm_provider.generate_embeddings([action_text]),
-                        timeout=self.config.timeout_seconds,
-                    )
-                    emb = gen[0] if gen else None
-                except Exception as gen_err:
-                    memory_logger.warning(
-                        f"Embedding generation failed for action text: {gen_err}"
-                    )
-                    emb = None
-
-            if event_type == "ADD":
-                if emb is None:
-                    memory_logger.warning(
-                        f"Skipping ADD action due to missing embedding: {action_text}"
-                    )
-                    continue
-
-                memory_id = str(uuid.uuid4())
-                current_time = str(int(time.time()))
-                memory_entries.append(
-                    MemoryEntry(
-                        id=memory_id,
-                        content=action_text,
-                        metadata=base_metadata,
-                        embedding=emb,
-                        created_at=current_time,
-                        updated_at=current_time,
-                    )
-                )
-                memory_logger.info(
-                    f"➕ Added new memory: {memory_id} - {action_text[:50]}..."
-                )
-
-            elif event_type == "UPDATE":
-                provided_id = resp.get("id")
-                actual_id = temp_uuid_mapping.get(str(provided_id), provided_id)
-
-                if actual_id and emb is not None:
-                    try:
-                        updated = await self.vector_store.update_memory(
-                            memory_id=str(actual_id),
-                            new_content=action_text,
-                            new_embedding=emb,
-                            new_metadata=base_metadata,
-                        )
-                        if updated:
-                            created_ids.append(str(actual_id))
-                            memory_logger.info(
-                                f"🔄 Updated memory: {actual_id} - {action_text[:50]}..."
-                            )
-                        else:
-                            memory_logger.warning(
-                                f"Failed to update memory {actual_id}"
-                            )
-                    except Exception as update_err:
-                        memory_logger.error(f"Update memory failed: {update_err}")
-                else:
-                    memory_logger.warning(
-                        f"Skipping UPDATE due to missing ID or embedding"
-                    )
-
-            elif event_type == "DELETE":
-                provided_id = resp.get("id")
-                actual_id = temp_uuid_mapping.get(str(provided_id), provided_id)
-                if actual_id:
-                    try:
-                        deleted = await self.vector_store.delete_memory(str(actual_id))
-                        if deleted:
-                            memory_logger.info(f"🗑️ Deleted memory {actual_id}")
-                        else:
-                            memory_logger.warning(
-                                f"Failed to delete memory {actual_id}"
-                            )
-                    except Exception as delete_err:
-                        memory_logger.error(f"Delete memory failed: {delete_err}")
-                else:
-                    memory_logger.warning(
-                        f"Skipping DELETE due to missing ID: {provided_id}"
-                    )
-
-            elif event_type == "NONE":
-                memory_logger.debug(
-                    f"NONE action - no changes for: {action_text[:50]}..."
-                )
-                continue
-            else:
-                memory_logger.warning(f"Unknown event type: {event_type}")
-
-        # Store new entries
-        if memory_entries:
-            stored_ids = await self.vector_store.add_memories(memory_entries)
-            created_ids.extend(stored_ids)
-
-        memory_logger.info(
-            f"✅ Actions processed: {len(memory_entries)} new entries, {len(created_ids)} total changes"
-        )
-        return created_ids
-
-    async def _update_database_relationships(
-        self, db_helper: Any, source_id: str, created_ids: List[str]
-    ) -> None:
-        """Update database relationships for created memories.
-
-        Args:
-            db_helper: Database helper instance
-            source_id: Source session identifier
-            created_ids: List of created memory IDs
-        """
-        for memory_id in created_ids:
-            try:
-                await db_helper.add_memory_reference(source_id, memory_id, "created")
-            except Exception as db_error:
-                memory_logger.error(f"Database relationship update failed: {db_error}")
-
-
-# Example usage function
-async def example_usage():
-    """Example of how to use the memory service."""
-    from .config import build_memory_config_from_env
-
-    # Build config from environment
-    config = build_memory_config_from_env()
-
-    # Initialize service
-    memory_service = MemoryService(config)
-    await memory_service.initialize()
-
-    # Add memory
-    success, memory_ids = await memory_service.add_memory(
-        transcript="User discussed their goals for the next quarter.",
-        client_id="client123",
-        source_id="audio456",
-        user_id="user789",
-        user_email="user@example.com",
-    )
-
-    if success:
-        print(f"✅ Added memories: {memory_ids}")
-
-        # Search memories
-        results = await memory_service.search_memories(
-            query="quarterly goals", user_id="user789", limit=5
-        )
-        print(f"🔍 Found {len(results)} search results")
-
-        # Get all memories
-        all_memories = await memory_service.get_all_memories(
-            user_id="user789", limit=100
-        )
-        print(f"📚 Total memories: {len(all_memories)}")
-
-        # Clean up test data
-        for memory_id in memory_ids:
-            await memory_service.delete_memory(memory_id)
-        print("🧹 Cleaned up test data")
-
-    memory_service.shutdown()
-
-
-if __name__ == "__main__":
-    import asyncio
-
-    asyncio.run(example_usage())
+    def shutdown(self) -> None:
+        self._initialized = False
+        memory_logger.info("Memory service shut down")

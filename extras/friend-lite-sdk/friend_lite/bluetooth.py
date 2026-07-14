@@ -5,12 +5,17 @@ from bleak import BleakClient, BleakScanner
 
 from .uuids import (
     BATTERY_LEVEL_CHAR_UUID,
+    ELATO_SPEAKER_CHAR_UUID,
     FEATURE_HAPTIC,
     FEATURE_WIFI,
     FEATURES_CHAR_UUID,
     HAPTIC_CHAR_UUID,
     OMI_AUDIO_CHAR_UUID,
     OMI_BUTTON_CHAR_UUID,
+    SPEAKER_OP_AUDIO,
+    SPEAKER_OP_END,
+    SPEAKER_OP_START,
+    SPEAKER_OP_STOP,
     STORAGE_DATA_STREAM_CHAR_UUID,
     STORAGE_READ_CONTROL_CHAR_UUID,
     STORAGE_WIFI_CHAR_UUID,
@@ -113,6 +118,58 @@ class OmiConnection(WearableConnection):
         self, callback: Callable[[int, bytearray], None]
     ) -> None:
         await self.subscribe(OMI_BUTTON_CHAR_UUID, callback)
+
+    # -- Speaker downlink (Elato) ------------------------------------------
+
+    def _speaker_chunk_size(self) -> int:
+        """Max Opus bytes per BLE write, derived from the negotiated MTU.
+
+        Each write carries a 2-byte header (opcode + flags) on top of the 3-byte
+        ATT write overhead. Fall back to a tiny but safe payload if the MTU is the
+        23-byte default (the firmware reassembles fragments, so any size works).
+        """
+        mtu = getattr(self._client, "mtu_size", 0) or 0
+        return max(mtu - 3 - 2, 18)
+
+    async def _speaker_control(self, opcode: int) -> None:
+        if self._client is None:
+            raise RuntimeError("Not connected to device")
+        await self._client.write_gatt_char(
+            ELATO_SPEAKER_CHAR_UUID, bytes([opcode]), response=False
+        )
+
+    async def speaker_start(self) -> None:
+        """Begin a speaker clip (resets the device's playback ring)."""
+        await self._speaker_control(SPEAKER_OP_START)
+
+    async def speaker_end(self) -> None:
+        """End a speaker clip (device drains its buffer then stops)."""
+        await self._speaker_control(SPEAKER_OP_END)
+
+    async def speaker_stop(self) -> None:
+        """Barge-in: stop playback now and drop buffered audio."""
+        await self._speaker_control(SPEAKER_OP_STOP)
+
+    async def write_speaker_audio(self, opus_packet: bytes) -> None:
+        """Write one Opus packet (24 kHz mono) to the speaker, fragmented to the MTU.
+
+        Each fragment is ``[SPEAKER_OP_AUDIO][flags][opus bytes]``; the final fragment
+        of a packet sets flags bit0 so the firmware decodes the reassembled packet.
+        """
+        if self._client is None:
+            raise RuntimeError("Not connected to device")
+        size = self._speaker_chunk_size()
+        n = len(opus_packet)
+        offset = 0
+        while offset < n:
+            chunk = opus_packet[offset : offset + size]
+            offset += len(chunk)
+            flags = 0x01 if offset >= n else 0x00  # bit0 = final fragment
+            await self._client.write_gatt_char(
+                ELATO_SPEAKER_CHAR_UUID,
+                bytes([SPEAKER_OP_AUDIO, flags]) + chunk,
+                response=False,
+            )
 
     # -- Haptic ------------------------------------------------------------
 

@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import yaml
 from dotenv import set_key
 from rich.console import Console
 from rich.panel import Panel
@@ -24,7 +25,7 @@ from rich.text import Text
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from config_manager import ConfigManager
 from setup_utils import detect_cuda_version as _detect_cuda_version
-from setup_utils import read_env_value
+from setup_utils import read_env_value, resolve_ingest_config
 
 # Provider and model definitions
 PROVIDERS = {
@@ -32,9 +33,9 @@ PROVIDERS = {
         "name": "VibeVoice",
         "description": "Microsoft VibeVoice-ASR with built-in speaker diarization",
         "models": {
-            "microsoft/VibeVoice-ASR": "VibeVoice-ASR (7B, speaker diarization, 60-min audio)",
+            "microsoft/VibeVoice-ASR-HF": "VibeVoice-ASR (7B, speaker diarization, 60-min audio)",
         },
-        "default_model": "microsoft/VibeVoice-ASR",
+        "default_model": "microsoft/VibeVoice-ASR-HF",
         "service": "vibevoice-asr",
         # Note: VibeVoice provides diarization but NOT word_timestamps
         "capabilities": [
@@ -48,9 +49,9 @@ PROVIDERS = {
         "name": "VibeVoice (Strix Halo)",
         "description": "Microsoft VibeVoice-ASR for AMD Strix Halo (gfx1151 / Ryzen AI Max) with ROCm",
         "models": {
-            "microsoft/VibeVoice-ASR": "VibeVoice-ASR (7B, speaker diarization, 60-min audio)",
+            "microsoft/VibeVoice-ASR-HF": "VibeVoice-ASR (7B, speaker diarization, 60-min audio)",
         },
-        "default_model": "microsoft/VibeVoice-ASR",
+        "default_model": "microsoft/VibeVoice-ASR-HF",
         "service": "vibevoice-asr-strixhalo",
         "capabilities": [
             "timestamps",
@@ -81,6 +82,7 @@ PROVIDERS = {
         "name": "Transformers",
         "description": "HuggingFace models (Hindi Whisper, custom models)",
         "models": {
+            "shunyalabs/zero-stt-hinglish": "Zero STT Hinglish (Whisper Medium, Hindi-English code-switching)",
             "Oriserve/Whisper-Hindi2Hinglish-Prime": "Hindi/Hinglish Whisper (Fine-tuned Large V3)",
             "openai/whisper-large-v3": "OpenAI Whisper Large V3",
         },
@@ -99,6 +101,21 @@ PROVIDERS = {
         "service": "nemo-asr",
         "capabilities": ["timestamps", "word_timestamps", "chunked_processing"],
     },
+    "nemotron": {
+        "name": "Nemotron 3.5",
+        "description": "NVIDIA Nemotron 3.5 cache-aware streaming ASR (NeMo, ~100ms, batch + streaming)",
+        "models": {
+            "nvidia/nemotron-3.5-asr-streaming-0.6b": "Nemotron 3.5 Streaming 0.6B (Default)",
+        },
+        "default_model": "nvidia/nemotron-3.5-asr-streaming-0.6b",
+        "service": "nemotron-stream-asr",
+        "capabilities": [
+            "word_timestamps",
+            "segments",
+            "streaming",
+            "multilingual",
+        ],
+    },
     "nemo-strixhalo": {
         "name": "NeMo (Strix Halo)",
         "description": "NVIDIA NeMo ASR for AMD Strix Halo (gfx1151 / Ryzen AI Max) with ROCm",
@@ -109,6 +126,42 @@ PROVIDERS = {
         "default_model": "nvidia/parakeet-tdt-0.6b-v3",
         "service": "nemo-asr-strixhalo",
         "capabilities": ["timestamps", "word_timestamps", "chunked_processing"],
+    },
+    "gemma4": {
+        "name": "Gemma 4",
+        "description": "Google Gemma 4 E2B multimodal (prompt-based diarization, MTP-accelerated)",
+        "models": {
+            "google/gemma-4-E2B-it": "Gemma 4 E2B-it (~10GB VRAM at BF16 + MTP, fits 24GB)",
+            "google/gemma-4-E4B-it": "Gemma 4 E4B-it (8B, ~17GB VRAM at BF16)",
+            "google/gemma-4-12B-it": "Gemma 4 12B-it (~9GB VRAM at 4-bit + MTP, fits 24GB)",
+        },
+        "default_model": "google/gemma-4-E2B-it",
+        "service": "gemma4-asr",
+        "capabilities": ["timestamps", "diarization"],
+    },
+    "granite": {
+        "name": "Granite Speech",
+        "description": "IBM Granite Speech (LLM-backbone, batch; en/fr/de/es/pt)",
+        "models": {
+            "ibm-granite/granite-speech-4.1-2b-plus": "Granite Speech 4.1 2B-plus (default, ~2B, bf16)",
+            "ibm-granite/granite-speech-4.1-2b": "Granite Speech 4.1 2B",
+            "ibm-granite/granite-speech-3.3-8b": "Granite Speech 3.3 8B (English/French)",
+        },
+        "default_model": "ibm-granite/granite-speech-4.1-2b-plus",
+        "service": "granite-asr",
+        "capabilities": ["context_prompt"],
+    },
+    "af-next": {
+        "name": "Audio Flamingo Next",
+        "description": "NVIDIA Audio Flamingo Next (timestamped diarization; NONCOMMERCIAL license)",
+        "models": {
+            "nvidia/audio-flamingo-next-hf": "AF-Next Instruct (default; recommended for ASR — used by NVIDIA's HF Space)",
+            "nvidia/audio-flamingo-next-think-hf": "AF-Next Think (emits <think> reasoning trace; biased toward scene description)",
+            "nvidia/audio-flamingo-next-captioner-hf": "AF-Next Captioner (verbose descriptions)",
+        },
+        "default_model": "nvidia/audio-flamingo-next-hf",
+        "service": "af-next-asr",
+        "capabilities": ["timestamps", "diarization"],
     },
     "qwen3-asr": {
         "name": "Qwen3-ASR",
@@ -183,6 +236,23 @@ class ASRServicesSetup:
         """Read a value from existing .env file (delegates to shared utility)"""
         return read_env_value(".env", key)
 
+    def resolve_hf_token(self) -> Optional[str]:
+        """HF token, in priority order: --hf-token arg, backend .env, repo-root .env,
+        this service's own .env.
+
+        Mirrors how the wizard sources shared secrets: ``backends/advanced/.env`` is
+        the canonical hub on a main machine; the repo-root ``.env`` is the per-node
+        store for backend-less cluster-join nodes. Both are two levels up from here.
+        """
+        arg_token = getattr(self.args, "hf_token", None)
+        if arg_token:
+            return arg_token
+        for path in ("../../backends/advanced/.env", "../../.env", ".env"):
+            value = read_env_value(path, "HF_TOKEN")
+            if value:
+                return value
+        return None
+
     def backup_existing_env(self):
         """Backup existing .env file"""
         env_path = Path(".env")
@@ -232,6 +302,11 @@ class ASRServicesSetup:
         )
         table.add_row("transformers", "HuggingFace models", "Hindi, custom models")
         table.add_row(
+            "granite",
+            "IBM Granite Speech (LLM-backbone)",
+            "en/fr/de/es/pt, batch",
+        )
+        table.add_row(
             "faster-whisper",
             "Fast Whisper (CTranslate2)",
             "Lightweight, fast inference",
@@ -247,6 +322,8 @@ class ASRServicesSetup:
             "5": "nemo - NVIDIA NeMo Parakeet (streaming + batch, word timestamps)",
             "6": "transformers - HuggingFace models (Hindi, custom)",
             "7": "faster-whisper - Fast Whisper (lightweight, fast inference)",
+            "8": "granite - IBM Granite Speech (LLM-backbone, en/fr/de/es/pt, batch)",
+            "9": "nemotron - NVIDIA Nemotron 3.5 (true cache-aware streaming ~100ms + batch)",
         }
 
         choice = self.prompt_choice("Choose ASR provider:", provider_choices, "1")
@@ -258,6 +335,8 @@ class ASRServicesSetup:
             "5": "nemo",
             "6": "transformers",
             "7": "faster-whisper",
+            "8": "granite",
+            "9": "nemotron",
         }
         return choice_to_provider[choice]
 
@@ -334,17 +413,16 @@ class ASRServicesSetup:
             )
 
             cuda_choices = {
-                "1": "CUDA 12.1 (cu121)",
-                "2": "CUDA 12.6 (cu126) - Recommended",
-                "3": "CUDA 12.8 (cu128)",
+                "1": "CUDA 12.6 (cu126) - Recommended",
+                "2": "CUDA 12.8 (cu128)",
             }
-            cuda_to_choice = {"cu121": "1", "cu126": "2", "cu128": "3"}
-            default_choice = cuda_to_choice.get(detected_cuda, "2")
+            cuda_to_choice = {"cu126": "1", "cu128": "2"}
+            default_choice = cuda_to_choice.get(detected_cuda, "1")
 
             choice = self.prompt_choice(
                 "Choose CUDA version:", cuda_choices, default_choice
             )
-            choice_to_cuda = {"1": "cu121", "2": "cu126", "3": "cu128"}
+            choice_to_cuda = {"1": "cu126", "2": "cu128"}
             cuda_version = choice_to_cuda[choice]
 
         self.config["PYTORCH_CUDA_VERSION"] = cuda_version
@@ -369,8 +447,13 @@ class ASRServicesSetup:
                     self.config["LANGUAGE"] = lang
 
         elif provider == "vibevoice":
-            # VibeVoice uses transformers backend with specific optimizations
-            self.config["TORCH_DTYPE"] = "float16"
+            # VibeVoice uses transformers backend with specific optimizations.
+            # bf16, NOT fp16: VibeVoice's long autoregressive decode overflows in
+            # fp16 (max ~65504) → Inf/NaN → repetition/template-leak collapse on hard
+            # far-field audio (A/B verified: fp16 dropped a 270s window, bf16 clean
+            # + 2.4x faster). Dedicated var so it never inherits a global
+            # TORCH_DTYPE=float16 (which whisper/transformers providers do want).
+            self.config["VIBEVOICE_TORCH_DTYPE"] = "bfloat16"
             self.config["DEVICE"] = "cuda"
             self.config["USE_FLASH_ATTENTION"] = "true"
             self.console.print(
@@ -408,8 +491,9 @@ class ASRServicesSetup:
                 self.config["FINETUNE_ENABLED"] = "false"
 
         elif provider == "vibevoice-strixhalo":
-            # Strix Halo uses ROCm; sdpa attention, bfloat16 for gfx1151
-            self.config["TORCH_DTYPE"] = "bfloat16"
+            # Strix Halo uses ROCm; sdpa attention, bfloat16 for gfx1151.
+            # Dedicated var (both vibevoice compose blocks read VIBEVOICE_TORCH_DTYPE).
+            self.config["VIBEVOICE_TORCH_DTYPE"] = "bfloat16"
             self.config["DEVICE"] = "cuda"
             self.config["VIBEVOICE_ATTN_IMPL"] = "sdpa"
             self.config["PYTORCH_CUDA_VERSION"] = "strixhalo"
@@ -519,11 +603,16 @@ class ASRServicesSetup:
             "nemo": "stt-nemo",
             "nemo-strixhalo": "stt-nemo",
             "qwen3-asr": "stt-qwen3-asr",
+            "gemma4": "stt-gemma4",
+            "af-next": "stt-af-next",
+            "granite": "stt-granite",
+            "nemotron": "stt-nemotron-batch",
         }
 
         # Providers that also have a streaming model
         provider_to_stream_model = {
             "qwen3-asr": "stt-qwen3-asr-stream",
+            "nemotron": "stt-nemotron-stream",
         }
 
         stt_model = provider_to_stt_model.get(provider)
@@ -552,8 +641,6 @@ class ASRServicesSetup:
                 # Load defaults.yml to get model definitions
                 defaults_path = config_manager.config_dir / "defaults.yml"
                 if defaults_path.exists():
-                    import yaml
-
                     with open(defaults_path) as f:
                         defaults = yaml.safe_load(f) or {}
                     defaults_models = defaults.get("models", []) or []
@@ -680,11 +767,34 @@ class ASRServicesSetup:
             model = self.select_model(provider)
 
             # Configure CUDA version (only for providers that need local CUDA builds)
-            if provider in ["nemo", "transformers"]:
+            if provider in ["nemo", "nemotron", "transformers", "granite"]:
                 self.setup_cuda_version()
 
             # Provider-specific configuration
             self.setup_provider_config(provider, model)
+
+            # HF token: several providers pull (possibly gated) models from
+            # HuggingFace; a token avoids rate-limits and unlocks gated repos.
+            hf_token = self.resolve_hf_token()
+            if hf_token:
+                self.config["HF_TOKEN"] = hf_token
+
+            # Cross-service error routing: push this service's ERROR/CRITICAL logs to
+            # the backend's System Errors page. Sourced from the backend .env on the
+            # same machine; opt-in, so only wired when a backend token is found
+            # locally (a remote service node leaves these unset → reporter no-ops).
+            # CHRONICLE_SERVICE_NAME is intentionally NOT set so the source stays
+            # auto-derived per running provider (asr-<provider>) across switches.
+            ingest_url, ingest_token = resolve_ingest_config(
+                ["../../backends/advanced/.env", "../../.env"]
+            )
+            if ingest_url and ingest_token:
+                self.config["CHRONICLE_INGEST_URL"] = ingest_url
+                self.config["CHRONICLE_INGEST_TOKEN"] = ingest_token
+                self.console.print(
+                    "[blue][INFO][/blue] Cross-service error reporting → backend "
+                    "System Errors page enabled"
+                )
 
             # Generate files
             self.print_header("Configuration Complete!")
@@ -724,14 +834,22 @@ def main():
             "nemo",
             "nemo-strixhalo",
             "qwen3-asr",
+            "gemma4",
+            "af-next",
+            "granite",
+            "nemotron",
         ],
         help="ASR provider to use",
     )
     parser.add_argument("--model", help="Model identifier (HuggingFace repo or path)")
     parser.add_argument(
         "--pytorch-cuda-version",
-        choices=["cu121", "cu126", "cu128", "strixhalo"],
+        choices=["cu126", "cu128", "strixhalo"],
         help="PyTorch CUDA version",
+    )
+    parser.add_argument(
+        "--hf-token",
+        help="Hugging Face token (avoids HF rate-limits / unlocks gated repos)",
     )
 
     args = parser.parse_args()

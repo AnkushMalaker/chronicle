@@ -3,15 +3,17 @@
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional
 
 import yaml
 
+from advanced_omi_backend.config import get_config_yml_path
 from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.utils.config_utils import resolve_value
 
 memory_logger = logging.getLogger("memory_service")
+
+__all__ = ["resolve_value"]
 
 
 class LLMProvider(Enum):
@@ -23,19 +25,10 @@ class LLMProvider(Enum):
     CUSTOM = "custom"
 
 
-class VectorStoreProvider(Enum):
-    """Supported vector store providers."""
-
-    QDRANT = "qdrant"
-    WEAVIATE = "weaviate"
-    CUSTOM = "custom"
-
-
 class MemoryProvider(Enum):
     """Supported memory service providers."""
 
-    CHRONICLE = "chronicle"  # Default sophisticated implementation
-    OPENMEMORY_MCP = "openmemory_mcp"  # OpenMemory MCP backend
+    CHRONICLE = "chronicle"  # Agentic Markdown vault (the only provider)
 
 
 @dataclass
@@ -44,11 +37,8 @@ class MemoryConfig:
 
     memory_provider: MemoryProvider = MemoryProvider.CHRONICLE
     llm_provider: LLMProvider = LLMProvider.OPENAI
-    vector_store_provider: VectorStoreProvider = VectorStoreProvider.QDRANT
     llm_config: Dict[str, Any] = None
-    vector_store_config: Dict[str, Any] = None
     embedder_config: Dict[str, Any] = None
-    openmemory_config: Dict[str, Any] = None  # Configuration for OpenMemory MCP
     extraction_prompt: str = None
     extraction_enabled: bool = True
     timeout_seconds: int = 1200
@@ -64,8 +54,6 @@ def load_config_yml() -> Dict[str, Any]:
     Raises:
         FileNotFoundError: If config.yml does not exist
     """
-    from advanced_omi_backend.config import get_config_yml_path
-
     config_path = get_config_yml_path()
 
     if not config_path.exists():
@@ -76,21 +64,6 @@ def load_config_yml() -> Dict[str, Any]:
 
     with open(config_path, "r") as f:
         return yaml.safe_load(f) or {}
-
-
-def create_openmemory_config(
-    server_url: str = "http://localhost:8765",
-    client_name: str = "chronicle",
-    user_id: str = "default",
-    timeout: int = 30,
-) -> Dict[str, Any]:
-    """Create OpenMemory MCP configuration."""
-    return {
-        "server_url": server_url,
-        "client_name": client_name,
-        "user_id": user_id,
-        "timeout": timeout,
-    }
 
 
 def create_openai_config(
@@ -110,21 +83,6 @@ def create_openai_config(
         "base_url": base_url,
         "temperature": temperature,
         "max_tokens": max_tokens,
-    }
-
-
-def create_qdrant_config(
-    host: str = "localhost",
-    port: int = 6333,
-    collection_name: str = "chronicle_memories",
-    embedding_dims: int = 1536,
-) -> Dict[str, Any]:
-    """Create Qdrant vector store configuration."""
-    return {
-        "host": host,
-        "port": port,
-        "collection_name": collection_name,
-        "embedding_dims": embedding_dims,
     }
 
 
@@ -148,32 +106,10 @@ def build_memory_config_from_env() -> MemoryConfig:
 
         memory_provider_enum = MemoryProvider(memory_provider)
 
-        # For OpenMemory MCP, configuration is much simpler
-        if memory_provider_enum == MemoryProvider.OPENMEMORY_MCP:
-            mcp = mem_settings.get("openmemory_mcp") or {}
-            openmemory_config = create_openmemory_config(
-                server_url=mcp.get("server_url", "http://localhost:8765"),
-                client_name=mcp.get("client_name", "chronicle"),
-                user_id=mcp.get("user_id", "default"),
-                timeout=int(mcp.get("timeout", 30)),
-            )
-
-            memory_logger.info(
-                f"🔧 Memory config: Provider=OpenMemory MCP, URL={openmemory_config['server_url']}"
-            )
-
-            return MemoryConfig(
-                memory_provider=memory_provider_enum,
-                openmemory_config=openmemory_config,
-                timeout_seconds=int(mem_settings.get("timeout_seconds", 1200)),
-            )
-
-        # For Chronicle provider, use registry-driven configuration
-
-        # Registry-driven configuration only (no env-based branching)
+        # Chronicle uses registry-driven OpenAI-compatible LLM configuration
+        # (the memory agent calls the LLM via the operations registry).
         llm_config = None
         llm_provider_enum = LLMProvider.OPENAI  # OpenAI-compatible API family
-        embedding_dims = 1536
         if not reg:
             raise ValueError("config.yml not found; cannot configure LLM provider")
         llm_def = reg.get_default("llm")
@@ -184,7 +120,7 @@ def build_memory_config_from_env() -> MemoryConfig:
         embedding_model = (
             embed_def.model_name if embed_def else "text-embedding-3-small"
         )
-        base_url = llm_def.model_url
+        base_url = llm_def.resolved_url()
         memory_logger.info(
             f"🔧 Memory config (registry): LLM={model}, Embedding={embedding_model}, Base URL={base_url}"
         )
@@ -196,26 +132,6 @@ def build_memory_config_from_env() -> MemoryConfig:
             temperature=float(llm_def.model_params.get("temperature", 0.1)),
             max_tokens=int(llm_def.model_params.get("max_tokens", 2000)),
         )
-        embedding_dims = get_embedding_dims(llm_config)
-        memory_logger.info(f"🔧 Setting Embedder dims {embedding_dims}")
-
-        # Build vector store configuration from registry (no env)
-        vs_def = reg.get_default("vector_store")
-        if not vs_def or (vs_def.model_provider or "").lower() != "qdrant":
-            raise ValueError("No default Qdrant vector_store defined in config.yml")
-
-        host = str(vs_def.model_params.get("host", "qdrant"))
-        port = int(vs_def.model_params.get("port", 6333))
-        collection_name = str(
-            vs_def.model_params.get("collection_name", "chronicle_memories")
-        )
-        vector_store_config = create_qdrant_config(
-            host=host,
-            port=port,
-            collection_name=collection_name,
-            embedding_dims=embedding_dims,
-        )
-        vector_store_provider_enum = VectorStoreProvider.QDRANT
 
         # Get memory extraction settings from registry
         extraction_cfg = mem_settings.get("extraction") or {}
@@ -226,15 +142,14 @@ def build_memory_config_from_env() -> MemoryConfig:
         timeout_seconds = int(mem_settings.get("timeout_seconds", 1200))
 
         memory_logger.info(
-            f"🔧 Memory config: Provider=Chronicle, LLM={llm_def.model_provider if 'llm_def' in locals() else 'unknown'}, VectorStore={vector_store_provider_enum}, Extraction={extraction_enabled}"
+            f"🔧 Memory config: Provider={memory_provider_enum.value}, "
+            f"LLM={llm_def.model_provider}, Extraction={extraction_enabled}"
         )
 
         return MemoryConfig(
             memory_provider=memory_provider_enum,
             llm_provider=llm_provider_enum,
-            vector_store_provider=vector_store_provider_enum,
             llm_config=llm_config,
-            vector_store_config=vector_store_config,
             embedder_config={},  # Included in llm_config
             extraction_prompt=extraction_prompt,
             extraction_enabled=extraction_enabled,
@@ -246,22 +161,3 @@ def build_memory_config_from_env() -> MemoryConfig:
             "Config loader not available, using environment variables only"
         )
         raise
-
-
-def get_embedding_dims(llm_config: Dict[str, Any]) -> int:
-    """
-    Query the embedding endpoint and return the embedding vector length.
-    Works for OpenAI and OpenAI-compatible endpoints (e.g., Ollama).
-    """
-    embedding_model = llm_config.get("embedding_model")
-    try:
-        reg = get_models_registry()
-        if reg:
-            emb_def = reg.get_default("embedding")
-            if emb_def and emb_def.embedding_dimensions:
-                return int(emb_def.embedding_dimensions)
-    except Exception as e:
-        memory_logger.exception(
-            f"Failed to get embedding dimensions from registry for model '{embedding_model}'"
-        )
-        raise e

@@ -17,11 +17,16 @@ interface OrchestratorParams {
   };
   phoneAudioRecorder: {
     isRecording: boolean;
-    startRecording: (onData: (pcmBuffer: Uint8Array) => Promise<void>) => Promise<void>;
+    startRecording: (
+      onData: (pcmBuffer: Uint8Array) => Promise<void>,
+      options?: { deviceId?: string }
+    ) => Promise<void>;
     stopRecording: () => Promise<void>;
   };
   originalStartAudioListener: (onAudioData: (bytes: Uint8Array) => void) => Promise<void>;
   originalStopAudioListener: () => Promise<void>;
+  /** Resolves which input device to record from (undefined = system default mic). */
+  resolvePhoneInputDeviceId?: () => Promise<string | undefined>;
   settings: AppSettings;
 }
 
@@ -40,6 +45,7 @@ export const useAudioStreamingOrchestrator = ({
   phoneAudioRecorder,
   originalStartAudioListener,
   originalStopAudioListener,
+  resolvePhoneInputDeviceId,
   settings,
 }: OrchestratorParams): AudioOrchestrator => {
   const [isPhoneAudioMode, setIsPhoneAudioMode] = useState<boolean>(false);
@@ -124,13 +130,15 @@ export const useAudioStreamingOrchestrator = ({
 
     try {
       const finalUrl = buildPhoneWebSocketUrl(settings.webSocketUrl);
+      // Resolve the input device (auto-prefers Bluetooth headset mic) before recording.
+      const deviceId = resolvePhoneInputDeviceId ? await resolvePhoneInputDeviceId() : undefined;
       await audioStreamer.startStreaming(finalUrl);
       await phoneAudioRecorder.startRecording(async (pcmBuffer) => {
         const wsReady = audioStreamer.getWebSocketReadyState();
         if (wsReady === WebSocket.OPEN && pcmBuffer.length > 0) {
           await audioStreamer.sendAudio(pcmBuffer);
         }
-      });
+      }, { deviceId });
       setIsPhoneAudioMode(true);
     } catch (error) {
       Alert.alert('Error', 'Could not start phone audio streaming.');
@@ -138,7 +146,7 @@ export const useAudioStreamingOrchestrator = ({
       if (phoneAudioRecorder.isRecording) await phoneAudioRecorder.stopRecording();
       setIsPhoneAudioMode(false);
     }
-  }, [audioStreamer, phoneAudioRecorder, settings.webSocketUrl, buildPhoneWebSocketUrl]);
+  }, [audioStreamer, phoneAudioRecorder, settings.webSocketUrl, buildPhoneWebSocketUrl, resolvePhoneInputDeviceId]);
 
   const handleStopPhoneAudioStreaming = useCallback(async () => {
     await phoneAudioRecorder.stopRecording();

@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react'
 import { Zap, RefreshCw, AlertCircle, AlertTriangle, CheckCircle, Clock, Play, ToggleLeft, ToggleRight, Edit3, X, Check, Eye } from 'lucide-react'
 import cronstrue from 'cronstrue'
 import { finetuningApi } from '../services/api'
-import { useFinetuningStatus, useCronJobs, useToggleCronJob, useUpdateCronSchedule, useRunCronJob, useProcessAnnotations, useDeleteOrphanedAnnotations } from '../hooks/useFinetuning'
+import { useFinetuningStatus, useCronJobs, useToggleCronJob, useUpdateCronSchedule, useRunCronJob, useProcessAnnotations, useDeleteOrphanedAnnotations, useRetryFailedAnnotations, useDeleteFailedAnnotations } from '../hooks/useFinetuning'
+import EnrollmentCandidates from '../components/finetuning/EnrollmentCandidates'
 
 interface AnnotationTypeCounts {
   total: number
@@ -10,6 +11,7 @@ interface AnnotationTypeCounts {
   applied: number
   trained: number
   orphaned: number
+  failed: number
 }
 
 function humanCron(expr: string): string {
@@ -96,6 +98,8 @@ export default function Finetuning() {
   const runJob = useRunCronJob()
   const processAnnotations = useProcessAnnotations()
   const deleteOrphaned = useDeleteOrphanedAnnotations()
+  const retryFailed = useRetryFailedAnnotations()
+  const deleteFailed = useDeleteFailedAnnotations()
 
   const loadAll = () => {
     refetchStatus()
@@ -116,14 +120,41 @@ export default function Finetuning() {
         setError(data.message || 'No annotations ready for training')
       } else if (totalProcessed === 0 && failedCount > 0) {
         const errorDetail = data.errors?.length ? `: ${data.errors.join(', ')}` : ''
-        setError(`All ${failedCount} annotations failed to process${errorDetail}`)
+        setError(`All ${failedCount} annotations failed to process${errorDetail}. See "Failed" below to retry or discard them.`)
       } else if (failedCount > 0) {
-        setSuccessMessage(`Processed ${totalProcessed} annotations (${failedCount} failed)`)
+        // Partial failure — surface it as an error (not a green success) so the
+        // user knows some annotations are stuck and can act on them below.
+        setError(`Processed ${totalProcessed} annotations, but ${failedCount} failed. See "Failed" below to retry or discard them.`)
       } else {
         setSuccessMessage(`Successfully processed ${totalProcessed} annotations for training`)
       }
     } catch (err: any) {
       setError(err.response?.data?.detail || err.message || 'Failed to process annotations')
+    }
+  }
+
+  const handleRetryFailed = async () => {
+    try {
+      setError(null)
+      setSuccessMessage(null)
+      const data = await retryFailed.mutateAsync('diarization')
+      setSuccessMessage(`Reset ${data.reset_count ?? 0} failed annotations — they will be retried on the next training run`)
+    } catch (err: any) {
+      setError(err.response?.data?.detail || err.message || 'Failed to reset annotations')
+    }
+  }
+
+  const handleDiscardFailed = async () => {
+    if (!window.confirm('Discard all failed annotations? This permanently deletes annotations that keep failing to train. This cannot be undone.')) {
+      return
+    }
+    try {
+      setError(null)
+      setSuccessMessage(null)
+      const data = await deleteFailed.mutateAsync('diarization')
+      setSuccessMessage(`Discarded ${data.deleted_count ?? 0} failed annotations`)
+    } catch (err: any) {
+      setError(err.response?.data?.detail || err.message || 'Failed to discard annotations')
     }
   }
 
@@ -467,30 +498,85 @@ export default function Finetuning() {
         </div>
       )}
 
-      {/* Manual Training Trigger */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-        <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">Manual Speaker Training</h2>
-        <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-          Process applied diarization annotations and send them to the speaker recognition service for model fine-tuning.
-        </p>
-        <button
-          onClick={handleProcessAnnotations}
-          disabled={processAnnotations.isPending || (status?.applied_annotation_count || 0) === 0}
-          className="flex items-center space-x-2 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-        >
-          {processAnnotations.isPending ? (
-            <>
-              <RefreshCw className="h-5 w-5 animate-spin" />
-              <span>Processing...</span>
-            </>
-          ) : (
-            <>
-              <Zap className="h-5 w-5" />
-              <span>Process {status?.applied_annotation_count || 0} Diarization Annotations</span>
-            </>
+      {/* Failed (stuck) annotations panel */}
+      {(status?.failed_annotation_count || 0) > 0 && (
+        <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-lg">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center space-x-2">
+              <AlertTriangle className="h-5 w-5 text-red-600 dark:text-red-400" />
+              <h3 className="text-base font-semibold text-red-700 dark:text-red-300">
+                {status?.failed_annotation_count} annotation{(status?.failed_annotation_count || 0) === 1 ? '' : 's'} failed to train
+              </h3>
+            </div>
+            <div className="flex space-x-2">
+              <button
+                onClick={handleRetryFailed}
+                disabled={retryFailed.isPending || deleteFailed.isPending}
+                className="px-3 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+              >
+                {retryFailed.isPending ? 'Retrying...' : 'Retry'}
+              </button>
+              <button
+                onClick={handleDiscardFailed}
+                disabled={retryFailed.isPending || deleteFailed.isPending}
+                className="px-3 py-1.5 bg-red-600 text-white text-sm rounded-lg hover:bg-red-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+              >
+                {deleteFailed.isPending ? 'Discarding...' : 'Discard'}
+              </button>
+            </div>
+          </div>
+          <p className="text-sm text-red-700 dark:text-red-300 mb-2">
+            These annotations keep failing (corrupt segment times, missing audio, or speaker-service errors).
+            <strong> Retry</strong> re-attempts them on the next training run (fix the root cause first, e.g. reprocess the conversation);
+            <strong> Discard</strong> permanently deletes them.
+          </p>
+          {status?.failed_annotation_errors && status.failed_annotation_errors.length > 0 && (
+            <ul className="text-xs text-red-600 dark:text-red-400 list-disc list-inside space-y-0.5">
+              {status.failed_annotation_errors.map((e: string, i: number) => (
+                <li key={i} className="truncate" title={e}>{e}</li>
+              ))}
+            </ul>
           )}
-        </button>
-      </div>
+        </div>
+      )}
+
+      {/* Curated enrollment — the safe, quality-gated path (primary) */}
+      <EnrollmentCandidates />
+
+      {/* Legacy blast trigger — sends EVERY applied annotation with no gate. Kept
+          behind a disclosure because it mismatched audio↔label and enrolled
+          cross-talk/short scraps; use Curated Enrollment above instead. */}
+      <details className="mt-6 group">
+        <summary className="cursor-pointer text-sm text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 select-none">
+          Advanced: legacy bulk training (sends all applied annotations, no quality gate)
+        </summary>
+        <div className="mt-3 bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+          <div className="flex items-start space-x-2 mb-4">
+            <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" />
+            <p className="text-sm text-gray-600 dark:text-gray-400">
+              Processes <strong>every</strong> applied diarization annotation and enrolls it with no duration or
+              cross-talk gating — this can contaminate voiceprints with overlap/short audio. Prefer Curated Enrollment.
+            </p>
+          </div>
+          <button
+            onClick={handleProcessAnnotations}
+            disabled={processAnnotations.isPending || (status?.applied_annotation_count || 0) === 0}
+            className="flex items-center space-x-2 px-6 py-3 bg-gray-600 text-white rounded-lg hover:bg-gray-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+          >
+            {processAnnotations.isPending ? (
+              <>
+                <RefreshCw className="h-5 w-5 animate-spin" />
+                <span>Processing...</span>
+              </>
+            ) : (
+              <>
+                <Zap className="h-5 w-5" />
+                <span>Process {status?.applied_annotation_count || 0} Diarization Annotations</span>
+              </>
+            )}
+          </button>
+        </div>
+      </details>
     </div>
   )
 }

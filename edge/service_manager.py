@@ -1,0 +1,824 @@
+"""
+Node agent — control + advertise a Chronicle node, from the WebUI.
+
+A small host-side HTTP API that wraps services.py (the docker compose
+orchestrator). Runs natively on the host — it MUST, because docker compose needs
+host bind-mount paths and (on Docker Desktop/WSL2) a container can't bind the
+Tailscale interface to advertise. One agent per machine.
+
+It does two jobs that were previously two separate native processes:
+  1. CONTROL   — start/stop/restart services + switch ASR/TTS providers (the
+                 backend proxies the WebUI System page here via SERVICE_MANAGER_URL).
+  2. ADVERTISE — announce this node's services (and itself, as ``chronicle-node``)
+                 on the Tailnet via minidisc, so other nodes/the backend discover
+                 them. This folds in the old standalone discovery agent.
+
+It also exposes node identity (/node) and a live cluster view (/cluster).
+
+Launched by services.py (any ./start.sh) with:
+  SERVICE_MANAGER_TOKEN  — shared secret, required (auto-generated into
+                           backends/advanced/.env on first start)
+  SERVICE_MANAGER_PORT   — default 8775
+  SERVICE_MANAGER_HOST   — default 0.0.0.0 (token-authed; must be reachable
+                           from the backend container via host.docker.internal)
+
+All endpoints except /health require "Authorization: Bearer <token>".
+Compose operations run in a background thread (builds can take minutes);
+POST endpoints return 202 with an operation id to poll. Tailnet advertising runs
+in its own daemon thread so a bind failure never blocks the control API.
+"""
+
+import io
+import ipaddress
+import logging
+import os
+import platform
+import shutil
+import sys
+import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import requests
+import uvicorn
+from dotenv import dotenv_values, set_key
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel
+from rich.console import Console
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+import discovery  # noqa: E402  (repo-root discovery.py)
+import services  # noqa: E402  (repo-root services.py)
+import status  # noqa: E402  (repo-root status.py — restart-count helper)
+from setup_utils import detect_cuda_version, detect_tailscale_info  # noqa: E402
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [service-manager] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+TOKEN = os.environ.get("SERVICE_MANAGER_TOKEN", "")
+PORT = int(os.environ.get("SERVICE_MANAGER_PORT", "8775"))
+HOST = os.environ.get("SERVICE_MANAGER_HOST", "0.0.0.0")
+
+# Cluster control: trust requests that arrive from a Tailscale-range source IP even
+# without the bearer token, so the hub can control this node's services without
+# sharing tokens across the cluster. Tailnet IPs are only routable between your own
+# tailnet peers, so this scopes "tokenless" control to trusted devices. Set
+# SERVICE_MANAGER_TRUST_TAILNET=0 to require the token from everyone.
+TRUST_TAILNET = os.environ.get("SERVICE_MANAGER_TRUST_TAILNET", "1").lower() not in (
+    "0",
+    "false",
+    "no",
+    "",
+)
+# Tailscale's address ranges: IPv4 CGNAT 100.64.0.0/10 and the ULA IPv6 block.
+_TAILNET_NETS = (
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("fd7a:115c:a1e0::/48"),
+)
+
+VALID_ACTIONS = ("start", "stop", "restart")
+
+# Retained minidisc registry handle — advertising stops if this is GC'd, so it
+# must live for the process lifetime. Set by the advertising daemon thread.
+_advertise_registry = None
+_advertise_lock = threading.Lock()
+# How often the advertising thread refreshes live state (health/running) into the
+# minidisc labels. advertise_service is keyed by port, so a refresh replaces the
+# entry in place rather than duplicating it.
+_ADVERTISE_REFRESH_SECS = int(os.environ.get("ADVERTISE_REFRESH_SECS", "30"))
+
+# Provider-switchable services: service name → (env file key, provider→compose map)
+_PROVIDER_ENV_KEYS = {
+    "asr-services": ("ASR_PROVIDER", services.ASR_PROVIDER_TO_SERVICE),
+    "tts": ("TTS_PROVIDER", services._TTS_PROVIDER_TO_SERVICE),
+}
+
+app = FastAPI(title="Chronicle Service Manager", docs_url=None, redoc_url=None)
+_bearer = HTTPBearer(auto_error=False)
+
+
+def _is_tailnet_ip(host: str | None) -> bool:
+    """Whether host is a Tailscale-range address (the request came from a tailnet peer)."""
+    if not host:
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any(ip in net for net in _TAILNET_NETS)
+
+
+def require_token(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+):
+    # Valid bearer token always passes (local backend / docker-bridge callers).
+    if TOKEN and credentials is not None and credentials.credentials == TOKEN:
+        return
+    # Otherwise, trust a tailnet peer (the hub controlling this node over the Tailnet).
+    if TRUST_TAILNET and _is_tailnet_ip(
+        request.client.host if request.client else None
+    ):
+        return
+    if not TOKEN:
+        raise HTTPException(status_code=503, detail="Agent has no token configured")
+    raise HTTPException(status_code=401, detail="Invalid or missing token")
+
+
+# ── Operations: one compose operation at a time, polled by id ────────────────
+
+_ops_lock = threading.Lock()  # guards _operations dict
+_busy_lock = threading.Lock()  # serializes compose operations
+_operations: dict[str, dict] = {}
+_MAX_OPERATIONS = 50
+
+
+def _record_operation(service: str, action: str) -> dict:
+    op = {
+        "id": uuid.uuid4().hex[:12],
+        "service": service,
+        "action": action,
+        "status": "running",
+        "ok": None,
+        "log": "",
+        "phase": "",  # human-readable progress step, updated as the op runs
+        "started_at": time.time(),
+        "finished_at": None,
+    }
+    with _ops_lock:
+        _operations[op["id"]] = op
+        while len(_operations) > _MAX_OPERATIONS:
+            oldest = min(_operations.values(), key=lambda o: o["started_at"])
+            if oldest["status"] == "running":
+                break
+            del _operations[oldest["id"]]
+    return op
+
+
+def _run_operation(op: dict, fn):
+    """Run a compose operation in a thread, capturing services.py console output.
+
+    ``fn`` is called with the op dict so it can publish progress via
+    ``op["phase"]`` (polled by the WebUI).
+    """
+
+    def _go():
+        buf = io.StringIO()
+        original_console = services.console
+        services.console = Console(file=buf, force_terminal=False, width=120)
+        try:
+            ok = fn(op)
+            op["ok"] = bool(ok)
+            op["status"] = "done" if ok else "failed"
+        except Exception as e:
+            logger.exception("Operation %s/%s crashed", op["service"], op["action"])
+            op["ok"] = False
+            op["status"] = "failed"
+            buf.write(f"\nException: {e}\n")
+        finally:
+            services.console = original_console
+            op["log"] = buf.getvalue()[-8000:]
+            op["finished_at"] = time.time()
+            _busy_lock.release()
+            logger.info(
+                "Operation %s %s → %s", op["action"], op["service"], op["status"]
+            )
+
+    threading.Thread(target=_go, daemon=True).start()
+
+
+def _start_operation(service: str, action: str, fn) -> dict:
+    if not _busy_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409, detail="Another operation is already running"
+        )
+    op = _record_operation(service, action)
+    logger.info("Operation %s %s started (%s)", action, service, op["id"])
+    _run_operation(op, fn)
+    return op
+
+
+# ── Service info ─────────────────────────────────────────────────────────────
+
+
+def _provider_info(service_name: str) -> dict | None:
+    if service_name not in _PROVIDER_ENV_KEYS:
+        return None
+    env_key, provider_map = _PROVIDER_ENV_KEYS[service_name]
+    env_path = REPO_ROOT / services.SERVICES[service_name]["path"] / ".env"
+    env_values = dotenv_values(env_path) if env_path.exists() else {}
+    current = (env_values.get(env_key) or "").strip("'\"")
+    info = {
+        "env_key": env_key,
+        "current": current,
+        "available": [
+            {
+                "key": key,
+                "label": (
+                    services._ASR_PROVIDER_LABELS.get(key, key)
+                    if service_name == "asr-services"
+                    else key
+                ),
+                # Whether this provider runs a local container. Switching to/from a
+                # local provider is "heavy" (start/stop, possible model download);
+                # the UI uses this to decide whether to gate the change behind Apply.
+                "local": bool(provider_map.get(key)),
+            }
+            for key in provider_map
+        ],
+    }
+    if service_name == "asr-services":
+        # The active streaming provider is whatever defaults.stt_stream resolves to
+        # (cloud providers leave STREAMING_ASR_PROVIDER empty), not just the env var.
+        info["streaming_current"] = services.active_streaming_asr_provider()
+        info["streaming_available"] = [
+            {"key": key, "label": opt["label"], "local": bool(opt["service"])}
+            for key, opt in services.STREAMING_ASR_PROVIDER_OPTIONS.items()
+        ]
+    return info
+
+
+def _containers_running(name: str) -> bool:
+    """Whether any compose container for this service is currently running.
+
+    Uses the engine-aware status helper (docker compose ps vs podman ps by compose
+    project label) so it works under both docker and podman-compose.
+    """
+    service_path = REPO_ROOT / services.SERVICES[name]["path"]
+    try:
+        return any(
+            c.get("state") == "running" for c in services.compose_ps_json(service_path)
+        )
+    except Exception:
+        return False
+
+
+# A crash-looping container keeps flickering "Up <1s" so its health endpoint never
+# answers — without this it would forever read "starting". Past this many container
+# restarts we call it "unhealthy" instead. RestartCount is lifetime-cumulative but we
+# only consult it while the endpoint is down AND containers are up, so a genuinely
+# booting service (RestartCount stays 0 — it hasn't crashed) still reads "starting".
+RESTART_LOOP_THRESHOLD = 3
+
+
+def _max_restart_count(name: str) -> int:
+    """Highest container RestartCount for this service (0 if unknown).
+
+    Engine-aware via status.get_restart_counts (docker/podman inspect RestartCount).
+    """
+    service_path = REPO_ROOT / services.SERVICES[name]["path"]
+    try:
+        containers = services.compose_ps_json(service_path)
+    except Exception:
+        return 0
+    names = [c["name"] for c in containers if c.get("name")]
+    if not names:
+        return 0
+    counts = status.get_restart_counts(names)
+    return max(counts.values(), default=0)
+
+
+def _effective_health(name: str) -> tuple[str, str]:
+    """(health, detail) with the container-state overrides the raw endpoint check
+    can't see: distinguish a booting service from a crash loop.
+
+    "stopped" from check_service_health only means the endpoint isn't answering. If
+    containers are up we look at the restart count: a fresh boot (GPU model loads take
+    minutes) still has RestartCount 0 → "starting"; a crash loop has climbed past the
+    threshold → "unhealthy".
+    """
+    health, detail = services.check_service_health(name)
+    if health == "stopped" and _containers_running(name):
+        restarts = _max_restart_count(name)
+        if restarts >= RESTART_LOOP_THRESHOLD:
+            return (
+                "unhealthy",
+                f"crash loop: containers restarted {restarts}× without becoming healthy",
+            )
+        return ("starting", "containers up, waiting for health endpoint")
+    return health, detail
+
+
+def _service_entry(name: str) -> dict:
+    service = services.SERVICES[name]
+    health, detail = _effective_health(name)
+    return {
+        "name": name,
+        "description": service["description"],
+        "ports": service["ports"],
+        "enabled": services.check_service_enabled(name),
+        "health": health,
+        "health_detail": detail,
+        "provider": _provider_info(name),
+    }
+
+
+# ── Cluster routing: control OTHER nodes' services via their agents ───────────
+# The backend (in a container) can't present a Tailnet source IP, so it proxies
+# everything to THIS agent. This agent runs natively on the host with a real
+# Tailnet identity, so host→host calls to peer agents are tailnet-trusted — that's
+# why cross-node merge + forwarding lives here, not in the backend.
+
+_REMOTE_TIMEOUT = 10.0
+
+
+def _self_host() -> str:
+    return os.uname().nodename
+
+
+def _remote_node_agents() -> list[dict]:
+    """Other nodes' agents on the Tailnet as ``[{host, url}]`` (excludes self).
+
+    Each full node advertises itself as ``chronicle-node`` on its agent port, so a
+    discovered node entry is exactly that node's control URL.
+    """
+    self_host = _self_host()
+    agents: list[dict] = []
+    try:
+        for svc in discovery.list_all_services() or []:
+            labels = svc.get("labels", {})
+            if labels.get("type") != "node":
+                continue
+            host = labels.get("host")
+            address = svc.get("address")
+            port = svc.get("port")
+            if host and address and port and host != self_host:
+                agents.append({"host": host, "url": f"http://{address}:{port}"})
+    except Exception:  # noqa: BLE001 - discovery is best-effort
+        logger.warning("remote node discovery failed", exc_info=True)
+    return agents
+
+
+def _remote_services(agent: dict) -> list[dict]:
+    """A peer node's own services (scope=local avoids re-merge), tagged with its host."""
+    try:
+        resp = requests.get(
+            f"{agent['url']}/services",
+            params={"scope": "local"},
+            timeout=_REMOTE_TIMEOUT,
+        )
+        if resp.ok:
+            return [
+                {**s, "node": agent["host"], "remote": True}
+                for s in resp.json().get("services", [])
+            ]
+    except requests.RequestException:
+        logger.debug("remote /services failed for %s", agent.get("host"))
+    return []
+
+
+def _remote_request(node: str, method: str, path: str, json_body: dict | None = None):
+    """Forward a control request to a peer node's agent (host→host, tailnet-trusted)."""
+    agent = next((a for a in _remote_node_agents() if a["host"] == node), None)
+    if agent is None:
+        raise HTTPException(
+            status_code=404, detail=f"No node agent found for host {node!r}"
+        )
+    try:
+        resp = requests.request(
+            method, f"{agent['url']}{path}", json=json_body, timeout=_REMOTE_TIMEOUT
+        )
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Node {node} unreachable: {e}")
+    if resp.status_code >= 400:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except ValueError:
+            detail = resp.text
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+    return resp.json()
+
+
+# ── Tailnet advertising (folds in the old standalone discovery agent) ────────
+
+
+def _node_labels() -> dict:
+    """minidisc labels for this node's self-advertisement (``chronicle-node``).
+
+    Stays consistent with the existing ``{host, type}`` schema (the WebUI Network
+    page groups discovered services by ``labels.host`` and badges ``type=='edge'``).
+    ``type='node'`` distinguishes the orchestrator from advertise-only edge nodes.
+    All values must be strings (minidisc labels are str→str).
+    """
+    return {
+        "host": os.uname().nodename,
+        "type": "node",
+        "arch": platform.machine(),
+        "gpu": "1" if shutil.which("nvidia-smi") else "0",
+    }
+
+
+def _service_labels(svc_name: str, hostname: str) -> dict:
+    """Per-service minidisc labels carrying LIVE state, not just 'enabled'.
+
+    Reflects this node's own view — whether containers are up and the health
+    verdict — so a consumer learns what's actually live from the advertisement
+    itself. ``host``/``type`` are kept for the Network page (it groups by host).
+    All values are strings (minidisc labels are str→str).
+    """
+    health, _detail = _effective_health(svc_name)
+    return {
+        "host": hostname,
+        "type": "service",
+        "service": svc_name,
+        "enabled": "1",
+        "running": "1" if _containers_running(svc_name) else "0",
+        "health": health,  # healthy | partial | unhealthy | starting | stopped
+    }
+
+
+def _build_advertise_entries(triples) -> list:
+    """(name, port, labels) for every enabled service + this node, with live state.
+
+    ``triples`` are the ``(discovery_name, port, display_label)`` from
+    ``services._get_advertised_services()`` (passed in to avoid recomputing).
+    """
+    hostname = os.uname().nodename
+    disc_to_svc = {disc: svc for svc, disc in services._DISCOVERY_NAMES.items()}
+    entries = [
+        (
+            disc_name,
+            port,
+            _service_labels(disc_to_svc.get(disc_name, disc_name), hostname),
+        )
+        for disc_name, port, _display in triples
+    ]
+    entries.append(("chronicle-node", PORT, _node_labels()))
+    return entries
+
+
+def _advertise_worker():
+    """Advertise this node's services + itself on the Tailnet, refreshing live
+    state on a timer.
+
+    Runs in a daemon thread so a minidisc bind failure (common on Docker
+    Desktop/WSL2) never blocks the control API. ``advertise_service`` is keyed by
+    port, so re-advertising updates labels in place (no duplicates);
+    ``unlist_service`` drops services that are no longer enabled.
+    """
+    global _advertise_registry
+    registry = None
+    advertised_ports: set = set()
+
+    while True:
+        try:
+            triples = services._get_advertised_services()
+        except Exception:
+            logger.exception("Failed to compute advertised services")
+            triples = []
+        entries = _build_advertise_entries(triples)
+
+        # Local manifest the backend Network page reads — written regardless of
+        # whether minidisc binds, so the "advertising" list shows even where the
+        # Tailscale interface isn't reachable.
+        try:
+            services._write_advertised_services(triples)
+        except Exception:
+            logger.exception("Failed to write advertised-services.json")
+
+        if registry is None:
+            registry = discovery.start_advertising(entries)
+            if registry is not None:
+                with _advertise_lock:
+                    _advertise_registry = registry
+                advertised_ports = {port for _n, port, _l in entries}
+                logger.info("Advertising %d entr(ies) on the Tailnet", len(entries))
+            else:
+                logger.warning(
+                    "Tailnet advertising unavailable (minidisc/tailscale not reachable); "
+                    "retrying in %ds",
+                    _ADVERTISE_REFRESH_SECS,
+                )
+        else:
+            current = {port for _n, port, _l in entries}
+            for name, port, labels in entries:
+                try:
+                    registry.advertise_service(port, name, labels)
+                except Exception as e:  # noqa: BLE001 - refresh is best-effort
+                    logger.debug("re-advertise %s failed (non-fatal): %s", name, e)
+            for stale in advertised_ports - current:
+                try:
+                    registry.unlist_service(stale)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("unlist port %d failed (non-fatal): %s", stale, e)
+            advertised_ports = current
+
+        time.sleep(_ADVERTISE_REFRESH_SECS)
+
+
+def _start_advertising_thread():
+    threading.Thread(target=_advertise_worker, daemon=True, name="advertise").start()
+
+
+# ── Routes ───────────────────────────────────────────────────────────────────
+
+
+class ActionBody(BaseModel):
+    build: bool = False
+    recreate: bool = False
+    force: bool = False
+    # Owning node host. When set and != this node, the request is forwarded to that
+    # node's agent (host→host, tailnet-trusted). Omitted / self → handled locally.
+    node: str | None = None
+
+
+class ProviderBody(BaseModel):
+    provider: str
+    build: bool = False
+    # "batch" switches ASR_PROVIDER (the stt model); "streaming" switches the
+    # STREAMING_ASR_PROVIDER (the stt_stream model). Only meaningful for asr-services.
+    lane: str = "batch"
+    # Owning node host (see ActionBody.node).
+    node: str | None = None
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "host": os.uname().nodename, "agent_port": PORT}
+
+
+@app.get("/node", dependencies=[Depends(require_token)])
+def node_info():
+    """This node's identity + hardware capabilities + per-service status.
+
+    Used (now/by future cluster control) to place services sensibly — e.g. don't
+    offer GPU-only services on an arm64 box with no NVIDIA GPU.
+    """
+    dns, ip = detect_tailscale_info()
+    return {
+        "host": os.uname().nodename,
+        "tailscale": {"dns": dns, "ip": ip},
+        "arch": platform.machine(),
+        "gpu": {
+            # detect_cuda_version returns "" here when nvidia-smi is absent/unparseable
+            "cuda": detect_cuda_version(default=""),
+            "nvidia_smi": shutil.which("nvidia-smi") is not None,
+        },
+        "agent_port": PORT,
+        "services": [_service_entry(name) for name in services.SERVICES],
+    }
+
+
+@app.get("/cluster", dependencies=[Depends(require_token)])
+def cluster():
+    """Live view of all chronicle-* services advertised on the Tailnet."""
+    return {"services": discovery.list_all_services()}
+
+
+@app.get("/services", dependencies=[Depends(require_token)])
+def list_services(scope: str = "cluster"):
+    """This node's services, tagged with node host.
+
+    Default ``scope=cluster`` also folds in peer nodes' services (fanned out to their
+    agents in parallel, best-effort). ``scope=local`` returns only this node — used by
+    peers' fan-out so the merge doesn't recurse.
+    """
+    with _ops_lock:
+        running = [o for o in _operations.values() if o["status"] == "running"]
+    self_host = _self_host()
+    local = [
+        {**_service_entry(name), "node": self_host, "remote": False}
+        for name in services.SERVICES
+    ]
+    operation = running[0] if running else None
+    if scope == "local":
+        return {"services": local, "operation": operation}
+
+    agents = _remote_node_agents()
+    remote: list[dict] = []
+    if agents:
+        with ThreadPoolExecutor(max_workers=min(8, len(agents))) as pool:
+            for svc_list in pool.map(_remote_services, agents):
+                remote.extend(svc_list)
+    return {"services": local + remote, "operation": operation}
+
+
+@app.get("/operations/{op_id}", dependencies=[Depends(require_token)])
+def get_operation(op_id: str, node: str | None = None):
+    # Remote operations live on the node that started them.
+    if node and node != _self_host():
+        return _remote_request(node, "GET", f"/operations/{op_id}")
+    with _ops_lock:
+        op = _operations.get(op_id)
+    if not op:
+        raise HTTPException(status_code=404, detail="Unknown operation")
+    return op
+
+
+@app.post("/services/{name}/provider", dependencies=[Depends(require_token)])
+def set_provider(name: str, body: ProviderBody):
+    # Forward to the owning node's agent if this isn't it (node stripped so the
+    # peer handles it as local).
+    if body.node and body.node != _self_host():
+        return _remote_request(
+            body.node,
+            "POST",
+            f"/services/{name}/provider",
+            {**body.dict(), "node": None},
+        )
+    if name not in _PROVIDER_ENV_KEYS:
+        raise HTTPException(
+            status_code=400, detail=f"{name} does not support provider switching"
+        )
+
+    env_path = REPO_ROOT / services.SERVICES[name]["path"] / ".env"
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.touch(exist_ok=True)
+
+    streaming = name == "asr-services" and body.lane == "streaming"
+    # When True, the local-container set doesn't change, so we skip compose
+    # entirely (the backend repoints defaults.stt_stream + signals workers).
+    skip_compose = False
+
+    if streaming:
+        # Streaming lane: STREAMING_ASR_PROVIDER selects the stt_stream model.
+        # Cloud providers (smallest/deepgram) have no local container, so the env
+        # var is cleared and only the batch container is (re)started.
+        env_key = "STREAMING_ASR_PROVIDER"
+        options = services.STREAMING_ASR_PROVIDER_OPTIONS
+        if body.provider not in options:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown streaming provider '{body.provider}'. Available: {', '.join(options)}",
+            )
+        # The streaming companion container (if any) for old vs new selection.
+        old_provider = (
+            dotenv_values(env_path).get("STREAMING_ASR_PROVIDER") or ""
+        ).strip("'\"")
+        old_service = services.STREAMING_ASR_PROVIDER_TO_SERVICE.get(old_provider)
+        new_service = options[body.provider]["service"]
+        # Only local-container providers belong in STREAMING_ASR_PROVIDER (it drives
+        # which companion container `up` starts); cloud providers leave it empty.
+        env_value = body.provider if new_service else ""
+        # If the local container set is unchanged (e.g. cloud→cloud like
+        # smallest→deepgram), don't churn containers — repointing the stt_stream
+        # model is enough, and we avoid a needless heavy batch-model reload.
+        skip_compose = old_service == new_service
+    else:
+        env_key, provider_map = _PROVIDER_ENV_KEYS[name]
+        if body.provider not in provider_map:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown provider '{body.provider}'. Available: {', '.join(provider_map)}",
+            )
+        env_value = body.provider
+
+    set_key(str(env_path), env_key, env_value, quote_mode="never")
+
+    # Does the NEW selection run a local container? Drives both whether we start a
+    # container below and the config.yml enabled flag. For asr-services this is a
+    # property of *either* lane, read fresh from the .env we just wrote; every tts
+    # provider runs a local container.
+    if name == "asr-services":
+        needs_container = services.asr_needs_local_container()
+    else:
+        needs_container = bool(services._TTS_PROVIDER_TO_SERVICE.get(body.provider))
+
+    # Keep config.yml's enabled set in step with the provider choice: the System
+    # page only shows/controls enabled services and ./start.sh only starts them, so
+    # switching to a cloud (container-less) provider must disable the service and
+    # switching to a local one must (re-)enable it — otherwise the dropdown that
+    # made the switch disappears and the lifecycle drifts from the running state.
+    if name == "asr-services" and services.set_service_enabled(name, needs_container):
+        logger.info(
+            "asr-services enabled=%s in config.yml after provider switch",
+            needs_container,
+        )
+
+    def fn(op):
+        if skip_compose:
+            op["phase"] = "Applying provider (no container change)…"
+            return True
+        # down first: providers share one port, so the old container must go
+        # before the new one binds.
+        op["phase"] = "Stopping current service…"
+        ok = services.run_compose_command(name, "down")
+        # Cloud-only selection has no container to start — down is enough. A local
+        # provider is (re)started whether or not it was running before, since
+        # switching *to* a provider means you want it active.
+        if not ok or not needs_container:
+            return ok
+        op["phase"] = f"Starting {body.provider}…"
+        return services.run_compose_command(name, "up", build=body.build)
+
+    op = _start_operation(name, f"provider:{body.provider}", fn)
+    return {"operation": op}
+
+
+# NOTE: declared after /services/{name}/provider so "provider" never matches {action}.
+@app.post("/services/{name}/{action}", dependencies=[Depends(require_token)])
+def service_action(name: str, action: str, body: ActionBody | None = None):
+    body = body or ActionBody()
+    # Forward to the owning node's agent if this isn't it.
+    if body.node and body.node != _self_host():
+        if action not in VALID_ACTIONS:
+            raise HTTPException(status_code=404, detail=f"Unknown action: {action}")
+        return _remote_request(
+            body.node,
+            "POST",
+            f"/services/{name}/{action}",
+            {**body.dict(), "node": None},
+        )
+    if name not in services.SERVICES:
+        raise HTTPException(status_code=404, detail=f"Unknown service: {name}")
+    if action not in VALID_ACTIONS:
+        raise HTTPException(status_code=404, detail=f"Unknown action: {action}")
+
+    # Stopping/restarting the backend kills the WebUI (and this request's caller).
+    # Require an explicit force flag so it can't happen by accident.
+    if name == "backend" and action in ("stop", "restart") and not body.force:
+        raise HTTPException(
+            status_code=400,
+            detail="Stopping the backend kills the WebUI. Pass force=true to confirm.",
+        )
+
+    if action == "start":
+        if not services.check_service_enabled(name):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{name} is not enabled in config/config.yml — run the wizard first",
+            )
+
+        def fn(op):
+            op["phase"] = "Starting…"
+            return services.run_compose_command(name, "up", build=body.build)
+
+    elif action == "stop":
+
+        def fn(op):
+            op["phase"] = "Stopping…"
+            return services.run_compose_command(name, "down")
+
+    else:  # restart — down + up so provider/env changes take effect
+
+        def fn(op):
+            op["phase"] = "Stopping…"
+            if not services.run_compose_command(name, "down"):
+                return False
+            op["phase"] = "Starting…"
+            return services.run_compose_command(name, "up", build=body.build)
+
+    op = _start_operation(name, action, fn)
+    return {"operation": op}
+
+
+# ── Claude remote-control session ────────────────────────────────────────────
+#
+# Lets the WebUI start/stop a `claude remote-control` server (in tmux) on this
+# host, so new Claude Code sessions can be spawned from the phone. Backed by the
+# services.py helpers (tmux + optional systemd unit).
+
+_RC_ACTIONS = ("start", "stop", "restart")
+
+
+@app.get("/remote-control", dependencies=[Depends(require_token)])
+def remote_control_status():
+    return services.remote_control_status()
+
+
+@app.post("/remote-control/{action}", dependencies=[Depends(require_token)])
+def remote_control_action(action: str):
+    if action not in _RC_ACTIONS:
+        raise HTTPException(status_code=404, detail=f"Unknown action: {action}")
+    try:
+        if action == "start":
+            ok = services.start_remote_control()
+        elif action == "stop":
+            ok = services.stop_remote_control()
+        else:  # restart
+            services.stop_remote_control()
+            ok = services.start_remote_control()
+    except Exception as e:  # noqa: BLE001 - surface failure to the WebUI
+        logger.exception("remote-control %s failed", action)
+        raise HTTPException(
+            status_code=500, detail=f"remote-control {action} failed: {e}"
+        )
+    if not ok:
+        raise HTTPException(
+            status_code=500,
+            detail=f"remote-control {action} did not succeed (tmux/claude available?)",
+        )
+    return services.remote_control_status()
+
+
+def main():
+    if not TOKEN:
+        logger.error("SERVICE_MANAGER_TOKEN not set — refusing to start")
+        sys.exit(1)
+    # Advertise on the Tailnet in the background — never blocks the control API.
+    _start_advertising_thread()
+    logger.info("Node agent listening on %s:%d", HOST, PORT)
+    uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
+
+
+if __name__ == "__main__":
+    main()

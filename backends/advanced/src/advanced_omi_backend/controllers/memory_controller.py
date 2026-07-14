@@ -3,12 +3,18 @@ Memory controller for handling memory-related business logic.
 """
 
 import asyncio
+import difflib
 import logging
 from typing import Optional
 
+from beanie import PydanticObjectId
 from fastapi.responses import JSONResponse
 
+from advanced_omi_backend.controllers.conversation_controller import (
+    _memory_audit_to_dict,
+)
 from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
 from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.services.memory.base import MemoryEntry
 from advanced_omi_backend.users import User
@@ -22,6 +28,131 @@ def _resolve_target_user(user: User, user_id: Optional[str] = None) -> str:
     if user.is_superuser and user_id:
         return user_id
     return user.user_id
+
+
+async def get_memory_audit(
+    user: User,
+    limit: int,
+    user_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+):
+    """Return the memory vault change ledger for a user (newest first).
+
+    Records which notes were created/updated/deleted, when, and what triggered
+    each change (memory extraction, speaker reprocess, or an inbound Obsidian edit).
+    """
+    try:
+        target_user_id = _resolve_target_user(user, user_id)
+
+        query = MemoryAuditEntry.find(MemoryAuditEntry.user_id == target_user_id)
+        if conversation_id:
+            query = query.find(MemoryAuditEntry.conversation_id == conversation_id)
+
+        entries = await query.sort(-MemoryAuditEntry.created_at).limit(limit).to_list()
+
+        return {
+            "user_id": target_user_id,
+            "count": len(entries),
+            "entries": [_memory_audit_to_dict(e) for e in entries],
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching memory audit: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"message": f"Error fetching memory audit: {str(e)}"},
+        )
+
+
+async def get_memory_audit_diff(user: User, entry_id: str):
+    """Return the before→after diff for a single memory-audit entry.
+
+    The ledger stores the post-change note content (``after_text``); the "before"
+    is reconstructed from the most recent prior recorded change to the same note.
+    The diff therefore reflects the net change since the last recorded state,
+    whether the previous writer was the AI or an inbound Obsidian (human) edit.
+    """
+    try:
+        try:
+            oid = PydanticObjectId(entry_id)
+        except Exception:
+            return JSONResponse(
+                status_code=400, content={"message": "Invalid audit entry id"}
+            )
+
+        entry = await MemoryAuditEntry.get(oid)
+        if entry is None:
+            return JSONResponse(
+                status_code=404, content={"message": "Audit entry not found"}
+            )
+
+        # Ownership: users may only diff their own ledger; admins may diff any.
+        if entry.user_id != user.user_id and not user.is_superuser:
+            return JSONResponse(
+                status_code=403, content={"message": "Not authorized for this entry"}
+            )
+
+        after_text = entry.after_text
+
+        # Reconstruct the prior state from the previous recorded change to this note.
+        before_text: Optional[str] = None
+        if entry.note_path:
+            prior = (
+                await MemoryAuditEntry.find(
+                    MemoryAuditEntry.user_id == entry.user_id,
+                    MemoryAuditEntry.note_path == entry.note_path,
+                    MemoryAuditEntry.created_at < entry.created_at,
+                )
+                .sort(-MemoryAuditEntry.created_at)
+                .limit(1)
+                .to_list()
+            )
+            if prior:
+                before_text = prior[0].after_text
+
+        base = {
+            "id": str(entry.id),
+            "note_path": entry.note_path,
+            "operation": entry.operation,
+            "cause": entry.cause,
+            "created_at": entry.created_at.isoformat() if entry.created_at else None,
+        }
+
+        # Nothing recorded on either side (legacy entry or note-less delete_all).
+        if after_text is None and before_text is None:
+            return {
+                **base,
+                "before_text": None,
+                "after_text": None,
+                "diff": "",
+                "diff_available": False,
+                "reason": "No note content was recorded for this change.",
+            }
+
+        diff = "\n".join(
+            difflib.unified_diff(
+                (before_text or "").splitlines(),
+                (after_text or "").splitlines(),
+                fromfile=f"a/{entry.note_path or 'note'}",
+                tofile=f"b/{entry.note_path or 'note'}",
+                lineterm="",
+            )
+        )
+
+        return {
+            **base,
+            "before_text": before_text,
+            "after_text": after_text,
+            "diff": diff,
+            "diff_available": True,
+        }
+
+    except Exception as e:
+        logger.error(f"Error building memory audit diff: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"message": f"Error building memory audit diff: {str(e)}"},
+        )
 
 
 async def get_memories(user: User, limit: int, user_id: Optional[str] = None):

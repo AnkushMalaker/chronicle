@@ -43,7 +43,6 @@ read_config_yml = _wizard.read_config_yml
 get_existing_stt_provider = _wizard.get_existing_stt_provider
 get_existing_stream_provider = _wizard.get_existing_stream_provider
 select_llm_provider = _wizard.select_llm_provider
-select_memory_provider = _wizard.select_memory_provider
 select_knowledge_graph = _wizard.select_knowledge_graph
 
 
@@ -195,43 +194,6 @@ def test_select_llm_provider_none_config():
     """Treats None config_yml as empty dict (defaults to openai)."""
     result = _select_llm_with_eof(None)
     assert result == "openai"
-
-
-# ---------------------------------------------------------------------------
-# select_memory_provider — test default resolution logic via EOFError path
-# ---------------------------------------------------------------------------
-
-
-def _select_memory_with_eof(config_yml):
-    with patch.object(_wizard, "Prompt") as mock_prompt:
-        mock_prompt.ask.side_effect = EOFError
-        return select_memory_provider(config_yml)
-
-
-def test_select_memory_provider_defaults_to_chronicle_when_no_config():
-    """Defaults to chronicle when config is empty."""
-    result = _select_memory_with_eof({})
-    assert result == "chronicle"
-
-
-def test_select_memory_provider_defaults_to_chronicle():
-    """Picks chronicle when existing config has memory.provider = chronicle."""
-    config = {"memory": {"provider": "chronicle"}}
-    result = _select_memory_with_eof(config)
-    assert result == "chronicle"
-
-
-def test_select_memory_provider_defaults_to_openmemory_mcp():
-    """Picks openmemory_mcp when existing config has memory.provider = openmemory_mcp."""
-    config = {"memory": {"provider": "openmemory_mcp"}}
-    result = _select_memory_with_eof(config)
-    assert result == "openmemory_mcp"
-
-
-def test_select_memory_provider_none_config():
-    """Treats None config_yml as empty dict (defaults to chronicle)."""
-    result = _select_memory_with_eof(None)
-    assert result == "chronicle"
 
 
 # ---------------------------------------------------------------------------

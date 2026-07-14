@@ -66,3 +66,23 @@ export function useDeleteOrphanedAnnotations() {
     },
   })
 }
+
+export function useRetryFailedAnnotations() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (annotationType?: string) => finetuningApi.retryFailedAnnotations(annotationType).then(r => r.data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['finetuning'] })
+    },
+  })
+}
+
+export function useDeleteFailedAnnotations() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (annotationType?: string) => finetuningApi.deleteFailedAnnotations(annotationType).then(r => r.data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['finetuning'] })
+    },
+  })
+}

@@ -1,8 +1,18 @@
 // useAudioStreamer.ts
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { PermissionsAndroid, Platform } from 'react-native';
+import { AppState, PermissionsAndroid, Platform } from 'react-native';
 import notifee, { AndroidImportance } from '@notifee/react-native';
 import NetInfo from '@react-native-community/netinfo';
+import { refreshToken } from '../services/auth';
+import { playDownlinkAudio } from '../utils/audioPlayback';
+import { useConnectionLog, ConnectionEventType, ConnectionEvent } from '../contexts/ConnectionLogContext';
+
+interface UseAudioStreamerOptions {
+  /** Called when a new JWT token is obtained via auto-re-login */
+  onTokenRefreshed?: (token: string) => void;
+  /** When false, the socket connects once and does NOT auto-reconnect on drop. */
+  autoReconnectEnabled?: boolean;
+}
 
 interface UseAudioStreamer {
   isStreaming: boolean;
@@ -90,7 +100,7 @@ async function stopForegroundServiceNotification() {
 
 /** -------------------- Hook -------------------- */
 
-export const useAudioStreamer = (): UseAudioStreamer => {
+export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStreamer => {
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
   const [isConnecting, setIsConnecting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -108,6 +118,24 @@ export const useAudioStreamer = (): UseAudioStreamer => {
   const MAX_RECONNECT_MS = 30000;
   const HEARTBEAT_MS = 25000;
 
+  // Track if we received an auth error so onclose doesn't blindly reconnect
+  const authFailedRef = useRef<boolean>(false);
+
+  // User preference: when false, connect once (no auto-reconnect on drop).
+  const autoReconnectEnabledRef = useRef<boolean>(options?.autoReconnectEnabled ?? true);
+  useEffect(() => {
+    autoReconnectEnabledRef.current = options?.autoReconnectEnabled ?? true;
+  }, [options?.autoReconnectEnabled]);
+
+  // Zombie-socket detection: timestamp of the last pong from the backend.
+  const lastPongRef = useRef<number>(0);
+  // Last known network reachability, so we only log actual online/offline
+  // transitions (NetInfo fires on many intermediate changes).
+  const lastNetOnlineRef = useRef<boolean | null>(null);
+  // Notify the user only once when reconnect attempts cross the threshold
+  // (we keep retrying indefinitely rather than giving up).
+  const exhaustedNotifiedRef = useRef<boolean>(false);
+
   // Guard state updates after unmount
   const mountedRef = useRef<boolean>(true);
   useEffect(() => {
@@ -119,6 +147,20 @@ export const useAudioStreamer = (): UseAudioStreamer => {
   const setStateSafe = useCallback(<T,>(setter: (v: T) => void, val: T) => {
     if (mountedRef.current) setter(val);
   }, []);
+
+  // Diagnostics: surface WebSocket/network lifecycle in the in-app Connection Log
+  // (and, via the context, the persistent crash-log file). Held in a ref so the
+  // logging helper stays stable and we don't have to thread `addEvent` through
+  // every callback's dependency array.
+  const { addEvent } = useConnectionLog();
+  const addEventRef = useRef(addEvent);
+  useEffect(() => { addEventRef.current = addEvent; }, [addEvent]);
+  const logEvent = useCallback(
+    (type: ConnectionEventType, details?: string, extra?: Partial<ConnectionEvent>) => {
+      try { addEventRef.current?.(type, details, extra); } catch {}
+    },
+    []
+  );
 
   // Helper: background-safe, optional notification for errors/info (NEW)
   const notifyInfo = useCallback(async (title: string, body: string) => {
@@ -132,6 +174,27 @@ export const useAudioStreamer = (): UseAudioStreamer => {
       // ignore if not available
     }
   }, []);
+
+  // Helper: re-authenticate via the central auth service (silent refresh from
+  // stored credentials), then rebuild the WebSocket URL with the fresh token.
+  const attemptReLogin = useCallback(async (): Promise<boolean> => {
+    const newToken = await refreshToken();
+    if (!newToken) {
+      console.warn('[AudioStreamer] Re-login failed (no token)');
+      return false;
+    }
+
+    options?.onTokenRefreshed?.(newToken);
+
+    // Rebuild the current URL with the new token
+    currentUrlRef.current = currentUrlRef.current.replace(
+      /([?&])token=[^&]*/,
+      `$1token=${encodeURIComponent(newToken)}`
+    );
+
+    console.log('[AudioStreamer] Re-login successful, token refreshed');
+    return true;
+  }, [options]);
 
   // Helper: send Wyoming protocol events (UNCHANGED logic)
   const sendWyomingEvent = useCallback(async (event: WyomingEvent, payload?: Uint8Array) => {
@@ -185,26 +248,37 @@ export const useAudioStreamer = (): UseAudioStreamer => {
     await stopForegroundServiceNotification();
   }, [sendWyomingEvent, setStateSafe]);
 
-  // Reconnect (CHANGED): exponential backoff + no Alerts + optional notification on max attempts
+  // Reconnect (persistent): exponential backoff capped at MAX_RECONNECT_MS, and
+  // we NEVER permanently give up — giving up would also disable the NetInfo and
+  // AppState recovery paths. After MAX_RECONNECT_ATTEMPTS we keep retrying at the
+  // capped interval and notify the user once.
   const attemptReconnect = useCallback(() => {
     if (manuallyStoppedRef.current || !currentUrlRef.current) {
       console.log('[AudioStreamer] Not reconnecting: manually stopped or missing URL');
       return;
     }
-    if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
-      console.log('[AudioStreamer] Reconnect attempts exhausted');
-      notifyInfo('Connection lost', 'Failed to reconnect after multiple attempts.');
-      manuallyStoppedRef.current = true;
-      setStateSafe(setIsStreaming, false);
+    // "Connect once" mode: don't auto-reconnect on drop.
+    if (!autoReconnectEnabledRef.current) {
+      console.log('[AudioStreamer] Auto-reconnect disabled (connect-once mode)');
       setStateSafe(setIsConnecting, false);
       return;
     }
 
     const attempt = reconnectAttemptsRef.current + 1;
-    const delay = Math.min(MAX_RECONNECT_MS, BASE_RECONNECT_MS * Math.pow(2, reconnectAttemptsRef.current));
     reconnectAttemptsRef.current = attempt;
 
-    console.log(`[AudioStreamer] Reconnect attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS} in ${delay}ms`);
+    // Cap the exponent so the delay saturates at MAX_RECONNECT_MS rather than
+    // overflowing once attempts grow large.
+    const exponent = Math.min(attempt - 1, 10);
+    const delay = Math.min(MAX_RECONNECT_MS, BASE_RECONNECT_MS * Math.pow(2, exponent));
+
+    if (attempt > MAX_RECONNECT_ATTEMPTS && !exhaustedNotifiedRef.current) {
+      exhaustedNotifiedRef.current = true;
+      notifyInfo('Connection lost', 'Still trying to reconnect…');
+    }
+
+    console.log(`[AudioStreamer] Reconnect attempt ${attempt} in ${delay}ms`);
+    logEvent('ws_reconnect', `Attempt ${attempt} in ${Math.round(delay / 1000)}s`);
 
     if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
     setStateSafe(setIsConnecting, true);
@@ -218,7 +292,7 @@ export const useAudioStreamer = (): UseAudioStreamer => {
           });
       }
     }, delay);
-  }, [notifyInfo, setStateSafe]);
+  }, [notifyInfo, setStateSafe, logEvent]);
 
   // Start (CHANGED): start/refresh FGS before connecting; remove Alerts; set heartbeat
   const startStreaming = useCallback(async (url: string): Promise<void> => {
@@ -231,12 +305,14 @@ export const useAudioStreamer = (): UseAudioStreamer => {
 
     currentUrlRef.current = trimmed;
     manuallyStoppedRef.current = false;
+    authFailedRef.current = false;
 
     // Network gate
     const netState = await NetInfo.fetch();
     if (!netState.isConnected || !netState.isInternetReachable) {
       const errorMsg = 'No internet connection.';
       setStateSafe(setError, errorMsg);
+      logEvent('ws_error', 'Connect aborted: no internet connection');
       return Promise.reject(new Error(errorMsg));
     }
 
@@ -249,25 +325,39 @@ export const useAudioStreamer = (): UseAudioStreamer => {
     setStateSafe(setIsConnecting, true);
     setStateSafe(setError, null);
 
+    logEvent('ws_connecting', reconnectAttemptsRef.current > 0 ? 'Opening socket (reconnect)' : 'Opening socket');
+
     return new Promise<void>((resolve, reject) => {
       try {
         const ws = new WebSocket(trimmed);
 
         ws.onopen = async () => {
           console.log('[AudioStreamer] WebSocket open');
+          logEvent('ws_open', 'WebSocket connected');
           websocketRef.current = ws;
           reconnectAttemptsRef.current = 0;
+          exhaustedNotifiedRef.current = false;
+          lastPongRef.current = Date.now(); // assume healthy at open
           setStateSafe(setIsConnecting, false);
           setStateSafe(setIsStreaming, true);
           setStateSafe(setError, null);
 
-          // Start heartbeat
+          // Start heartbeat. Each tick also checks for a half-open (zombie)
+          // socket: if the backend hasn't ponged within 2 heartbeats the TCP
+          // connection is dead even though readyState still reads OPEN, so we
+          // force-close to trigger onclose → reconnect.
           if (heartbeatRef.current) clearInterval(heartbeatRef.current);
           heartbeatRef.current = setInterval(() => {
             try {
-              if (websocketRef.current?.readyState === WebSocket.OPEN) {
-                websocketRef.current.send(JSON.stringify({ type: 'ping', t: Date.now() }));
+              const sock = websocketRef.current;
+              if (sock?.readyState !== WebSocket.OPEN) return;
+              if (lastPongRef.current && Date.now() - lastPongRef.current > 2 * HEARTBEAT_MS) {
+                console.warn('[AudioStreamer] No pong within 2 heartbeats; closing zombie socket');
+                logEvent('ws_error', 'No pong within 2 heartbeats; closing zombie socket');
+                try { sock.close(4000, 'zombie-no-pong'); } catch {}
+                return;
               }
+              sock.send(JSON.stringify({ type: 'ping', t: Date.now() }));
             } catch {}
           }, HEARTBEAT_MS);
 
@@ -284,13 +374,38 @@ export const useAudioStreamer = (): UseAudioStreamer => {
         };
 
         ws.onmessage = (event) => {
-          // Handle server messages if needed
-          console.log('[AudioStreamer] Message:', event.data);
+          // Parse server messages to detect auth errors
+          try {
+            const msg = JSON.parse(event.data);
+            // Heartbeat reply — proves the socket is alive end-to-end.
+            if (msg.type === 'pong') {
+              lastPongRef.current = Date.now();
+              return;
+            }
+            if (msg.type === 'error' && (msg.error === 'token_expired' || msg.error === 'authentication_failed' || msg.error === 'user_not_found')) {
+              console.warn(`[AudioStreamer] Auth error from server: ${msg.error} — ${msg.message}`);
+              authFailedRef.current = true;
+              setStateSafe(setError, msg.message || 'Session expired. Re-authenticating...');
+              return;
+            }
+            // Backend→device downlink: play synthesized audio (e.g. TTS reply)
+            // out of the phone speaker, just like the HAVPE relay does on-device.
+            if (msg.type === 'play-audio' && msg.data) {
+              playDownlinkAudio(msg.data).catch((e) =>
+                console.warn('[AudioStreamer] Failed to play downlink audio:', e)
+              );
+              return;
+            }
+          } catch {
+            // Not JSON, that's fine (e.g. binary messages)
+          }
+          console.log('[AudioStreamer] Message:', typeof event.data === 'string' ? event.data.substring(0, 200) : '(binary)');
         };
 
         ws.onerror = (e) => {
           const msg = (e as any).message || 'WebSocket connection error.';
           console.error('[AudioStreamer] Error:', msg);
+          logEvent('ws_error', msg);
           setStateSafe(setError, msg);
           setStateSafe(setIsConnecting, false);
           setStateSafe(setIsStreaming, false);
@@ -301,27 +416,58 @@ export const useAudioStreamer = (): UseAudioStreamer => {
         ws.onclose = (event) => {
           console.log('[AudioStreamer] Closed. Code:', event.code, 'Reason:', event.reason);
           const isManual = event.code === 1000 && event.reason === 'manual-stop';
+          logEvent('ws_close', `Closed code=${event.code}${event.reason ? ` reason="${event.reason}"` : ''}${isManual ? ' (manual)' : ''}`);
 
           setStateSafe(setIsConnecting, false);
           setStateSafe(setIsStreaming, false);
 
           if (websocketRef.current === ws) websocketRef.current = null;
 
+          // Auth failure: try re-login instead of blind reconnect
+          if (authFailedRef.current && !manuallyStoppedRef.current && autoReconnectEnabledRef.current) {
+            authFailedRef.current = false;
+            console.log('[AudioStreamer] Auth failure detected, attempting re-login...');
+            logEvent('ws_reauth', 'Auth failed; attempting re-login');
+            setStateSafe(setError, 'Session expired. Re-authenticating...');
+            attemptReLogin().then(success => {
+              if (success && currentUrlRef.current) {
+                console.log('[AudioStreamer] Re-login succeeded, reconnecting...');
+                logEvent('ws_reauth', 'Re-login succeeded; reconnecting');
+                reconnectAttemptsRef.current = 0;
+                startStreaming(currentUrlRef.current).catch(err => {
+                  console.error('[AudioStreamer] Reconnect after re-login failed:', err);
+                  setStateSafe(setError, 'Re-authentication succeeded but reconnection failed.');
+                });
+              } else {
+                console.warn('[AudioStreamer] Re-login failed. Please log in manually.');
+                logEvent('ws_reauth', 'Re-login failed; manual login required');
+                setStateSafe(setError, 'Session expired. Please log in again in Settings.');
+                notifyInfo('Session Expired', 'Please open the app and log in again.');
+              }
+            });
+            return;
+          }
+
           if (!isManual && !manuallyStoppedRef.current) {
-            setStateSafe(setError, 'Connection closed; attempting to reconnect.');
-            attemptReconnect();
+            if (autoReconnectEnabledRef.current) {
+              setStateSafe(setError, 'Connection closed; attempting to reconnect.');
+              attemptReconnect();
+            } else {
+              setStateSafe(setError, 'Connection closed.');
+            }
           }
         };
       } catch (e) {
         const msg = (e as any).message || 'Failed to create WebSocket.';
         console.error('[AudioStreamer] Create WS error:', msg);
+        logEvent('ws_error', `Failed to create WebSocket: ${msg}`);
         setStateSafe(setError, msg);
         setStateSafe(setIsConnecting, false);
         setStateSafe(setIsStreaming, false);
         reject(new Error(msg));
       }
     });
-  }, [attemptReconnect, sendWyomingEvent, setStateSafe, stopStreaming]);
+  }, [attemptReconnect, attemptReLogin, notifyInfo, sendWyomingEvent, setStateSafe, stopStreaming, logEvent]);
 
   const sendAudio = useCallback(async (audioBytes: Uint8Array) => {
     if (websocketRef.current && websocketRef.current.readyState === WebSocket.OPEN && audioBytes.length > 0) {
@@ -349,6 +495,13 @@ export const useAudioStreamer = (): UseAudioStreamer => {
   useEffect(() => {
     const sub = NetInfo.addEventListener(state => {
       const online = !!state.isConnected && !!state.isInternetReachable;
+
+      // Log only real transitions so the diagnostics aren't flooded.
+      if (lastNetOnlineRef.current !== online) {
+        lastNetOnlineRef.current = online;
+        logEvent('net_change', online ? `Network online (${state.type})` : `Network offline (${state.type})`);
+      }
+
       if (online && !manuallyStoppedRef.current) {
         // If socket isn’t open, try to reconnect with backoff
         const ready = websocketRef.current?.readyState;
@@ -359,7 +512,23 @@ export const useAudioStreamer = (): UseAudioStreamer => {
       }
     });
     return () => sub();
-  }, [attemptReconnect]);
+  }, [attemptReconnect, logEvent]);
+
+  /** App-lifecycle reconnect: on return to foreground, if a session is intended
+   * but the socket isn't open (the JS VM may have been suspended in background),
+   * reconnect. */
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', nextState => {
+      if (nextState !== 'active') return;
+      if (manuallyStoppedRef.current || !currentUrlRef.current) return;
+      if (websocketRef.current?.readyState !== WebSocket.OPEN) {
+        console.log('[AudioStreamer] Foregrounded; scheduling reconnect');
+        logEvent('ws_reconnect', 'App foregrounded; socket not open, reconnecting');
+        attemptReconnect();
+      }
+    });
+    return () => subscription.remove();
+  }, [attemptReconnect, logEvent]);
 
   /** Cleanup on unmount (CHANGED): don’t auto-stop streaming; just clear timers */
   useEffect(() => {
