@@ -49,7 +49,7 @@ Test Cleanup
 Placeholder Conversation Created Immediately With Always Persist
     [Documentation]    Verify that when always_persist=true, a conversation is created
     ...                immediately (before speech detection) with placeholder title and
-    ...                processing_status="pending_transcription".
+    ...                processing_status="active".
     [Tags]    conversation	audio-streaming
 
     ${device_name}=    Set Variable    test-placeholder
@@ -79,8 +79,8 @@ Placeholder Conversation Created Immediately With Always Persist
     # Verify placeholder title
     Verify Placeholder Conversation Title    ${conversation_id}
 
-    # Verify processing_status
-    Verify Conversation Processing Status    ${conversation_id}    pending_transcription
+    # Verify processing_status (3-state machine: still in flight -> active)
+    Verify Conversation Processing Status    ${conversation_id}    active
 
     # Verify always_persist flag
     Verify Conversation Always Persist Flag    ${conversation_id}
@@ -303,7 +303,7 @@ Audio Chunks Persisted Despite Transcription Failure
 
 Conversation Updates To Completed When Transcription Succeeds
     [Documentation]    Verify that when transcription succeeds, the placeholder conversation
-    ...                updates from processing_status="pending_transcription" to "completed",
+    ...                updates from processing_status="active" to "completed",
     ...                and the title updates from placeholder to actual summary.
     [Tags]    conversation	audio-streaming	requires-api-keys
 
@@ -324,8 +324,8 @@ Conversation Updates To Completed When Transcription Succeeds
     ${conversation}=    Set Variable    ${convs_after}[0]
     ${conversation_id}=    Set Variable    ${conversation}[conversation_id]
 
-    # Verify initial placeholder state
-    Verify Conversation Processing Status    ${conversation_id}    pending_transcription
+    # Verify initial placeholder state (3-state machine: still in flight -> active)
+    Verify Conversation Processing Status    ${conversation_id}    active
     Verify Placeholder Conversation Title    ${conversation_id}
 
     # Send audio chunks with speech (transcription will succeed)

@@ -43,7 +43,6 @@ read_config_yml = _wizard.read_config_yml
 get_existing_stt_provider = _wizard.get_existing_stt_provider
 get_existing_stream_provider = _wizard.get_existing_stream_provider
 select_llm_provider = _wizard.select_llm_provider
-select_knowledge_graph = _wizard.select_knowledge_graph
 
 
 # ---------------------------------------------------------------------------
@@ -194,40 +193,3 @@ def test_select_llm_provider_none_config():
     """Treats None config_yml as empty dict (defaults to openai)."""
     result = _select_llm_with_eof(None)
     assert result == "openai"
-
-
-# ---------------------------------------------------------------------------
-# select_knowledge_graph — test default resolution logic via EOFError path
-# ---------------------------------------------------------------------------
-
-
-def _select_kg_with_eof(config_yml):
-    with patch.object(_wizard, "Confirm") as mock_confirm:
-        mock_confirm.ask.side_effect = EOFError
-        return select_knowledge_graph(config_yml)
-
-
-def test_select_knowledge_graph_defaults_to_true_when_no_config():
-    """Defaults to True (enabled) when config is empty."""
-    result = _select_kg_with_eof({})
-    assert result is True
-
-
-def test_select_knowledge_graph_respects_existing_true():
-    """Returns True when existing config has knowledge_graph.enabled = True."""
-    config = {"memory": {"knowledge_graph": {"enabled": True}}}
-    result = _select_kg_with_eof(config)
-    assert result is True
-
-
-def test_select_knowledge_graph_respects_existing_false():
-    """Returns False when existing config has knowledge_graph.enabled = False."""
-    config = {"memory": {"knowledge_graph": {"enabled": False}}}
-    result = _select_kg_with_eof(config)
-    assert result is False
-
-
-def test_select_knowledge_graph_none_config():
-    """Treats None config_yml as empty dict (defaults to True)."""
-    result = _select_kg_with_eof(None)
-    assert result is True

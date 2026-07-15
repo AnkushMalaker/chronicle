@@ -256,10 +256,10 @@ Worker Count Validation Test
     Log To Console    Idle workers: ${idle_workers}
 
     # Verify exact worker count
-    # Expected: 9 RQ workers (6 general workers + 3 audio persistence workers)
+    # Expected: 10 RQ workers (6 general + 1 memory + 3 audio persistence)
     # Note: Audio stream workers (Deepgram/Parakeet) are NOT RQ workers - they don't register
     # We wait up to 20s for registration, so all workers should be present
-    Should Be Equal As Integers    ${worker_count}    9    msg=Expected exactly 9 RQ workers (6 general + 3 audio persistence)
+    Should Be Equal As Integers    ${worker_count}    10    msg=Expected exactly 10 RQ workers (6 general + 1 memory + 3 audio persistence)
 
     # Verify active + idle = total
     ${sum}=    Evaluate    ${active_workers} + ${idle_workers}
