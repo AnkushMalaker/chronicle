@@ -209,13 +209,20 @@ def _normalize_provider_segments(segments: list) -> list:
 class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
     """Batch transcription provider driven by config.yml."""
 
-    def __init__(self):
+    def __init__(self, model_name: Optional[str] = None):
         registry = get_models_registry()
         if not registry:
             raise RuntimeError("config.yml not found; cannot configure STT provider")
-        model = registry.get_default("stt")
-        if not model:
-            raise RuntimeError("No default STT model defined in config.yml")
+        if model_name:
+            model = registry.get_by_name(model_name)
+            if not model or model.model_type != "stt":
+                raise RuntimeError(
+                    f"Model '{model_name}' is not a configured STT model"
+                )
+        else:
+            model = registry.get_default("stt")
+            if not model:
+                raise RuntimeError("No default STT model defined in config.yml")
         self.model = model
         self._name = model.model_provider or model.name
         # Load capabilities from config.yml model definition

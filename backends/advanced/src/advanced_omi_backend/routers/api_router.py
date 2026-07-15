@@ -20,6 +20,7 @@ from .modules import (
     data_audit_router,
     finetuning_router,
     memory_router,
+    openai_compat_router,
     queue_router,
     sse_router,
     system_events_router,
@@ -47,6 +48,7 @@ router.include_router(conversation_router)
 router.include_router(data_audit_router)
 router.include_router(finetuning_router)
 router.include_router(memory_router)
+router.include_router(openai_compat_router)
 router.include_router(sse_router)
 router.include_router(system_events_router)
 router.include_router(system_router)

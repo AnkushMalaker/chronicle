@@ -28,6 +28,7 @@ from .data_audit_routes import router as data_audit_router
 from .finetuning_routes import router as finetuning_router
 from .health_routes import router as health_router
 from .memory_routes import router as memory_router
+from .openai_compat_routes import router as openai_compat_router
 from .queue_routes import router as queue_router
 from .sse_routes import router as sse_router
 from .system_events_routes import router as system_events_router
@@ -48,6 +49,7 @@ __all__ = [
     "finetuning_router",
     "health_router",
     "memory_router",
+    "openai_compat_router",
     "queue_router",
     "sse_router",
     "system_events_router",
