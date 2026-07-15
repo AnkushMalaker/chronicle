@@ -88,21 +88,23 @@ class TestDockerfileCUDASupport:
             r"uv\s+sync.*--extra\s+\$\{PYTORCH_CUDA_VERSION\}", content
         ), "NeMo Dockerfile should use CUDA version in uv sync"
 
-    def test_nemo_strix_dockerfile_uses_pypi_extra_index(
+    def test_nemo_strix_dockerfile_preserves_rocm_base_torch(
         self, nemo_strix_dockerfile_path
     ):
-        """Strix Halo NeMo Dockerfile should include PyPI fallback index."""
+        """Strix Halo NeMo must not replace the ROCm base image's torch build."""
         content = nemo_strix_dockerfile_path.read_text()
-        assert "--index-url https://rocm.nightlies.amd.com/v2/gfx1151/" in content
-        assert "--extra-index-url https://pypi.org/simple" in content
+        assert "FROM rocm/pytorch:" in content
+        assert "--prune torch --prune torchaudio" in content
+        assert "torch.version.hip is not None" in content
 
-    def test_vibevoice_strix_dockerfile_uses_pypi_extra_index(
+    def test_vibevoice_strix_dockerfile_preserves_rocm_base_torch(
         self, vibevoice_strix_dockerfile_path
     ):
-        """Strix Halo VibeVoice Dockerfile should include PyPI fallback index."""
+        """Strix Halo VibeVoice must not replace the ROCm base image's torch build."""
         content = vibevoice_strix_dockerfile_path.read_text()
-        assert "--index-url https://rocm.nightlies.amd.com/v2/gfx1151/" in content
-        assert "--extra-index-url https://pypi.org/simple" in content
+        assert "FROM rocm/pytorch:" in content
+        assert "--prune torch --prune torchaudio" in content
+        assert "torch.version.hip is not None" in content
 
     def test_docker_compose_passes_cuda_arg_to_vibevoice(self, docker_compose_path):
         """Test that docker-compose.yml passes PYTORCH_CUDA_VERSION to vibevoice service."""
