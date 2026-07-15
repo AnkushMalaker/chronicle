@@ -78,9 +78,9 @@ jobs:
       working-directory: tests
       run: |
         # Use Makefile target (starts containers with mock config, excludes api-keys/slow/sdk/gpu tests)
-        make test-no-api OUTPUTDIR=results-no-api
-        TEST_EXIT_CODE=$?
-        echo "test_exit_code=$TEST_EXIT_CODE" >> $GITHUB_ENV
+        TEST_EXIT_CODE=0
+        make test-no-api OUTPUTDIR=results-no-api || TEST_EXIT_CODE=$?
+        echo "test_exit_code=$TEST_EXIT_CODE" >> "$GITHUB_ENV"
         exit 0  # Don't fail here, we'll fail at the end after uploading artifacts
 
     - name: Save service logs to files
@@ -270,8 +270,12 @@ jobs:
     - name: Fail workflow if tests failed
       if: always()
       run: |
-        if [ "${{ env.test_exit_code }}" != "0" ]; then
-          echo "❌ Tests failed with exit code ${{ env.test_exit_code }}"
+        TEST_EXIT_CODE="${{ env.test_exit_code }}"
+        if [ -z "$TEST_EXIT_CODE" ]; then
+          echo "❌ Test step did not record an exit code; check earlier setup/test steps"
+          exit 1
+        elif [ "$TEST_EXIT_CODE" != "0" ]; then
+          echo "❌ Tests failed with exit code $TEST_EXIT_CODE"
           exit 1
         else
           echo "✅ All tests passed"
