@@ -54,7 +54,7 @@ function NodeUpdateControl({
 
   const startUpdate = async () => {
     const message = isHubNode
-      ? 'Update this node?\n\nThis restarts the backend — the WebUI will briefly disconnect and the page may need a reload.'
+      ? 'Update the hub node?\n\nThis restarts the backend — the WebUI will briefly disconnect and the page may need a reload.'
       : `Update node ${node ?? ''}?\n\nThis restarts the node agent and backend on that host.`
     if (!window.confirm(message)) return
     setStarting(true)
@@ -493,7 +493,7 @@ export default function ExternalServices({
                       : 'bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-300'
                   }`}
                 >
-                  {groupServices[0]?.remote ? 'remote node' : 'this node'}
+                  {groupServices[0]?.remote ? 'remote node' : 'hub'}
                 </span>
               </div>
             )}
