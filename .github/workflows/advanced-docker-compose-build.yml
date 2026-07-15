@@ -93,13 +93,10 @@ jobs:
           echo "Writing .env from ADVANCED_ENV secret"
           printf "%s\n" "${ADVANCED_ENV}" > .env
 
-      - name: Source .env (if present)
+      - name: Verify .env file (if present)
         run: |
           if [ -f .env ]; then
-            set -a
-            # shellcheck disable=SC1091
-            source .env
-            set +a
+            echo "Using generated .env for Docker Compose"
           else
             echo ".env not found; continuing"
           fi
