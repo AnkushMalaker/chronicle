@@ -27,27 +27,49 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
-  build-default:
+  build-images:
+    name: Build ${{ matrix.image }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: chronicle-backend
+            service: chronicle-backend
+            directory: backends/advanced
+            variant: ""
+          - image: chronicle-asr-nemo-cu126
+            service: parakeet-asr
+            directory: extras/asr-services
+            variant: cu126
+          - image: chronicle-asr-nemo-cu128
+            service: parakeet-asr
+            directory: extras/asr-services
+            variant: cu128
+          - image: chronicle-speaker-cpu
+            service: speaker-service
+            directory: extras/speaker-recognition
+            variant: cpu
+          - image: chronicle-speaker-cu126
+            service: speaker-service
+            directory: extras/speaker-recognition
+            variant: cu126
+          - image: chronicle-speaker-cu128
+            service: speaker-service
+            directory: extras/speaker-recognition
+            variant: cu128
     env:
       ADVANCED_ENV: ${{ secrets.ADVANCED_ENV }}
-      RUNNER_FLAVOUR: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-        working-directory: backends/advanced
 
     steps:
-      - name: Show selected runner
-        run: echo "Workflow running on ${RUNNER_FLAVOUR} runner"
-        working-directory: .
-
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Print commit details
+        working-directory: ${{ matrix.directory }}
         run: |
+          echo "Image: ${{ matrix.image }}"
           echo "Event: ${{ github.event_name }}"
           echo "Ref: $GITHUB_REF"
           echo "Ref name: ${{ github.ref_name }}"
@@ -68,40 +90,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Copy .env.template to .env
+      - name: Copy .env template
+        working-directory: ${{ matrix.directory }}
         run: |
           set -euo pipefail
-          copy_env() {
-            local dir="$1"
-            local template="${dir}/.env.template"
-            local target="${dir}/.env"
-            if [ -f "$template" ]; then
-              echo "Copying $template to $target"
-              cp "$template" "$target"
-            else
-              echo "$template not found; skipping"
-            fi
-          }
-
-          copy_env .
-          copy_env ../../extras/asr-services
-          copy_env ../../extras/speaker-recognition
+          if [ -f .env.template ]; then
+            cp .env.template .env
+          else
+            touch .env
+          fi
 
       - name: Create .env from secret (if provided)
-        if: env.ADVANCED_ENV != ''
+        if: matrix.image == 'chronicle-backend' && env.ADVANCED_ENV != ''
+        working-directory: ${{ matrix.directory }}
         run: |
           echo "Writing .env from ADVANCED_ENV secret"
           printf "%s\n" "${ADVANCED_ENV}" > .env
 
-      - name: Verify .env file (if present)
-        run: |
-          if [ -f .env ]; then
-            echo "Using generated .env for Docker Compose"
-          else
-            echo ".env not found; continuing"
-          fi
-
       - name: Free Disk Space
+        working-directory: ${{ matrix.directory }}
         run: |
           echo "Freeing disk space..."
           df -h
@@ -114,6 +121,7 @@ jobs:
 
       - name: Determine version
         id: version
+        working-directory: ${{ matrix.directory }}
         run: |
           if [ -n "${{ github.event.inputs.version }}" ]; then
             VERSION="${{ github.event.inputs.version }}"
@@ -127,153 +135,44 @@ jobs:
 
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Build, tag, and push services sequentially with version
+      - name: Build, tag, and push ${{ matrix.image }}
+        working-directory: ${{ matrix.directory }}
         env:
           OWNER: ${{ github.repository_owner }}
           VERSION: ${{ steps.version.outputs.VERSION }}
-          # Baked into images that take this build arg (backend /version endpoint).
           CHRONICLE_BUILD_VERSION: ${{ steps.version.outputs.VERSION }}
+          PYTORCH_CUDA_VERSION: ${{ matrix.variant }}
         run: |
           set -euo pipefail
           docker compose version
           OWNER_LC=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
+          docker compose build --pull "${{ matrix.service }}"
 
-          # CUDA variants from pyproject.toml
-          CUDA_VARIANTS=("cpu" "cu126" "cu128")
+          img_id=$(docker compose images -q "${{ matrix.service }}" | head -n1)
+          if [ -z "${img_id:-}" ]; then
+            echo "No image found after building ${{ matrix.service }}" >&2
+            exit 1
+          fi
 
-          # Base services (no CUDA variants, no profiles)
-          # Image names must match what docker-compose.yml expects (chronicle-backend).
-          # The webui is dev-server only (webui-dev, built locally from Dockerfile.dev),
-          # so there is no prebuilt webui image to distribute.
-          base_service_specs=(
-            "chronicle-backend|chronicle-backend|docker-compose.yml|."
-          )
+          target_image="$REGISTRY/$OWNER_LC/${{ matrix.image }}:$VERSION"
+          latest_image="$REGISTRY/$OWNER_LC/${{ matrix.image }}:latest"
+          docker tag "$img_id" "$target_image"
+          docker tag "$img_id" "$latest_image"
+          docker push "$target_image"
+          docker push "$latest_image"
 
-          # Build and push base services
-          for spec in "${base_service_specs[@]}"; do
-            IFS='|' read -r svc svc_repo compose_file project_dir <<< "$spec"
-
-            echo "::group::Building and pushing $svc_repo"
-            if [ "$compose_file" = "docker-compose.yml" ] && [ "$project_dir" = "." ]; then
-              docker compose build --pull "$svc"
-            else
-              docker compose -f "$compose_file" --project-directory "$project_dir" build "$svc"
-            fi
-            # Resolve the built image ID via compose (avoids name mismatches)
-            if [ "$compose_file" = "docker-compose.yml" ] && [ "$project_dir" = "." ]; then
-              img_id=$(docker compose images -q "$svc" | head -n1)
-            else
-              img_id=$(docker compose -f "$compose_file" --project-directory "$project_dir" images -q "$svc" | head -n1)
-            fi
-            if [ -z "${img_id:-}" ]; then
-              echo "Skipping $svc_repo (no built image found after build)"
-              echo "::endgroup::"
-              continue
-            fi
-
-            # Tag and push with version
-            target_image="$REGISTRY/$OWNER_LC/$svc_repo:$VERSION"
-            latest_image="$REGISTRY/$OWNER_LC/$svc_repo:latest"
-            echo "Tagging $img_id as $target_image"
-            docker tag "$img_id" "$target_image"
-            echo "Tagging $img_id as $latest_image"
-            docker tag "$img_id" "$latest_image"
-
-            echo "Pushing $target_image"
-            docker push "$target_image"
-            echo "Pushing $latest_image"
-            docker push "$latest_image"
-
-            # Clean up local tags
-            docker image rm -f "$target_image" || true
-            docker image rm -f "$latest_image" || true
-            echo "::endgroup::"
-
-            # Aggressive cleanup to save space
-            docker system prune -af || true
-          done
-
-          # Build and push parakeet-asr with CUDA variants (cu126, cu128)
-          echo "::group::Building and pushing parakeet-asr CUDA variants"
-          cd ../../extras/asr-services
-          for cuda_variant in cu126 cu128; do
-            echo "Building parakeet-asr-${cuda_variant}"
-            export PYTORCH_CUDA_VERSION="${cuda_variant}"
-            docker compose build parakeet-asr
-
-            img_id=$(docker compose images -q parakeet-asr | head -n1)
-            if [ -n "${img_id:-}" ]; then
-              target_image="$REGISTRY/$OWNER_LC/chronicle-asr-nemo-${cuda_variant}:$VERSION"
-              latest_image="$REGISTRY/$OWNER_LC/chronicle-asr-nemo-${cuda_variant}:latest"
-              echo "Tagging $img_id as $target_image"
-              docker tag "$img_id" "$target_image"
-              echo "Tagging $img_id as $latest_image"
-              docker tag "$img_id" "$latest_image"
-
-              echo "Pushing $target_image"
-              docker push "$target_image"
-              echo "Pushing $latest_image"
-              docker push "$latest_image"
-
-              # Clean up local tags
-              docker image rm -f "$target_image" || true
-              docker image rm -f "$latest_image" || true
-            fi
-
-            # Aggressive cleanup to save space
-            docker system prune -af || true
-          done
-          cd - > /dev/null
-          echo "::endgroup::"
-
-          # Build and push speaker-recognition with all CUDA variants (including CPU)
-          # Note: speaker-service has profiles, but we can build it directly by setting PYTORCH_CUDA_VERSION
-          echo "::group::Building and pushing speaker-recognition variants"
-          cd ../../extras/speaker-recognition
-          for cuda_variant in "${CUDA_VARIANTS[@]}"; do
-            echo "Building speaker-recognition-${cuda_variant}"
-            export PYTORCH_CUDA_VERSION="${cuda_variant}"
-            # Build speaker-service directly (profiles only affect 'up', not 'build')
-            docker compose build speaker-service
-
-            img_id=$(docker compose images -q speaker-service | head -n1)
-            if [ -n "${img_id:-}" ]; then
-              target_image="$REGISTRY/$OWNER_LC/chronicle-speaker-${cuda_variant}:$VERSION"
-              latest_image="$REGISTRY/$OWNER_LC/chronicle-speaker-${cuda_variant}:latest"
-              echo "Tagging $img_id as $target_image"
-              docker tag "$img_id" "$target_image"
-              echo "Tagging $img_id as $latest_image"
-              docker tag "$img_id" "$latest_image"
-
-              echo "Pushing $target_image"
-              docker push "$target_image"
-              echo "Pushing $latest_image"
-              docker push "$latest_image"
-
-              # Clean up local tags
-              docker image rm -f "$target_image" || true
-              docker image rm -f "$latest_image" || true
-            fi
-
-            # Aggressive cleanup to save space
-            docker system prune -af || true
-          done
-          cd - > /dev/null
-          echo "::endgroup::"
-
-          # Summary
-          echo "::group::Build Summary"
-          echo "Built and pushed images with version tag: ${VERSION}"
-          echo "Images pushed to: $REGISTRY/$OWNER_LC/"
-          echo "::endgroup::"
-
+  update-release:
+    name: Update release notes
+    needs: build-images
+    if: github.event_name == 'release' || inputs.version != ''
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      OWNER: ${{ github.repository_owner }}
+      VERSION: ${{ github.event.release.tag_name || inputs.version }}
+      TAG_NAME: ${{ github.event.release.tag_name || inputs.version }}
+    steps:
       - name: Update release notes with Docker images
-        if: github.event_name == 'release'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OWNER: ${{ github.repository_owner }}
-          VERSION: ${{ steps.version.outputs.VERSION }}
-          TAG_NAME: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
           OWNER_LC=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
@@ -307,7 +206,7 @@ jobs:
           )
 
           EXISTING_BODY=$(gh release view "$TAG_NAME" --json body -q '.body' --repo "$GITHUB_REPOSITORY")
+          EXISTING_BODY="${EXISTING_BODY%%$'\n---\n\n## Docker Images'*}"
           UPDATED_BODY="${EXISTING_BODY}${DOCKER_SECTION}"
           gh release edit "$TAG_NAME" --notes "$UPDATED_BODY" --repo "$GITHUB_REPOSITORY"
           echo "Release notes updated with Docker image info"
-        working-directory: .
