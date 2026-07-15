@@ -73,9 +73,20 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 # Test Configuration
 TEST_CONFIG = {"retry_count": 3, "retry_delay": 1, "default_timeout": 30}
 
-# Docker Container Names (based on docker-compose-test.yml project name: backend-test)
-BACKEND_CONTAINER = "backend-test-chronicle-backend-test-1"
-WORKERS_CONTAINER = "backend-test-workers-test-1"
-MONGO_CONTAINER = "backend-test-mongo-test-1"
-REDIS_CONTAINER = "backend-test-redis-test-1"
-WEBUI_CONTAINER = "backend-test-webui-test-1"
+# Container engine: docker in CI; export CONTAINER_ENGINE=podman on podman machines.
+CONTAINER_ENGINE = os.getenv("CONTAINER_ENGINE", "docker")
+
+# Container names (docker-compose-test.yml project name: backend-test).
+# docker compose joins with "-", podman-compose with "_".
+_SEP = "_" if CONTAINER_ENGINE == "podman" else "-"
+
+
+def _container_name(service: str) -> str:
+    return f"backend-test{_SEP}{service}{_SEP}1"
+
+
+BACKEND_CONTAINER = _container_name("chronicle-backend-test")
+WORKERS_CONTAINER = _container_name("workers-test")
+MONGO_CONTAINER = _container_name("mongo-test")
+REDIS_CONTAINER = _container_name("redis-test")
+WEBUI_CONTAINER = _container_name("webui-test")

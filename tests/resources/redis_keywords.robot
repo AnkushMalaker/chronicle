@@ -24,7 +24,7 @@ Get Redis Session Data
 
     # Use redis-cli to get session hash
     ${redis_key}=    Set Variable    audio:session:${session_id}
-    ${result}=    Run Process    docker    exec    ${REDIS_CONTAINER}
+    ${result}=    Run Process    ${CONTAINER_ENGINE}    exec    ${REDIS_CONTAINER}
     ...    redis-cli    HGETALL    ${redis_key}
 
     Should Be Equal As Integers    ${result.rc}    0
@@ -81,7 +81,7 @@ Redis Command
     [Arguments]    ${command}    @{args}
 
     # Execute redis-cli command
-    ${result}=    Run Process    docker    exec    ${REDIS_CONTAINER}
+    ${result}=    Run Process    ${CONTAINER_ENGINE}    exec    ${REDIS_CONTAINER}
     ...    redis-cli    ${command}    @{args}
 
     Should Be Equal As Integers    ${result.rc}    0
@@ -127,7 +127,7 @@ Verify Conversation Current Key
 
     # Use KEYS pattern to find matching key (handles counter suffixes like -2, -3)
     ${pattern}=    Set Variable    conversation:current:${session_id}*
-    ${result}=    Run Process    docker    exec    ${REDIS_CONTAINER}
+    ${result}=    Run Process    ${CONTAINER_ENGINE}    exec    ${REDIS_CONTAINER}
     ...    redis-cli    KEYS    ${pattern}
     Should Be Equal As Integers    ${result.rc}    0
 

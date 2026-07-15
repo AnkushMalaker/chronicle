@@ -51,15 +51,18 @@ Non Admin User Can Access Own Suggestions
     [Documentation]    Verify non-admin users can access the suggestions endpoint
     [Tags]    infra	permissions
 
-    # Create a regular test user
+    # Create a regular test user (random email so leftover users from an
+    # aborted run can't collide with a 409)
     ${session}=    Get Admin API Session
-    ${user}=    Create Test User    ${session}    suggestions_test@example.com    testpass123
+    ${user}=    Create Test User    ${session}
 
     # Login as the test user
-    Create API Session    user_session    suggestions_test@example.com    testpass123
+    Create API Session    user_session    ${user}[email]    ${TEST_USER_PASSWORD}
 
     ${response}=    GET On Session    user_session    /api/annotations/suggestions
     Should Be Equal As Integers    ${response.status_code}    200
 
     ${suggestions}=    Set Variable    ${response.json()}
     Should Be Equal As Integers    ${suggestions.__len__()}    0
+
+    [Teardown]    Run Keyword And Ignore Error    Delete User    ${session}    ${user}[id]
