@@ -56,10 +56,17 @@ async def test_extract_memories_triggers_plugin_dispatch():
     cs.memory_service.add_memory = AsyncMock(return_value=(True, ["mem-1", "mem-2"]))
     cs.memory_service.provider_identifier = "chronicle"
 
-    with patch(
-        "advanced_omi_backend.chat_service.dispatch_plugin_event",
-        new_callable=AsyncMock,
-    ) as fake_dispatch:
+    with (
+        patch(
+            "advanced_omi_backend.chat_service.get_user_by_id",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "advanced_omi_backend.chat_service.dispatch_plugin_event",
+            new_callable=AsyncMock,
+        ) as fake_dispatch,
+    ):
         ok, ids, count = await cs.extract_memories_from_session(
             session_id="sess-x", user_id="user-x"
         )
@@ -111,10 +118,17 @@ async def test_no_memories_still_dispatches_success():
     cs.memory_service.add_memory = AsyncMock(return_value=(True, []))
     cs.memory_service.provider_identifier = "chronicle"
 
-    with patch(
-        "advanced_omi_backend.chat_service.dispatch_plugin_event",
-        new_callable=AsyncMock,
-    ) as fake_dispatch:
+    with (
+        patch(
+            "advanced_omi_backend.chat_service.get_user_by_id",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "advanced_omi_backend.chat_service.dispatch_plugin_event",
+            new_callable=AsyncMock,
+        ) as fake_dispatch,
+    ):
         ok, ids, count = await cs.extract_memories_from_session(
             session_id="sess-x", user_id="user-x"
         )
@@ -159,10 +173,17 @@ async def test_dispatch_failure_is_non_fatal():
     cs.memory_service.add_memory = AsyncMock(return_value=(True, ["m"]))
     cs.memory_service.provider_identifier = "chronicle"
 
-    with patch(
-        "advanced_omi_backend.chat_service.dispatch_plugin_event",
-        new_callable=AsyncMock,
-        side_effect=RuntimeError("plugin router down"),
+    with (
+        patch(
+            "advanced_omi_backend.chat_service.get_user_by_id",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "advanced_omi_backend.chat_service.dispatch_plugin_event",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("plugin router down"),
+        ),
     ):
         ok, _ids, count = await cs.extract_memories_from_session(
             session_id="sess-x", user_id="user-x"
@@ -204,13 +225,21 @@ async def test_failed_extraction_does_not_dispatch():
     cs.memory_service = AsyncMock()
     cs.memory_service.add_memory = AsyncMock(return_value=(False, []))
 
-    with patch(
-        "advanced_omi_backend.chat_service.dispatch_plugin_event",
-        new_callable=AsyncMock,
-    ) as fake_dispatch:
+    with (
+        patch(
+            "advanced_omi_backend.chat_service.get_user_by_id",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "advanced_omi_backend.chat_service.dispatch_plugin_event",
+            new_callable=AsyncMock,
+        ) as fake_dispatch,
+    ):
         ok, _ids, _count = await cs.extract_memories_from_session(
             session_id="sess-x", user_id="user-x"
         )
 
     assert ok is False
+    cs.memory_service.add_memory.assert_awaited_once()
     fake_dispatch.assert_not_awaited()
