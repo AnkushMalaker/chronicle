@@ -37,26 +37,32 @@ jobs:
         include:
           - image: chronicle-backend
             service: chronicle-backend
+            source-image: chronicle-backend:latest
             directory: backends/advanced
             variant: ""
           - image: chronicle-asr-nemo-cu126
             service: parakeet-asr
+            source-image: parakeet-asr:latest
             directory: extras/asr-services
             variant: cu126
           - image: chronicle-asr-nemo-cu128
             service: parakeet-asr
+            source-image: parakeet-asr:latest
             directory: extras/asr-services
             variant: cu128
           - image: chronicle-speaker-cpu
             service: speaker-service
+            source-image: chronicle-speaker:latest
             directory: extras/speaker-recognition
             variant: cpu
           - image: chronicle-speaker-cu126
             service: speaker-service
+            source-image: chronicle-speaker:latest
             directory: extras/speaker-recognition
             variant: cu126
           - image: chronicle-speaker-cu128
             service: speaker-service
+            source-image: chronicle-speaker:latest
             directory: extras/speaker-recognition
             variant: cu128
     env:
@@ -148,11 +154,7 @@ jobs:
           OWNER_LC=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')
           docker compose build --pull "${{ matrix.service }}"
 
-          img_id=$(docker compose images -q "${{ matrix.service }}" | head -n1)
-          if [ -z "${img_id:-}" ]; then
-            echo "No image found after building ${{ matrix.service }}" >&2
-            exit 1
-          fi
+          img_id=$(docker image inspect "${{ matrix.source-image }}" --format '{{.Id}}')
 
           target_image="$REGISTRY/$OWNER_LC/${{ matrix.image }}:$VERSION"
           latest_image="$REGISTRY/$OWNER_LC/${{ matrix.image }}:latest"
