@@ -67,6 +67,12 @@ ENV VIRTUAL_ENV=/app/.venv
 ENV PATH="/app/.venv/bin:${PATH}"
 ENV PYTHONPATH=/app/src:/app
 
+# Code version baked at build time (git describe locally via services.py, the
+# release tag in CI) — surfaced by the backend's /version endpoint so a running
+# container reports what it was built from.
+ARG CHRONICLE_BUILD_VERSION=dev
+ENV CHRONICLE_BUILD_VERSION=${CHRONICLE_BUILD_VERSION}
+
 # Copy application code
 COPY . .
 

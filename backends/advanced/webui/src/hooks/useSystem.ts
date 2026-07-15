@@ -191,6 +191,36 @@ export function useExternalServices(isAdmin: boolean, pollWhileBusy: boolean) {
   })
 }
 
+// ── Node code-version + update flow ─────────────────────────────────────────
+export interface UpdateCheckResult {
+  available: boolean
+  reason?: string
+  detail?: string
+  node?: string | null
+  current?: { describe: string; commit: string; branch: string; dirty: boolean }
+  target?: { ref: string; kind: 'branch' | 'tag' | 'ref'; commit: string } | null
+  update_available?: boolean
+  error?: string
+}
+
+export interface VersionInfo {
+  version: string
+  package_version: string
+  timestamp: string
+}
+
+export function useBackendVersion() {
+  return useQuery<VersionInfo | null>({
+    queryKey: ['system', 'version'],
+    queryFn: async () => {
+      const response = await systemApi.getVersion()
+      return response.data ?? null
+    },
+    staleTime: 5 * 60_000,
+    retry: 1,
+  })
+}
+
 export function useRestartWorkers() {
   const queryClient = useQueryClient()
   return useMutation({

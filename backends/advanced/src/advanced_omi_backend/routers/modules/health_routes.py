@@ -14,6 +14,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 
+from advanced_omi_backend import __version__ as package_version
 from advanced_omi_backend.client_manager import get_client_manager
 from advanced_omi_backend.controllers.queue_controller import get_queue_health
 from advanced_omi_backend.llm_client import (
@@ -106,6 +107,7 @@ async def health_check():
         logger.warning(f"Failed to load model config for health check: {e}")
     health_status = {
         "status": "healthy",
+        "version": os.getenv("CHRONICLE_BUILD_VERSION", "dev"),
         "timestamp": int(time.time()),
         "services": {},
         "config": {
@@ -516,6 +518,20 @@ async def health_check():
         health_status["message"] = "; ".join(messages)
 
     return JSONResponse(content=health_status, status_code=200)
+
+
+@router.get("/version")
+async def version_check():
+    """Report the running backend build version. Unauthenticated, like /health.
+
+    ``version`` is the baked-in git describe / release tag (CHRONICLE_BUILD_VERSION,
+    defaults to "dev"); ``package_version`` is the Python package version.
+    """
+    return {
+        "version": os.getenv("CHRONICLE_BUILD_VERSION", "dev"),
+        "package_version": package_version,
+        "timestamp": int(time.time()),
+    }
 
 
 @router.get("/readiness")

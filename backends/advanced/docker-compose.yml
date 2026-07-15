@@ -5,6 +5,10 @@ services:
       context: .
       dockerfile: Dockerfile
       target: prod  # Use prod stage without test dependencies
+      args:
+        # git describe of the checkout (exported by services.py before builds;
+        # CI sets it to the release tag) — reported by the /version endpoint.
+        CHRONICLE_BUILD_VERSION: ${CHRONICLE_BUILD_VERSION:-dev}
     ports:
       - "8000:8000"
     env_file:
@@ -74,6 +78,9 @@ services:
       context: .
       dockerfile: Dockerfile
       target: prod  # Use prod stage without test dependencies
+      args:
+        # Must match chronicle-backend's build args (same image tag).
+        CHRONICLE_BUILD_VERSION: ${CHRONICLE_BUILD_VERSION:-dev}
     command: ["python", "worker_orchestrator.py"]
     env_file:
       - .env
@@ -132,6 +139,9 @@ services:
       context: .
       dockerfile: Dockerfile
       target: prod
+      args:
+        # Must match chronicle-backend's build args (same image tag).
+        CHRONICLE_BUILD_VERSION: ${CHRONICLE_BUILD_VERSION:-dev}
     command: ["python", "-m", "advanced_omi_backend.cron"]
     container_name: chronicle-annotation-cron
     env_file:

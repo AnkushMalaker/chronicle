@@ -508,6 +508,24 @@ export const systemApi = {
   getExternalServiceOperation: (operationId: string, node?: string | null) =>
     api.get(`/api/admin/services/operations/${operationId}`, { params: node ? { node } : undefined }),
 
+  // Node code-version updates (git fetch + rebuild/restart via the node agent).
+  // The check does a `git fetch` on the node and can take up to ~90s, so it needs
+  // a longer timeout than the default 60s axios instance.
+  checkNodeUpdate: (node?: string | null, target?: string) =>
+    api.get('/api/admin/update', {
+      params: {
+        ...(node ? { node } : {}),
+        ...(target ? { target } : {}),
+      },
+      timeout: 100_000,
+    }),
+  startNodeUpdate: (body: { target?: string; prebuilt?: string; node?: string | null }) =>
+    api.post('/api/admin/update', body),
+  // Backend build version (unauthenticated). Uses the /api-prefixed mount:
+  // Caddy only routes /api/* (+ a few named paths) to the backend; a bare
+  // /version would fall through to the webui-dev catch-all and 404.
+  getVersion: () => api.get('/api/version'),
+
   // Claude remote-control session (control Claude Code from your phone)
   getRemoteControl: () => api.get('/api/admin/remote-control'),
   remoteControlAction: (action: 'start' | 'stop' | 'restart') =>

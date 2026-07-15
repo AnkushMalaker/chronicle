@@ -2506,7 +2506,12 @@ def _service_manager_config() -> tuple[str, str]:
 
 
 async def _service_manager_request(
-    method: str, path: str, json_body: dict | None = None, *, params: dict | None = None
+    method: str,
+    path: str,
+    json_body: dict | None = None,
+    *,
+    params: dict | None = None,
+    timeout: float = _SERVICE_MANAGER_TIMEOUT,
 ):
     """Proxy a request to the LOCAL service manager agent. Raises on failure.
 
@@ -2514,6 +2519,9 @@ async def _service_manager_request(
     forwarding happens inside the agent (a host process with a real Tailnet
     identity), because a container can't present a Tailnet source IP for the peer
     agents' tailnet-trust to accept.
+
+    ``timeout`` overrides the default for slow calls (e.g. the update status
+    check, where the agent fetches from origin before answering).
     """
     url, token = _service_manager_config()
     if not url or not token:
@@ -2522,7 +2530,7 @@ async def _service_manager_request(
             detail="Service manager not configured (SERVICE_MANAGER_URL / SERVICE_MANAGER_TOKEN)",
         )
     try:
-        async with httpx.AsyncClient(timeout=_SERVICE_MANAGER_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.request(
                 method,
                 f"{url}{path}",
@@ -2578,6 +2586,48 @@ async def external_service_action(name: str, action: str, body: dict):
     """Start/stop/restart a host-managed service. ``body["node"]`` selects the owning
     node; the local agent forwards to that node when it isn't the local one."""
     result = await _service_manager_request("POST", f"/services/{name}/{action}", body)
+    # Tag the operation with its node so the WebUI polls the right agent.
+    if isinstance(result.get("operation"), dict):
+        result["operation"]["node"] = body.get("node")
+    return result
+
+
+async def get_node_update_status(node: str | None = None, target: str | None = None):
+    """Check whether a node can be updated (fetches from origin via the agent).
+
+    The local agent inspects its git checkout (or forwards to ``node``'s agent) and
+    reports the current describe/commit/branch plus whether ``target`` is ahead.
+    Returns available=False (instead of raising) when the agent is not configured or
+    unreachable, so the WebUI can hide/disable the update card. The agent's fetch can
+    take several seconds, so this call uses an extended timeout.
+    """
+    url, token = _service_manager_config()
+    if not url or not token:
+        return {"available": False, "reason": "not_configured"}
+    params = {}
+    if node:
+        params["node"] = node
+    if target:
+        params["target"] = target
+    try:
+        data = await _service_manager_request(
+            "GET", "/update", params=params or None, timeout=90.0
+        )
+    except HTTPException as e:
+        if e.status_code in (502, 503):
+            return {"available": False, "reason": "unreachable", "detail": e.detail}
+        raise
+    return {"available": True, "node": node, **data}
+
+
+async def trigger_node_update(body: dict):
+    """Update a node's git checkout and rebuild/restart its services via the agent.
+
+    ``body["node"]`` selects the owning node (the local agent forwards to that node
+    when set). This is an explicit admin action, so failures raise through as
+    HTTPExceptions rather than being wrapped in available=False. The agent's fetch +
+    build can be slow, so this call uses an extended timeout."""
+    result = await _service_manager_request("POST", "/update", body, timeout=90.0)
     # Tag the operation with its node so the WebUI polls the right agent.
     if isinstance(result.get("operation"), dict):
         result["operation"]["node"] = body.get("node")

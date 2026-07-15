@@ -34,6 +34,7 @@ import logging
 import os
 import platform
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -55,6 +56,7 @@ sys.path.insert(0, str(REPO_ROOT))
 import discovery  # noqa: E402  (repo-root discovery.py)
 import services  # noqa: E402  (repo-root services.py)
 import status  # noqa: E402  (repo-root status.py — restart-count helper)
+import updates  # noqa: E402  (repo-root updates.py — version + self-update)
 from setup_utils import detect_cuda_version, detect_tailscale_info  # noqa: E402
 
 logging.basicConfig(
@@ -376,7 +378,13 @@ def _remote_services(agent: dict) -> list[dict]:
     return []
 
 
-def _remote_request(node: str, method: str, path: str, json_body: dict | None = None):
+def _remote_request(
+    node: str,
+    method: str,
+    path: str,
+    json_body: dict | None = None,
+    timeout: float = _REMOTE_TIMEOUT,
+):
     """Forward a control request to a peer node's agent (host→host, tailnet-trusted)."""
     agent = next((a for a in _remote_node_agents() if a["host"] == node), None)
     if agent is None:
@@ -385,7 +393,7 @@ def _remote_request(node: str, method: str, path: str, json_body: dict | None = 
         )
     try:
         resp = requests.request(
-            method, f"{agent['url']}{path}", json=json_body, timeout=_REMOTE_TIMEOUT
+            method, f"{agent['url']}{path}", json=json_body, timeout=timeout
         )
     except requests.RequestException as e:
         raise HTTPException(status_code=502, detail=f"Node {node} unreachable: {e}")
@@ -414,6 +422,9 @@ def _node_labels() -> dict:
         "type": "node",
         "arch": platform.machine(),
         "gpu": "1" if shutil.which("nvidia-smi") else "0",
+        # Code version rides the advertisement so the hub sees cluster-wide
+        # version drift without polling every agent.
+        "version": updates.repo_version()["describe"],
     }
 
 
@@ -564,6 +575,7 @@ def node_info():
             "nvidia_smi": shutil.which("nvidia-smi") is not None,
         },
         "agent_port": PORT,
+        "version": updates.repo_version(),
         "services": [_service_entry(name) for name in services.SERVICES],
     }
 
@@ -768,6 +780,98 @@ def service_action(name: str, action: str, body: ActionBody | None = None):
             return services.run_compose_command(name, "up", build=body.build)
 
     op = _start_operation(name, action, fn)
+    return {"operation": op}
+
+
+# ── Node self-update ──────────────────────────────────────────────────────────
+#
+# Updating a node = move the git checkout (branch pull or release-tag checkout,
+# see updates.py) + rebuild/restart the enabled services + restart this agent so
+# it too runs the new code. The hub drives peers through the same node-forwarding
+# used by service actions, so one WebUI updates the whole cluster node-by-node.
+
+# Update checks fetch from origin and a forwarded POST returns after only
+# *starting* the peer's operation, but both can sit behind a slow git fetch —
+# give them more headroom than plain control calls.
+_UPDATE_FORWARD_TIMEOUT = 90.0
+
+
+class UpdateBody(BaseModel):
+    # Explicit tag/ref to update to. Omitted → upstream branch, else latest v* tag.
+    target: str | None = None
+    # Prebuilt image tag: pull registry images instead of building locally.
+    prebuilt: str | None = None
+    # Owning node host (see ActionBody.node).
+    node: str | None = None
+
+
+def _restart_self(delay: float = 3.0):
+    """Restart this agent so it runs the just-updated code.
+
+    Deferred a few seconds so the update operation's final poll can still read
+    "done" from THIS process. Under systemd the unit restart re-resolves deps via
+    uv; otherwise re-exec the same interpreter on the updated source (new deps in
+    setup-requirements.txt then need a manual ./start.sh, which is rare enough
+    to accept).
+    """
+
+    def _go():
+        logger.info("Restarting agent to pick up updated code")
+        if services._service_manager_managed():
+            subprocess.run(
+                ["systemctl", "--user", "restart", "chronicle-service-manager"]
+            )
+        else:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    threading.Timer(delay, _go).start()
+
+
+@app.get("/update", dependencies=[Depends(require_token)])
+def update_check(node: str | None = None, target: str | None = None):
+    """Whether an update is available for this node (fetches from origin).
+
+    ``node`` routes the check to a peer's agent; ``target`` pins a specific
+    tag/ref instead of the default (upstream branch, else latest release tag).
+    """
+    if node and node != _self_host():
+        params = f"?target={target}" if target else ""
+        return _remote_request(
+            node, "GET", f"/update{params}", timeout=_UPDATE_FORWARD_TIMEOUT
+        )
+    return updates.check_update(target=target)
+
+
+@app.post("/update", dependencies=[Depends(require_token)])
+def update_node(body: UpdateBody | None = None):
+    """Update this node: move the checkout, rebuild/restart enabled services,
+    then restart this agent. Returns 202-style {operation} to poll; on the hub
+    this restarts the backend too, so the WebUI must expect a brief outage.
+    """
+    body = body or UpdateBody()
+    if body.node and body.node != _self_host():
+        return _remote_request(
+            body.node,
+            "POST",
+            "/update",
+            {**body.dict(), "node": None},
+            timeout=_UPDATE_FORWARD_TIMEOUT,
+        )
+
+    def fn(op):
+        ok = updates.perform_update(
+            target=body.target,
+            prebuilt=body.prebuilt,
+            progress=lambda msg: op.__setitem__("phase", msg),
+        )
+        if ok:
+            # Even an "already up to date" run is safe to restart on — cheap,
+            # and guarantees the agent never lags the checkout it manages.
+            op["phase"] = "Restarting node agent…"
+            _restart_self()
+        return ok
+
+    op = _start_operation("node", "update", fn)
     return {"operation": op}
 
 

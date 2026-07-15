@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { AlertCircle, Check, CheckCircle, Circle, Play, RefreshCw, RotateCcw, Server, Square, Wrench, XCircle } from 'lucide-react'
+import { AlertCircle, ArrowUpCircle, Check, CheckCircle, Circle, Play, RefreshCw, RotateCcw, Server, Square, Wrench, XCircle } from 'lucide-react'
 import { systemApi } from '../services/api'
-import { useExternalServices, ExternalService, ServiceOperation } from '../hooks/useSystem'
+import { useExternalServices, ExternalService, ServiceOperation, UpdateCheckResult } from '../hooks/useSystem'
 
 type Lane = 'batch' | 'streaming'
 
@@ -17,6 +17,147 @@ function operationLabel(op: ServiceOperation): string {
     return `Switching ${op.service} to ${op.action.split(':')[1]}`
   }
   return `${ACTION_LABELS[op.action] ?? op.action} ${op.service}`
+}
+
+// Per-node code-version + update control (lifecycle mode only). Checks the node's
+// git state against a target ref (default from the backend), then offers to run the
+// update. The resulting operation is polled by the shared operation banner via
+// `onStarted` → the parent's setActiveOp, so progress (`phase`) shows live.
+function NodeUpdateControl({
+  node,
+  isHubNode,
+  busy,
+  onStarted,
+}: {
+  node: string | null
+  isHubNode: boolean
+  busy: boolean
+  onStarted: (op: ServiceOperation) => void
+}) {
+  const [checking, setChecking] = useState(false)
+  const [result, setResult] = useState<UpdateCheckResult | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [starting, setStarting] = useState(false)
+
+  const check = async () => {
+    setChecking(true)
+    setError(null)
+    try {
+      const response = await systemApi.checkNodeUpdate(node)
+      setResult(response.data)
+    } catch (e: any) {
+      setError(e.response?.data?.detail ?? e.message)
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  const startUpdate = async () => {
+    const message = isHubNode
+      ? 'Update this node?\n\nThis restarts the backend — the WebUI will briefly disconnect and the page may need a reload.'
+      : `Update node ${node ?? ''}?\n\nThis restarts the node agent and backend on that host.`
+    if (!window.confirm(message)) return
+    setStarting(true)
+    setError(null)
+    try {
+      const response = await systemApi.startNodeUpdate({ node: node ?? undefined })
+      onStarted(response.data.operation)
+    } catch (e: any) {
+      setError(e.response?.data?.detail ?? e.message)
+    } finally {
+      setStarting(false)
+    }
+  }
+
+  // Check not run yet — offer the check action.
+  if (!result && !checking && !error) {
+    return (
+      <div className="px-1">
+        <button
+          onClick={check}
+          disabled={busy}
+          className="flex items-center gap-1.5 text-xs text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-50"
+        >
+          <ArrowUpCircle className="h-3.5 w-3.5" />
+          <span>Check for updates</span>
+        </button>
+      </div>
+    )
+  }
+
+  if (checking) {
+    return (
+      <div className="flex items-center gap-1.5 px-1 text-xs text-gray-500 dark:text-gray-400">
+        <RefreshCw className="h-3.5 w-3.5 text-blue-500 animate-spin" />
+        <span>Checking for updates… (this can take up to a minute)</span>
+      </div>
+    )
+  }
+
+  // Network / request failure on the check itself.
+  if (error && !result) {
+    return (
+      <div className="flex items-center gap-2 px-1 text-xs">
+        <span className="text-red-600 dark:text-red-400">Update check failed: {error}</span>
+        <button onClick={check} className="text-blue-600 dark:text-blue-400 hover:underline">
+          Retry
+        </button>
+      </div>
+    )
+  }
+
+  if (!result) return null
+
+  // Update mechanism not available on this node (e.g. not a git checkout).
+  if (!result.available) {
+    return (
+      <div className="px-1 text-xs text-gray-400 dark:text-gray-500">
+        Updates unavailable{result.reason ? `: ${result.reason}` : ''}
+        {result.detail ? ` (${result.detail})` : ''}
+      </div>
+    )
+  }
+
+  const current = result.current
+  const target = result.target
+  const updateAvailable = Boolean(result.update_available && target)
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 px-1 text-xs">
+      {updateAvailable && target ? (
+        <>
+          <span className="text-amber-600 dark:text-amber-400 font-medium">Update available:</span>
+          <span className="font-mono text-gray-600 dark:text-gray-300">
+            {current?.describe ?? '?'} → {target.ref} ({target.commit.slice(0, 7)})
+          </span>
+          <button
+            onClick={startUpdate}
+            disabled={busy || starting}
+            className="flex items-center gap-1 px-2 py-1 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50"
+          >
+            <ArrowUpCircle className="h-3.5 w-3.5" />
+            <span>Update node</span>
+          </button>
+        </>
+      ) : (
+        <>
+          <CheckCircle className="h-3.5 w-3.5 text-green-500" />
+          <span className="text-gray-500 dark:text-gray-400">
+            Up to date{current?.describe ? ` (${current.describe})` : ''}
+          </span>
+          <button onClick={check} disabled={busy} className="text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-50">
+            Re-check
+          </button>
+        </>
+      )}
+      {result.error && (
+        <span className="text-red-600 dark:text-red-400">— {result.error}</span>
+      )}
+      {error && (
+        <span className="text-red-600 dark:text-red-400">— {error}</span>
+      )}
+    </div>
+  )
 }
 
 function HealthBadge({ service }: { service: ExternalService }) {
@@ -355,6 +496,21 @@ export default function ExternalServices({
                   {groupServices[0]?.remote ? 'remote node' : 'this node'}
                 </span>
               </div>
+            )}
+            {mode === 'lifecycle' && (
+              <NodeUpdateControl
+                node={groupServices[0]?.node ?? null}
+                isHubNode={
+                  groupServices.some(s => s.name === 'backend' && s.remote === false) ||
+                  !groupServices[0]?.remote
+                }
+                busy={busy}
+                onStarted={op => {
+                  setError(null)
+                  setLastFailedOp(null)
+                  setActiveOp(op)
+                }}
+              />
             )}
             {groupServices.map(service => {
           const stopped = service.health === 'stopped'

@@ -701,6 +701,17 @@ class ServiceProviderRequest(BaseModel):
     node: str | None = None
 
 
+class NodeUpdateRequest(BaseModel):
+    """Options for updating a node's git checkout and rebuilding its services."""
+
+    # Git ref (branch/tag/commit) to update to. Omitted → the node's current branch.
+    target: str | None = None
+    # Prebuilt image reference to deploy instead of building from source.
+    prebuilt: str | None = None
+    # Owning node host (see ServiceActionRequest.node).
+    node: str | None = None
+
+
 @router.get("/admin/services")
 async def list_external_services(current_user: User = Depends(current_superuser)):
     """List host-managed services (ASR, TTS, speaker recognition, ...). Admin only.
@@ -747,6 +758,37 @@ async def external_service_action(
     return await system_controller.external_service_action(
         name, action, (body or ServiceActionRequest()).dict()
     )
+
+
+@router.get("/admin/update")
+async def get_node_update_status(
+    node: str | None = None,
+    target: str | None = None,
+    current_user: User = Depends(current_superuser),
+):
+    """Check whether a node can be updated to a newer git ref. Admin only.
+
+    Reports the node's current describe/commit/branch and whether ``target`` (or its
+    current branch) is ahead. ``node`` selects the node (local agent forwards to a
+    remote node when set). The agent fetches from origin, so this may take a few
+    seconds. Returns available=False when no service manager agent is configured/reachable.
+    """
+    return await system_controller.get_node_update_status(node, target)
+
+
+@router.post("/admin/update")
+async def trigger_node_update(
+    body: NodeUpdateRequest,
+    current_user: User = Depends(current_superuser),
+):
+    """Update a node's git checkout and rebuild/restart its services. Admin only.
+
+    Updates the node's git checkout to ``target``, rebuilds/restarts its services, and
+    restarts the node agent. Updating the hub restarts the backend, causing a brief
+    WebUI outage. ``node`` selects the node (local agent forwards to a remote node when
+    set). Returns ``{operation}`` to poll via GET /admin/services/operations/{id}?node=.
+    """
+    return await system_controller.trigger_node_update(body.dict())
 
 
 @router.get("/admin/remote-control")

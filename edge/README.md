@@ -73,6 +73,20 @@ docker compose --profile edge logs -f # logs
 docker compose --profile edge down    # stop
 ```
 
+## Update a Node
+
+```bash
+cd ~/chronicle
+uv run --with-requirements setup-requirements.txt python services.py update --check
+uv run --with-requirements setup-requirements.txt python services.py update
+```
+
+Branch installs pull their branch; release-tag installs move to the latest `v*`
+tag. Enabled services are rebuilt and restarted from the new code (rolled back
+if one fails to come up). Nodes running the node agent can also be updated
+remotely from the hub's WebUI System page (the hub fans out to peer agents over
+the Tailnet). See `docs/fleet-updates.md`.
+
 ## How It Works
 
 By default the **node agent** runs natively on the edge box: it starts the service via

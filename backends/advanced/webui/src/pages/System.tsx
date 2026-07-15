@@ -4,7 +4,7 @@ import { QRCodeSVG } from 'qrcode.react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
-import { useSystemData, useRestartWorkers, useRestartBackend } from '../hooks/useSystem'
+import { useSystemData, useRestartWorkers, useRestartBackend, useBackendVersion } from '../hooks/useSystem'
 import { systemApi } from '../services/api'
 import ExternalServices from '../components/ExternalServices'
 import RemoteControl from '../components/RemoteControl'
@@ -90,6 +90,9 @@ export default function System() {
   // Restart mutations
   const restartWorkersMutation = useRestartWorkers()
   const restartBackendMutation = useRestartBackend()
+
+  // Backend build version (muted chip in the header)
+  const { data: backendVersion } = useBackendVersion()
 
   // UI state
   const [menuOpen, setMenuOpen] = useState(false)
@@ -283,6 +286,14 @@ export default function System() {
           </h1>
         </div>
         <div className="flex flex-wrap items-center gap-2 sm:gap-4">
+          {backendVersion?.version && (
+            <span
+              className="text-xs font-mono px-2 py-1 rounded bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400"
+              title={backendVersion.timestamp ? `Built ${backendVersion.timestamp}` : undefined}
+            >
+              Backend {backendVersion.version}
+            </span>
+          )}
           {lastUpdated && (
             <span className="text-sm text-gray-600 dark:text-gray-400">
               Last updated: {lastUpdated.toLocaleTimeString()}

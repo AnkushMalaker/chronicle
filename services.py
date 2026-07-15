@@ -645,6 +645,15 @@ def run_compose_command(service_name, command, build=False, force_recreate=False
 
     # Step 1: If build is requested, run build separately first (no timeout for CUDA builds)
     if build and command == "up":
+        # Stamp the checkout's git-describe into images whose compose files take
+        # a CHRONICLE_BUILD_VERSION build arg (backend), so a running container
+        # can report what code it was built from (backend /version endpoint).
+        # CI overrides this with the release tag before its own compose builds.
+        import updates  # lazy: updates.py imports this module
+
+        os.environ.setdefault(
+            "CHRONICLE_BUILD_VERSION", updates.repo_version()["describe"] or "dev"
+        )
         # Build command - need to specify profiles for build too
         build_cmd = compose_base()
 
@@ -1961,6 +1970,31 @@ def main():
     # Status command
     subparsers.add_parser("status", help="Show service status")
 
+    # Update command — move the git checkout and restart services from it
+    update_parser = subparsers.add_parser(
+        "update", help="Update this node's code and restart its services"
+    )
+    update_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Only check whether an update is available",
+    )
+    update_parser.add_argument(
+        "--tag",
+        metavar="REF",
+        help="Update to a specific tag/ref (default: upstream branch, else latest release tag)",
+    )
+    update_parser.add_argument(
+        "--prebuilt",
+        metavar="TAG",
+        help="Use prebuilt images at TAG instead of building locally",
+    )
+    update_parser.add_argument(
+        "--no-restart",
+        action="store_true",
+        help="Move the checkout only; don't restart services",
+    )
+
     # Service manager agent command
     manager_parser = subparsers.add_parser(
         "manager", help="Manage the service manager agent (WebUI start/stop control)"
@@ -2075,6 +2109,31 @@ def main():
             return
 
         restart_services(services, recreate=args.recreate)
+
+    elif args.command == "update":
+        import updates  # lazy: updates.py imports this module
+
+        if args.check:
+            info = updates.check_update(target=args.tag)
+            cur, tgt = info["current"], info.get("target")
+            where = f" (branch {cur['branch']})" if cur["branch"] else " (detached)"
+            console.print(f"Current: {cur['describe']}{where}")
+            if info.get("error"):
+                console.print(f"[red]❌ {info['error']}[/red]")
+                sys.exit(1)
+            elif info["update_available"]:
+                console.print(
+                    f"[yellow]⬆️  Update available → {tgt['ref']} ({tgt['commit']})[/yellow]"
+                )
+            else:
+                console.print("[green]✅ Up to date[/green]")
+        else:
+            ok = updates.perform_update(
+                target=args.tag,
+                prebuilt=args.prebuilt,
+                restart_services=not args.no_restart,
+            )
+            sys.exit(0 if ok else 1)
 
     elif args.command == "manager":
         if args.manager_action == "start":

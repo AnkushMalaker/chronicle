@@ -134,6 +134,8 @@ jobs:
         env:
           OWNER: ${{ github.repository_owner }}
           VERSION: ${{ steps.version.outputs.VERSION }}
+          # Baked into images that take this build arg (backend /version endpoint).
+          CHRONICLE_BUILD_VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
           set -euo pipefail
           docker compose version
