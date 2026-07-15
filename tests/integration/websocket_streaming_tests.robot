@@ -105,8 +105,11 @@ Conversation Job Created After Speech Detection
 
 
 Button Press Should Close Active Conversation
-    [Documentation]    Verify that a button single press during an active conversation
-    ...                closes it with end_reason=close_requested and triggers post-processing
+    [Documentation]    Verify that a button double press during an active conversation
+    ...                closes it with end_reason=close_requested and triggers post-processing.
+    ...                (Double press: the button_control plugin maps single_press to
+    ...                stop_playback and double_press to close_conversation — see
+    ...                plugins/button_control/config.yml.)
     [Tags]    audio-streaming	conversation
     [Timeout]    120s
 
@@ -128,8 +131,9 @@ Button Press Should Close Active Conversation
     ${conversation_id}=    Evaluate    $jobs[0]['meta'].get('conversation_id', '')
     Should Not Be Empty    ${conversation_id}    msg=Conversation ID not found in job meta
 
-    # Act: Send button press to close the conversation
-    Send Button Event To Stream    ${stream_id}    SINGLE_PRESS
+    # Act: Send button double press to close the conversation
+    # (single press is mapped to stop_playback since the button_control rework)
+    Send Button Event To Stream    ${stream_id}    DOUBLE_PRESS
 
     # Assert: Conversation should close with end_reason=close_requested
     Wait Until Keyword Succeeds    30s    2s

@@ -233,6 +233,17 @@ def load_plugin_config(
     config["events"] = orchestration_config.get("events", [])
     config["condition"] = orchestration_config.get("condition", {"type": "always"})
 
+    # config/plugins.yml is orchestration-only; plugin settings live in the
+    # plugin's own config.yml. Warn about extra keys instead of silently
+    # dropping them (e.g. an `actions:` block that never takes effect).
+    ignored_keys = set(orchestration_config) - {"enabled", "events", "condition"}
+    if ignored_keys:
+        logger.warning(
+            f"Plugin '{plugin_id}': ignoring non-orchestration key(s) "
+            f"{sorted(ignored_keys)} in config/plugins.yml — plugin settings "
+            f"belong in plugins/{plugin_id}/config.yml"
+        )
+
     # Add plugin ID for reference
     config["plugin_id"] = plugin_id
 

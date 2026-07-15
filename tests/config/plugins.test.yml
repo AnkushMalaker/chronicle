@@ -20,6 +20,6 @@ plugins:
       - button.double_press
     condition:
       type: always
-    actions:
-      single_press:
-        type: close_conversation
+    # NOTE: only enabled/events/condition are read from this file (orchestration).
+    # Button->action mapping comes from plugins/button_control/config.yml:
+    #   single_press -> stop_playback, double_press -> close_conversation
