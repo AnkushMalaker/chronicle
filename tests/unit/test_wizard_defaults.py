@@ -8,10 +8,9 @@ settings.
 import importlib.util
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-import yaml
 
 # ---------------------------------------------------------------------------
 # Import the pure helper functions directly from wizard.py.
@@ -39,55 +38,9 @@ def _load_wizard():
 # Load once and reuse
 _wizard = _load_wizard()
 
-read_config_yml = _wizard.read_config_yml
 get_existing_stt_provider = _wizard.get_existing_stt_provider
 get_existing_stream_provider = _wizard.get_existing_stream_provider
 select_llm_provider = _wizard.select_llm_provider
-
-
-# ---------------------------------------------------------------------------
-# read_config_yml
-# ---------------------------------------------------------------------------
-
-
-def test_read_config_yml_missing_file(tmp_path, monkeypatch):
-    """Returns empty dict when config/config.yml does not exist."""
-    monkeypatch.chdir(tmp_path)
-    result = read_config_yml()
-    assert result == {}
-
-
-def test_read_config_yml_valid_file(tmp_path, monkeypatch):
-    """Parses and returns dict from a valid YAML file."""
-    monkeypatch.chdir(tmp_path)
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    (config_dir / "config.yml").write_text(
-        "defaults:\n  llm: openai-llm\n  stt: stt-deepgram\n"
-    )
-    result = read_config_yml()
-    assert result["defaults"]["llm"] == "openai-llm"
-    assert result["defaults"]["stt"] == "stt-deepgram"
-
-
-def test_read_config_yml_empty_file(tmp_path, monkeypatch):
-    """Returns empty dict for an empty YAML file (yaml.safe_load returns None)."""
-    monkeypatch.chdir(tmp_path)
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    (config_dir / "config.yml").write_text("")
-    result = read_config_yml()
-    assert result == {}
-
-
-def test_read_config_yml_comment_only_file(tmp_path, monkeypatch):
-    """Returns empty dict when the file contains only YAML comments."""
-    monkeypatch.chdir(tmp_path)
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    (config_dir / "config.yml").write_text("# just a comment\n")
-    result = read_config_yml()
-    assert result == {}
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +117,11 @@ def test_get_existing_stream_provider_missing_key():
 
 def _select_llm_with_eof(config_yml):
     """Drive select_llm_provider in non-interactive mode by injecting EOFError."""
-    with patch.object(_wizard, "Prompt") as mock_prompt:
+    with (
+        patch.object(_wizard, "Confirm") as mock_confirm,
+        patch.object(_wizard, "Prompt") as mock_prompt,
+    ):
+        mock_confirm.ask.side_effect = EOFError
         mock_prompt.ask.side_effect = EOFError
         return select_llm_provider(config_yml)
 

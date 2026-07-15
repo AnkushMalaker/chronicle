@@ -86,14 +86,16 @@ def load_config(force_reload: bool = False) -> DictConfig:
     # OmegaConf.merge replaces lists entirely, so we need custom merge
     # for the 'models' list: merge by name so defaults models that aren't
     # in user config are still available.
+    default_models_config = defaults.get("models") if defaults else None
+    user_models_config = user_config.get("models") if user_config else None
     default_models = (
-        OmegaConf.to_container(defaults.get("models", []) or [], resolve=False)
-        if defaults
+        OmegaConf.to_container(default_models_config, resolve=False)
+        if default_models_config is not None
         else []
     )
     user_models = (
-        OmegaConf.to_container(user_config.get("models", []) or [], resolve=False)
-        if user_config
+        OmegaConf.to_container(user_models_config, resolve=False)
+        if user_models_config is not None
         else []
     )
 

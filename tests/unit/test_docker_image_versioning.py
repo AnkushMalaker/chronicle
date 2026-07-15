@@ -84,7 +84,7 @@ class TestUsePrebuiltFlag:
             patch.object(
                 services_mod, "start_services", side_effect=fake_start_services
             ),
-            patch.object(services_mod, "check_service_configured", return_value=True),
+            patch.object(services_mod, "check_service_enabled", return_value=True),
             patch.object(services_mod, "ensure_docker_network", return_value=True),
             patch.object(
                 services_mod, "_langfuse_enabled_in_backend", return_value=False
@@ -102,7 +102,7 @@ class TestUsePrebuiltFlag:
         # Drive it through argparse without executing side effects
         with (
             patch.object(services_mod, "start_services"),
-            patch.object(services_mod, "check_service_configured", return_value=True),
+            patch.object(services_mod, "check_service_enabled", return_value=True),
             patch.object(services_mod, "ensure_docker_network", return_value=True),
             patch.object(
                 services_mod, "_langfuse_enabled_in_backend", return_value=False
@@ -214,8 +214,10 @@ class TestBackendDockerComposeImages:
     def test_annotation_cron_has_image_field(self):
         assert _has_chronicle_vars(_image_for(self.COMPOSE, "annotation-cron"))
 
-    def test_webui_has_image_field(self):
-        assert _has_chronicle_vars(_image_for(self.COMPOSE, "webui"))
+    def test_webui_dev_is_built_locally(self):
+        webui = self.COMPOSE["services"]["webui-dev"]
+        assert "build" in webui
+        assert "image" not in webui
 
     def test_backend_services_share_same_image_name(self):
         """chronicle-backend, workers, and annotation-cron should use the same image."""
@@ -224,14 +226,9 @@ class TestBackendDockerComposeImages:
         cron_img = _image_for(self.COMPOSE, "annotation-cron")
         assert backend_img == workers_img == cron_img
 
-    def test_webui_uses_different_image_from_backend(self):
-        backend_img = _image_for(self.COMPOSE, "chronicle-backend")
-        webui_img = _image_for(self.COMPOSE, "webui")
-        assert backend_img != webui_img
-
     def test_image_names_with_defaults_are_local(self):
         """With empty env vars the image names should have no registry prefix."""
-        for service in ("chronicle-backend", "webui"):
+        for service in ("chronicle-backend", "workers", "annotation-cron"):
             image = _image_for(self.COMPOSE, service)
             # The default expansion of ${CHRONICLE_REGISTRY:-} is ""
             # so the name should start with "chronicle-"
