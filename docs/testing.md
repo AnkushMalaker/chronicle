@@ -25,7 +25,8 @@ PYTHONPATH=backends/advanced/src uv run \
 
 ### Advanced backend
 
-The default fast lane excludes the MongoDB integration module:
+The default fast lane excludes the MongoDB integration module and manual scripts under
+`tests/scripts/`:
 
 ```bash
 cd backends/advanced
@@ -71,3 +72,6 @@ green; CI still fails when a test fails.
 
 The repository-level `tests/` directory owns composed Robot Framework behavior. Its current
 commands and environment setup are documented in [`tests/README.md`](../tests/README.md).
+
+The coverage baseline and test-ownership cleanup plan are recorded in the
+[test coverage audit](test-coverage-audit.md).
