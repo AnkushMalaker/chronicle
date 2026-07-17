@@ -38,6 +38,7 @@ plugins/*/config.yml.backup
 example/*
 **/node_modules/*
 **/ollama-data/*
+**/model_cache
 **/model_cache/*
 .vscode/*
 **/audio_chunks/*
@@ -112,6 +113,8 @@ backends/advanced-backend/data/speaker_model_cache/
 *.bin
 *.sqlite3
 *checkpoints
+extras/asr-services/providers/*/finetune/out/
+extras/asr-services/providers/*/finetune/split_adapters/
 
 
 # k8s config
