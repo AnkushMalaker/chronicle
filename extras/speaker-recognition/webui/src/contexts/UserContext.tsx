@@ -59,17 +59,20 @@ export function UserProvider({ children }: { children: ReactNode }) {
     const initializeUser = async () => {
       setIsLoading(true)
       try {
-        // First, refresh users list
-        await refreshUsers()
+        const userList = await apiService.getUsers()
+        setUsers(userList)
 
-        // Check if there's a saved user
         const savedUser = localStorage.getItem('selectedUser')
         if (savedUser) {
           const parsedUser = JSON.parse(savedUser)
-          setUser(parsedUser)
+          const canonicalUser = userList.find(u => u.username === parsedUser.username)
+          if (canonicalUser) {
+            setUser(canonicalUser)
+            localStorage.setItem('selectedUser', JSON.stringify(canonicalUser))
+          } else {
+            localStorage.removeItem('selectedUser')
+          }
         } else {
-          // Auto-create admin user if no users exist
-          const userList = await apiService.getUsers()
           if (userList.length === 0) {
             await createUser('admin')
           }

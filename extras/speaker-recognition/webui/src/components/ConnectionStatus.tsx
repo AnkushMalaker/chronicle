@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import { Circle } from 'lucide-react'
 import axios from 'axios'
 
@@ -15,17 +15,7 @@ export default function ConnectionStatus() {
   const [status, setStatus] = useState<BackendStatus>({ status: 'disconnected' })
 
   const getBackendUrl = () => {
-    // For display purposes, show the URL that the browser can actually access
-    // In development, this would be localhost:8085 (via port-forward)
-    // In production with ingress, this would be the ingress URL
-    const isDevelopment = process.env.NODE_ENV === 'development'
-
-    if (isDevelopment) {
-      return 'http://localhost:8085'
-    } else {
-      // In production, use the current window location but with /api prefix
-      return `${window.location.protocol}//${window.location.host}/api`
-    }
+    return `${window.location.origin}/api`
   }
 
   const checkBackendConnection = async () => {

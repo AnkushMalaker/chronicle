@@ -6,23 +6,38 @@ speaker it actually sounds like or delete it — recomputing the affected centro
 fix takes effect on the next identification.
 """
 
+import asyncio
+import json
 import logging
+import os
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query
+import numpy as np
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
+
+from simple_speaker_recognition.api.core.utils import secure_temp_file
 from simple_speaker_recognition.core.enrollment_audit import (
     compute_audit,
     recompute_speaker_centroid,
 )
 from simple_speaker_recognition.core.unified_speaker_db import UnifiedSpeakerDB
 from simple_speaker_recognition.database import get_db_session
-from simple_speaker_recognition.database.models import Speaker, SpeakerAudioSegment
+from simple_speaker_recognition.database.models import (
+    ProcessingJob,
+    Speaker,
+    SpeakerAudioSegment,
+)
+from simple_speaker_recognition.utils.audio_processing import get_audio_info
 
 router = APIRouter()
 log = logging.getLogger("speaker_service")
+BACKFILL_JOB_TYPE = "enrollment_segment_backfill"
+_backfill_tasks: set[asyncio.Task] = set()
 
 
 async def get_db():
@@ -59,11 +74,168 @@ async def enrollment_health(
     user_id: Optional[int] = Query(
         None, description="Scope audit to a user's speakers"
     ),
+    before: Optional[datetime] = Query(
+        None, description="Only include clips created before this timestamp"
+    ),
 ):
     """Contamination audit over per-clip enrollment embeddings."""
     session = get_db_session()
     try:
-        return compute_audit(session, user_id)
+        return compute_audit(session, user_id, before)
+    finally:
+        session.close()
+
+
+def _backfill_job_response(job: ProcessingJob) -> dict:
+    output = json.loads(job.output_data) if job.output_data else None
+    return {
+        "id": job.id,
+        "status": job.status,
+        "progress": job.progress,
+        "result": output,
+        "error": job.error_message,
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "completed_at": job.completed_at,
+    }
+
+
+async def _run_segment_backfill(job_id: int, user_id: int) -> None:
+    """Populate missing per-clip embeddings using the service's loaded GPU model."""
+    from .. import service
+
+    session = get_db_session()
+    try:
+        job = session.query(ProcessingJob).filter(ProcessingJob.id == job_id).one()
+        job.status = "running"
+        job.started_at = datetime.utcnow()
+        session.commit()
+
+        speakers = session.query(Speaker).filter(Speaker.user_id == user_id).all()
+        speaker_ids = {speaker.id for speaker in speakers}
+        existing = {
+            (row.speaker_id, os.path.basename(row.audio_file_path))
+            for row in session.query(SpeakerAudioSegment)
+            .join(Speaker)
+            .filter(Speaker.user_id == user_id)
+            .all()
+        }
+        enrollment_dir = get_auth().enrollment_audio_dir.resolve()
+        user_dir = enrollment_dir / str(user_id)
+        candidates = (
+            [
+                (speaker_dir.name, wav)
+                for speaker_dir in sorted(user_dir.iterdir())
+                if speaker_dir.is_dir() and speaker_dir.name in speaker_ids
+                for wav in sorted(speaker_dir.glob("*.wav"))
+                if (speaker_dir.name, wav.name) not in existing
+            ]
+            if user_dir.exists()
+            else []
+        )
+
+        added = failed = 0
+        total = len(candidates)
+        for index, (speaker_id, wav) in enumerate(candidates, start=1):
+            try:
+                duration = float(service.audio_backend.loader.get_duration(str(wav)))
+                wave = service.audio_backend.load_wave(wav)
+                vector = np.asarray(
+                    await service.audio_backend.async_embed(wave), dtype=np.float32
+                ).reshape(-1)
+                norm = np.linalg.norm(vector)
+                if not np.isfinite(norm) or norm <= 0:
+                    raise ValueError("embedding was not finite")
+                vector /= norm
+                relative_path = str(wav.resolve().relative_to(enrollment_dir))
+                session.add(
+                    SpeakerAudioSegment(
+                        speaker_id=speaker_id,
+                        audio_file_path=relative_path,
+                        original_file_path=wav.name,
+                        start_time=0.0,
+                        end_time=duration,
+                        duration_seconds=duration,
+                        embedding=json.dumps(vector.tolist()),
+                    )
+                )
+                added += 1
+            except Exception:
+                failed += 1
+                log.exception("Could not backfill enrollment clip %s", wav)
+
+            job.progress = round(index * 100 / total, 1) if total else 100.0
+            session.commit()
+
+        job.status = "completed"
+        job.progress = 100.0
+        job.output_data = json.dumps(
+            {"added": added, "failed": failed, "already_available": len(existing)}
+        )
+        job.completed_at = datetime.utcnow()
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        job = session.query(ProcessingJob).filter(ProcessingJob.id == job_id).first()
+        if job:
+            job.status = "failed"
+            job.error_message = str(exc)
+            job.completed_at = datetime.utcnow()
+            session.commit()
+        log.exception("Enrollment segment backfill job %s failed", job_id)
+    finally:
+        session.close()
+
+
+@router.post("/enrollment/segments/backfill", status_code=202)
+async def start_segment_backfill(user_id: int = Query(...)):
+    """Start or attach to the idempotent per-clip embedding backfill."""
+    session = get_db_session()
+    try:
+        active = (
+            session.query(ProcessingJob)
+            .filter(
+                ProcessingJob.job_type == BACKFILL_JOB_TYPE,
+                ProcessingJob.status.in_(["pending", "running"]),
+                ProcessingJob.input_data == json.dumps({"user_id": user_id}),
+            )
+            .order_by(ProcessingJob.id.desc())
+            .first()
+        )
+        if active:
+            return _backfill_job_response(active)
+
+        job = ProcessingJob(
+            job_type=BACKFILL_JOB_TYPE,
+            input_data=json.dumps({"user_id": user_id}),
+        )
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+        response = _backfill_job_response(job)
+        task = asyncio.create_task(_run_segment_backfill(job.id, user_id))
+        _backfill_tasks.add(task)
+        task.add_done_callback(_backfill_tasks.discard)
+        return response
+    finally:
+        session.close()
+
+
+@router.get("/enrollment/segments/backfill")
+async def get_segment_backfill(user_id: int = Query(...)):
+    """Return the latest backfill job so refreshed pages reattach to it."""
+    session = get_db_session()
+    try:
+        job = (
+            session.query(ProcessingJob)
+            .filter(
+                ProcessingJob.job_type == BACKFILL_JOB_TYPE,
+                ProcessingJob.input_data == json.dumps({"user_id": user_id}),
+            )
+            .order_by(ProcessingJob.id.desc())
+            .first()
+        )
+        return _backfill_job_response(job) if job else None
     finally:
         session.close()
 
@@ -87,6 +259,211 @@ async def segment_audio(segment_id: int):
     if not path.exists():
         raise HTTPException(404, "Audio file missing on disk")
     return FileResponse(str(path), media_type="audio/wav", filename=path.name)
+
+
+def _unit(v: np.ndarray) -> Optional[np.ndarray]:
+    v = np.asarray(v, dtype=np.float32).reshape(-1)
+    n = np.linalg.norm(v)
+    if v.size == 0 or not np.all(np.isfinite(v)) or n == 0:
+        return None
+    return v / n
+
+
+class EmbeddingScoreRequest(BaseModel):
+    speaker_id: str
+    embeddings: list[list[float]] = Field(..., min_length=1, max_length=5000)
+
+
+def _score_embeddings(embeddings: list[list[float]], speaker_id: str) -> list[dict]:
+    """Compare precomputed unit embeddings with one live speaker gallery."""
+    session = get_db_session()
+    try:
+        target = session.query(Speaker).filter(Speaker.id == speaker_id).first()
+        if not target:
+            raise HTTPException(404, "Target speaker not found")
+        centroid = (
+            _unit(json.loads(target.embedding_data)) if target.embedding_data else None
+        )
+        if centroid is None:
+            raise HTTPException(422, "Target speaker has no valid centroid")
+
+        clip_vectors = []
+        for seg in (
+            session.query(SpeakerAudioSegment)
+            .filter(SpeakerAudioSegment.speaker_id == speaker_id)
+            .all()
+        ):
+            if seg.embedding:
+                vector = _unit(json.loads(seg.embedding))
+                if vector is not None:
+                    clip_vectors.append(vector)
+
+        others = []
+        for other in (
+            session.query(Speaker)
+            .filter(Speaker.id != speaker_id, Speaker.user_id == target.user_id)
+            .all()
+        ):
+            if other.embedding_data:
+                vector = _unit(json.loads(other.embedding_data))
+                if vector is not None:
+                    others.append((other, vector))
+
+        results = []
+        for values in embeddings:
+            emb = _unit(values)
+            if emb is None or emb.shape != centroid.shape:
+                results.append({"error": "invalid_embedding"})
+                continue
+            best_other = None
+            for other, vector in others:
+                score = float(np.dot(emb, vector))
+                if best_other is None or score > best_other["score"]:
+                    best_other = {
+                        "speaker_id": other.id,
+                        "name": other.name,
+                        "score": round(score, 4),
+                    }
+            results.append(
+                {
+                    "sim_centroid": round(float(np.dot(emb, centroid)), 4),
+                    "max_clip_sim": (
+                        round(
+                            max(float(np.dot(emb, vector)) for vector in clip_vectors),
+                            4,
+                        )
+                        if clip_vectors
+                        else None
+                    ),
+                    "n_gallery_clips": len(clip_vectors),
+                    "best_other": best_other,
+                }
+            )
+        return results
+    finally:
+        session.close()
+
+
+@router.post("/enrollment/candidates/score-embeddings")
+async def score_enrollment_embeddings(body: EmbeddingScoreRequest):
+    """Score cached corpus embeddings without decoding or embedding audio again."""
+    return {"scores": _score_embeddings(body.embeddings, body.speaker_id)}
+
+
+@router.post("/enrollment/candidates/score")
+async def score_enrollment_candidate(
+    file: UploadFile = File(..., description="Candidate clip (single speaker)"),
+    speaker_id: str = Form(..., description="Target enrolled speaker"),
+):
+    """Score a candidate clip's enrollment value for one target speaker.
+
+    Returns the clip's cosine to the target centroid, its redundancy against the
+    target's existing per-clip gallery (max cosine — high means the gallery already
+    covers this acoustic condition), and the closest *other* enrolled speaker, so a
+    caller can rank candidates by marginal information instead of blind similarity.
+    """
+    with secure_temp_file() as tmp:
+        tmp.write(await file.read())
+        tmp_path = Path(tmp.name)
+
+    try:
+        duration = get_audio_info(str(tmp_path)).get("duration_seconds")
+        from .. import service
+
+        wav = service.audio_backend.load_wave(tmp_path)
+        emb = _unit(await service.audio_backend.async_embed(wav))
+        if emb is None:
+            raise HTTPException(422, "Could not extract a valid embedding from clip")
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    session = get_db_session()
+    try:
+        target = session.query(Speaker).filter(Speaker.id == speaker_id).first()
+        if not target:
+            raise HTTPException(404, "Target speaker not found")
+        centroid = (
+            _unit(json.loads(target.embedding_data)) if target.embedding_data else None
+        )
+        if centroid is None:
+            raise HTTPException(422, "Target speaker has no valid centroid")
+
+        clip_sims = []
+        for seg in (
+            session.query(SpeakerAudioSegment)
+            .filter(SpeakerAudioSegment.speaker_id == speaker_id)
+            .all()
+        ):
+            if not seg.embedding:
+                continue
+            v = _unit(json.loads(seg.embedding))
+            if v is not None:
+                clip_sims.append(float(np.dot(emb, v)))
+
+        best_other = None
+        others = (
+            session.query(Speaker)
+            .filter(Speaker.id != speaker_id, Speaker.user_id == target.user_id)
+            .all()
+        )
+        for other in others:
+            if not other.embedding_data:
+                continue
+            v = _unit(json.loads(other.embedding_data))
+            if v is None:
+                continue
+            score = float(np.dot(emb, v))
+            if best_other is None or score > best_other["score"]:
+                best_other = {
+                    "speaker_id": other.id,
+                    "name": other.name,
+                    "score": round(score, 4),
+                }
+
+        return {
+            "duration": round(float(duration), 3) if duration else None,
+            "sim_centroid": round(float(np.dot(emb, centroid)), 4),
+            "max_clip_sim": round(max(clip_sims), 4) if clip_sims else None,
+            "n_gallery_clips": len(clip_sims),
+            "best_other": best_other,
+        }
+    finally:
+        session.close()
+
+
+@router.post("/enrollment/candidates/embed")
+async def embed_enrollment_candidate(
+    file: UploadFile = File(..., description="Human-labeled evaluation clip"),
+):
+    """Extract a unit speaker embedding without changing the live gallery."""
+    with secure_temp_file() as tmp:
+        tmp.write(await file.read())
+        tmp_path = Path(tmp.name)
+    try:
+        duration = get_audio_info(str(tmp_path)).get("duration_seconds")
+        from .. import service
+
+        wav = service.audio_backend.load_wave(tmp_path)
+        emb = _unit(await service.audio_backend.async_embed(wav))
+        if emb is None:
+            raise HTTPException(422, "Could not extract a valid embedding from clip")
+        return {
+            "embedding": emb.tolist(),
+            "duration": round(float(duration), 3) if duration else None,
+            "embedding_model": service.audio_backend.EMBEDDING_MODEL_ID,
+        }
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+@router.get("/enrollment/candidates/embedding-info")
+async def enrollment_embedding_info():
+    """Fingerprint used to invalidate cached evaluation embeddings."""
+    from .. import service
+
+    return {
+        "embedding_model": service.audio_backend.EMBEDDING_MODEL_ID,
+    }
 
 
 @router.post("/enrollment/segments/{segment_id}/relabel")

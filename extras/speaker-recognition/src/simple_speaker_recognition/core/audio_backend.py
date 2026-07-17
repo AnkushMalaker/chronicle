@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 class AudioBackend:
     """Wrapper around PyAnnote & SpeechBrain components."""
 
+    EMBEDDING_MODEL_ID = "pyannote/wespeaker-voxceleb-resnet34-LM"
+
     def __init__(self, hf_token: str, device: torch.device):
         self.device = device
         self.diar = Pipeline.from_pretrained(
@@ -38,7 +40,7 @@ class AudioBackend:
 
         # Use the EXACT same embedding model that the diarization pipeline uses internally
         self.embedder = PretrainedSpeakerEmbedding(
-            "pyannote/wespeaker-voxceleb-resnet34-LM", device=device
+            self.EMBEDDING_MODEL_ID, device=device
         )
         self.loader = Audio(sample_rate=16_000, mono="downmix")
 
