@@ -296,6 +296,7 @@ models:
         # insertions on Hindi speech (158% corpus WER vs 12.9% with hi on CoSHE-100)
         language: hi
         word_timestamps: 'true'
+        diarize: 'true'
       response:
         type: json
         extract:
