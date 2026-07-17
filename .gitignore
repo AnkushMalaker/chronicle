@@ -1,4 +1,8 @@
 **/__pycache__
+.coverage
+.coverage.*
+**/coverage-reports/
+**/htmlcov/
 *.wav
 # Wake-word notification tones are bundled assets, not user audio — keep them tracked
 # so they're baked into the wakeword-service image (and served to all clients).
