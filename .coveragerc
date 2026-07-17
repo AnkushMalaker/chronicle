@@ -1,0 +1,22 @@
+[run]
+branch = True
+relative_files = True
+source =
+    config_manager
+    discovery
+    services
+    setup_utils
+    status
+    updates
+    wizard
+
+[report]
+precision = 1
+show_missing = True
+skip_empty = True
+
+[xml]
+output = coverage-reports/coverage.xml
+
+[html]
+directory = coverage-reports/html
