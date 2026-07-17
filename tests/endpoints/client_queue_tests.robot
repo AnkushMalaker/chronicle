@@ -13,7 +13,7 @@ Suite Teardown   Delete All Sessions
 
 Get Active Clients Test
     [Documentation]    Test getting active client information
-    [Tags]             client    active    positive
+    [Tags]    infra
 
     Create API Session    admin_session
     ${response}=       GET On Session    admin_session    /api/clients/active
@@ -31,7 +31,7 @@ Get Active Clients Test
 
 Get Queue Jobs Test
     [Documentation]    Test getting queue jobs with pagination
-    [Tags]             queue    jobs    positive
+    [Tags]    queue
 
     Create API Session    admin_session
     &{params}=         Create Dictionary    limit=20    offset=0
@@ -53,7 +53,7 @@ Get Queue Jobs Test
 
 Get Queue Jobs With Different Limits Test
     [Documentation]    Test queue jobs pagination with different limits
-    [Tags]             queue    jobs    pagination    positive
+    [Tags]    queue
     Get Anonymous Session    anon_session
 
     Create API Session    admin_session
@@ -78,7 +78,7 @@ Get Queue Jobs With Different Limits Test
 
 Get Queue Statistics Test
     [Documentation]    Test getting queue statistics
-    [Tags]             queue    statistics    positive
+    [Tags]    queue
     Get Anonymous Session    anon_session
 
     Create API Session    admin_session
@@ -95,7 +95,7 @@ Get Queue Statistics Test
 
 Get Queue Health Test
     [Documentation]    Test getting queue health status
-    [Tags]             queue    health    positive
+    [Tags]    queue	health
     Get Anonymous Session    anon_session
 
     Create API Session    admin_session
@@ -112,7 +112,7 @@ Get Queue Health Test
 
 Queue Jobs User Isolation Test
     [Documentation]    Test that regular users only see their own queue jobs
-    [Tags]             queue    security    isolation
+    [Tags]    queue	permissions
     Get Anonymous Session    anon_session
 
     Create API Session    admin_session
@@ -140,7 +140,7 @@ Queue Jobs User Isolation Test
 
 Invalid Queue Parameters Test
     [Documentation]    Test queue endpoints with invalid parameters
-    [Tags]             queue    negative    validation
+    [Tags]    queue
     Get Anonymous Session    anon_session
 
     Create API Session    admin_session
@@ -162,7 +162,7 @@ Invalid Queue Parameters Test
 
 Unauthorized Client Access Test
     [Documentation]    Test that client endpoints require authentication
-    [Tags]             client    security    negative
+    [Tags]    infra	permissions
     ${session}=    Get Anonymous Session    session
 
 
@@ -172,7 +172,7 @@ Unauthorized Client Access Test
 
 Unauthorized Queue Access Test
     [Documentation]    Test that queue endpoints require authentication
-    [Tags]             queue    security    negative
+    [Tags]    queue	permissions
     ${session}=    Get Anonymous Session    session
 
     # Try to access queue jobs without token
@@ -186,7 +186,7 @@ Unauthorized Queue Access Test
 
 Client Manager Integration Test
     [Documentation]    Test client manager functionality
-    [Tags]             client    manager    integration
+    [Tags]    infra
 
     Create API Session    admin_session
 

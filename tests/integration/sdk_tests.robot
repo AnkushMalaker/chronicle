@@ -16,6 +16,7 @@ Variables        ../setup/test_env.py
 
 Suite Setup      Suite Setup
 Suite Teardown   Suite Teardown
+Test Tags        sdk
 
 *** Variables ***
 ${BACKEND_URL}        http://localhost:8001

@@ -2,6 +2,7 @@
 Documentation   Tests for Transcription Service URL Configuration
 Library         Collections
 Library         ../libs/ConfigTestHelper.py
+Test Tags       infra
 
 *** Test Cases ***
 Vibevoice Url Without Http Prefix

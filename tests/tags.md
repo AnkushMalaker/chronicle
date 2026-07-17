@@ -4,7 +4,8 @@ This document defines the standard tags used across the Chronicle test suite.
 
 ## Simplified Tag Set
 
-Chronicle uses a **minimal, focused tag set** for test organization. Only 15 tags are permitted.
+Chronicle uses 11 business tags and four execution-requirement tags. The 15 permitted tags are
+defined in [`robot-tags.json`](robot-tags.json), which is the canonical machine-readable allowlist.
 
 ## Tag Format
 
@@ -102,7 +103,7 @@ Chronicle uses a **minimal, focused tag set** for test organization. Only 15 tag
 - Connection resilience tests
 - Heavy integration tests with multiple service restarts
 - Excluded from default `make test` runs for faster feedback
-- Run explicitly with `make test-slow` or `make test-all-with-slow`
+- Run explicitly with `make test-slow` or `make test-all-with-slow-and-sdk`
 
 **`sdk`** - Tests for unreleased SDK functionality
 - SDK integration tests
@@ -197,7 +198,7 @@ Use 2-3 tags only when testing interactions between components:
 
 ## Prohibited Tags
 
-**DO NOT create or use any tags other than the 14 approved tags above.**
+**DO NOT create or use any tags other than the 15 approved tags above.**
 
 Commonly misused tags that should NOT be used:
 - ❌ `positive`, `negative` - Test outcome is in the results, not tags
@@ -233,9 +234,10 @@ robot --include audio-upload --include audio-streaming tests/
 ### Before Adding a New Tag
 
 **STOP!** Ask yourself:
-1. Can I use one of the existing 11 tags?
-2. Is this tag really necessary for test organization?
-3. Have I checked with the team?
+1. Can I use one of the 11 business tags?
+2. Does the test genuinely need one of the four execution-requirement tags?
+3. Is a new tag really necessary for test selection?
+4. Have I checked with the team?
 
 **New tags require team approval and must be added to this document first.**
 
@@ -243,9 +245,10 @@ robot --include audio-upload --include audio-streaming tests/
 
 When updating tags across test files:
 1. Update all affected test files
-2. Update this document (tags.md)
-3. Update TESTING_GUIDELINES.md if rules changed
-4. Document the change in the commit message
+2. Update `robot-tags.json`
+3. Update this document (tags.md)
+4. Update TESTING_GUIDELINES.md if rules changed
+5. Document the change in the commit message
 
 ## Tag Statistics
 
