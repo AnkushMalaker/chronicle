@@ -115,6 +115,10 @@ class SessionView:
     # audio seconds sent to the streaming transcription provider (session-relative
     # clock; persisted so word-timestamp offsets survive provider reconnects)
     transcription_seconds_sent: float = 0.0
+    transcription_provider_status: str = ""
+    transcription_provider_connected_at: float = 0.0
+    transcription_last_audio_sent_at: float = 0.0
+    transcription_last_message_at: float = 0.0
     # job ids
     speech_detection_job_id: str = ""
     audio_persistence_job_id: str = ""
@@ -202,6 +206,16 @@ class SessionView:
             speech_detected_at=s("speech_detected_at"),
             chunks_published=fint("chunks_published"),
             transcription_seconds_sent=ffloat("transcription_seconds_sent") or 0.0,
+            transcription_provider_status=s("transcription_provider_status"),
+            transcription_provider_connected_at=(
+                ffloat("transcription_provider_connected_at") or 0.0
+            ),
+            transcription_last_audio_sent_at=(
+                ffloat("transcription_last_audio_sent_at") or 0.0
+            ),
+            transcription_last_message_at=(
+                ffloat("transcription_last_message_at") or 0.0
+            ),
             speech_detection_job_id=s("speech_detection_job_id"),
             audio_persistence_job_id=s("audio_persistence_job_id"),
             websocket_connected=s("websocket_connected") == "true",
@@ -289,6 +303,10 @@ class SessionStore:
                 # Connection-scoped — reset on every (re)connect (see docstring).
                 "transcription_error": "",
                 "transcription_seconds_sent": "0",
+                "transcription_provider_status": "disconnected",
+                "transcription_provider_connected_at": "0",
+                "transcription_last_audio_sent_at": "0",
+                "transcription_last_message_at": "0",
                 "completion_reason": "",
             },
         )
@@ -383,7 +401,40 @@ class SessionStore:
         await self._redis.hset(self._key(session_id), "markers", json.dumps(markers))
 
     async def set_transcription_error(self, session_id: str, message: str) -> None:
-        await self._redis.hset(self._key(session_id), "transcription_error", message)
+        await self._redis.hset(
+            self._key(session_id),
+            mapping={
+                "transcription_error": message,
+                "transcription_provider_status": "error",
+            },
+        )
+
+    async def mark_transcription_provider_connected(self, session_id: str) -> None:
+        now = str(time.time())
+        await self._redis.hset(
+            self._key(session_id),
+            mapping={
+                "transcription_provider_status": "connected",
+                "transcription_provider_connected_at": now,
+                "transcription_error": "",
+            },
+        )
+
+    async def mark_transcription_audio_sent(self, session_id: str) -> None:
+        await self._redis.hset(
+            self._key(session_id), "transcription_last_audio_sent_at", str(time.time())
+        )
+
+    async def mark_transcription_provider_message(self, session_id: str) -> None:
+        await self._redis.hset(
+            self._key(session_id), "transcription_last_message_at", str(time.time())
+        )
+
+    async def mark_transcription_provider_disconnected(self, session_id: str) -> None:
+        key = self._key(session_id)
+        status = await self._redis.hget(key, "transcription_provider_status")
+        if _to_str(status) != "error":
+            await self._redis.hset(key, "transcription_provider_status", "disconnected")
 
     async def set_transcription_seconds(self, session_id: str, seconds: float) -> None:
         """Persist the streaming provider's session-relative audio clock."""

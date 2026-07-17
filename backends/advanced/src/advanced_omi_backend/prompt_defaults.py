@@ -702,3 +702,18 @@ Rules:
         category="memory",
         variables=["vault_summary"],
     )
+
+    from advanced_omi_backend.services.memory.agent.codex_agent import (
+        DEFAULT_CODEX_AGENT_SYSTEM_PROMPT,
+    )
+
+    registry.register_default(
+        "memory.codex_agent_system",
+        template=DEFAULT_CODEX_AGENT_SYSTEM_PROMPT,
+        name="Codex Memory Agent System Prompt",
+        description="Vault-aware instructions for the Codex CLI memory-agent executor "
+        "(memory.agent_executor: codex) — same conventions as the direct agent, phrased "
+        "for direct file editing. Supports a {{vault_summary}} slot.",
+        category="memory",
+        variables=["vault_summary"],
+    )

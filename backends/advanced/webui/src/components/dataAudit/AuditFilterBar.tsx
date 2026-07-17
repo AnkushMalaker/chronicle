@@ -95,7 +95,12 @@ export default function AuditFilterBar({
                 title={`Edit ${def.label.toLowerCase()} filter`}
               >
                 <Icon className="h-3.5 w-3.5" />
-                <span>{def.chipLabel(value)}</span>
+                <span
+                  className="max-w-48 truncate sm:max-w-72"
+                  title={def.chipLabel(value)}
+                >
+                  {def.chipLabel(value)}
+                </span>
               </button>
               <button
                 onClick={() => {

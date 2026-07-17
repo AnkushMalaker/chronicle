@@ -72,8 +72,12 @@ def main():
 
     logger.info("✅ RQ worker ready")
 
-    # This blocks until worker is stopped
-    worker.work(logging_level="INFO")
+    # This blocks until worker is stopped.
+    # with_scheduler: required for Retry(interval=...) — retried jobs land in
+    # ScheduledJobRegistry and need a scheduler to promote them back onto the
+    # queue (RQ elects one scheduler per queue via a lock, so this is safe
+    # across multiple worker processes).
+    worker.work(logging_level="INFO", with_scheduler=True)
 
 
 if __name__ == "__main__":

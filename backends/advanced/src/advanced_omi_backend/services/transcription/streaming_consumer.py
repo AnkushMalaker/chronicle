@@ -356,7 +356,9 @@ class StreamingTranscriptionConsumer:
                     "last_activity": time.time(),
                     "sample_rate": sample_rate,
                     "time_offset": time_offset,
+                    "last_health_persisted_at": 0.0,
                 }
+                await self.store.mark_transcription_provider_connected(session_id)
 
                 # Only buffer audio for speaker identification when provider lacks diarization
                 if not self._provider_has_diarization:
@@ -506,6 +508,12 @@ class StreamingTranscriptionConsumer:
             completion_status = "error"
 
         finally:
+            try:
+                await self.store.mark_transcription_provider_disconnected(session_id)
+            except Exception:
+                logger.warning(
+                    f"Failed to mark transcription provider disconnected for {session_id}"
+                )
             # Cleanup must run on both paths (previously the error path leaked
             # active_sessions / audio buffer entries).
             self.active_sessions.pop(session_id, None)
@@ -555,14 +563,22 @@ class StreamingTranscriptionConsumer:
             # send — a chunk that dies mid-send is re-sent after reconnect.
             session = self.active_sessions.get(session_id)
             if session is not None:
-                session["last_activity"] = time.time()
+                now = time.time()
+                session["last_activity"] = now
                 self._session_audio_seconds[session_id] = (
                     self._session_audio_seconds.get(session_id, 0.0)
                     + len(audio_chunk) / (session.get("sample_rate", 16000) * 2)
                 )
+                # Audio chunks can arrive several times per second. Persisting
+                # this health timestamp at most every five seconds keeps the
+                # cross-worker signal useful without amplifying Redis traffic.
+                if now - session.get("last_health_persisted_at", 0.0) >= 5.0:
+                    await self.store.mark_transcription_audio_sent(session_id)
+                    session["last_health_persisted_at"] = now
 
             # Provider returns None if no response yet, or a dict with results
             if result:
+                await self.store.mark_transcription_provider_message(session_id)
                 is_final = result.get("is_final", False)
                 text = result.get("text", "")
                 words = result.get("words") or []

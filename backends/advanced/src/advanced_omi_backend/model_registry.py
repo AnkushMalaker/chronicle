@@ -10,6 +10,7 @@ Environment variable resolution is handled by OmegaConf in the config module.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -306,11 +307,11 @@ class ResolvedLLMOperation(BaseModel):
         if self.reasoning_effort:
             if openai_reasoning:
                 effort = self.reasoning_effort.strip().lower()
-                # "none" is only accepted from gpt-5.1 on; earlier reasoning
-                # models (gpt-5-nano, o3, …) reject it — "minimal" is their floor.
-                if effort in ("none", "off", "0") and not model_name.lower().startswith(
-                    "gpt-5.1"
-                ):
+                # "none" is accepted by versioned GPT-5.1+ models. Earlier GPT-5
+                # variants (gpt-5, gpt-5-mini/nano) require "minimal" instead.
+                version_match = re.match(r"^gpt-5\.(\d+)", model_name.lower())
+                supports_none = bool(version_match and int(version_match.group(1)) >= 1)
+                if effort in ("none", "off", "0") and not supports_none:
                     effort = "minimal"
                 params["reasoning_effort"] = effort
             elif self.model_def.thinking:

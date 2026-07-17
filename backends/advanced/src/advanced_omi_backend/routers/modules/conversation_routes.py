@@ -13,6 +13,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from advanced_omi_backend.auth import current_active_user, current_superuser
 from advanced_omi_backend.controllers import conversation_controller
 from advanced_omi_backend.controllers.drift_controller import find_drift_conversations
+from advanced_omi_backend.controllers.queue_controller import (
+    JOB_RESULT_TTL,
+    default_queue,
+)
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.waveform import WaveformData
 from advanced_omi_backend.users import User
@@ -21,6 +25,7 @@ from advanced_omi_backend.utils.audio_chunk_utils import (
     get_trimmed_opus_for_time_range,
     reconstruct_audio_segment,
 )
+from advanced_omi_backend.workers.drift_jobs import cluster_embedding_backfill_job
 from advanced_omi_backend.workers.waveform_jobs import generate_waveform_data
 
 logger = logging.getLogger(__name__)
@@ -94,6 +99,25 @@ async def identify_drift(current_user: User = Depends(current_superuser)):
     Declared before ``/{conversation_id}`` so the static path isn't captured as an id.
     """
     return await find_drift_conversations()
+
+
+@router.post("/drift/backfill-cluster-embeddings")
+async def backfill_drift_cluster_embeddings(
+    current_user: User = Depends(current_superuser),
+):
+    """Queue the GPU-backed embedding pass needed to analyze older conversations."""
+    job = default_queue.enqueue(
+        cluster_embedding_backfill_job,
+        job_timeout=7200,
+        result_ttl=JOB_RESULT_TTL,
+        description="Backfill speaker cluster embeddings for drift analysis",
+    )
+    logger.info(
+        "Enqueued cluster-embedding backfill job %s for admin %s",
+        job.id,
+        current_user.user_id,
+    )
+    return {"job_id": job.id, "status": "queued"}
 
 
 @router.get("/{conversation_id}")

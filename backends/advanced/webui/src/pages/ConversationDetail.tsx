@@ -355,7 +355,7 @@ export default function ConversationDetail() {
   }
 
   return (
-    <div className="max-w-5xl mx-auto p-6 space-y-6">
+    <div className="max-w-7xl mx-auto p-6 space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <button
@@ -492,11 +492,11 @@ export default function ConversationDetail() {
       />
 
       {/* Main Content Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
         {/* Left Column - Main Content */}
-        <div className="lg:col-span-2 space-y-6">
+        <div className="lg:col-span-3 space-y-6">
           {/* Title */}
-          <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-6">
+          <div id="transcript" className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-6 scroll-mt-6">
             {editingTitle ? (
               <div className="space-y-2">
                 <div className="flex items-center space-x-2">
@@ -599,7 +599,7 @@ export default function ConversationDetail() {
         </div>
 
         {/* Right Column - Sidebar */}
-        <div className="space-y-6">
+        <div className="space-y-6 lg:sticky lg:top-6 lg:self-start">
           {/* Metadata Card */}
           <div className="bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
             <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase mb-3">
@@ -663,27 +663,20 @@ export default function ConversationDetail() {
             </dl>
           </div>
 
-          {/* Version Info Card */}
-          {(conversation.transcript_version_count || 0) > 0 && (
-            <div className="bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
-              <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase mb-3">
-                Versions
-              </h3>
-              <dl className="space-y-3 text-sm">
-                <div className="flex justify-between items-start">
-                  <dt className="text-gray-600 dark:text-gray-400">Transcript</dt>
-                  <dd className="text-gray-900 dark:text-gray-100">
-                    v{conversation.active_transcript_version_number || 1} of {conversation.transcript_version_count}
-                  </dd>
-                </div>
-              </dl>
-            </div>
-          )}
+          <a
+            href="#memory-history"
+            className="flex w-full items-center justify-between rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-medium text-blue-700 transition-colors hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-300 dark:hover:bg-blue-900/35"
+          >
+            <span>Memory history</span>
+            <span aria-hidden="true">↓</span>
+          </a>
 
-          {/* Memory change history (audit ledger) */}
-          <MemoryAuditCard conversationId={conversation.conversation_id} />
         </div>
       </div>
+
+      {/* Memory change history is intentionally full-width: paths, summaries, and
+          timestamps become unreadable in the narrow metadata rail. */}
+      <MemoryAuditCard conversationId={conversation.conversation_id} />
 
       {/* Split modal — on success the conversation is soft-deleted, so leave */}
       {showSplitModal && (

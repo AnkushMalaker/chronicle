@@ -72,6 +72,7 @@ robotframework = "^6.1.1"
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
+norecursedirs = ["tests/scripts"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*", "*Tests"]
 python_functions = ["test_*"]
@@ -105,6 +106,28 @@ filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::PendingDeprecationWarning",
 ]
+
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["advanced_omi_backend"]
+
+[tool.coverage.paths]
+source = [
+    "src/advanced_omi_backend",
+    "*/site-packages/advanced_omi_backend",
+]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+skip_empty = true
+
+[tool.coverage.xml]
+output = "coverage-reports/coverage.xml"
+
+[tool.coverage.html]
+directory = "coverage-reports/html"
 
 [dependency-groups]
 dev = [

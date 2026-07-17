@@ -244,6 +244,36 @@ _FALLBACK_EXCEPTIONS = (
 )
 
 
+def _is_context_length_error(exc: Exception) -> bool:
+    """Return whether a provider 400 specifically reports context overflow."""
+    if not isinstance(exc, openai.BadRequestError):
+        return False
+
+    values: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in {"code", "type", "message"}:
+                    values.append(str(item).lower())
+                collect(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                collect(item)
+
+    collect(getattr(exc, "body", None))
+    details = " ".join(values)
+    return any(
+        marker in details
+        for marker in (
+            "exceed_context_size_error",
+            "context_length_exceeded",
+            "exceeds the available context size",
+            "maximum context length",
+        )
+    )
+
+
 def _get_fallback_model_def():
     """ModelDef named by defaults.fallback_llm, or None when unset/invalid or
     identical to defaults.llm (retrying the same model is pointless)."""
@@ -384,12 +414,14 @@ async def async_chat_with_tools(
     model: str | None = None,
     temperature: float | None = None,
     operation: str | None = None,
+    force_fallback: bool = False,
 ):
     """Async wrapper for chat completion with tool calling.
 
     When ``operation`` is provided, parameters are resolved from config.
-    Unreachable-primary calls retry once against ``defaults.fallback_llm``
-    (see :func:`async_generate`).
+    Unreachable-primary and context-overflow calls retry once against
+    ``defaults.fallback_llm``. ``force_fallback`` is used for a semantic retry after
+    a provider returned a syntactically valid but incomplete result.
     Tracing is handled automatically by the OTEL instrumentor.
     """
 
@@ -409,9 +441,25 @@ async def async_chat_with_tools(
         registry = get_models_registry()
         if registry:
             op = registry.get_llm_operation(operation)
+            if force_fallback:
+                fb_op = registry.get_fallback_llm_operation(operation, primary=op)
+                if fb_op is None:
+                    raise RuntimeError(
+                        f"No fallback LLM is configured for operation {operation!r}"
+                    )
+                logger.warning(
+                    "Using fallback LLM %r for semantic retry of operation %r",
+                    fb_op.model_name,
+                    operation,
+                )
+                return await _chat_once(fb_op, None)
             try:
                 return await _chat_once(op, model)
-            except _FALLBACK_EXCEPTIONS as e:
+            except Exception as e:
+                if not isinstance(
+                    e, _FALLBACK_EXCEPTIONS
+                ) and not _is_context_length_error(e):
+                    raise
                 fb_op = registry.get_fallback_llm_operation(operation, primary=op)
                 if fb_op is None:
                     raise

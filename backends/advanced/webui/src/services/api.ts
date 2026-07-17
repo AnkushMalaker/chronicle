@@ -148,6 +148,10 @@ export const conversationsApi = {
 
   // Conversations whose speaker labels would change under the current gallery (admin).
   getDrift: () => api.get('/api/conversations/drift'),
+  backfillDriftClusterEmbeddings: () =>
+    api.post<{ job_id: string; status: string }>(
+      '/api/conversations/drift/backfill-cluster-embeddings'
+    ),
 
   // Version management (transcript only — memory is no longer versioned)
   activateTranscriptVersion: (conversationId: string, versionId: string) => api.post(`/api/conversations/${conversationId}/activate-transcript/${versionId}`),
@@ -641,8 +645,12 @@ export const queueApi = {
 }
 
 export const uploadApi = {
-  uploadAudioFiles: (files: FormData, onProgress?: (progress: number) => void) =>
-    api.post('/api/audio/upload', files, {
+  uploadAudioFiles: (
+    files: FormData,
+    onProgress?: (progress: number) => void,
+    options?: { annotationOnly?: boolean }
+  ) =>
+    api.post(options?.annotationOnly ? '/api/audio/upload/annotation' : '/api/audio/upload', files, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 300000, // 5 minutes
       onUploadProgress: (progressEvent) => {
@@ -653,8 +661,8 @@ export const uploadApi = {
       },
     }),
 
-  uploadFromGDriveFolder: (payload: { gdrive_folder_id: string; device_name?: string }) =>
-    api.post('/api/audio/upload_audio_from_gdrive', null, {
+  uploadFromGDriveFolder: (payload: { gdrive_folder_id: string; device_name?: string; annotation_only?: boolean }) =>
+    api.post(payload.annotation_only ? '/api/audio/upload_audio_from_gdrive/annotation' : '/api/audio/upload_audio_from_gdrive', null, {
       params: {
         gdrive_folder_id: payload.gdrive_folder_id,
         device_name: payload.device_name,
@@ -810,6 +818,26 @@ export interface AuditListResponse {
   // Distinct speaker labels present in the scanned working set, so the
   // speaker filter offers only labels that exist in the current view.
   speakers: string[]
+  // Annotation dataset IDs available to the dataset filter.
+  datasets: string[]
+}
+
+export interface AnnotationImportResponse {
+  dataset_id: string
+  schema_version: number
+  message: string
+  results: Array<{
+    clip_id: string
+    status: 'imported' | 'skipped' | 'error'
+    conversation_id?: string
+    error?: string
+  }>
+  summary: {
+    total: number
+    imported: number
+    skipped: number
+    failed: number
+  }
 }
 
 export interface SpeakerConfidenceRow {
@@ -968,6 +996,171 @@ export interface ScreenResult {
   totals: { conversation_count: number; flagged_segments: number }
 }
 
+export interface GuidedEnrollmentClip {
+  conversation_id: string
+  conversation_title: string | null
+  conversation_date: string
+  conversation_duration: number
+  segment_index: number
+  start: number
+  end: number
+  duration: number
+  text: string
+  current_label: string | null
+  stored_confidence: number | null
+  scores: {
+    duration: number | null
+    sim_centroid: number
+    max_clip_sim: number | null
+    n_gallery_clips: number
+    best_other: { speaker_id: string; name: string; score: number } | null
+  }
+  info_score: number
+  novelty: number
+  uncertainty: number
+  reasons: string[]
+}
+
+export interface GuidedEnrollmentSpeaker {
+  speaker_id: string
+  speaker_name: string
+  n_clips: number | null
+  total_duration_s: number | null
+}
+
+export interface GuidedEnrollmentSuggestResponse {
+  speaker: GuidedEnrollmentSpeaker
+  threshold: number
+  batch: GuidedEnrollmentClip[]
+  scanned: number
+  gated_out: number
+  pool_remaining: number
+  reviewed_total: number
+  discovery_indexed: boolean
+  discovery_candidates: number
+}
+
+export interface GuidedEnrollmentDecideResponse {
+  speaker: GuidedEnrollmentSpeaker | null
+  enrolled: number
+  reassigned: number
+  rejected: number
+  skipped: number
+  multiple_speakers: number
+  bad_clips: number
+  health_before: GuidedEnrollmentHealth | null
+  health_after: GuidedEnrollmentHealth | null
+  coverage: { accepted_novelty_mean: number | null }
+  benchmark_job_id: string | null
+  discovery_job_id: string | null
+  errors: { clip: unknown; error: string }[]
+  status: string
+}
+
+export interface GuidedEnrollmentHealth {
+  n_clips: number
+  median_self: number | null
+  n_flagged: number
+  flagged_rate: number
+  verdict: string
+}
+
+export interface GuidedEnrollmentSession {
+  created_at: string
+  health_before: GuidedEnrollmentHealth | null
+  health_after: GuidedEnrollmentHealth | null
+  coverage: { accepted_novelty_mean: number | null }
+  decisions: {
+    enrolled: number
+    reassigned: number
+    rejected: number
+    skipped: number
+    multiple_speakers: number
+    bad_clips: number
+  }
+}
+
+export interface SpeakerBenchmarkReport {
+  created_at: string
+  protocol: string
+  threshold: number
+  embedding_model: string
+  conversation_groups: number
+  dataset: {
+    labeled_clips: number
+    embedded_clips: number
+    speakers: number
+    cache_hits: number
+    embedding_failures: number
+    exclusions: Record<string, number>
+  }
+  learning_curve: Array<{
+    fraction: number
+    train_clips_mean: number
+    top1_accuracy_mean: number | null
+    macro_recall_mean: number | null
+    false_accept_rate_mean: number | null
+    eer_mean: number | null
+  }>
+  folds: Array<{
+    fold: number
+    train_clips: number
+    test_clips: number
+    top1_accuracy: number | null
+    macro_recall: number | null
+    false_accept_rate: number | null
+    eer: number | null
+    per_speaker_recall: Record<string, number>
+    confusion: Record<string, Record<string, number>>
+  }>
+}
+
+export interface SpeakerGalleryBaseline {
+  cutoff: string | null
+  status: string
+  limitations?: string
+  speakers: Array<{
+    speaker_id: string
+    name: string
+    baseline: { n_clips: number; median_self: number | null; n_flagged: number; verdict: string }
+    current: { n_clips: number; median_self: number | null; n_flagged: number; verdict: string } | null
+  }>
+}
+
+export interface GuidedEnrollmentGalleryClip {
+  segment_id: number
+  filename: string
+  duration: number
+  self_score: number | null
+  best_other: { speaker_id: string; name: string; score: number } | null
+  flags: string[]
+  suggested: { speaker_id: string; name: string; score: number } | null
+}
+
+export interface GuidedEnrollmentGalleryResponse {
+  speaker: {
+    speaker_id: string
+    speaker_name: string
+    n_clips: number | null
+    total_duration_s: number | null
+  }
+  verdict: string | null
+  median_self: number | null
+  clips: GuidedEnrollmentGalleryClip[]
+}
+
+export interface GuidedEnrollmentResetResponse {
+  speaker_name: string
+  deleted: {
+    reviews: number
+    sessions: number
+    discovery_matches: number
+    discovery_runs: number
+  }
+  gallery_deleted: boolean
+  status: string
+}
+
 export const dataAuditApi = {
   // Enqueue batch VAD analysis. Returns { job_id, status }.
   analyze: (conversationIds?: string[], force: boolean = false) =>
@@ -1054,6 +1247,108 @@ export const dataAuditApi = {
       { start, end }
     ),
 
+  // Guided enrollment: next batch of highest-information clips for a speaker.
+  guidedEnrollmentSuggest: (
+    speakerName: string,
+    order: 'informative' | 'confidence' = 'informative'
+  ) =>
+    api.post<GuidedEnrollmentSuggestResponse>(
+      '/api/data-audit/enrollment/guided/suggest',
+      { speaker_name: speakerName, batch_size: 5, order }
+    ),
+
+  // Guided enrollment: record accept/reject decisions; accepted clips enroll.
+  guidedEnrollmentDecide: (
+    speakerName: string,
+    decisions: {
+      conversation_id: string
+      start: number
+      end: number
+      original_start: number
+      original_end: number
+      decision: 'accept' | 'reject' | 'skip' | 'bad_clip' | 'multiple_speakers' | 'another_speaker'
+      actual_speaker?: string
+      scores?: GuidedEnrollmentClip['scores']
+    }[]
+  ) =>
+    api.post<GuidedEnrollmentDecideResponse>(
+      '/api/data-audit/enrollment/guided/decide',
+      { speaker_name: speakerName, decisions }
+    ),
+
+  guidedEnrollmentHistory: (speakerName: string) =>
+    api.get<{ speaker_name: string; sessions: GuidedEnrollmentSession[] }>(
+      '/api/data-audit/enrollment/guided/history',
+      { params: { speaker_name: speakerName } }
+    ),
+
+  discoverSpeakerCorpus: (speakerName: string, includeDeleted = false) =>
+    api.post<{ job_id: string; status: string; reused: boolean }>(
+      '/api/data-audit/enrollment/guided/discover',
+      { speaker_name: speakerName, batch_size: 5, include_deleted: includeDeleted }
+    ),
+
+  // Upload an unlabelled audio corpus and mine it for one speaker: files become
+  // annotation-only conversations; discovery is chained after transcription.
+  mineCorpusAudio: (speakerName: string, files: File[]) => {
+    const form = new FormData()
+    form.append('speaker_name', speakerName)
+    files.forEach((f) => form.append('files', f))
+    return api.post<{
+      speaker_name: string
+      ingested: number
+      failed: { filename: string; error: string }[]
+      transcription_jobs: number
+      transcription_available: boolean
+      discovery_job_id: string | null
+    }>('/api/data-audit/enrollment/guided/mine', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
+
+  getSpeakerCorpusDiscovery: (speakerName: string) =>
+    api.get<{
+      speaker_name: string
+      job_id: string | null
+      status: string | null
+      matched_segments: number
+    }>('/api/data-audit/enrollment/guided/discover', {
+      params: { speaker_name: speakerName },
+    }),
+
+  runSpeakerBenchmark: () =>
+    api.post<{ job_id: string; status: string }>('/api/data-audit/enrollment/benchmark'),
+
+  getLatestSpeakerBenchmark: () =>
+    api.get<{ report: SpeakerBenchmarkReport | null }>(
+      '/api/data-audit/enrollment/benchmark/latest'
+    ),
+
+  getSpeakerGalleryBaseline: () =>
+    api.get<SpeakerGalleryBaseline>('/api/data-audit/enrollment/baseline'),
+
+  // Enrolled clips for one speaker with per-clip contamination flags.
+  getEnrollmentGallery: (speakerName: string) =>
+    api.get<GuidedEnrollmentGalleryResponse>(
+      '/api/data-audit/enrollment/guided/gallery',
+      { params: { speaker_name: speakerName } }
+    ),
+
+  // Remove one enrolled clip from the voiceprint (quarantined by default).
+  deleteEnrollmentGalleryClip: (speakerName: string, segmentId: number, hard = false) =>
+    api.post(
+      `/api/data-audit/enrollment/guided/gallery/segments/${segmentId}/delete`,
+      { speaker_name: speakerName, hard }
+    ),
+
+  // Forget all guided-enrollment state for a speaker name (reviews, history,
+  // discovery); optionally also purge the voiceprint gallery.
+  resetGuidedEnrollment: (speakerName: string, purgeGallery = false) =>
+    api.post<GuidedEnrollmentResetResponse>(
+      '/api/data-audit/enrollment/guided/reset',
+      { speaker_name: speakerName, purge_gallery: purgeGallery }
+    ),
+
   // Count of unapplied triage decisions and conversations they span.
   getTriagePending: () =>
     api.get<{ pending_count: number; conversation_count: number }>(
@@ -1106,6 +1401,19 @@ export const dataAuditApi = {
     api.post<{ job_id: string; export_id: string; status: string }>('/api/data-audit/export', {
       conversation_ids: conversationIds,
       ...params,
+    }),
+
+  // Import an export-compatible ZIP as memory-excluded conversations with the
+  // manifest transcripts already active in the editor.
+  importDataset: (dataset: FormData, onProgress?: (progress: number) => void) =>
+    api.post<AnnotationImportResponse>('/api/data-audit/import', dataset, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 300000,
+      onUploadProgress: (progressEvent) => {
+        if (onProgress && progressEvent.total) {
+          onProgress(Math.round((progressEvent.loaded * 100) / progressEvent.total))
+        }
+      },
     }),
 
   // List completed annotation exports

@@ -189,6 +189,18 @@ class Conversation(Document):
     external_source_type: Optional[str] = Field(
         None, description="Type of external source (gdrive, dropbox, s3, etc.)"
     )
+    data_purpose: Optional[str] = Field(
+        None,
+        description="Operational purpose for this conversation, e.g. annotation or normal_capture",
+    )
+    memory_excluded: bool = Field(
+        False,
+        description="When true, this conversation must not create or reprocess memories",
+    )
+    memory_exclusion_reason: Optional[str] = Field(
+        None,
+        description="Why memory processing is disabled for this conversation",
+    )
 
     # MongoDB chunk-based audio storage (new system)
     audio_chunks_count: Optional[int] = Field(
@@ -536,6 +548,9 @@ def create_conversation(
     segments: Optional[List["Conversation.SpeakerSegment"]] = None,
     external_source_id: Optional[str] = None,
     external_source_type: Optional[str] = None,
+    data_purpose: Optional[str] = None,
+    memory_excluded: bool = False,
+    memory_exclusion_reason: Optional[str] = None,
 ) -> Conversation:
     """
     Factory function to create a new conversation.
@@ -565,6 +580,9 @@ def create_conversation(
         "active_transcript_version": None,
         "external_source_id": external_source_id,
         "external_source_type": external_source_type,
+        "data_purpose": data_purpose,
+        "memory_excluded": memory_excluded,
+        "memory_exclusion_reason": memory_exclusion_reason,
     }
 
     # Only set conversation_id if provided, otherwise let the model auto-generate it

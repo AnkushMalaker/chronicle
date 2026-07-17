@@ -60,6 +60,10 @@ async def upload_audio_from_drive_folder(
     ),
     current_user: User = Depends(current_superuser),
     device_name: str = Query(default="upload"),
+    annotation_only: bool = Query(
+        default=False,
+        description="Create editable annotation records without memory extraction",
+    ),
 ):
     try:
         files = await download_audio_files_from_drive(gdrive_folder_id, current_user.id)
@@ -67,7 +71,26 @@ async def upload_audio_from_drive_folder(
         raise HTTPException(status_code=400, detail=str(e))
 
     return await audio_controller.upload_and_process_audio_files(
-        current_user, files, device_name, source="gdrive"
+        current_user,
+        files,
+        device_name,
+        source="gdrive",
+        annotation_only=annotation_only,
+    )
+
+
+@router.post("/upload_audio_from_gdrive/annotation")
+async def upload_audio_from_drive_folder_for_annotation(
+    gdrive_folder_id: str = Query(..., description="Google Drive folder ID"),
+    current_user: User = Depends(current_superuser),
+    device_name: str = Query(default="annotation-import"),
+):
+    """Import a Drive folder into the annotation workspace without memory writes."""
+    return await upload_audio_from_drive_folder(
+        gdrive_folder_id=gdrive_folder_id,
+        current_user=current_user,
+        device_name=device_name,
+        annotation_only=True,
     )
 
 
@@ -444,6 +467,10 @@ async def upload_audio_files(
     device_name: str = Query(
         default="upload", description="Device name for uploaded files"
     ),
+    annotation_only: bool = Query(
+        default=False,
+        description="Create editable annotation records without memory extraction",
+    ),
 ):
     """
     Upload and process audio files. Admin only.
@@ -456,5 +483,23 @@ async def upload_audio_files(
         - Summary of enqueued vs failed uploads
     """
     return await audio_controller.upload_and_process_audio_files(
-        current_user, files, device_name
+        current_user, files, device_name, annotation_only=annotation_only
+    )
+
+
+@router.post("/upload/annotation")
+async def upload_audio_files_for_annotation(
+    files: list[UploadFile] = File(...),
+    current_user: User = Depends(current_superuser),
+    device_name: str = Query(
+        default="annotation-upload",
+        description="Device name for annotation workspace uploads",
+    ),
+):
+    """Transcribe raw audio into the annotation workspace without memory writes."""
+    return await audio_controller.upload_and_process_audio_files(
+        current_user,
+        files,
+        device_name,
+        annotation_only=True,
     )

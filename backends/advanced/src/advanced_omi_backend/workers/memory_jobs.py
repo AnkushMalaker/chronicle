@@ -13,6 +13,7 @@ Supports two processing pathways:
 """
 
 import logging
+import re
 import time
 from typing import Any, Dict, List
 
@@ -45,6 +46,76 @@ from advanced_omi_backend.users import get_user_by_id
 logger = logging.getLogger(__name__)
 
 MIN_CONVERSATION_LENGTH = 10
+_OVERLAP_TOKEN = re.compile(r"[^\w']+")
+
+
+def _normalise_overlap_token(token: str) -> str:
+    return _OVERLAP_TOKEN.sub("", token).casefold()
+
+
+def _trim_repeated_prefix(previous: str, current: str) -> str:
+    """Remove a repeated word suffix/prefix caused by overlapping ASR windows."""
+    previous_words = previous.split()
+    current_words = current.split()
+    limit = min(len(previous_words), len(current_words), 80)
+    for size in range(limit, 2, -1):
+        left = [_normalise_overlap_token(word) for word in previous_words[-size:]]
+        right = [_normalise_overlap_token(word) for word in current_words[:size]]
+        if left == right and all(left):
+            return " ".join(current_words[size:]).strip()
+    return current.strip()
+
+
+def build_memory_transcript(
+    segments: list, raw_transcript: str | None
+) -> tuple[str, set[str]]:
+    """Build bounded, speaker-labelled memory input from transcript segments.
+
+    Provider window overlap is trimmed only for temporally adjacent speech segments.
+    If the resulting segment text is still much larger than the durable raw transcript,
+    the raw transcript wins so duplicated windows cannot multiply LLM input and facts.
+    """
+    dialogue_lines: list[str] = []
+    transcript_speakers: set[str] = set()
+    previous_speech_text = ""
+    previous_speech_end: float | None = None
+
+    for segment in sorted(segments or [], key=lambda item: (item.start, item.end)):
+        text = segment.text.strip()
+        speaker = segment.speaker
+        seg_type = getattr(segment, "segment_type", "speech")
+        if not text:
+            continue
+        if seg_type == "event":
+            dialogue_lines.append(f"[{text}]" if not text.startswith("[") else text)
+            continue
+        if seg_type == "note":
+            dialogue_lines.append(f"[Note: {text}]")
+            continue
+
+        if (
+            previous_speech_end is not None
+            and segment.start <= previous_speech_end + 1.5
+        ):
+            text = _trim_repeated_prefix(previous_speech_text, text)
+        if text:
+            dialogue_lines.append(f"{speaker}: {text}")
+        previous_speech_text = segment.text.strip()
+        previous_speech_end = segment.end
+        if speaker and not speaker.casefold().startswith("unknown"):
+            transcript_speakers.add(speaker.strip().lower())
+
+    assembled = "\n".join(dialogue_lines)
+    raw = raw_transcript.strip() if isinstance(raw_transcript, str) else ""
+    if raw and len(assembled) > max(int(len(raw) * 1.75), len(raw) + 1000):
+        logger.warning(
+            "Memory transcript segments amplified source text (%d vs %d chars); "
+            "using raw transcript",
+            len(assembled),
+            len(raw),
+        )
+        return raw, transcript_speakers
+    return assembled, transcript_speakers
 
 
 def compute_speaker_diff(
@@ -165,6 +236,20 @@ async def process_memory_job(
         logger.warning(f"No conversation found for {conversation_id}")
         return {"success": False, "error": "Conversation not found"}
 
+    # This is the final safety boundary. Scheduling paths should avoid enqueueing
+    # memory work for annotation datasets, but a stale or manual job must still be
+    # unable to mutate the user's vault.
+    if conversation_model.memory_excluded:
+        logger.info(
+            f"Skipping memory processing for excluded conversation {conversation_id}"
+        )
+        return {
+            "success": True,
+            "skipped": True,
+            "reason": "memory_excluded",
+            "conversation_id": conversation_id,
+        }
+
     # Get client_id, user_id, and user_email from conversation/user
     client_id = conversation_model.client_id
     user_id = conversation_model.user_id
@@ -181,30 +266,10 @@ async def process_memory_job(
         f"🔄 Processing memory for conversation {conversation_id}, client={client_id}, user={user_id}"
     )
 
-    # Extract conversation text and speakers from transcript segments in a single pass
-    dialogue_lines = []
-    transcript_speakers = set()
-    segments = conversation_model.segments
-    if segments:
-        for segment in segments:
-            text = segment.text.strip()
-            speaker = segment.speaker
-            seg_type = getattr(segment, "segment_type", "speech")
-            if text:
-                if seg_type == "event":
-                    # Non-speech event: include as context marker without speaker prefix
-                    dialogue_lines.append(
-                        f"[{text}]" if not text.startswith("[") else text
-                    )
-                elif seg_type == "note":
-                    # User-inserted note: include as distinct context
-                    dialogue_lines.append(f"[Note: {text}]")
-                else:
-                    # Normal speech segment
-                    dialogue_lines.append(f"{speaker}: {text}")
-            if speaker and speaker != "Unknown" and seg_type == "speech":
-                transcript_speakers.add(speaker.strip().lower())
-    full_conversation = "\n".join(dialogue_lines)
+    full_conversation, transcript_speakers = build_memory_transcript(
+        conversation_model.segments,
+        conversation_model.transcript,
+    )
 
     # Fallback: if segments have no text content but transcript exists, use transcript
     # This handles cases where speaker recognition fails/is disabled
@@ -282,6 +347,13 @@ async def process_memory_job(
                     user_id,
                     user_email,
                     allow_update=True,
+                    source_date=conversation_model.created_at.isoformat(),
+                    source_duration_minutes=(
+                        conversation_model.audio_total_duration / 60
+                        if conversation_model.audio_total_duration is not None
+                        else None
+                    ),
+                    source_title=conversation_model.title,
                 )
     except Exception as e:
         logger.error(
@@ -537,6 +609,9 @@ def enqueue_memory_processing(
     *,
     cause: MemoryCause = MemoryCause.AUTO_EXTRACTION,
     strategy: UpdateStrategy = UpdateStrategy.FULL,
+    depends_on=None,
+    job_id: str | None = None,
+    job_timeout: int | None = None,
 ):
     """
     Enqueue a memory processing job.
@@ -560,12 +635,14 @@ def enqueue_memory_processing(
     # job_id uses [:12] to match the deterministic id the post-conversation chain and
     # _clear_post_conversation_chain use — so a standalone re-enqueue collides with
     # (replaces) the chain's memory job rather than creating an orphan twin.
+    resolved_job_id = job_id or f"memory_{conversation_id[:12]}"
+    resolved_timeout = job_timeout or timeout_mapping.get(priority, 1800)
     job = memory_queue.enqueue(
         process_memory_job,
         conversation_id,  # Only argument needed - job fetches conversation data internally
-        job_timeout=timeout_mapping.get(priority, 1800),
+        job_timeout=resolved_timeout,
         result_ttl=JOB_RESULT_TTL,
-        job_id=f"memory_{conversation_id[:12]}",
+        job_id=resolved_job_id,
         description=f"Process memory for conversation {conversation_id[:8]}",
         **post_conv_enqueue_kwargs(
             "memory",
@@ -574,6 +651,7 @@ def enqueue_memory_processing(
                 "cause": cause.value,
                 "strategy": strategy.value,
             },
+            depends_on=depends_on,
         ),
     )
 

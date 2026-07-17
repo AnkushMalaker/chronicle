@@ -15,12 +15,18 @@ how the vault is shaped lives in the memory agent's prompts (see ``..agent``).
 
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
 from ..audit import record_vault_change
 from ..base import MemoryEntry, MemoryServiceBase
 from ..config import MemoryConfig
+from ..conversation_note import (
+    ConversationNoteError,
+    canonicalize_conversation_note,
+    write_source_fallback_conversation_note,
+)
 from ..vault_manager import ConvDocVaultManager
 from ..vault_scaffold import is_scaffold_note, seed_vault_scaffold
 
@@ -52,6 +58,29 @@ class MemoryService(MemoryServiceBase):
         self._initialized = True
         memory_logger.info("✅ Chronicle memory service initialized (agentic vault).")
 
+    def _agent_class(self):
+        """The write-agent executor: the built-in tool loop, or the Codex CLI.
+
+        Falls back to the direct agent (with a warning) when Codex is configured but
+        the CLI/auth is unavailable, so memory jobs keep flowing.
+        """
+        # Lazy import: circular dependency (agent → memory_agent → llm_client →
+        # services.memory.config → service_factory → this module)
+        from ..agent import MemoryAgent
+
+        if (getattr(self.config, "agent_executor", "direct") or "direct") == "codex":
+            from ..agent.codex_agent import CodexMemoryAgent, codex_executor_available
+
+            available, detail = codex_executor_available()
+            if available:
+                return CodexMemoryAgent
+            memory_logger.warning(
+                "memory.agent_executor is 'codex' but the executor is unavailable "
+                "(%s) — using the direct LLM agent",
+                detail,
+            )
+        return MemoryAgent
+
     # =========================================================================
     # ADD MEMORY
     # =========================================================================
@@ -65,12 +94,30 @@ class MemoryService(MemoryServiceBase):
         user_email: str,
         allow_update: bool = False,
         db_helper: Any = None,
+        *,
+        source_date: Optional[str] = None,
+        source_duration_minutes: Optional[float] = None,
+        source_title: Optional[str] = None,
     ) -> Tuple[bool, List[str]]:
         await self._ensure_initialized()
-        return await self._add_memory_agent(transcript, source_id, user_id)
+        return await self._add_memory_agent(
+            transcript,
+            source_id,
+            user_id,
+            source_date=source_date,
+            source_duration_minutes=source_duration_minutes,
+            source_title=source_title,
+        )
 
     async def _add_memory_agent(
-        self, transcript: str, source_id: str, user_id: str
+        self,
+        transcript: str,
+        source_id: str,
+        user_id: str,
+        *,
+        source_date: Optional[str] = None,
+        source_duration_minutes: Optional[float] = None,
+        source_title: Optional[str] = None,
     ) -> Tuple[bool, List[str]]:
         """Write path via the tool-calling memory agent.
 
@@ -79,10 +126,6 @@ class MemoryService(MemoryServiceBase):
         vault-relative note paths stand in for the chunk/memory ids the older index
         path returned, so the existing job bookkeeping (counts, versions) works unchanged.
         """
-        # Lazy import: circular dependency (agent → memory_agent → llm_client →
-        # services.memory.config → service_factory → this module)
-        from ..agent import MemoryAgent
-
         if not transcript or len(transcript.strip()) < 10:
             memory_logger.info(f"Skipping empty transcript for {source_id}")
             return True, []
@@ -94,8 +137,15 @@ class MemoryService(MemoryServiceBase):
         # per-user vault_note_lock (lock-write-unlock, never across LLM calls).
         seed_vault_scaffold(user_root)  # idempotent: .base + hub notes
         existing_before = self._vault_note_set(user_root)
-        agent = MemoryAgent(user_root)
-        result = await agent.run(transcript, source_id)
+        result = await self._run_agent_with_note_guarantee(
+            self._agent_class(),
+            user_root,
+            transcript,
+            source_id,
+            source_date=source_date,
+            source_duration_minutes=source_duration_minutes,
+            source_title=source_title,
+        )
         if (result.truncated or result.stalled) and not result.touched:
             reason = (
                 "truncated LLM response" if result.truncated else "stalled retry loop"
@@ -110,6 +160,21 @@ class MemoryService(MemoryServiceBase):
                 time.perf_counter() - t0,
             )
             return False, []
+        await self._record_agent_touches(
+            user_id,
+            source_id,
+            user_root,
+            result.touched,
+            existing_before,
+            removed=result.removed,
+        )
+        expected_note = user_root / "Conversations" / f"{Path(source_id).name}.md"
+        if not expected_note.is_file():
+            memory_logger.error(
+                "❌ add_memory(agent) %s: required conversation note was not created",
+                source_id,
+            )
+            return False, result.touched
         memory_logger.info(
             "✅ add_memory(agent) %s: touched=%d rounds=%d tools=%d errors=%d (%.2fs) — %s",
             source_id,
@@ -120,10 +185,116 @@ class MemoryService(MemoryServiceBase):
             time.perf_counter() - t0,
             result.summary[:160],
         )
-        await self._record_agent_touches(
-            user_id, source_id, user_root, result.touched, existing_before
-        )
         return True, result.touched
+
+    async def _run_agent_with_note_guarantee(
+        self,
+        agent_class,
+        user_root: Path,
+        transcript: str,
+        source_id: str,
+        *,
+        guidance: str = "",
+        source_date: Optional[str] = None,
+        source_duration_minutes: Optional[float] = None,
+        source_title: Optional[str] = None,
+    ):
+        """Retry when the exact conversation note is absent or fails validation."""
+        trusted_date = source_date or datetime.now(timezone.utc).isoformat()
+        result = await agent_class(user_root).run(
+            transcript,
+            source_id,
+            date=trusted_date,
+            duration_minutes=source_duration_minutes,
+            title=source_title,
+            guidance=guidance,
+        )
+        note_name = Path(source_id).name
+        expected_note = user_root / "Conversations" / f"{note_name}.md"
+        if self._canonicalize_conversation_note(
+            expected_note,
+            source_id,
+            trusted_date,
+            source_duration_minutes,
+            source_title,
+        ):
+            return result
+
+        memory_logger.warning(
+            "Memory agent did not create Conversations/%s.md; retrying with the "
+            "configured fallback LLM",
+            note_name,
+        )
+        recovery_guidance = (f"{guidance}\n\n" if guidance else "") + (
+            "RECOVERY REQUIREMENT: the previous attempt did not create the required "
+            f"conversation note. You MUST write it at exactly Conversations/{note_name}.md "
+            f"using conversation_id {source_id}. Do not alter or abbreviate the ID. "
+            "The Summary and Key Facts sections MUST contain substantive text. For a "
+            "short or low-information transcript, summarize the exact utterance rather "
+            "than leaving either section blank."
+        )
+        recovery = await agent_class(user_root, force_fallback=True).run(
+            transcript,
+            source_id,
+            date=trusted_date,
+            duration_minutes=source_duration_minutes,
+            title=source_title,
+            guidance=recovery_guidance,
+        )
+        recovery.rounds += result.rounds
+        recovery.tool_calls += result.tool_calls
+        recovery.touched = list(dict.fromkeys((*result.touched, *recovery.touched)))
+        recovery.removed = [*result.removed, *recovery.removed]
+        recovery.errors = [*result.errors, *recovery.errors]
+        recovery_valid = self._canonicalize_conversation_note(
+            expected_note,
+            source_id,
+            trusted_date,
+            source_duration_minutes,
+            source_title,
+        )
+        if not recovery_valid:
+            memory_logger.warning(
+                "Both memory-agent attempts produced an invalid note for %s; "
+                "writing a source-preserving fallback",
+                source_id,
+            )
+            write_source_fallback_conversation_note(
+                expected_note,
+                transcript=transcript,
+                conversation_id=source_id,
+                date=trusted_date,
+                duration_minutes=source_duration_minutes,
+                title=source_title,
+            )
+            recovery.touched = list(
+                dict.fromkeys((*recovery.touched, f"Conversations/{note_name}.md"))
+            )
+        return recovery
+
+    @staticmethod
+    def _canonicalize_conversation_note(
+        path: Path,
+        source_id: str,
+        source_date: str,
+        source_duration_minutes: Optional[float],
+        source_title: Optional[str],
+    ) -> bool:
+        if not path.is_file():
+            return False
+        try:
+            canonicalize_conversation_note(
+                path,
+                conversation_id=source_id,
+                date=source_date,
+                duration_minutes=source_duration_minutes,
+                title=source_title,
+            )
+            return True
+        except ConversationNoteError as exc:
+            memory_logger.warning("Invalid conversation note %s: %s", path, exc)
+            path.unlink(missing_ok=True)
+            return False
 
     async def _reprocess_memory_agent(
         self,
@@ -140,10 +311,6 @@ class MemoryService(MemoryServiceBase):
         backlinks) instead of leaving orphaned ``[[Speaker 0]]`` notes. Person/topic notes
         are kept and surgically updated — only the conversation note is regenerated.
         """
-        # Lazy import: circular dependency (agent → memory_agent → llm_client →
-        # services.memory.config → service_factory → this module)
-        from ..agent import MemoryAgent
-
         if not transcript or len(transcript.strip()) < 10:
             memory_logger.info(f"Skipping empty transcript for {source_id}")
             return True, []
@@ -163,8 +330,13 @@ class MemoryService(MemoryServiceBase):
         if conv_note.exists():
             conv_note.unlink()
 
-        agent = MemoryAgent(user_root)
-        result = await agent.run(transcript, source_id, guidance=guidance)
+        result = await self._run_agent_with_note_guarantee(
+            self._agent_class(),
+            user_root,
+            transcript,
+            source_id,
+            guidance=guidance,
+        )
         if result.truncated and not result.touched:
             memory_logger.error(
                 "❌ reprocess_memory(agent) %s: aborted on truncated LLM response after "
@@ -175,6 +347,20 @@ class MemoryService(MemoryServiceBase):
                 time.perf_counter() - t0,
             )
             return False, []
+        await self._record_agent_touches(
+            user_id,
+            source_id,
+            user_root,
+            result.touched,
+            existing_before,
+            removed=result.removed,
+        )
+        if not conv_note.is_file():
+            memory_logger.error(
+                "❌ reprocess_memory(agent) %s: required conversation note was not created",
+                source_id,
+            )
+            return False, result.touched
         memory_logger.info(
             "✅ reprocess_memory(agent) %s: touched=%d rounds=%d tools=%d errors=%d (%.2fs) — %s",
             source_id,
@@ -185,16 +371,21 @@ class MemoryService(MemoryServiceBase):
             time.perf_counter() - t0,
             result.summary[:160],
         )
-        await self._record_agent_touches(
-            user_id, source_id, user_root, result.touched, existing_before
-        )
         return True, result.touched
 
-    def _vault_note_set(self, user_root: Path) -> set:
-        """Vault-relative paths of all notes currently on disk (for create/update audit)."""
+    def _vault_note_set(self, user_root: Path) -> dict[str, str]:
+        """Snapshot vault-relative note contents for create/update audit records."""
         if not user_root.exists():
-            return set()
-        return {p.relative_to(user_root).as_posix() for p in user_root.rglob("*.md")}
+            return {}
+        snapshot: dict[str, str] = {}
+        for path in user_root.rglob("*.md"):
+            try:
+                snapshot[path.relative_to(user_root).as_posix()] = path.read_text(
+                    encoding="utf-8"
+                )
+            except OSError:
+                continue
+        return snapshot
 
     async def _record_agent_touches(
         self,
@@ -202,9 +393,28 @@ class MemoryService(MemoryServiceBase):
         source_id: str,
         user_root: Path,
         touched: Iterable[str],
-        existing_before: set,
+        existing_before: dict[str, str],
+        removed: Optional[Iterable[dict]] = None,
     ) -> None:
-        """Record one audit-ledger entry per note the memory agent changed."""
+        """Record one audit-ledger entry per note the memory agent changed.
+
+        ``removed`` are notes retired by a rename/merge (``VaultTools.removed``): each
+        is logged as a ``rename`` entry carrying the pre-removal content, so a note
+        disappearing from the vault is never invisible in the ledger (the gap that made
+        a rename look like an unexplained clobber followed later by a fresh ``create``).
+        """
+        for entry in removed or ():
+            await record_vault_change(
+                user_id=user_id,
+                conversation_id=source_id,
+                operation="rename",
+                note_path=entry.get("old_path"),
+                before=entry.get("before"),
+                after=None,
+                agent_mode=True,
+                summary=f"renamed/merged into {entry.get('new_path')}",
+                new_path=entry.get("new_path"),
+            )
         for rel in sorted(touched):
             try:
                 after: Optional[str] = (user_root / rel).read_text(encoding="utf-8")
@@ -216,6 +426,7 @@ class MemoryService(MemoryServiceBase):
                 conversation_id=source_id,
                 operation="create" if is_new else "update",
                 note_path=rel,
+                before=existing_before.get(rel),
                 after=after,
                 agent_mode=True,
                 summary=(

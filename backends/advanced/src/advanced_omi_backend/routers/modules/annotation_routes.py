@@ -60,6 +60,11 @@ def _apply_diarization_label(segment, corrected_speaker: str) -> None:
         segment.segment_type = Conversation.SegmentType.EVENT.value
 
 
+def _should_reprocess_memory(conversation: Conversation) -> bool:
+    """False for annotation/training imports that are explicitly excluded from memory."""
+    return not getattr(conversation, "memory_excluded", False)
+
+
 @router.get("/suggestions")
 async def get_pending_suggestions(
     current_user: User = Depends(current_active_user),
@@ -1090,15 +1095,21 @@ async def apply_diarization_annotations(
             annotation.processed_by = "apply"
             await annotation.save()
 
-        # Chain memory reprocessing. Diarization-only edits change speaker
-        # attribution, so use the same speaker-diff strategy as a speaker
-        # reprocess (it falls back to a full re-extraction if no diff applies).
-        enqueue_memory_processing(
-            conversation_id=conversation_id,
-            priority=JobPriority.NORMAL,
-            cause=MemoryCause.ANNOTATION_APPLY,
-            strategy=UpdateStrategy.SPEAKER_DIFF,
-        )
+        # Chain memory reprocessing unless this is an annotation/training import.
+        # Diarization-only edits change speaker attribution, so use the same
+        # speaker-diff strategy as a speaker reprocess (it falls back to full
+        # re-extraction if no diff applies).
+        if _should_reprocess_memory(conversation):
+            enqueue_memory_processing(
+                conversation_id=conversation_id,
+                priority=JobPriority.NORMAL,
+                cause=MemoryCause.ANNOTATION_APPLY,
+                strategy=UpdateStrategy.SPEAKER_DIFF,
+            )
+        else:
+            logger.info(
+                f"Skipping memory reprocessing for memory-excluded conversation {conversation_id[:8]}"
+            )
 
         return JSONResponse(
             content={
@@ -1337,14 +1348,20 @@ async def apply_all_annotations(
             annotation.status = AnnotationStatus.ACCEPTED
             await annotation.save()
 
-        # Trigger memory reprocessing (once for all changes). Combined apply may
-        # change transcript text as well as speakers, so re-extract in full.
-        enqueue_memory_processing(
-            conversation_id=conversation_id,
-            priority=JobPriority.NORMAL,
-            cause=MemoryCause.ANNOTATION_APPLY,
-            strategy=UpdateStrategy.FULL,
-        )
+        # Trigger memory reprocessing (once for all changes) unless this is an
+        # annotation/training import. Combined apply may change transcript text as
+        # well as speakers, so re-extract in full for normal conversations.
+        if _should_reprocess_memory(conversation):
+            enqueue_memory_processing(
+                conversation_id=conversation_id,
+                priority=JobPriority.NORMAL,
+                cause=MemoryCause.ANNOTATION_APPLY,
+                strategy=UpdateStrategy.FULL,
+            )
+        else:
+            logger.info(
+                f"Skipping memory reprocessing for memory-excluded conversation {conversation_id[:8]}"
+            )
 
         return JSONResponse(
             content={

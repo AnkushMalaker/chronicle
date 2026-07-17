@@ -27,6 +27,8 @@ interface WaveformRegionEditorProps {
   onCancel: () => void
   /** Audition the current region. */
   onPlay?: (region: Region) => void
+  /** Place the playhead at a clicked time and start playback. Drag gestures do not fire this. */
+  onSeekPlay?: (time: number, region: Region | null) => void
   /**
    * Picker mode: no own commit buttons — just a region selector. Fires `onChange`
    * whenever the region changes; an external form (the insert menu) does the commit.
@@ -41,6 +43,8 @@ interface WaveformRegionEditorProps {
    */
   commitMode?: 'self' | 'linked'
   height?: number
+  /** Absolute conversation time supplied by an external audio player. */
+  playheadTime?: number | null
 }
 
 const EDGE_PX = 7 // hit zone for grabbing a region edge
@@ -75,16 +79,19 @@ export const WaveformRegionEditor: React.FC<WaveformRegionEditorProps> = ({
   addLabel = '+ New',
   onCancel,
   onPlay,
+  onSeekPlay,
   pickerMode = false,
   onChange,
   commitMode = 'self',
   height = 96,
+  playheadTime,
 }) => {
   const ownCommit = !pickerMode && commitMode === 'self'
   const { data, loading, error } = useWaveformData(conversationId)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   // Live playback position (so the playhead moves while playing, even when zoomed in).
-  const currentTime = usePlayheadTime(conversationId)
+  const sharedCurrentTime = usePlayheadTime(conversationId)
+  const currentTime = playheadTime !== undefined ? playheadTime : sharedCurrentTime
   const playheadRef = useRef<number | null>(currentTime ?? null)
 
   // view = visible [t0,t1] window; region = current selection (null = free-select mode).
@@ -114,8 +121,8 @@ export const WaveformRegionEditor: React.FC<WaveformRegionEditorProps> = ({
     onChange?.(r)
   }
 
-  const dragRef = useRef<{ mode: DragMode; anchorT: number; offset: number; panT0: number; panX: number }>(
-    { mode: null, anchorT: 0, offset: 0, panT0: 0, panX: 0 }
+  const dragRef = useRef<{ mode: DragMode; anchorT: number; offset: number; panT0: number; panX: number; downX: number; moved: boolean }>(
+    { mode: null, anchorT: 0, offset: 0, panT0: 0, panX: 0, downX: 0, moved: false }
   )
 
   // Smooth auto-zoom from the full clip down to the segment (or to the focus time, in
@@ -279,6 +286,8 @@ export const WaveformRegionEditor: React.FC<WaveformRegionEditorProps> = ({
     const t = xToTime(x, rect.width)
     const r = regionRef.current
     const d = dragRef.current
+    d.downX = x
+    d.moved = false
 
     if (r) {
       const xs = timeToX(r.start, rect.width)
@@ -306,6 +315,7 @@ export const WaveformRegionEditor: React.FC<WaveformRegionEditorProps> = ({
     const el = canvasRef.current!
     const rect = el.getBoundingClientRect()
     const x = clamp(e.clientX - rect.left, 0, rect.width)
+    if (Math.abs(x - d.downX) > 4) d.moved = true
     const t = clamp(xToTime(x, rect.width), 0, duration)
     const r = regionRef.current
 
@@ -333,11 +343,16 @@ export const WaveformRegionEditor: React.FC<WaveformRegionEditorProps> = ({
 
   const endDrag = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const d = dragRef.current
+    const wasClick = !d.moved
+    const el = canvasRef.current
+    const rect = el?.getBoundingClientRect()
+    const clickTime = rect ? clamp(xToTime(clamp(e.clientX - rect.left, 0, rect.width), rect.width), 0, duration) : null
     if (d.mode === 'draw') {
       const r = regionRef.current
       if (r && r.end - r.start < MIN_REGION) setRegion(null) // treat as a stray click
     }
     d.mode = null
+    if (wasClick && clickTime !== null && onSeekPlay) onSeekPlay(clickTime, regionRef.current)
     try {
       canvasRef.current?.releasePointerCapture(e.pointerId)
     } catch {
@@ -366,7 +381,7 @@ export const WaveformRegionEditor: React.FC<WaveformRegionEditorProps> = ({
           onPointerCancel={endDrag}
           className="w-full rounded bg-white/60 dark:bg-gray-900/40 touch-none select-none"
           style={{ height, cursor }}
-          title="Scroll to zoom · drag the band to move · drag edges to resize · drag outside to pan"
+          title={`${onSeekPlay ? 'Click to play from that point · ' : ''}scroll to zoom · drag the band to move · drag edges to resize · drag outside to pan`}
         />
       )}
 

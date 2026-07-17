@@ -486,6 +486,7 @@ async def get_queue_worker_details(current_user: User = Depends(current_active_u
             },
             "queues": queue_health.get("queues", {}),
             "redis_connection": queue_health.get("redis_connection", "unknown"),
+            "worker_fleet": queue_health.get("worker_fleet", {}),
         }
 
         return status

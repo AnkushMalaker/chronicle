@@ -1,8 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { Check, Plus, UserX } from 'lucide-react'
 import { useSortedSpeakers } from '../hooks/useSortedSpeakers'
-
-const UNKNOWN_SPEAKER = 'Unknown Speaker'
+import { nextUnknownSpeakerLabel } from '../utils/speakerLabels'
 
 interface SpeakerNameDropdownProps {
   currentSpeaker: string
@@ -13,6 +12,7 @@ interface SpeakerNameDropdownProps {
   annotated?: boolean
   speakerColor?: string
   recentSpeakers?: string[]
+  usedSpeakerNames?: string[]
 }
 
 export default function SpeakerNameDropdown({
@@ -22,6 +22,7 @@ export default function SpeakerNameDropdown({
   annotated = false,
   speakerColor = 'text-blue-700 dark:text-blue-300',
   recentSpeakers = [],
+  usedSpeakerNames = [],
 }: SpeakerNameDropdownProps) {
   const [isOpen, setIsOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -29,6 +30,10 @@ export default function SpeakerNameDropdown({
 
   const sortedSpeakers = useSortedSpeakers(enrolledSpeakers, searchQuery, recentSpeakers)
   const hasResults = sortedSpeakers.recent.length > 0 || sortedSpeakers.rest.length > 0
+  const unknownSpeakers = [nextUnknownSpeakerLabel(usedSpeakerNames)]
+  const matchingUnknowns = unknownSpeakers.filter((name) =>
+    !searchQuery || name.toLowerCase().includes(searchQuery.toLowerCase())
+  )
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -74,7 +79,9 @@ export default function SpeakerNameDropdown({
     </button>
   )
 
-  const canCreate = searchQuery && !enrolledSpeakers.some(s => s.name.toLowerCase() === searchQuery.toLowerCase())
+  const canCreate = searchQuery &&
+    !unknownSpeakers.some((name) => name.toLowerCase() === searchQuery.trim().toLowerCase()) &&
+    !enrolledSpeakers.some(s => s.name.toLowerCase() === searchQuery.toLowerCase())
 
   return (
     <div className="relative inline-block" ref={dropdownRef}>
@@ -103,7 +110,10 @@ export default function SpeakerNameDropdown({
               autoFocus
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
-                  if (hasResults) {
+                  const exactUnknown = unknownSpeakers.find((name) => name.toLowerCase() === searchQuery.trim().toLowerCase())
+                  if (exactUnknown) {
+                    handleSpeakerSelect(exactUnknown)
+                  } else if (hasResults) {
                     const first = sortedSpeakers.recent[0] || sortedSpeakers.rest[0]
                     if (first) handleSpeakerSelect(first.name)
                   } else if (searchQuery) {
@@ -115,20 +125,21 @@ export default function SpeakerNameDropdown({
           </div>
 
           {/* Unknown Speaker option */}
-          {(!searchQuery || UNKNOWN_SPEAKER.toLowerCase().includes(searchQuery.toLowerCase())) && (
+          {matchingUnknowns.length > 0 && (
             <div className="border-b border-gray-200 dark:border-gray-700">
-              <button
-                onClick={() => handleSpeakerSelect(UNKNOWN_SPEAKER)}
-                className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center justify-between"
-              >
-                <span className="flex items-center space-x-2 text-gray-500 dark:text-gray-400">
-                  <UserX className="h-4 w-4" />
-                  <span>{UNKNOWN_SPEAKER}</span>
-                </span>
-                {currentSpeaker === UNKNOWN_SPEAKER && (
-                  <Check className="h-4 w-4 text-green-600" />
-                )}
-              </button>
+              {matchingUnknowns.map((name) => (
+                <button
+                  key={name}
+                  onClick={() => handleSpeakerSelect(name)}
+                  className="w-full text-left px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center justify-between"
+                >
+                  <span className="flex items-center space-x-2 text-gray-500 dark:text-gray-400">
+                    <UserX className="h-4 w-4" />
+                    <span>{name}</span>
+                  </span>
+                  {currentSpeaker === name && <Check className="h-4 w-4 text-green-600" />}
+                </button>
+              ))}
             </div>
           )}
 

@@ -1240,11 +1240,83 @@ class ChronicleSetup:
 
         Chronicle's agentic Markdown vault is currently the only memory provider,
         so there is no provider choice to make — we just ensure config.yml/.env
-        record it.
+        record it, then choose how the memory agent executes.
         """
         self.config_manager.update_memory_config({"provider": "chronicle"})
         self.console.print(
             "[green][SUCCESS][/green] Memory: Chronicle agentic vault (config.yml + .env)"
+        )
+        self.setup_memory_executor()
+
+    def setup_memory_executor(self):
+        """Choose how the memory agent runs: the built-in LLM tool loop (metered
+        API calls) or the OpenAI Codex CLI on a ChatGPT subscription."""
+        self.print_section("Memory agent executor")
+        self.console.print(
+            "[blue][INFO][/blue] The memory agent records each conversation into "
+            "your vault. It can run through the configured LLM (per-call API usage) "
+            "or through the OpenAI Codex CLI, which bills against a ChatGPT "
+            "subscription instead of API keys."
+        )
+        self.console.print()
+
+        existing = (
+            self.config_manager.get_memory_config().get("agent_executor") or "direct"
+        )
+        choices = {
+            "1": "Direct LLM tool loop (uses the configured LLM's API)",
+            "2": "Codex CLI (uses your ChatGPT subscription)",
+        }
+        choice = self.prompt_choice(
+            "How should the memory agent run?",
+            choices,
+            "2" if str(existing).lower() == "codex" else "1",
+        )
+
+        if choice != "2":
+            self.config_manager.update_memory_config({"agent_executor": "direct"})
+            self.console.print(
+                "[green][SUCCESS][/green] Memory agent: direct LLM loop "
+                "(memory.agent_executor: direct)"
+            )
+            return
+
+        codex_home = Path(
+            os.environ.get("CODEX_HOME") or (Path.home() / ".codex")
+        ).expanduser()
+        auth_file = codex_home / "auth.json"
+        if not shutil.which("codex"):
+            self.console.print(
+                "[yellow][WARNING][/yellow] No `codex` CLI found on this host. The "
+                "containers ship their own binary, but you still need subscription "
+                "auth: install Codex and run `codex login` (ChatGPT sign-in), then "
+                "re-run init."
+            )
+        if auth_file.is_file():
+            self.console.print(
+                f"[green]✅[/green] Found Codex subscription auth at {auth_file}"
+            )
+        else:
+            self.console.print(
+                f"[yellow][WARNING][/yellow] No Codex auth at {auth_file} — until "
+                "`codex login` has been run on this host, the backend automatically "
+                "falls back to the direct LLM loop."
+            )
+        # The compose files mount CODEX_HOME_DIR at /codex-home inside the backend
+        # and workers containers (CODEX_HOME env) — read-write, because codex
+        # rotates the refresh tokens in auth.json.
+        self.config["CODEX_HOME_DIR"] = str(codex_home)
+        # danger-full-access: codex's own sandbox (bubblewrap) cannot run nested
+        # inside the rootless-podman containers; the container is the boundary.
+        self.config_manager.update_memory_config(
+            {
+                "agent_executor": "codex",
+                "codex": {"sandbox_mode": "danger-full-access"},
+            }
+        )
+        self.console.print(
+            "[green][SUCCESS][/green] Memory agent: Codex CLI "
+            f"(memory.agent_executor: codex; {codex_home} mounted into the containers)"
         )
 
     def setup_optional_services(self):

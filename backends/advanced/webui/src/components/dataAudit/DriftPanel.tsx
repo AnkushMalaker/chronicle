@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react'
-import { ChevronDown, ChevronRight, Waypoints, RefreshCw } from 'lucide-react'
-import { conversationsApi } from '../../services/api'
+import { ChevronDown, ChevronRight, DatabaseZap, RefreshCw, Waypoints } from 'lucide-react'
+import { conversationsApi, dataAuditApi } from '../../services/api'
 
 interface Transition { from: string | null; to: string | null; count: number }
 interface DriftConversation {
@@ -18,6 +18,7 @@ interface DriftReport {
   no_centroid_data: number
   similarity_threshold: number | null
 }
+interface BackfillResult { backfilled: number; skipped: number; failed: number }
 
 const lbl = (s: string | null) => s || 'Unknown'
 
@@ -36,6 +37,9 @@ export default function DriftPanel() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [reprocessed, setReprocessed] = useState<Set<string>>(new Set())
+  const [backfilling, setBackfilling] = useState(false)
+  const [backfillProgress, setBackfillProgress] = useState<string | null>(null)
+  const [backfillResult, setBackfillResult] = useState<BackfillResult | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -65,6 +69,39 @@ export default function DriftPanel() {
       setError(`Failed to queue reprocess for ${id.slice(0, 8)}`)
     } finally {
       setBusy(null)
+    }
+  }
+
+  const backfill = async () => {
+    setBackfilling(true)
+    setBackfillProgress('Queueing cluster-embedding backfill…')
+    setBackfillResult(null)
+    setError(null)
+    try {
+      const queued = await conversationsApi.backfillDriftClusterEmbeddings()
+      const jobId = queued.data.job_id
+      while (true) {
+        const statusResponse = await dataAuditApi.getJobStatus(jobId)
+        const { status, batch_progress: progress } = statusResponse.data
+        setBackfillProgress(
+          progress?.message || (status === 'queued' ? 'Waiting for a worker…' : 'Backfilling…')
+        )
+        if (status === 'finished') {
+          const resultResponse = await dataAuditApi.getJobResult<BackfillResult>(jobId)
+          setBackfillResult(resultResponse.data.result)
+          await load()
+          break
+        }
+        if (status === 'failed' || status === 'canceled' || status === 'stopped') {
+          throw new Error(`Backfill job ${status}`)
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 1500))
+      }
+    } catch {
+      setError('Cluster-embedding backfill failed')
+    } finally {
+      setBackfilling(false)
+      setBackfillProgress(null)
     }
   }
 
@@ -115,17 +152,38 @@ export default function DriftPanel() {
           {error && <p className="text-sm text-red-600">{error}</p>}
 
           {data && data.no_centroid_data > 0 && (
-            <p className="text-[11px] text-amber-600 dark:text-amber-400">
-              {data.no_centroid_data} conversations have no stored cluster embeddings yet and
-              can't be analyzed (run the cluster-embedding backfill to cover them).
+            <div className="flex flex-wrap items-center gap-2 text-[11px] text-amber-600 dark:text-amber-400">
+              <span>
+                {data.no_centroid_data} conversations have no stored cluster embeddings yet and
+                can't be analyzed.
+              </span>
+              <button
+                onClick={backfill}
+                disabled={backfilling}
+                className="inline-flex items-center gap-1.5 rounded bg-amber-100 px-2.5 py-1 font-medium text-amber-800 hover:bg-amber-200 disabled:opacity-50 dark:bg-amber-900/40 dark:text-amber-200 dark:hover:bg-amber-900/60"
+              >
+                <DatabaseZap className={`h-3 w-3 ${backfilling ? 'animate-pulse' : ''}`} />
+                {backfilling ? 'Backfilling…' : `Backfill ${data.no_centroid_data}`}
+              </button>
+              {backfillProgress && <span>{backfillProgress}</span>}
+            </div>
+          )}
+
+          {backfillResult && (
+            <p className={`text-[11px] ${backfillResult.failed ? 'text-amber-600 dark:text-amber-400' : 'text-green-600 dark:text-green-400'}`}>
+              Backfill complete: {backfillResult.backfilled} added, {backfillResult.skipped} skipped,
+              {' '}{backfillResult.failed} failed. Drift analysis refreshed.
             </p>
           )}
 
-          {data && data.total_drifted === 0 && !loading && (
-            <p className="text-sm text-green-600 dark:text-green-400">
-              No drift — every analyzable conversation still matches the current gallery.
-            </p>
-          )}
+          {data &&
+            data.total_drifted === 0 &&
+            data.conversations_scanned > data.no_centroid_data &&
+            !loading && (
+              <p className="text-sm text-green-600 dark:text-green-400">
+                No drift — every analyzable conversation still matches the current gallery.
+              </p>
+            )}
 
           {data && data.total_drifted > 0 && (
             <div className="overflow-x-auto">

@@ -38,8 +38,9 @@ class MemoryAuditEntry(Document):
     cause: Optional[str] = Field(
         None,
         description="Why the memory changed (provenance), one of MemoryCause: "
-        "auto_extraction, memory_replay, transcript_reprocess, speaker_reprocess, "
-        "annotation_apply, obsidian_sync, delete_all. See services/memory/audit.py.",
+        "auto_extraction, memory_replay, memory_rebuild, transcript_reprocess, "
+        "speaker_reprocess, annotation_apply, obsidian_sync, delete_all. "
+        "See services/memory/audit.py.",
     )
     strategy: Optional[str] = Field(
         None,

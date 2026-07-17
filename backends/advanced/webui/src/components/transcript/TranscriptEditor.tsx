@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Play, Pause, X, Check, RefreshCw, Trash2, Eye, EyeOff, Plus } from 'lucide-react'
+import { Play, Pause, X, Check, RefreshCw, Trash2, Eye, EyeOff, Plus, Users, AlignLeft, Infinity, Scissors, ChevronLeft, ChevronRight } from 'lucide-react'
 import { annotationsApi } from '../../services/api'
 import { useGaplessPlayer } from '../../hooks/useGaplessPlayer'
 import SpeakerNameDropdown from '../SpeakerNameDropdown'
+import SpeakerInlineInput from '../SpeakerInlineInput'
 import { PlayheadWaveform, PlayheadTimeLabel } from '../audio/PlayheadWaveform'
 import { WaveformRegionEditor, Region } from '../audio/WaveformRegionEditor'
 import InsertSegmentForm from './InsertSegmentForm'
@@ -42,6 +43,8 @@ const SPEAKER_COLOR_PALETTE = [
   'text-amber-700 dark:text-amber-300',
   'text-indigo-700 dark:text-indigo-300',
 ]
+
+const SPEAKER_HEX_PALETTE = ['#2563eb', '#059669', '#9333ea', '#ea580c', '#db2777', '#0891b2', '#d97706', '#4f46e5']
 
 const formatDuration = (seconds: number) => {
   const m = Math.floor(seconds / 60)
@@ -99,6 +102,15 @@ export default function TranscriptEditor({
   const [preview, setPreview] = useState(false)
   const [applying, setApplying] = useState(false)
   const [clearing, setClearing] = useState(false)
+  const [annotationMode, setAnnotationMode] = useState<'transcript' | 'speakers'>('transcript')
+  const [selectedSpeakerSegment, setSelectedSpeakerSegment] = useState<number | null>(null)
+  const [continuePastSegment, setContinuePastSegment] = useState(false)
+  const [autoPlayOnClick, setAutoPlayOnClick] = useState(false)
+  const [speakerCreationMode, setSpeakerCreationMode] = useState<'snip' | 'draw' | null>(null)
+  const [newSpeaker, setNewSpeaker] = useState('')
+  const [newSpeakerRegion, setNewSpeakerRegion] = useState<Region | null>(null)
+  const [speakerSnipTime, setSpeakerSnipTime] = useState<number | null>(null)
+  const [speakerFilters, setSpeakerFilters] = useState<Record<string, 'include' | 'exclude'>>({})
   // While inserting with the waveform open, the region drawn on it for the new segment.
   const [insertRegion, setInsertRegion] = useState<Region | null>(null)
   // Whether the insert menu drives the top waveform (draw the new segment's span).
@@ -142,6 +154,15 @@ export default function TranscriptEditor({
     return list
   }, [enrolledSpeakers, diar])
 
+  const usedSpeakerNames = useMemo(() => {
+    const names = new Set(segments.map((segment) => segment.speaker).filter((name): name is string => !!name))
+    pendingDiar.forEach((annotation) => names.add(annotation.corrected_speaker))
+    pendingInsert.forEach((annotation) => {
+      if (annotation.insert_speaker) names.add(annotation.insert_speaker)
+    })
+    return [...names]
+  }, [segments, pendingDiar, pendingInsert])
+
   const speakerColorMap = useMemo(() => {
     const map: Record<string, string> = {}
     let i = 0
@@ -154,6 +175,89 @@ export default function TranscriptEditor({
     })
     return map
   }, [segments])
+
+  const speakerHexMap = useMemo(() => {
+    const map: Record<string, string> = {}
+    let i = 0
+    segments.forEach((seg, idx) => {
+      const corrected = pendingDiar.find((a) => a.segment_index === idx)?.corrected_speaker
+      const sp = corrected || seg.speaker || 'Unknown'
+      if (!map[sp]) map[sp] = SPEAKER_HEX_PALETTE[i++ % SPEAKER_HEX_PALETTE.length]
+    })
+    return map
+  }, [segments, pendingDiar])
+
+  const displaySpeakerForSegment = useCallback((segment: Segment, idx: number) => (
+    pendingDiar.find((annotation) => annotation.segment_index === idx)?.corrected_speaker
+      || segment.speaker
+      || 'Unknown'
+  ), [pendingDiar])
+
+  const transcriptSpeakers = useMemo(() => {
+    const speakers: string[] = []
+    const seen = new Set<string>()
+    segments.forEach((segment, idx) => {
+      if (segment.segment_type === 'event' || segment.segment_type === 'note') return
+      const speaker = displaySpeakerForSegment(segment, idx)
+      if (!seen.has(speaker)) {
+        seen.add(speaker)
+        speakers.push(speaker)
+      }
+    })
+    return speakers
+  }, [segments, displaySpeakerForSegment])
+
+  useEffect(() => {
+    setSpeakerFilters((current) => {
+      const available = new Set(transcriptSpeakers)
+      const next = Object.fromEntries(Object.entries(current).filter(([speaker]) => available.has(speaker))) as Record<string, 'include' | 'exclude'>
+      return Object.keys(next).length === Object.keys(current).length ? current : next
+    })
+  }, [transcriptSpeakers])
+
+  const cycleSpeakerFilter = (speaker: string) => {
+    setSpeakerFilters((current) => {
+      const next = { ...current }
+      if (!current[speaker]) next[speaker] = 'include'
+      else if (current[speaker] === 'include') next[speaker] = 'exclude'
+      else delete next[speaker]
+      return next
+    })
+  }
+
+  const speakerIsVisible = (speaker: string) => {
+    const includes = Object.entries(speakerFilters).filter(([, state]) => state === 'include').map(([name]) => name)
+    if (speakerFilters[speaker] === 'exclude') return false
+    return includes.length === 0 || includes.includes(speaker)
+  }
+
+  useEffect(() => {
+    if (selectedSpeakerSegment === null || Object.keys(speakerFilters).length === 0) return
+    const selected = segments[selectedSpeakerSegment]
+    if (!selected || !speakerIsVisible(displaySpeakerForSegment(selected, selectedSpeakerSegment))) {
+      setSelectedSpeakerSegment(null)
+    }
+  }, [speakerFilters, selectedSpeakerSegment, segments, displaySpeakerForSegment])
+
+  const speakerTimelineSegments = useMemo(
+    () => segments.flatMap((seg, idx) => {
+      if (seg.segment_type === 'event' || seg.segment_type === 'note') return []
+      const region = (() => {
+        const pending = pendingTiming.find((a) => a.segment_index === idx)
+        return pending ? { start: pending.new_start, end: pending.new_end } : seg
+      })()
+      const speaker = displaySpeakerForSegment(seg, idx)
+      if (!speakerIsVisible(speaker)) return []
+      return [{
+        start: region.start,
+        end: region.end,
+        color: speakerHexMap[speaker] || SPEAKER_HEX_PALETTE[0],
+        segmentIndex: idx,
+        label: `${speaker} · ${formatDuration(region.start)}–${formatDuration(region.end)}`,
+      }]
+    }),
+    [segments, pendingTiming, speakerHexMap, displaySpeakerForSegment, speakerFilters]
+  )
 
   // Auto-open the timing editor on the main waveform when editing a segment's text
   // (unless the user disabled waveform zoom). Closing the text edit closes it too.
@@ -375,6 +479,7 @@ export default function TranscriptEditor({
             afterIndex={afterIndex}
             allSpeakers={allSpeakers}
             recentSpeakers={recentSpeakers}
+            usedSpeakerNames={usedSpeakerNames}
             onSpeakerUsed={noteRecent}
             onDone={async () => {
               closeInsert()
@@ -403,8 +508,137 @@ export default function TranscriptEditor({
   // transcript (no scrolling back up to the player).
   const editorActive = timingEditSegment !== null || insertOpen !== null
 
+  const playFromSpeakerPoint = (time: number, region: Region | null, segmentId: string) => {
+    setSpeakerSnipTime(time)
+    if (!autoPlayOnClick) return
+    if (continuePastSegment) {
+      player.play(conversationId, time, { totalDuration: duration! })
+      return
+    }
+    if (region && time >= region.start && time < region.end) {
+      player.playSegment(conversationId, segmentId, time, region.end)
+      return
+    }
+    // With bounded playback selected, a click outside a span is positioning only.
+    // Stop any prior continuous program so it cannot appear to ignore the toggle.
+    player.pause()
+  }
+
+  const selectSpeakerSegment = (idx: number) => {
+    const segment = segments[idx]
+    if (!segment) return
+    closeSpeakerCreation()
+    setSpeakerSnipTime(null)
+    setSelectedSpeakerSegment(idx)
+    const region = regionForSegment(idx)
+    playFromSpeakerPoint(region.start, region, `${conversationId}-${idx}`)
+  }
+
+  const closeSpeakerCreation = () => {
+    setSpeakerCreationMode(null)
+    setNewSpeaker('')
+    setNewSpeakerRegion(null)
+  }
+
+  const createSpeakerSpan = async () => {
+    if (selectedSpeakerSegment === null || !newSpeaker.trim()) return
+    const idx = selectedSpeakerSegment
+    const selectedRegion = regionForSegment(idx)
+    let region: Region | null = newSpeakerRegion
+
+    if (speakerCreationMode === 'snip') {
+      const splitAt = speakerSnipTime
+      if (splitAt == null || splitAt <= selectedRegion.start + 0.05 || splitAt >= selectedRegion.end - 0.05) {
+        setRegionError('Place the red playhead inside the selected span before snipping.')
+        return
+      }
+      region = { start: splitAt, end: selectedRegion.end }
+      await handleSaveTiming(idx, { start: selectedRegion.start, end: splitAt })
+    }
+
+    if (!region || region.end - region.start < 0.05) {
+      setRegionError('Drag a speaker span on the waveform first.')
+      return
+    }
+
+    await annotationsApi.createInsertAnnotation({
+      conversation_id: conversationId,
+      insert_after_index: idx,
+      insert_text: '',
+      insert_segment_type: 'speech',
+      insert_speaker: newSpeaker.trim(),
+      insert_start: region.start,
+      insert_end: region.end,
+    })
+    noteRecent(newSpeaker.trim())
+    closeSpeakerCreation()
+    await reload()
+  }
+
   return (
     <div className="space-y-3">
+      {showAudio && (
+        <div className="flex items-center justify-between gap-3">
+          <div className="inline-flex rounded-lg bg-gray-100 dark:bg-gray-700 p-1" aria-label="Annotation mode">
+            <button
+              onClick={() => setAnnotationMode('transcript')}
+              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium ${annotationMode === 'transcript' ? 'bg-white dark:bg-gray-800 shadow text-gray-900 dark:text-white' : 'text-gray-500 dark:text-gray-300'}`}
+            >
+              <AlignLeft className="h-3.5 w-3.5" /> Transcript
+            </button>
+            <button
+              onClick={() => {
+                setAnnotationMode('speakers')
+                setEditingSegment(null)
+                setInsertOpen(null)
+              }}
+              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium ${annotationMode === 'speakers' ? 'bg-white dark:bg-gray-800 shadow text-gray-900 dark:text-white' : 'text-gray-500 dark:text-gray-300'}`}
+            >
+              <Users className="h-3.5 w-3.5" /> Edit speakers & timing
+            </button>
+          </div>
+          {annotationMode === 'speakers' && (
+            <span className="text-xs text-gray-500 dark:text-gray-400">Hover a colored span to preview it, then click to edit</span>
+          )}
+        </div>
+      )}
+
+      {transcriptSpeakers.length > 1 && (
+        <div className="flex flex-wrap items-center gap-1.5" aria-label="Filter by speaker">
+          <span className="mr-1 text-xs text-gray-500 dark:text-gray-400">Speakers:</span>
+          {transcriptSpeakers.map((speaker) => {
+            const state = speakerFilters[speaker]
+            return (
+              <button
+                key={speaker}
+                type="button"
+                onClick={() => cycleSpeakerFilter(speaker)}
+                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                  state === 'include'
+                    ? 'bg-blue-100 border-blue-400 text-blue-700 dark:bg-blue-900 dark:text-blue-100 dark:border-blue-600'
+                    : state === 'exclude'
+                      ? 'bg-red-100 border-red-400 text-red-700 line-through dark:bg-red-900/40 dark:text-red-200 dark:border-red-600'
+                      : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-100 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
+                }`}
+                title={`${speaker}: ${state || 'off'} — click to cycle`}
+              >
+                <span className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: speakerHexMap[speaker] || SPEAKER_HEX_PALETTE[0] }} />
+                {speaker}
+              </button>
+            )
+          })}
+          {Object.keys(speakerFilters).length > 0 && (
+            <button
+              type="button"
+              onClick={() => setSpeakerFilters({})}
+              className="px-2 py-1 text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Waveform — doubles as the timing editor while editing a segment */}
       {showAudio && (
         <div
@@ -414,7 +648,221 @@ export default function TranscriptEditor({
               : undefined
           }
         >
-          {timingEditSegment !== null ? (
+          {annotationMode === 'speakers' ? (
+            <div className="space-y-3">
+              <PlayheadWaveform
+                cid={conversationId}
+                duration={duration!}
+                onSeek={(t) => {
+                  playFromSpeakerPoint(t, null, `${conversationId}-overview`)
+                }}
+                height={104}
+                coloredSegments={speakerTimelineSegments}
+                onSegmentClick={selectSpeakerSegment}
+                segmentMarker={player.segmentMarker}
+                hoverMarker={selectedSpeakerSegment === null ? null : regionForSegment(selectedSpeakerSegment)}
+              />
+
+              {selectedSpeakerSegment !== null ? (() => {
+                const idx = selectedSpeakerSegment
+                const segment = segments[idx]
+                const originalSpeaker = segment.speaker || 'Unknown'
+                const diarA = pendingDiar.find((a) => a.segment_index === idx)
+                const displaySpeaker = diarA?.corrected_speaker || originalSpeaker
+                return (
+                  <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-3">
+                    <div className="flex items-center justify-between gap-3 mb-2">
+                      <div className="flex items-center gap-2">
+                        <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: speakerHexMap[displaySpeaker] }} />
+                        <SpeakerNameDropdown
+                          currentSpeaker={displaySpeaker}
+                          enrolledSpeakers={allSpeakers}
+                          onSpeakerChange={(speaker) => handleSpeakerChange(idx, originalSpeaker, speaker, segment.start)}
+                          segmentIndex={idx}
+                          conversationId={conversationId}
+                          annotated={!!diarA}
+                          speakerColor="text-gray-900 dark:text-white"
+                          recentSpeakers={recentSpeakers}
+                          usedSpeakerNames={usedSpeakerNames}
+                        />
+                        <span className="text-xs text-gray-400">Segment {idx + 1} of {segments.length}</span>
+                        <button
+                          type="button"
+                          disabled={idx <= 0}
+                          onClick={() => selectSpeakerSegment(idx - 1)}
+                          className="p-1 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 rounded disabled:opacity-30"
+                          title="Previous segment"
+                          aria-label="Previous segment"
+                        >
+                          <ChevronLeft className="h-4 w-4" />
+                        </button>
+                        <button
+                          type="button"
+                          disabled={idx >= segments.length - 1}
+                          onClick={() => selectSpeakerSegment(idx + 1)}
+                          className="p-1 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 rounded disabled:opacity-30"
+                          title="Next segment"
+                          aria-label="Next segment"
+                        >
+                          <ChevronRight className="h-4 w-4" />
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          aria-pressed={autoPlayOnClick}
+                          onClick={() => setAutoPlayOnClick((value) => !value)}
+                          className={`inline-flex items-center gap-1 rounded px-1.5 py-1 text-xs ${autoPlayOnClick ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' : 'text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+                          title={autoPlayOnClick ? 'Auto-play is on: waveform clicks start playback' : 'Auto-play is off: waveform clicks only position the snip cursor'}
+                        >
+                          <Play className="h-3.5 w-3.5" />
+                          <span className="hidden sm:inline">Auto-play</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setRegionError(null)
+                            setSpeakerCreationMode('snip')
+                            setNewSpeaker('')
+                            setNewSpeakerRegion(null)
+                          }}
+                          className={`inline-flex items-center gap-1 rounded px-1.5 py-1 text-xs ${speakerCreationMode === 'snip' ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300' : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+                          title="Split this speaker span at the red playhead"
+                        >
+                          <Scissors className="h-3.5 w-3.5" /> Snip
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setRegionError(null)
+                            setSpeakerCreationMode('draw')
+                            setNewSpeaker('')
+                            setNewSpeakerRegion(null)
+                          }}
+                          className={`inline-flex items-center gap-1 rounded px-1.5 py-1 text-xs ${speakerCreationMode === 'draw' ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300' : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+                          title="Drag a new independent or overlapping speaker span"
+                        >
+                          <Plus className="h-3.5 w-3.5" /> New span
+                        </button>
+                        <button
+                          type="button"
+                          aria-pressed={continuePastSegment}
+                          onClick={() => setContinuePastSegment((value) => {
+                            if (value) player.stop()
+                            return !value
+                          })}
+                          className={`inline-flex items-center gap-1 rounded px-1.5 py-1 text-xs ${continuePastSegment ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' : 'text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+                          title={continuePastSegment ? 'Continuous playback enabled: clicks play beyond this segment' : 'Stop at segment end: click to enable continuous playback'}
+                        >
+                          <Infinity className="h-3.5 w-3.5" />
+                          <span className="hidden sm:inline">Continue</span>
+                        </button>
+                        <button onClick={() => setSelectedSpeakerSegment(null)} className="p-1 text-gray-400 hover:text-gray-700" title="Close selection"><X className="h-4 w-4" /></button>
+                      </div>
+                    </div>
+                    <WaveformRegionEditor
+                      key={`speaker-boundary-${idx}-${regionForSegment(idx).start}-${regionForSegment(idx).end}`}
+                      conversationId={conversationId}
+                      duration={duration!}
+                      initialRegion={regionForSegment(idx)}
+                      onSaveTiming={async (region) => handleSaveTiming(idx, region)}
+                      onCancel={() => setSelectedSpeakerSegment(null)}
+                      onPlay={handlePlayRegion}
+                      onSeekPlay={(time, region) => {
+                        playFromSpeakerPoint(time, region, `${conversationId}-${idx}`)
+                      }}
+                      playheadTime={autoPlayOnClick ? undefined : speakerSnipTime}
+                      height={96}
+                    />
+                    <p className="mt-2 text-xs text-gray-500 dark:text-gray-400 line-clamp-1" title={segment.text}>
+                      Words are reference only: {segment.text || '(no transcript text)'}
+                    </p>
+
+                    {speakerCreationMode && (
+                      <div className="mt-3 rounded-lg border border-purple-200 dark:border-purple-800 bg-purple-50/60 dark:bg-purple-900/10 p-3 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-xs text-purple-700 dark:text-purple-300">
+                            {speakerCreationMode === 'snip'
+                              ? `The new speaker starts at the last point clicked in the zoomed waveform (${speakerSnipTime == null ? 'click the waveform first' : `${speakerSnipTime.toFixed(2)}s`}) and takes the remainder of this span.`
+                              : 'Drag the exact new speaker span below. It may overlap an existing speaker.'}
+                          </p>
+                          <button onClick={closeSpeakerCreation} className="p-1 text-gray-400 hover:text-gray-700" title="Cancel"><X className="h-3.5 w-3.5" /></button>
+                        </div>
+
+                        {speakerCreationMode === 'draw' && (
+                          <WaveformRegionEditor
+                            key={`new-speaker-span-${idx}`}
+                            conversationId={conversationId}
+                            duration={duration!}
+                            initialRegion={null}
+                            focusTime={speakerSnipTime ?? regionForSegment(idx).end}
+                            pickerMode
+                            onChange={setNewSpeakerRegion}
+                            onCancel={closeSpeakerCreation}
+                            onPlay={handlePlayRegion}
+                            onSeekPlay={(time, region) => {
+                              playFromSpeakerPoint(time, region, `${conversationId}-new-speaker-span`)
+                            }}
+                            playheadTime={autoPlayOnClick ? undefined : speakerSnipTime}
+                            height={88}
+                          />
+                        )}
+
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-gray-500 whitespace-nowrap">New speaker:</span>
+                          <div className="flex-1 min-w-0">
+                            <SpeakerInlineInput
+                              value={newSpeaker}
+                              onChange={setNewSpeaker}
+                              onSelect={(speaker) => {
+                                setNewSpeaker(speaker)
+                                noteRecent(speaker)
+                              }}
+                              enrolledSpeakers={allSpeakers}
+                              recentSpeakers={recentSpeakers}
+                              usedSpeakerNames={usedSpeakerNames}
+                              placeholder="Select who starts here…"
+                            />
+                          </div>
+                          <button
+                            onClick={createSpeakerSpan}
+                            disabled={!newSpeaker.trim() || (speakerCreationMode === 'draw' && !newSpeakerRegion)}
+                            className="inline-flex items-center gap-1 rounded bg-purple-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-purple-700 disabled:opacity-40"
+                          >
+                            {speakerCreationMode === 'snip' ? <Scissors className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
+                            {speakerCreationMode === 'snip' ? 'Create split' : 'Create span'}
+                          </button>
+                        </div>
+                        {regionError && <p className="text-xs text-red-500">{regionError}</p>}
+                      </div>
+                    )}
+                  </div>
+                )
+              })() : (
+                <div className="rounded-lg border border-dashed border-gray-300 dark:border-gray-600 px-3 py-5 text-center text-sm text-gray-500">
+                  Hover a colored span to see its speaker and time, then click to edit it.
+                </div>
+              )}
+
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => {
+                    if (player.isActive(conversationId) && player.isPlaying) {
+                      setAutoPlayOnClick(false)
+                      player.pause()
+                    } else {
+                      player.togglePlay(conversationId, duration!)
+                    }
+                  }}
+                  className="p-2 rounded-full bg-blue-600 hover:bg-blue-700 text-white"
+                  title={player.isActive(conversationId) && player.isPlaying ? 'Pause and disable auto-play' : 'Play'}
+                >
+                  {player.isActive(conversationId) && player.isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                </button>
+                <PlayheadTimeLabel cid={conversationId} total={duration} className="text-sm text-gray-600 dark:text-gray-400 font-mono" />
+              </div>
+            </div>
+          ) : timingEditSegment !== null ? (
             <>
               <WaveformRegionEditor
                 key={`timing-${timingEditSegment}`}
@@ -454,6 +902,7 @@ export default function TranscriptEditor({
                   afterIndex={insertOpen}
                   allSpeakers={allSpeakers}
                   recentSpeakers={recentSpeakers}
+                  usedSpeakerNames={usedSpeakerNames}
                   onSpeakerUsed={noteRecent}
                   region={insertRegion}
                   onDone={async () => {
@@ -534,14 +983,18 @@ export default function TranscriptEditor({
       )}
 
       {/* Segments */}
-      {segments.length > 0 ? (
+      {annotationMode === 'transcript' && (segments.length > 0 ? (
         <div className="space-y-0.5">
           <InsertDivider afterIndex={-1} />
           {segments.map((segment, idx) => {
             const speaker = segment.speaker || 'Unknown'
             const isEvent = segment.segment_type === 'event'
             const isNote = segment.segment_type === 'note'
-            if (hideUnknownSpeakers && !isNote && isUnknownSpeakerLabel(speaker)) return <InsertDivider key={`d${idx}`} afterIndex={idx} />
+            const displaySpeaker = displaySpeakerForSegment(segment, idx)
+            if (Object.keys(speakerFilters).length > 0 && (isEvent || isNote || !speakerIsVisible(displaySpeaker))) {
+              return null
+            }
+            if (hideUnknownSpeakers && !isNote && isUnknownSpeakerLabel(speaker)) return null
 
             const speakerColor = speakerColorMap[speaker] || SPEAKER_COLOR_PALETTE[0]
             const isEditing = editingSegment === idx
@@ -549,15 +1002,14 @@ export default function TranscriptEditor({
             const textA = pendingText.find((a) => a.segment_index === idx)
             const timingA = pendingTiming.find((a) => a.segment_index === idx)
             const delA = pendingDeletion.find((a) => a.segment_index === idx)
-            const displaySpeaker = diarA ? diarA.corrected_speaker : speaker
             const displayText = textA ? textA.corrected_text : segment.text
 
             if (isEvent || isNote) {
               return (
                 <div key={idx}>
                   <div
-                    className={`group flex items-center gap-2 py-1 px-3 rounded ${
-                      isEvent ? 'bg-yellow-50 dark:bg-yellow-900/20 border-l-2 border-yellow-400' : 'bg-green-50 dark:bg-green-900/20 border-l-2 border-green-400'
+                    className={`group flex items-center gap-2 py-1.5 px-3 rounded ${
+                      isEvent ? 'bg-amber-50 dark:bg-amber-900/25 border-l-2 border-amber-500' : 'bg-green-50 dark:bg-green-900/25 border-l-2 border-green-500'
                     }`}
                     onMouseEnter={isEvent ? () => setHoverMarker({ start: segment.start, end: segment.end }) : undefined}
                     onMouseLeave={isEvent ? () => setHoverMarker(null) : undefined}
@@ -567,8 +1019,8 @@ export default function TranscriptEditor({
                         {player.playingSegmentId === `${conversationId}-${idx}` ? <Pause className="h-3 w-3 text-yellow-600" /> : <Play className="h-3 w-3 text-yellow-600" />}
                       </button>
                     )}
-                    <span className="text-xs font-medium text-gray-500 uppercase mr-2">{isEvent ? 'event' : 'note'}</span>
-                    <span className="text-sm text-gray-700 dark:text-gray-300 italic">{displayText}</span>
+                    <span className="text-xs font-semibold text-gray-700 dark:text-gray-300 uppercase mr-2">{isEvent ? 'event' : 'note'}</span>
+                    <span className="text-sm text-gray-800 dark:text-gray-200 italic">{displayText}</span>
                   </div>
                   <InsertDivider afterIndex={idx} />
                 </div>
@@ -579,7 +1031,7 @@ export default function TranscriptEditor({
               <div key={idx}>
                 <div
                   className={`group flex items-start gap-2 py-1 rounded hover:bg-gray-50 dark:hover:bg-gray-700/50 ${
-                    delA ? 'bg-red-50 dark:bg-red-900/10 opacity-60' : textA ? 'bg-yellow-50 dark:bg-yellow-900/10' : ''
+                    delA ? 'bg-red-50 dark:bg-red-900/10 opacity-60' : (!preview && textA) ? 'bg-yellow-50 dark:bg-yellow-900/10' : ''
                   }`}
                   onMouseEnter={() => setHoverMarker({ start: segment.start, end: segment.end })}
                   onMouseLeave={() => setHoverMarker(null)}
@@ -609,6 +1061,7 @@ export default function TranscriptEditor({
                           annotated={!!diarA}
                           speakerColor={speakerColor}
                           recentSpeakers={recentSpeakers}
+                          usedSpeakerNames={usedSpeakerNames}
                         />
                       </>
                     )}
@@ -646,11 +1099,22 @@ export default function TranscriptEditor({
                       </div>
                     ) : (
                       <p
-                        className={`text-sm text-gray-700 dark:text-gray-300 px-1 rounded ${delA ? 'line-through text-red-500 dark:text-red-400' : ''} ${preview ? '' : 'cursor-pointer hover:bg-yellow-50 dark:hover:bg-yellow-900/10'}`}
+                        className={`min-h-5 text-sm text-gray-700 dark:text-gray-300 px-1 rounded ${delA ? 'line-through text-red-500 dark:text-red-400' : ''} ${preview ? '' : 'cursor-pointer hover:bg-yellow-50 dark:hover:bg-yellow-900/10'}`}
                         onClick={preview ? undefined : () => handleStartEdit(idx, segment.text)}
-                        title={preview ? undefined : 'Click to edit'}
+                        title={preview ? undefined : (textA ? `Suggested: ${textA.corrected_text}` : (displayText ? 'Click to edit' : 'Click to add transcript text'))}
                       >
-                        {displayText}
+                        {/* Review mode shows the pending change as a diff (original struck
+                            + correction in green); preview shows the clean applied result. */}
+                        {textA && !preview && !delA ? (
+                          <>
+                            <span className="line-through text-gray-400 dark:text-gray-500">{segment.text}</span>{' '}
+                            <span className="text-green-700 dark:text-green-400">{textA.corrected_text}</span>
+                          </>
+                        ) : (
+                          displayText || (!preview && (
+                            <span className="italic text-gray-400 dark:text-gray-500">Click to add transcript text</span>
+                          ))
+                        )}
                       </p>
                     )}
                   </div>
@@ -688,7 +1152,7 @@ export default function TranscriptEditor({
         </div>
       ) : (
         <p className="text-sm text-gray-500 dark:text-gray-400 italic">{isLive ? 'Waiting for speech...' : 'No transcript segments available'}</p>
-      )}
+      ))}
     </div>
   )
 }

@@ -11,7 +11,8 @@ tick:
    ``error`` (``critical`` for a crash loop); returning to healthy → ``info``.
 2. **Failed RQ jobs** — newly-failed jobs (hard crashes / timeouts) that the
    per-site soft-failure taps can't see, deduped by job id.
-3. **Config diagnostics** — new configuration *issues* (errors), forgotten when
+3. **Worker fleet heartbeat** — missing, stale, or unhealthy supervisor state.
+4. **Config diagnostics** — new configuration *issues* (errors), forgotten when
    resolved so they re-alarm if they recur.
 
 Last-known state lives in Redis so it survives a backend restart without
@@ -32,20 +33,77 @@ from advanced_omi_backend.controllers.system_controller import (
     get_config_diagnostics,
     get_external_services,
 )
+from advanced_omi_backend.heartbeat import FLEET_HEALTH_KEY, evaluate_fleet_health
 from advanced_omi_backend.redis_factory import create_async_redis
 from advanced_omi_backend.services.observability.system_events import record_event
 
 logger = logging.getLogger("observability.health_poller")
 
-POLL_INTERVAL_SECS = 30
+POLL_INTERVAL_SECS = 15
 # Let services finish booting before the first sample (avoid "starting" noise).
-INITIAL_DELAY_SECS = 45
+INITIAL_DELAY_SECS = 20
 
 # Redis keys for last-known state.
 _HEALTH_KEY = "system:health:last"  # hash: "{node}/{service}" -> health
 _SEEN_FAILED_KEY = "system:health:seen_failed_jobs"  # set of job ids
 _CONFIG_SEEN_KEY = "system:health:config_issues"  # set of issue keys
+_WORKER_HEALTH_FIELD = "internal/workers-fleet"
 _SEEN_FAILED_TTL = 7 * 24 * 3600
+
+_BAD_WORKER_STATES = {"missing", "stale", "invalid", "unhealthy"}
+
+
+async def _poll_worker_fleet(redis, *, now: float | None = None) -> None:
+    """Record worker fleet outage and recovery transitions."""
+    result = evaluate_fleet_health(await redis.get(FLEET_HEALTH_KEY), now=now)
+    health = result["status"]
+    previous = await redis.hget(_HEALTH_KEY, _WORKER_HEALTH_FIELD)
+
+    # A fresh orchestrator can legitimately be in its startup grace period. Keep a
+    # prior outage active until it reports healthy, but do not alarm on startup.
+    if health == "starting":
+        if previous is None:
+            await redis.hset(_HEALTH_KEY, _WORKER_HEALTH_FIELD, health)
+        return
+
+    if health == previous:
+        return
+
+    previous_bad = previous in _BAD_WORKER_STATES
+    current_bad = health in _BAD_WORKER_STATES
+    await redis.hset(_HEALTH_KEY, _WORKER_HEALTH_FIELD, health)
+
+    metadata = {
+        "health": health,
+        "previous": previous,
+        "heartbeat_age_seconds": round(result.get("age_seconds", 0), 1),
+        "workers_total": result.get("workers_total"),
+        "workers_alive": result.get("workers_alive"),
+    }
+    if current_bad and not previous_bad:
+        await record_event(
+            severity="critical",
+            category="service",
+            source="workers",
+            title="Worker fleet unavailable",
+            detail=(
+                f"{result.get('detail')}. Audio persistence, speech detection, "
+                "transcription, memory, and background jobs may not run."
+            ),
+            metadata=metadata,
+        )
+    elif previous_bad and health == "healthy":
+        await record_event(
+            severity="info",
+            category="service",
+            source="workers",
+            title="Worker fleet recovered",
+            detail=(
+                f"The worker supervisor reports {result.get('workers_alive', 0)}/"
+                f"{result.get('workers_total', 0)} child processes alive."
+            ),
+            metadata=metadata,
+        )
 
 
 def _bad_severity(health: str | None, detail: str) -> str | None:
@@ -177,6 +235,7 @@ async def run_health_poller(app=None) -> None:
         while True:
             try:
                 await _poll_external_services(redis)
+                await _poll_worker_fleet(redis)
                 await _poll_failed_jobs(redis)
                 await _poll_config_diagnostics(redis)
             except asyncio.CancelledError:

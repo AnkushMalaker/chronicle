@@ -69,6 +69,10 @@ from advanced_omi_backend.utils.conversation_utils import (
 )
 from advanced_omi_backend.utils.job_utils import check_job_alive, update_job_meta
 from advanced_omi_backend.utils.segment_utils import classify_segment_text
+from advanced_omi_backend.utils.silence_condense import (
+    condense_silence,
+    remap_condensed_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +272,37 @@ async def transcribe_audio_range(
     if hasattr(provider, "get_capabilities_dict"):
         provider_capabilities = provider.get_capabilities_dict()
 
+    # Batch providers bill by audio duration, silence included — cut long
+    # silences with the local VAD before sending, and map timestamps back to
+    # the original timeline afterwards (see utils/silence_condense.py).
+    condense_map = None
+    condensed_pcm, mapping, speech_seconds = condense_silence(
+        pcm_data, actual_sample_rate, channels, sample_width
+    )
+    if mapping is not None and not mapping:
+        logger.info(
+            f"🔇 No speech detected in [{start_time:.1f}s - {end_time or 'end'}] "
+            f"of {conversation_id[:8]} — skipping paid transcription entirely"
+        )
+        return {
+            "text": "",
+            "segments": [],
+            "words": [],
+            "provider_name": provider.name,
+            "provider_capabilities": provider_capabilities,
+            "wav_size": 0,
+            "sample_rate": actual_sample_rate,
+        }
+    if mapping is not None:
+        condense_map = mapping
+        pcm_data = condensed_pcm
+        wav_data = _build_wav(pcm_data, actual_sample_rate, channels, sample_width)
+        duration = (
+            len(pcm_data) / (actual_sample_rate * sample_width * channels)
+            if (actual_sample_rate * sample_width * channels) > 0
+            else 0
+        )
+
     if duration <= BATCH_CHUNK_SECONDS:
         # Single chunk — transcribe directly
         transcribe_kwargs: dict = {
@@ -289,6 +324,8 @@ async def transcribe_audio_range(
         except Exception as e:
             raise RuntimeError(f"Transcription failed ({type(e).__name__}): {e}")
 
+        if condense_map:
+            result = remap_condensed_result(result, condense_map)
         return {
             "text": result.get("text", ""),
             "segments": result.get("segments", []),
@@ -357,7 +394,7 @@ async def transcribe_audio_range(
         all_words.extend(result.get("words", []))
         total_wav_size += len(chunk_wav)
 
-    return {
+    merged = {
         "text": " ".join(all_text),
         "segments": all_segments,
         "words": all_words,
@@ -366,6 +403,10 @@ async def transcribe_audio_range(
         "wav_size": total_wav_size,
         "sample_rate": actual_sample_rate,
     }
+    # Chunk offsets above are condensed-timeline; map back to original time.
+    if condense_map:
+        remap_condensed_result(merged, condense_map)
+    return merged
 
 
 async def process_transcription_result(
@@ -434,7 +475,7 @@ async def process_transcription_result(
         }
 
     # Trigger transcript-level plugins BEFORE speech validation
-    if transcript_text:
+    if transcript_text and not conversation.memory_excluded:
         try:
             await dispatch_plugin_event(
                 event=PluginEvent.TRANSCRIPT_BATCH,
@@ -453,6 +494,10 @@ async def process_transcription_result(
             logger.exception(
                 f"⚠️ Error triggering transcript plugins in batch mode: {e}"
             )
+    elif transcript_text:
+        logger.info(
+            f"Skipping transcript plugins for memory-excluded conversation {conversation_id[:8]}"
+        )
 
     # Validate meaningful speech
     transcript_data = {"text": transcript_text, "words": words}
@@ -1110,6 +1155,21 @@ async def _transcription_failure_context(
         chunk_count = "unknown"
     lines.append(f"   Transcribed chunks: {chunk_count}")
 
+    try:
+        view = await store.read(session_id)
+    except Exception:  # noqa: BLE001
+        view = None
+    if view:
+        lines.append(
+            f"   Provider connection: {view.transcription_provider_status or 'unknown'}"
+        )
+        lines.append(
+            f"   Last audio sent: {view.transcription_last_audio_sent_at or 'never'}"
+        )
+        lines.append(
+            f"   Last provider message: {view.transcription_last_message_at or 'never'}"
+        )
+
     lines.append(f"   session={session_id} client={client_id}")
     return "\n".join(lines)
 
@@ -1204,6 +1264,7 @@ async def stream_speech_detection_job(
     )
     last_speech_analysis = None  # Track last analysis for detailed logging
     max_runtime_reached = False  # Distinguish the max-runtime exit from session close
+    no_activity_warning_logged = False
 
     # Main loop: Listen for speech
     while True:
@@ -1222,7 +1283,12 @@ async def stream_speech_detection_job(
         # — in "off" mode nothing fills the aggregator by design, so skip it and let
         # the loop run until the session closes (full-audio batch fallback then runs).
         elapsed = time.time() - start_time
-        if expects_live_results and elapsed > 60 and not session_closed_at:
+        if (
+            expects_live_results
+            and elapsed > 60
+            and not session_closed_at
+            and not no_activity_warning_logged
+        ):
             watchdog_combined = await aggregator.get_combined_results(session_id)
             if not watchdog_combined.get("chunk_count", 0):
                 # Only a real provider fault when audio is flowing in but the streaming
@@ -1241,12 +1307,12 @@ async def stream_speech_detection_job(
                     diag = await _transcription_failure_context(
                         store, aggregator, session_id, client_id
                     )
-                    logger.error(
-                        f"❌ No transcription activity after {elapsed:.0f}s — "
-                        f"check provider config (API key, connectivity, consumer running)\n"
+                    logger.warning(
+                        f"⚠️ No transcription activity after {elapsed:.0f}s — "
+                        f"provider may be connected and awaiting recognizable speech\n"
                         f"{diag}"
                     )
-                    break
+                    no_activity_warning_logged = True
 
         # Check if session has closed
         session_closed = await store.get_status(session_id) in (
@@ -1308,7 +1374,8 @@ async def stream_speech_detection_job(
                     and grace_elapsed > 5
                     and not combined.get("chunk_count", 0)
                 ):
-                    # 5+ seconds with no transcription activity at all - likely API key issue
+                    # A healthy provider may legitimately produce no messages for
+                    # silence/noise, so lack of transcript alone is not a service error.
                     diag = await _transcription_failure_context(
                         store, aggregator, session_id, client_id
                     )
@@ -1319,10 +1386,10 @@ async def stream_speech_detection_job(
                             f"network drop, not a service fault\n{diag}"
                         )
                     else:
-                        logger.error(
-                            f"❌ Session failed - check transcription service configuration\n"
+                        logger.warning(
+                            f"⚠️ Session ended without transcription\n"
                             f"   No transcription activity after {grace_elapsed:.1f}s "
-                            f"(possible API key or connectivity issue)\n"
+                            f"of finalization grace\n"
                             f"{diag}"
                         )
                     break
@@ -1524,20 +1591,29 @@ async def stream_speech_detection_job(
     else:
         reason = "No transcription received"
 
-    # Distinguish between transcription failures (error) vs legitimate no speech (info)
+    # No transcript is not itself a provider failure: streaming APIs may emit no
+    # messages for silence/noise. Only an explicit transport/provider error is ERROR.
     if reason == "No transcription received":
         diag = await _transcription_failure_context(
             store, aggregator, session_id, client_id
         )
-        if await _session_ended_by_disconnect(store, session_id):
+        provider_error = await store.get_transcription_error(session_id)
+        if provider_error:
+            logger.error(
+                f"❌ Session failed - transcription provider error\n"
+                f"   Reason: {provider_error}\n"
+                f"   Runtime: {time.time() - start_time:.1f}s\n"
+                f"{diag}"
+            )
+        elif await _session_ended_by_disconnect(store, session_id):
             logger.warning(
                 f"⚠️ Session ended by client disconnect with no transcription "
                 f"(runtime {time.time() - start_time:.1f}s) — likely a network drop, "
                 f"not a service fault\n{diag}"
             )
         else:
-            logger.error(
-                f"❌ Session failed - transcription service did not respond\n"
+            logger.warning(
+                f"⚠️ Session ended without transcription\n"
                 f"   Reason: {reason}\n"
                 f"   Runtime: {time.time() - start_time:.1f}s\n"
                 f"{diag}"

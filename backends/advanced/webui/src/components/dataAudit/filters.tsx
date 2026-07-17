@@ -12,6 +12,7 @@ import {
   CalendarRange,
   CheckCheck,
   Clock,
+  FileArchive,
   LucideIcon,
   Mic,
   Search,
@@ -23,6 +24,7 @@ export type SpeakerFilterState = 'include' | 'exclude'
 
 export interface FilterContext {
   speakers: string[]
+  datasets: string[]
 }
 
 export interface EditorProps<V> {
@@ -373,6 +375,40 @@ const dateFilter: FilterDef<DateValue> = {
 }
 
 // ---------------------------------------------------------------------------
+// Imported annotation dataset
+// ---------------------------------------------------------------------------
+
+const datasetFilter: FilterDef<string> = {
+  key: 'dataset',
+  label: 'Dataset',
+  icon: FileArchive,
+  defaultValue: '',
+  isActive: (v) => v.trim() !== '',
+  chipLabel: (v) => `Dataset: ${v}`,
+  toParams: (v) => ({ dataset_id: v.trim() || undefined }),
+  Editor: ({ value, onChange, ctx }) => (
+    <div className="w-[min(20rem,calc(100vw-3rem))] space-y-2">
+      <label className="block text-xs font-medium text-gray-600 dark:text-gray-300">
+        Annotation dataset
+      </label>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="w-full rounded border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-700 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
+      >
+        <option value="">All datasets</option>
+        {!ctx.datasets.includes(value) && value && <option value={value}>{value}</option>}
+        {ctx.datasets.map((dataset) => (
+          <option key={dataset} value={dataset}>
+            {dataset}
+          </option>
+        ))}
+      </select>
+    </div>
+  ),
+}
+
+// ---------------------------------------------------------------------------
 // Hide failed (processing_status == 'failed')
 // ---------------------------------------------------------------------------
 
@@ -407,6 +443,7 @@ export const AUDIT_FILTERS: FilterDef[] = [
   durationFilter,
   speakersFilter,
   dateFilter,
+  datasetFilter,
   hideFailedFilter,
   hideReviewedFilter,
 ]

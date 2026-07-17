@@ -1,10 +1,23 @@
-import React, { useState, useCallback } from 'react'
-import { Upload as UploadIcon, File, X, CheckCircle, AlertCircle, RefreshCw } from 'lucide-react'
-import { uploadApi } from '../services/api'
+import React, { useCallback, useRef, useState } from 'react'
+import {
+  AlertCircle,
+  ArrowRight,
+  Brain,
+  CheckCircle,
+  File,
+  FileArchive,
+  PenLine,
+  RefreshCw,
+  Upload as UploadIcon,
+  X,
+} from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { dataAuditApi, uploadApi } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
 
 const SUPPORTED_EXTENSIONS = ['.wav', '.mp3', '.m4a', '.flac', '.ogg', '.mp4', '.webm']
 const VIDEO_EXTENSIONS = ['.mp4', '.webm']
+type UploadMode = 'memory' | 'annotation'
 
 interface UploadFile {
   file: File
@@ -14,12 +27,22 @@ interface UploadFile {
 }
 
 export default function Upload() {
+  const navigate = useNavigate()
   const [files, setFiles] = useState<UploadFile[]>([])
   const [isUploading, setIsUploading] = useState(false)
   const [dragActive, setDragActive] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [gdriveFolderId, setGdriveFolderId] = useState('')
   const [videoWarning, setVideoWarning] = useState(false)
+  const [uploadMode, setUploadMode] = useState<UploadMode>('memory')
+  const [uploadSummary, setUploadSummary] = useState('')
+  const [importedDataset, setImportedDataset] = useState<{
+    id: string
+    clipCount: number
+  } | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const annotationOnly = uploadMode === 'annotation'
 
   const { isAdmin } = useAuth()
 
@@ -44,6 +67,7 @@ export default function Upload() {
       await uploadApi.uploadFromGDriveFolder({
         gdrive_folder_id: gdriveFolderId,
         device_name: 'upload',
+        annotation_only: annotationOnly,
       })
 
       setGdriveUploadStatus({
@@ -67,12 +91,27 @@ export default function Upload() {
 
     const acceptedFiles = Array.from(selectedFiles).filter((file) => {
       const ext = '.' + file.name.split('.').pop()?.toLowerCase()
+      if (annotationOnly && ext === '.zip') return true
       return (
         file.type.startsWith('audio/') ||
         file.type.startsWith('video/') ||
         SUPPORTED_EXTENSIONS.includes(ext)
       )
     })
+
+    const datasetFiles = acceptedFiles.filter((file) => file.name.toLowerCase().endsWith('.zip'))
+    if (datasetFiles.length > 0) {
+      const datasetFile = datasetFiles[0]
+      setFiles([{
+        file: datasetFile,
+        id: generateId(),
+        status: 'pending',
+      }])
+      setVideoWarning(false)
+      setUploadSummary('')
+      setImportedDataset(null)
+      return
+    }
 
     const hasVideo = acceptedFiles.some((file) => {
       const ext = '.' + file.name.split('.').pop()?.toLowerCase()
@@ -87,6 +126,8 @@ export default function Upload() {
     }))
 
     setFiles((prev) => [...prev, ...newFiles])
+    setUploadSummary('')
+    setImportedDataset(null)
   }
 
   const removeFile = (id: string) => {
@@ -105,41 +146,79 @@ export default function Upload() {
     e.stopPropagation()
     setDragActive(false)
     handleFileSelect(e.dataTransfer.files)
-  }, [])
+  }, [annotationOnly])
+
+  const selectMode = (mode: UploadMode) => {
+    if (mode === uploadMode) return
+    setUploadMode(mode)
+    setFiles([])
+    setVideoWarning(false)
+    setUploadProgress(0)
+    setUploadSummary('')
+    setImportedDataset(null)
+    if (fileInputRef.current) fileInputRef.current.value = ''
+  }
 
   const uploadFiles = async () => {
-    if (files.length === 0) return
+    const pendingFiles = files.filter((file) => file.status === 'pending')
+    if (pendingFiles.length === 0) return
 
     setIsUploading(true)
     setUploadProgress(0)
 
     try {
+      const pendingIds = new Set(pendingFiles.map((file) => file.id))
+      const isDatasetImport =
+        annotationOnly &&
+        pendingFiles.length === 1 &&
+        pendingFiles[0].file.name.toLowerCase().endsWith('.zip')
       const formData = new FormData()
-      files.forEach(({ file }) => {
-        formData.append('files', file)
-      })
+      if (isDatasetImport) {
+        formData.append('dataset', pendingFiles[0].file)
+      } else {
+        pendingFiles.forEach(({ file }) => formData.append('files', file))
+      }
 
       setFiles((prev) =>
-        prev.map((f) => ({ ...f, status: 'uploading' }))
+        prev.map((f) => pendingIds.has(f.id) ? { ...f, status: 'uploading' } : f)
       )
 
-      await uploadApi.uploadAudioFiles(formData, (progress) => {
-        setUploadProgress(progress)
-      })
+      const response = isDatasetImport
+        ? await dataAuditApi.importDataset(formData, setUploadProgress)
+        : await uploadApi.uploadAudioFiles(formData, setUploadProgress, { annotationOnly })
 
       setFiles((prev) =>
-        prev.map((f) => ({ ...f, status: 'success' }))
+        prev.map((f) => pendingIds.has(f.id) ? { ...f, status: 'success' } : f)
       )
+      setUploadSummary(
+        isDatasetImport
+          ? `${response.data.summary.imported} clips imported for review${response.data.summary.skipped ? `, ${response.data.summary.skipped} already present` : ''}.`
+          : annotationOnly
+            ? `${pendingFiles.length} file${pendingFiles.length === 1 ? '' : 's'} sent to the annotation workspace.`
+            : `${pendingFiles.length} file${pendingFiles.length === 1 ? '' : 's'} sent for processing.`
+      )
+      if (isDatasetImport) {
+        setImportedDataset({
+          id: response.data.dataset_id,
+          clipCount: response.data.summary.imported + response.data.summary.skipped,
+        })
+      }
     } catch (err: any) {
       console.error('Upload failed:', err)
 
       setFiles((prev) =>
-        prev.map((f) => ({
-          ...f,
-          status: 'error',
-          error: err.message || 'Upload failed',
-        }))
+        prev.map((f) =>
+          f.status === 'uploading'
+            ? {
+                ...f,
+                status: 'error',
+                error: err?.response?.data?.error || err.message || 'Upload failed',
+              }
+            : f
+        )
       )
+      setUploadSummary('')
+      setImportedDataset(null)
     } finally {
       setIsUploading(false)
       setUploadProgress(100)
@@ -194,31 +273,67 @@ export default function Upload() {
       <div className="flex items-center space-x-2 mb-6">
         <UploadIcon className="h-6 w-6 text-blue-600" />
         <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-          Upload Audio Files
+          Upload Audio
         </h1>
+      </div>
+
+      <div className="mb-6">
+        <div className="inline-grid grid-cols-2 gap-1 rounded-lg bg-gray-100 p-1 dark:bg-gray-800">
+          <button
+            type="button"
+            aria-pressed={uploadMode === 'memory'}
+            onClick={() => selectMode('memory')}
+            className={`flex min-h-10 items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors ${
+              uploadMode === 'memory'
+                ? 'bg-white text-gray-900 shadow-sm dark:bg-gray-700 dark:text-gray-100'
+                : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100'
+            }`}
+          >
+            <Brain className="h-4 w-4" />
+            Process memories
+          </button>
+          <button
+            type="button"
+            aria-pressed={uploadMode === 'annotation'}
+            onClick={() => selectMode('annotation')}
+            className={`flex min-h-10 items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors ${
+              uploadMode === 'annotation'
+                ? 'bg-white text-gray-900 shadow-sm dark:bg-gray-700 dark:text-gray-100'
+                : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100'
+            }`}
+          >
+            <PenLine className="h-4 w-4" />
+            Annotation workspace
+          </button>
+        </div>
+        <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
+          {annotationOnly
+            ? 'Import a Chronicle dataset with transcripts, or transcribe new audio without changing memory.'
+            : 'Transcribe audio and run the normal memory pipeline.'}
+        </p>
       </div>
 
       {/* Google Drive Folder Upload */}
       <div className="mb-6 p-4 bg-gray-50 dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600">
         <label className="block mb-2 font-medium text-gray-900 dark:text-gray-100">
-          Paste Google Drive Folder ID:
+          Google Drive folder ID
         </label>
 
-        <div className="flex space-x-2">
+        <div className="flex flex-col gap-2 sm:flex-row">
           <input
             type="text"
             value={gdriveFolderId}
             onChange={(e) => setGdriveFolderId(e.target.value)}
             placeholder="1AbCdEfGhIjKlMnOpQrStUvWxYz123456"
-            className="flex-1 px-3 py-2 border rounded-lg dark:bg-gray-800 dark:text-gray-100"
+            className="min-w-0 flex-1 px-3 py-2 border rounded-lg dark:bg-gray-800 dark:text-gray-100"
           />
 
           <button
             onClick={handleGDriveSubmit}
             disabled={isUploading || !gdriveFolderId}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+            className="w-full whitespace-nowrap px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 sm:w-auto"
           >
-            {isUploading ? 'Submitting...' : 'Submit Folder'}
+            {isUploading ? 'Submitting...' : annotationOnly ? 'Import for review' : 'Process folder'}
           </button>
         </div>
 
@@ -249,25 +364,29 @@ export default function Upload() {
       >
         <UploadIcon className="h-12 w-12 mx-auto mb-4 text-gray-400" />
         <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-2">
-          Drop audio files here or click to browse
+          {annotationOnly ? 'Drop audio or a Chronicle dataset ZIP' : 'Drop audio files here'}
         </h3>
         <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-          Supported formats: WAV, MP3, M4A, FLAC, OGG, MP4, WebM
+          {annotationOnly
+            ? 'ZIP datasets keep their existing transcripts; audio files are transcribed.'
+            : 'WAV, MP3, M4A, FLAC, OGG, MP4, or WebM'}
         </p>
 
         <input
+          ref={fileInputRef}
           type="file"
           multiple
-          accept="audio/*,video/mp4,video/webm,.wav,.mp3,.m4a,.flac,.ogg,.mp4,.webm"
+          accept={`${annotationOnly ? '.zip,' : ''}audio/*,video/mp4,video/webm,.wav,.mp3,.m4a,.flac,.ogg,.mp4,.webm`}
           onChange={(e) => handleFileSelect(e.target.files)}
           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
         />
 
         <button
-          onClick={() => (document.querySelector('input[type="file"]') as HTMLInputElement)?.click()}
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
           className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
         >
-          Select Files
+          Select files
         </button>
       </div>
 
@@ -300,7 +419,13 @@ export default function Upload() {
                 disabled={isUploading || files.every((f) => f.status !== 'pending')}
                 className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
               >
-                {isUploading ? 'Uploading...' : 'Upload All'}
+                {isUploading
+                  ? 'Uploading...'
+                  : annotationOnly
+                    ? files.some((f) => f.file.name.toLowerCase().endsWith('.zip'))
+                      ? 'Import dataset'
+                      : 'Add to annotation workspace'
+                    : 'Process files'}
               </button>
             </div>
           </div>
@@ -358,6 +483,27 @@ export default function Upload() {
         </div>
       )}
 
+      {uploadSummary && (
+        <div className="mt-6 flex flex-col gap-3 rounded-lg border border-green-200 bg-green-50 p-4 text-sm text-green-800 dark:border-green-800 dark:bg-green-900/20 dark:text-green-300 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-start gap-2">
+            <CheckCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+            <span>{uploadSummary}</span>
+          </div>
+          {importedDataset && importedDataset.clipCount > 0 && (
+            <button
+              type="button"
+              onClick={() =>
+                navigate(`/data-audit?dataset=${encodeURIComponent(importedDataset.id)}`)
+              }
+              className="flex min-h-10 w-full items-center justify-center gap-2 rounded-md bg-green-700 px-4 py-2 font-medium text-white hover:bg-green-800 sm:w-auto"
+            >
+              Review {importedDataset.clipCount} clip{importedDataset.clipCount === 1 ? '' : 's'}
+              <ArrowRight className="h-4 w-4" />
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Upload Progress */}
       {isUploading && (
         <div className="mt-6 p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
@@ -381,18 +527,18 @@ export default function Upload() {
         </div>
       )}
 
-      {/* Instructions */}
-      <div className="mt-8 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4">
-        <h3 className="font-medium text-yellow-800 dark:text-yellow-200 mb-2">
-          📝 Upload Instructions
-        </h3>
-        <ul className="text-sm text-yellow-700 dark:text-yellow-300 space-y-1">
-          <li>• Audio files will be processed sequentially for transcription and memory extraction</li>
-          <li>• Processing time varies based on audio length (roughly 3× duration + 60s)</li>
-          <li>• Large files or multiple files may cause timeout errors</li>
-          <li>• Check the Conversations tab for processed results</li>
-          <li>• Supported formats: WAV, MP3, M4A, FLAC, OGG, MP4, WebM</li>
-        </ul>
+      <div className="mt-8 border-t border-gray-200 pt-4 text-sm text-gray-600 dark:border-gray-700 dark:text-gray-400">
+        {annotationOnly ? (
+          <div className="flex items-center gap-2">
+            <FileArchive className="h-4 w-4" />
+            Imported clips remain editable conversations but are permanently excluded from memory.
+          </div>
+        ) : (
+          <div className="flex items-center gap-2">
+            <Brain className="h-4 w-4" />
+            Uploaded audio follows the full transcription and memory pipeline.
+          </div>
+        )}
       </div>
 
     </div>

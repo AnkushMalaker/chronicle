@@ -16,7 +16,11 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from advanced_omi_backend import __version__ as package_version
 from advanced_omi_backend.client_manager import get_client_manager
-from advanced_omi_backend.controllers.queue_controller import get_queue_health
+from advanced_omi_backend.controllers.queue_controller import (
+    get_queue_health,
+    redis_conn,
+)
+from advanced_omi_backend.heartbeat import FLEET_HEALTH_KEY, evaluate_fleet_health
 from advanced_omi_backend.llm_client import (
     async_health_check,
     async_health_check_fallback,
@@ -189,6 +193,7 @@ async def health_check():
         worker_count = queue_health.get("total_workers", 0)
         active_workers = queue_health.get("active_workers", 0)
         idle_workers = queue_health.get("idle_workers", 0)
+        worker_fleet = queue_health.get("worker_fleet", {})
 
         if redis_healthy:
             health_status["services"]["redis"] = {
@@ -200,6 +205,22 @@ async def health_check():
                 "idle_workers": idle_workers,
                 "queues": queue_health.get("queues", {}),
             }
+
+            fleet_healthy = worker_fleet.get("healthy", False)
+            health_status["services"]["workers"] = {
+                **worker_fleet,
+                "status": (
+                    "✅ Worker fleet healthy"
+                    if fleet_healthy
+                    else f"❌ {worker_fleet.get('detail', 'Worker fleet unavailable')}"
+                ),
+                "fleet_status": worker_fleet.get("status", "unknown"),
+                "healthy": fleet_healthy,
+                "critical": True,
+            }
+            if not fleet_healthy:
+                overall_healthy = False
+                critical_services_healthy = False
         else:
             health_status["services"]["redis"] = {
                 "status": f"❌ Connection Failed: {queue_health.get('redis_connection')}",
@@ -542,8 +563,19 @@ async def readiness_check():
 
     # Only check critical services for readiness
     try:
-        # Quick MongoDB ping to ensure we can serve requests
+        # MongoDB and the worker fleet are both required for accepting audio. A
+        # backend with no workers can receive recordings but cannot persist or
+        # transcribe them, so reporting ready would permit silent data loss.
         await asyncio.wait_for(mongo_client.admin.command("ping"), timeout=2.0)
+        await asyncio.wait_for(asyncio.to_thread(redis_conn.ping), timeout=2.0)
+        fleet = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: evaluate_fleet_health(redis_conn.get(FLEET_HEALTH_KEY))
+            ),
+            timeout=2.0,
+        )
+        if not fleet["healthy"]:
+            raise RuntimeError(fleet.get("detail") or "Worker fleet unavailable")
         return JSONResponse(
             content={"status": "ready", "timestamp": int(time.time())}, status_code=200
         )

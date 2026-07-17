@@ -23,6 +23,11 @@ from rq.registry import DeferredJobRegistry, ScheduledJobRegistry
 
 from advanced_omi_backend.config import get_misc_settings
 from advanced_omi_backend.config_loader import get_service_config
+from advanced_omi_backend.heartbeat import (
+    FLEET_HEALTH_KEY,
+    evaluate_fleet_health,
+    is_rq_worker_fresh,
+)
 from advanced_omi_backend.redis_factory import create_sync_redis
 from advanced_omi_backend.services.memory.audit import MemoryCause, UpdateStrategy
 from advanced_omi_backend.services.sse_publisher import publish_sse_event
@@ -792,6 +797,7 @@ def start_post_conversation_jobs(
     client_id: Optional[str] = None,
     end_reason: str = "file_upload",
     skip_speaker_recognition: bool = False,
+    skip_memory_extraction: bool = False,
     memory_cause: MemoryCause = MemoryCause.AUTO_EXTRACTION,
     memory_strategy: UpdateStrategy = UpdateStrategy.FULL,
 ) -> Dict[str, str]:
@@ -816,6 +822,8 @@ def start_post_conversation_jobs(
         end_reason: Reason conversation ended (e.g., 'file_upload', 'websocket_disconnect', 'user_stopped')
         skip_speaker_recognition: Skip the speaker step even when enabled — used
             by split/merge, whose transcripts already carry speaker labels
+        skip_memory_extraction: Skip memory extraction even when globally enabled —
+            used for annotation/training datasets that should not enter user memory
 
     Returns:
         Dict with job IDs for speaker_recognition, memory, title_summary, event_dispatch
@@ -897,6 +905,11 @@ def start_post_conversation_jobs(
     memory_enabled = memory_config.get(
         "enabled", True
     )  # Default to True for backward compatibility
+    if memory_enabled and skip_memory_extraction:
+        logger.info(
+            f"⏭️  Memory extraction skipped by caller for conversation {conversation_id[:8]}"
+        )
+        memory_enabled = False
 
     memory_job = None
     if memory_enabled:
@@ -1059,12 +1072,18 @@ def get_queue_health() -> Dict[str, Any]:
         "total_workers": 0,
         "active_workers": 0,
         "idle_workers": 0,
+        "worker_fleet": {
+            "healthy": False,
+            "status": "unknown",
+            "detail": "Worker fleet health has not been checked",
+        },
     }
 
     # Check Redis connection
     try:
         redis_conn.ping()
         health["redis_connection"] = "healthy"
+        health["worker_fleet"] = evaluate_fleet_health(redis_conn.get(FLEET_HEALTH_KEY))
     except Exception as e:
         health["redis_connection"] = f"unhealthy: {e}"
         return health
@@ -1080,7 +1099,11 @@ def get_queue_health() -> Dict[str, Any]:
         }
 
     # Check workers
-    workers = Worker.all(connection=redis_conn)
+    workers = [
+        worker
+        for worker in Worker.all(connection=redis_conn)
+        if is_rq_worker_fresh(worker)
+    ]
     health["total_workers"] = len(workers)
 
     for worker in workers:

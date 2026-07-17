@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useWaveformData } from './useWaveformData';
 
 // A transcript-segment band rendered on the waveform.
@@ -19,6 +19,8 @@ interface WaveformDisplayProps {
   height?: number;  // Canvas height in pixels (default: 100)
   segments?: { start: number; end: number }[];  // All transcript segments — drawn as faint base bands when >1
   segmentMarkers?: SegmentMarker[];  // Transcript segment bands (playing/anchor/hover)
+  coloredSegments?: { start: number; end: number; color: string; segmentIndex?: number; label?: string }[];
+  onSegmentClick?: (index: number) => void;
 }
 
 export const WaveformDisplay: React.FC<WaveformDisplayProps> = ({
@@ -29,9 +31,36 @@ export const WaveformDisplay: React.FC<WaveformDisplayProps> = ({
   height = 100,
   segments,
   segmentMarkers,
+  coloredSegments,
+  onSegmentClick,
 }) => {
   const { data: waveformData, loading, error } = useWaveformData(conversationId);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [hoveredSegment, setHoveredSegment] = useState<number | null>(null);
+
+  const segmentAtPointer = (clientX: number) => {
+    if (!canvasRef.current || !coloredSegments?.length || duration <= 0) return null;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = Math.max(0, Math.min(clientX - rect.left, rect.width));
+    const time = (x / rect.width) * duration;
+    const hitSlopSeconds = (10 / rect.width) * duration;
+    const candidates = coloredSegments.map((segment, index) => {
+      const distance = time < segment.start
+        ? segment.start - time
+        : time > segment.end
+          ? time - segment.end
+          : 0;
+      return { segment, index, distance };
+    }).filter(({ distance }) => distance <= hitSlopSeconds);
+
+    candidates.sort((a, b) => {
+      if (a.distance !== b.distance) return a.distance - b.distance;
+      const aCenterDistance = Math.abs(time - ((a.segment.start + a.segment.end) / 2));
+      const bCenterDistance = Math.abs(time - ((b.segment.start + b.segment.end) / 2));
+      return aCenterDistance - bCenterDistance;
+    });
+    return candidates[0] ?? null;
+  };
 
   // Draw waveform when data changes
   useEffect(() => {
@@ -53,6 +82,34 @@ export const WaveformDisplay: React.FC<WaveformDisplayProps> = ({
     // Draw waveform bars
     drawWaveform(ctx, waveformData.samples, rect.width, height);
 
+    // Speaker annotation mode: color the waveform by speaker while keeping the
+    // waveform itself visible. These are deliberately rendered before selection
+    // markers and the playhead.
+    if (coloredSegments && duration > 0) {
+      coloredSegments.forEach((seg, index) => {
+        const x1 = (seg.start / duration) * rect.width;
+        const x2 = Math.max((seg.end / duration) * rect.width, x1 + 3);
+        ctx.fillStyle = `${seg.color}38`;
+        ctx.fillRect(x1, 0, x2 - x1, height);
+        ctx.strokeStyle = seg.color;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(x1, 0);
+        ctx.lineTo(x1, height);
+        ctx.moveTo(x2, 0);
+        ctx.lineTo(x2, height);
+        ctx.stroke();
+
+        if (index === hoveredSegment) {
+          ctx.fillStyle = `${seg.color}55`;
+          ctx.fillRect(x1, 0, x2 - x1, height);
+          ctx.strokeStyle = '#111827';
+          ctx.lineWidth = 2.5;
+          ctx.strokeRect(Math.max(1, x1), 1, Math.max(3, x2 - x1), height - 2);
+        }
+      });
+    }
+
     // Draw faint base bands for every transcript segment (only meaningful when there's >1)
     if (segments && segments.length > 1 && duration > 0) {
       segments.forEach(seg =>
@@ -70,7 +127,7 @@ export const WaveformDisplay: React.FC<WaveformDisplayProps> = ({
       drawPlaybackIndicator(ctx, currentTime, duration, rect.width, height);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [waveformData, currentTime, duration, height, segments, JSON.stringify(segmentMarkers)]);
+  }, [waveformData, currentTime, duration, height, segments, hoveredSegment, JSON.stringify(segmentMarkers), JSON.stringify(coloredSegments)]);
 
   const drawWaveform = (
     ctx: CanvasRenderingContext2D,
@@ -163,6 +220,14 @@ export const WaveformDisplay: React.FC<WaveformDisplayProps> = ({
     const seekProgress = x / rect.width;
     const seekTime = seekProgress * duration;
 
+    if (onSegmentClick && coloredSegments?.length) {
+      const hit = segmentAtPointer(e.clientX);
+      if (hit) {
+        onSegmentClick(hit.segment.segmentIndex ?? hit.index);
+        return;
+      }
+    }
+
     console.log(`🎵 Waveform seek: clicked at ${x}px (${(seekProgress * 100).toFixed(1)}%) → ${seekTime.toFixed(2)}s`);
 
     onSeek(seekTime);
@@ -197,9 +262,15 @@ export const WaveformDisplay: React.FC<WaveformDisplayProps> = ({
     <canvas
       ref={canvasRef}
       onClick={handleClick}
-      className="w-full cursor-pointer hover:opacity-80 transition-opacity rounded"
+      onMouseMove={(event) => setHoveredSegment(segmentAtPointer(event.clientX)?.index ?? null)}
+      onMouseLeave={() => setHoveredSegment(null)}
+      className="w-full cursor-crosshair rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
       style={{ height: `${height}px` }}
-      title="Click to seek to position"
+      title={onSegmentClick && hoveredSegment !== null
+        ? `${coloredSegments?.[hoveredSegment]?.label || 'Speaker segment'} · click to select`
+        : onSegmentClick
+          ? 'Hover a speaker segment, then click to select it'
+          : 'Click to seek to position'}
     />
   );
 };
