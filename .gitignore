@@ -113,8 +113,8 @@ backends/advanced-backend/data/speaker_model_cache/
 *.bin
 *.sqlite3
 *checkpoints
-extras/asr-services/providers/*/finetune/out/
-extras/asr-services/providers/*/finetune/split_adapters/
+# Experimental provider-local model fine-tuning workspaces
+extras/asr-services/providers/*/finetune/
 
 
 # k8s config
