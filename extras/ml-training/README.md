@@ -1,6 +1,6 @@
-# ML Training Scripts
+# ML Training Tools
 
-Standalone CLI tools for exporting training data from Chronicle and fine-tuning models. These are **not** part of the backend runtime -- they're run manually on a workstation with GPU access.
+Standalone CLI tools for exporting Chronicle annotations and training the event detection classifier. These are **not** part of the backend runtime -- they're run manually on a workstation.
 
 ## Contents
 
@@ -14,33 +14,10 @@ Export accepted/rejected annotations from MongoDB and train an event detection c
 
 See `event-detection/README.md` for full usage.
 
-### `whisper-adapter-finetuning/`
-
-Fine-tune a Whisper LoRA adapter for domain-specific ASR improvements (e.g., detecting non-speech events like sneezes, laughter).
-
-- `prepare_sneeze_data.py` - Prepare training data
-- `train_sneeze.py` - LoRA adapter training script
-- `evaluate_sneeze_model.py` - Evaluate trained adapter
-
-See `whisper-adapter-finetuning/README.md` for full usage.
-
-### `autoresearch-asr/`
-
-Autonomous LoRA fine-tuning loop for VibeVoice-ASR, adapted from [karpathy/autoresearch](https://github.com/karpathy/autoresearch). Give an AI agent the training setup and let it experiment overnight on Google Colab.
-
-- `prepare.py` - Fixed data loading, model caching, train/val/test split (DO NOT MODIFY)
-- `evaluate.py` - Fixed evaluation harness: WER + SWER + boundary MAE (DO NOT MODIFY)
-- `train.py` - The file the agent modifies: LoRA config, hyperparams, curriculum
-- `program.md` - Agent instructions for the autonomous experiment loop
-- `export_data.py` - Export training data from Chronicle API to VibeVoice format
-
-See `autoresearch-asr/program.md` for full usage.
-
 ## Prerequisites
 
 ```bash
 pip install -r event-detection/requirements.txt
-# For whisper adapter: see whisper-adapter-finetuning/README.md
 ```
 
 ## Relationship to Backend
