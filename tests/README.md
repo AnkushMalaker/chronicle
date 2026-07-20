@@ -5,13 +5,19 @@
 Start containers and run tests:
 ```bash
 cd tests
-make test           # Start containers + run all tests (excludes slow/sdk)
+make test           # Start containers + run tests (excludes slow/sdk/GPU)
+```
+
+Validate suite tags without starting containers:
+
+```bash
+make validate-tags
 ```
 
 Or step by step:
 ```bash
 make start          # Start test containers
-make test-all       # Run all tests (excludes slow/sdk)
+make all            # Run all tests (excludes slow/sdk/GPU)
 make stop           # Stop containers
 ```
 
@@ -22,9 +28,10 @@ make stop           # Stop containers
 Run specific test suites:
 
 ```bash
-make test-endpoints     # API endpoint tests (~40 tests, fast)
-make test-integration   # End-to-end workflows (~15 tests, slower)
-make test-infra         # Infrastructure resilience tests (~5 tests)
+make endpoints          # API endpoint tests
+make integration        # End-to-end workflows
+make infra              # Infrastructure resilience tests
+make configuration      # Container-independent configuration tests
 ```
 
 ### Special Test Categories
@@ -201,7 +208,7 @@ cat tests/logs/2026-01-17_14-30-45/chronicle-backend-test.log
 
 Chronicle tests are separated into two execution paths:
 
-### 1. No API Keys Required (~70% of tests)
+### 1. No API Keys Required
 These tests run without external API dependencies:
 - Endpoint tests (CRUD operations, permissions)
 - Infrastructure tests (workers, queues, health checks)
@@ -231,7 +238,7 @@ OPENAI_API_KEY=your-key-here
 
 **Faster iteration:**
 1. Start containers once: `make start`
-2. Run specific test suite: `make test-endpoints`
+2. Run specific test suite: `make endpoints`
 3. Keep containers running between test runs
 4. Only rebuild when code changes: `make rebuild`
 
@@ -252,7 +259,7 @@ uv run --with-requirements test-requirements.txt robot \
 make rebuild
 
 # 3. Run specific test suite
-make test-endpoints
+make endpoints
 
 # 4. View logs if needed
 make logs SERVICE=chronicle-backend-test

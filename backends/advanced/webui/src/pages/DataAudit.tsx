@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Sparkles, Archive as ArchiveIcon, AlertTriangle } from 'lucide-react'
+import { Sparkles, Archive as ArchiveIcon, AlertTriangle, Mic, ArrowRight } from 'lucide-react'
+import { Link, useSearchParams } from 'react-router-dom'
 import { dataAuditApi, AuditConversation } from '../services/api'
 import { useJobPolling } from '../hooks/useJobPolling'
 import AuditFilterBar from '../components/dataAudit/AuditFilterBar'
@@ -40,8 +41,9 @@ function loadSelection(): Set<string> {
   return new Set()
 }
 
-function loadFilters(): Record<string, unknown> {
+function loadFilters(datasetId: string | null): Record<string, unknown> {
   const defaults = defaultFilterValues()
+  if (datasetId) return { ...defaults, dataset: datasetId }
   try {
     const raw = sessionStorage.getItem(FILTERS_STORAGE_KEY)
     if (raw) return { ...defaults, ...JSON.parse(raw) }
@@ -51,7 +53,8 @@ function loadFilters(): Record<string, unknown> {
   return defaults
 }
 
-function loadArchivedView(): boolean {
+function loadArchivedView(datasetId: string | null): boolean {
+  if (datasetId) return false
   try {
     return sessionStorage.getItem(ARCHIVED_VIEW_STORAGE_KEY) === 'true'
   } catch {
@@ -66,14 +69,21 @@ const REASON_LABELS: Record<ArchiveReason, string> = {
 }
 
 export default function DataAudit() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const initialDatasetId = searchParams.get('dataset')
   // Filter values keyed by AUDIT_FILTERS registry keys — initialized from
   // sessionStorage (lazy) so they survive navigating to a conversation detail
   // page and back.
-  const [filters, setFilters] = useState<Record<string, unknown>>(() => loadFilters())
-  const [archivedOnly, setArchivedOnly] = useState(() => loadArchivedView())
+  const [filters, setFilters] = useState<Record<string, unknown>>(() =>
+    loadFilters(initialDatasetId)
+  )
+  const [archivedOnly, setArchivedOnly] = useState(() =>
+    loadArchivedView(initialDatasetId)
+  )
 
   // Data
   const [speakers, setSpeakers] = useState<string[]>([])
+  const [datasets, setDatasets] = useState<string[]>([])
   const [rows, setRows] = useState<AuditConversation[]>([])
   const [total, setTotal] = useState(0)
   const [scanCapped, setScanCapped] = useState(false)
@@ -131,6 +141,7 @@ export default function DataAudit() {
       // Speaker filter options come from the same scan, so the list only
       // contains speakers actually present in the current view.
       setSpeakers(res.data.speakers || [])
+      setDatasets(res.data.datasets || [])
       // Prune (not clear) the selection: keep selected rows that are still
       // visible so navigation/refresh doesn't lose a curation in progress.
       const visible = new Set(res.data.conversations.map((c) => c.conversation_id))
@@ -141,6 +152,15 @@ export default function DataAudit() {
       setLoading(false)
     }
   }, [filters, archivedOnly])
+
+  useEffect(() => {
+    const dataset = typeof filters.dataset === 'string' ? filters.dataset.trim() : ''
+    if ((searchParams.get('dataset') || '') === dataset) return
+    const next = new URLSearchParams(searchParams)
+    if (dataset) next.set('dataset', dataset)
+    else next.delete('dataset')
+    setSearchParams(next, { replace: true })
+  }, [filters.dataset, searchParams, setSearchParams])
 
   // Persist selection whenever it changes.
   useEffect(() => {
@@ -347,15 +367,25 @@ export default function DataAudit() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center space-x-3">
+      <div className="flex flex-wrap items-center gap-3">
         <Sparkles className="h-6 w-6 text-blue-600" />
-        <div>
+        <div className="flex-1 min-w-[240px]">
           <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Data Audit</h2>
           <p className="text-sm text-gray-500 dark:text-gray-400">
             Inspect recordings: find speech-free or mis-attributed audio, split long recordings at
             silence gaps, merge adjacent conversations, and archive audio.
           </p>
         </div>
+        {!archivedOnly && (
+          <Link
+            to="/speaker-enrollment"
+            className="inline-flex items-center gap-2 px-3 py-2 rounded border border-gray-300 dark:border-gray-600 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700"
+          >
+            <Mic className="h-4 w-4" />
+            Speaker enrollment
+            <ArrowRight className="h-4 w-4" />
+          </Link>
+        )}
       </div>
 
       {/* View toggle */}
@@ -405,7 +435,7 @@ export default function DataAudit() {
             loadConversations(next)
           }}
           onApply={() => loadConversations()}
-          ctx={{ speakers }}
+          ctx={{ speakers, datasets }}
           loading={loading}
         />
       )}
@@ -431,6 +461,8 @@ export default function DataAudit() {
 
       {/* Speaker confidence overview (per-speaker baselines + noise magnets) */}
       {!archivedOnly && <SpeakerConfidencePanel />}
+
+      {/* Guided enrollment: confirm high-information clips to improve a voiceprint */}
 
       {/* Drift: conversations whose speaker labels would change under the current gallery */}
       {!archivedOnly && <DriftPanel />}

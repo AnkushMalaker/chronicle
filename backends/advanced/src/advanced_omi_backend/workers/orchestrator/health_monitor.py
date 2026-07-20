@@ -6,6 +6,7 @@ Periodically checks worker health and restarts failed workers.
 """
 
 import asyncio
+import json
 import logging
 import time
 from typing import Optional
@@ -13,6 +14,11 @@ from typing import Optional
 from redis import Redis
 from rq import Worker
 
+from advanced_omi_backend.heartbeat import (
+    FLEET_HEALTH_KEY,
+    FLEET_HEARTBEAT_TTL_SECONDS,
+    is_rq_worker_fresh,
+)
 from advanced_omi_backend.services.plugin_service import WORKER_RESTART_KEY
 
 from .config import OrchestratorConfig, WorkerType
@@ -78,6 +84,11 @@ class HealthMonitor:
             except asyncio.CancelledError:
                 pass
 
+        try:
+            self.redis.delete(FLEET_HEALTH_KEY)
+        except Exception as e:
+            logger.warning("Failed to clear worker fleet heartbeat: %s", e)
+
         logger.info("Health monitor stopped")
 
     async def _monitor_loop(self):
@@ -87,6 +98,7 @@ class HealthMonitor:
                 # Wait for startup grace period before starting checks
                 elapsed = time.time() - self.start_time
                 if elapsed < self.config.startup_grace_period:
+                    self._publish_fleet_health("starting")
                     remaining = self.config.startup_grace_period - elapsed
                     logger.debug(
                         f"In startup grace period - waiting {remaining:.0f}s before health checks"
@@ -95,7 +107,11 @@ class HealthMonitor:
                     continue
 
                 # Perform health checks
-                await self._check_health()
+                worker_health, rq_health, detail = await self._check_health()
+                self._publish_fleet_health(
+                    "healthy" if worker_health and rq_health else "unhealthy",
+                    detail=detail,
+                )
 
                 # Wait for next check
                 await asyncio.sleep(self.config.check_interval)
@@ -110,13 +126,13 @@ class HealthMonitor:
             )
             raise  # Re-raise to ensure the monitor task fails properly
 
-    async def _check_health(self):
+    async def _check_health(self) -> tuple[bool, bool, str | None]:
         """Perform all health checks and restart failed workers"""
         try:
             # Check for plugin reload restart signal first
             if self._check_restart_signal():
                 # Workers are restarting — skip normal health checks this iteration
-                return
+                return True, True, "Workers restarting for plugin reload"
 
             # Check individual worker health
             worker_health = self._check_worker_health()
@@ -137,8 +153,38 @@ class HealthMonitor:
                     f"Health check: worker_health={worker_health}, rq_health={rq_health}"
                 )
 
+            detail = None
+            if not worker_health or not rq_health:
+                detail = (
+                    f"child_processes_healthy={worker_health}, "
+                    f"rq_registration_healthy={rq_health}"
+                )
+            return worker_health, rq_health, detail
+
         except Exception as e:
             logger.error(f"Error during health check: {e}", exc_info=True)
+            return False, False, str(e)
+
+    def _publish_fleet_health(self, status: str, detail: str | None = None) -> None:
+        """Publish the supervisor's view of the complete worker fleet."""
+        try:
+            worker_status = self.process_manager.get_status()
+            payload = {
+                "status": status,
+                "timestamp": time.time(),
+                "workers_total": len(worker_status),
+                "workers_alive": sum(
+                    1 for worker in worker_status.values() if worker["is_alive"]
+                ),
+                "detail": detail,
+            }
+            self.redis.set(
+                FLEET_HEALTH_KEY,
+                json.dumps(payload),
+                ex=FLEET_HEARTBEAT_TTL_SECONDS,
+            )
+        except Exception as e:
+            logger.warning("Failed to publish worker fleet heartbeat: %s", e)
 
     def _check_restart_signal(self) -> bool:
         """Check Redis for a plugin-reload restart signal and restart all workers if found.
@@ -236,7 +282,11 @@ class HealthMonitor:
             True if RQ worker count is sufficient
         """
         try:
-            workers = Worker.all(connection=self.redis)
+            workers = [
+                worker
+                for worker in Worker.all(connection=self.redis)
+                if is_rq_worker_fresh(worker)
+            ]
             worker_count = len(workers)
 
             if worker_count < self.config.min_rq_workers:
@@ -418,7 +468,11 @@ class HealthMonitor:
 
         # Check RQ worker registration
         try:
-            rq_workers = Worker.all(connection=self.redis)
+            rq_workers = [
+                worker
+                for worker in Worker.all(connection=self.redis)
+                if is_rq_worker_fresh(worker)
+            ]
             rq_worker_count = len(rq_workers)
         except Exception:
             rq_worker_count = -1  # Error indicator

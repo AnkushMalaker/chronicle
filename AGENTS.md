@@ -37,6 +37,8 @@ uv run --with-requirements setup-requirements.txt python wizard.py
 
 **Note on Convenience Scripts**: Chronicle provides wrapper scripts (`./wizard.sh`, `./start.sh`, `./restart.sh`, `./stop.sh`, `./status.sh`) that simplify the longer `uv run --with-requirements setup-requirements.txt python` commands. Use these for everyday operations.
 
+**Temporary Tooling Rule**: When a Python tool or dependency is needed only for a one-off task, run it ephemerally with `uv run --with <package> ...`; do not install it into a project environment or add it to project dependencies. For a package-owned CLI, use `uvx --from <package> <entrypoint>`. This applies to browser automation, screenshots, data inspection, and other temporary utilities.
+
 ### Setup Documentation
 For detailed setup instructions and troubleshooting, see:
 - **[@quickstart.md](quickstart.md)**: Beginner-friendly step-by-step setup guide
@@ -99,13 +101,13 @@ make test              # Start containers + run all tests
 
 # Or step by step
 make start             # Start test containers (with health checks)
-make test-all          # Run all test suites
+make all               # Run all test suites
 make stop              # Stop containers (preserves volumes)
 
 # Run specific test suites
-make test-endpoints    # API endpoint tests (~40 tests, fast)
-make test-integration  # End-to-end workflows (~15 tests, slower)
-make test-infra        # Infrastructure resilience (~5 tests)
+make endpoints         # API endpoint tests
+make integration       # End-to-end workflows
+make infra             # Infrastructure resilience
 
 # Quick iteration (reuse existing containers)
 make test-quick        # Run tests without restarting containers
@@ -611,13 +613,13 @@ For detailed technical documentation, see:
 
 Before writing any Robot Framework test:
 1. **Read [@tests/TESTING_GUIDELINES.md](tests/TESTING_GUIDELINES.md)** for comprehensive testing patterns and standards
-2. **Check [@tests/tags.md](tests/tags.md)** for approved tags - ONLY 11 tags are permitted
+2. **Check [@tests/tags.md](tests/tags.md)** for approved tags - only the 11 business tags and 4 execution tags are permitted
 3. **SCAN existing resource files** for keywords - NEVER write code that duplicates existing keywords
 4. **Follow the Arrange-Act-Assert pattern** with inline verifications (not abstracted to keywords)
 
 Key Testing Rules:
 - **Check Existing Keywords FIRST**: Before writing ANY test code, scan relevant resource files (`websocket_keywords.robot`, `queue_keywords.robot`, `conversation_keywords.robot`, etc.) for existing keywords
-- **Tags**: ONLY use the 11 approved tags from tags.md, tab-separated (e.g., `[Tags]    infra	audio-streaming`)
+- **Tags**: ONLY use the 15 approved tags from tags.md, tab-separated (e.g., `[Tags]    infra	audio-streaming`)
 - **Verifications**: Write assertions directly in tests, not in resource keywords
 - **Keywords**: Only create keywords for reusable setup/action operations AFTER confirming no existing keyword exists
 - **Resources**: Always check existing resource files before creating new keywords or duplicating logic
@@ -625,7 +627,7 @@ Key Testing Rules:
 
 **DO NOT:**
 - Write inline code without checking if a keyword already exists for that operation
-- Create custom tags (use only the 11 approved tags)
+- Create custom tags (use only the 15 approved tags)
 - Abstract verifications into keywords (keep them inline in tests)
 - Use space-separated tags (must be tab-separated)
 - Skip reading the guidelines before writing tests
@@ -635,6 +637,12 @@ Check if the src/ is volume mounted. If not, do compose build so that code chang
 Check `docs/backend/` for up-to-date information on the advanced backend.
 All docker projects have .dockerignore following the exclude pattern. That means files need to be included for them to be visible to docker.
 The uv package manager is used for all python projects. Wherever you'd call `python3 main.py` you'd call `uv run python main.py`
+For temporary Python-backed tooling that is not part of the repo dependencies, prefer `uv run --with <package> python ...` instead of installing packages into the project. Use `uvx --from <package> <entrypoint>` when invoking a package's own CLI. For browser scripts/screenshots, use `uv run --with playwright python - <<'PY'` and import `playwright.sync_api`; for the Playwright CLI use `uvx --from playwright playwright ...`. Do not add transient Playwright/npm packages to `package.json` just to drive a one-off check.
+
+**Compute-Intensive Workloads:**
+- Chronicle is designed for heavy data and AI processing. Re-encoding or recomputation is acceptable when it improves correctness or output quality.
+- Avoid wasteful repeated work: cache reusable artifacts, fingerprint model and configuration inputs, and reuse valid intermediate results.
+- Prefer GPU acceleration whenever the workload and deployed service support it.
 
 **Container Engine (Docker or Podman):**
 - The project supports **both Docker and Podman**. The active engine is set by `container_engine` in `config/config.yml` (default `docker`); prefer the lifecycle scripts (`./start.sh`/`./stop.sh`/`./restart.sh`) which route through the selected engine. For one-off manual commands under Podman use `podman-compose` (not `docker compose`). See **[@docs/podman.md](docs/podman.md)**.

@@ -1,7 +1,7 @@
 # Chronicle Test Makefile
 # Shortcuts for running tests and managing test containers
 
-.PHONY: help all clean configure \
+.PHONY: help all endpoints integration infra configuration clean configure validate-tags \
         containers-start containers-stop containers-restart containers-rebuild \
         containers-start-rebuild containers-clean containers-status containers-logs \
         start stop restart rebuild start-rebuild status logs \
@@ -11,7 +11,7 @@
 
 # Default output directory
 OUTPUTDIR ?= results
-TEST_DIR = endpoints integration infrastructure asr
+TEST_DIR = endpoints integration infrastructure asr configuration
 SERVICE ?= chronicle-backend-test
 
 # Test configuration file (set this to use different configs)
@@ -47,10 +47,12 @@ help:
 	@echo "  make status        - Show container status"
 	@echo ""
 	@echo "Running Tests:"
+	@echo "  make validate-tags - Validate Robot tags without starting containers"
 	@echo "  make all         - Run all tests (excludes slow/sdk/requires-gpu)"
 	@echo "  make endpoints   - Run only endpoint tests"
 	@echo "  make integration - Run only integration tests"
 	@echo "  make infra       - Run only infrastructure tests"
+	@echo "  make configuration - Run container-independent configuration tests"
 	@echo ""
 	@echo "ASR Tests:"
 	@echo "  make test-asr      - Run ASR protocol tests (no GPU required)"
@@ -108,7 +110,7 @@ help:
 
 # Run all tests (excludes slow, sdk, and requires-gpu tests for faster feedback)
 # Creates a persistent fixture conversation that won't be deleted between suites
-all:
+all: validate-tags
 	@echo "Running all tests (excluding slow, sdk, and requires-gpu tests)..."
 	CREATE_FIXTURE=true uv run --with-requirements test-requirements.txt robot --outputdir $(OUTPUTDIR) \
 		--name "All Tests" \
@@ -120,7 +122,7 @@ all:
 		$(TEST_DIR)
 
 # Run only endpoint tests
-endpoints:
+endpoints: validate-tags
 	@echo "Running endpoint tests..."
 	uv run --with-requirements test-requirements.txt robot --outputdir $(OUTPUTDIR) \
 		--name "Endpoint Tests" \
@@ -129,7 +131,7 @@ endpoints:
 		endpoints
 
 # Run only integration tests
-integration:
+integration: validate-tags
 	@echo "Running integration tests..."
 	CREATE_FIXTURE=true uv run --with-requirements test-requirements.txt robot --outputdir $(OUTPUTDIR) \
 		--name "Integration Tests" \
@@ -138,13 +140,22 @@ integration:
 		integration
 
 # Run only infrastructure tests
-infra:
+infra: validate-tags
 	@echo "Running infrastructure tests..."
 	uv run --with-requirements test-requirements.txt robot --outputdir $(OUTPUTDIR) \
 		--name "Infrastructure Tests" \
 		--console verbose \
 		--loglevel INFO:INFO \
 		infrastructure
+
+# Run container-independent configuration tests
+configuration: validate-tags
+	@echo "Running configuration tests..."
+	uv run --with-requirements test-requirements.txt robot --outputdir $(OUTPUTDIR) \
+		--name "Configuration Tests" \
+		--console verbose \
+		--loglevel INFO:INFO \
+		configuration
 
 # Show current test configuration
 show-config:
@@ -154,6 +165,10 @@ show-config:
 	@echo "To change config:"
 	@echo "  make test CONFIG=deepgram-openai.yml"
 	@echo "  make test CONFIG=/path/to/custom.yml"
+
+# Validate suite metadata before spending time starting the composed environment.
+validate-tags:
+	@uv run --with-requirements test-requirements.txt python3 scripts/validate_robot_tags.py
 
 # Clean up test output files
 clean:
@@ -289,7 +304,7 @@ test-with-api-keys:
 
 # Run tests without API keys (CI mode)
 # Switches to mock-services.yml config and excludes requires-api-keys tests
-test-no-api:
+test-no-api: validate-tags
 	@echo "🔄 Running tests without API keys (CI mode)..."
 	@$(MAKE) containers-stop
 	@TEST_CONFIG_FILE=/app/test-configs/mock-services.yml $(MAKE) containers-start

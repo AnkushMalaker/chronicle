@@ -48,6 +48,7 @@ class MemoryCause(str, Enum):
 
     AUTO_EXTRACTION = "auto_extraction"  # automatic post-conversation pipeline
     MEMORY_REPLAY = "memory_replay"  # manual re-extract, same inputs
+    MEMORY_REBUILD = "memory_rebuild"  # clean vault replay from durable transcripts
     TRANSCRIPT_REPROCESS = "transcript_reprocess"  # re-ran ASR
     SPEAKER_REPROCESS = "speaker_reprocess"  # re-ran diarization
     ANNOTATION_APPLY = "annotation_apply"  # user applied annotation corrections
@@ -67,6 +68,7 @@ class UpdateStrategy(str, Enum):
 _CAUSE_KIND = {
     MemoryCause.AUTO_EXTRACTION: "extraction",
     MemoryCause.MEMORY_REPLAY: "reprocess",
+    MemoryCause.MEMORY_REBUILD: "reprocess",
     MemoryCause.TRANSCRIPT_REPROCESS: "reprocess",
     MemoryCause.SPEAKER_REPROCESS: "reprocess",
     MemoryCause.ANNOTATION_APPLY: "reprocess",
@@ -77,6 +79,7 @@ _CAUSE_KIND = {
 _CAUSE_LABEL = {
     MemoryCause.AUTO_EXTRACTION: "AI extraction",
     MemoryCause.MEMORY_REPLAY: "Memory replay",
+    MemoryCause.MEMORY_REBUILD: "Memory rebuild",
     MemoryCause.TRANSCRIPT_REPROCESS: "Transcript reprocess",
     MemoryCause.SPEAKER_REPROCESS: "Speaker reprocess",
     MemoryCause.ANNOTATION_APPLY: "Annotation applied",

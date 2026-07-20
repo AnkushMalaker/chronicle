@@ -1,0 +1,21 @@
+{
+  "business": [
+    "permissions",
+    "conversation",
+    "memory",
+    "chat",
+    "queue",
+    "health",
+    "infra",
+    "audio-upload",
+    "audio-batch",
+    "audio-streaming",
+    "e2e"
+  ],
+  "execution": [
+    "requires-api-keys",
+    "slow",
+    "sdk",
+    "requires-gpu"
+  ]
+}

@@ -7,6 +7,7 @@ interface InsertSegmentFormProps {
   afterIndex: number // -1 = before first segment
   allSpeakers: { speaker_id: string; name: string }[]
   recentSpeakers: string[]
+  usedSpeakerNames?: string[]
   onSpeakerUsed?: (speaker: string) => void
   /** Optional waveform-drawn span for the new segment (else a zero-duration boundary marker). */
   region?: { start: number; end: number } | null
@@ -26,6 +27,7 @@ export default function InsertSegmentForm({
   afterIndex,
   allSpeakers,
   recentSpeakers,
+  usedSpeakerNames = [],
   onSpeakerUsed,
   region,
   onDone,
@@ -88,6 +90,7 @@ export default function InsertSegmentForm({
             }}
             enrolledSpeakers={allSpeakers}
             recentSpeakers={recentSpeakers}
+            usedSpeakerNames={usedSpeakerNames}
             placeholder="Type or select speaker..."
           />
         </div>

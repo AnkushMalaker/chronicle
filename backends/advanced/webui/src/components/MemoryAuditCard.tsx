@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Loader2 } from 'lucide-react'
+import { ArrowUp, Loader2 } from 'lucide-react'
 import { conversationsApi } from '../services/api'
 
 interface MemoryAuditEntry {
@@ -55,10 +55,15 @@ export default function MemoryAuditCard({ conversationId }: { conversationId: st
   if (!loading && !error && entries.length === 0) return null
 
   return (
-    <div className="bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
-      <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase mb-3">
-        Memory History
-      </h3>
+    <div id="memory-history" className="bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4 scroll-mt-6">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase">
+          Memory History
+        </h3>
+        <a href="#transcript" className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400">
+          <ArrowUp className="h-3.5 w-3.5" /> Back to transcript
+        </a>
+      </div>
 
       {loading && (
         <div className="flex items-center space-x-2 text-sm text-gray-500 dark:text-gray-400">
@@ -70,7 +75,7 @@ export default function MemoryAuditCard({ conversationId }: { conversationId: st
       {error && <div className="text-sm text-red-600 dark:text-red-400">{error}</div>}
 
       {!loading && !error && (
-        <ul className="space-y-2 text-sm">
+        <ul className="grid grid-cols-1 xl:grid-cols-2 gap-x-8 gap-y-3 text-sm">
           {entries.map((entry) => (
             <li key={entry.id} className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -83,7 +88,7 @@ export default function MemoryAuditCard({ conversationId }: { conversationId: st
                   >
                     {entry.operation}
                   </span>
-                  <span className="truncate text-gray-900 dark:text-gray-100">
+                  <span className="text-gray-900 dark:text-gray-100 break-all">
                     {entry.note_path || '(whole vault)'}
                   </span>
                 </div>

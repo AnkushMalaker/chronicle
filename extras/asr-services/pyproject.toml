@@ -202,6 +202,11 @@ dev = [
     "pytest>=8.0.0",
 ]
 
+test = [
+    "pytest>=8.0.0",
+    "pytest-cov>=6.0.0",
+]
+
 demo = [
     "fastrtc>=0.0.23",
     "gradio>=5.29.0",
@@ -214,3 +219,27 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["common", "providers", "providers.faster_whisper", "providers.transformers", "providers.nemo", "providers.vibevoice", "providers.qwen3_asr", "providers.gemma4", "providers.af_next", "providers.granite"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+markers = [
+    "asr: requires the containerized ASR service",
+]
+
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["common", "providers"]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+skip_empty = true
+
+[tool.coverage.xml]
+output = "coverage-reports/coverage.xml"
+
+[tool.coverage.html]
+directory = "coverage-reports/html"

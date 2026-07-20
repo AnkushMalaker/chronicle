@@ -44,6 +44,39 @@ class VaultLockTimeout(Exception):
 
 
 @contextlib.contextmanager
+def vault_run_lock(user_id: str, ttl_seconds: int = 1200) -> Iterator[None]:
+    """Hold the per-user vault lock for a whole external-executor run.
+
+    The Codex CLI executor edits vault files directly for the duration of one agent
+    run (minutes, not milliseconds), so it takes the SAME ``vault:write:{user_id}``
+    key with a run-scale TTL instead of the per-operation one. While it is held,
+    per-operation writers (``vault_note_lock``) block for their 30s window and then
+    fail closed with a retryable error — acceptable because memory jobs are already
+    serialised on one worker, so contention is limited to rare chat-driven writes.
+    """
+    client = create_sync_redis(decode_responses=True)
+    lock = client.lock(
+        f"vault:write:{user_id}",
+        timeout=ttl_seconds,
+        blocking_timeout=_LOCK_WAIT_SECONDS,
+    )
+    try:
+        if not lock.acquire():
+            raise VaultLockTimeout(
+                f"vault run lock for user {user_id} not acquired within "
+                f"{_LOCK_WAIT_SECONDS}s"
+            )
+        try:
+            yield
+        finally:
+            with contextlib.suppress(Exception):
+                lock.release()
+    finally:
+        with contextlib.suppress(Exception):
+            client.close()
+
+
+@contextlib.contextmanager
 def vault_note_lock(user_id: str) -> Iterator[None]:
     """Hold the per-user lock around ONE vault-mutating filesystem operation.
 

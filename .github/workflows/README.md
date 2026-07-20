@@ -6,11 +6,12 @@ Documentation for CI/CD workflows and test automation.
 
 Chronicle uses **three separate test workflows** to balance fast PR feedback with comprehensive testing:
 
-| Workflow | Trigger | Test Coverage | API Keys | Purpose |
+| Workflow | Trigger | Test selection | API Keys | Purpose |
 |----------|---------|---------------|----------|---------|
-| `robot-tests.yml` | All PRs | ~70% (no-API tests) | ❌ Not required | Fast PR validation |
-| `full-tests-with-api.yml` | Push to dev/main | 100% (full suite) | ✅ Required | Comprehensive validation |
-| `pr-tests-with-api.yml` | PR label trigger | 100% (full suite) | ✅ Required | Pre-merge API testing |
+| `python-tests.yml` | Relevant PRs, dev/main | Root, backend, and ASR pytest lanes | Not required | Unit tests and branch coverage reports |
+| `robot-tests.yml` | All PRs | No-API Robot subset | Not required | Fast PR validation |
+| `full-tests-with-api.yml` | Push to dev/main | Full Robot selection | Required | Comprehensive validation |
+| `pr-tests-with-api.yml` | PR label trigger | Full Robot selection | Required | Pre-merge API testing |
 
 ## Workflow Details
 
@@ -35,7 +36,7 @@ on:
 - **Makefile Target**: `make test-no-api OUTPUTDIR=results-no-api`
 - **Results**: `results-no-api/`
 - **Time**: ~10-15 minutes
-- **Coverage**: ~70% of test suite
+- **Selection**: Robot cases that do not require secrets, GPUs, or excluded slow/SDK environments
 
 **Benefits**:
 - Fast feedback on PRs
@@ -134,7 +135,7 @@ if: contains(github.event.pull_request.labels.*.name, 'test-with-api-keys')
 **Normal PR Workflow**:
 1. Push your branch
 2. Create PR
-3. `robot-tests.yml` runs automatically (~70% coverage)
+3. `robot-tests.yml` runs the no-API Robot selection automatically
 4. Fix any failures
 5. Merge when tests pass
 
@@ -142,7 +143,7 @@ if: contains(github.event.pull_request.labels.*.name, 'test-with-api-keys')
 1. Push your branch
 2. Create PR
 3. Ask maintainer to add `test-with-api-keys` label
-4. `pr-tests-with-api.yml` runs (100% coverage)
+4. `pr-tests-with-api.yml` runs the full Robot selection
 5. Fix any failures
 6. Merge when tests pass
 

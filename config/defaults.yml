@@ -376,6 +376,7 @@ models:
           # insertions on Hindi speech (158% corpus WER vs 12.9% with hi on CoSHE-100)
           language: hi
           word_timestamps: 'true'
+          diarize: 'true'
         response:
           type: json
           extract:
@@ -554,6 +555,21 @@ memory:
   # Chronicle's agentic Markdown vault is the only memory provider.
   provider: chronicle
   timeout_seconds: 1200
+  # How the memory agent executes vault writes:
+  #   direct — built-in tool-calling loop via the configured LLM (metered API calls)
+  #   codex  — OpenAI Codex CLI running on the vault directory (uses a ChatGPT
+  #            subscription; needs the codex binary + auth in CODEX_HOME — the
+  #            wizard mounts ~/.codex into the containers)
+  agent_executor: direct
+  codex:
+    model: "gpt-5.6-terra"          # faster/lower-cost Codex model for read-heavy vault work
+    reasoning_effort: low           # keep routine ingestion economical; raise for quality evals
+    # codex --sandbox. workspace-write (writes confined to the vault dir) needs
+    # bubblewrap, which cannot run nested inside the rootless-podman containers —
+    # there the container is the isolation boundary and the wizard sets
+    # danger-full-access instead.
+    sandbox_mode: workspace-write
+    timeout_seconds: 900            # per-run wall clock before the run is failed
   extraction:
     enabled: true
     prompt: |
@@ -576,7 +592,7 @@ speaker_recognition:
   hf_token: ${oc.env:HF_TOKEN,''}
 
   # Speaker identification threshold
-  similarity_threshold: 0.15
+  similarity_threshold: 0.5
 
   # Diarization chunking configuration (speaker service self-managed chunking)
   # Maximum audio duration (seconds) for single PyAnnote call
@@ -707,7 +723,7 @@ backend:
   # "pyannote" always re-diarizes via the speaker service
   diarization:
     diarization_source: provider
-    similarity_threshold: 0.15
+    similarity_threshold: 0.5
     min_duration: 0.5
     collar: 2.0
     min_duration_off: 1.5

@@ -8,3 +8,4 @@ websockets
 pymongo
 omegaconf
 pyyaml
+ruamel-yaml

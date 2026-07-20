@@ -1,4 +1,8 @@
 **/__pycache__
+.coverage
+.coverage.*
+**/coverage-reports/
+**/htmlcov/
 *.wav
 # Wake-word notification tones are bundled assets, not user audio — keep them tracked
 # so they're baked into the wakeword-service image (and served to all clients).
@@ -34,6 +38,7 @@ plugins/*/config.yml.backup
 example/*
 **/node_modules/*
 **/ollama-data/*
+**/model_cache
 **/model_cache/*
 .vscode/*
 **/audio_chunks/*
@@ -108,6 +113,8 @@ backends/advanced-backend/data/speaker_model_cache/
 *.bin
 *.sqlite3
 *checkpoints
+# Experimental provider-local model fine-tuning workspaces
+extras/asr-services/providers/*/finetune/
 
 
 # k8s config

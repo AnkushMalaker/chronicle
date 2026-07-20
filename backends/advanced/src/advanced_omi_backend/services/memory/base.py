@@ -101,6 +101,10 @@ class MemoryServiceBase(ABC):
         user_email: str,
         allow_update: bool = False,
         db_helper: Any = None,
+        *,
+        source_date: Optional[str] = None,
+        source_duration_minutes: Optional[float] = None,
+        source_title: Optional[str] = None,
     ) -> Tuple[bool, List[str]]:
         """Add memories extracted from a transcript.
 
@@ -112,6 +116,9 @@ class MemoryServiceBase(ABC):
             user_email: User email address
             allow_update: Whether to allow updating existing memories
             db_helper: Optional database helper for tracking relationships
+            source_date: Trusted source conversation timestamp
+            source_duration_minutes: Trusted source audio duration in minutes
+            source_title: Trusted source conversation title
 
         Returns:
             Tuple of (success: bool, created_memory_ids: List[str])

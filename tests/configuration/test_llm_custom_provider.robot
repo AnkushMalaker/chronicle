@@ -4,6 +4,7 @@ Library         OperatingSystem
 Library         Collections
 Library         String
 Library         ../libs/ConfigTestHelper.py
+Test Tags       infra
 
 *** Keywords ***
 Setup Temp Config

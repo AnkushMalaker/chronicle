@@ -77,6 +77,33 @@ def _section_counts(text: str) -> Counter:
     return Counter(m.group(1).lower() for m in _H2_RE.finditer(text))
 
 
+# Sections whose bullets carry accumulated facts and must survive a person-note
+# merge. ``Conversations`` is intentionally excluded — it holds a dynamic
+# ``![[Conversations.base]]`` embed, not facts to migrate.
+_MERGE_SECTIONS = ("About", "Mentions")
+
+
+def _extract_section_bullets(content: str, heading: str) -> List[str]:
+    """Return the non-empty bullet lines under a ``## heading`` (case-insensitive).
+
+    A bare ``-`` placeholder (an empty template bullet) is skipped so migrating an
+    untouched section contributes nothing.
+    """
+    want = heading.casefold()
+    out: List[str] = []
+    in_section = False
+    for line in content.splitlines():
+        m = _H2_RE.match(line.rstrip())
+        if m:
+            in_section = m.group(1).casefold() == want
+            continue
+        if in_section:
+            stripped = line.strip()
+            if stripped.startswith("-") and stripped.lstrip("-").strip():
+                out.append(line.rstrip())
+    return out
+
+
 def _assert_no_new_section_dupes(rel: str, before: str, after: str) -> None:
     """Reject a mutation that *introduces* a duplicated ``## Section`` heading.
 
@@ -112,6 +139,10 @@ class VaultTools:
         self._rg = shutil.which("rg")
         self._notesmd = os.getenv("NOTESMD_CLI_BIN") or shutil.which("notesmd-cli")
         self.touched: set = set()  # vault-relative paths created/edited this run
+        # Notes retired by a rename/merge this run. Each entry is
+        # {"old_path", "new_path", "before"} — the audit step turns these into
+        # ``rename`` ledger entries so a note vanishing is never invisible.
+        self.removed: List[dict] = []
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
@@ -319,6 +350,16 @@ class VaultTools:
             # one wholesale either duplicates the body or drops accumulated facts.
             # Force those updates through edit_note.
             top_folder = Path(rel).parts[0] if len(Path(rel).parts) > 1 else ""
+            note_stem = Path(rel).stem
+            if top_folder == "People" and (
+                re.fullmatch(r"unknown speaker(?:\s+\d+)?", note_stem, re.IGNORECASE)
+                or note_stem.casefold() == "hermes"
+            ):
+                raise VaultToolError(
+                    "Unknown Speaker diarization placeholders and the Hermes assistant are not people; "
+                    "do not create or link a person note for them. Use Topics/Hermes.md "
+                    "for the Hermes assistant."
+                )
             if existed and overwrite and top_folder in ("People", "Topics"):
                 raise VaultToolError(
                     f"Refusing to overwrite existing note '{rel}'. People/Topics notes "
@@ -361,26 +402,78 @@ class VaultTools:
                 raise VaultToolError(
                     f"Person note 'People/{old_name}.md' does not exist."
                 )
+            # Snapshot the retiring note before it moves/unlinks so the audit ledger
+            # keeps its final content and the merge never loses facts unrecorded.
+            old_content = old_fp.read_text(encoding="utf-8")
             if new_fp.exists():
-                # Merge case — a plain move would clobber the target. Rewrite backlinks in
-                # Python, leave the bodies for the agent to consolidate via edit_note.
+                # Merge case — a plain move would clobber the target. Migrate the old
+                # note's facts into the target *before* deleting it (non-lossy by
+                # construction — never rely on a follow-up edit_note that may not come),
+                # rewrite backlinks, then remove the old note.
+                migrated = self._migrate_person_facts(old_content, new_fp, old_rel)
                 n = self._rewrite_backlinks_python(old_name, new_name)
                 old_fp.unlink()
+                self.touched.add(new_rel)
+                self._record_removal(old_rel, new_rel, old_content)
                 return (
-                    f"'{new_name}' already existed — merged: rewrote {n} backlink(s) and "
+                    f"'{new_name}' already existed — merged into People/{new_name}.md: "
+                    f"migrated {migrated} fact bullet(s), rewrote {n} backlink(s), and "
                     f"deleted People/{old_name}.md. Review People/{new_name}.md and use "
-                    f"edit_note to consolidate any duplicated facts."
+                    f"edit_note to de-duplicate any overlapping facts."
                 )
             self.touched.add(new_rel)
             if self._notesmd:
                 try:
                     self._move_cli(old_rel, new_rel)
+                    self._record_removal(old_rel, new_rel, old_content)
                     return f"Renamed People/{old_name} -> People/{new_name} (backlinks rewritten)."
                 except Exception as e:  # noqa: BLE001
                     logger.warning("notesmd-cli move failed (%s); using python", e)
             n = self._rewrite_backlinks_python(old_name, new_name)
             old_fp.rename(new_fp)
+            self._record_removal(old_rel, new_rel, old_content)
         return f"Renamed People/{old_name} -> People/{new_name} ({n} backlink(s) rewritten)."
+
+    def _record_removal(self, old_rel: str, new_rel: str, before: str) -> None:
+        """Queue a rename/merge removal for the audit ledger and clear any prior
+        ``touched`` entry for the vanished path (it no longer exists to re-read)."""
+        self.touched.discard(old_rel)
+        self.removed.append(
+            {"old_path": old_rel, "new_path": new_rel, "before": before}
+        )
+
+    def _migrate_person_facts(
+        self, old_content: str, new_fp: Path, old_rel: str
+    ) -> int:
+        """Append the retiring note's fact bullets into the merge target so a merge
+        never silently drops accumulated facts. Bullets land under the matching
+        ``## About`` / ``## Mentions`` heading; if the target lacks a heading, they go
+        into a ``## Merged from <old>`` section rather than being lost. Duplicates are
+        acceptable here — the agent de-duplicates afterward. Returns bullets migrated.
+        """
+        target = new_fp.read_text(encoding="utf-8")
+        migrated = 0
+        orphaned: List[str] = []
+        for heading in _MERGE_SECTIONS:
+            bullets = _extract_section_bullets(old_content, heading)
+            if not bullets:
+                continue
+            block = "\n".join(bullets)
+            try:
+                target = apply_section_edit(target, heading, block, "append")
+            except SectionEditError:
+                orphaned.extend(bullets)
+            migrated += len(bullets)
+        if orphaned:
+            target = (
+                target.rstrip("\n")
+                + f"\n\n## Merged from {old_rel}\n"
+                + "\n".join(orphaned)
+                + "\n"
+            )
+        if migrated:
+            new_fp.write_text(target, encoding="utf-8")
+        return migrated
 
     def _move_cli(self, old_rel: str, new_rel: str) -> None:
         assert self._notesmd is not None  # callers gate on truthiness

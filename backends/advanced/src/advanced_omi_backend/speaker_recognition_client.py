@@ -18,6 +18,7 @@ import os
 import traceback
 import uuid
 import wave
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -33,6 +34,61 @@ from advanced_omi_backend.utils.audio_utils import pcm_to_wav_bytes
 from advanced_omi_backend.utils.segment_utils import is_non_speech
 
 logger = logging.getLogger(__name__)
+
+
+def _select_label_mappings(
+    label_votes: Dict[str, List[tuple[str, float]]],
+    *,
+    similarity_threshold: float,
+) -> Dict[str, tuple[str, float]]:
+    """Choose conservative, one-to-one names for diarized speaker labels.
+
+    Two agreeing samples are enough. A lone sample must clear a deliberately
+    stricter threshold, and an enrolled identity may name only one diarized label.
+    """
+    candidates: list[tuple[str, str, int, float]] = []
+    single_sample_threshold = max(0.65, similarity_threshold + 0.15)
+    for label, votes in label_votes.items():
+        by_name: Dict[str, List[float]] = {}
+        for name, confidence in votes:
+            by_name.setdefault(name, []).append(float(confidence))
+        if not by_name:
+            continue
+        best_name = max(
+            by_name,
+            key=lambda name: (
+                len(by_name[name]),
+                sum(by_name[name]) / len(by_name[name]),
+            ),
+        )
+        scores = by_name[best_name]
+        average = sum(scores) / len(scores)
+        if len(scores) < 2 and average < single_sample_threshold:
+            logger.info(
+                "Speaker label %r left unknown: one sample confidence %.3f < %.3f",
+                label,
+                average,
+                single_sample_threshold,
+            )
+            continue
+        candidates.append((label, best_name, len(scores), average))
+
+    selected: Dict[str, tuple[str, float]] = {}
+    used_names: set[str] = set()
+    for label, name, vote_count, average in sorted(
+        candidates, key=lambda item: (item[2], item[3]), reverse=True
+    ):
+        identity = name.casefold()
+        if identity in used_names:
+            logger.info(
+                "Speaker label %r left unknown: identity %r already assigned",
+                label,
+                name,
+            )
+            continue
+        used_names.add(identity)
+        selected[label] = (name, average)
+    return selected
 
 
 class SpeakerRecognitionClient:
@@ -525,9 +581,9 @@ class SpeakerRecognitionClient:
             await asyncio.gather(*all_tasks, return_exceptions=True)
 
         # Majority-vote per label
-        label_mapping: Dict[str, tuple] = {}  # label -> (identified_name, confidence)
+        label_votes: Dict[str, List[tuple[str, float]]] = {}
         for label, tasks in label_tasks.items():
-            name_votes: Dict[str, List[float]] = {}
+            votes: List[tuple[str, float]] = []
             for task in tasks:
                 try:
                     result = task.result()
@@ -536,27 +592,17 @@ class SpeakerRecognitionClient:
                 if result and result.get("found"):
                     name = result.get("speaker_name", "Unknown")
                     confidence = result.get("confidence", 0.0)
-                    name_votes.setdefault(name, []).append(confidence)
-
-            if name_votes:
-                # Pick name with most votes, break ties by average confidence
-                best_name = max(
-                    name_votes.keys(),
-                    key=lambda n: (
-                        len(name_votes[n]),
-                        sum(name_votes[n]) / len(name_votes[n]),
-                    ),
-                )
-                avg_confidence = sum(name_votes[best_name]) / len(name_votes[best_name])
-                label_mapping[label] = (best_name, avg_confidence)
-                logger.info(
-                    f"🎤 Label '{label}' -> '{best_name}' "
-                    f"({len(name_votes[best_name])}/{len(tasks)} votes, conf={avg_confidence:.3f})"
-                )
-            else:
+                    votes.append((name, confidence))
+            label_votes[label] = votes
+            if not votes:
                 logger.info(
                     f"🎤 Label '{label}' -> no identification (keeping original)"
                 )
+        label_mapping = _select_label_mappings(
+            label_votes, similarity_threshold=similarity_threshold
+        )
+        for label, (name, confidence) in label_mapping.items():
+            logger.info("🎤 Label %r -> %r (conf=%.3f)", label, name, confidence)
 
         # Build result segments in same format as diarize_identify_match()
         # Non-speech segments are kept but not speaker-identified
@@ -1311,6 +1357,213 @@ class SpeakerRecognitionClient:
         except Exception as e:
             logger.error(f"🎤 ❌ Error appending to speaker: {e}")
             return {"error": "unknown_error", "message": str(e)}
+
+    async def score_enrollment_candidate(
+        self, audio_wav_bytes: bytes, speaker_id: str
+    ) -> Dict:
+        """Score a candidate clip's enrollment value for one target speaker.
+
+        POST /enrollment/candidates/score — returns sim_centroid (cosine to the
+        target's centroid), max_clip_sim (redundancy vs the target's per-clip
+        gallery), n_gallery_clips, best_other ({speaker_id, name, score} of the
+        closest other enrolled speaker), and duration.
+        """
+        if not self.enabled:
+            return {"error": "speaker_recognition_disabled"}
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                form_data = aiohttp.FormData()
+                form_data.add_field(
+                    "file",
+                    audio_wav_bytes,
+                    filename="candidate.wav",
+                    content_type="audio/wav",
+                )
+                form_data.add_field("speaker_id", speaker_id)
+
+                async with session.post(
+                    f"{self.service_url}/enrollment/candidates/score",
+                    data=form_data,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status != 200:
+                        response_text = await response.text()
+                        logger.warning(
+                            f"🎤 /enrollment/candidates/score returned {response.status}: {response_text}"
+                        )
+                        return {"error": "score_failed", "status": response.status}
+                    return await response.json()
+
+        except aiohttp.ClientError as e:
+            logger.error(f"🎤 Failed to score enrollment candidate: {e}")
+            return {"error": "connection_failed", "message": str(e)}
+
+    async def get_enrollment_health(
+        self, user_id: int = 1, before: Optional[datetime] = None
+    ) -> Dict:
+        """Return per-clip gallery cohesion and contamination metrics."""
+        if not self.enabled:
+            return {"error": "speaker_recognition_disabled"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                params = {"user_id": user_id}
+                if before is not None:
+                    params["before"] = before.isoformat()
+                async with session.get(
+                    f"{self.service_url}/enrollment/health",
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status != 200:
+                        return {
+                            "error": "health_audit_failed",
+                            "status": response.status,
+                        }
+                    return await response.json()
+        except aiohttp.ClientError as e:
+            logger.error(f"🎤 Failed to audit enrollment health: {e}")
+            return {"error": "connection_failed", "message": str(e)}
+
+    async def get_enrollment_segment_audio(self, segment_id: int) -> Optional[bytes]:
+        """Fetch one enrolled clip's audio for playback (None if unavailable)."""
+        if not self.enabled:
+            return None
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.service_url}/enrollment/segments/{segment_id}/audio",
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status != 200:
+                        return None
+                    return await response.read()
+        except aiohttp.ClientError as e:
+            logger.error(f"🎤 Failed to fetch enrollment segment audio: {e}")
+            return None
+
+    async def delete_enrollment_segment(
+        self, segment_id: int, hard: bool = False
+    ) -> Dict:
+        """Remove one clip from a speaker's voiceprint (quarantined by default);
+        the service recomputes the speaker's centroid."""
+        if not self.enabled:
+            return {"error": "speaker_recognition_disabled"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                form_data = aiohttp.FormData()
+                form_data.add_field("hard", "true" if hard else "false")
+                async with session.post(
+                    f"{self.service_url}/enrollment/segments/{segment_id}/delete",
+                    data=form_data,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status != 200:
+                        response_text = await response.text()
+                        logger.warning(
+                            f"🎤 Segment delete returned {response.status}: {response_text}"
+                        )
+                        return {
+                            "error": "segment_delete_failed",
+                            "status": response.status,
+                        }
+                    return await response.json()
+        except aiohttp.ClientError as e:
+            logger.error(f"🎤 Failed to delete enrollment segment: {e}")
+            return {"error": "connection_failed", "message": str(e)}
+
+    async def delete_speaker(self, speaker_id: str, delete_audio: bool = True) -> Dict:
+        """Delete an enrolled speaker (and, by default, their enrollment audio)."""
+        if not self.enabled:
+            return {"error": "speaker_recognition_disabled"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.delete(
+                    f"{self.service_url}/speakers/{speaker_id}",
+                    params={"delete_audio": "true" if delete_audio else "false"},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status != 200:
+                        response_text = await response.text()
+                        logger.warning(
+                            f"🎤 Speaker delete returned {response.status}: {response_text}"
+                        )
+                        return {
+                            "error": "speaker_delete_failed",
+                            "status": response.status,
+                        }
+                    return await response.json()
+        except aiohttp.ClientError as e:
+            logger.error(f"🎤 Failed to delete speaker: {e}")
+            return {"error": "connection_failed", "message": str(e)}
+
+    async def extract_speaker_embedding(self, audio_wav_bytes: bytes) -> Dict:
+        """Extract an evaluation embedding without mutating speaker enrollment."""
+        if not self.enabled:
+            return {"error": "speaker_recognition_disabled"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                form_data = aiohttp.FormData()
+                form_data.add_field(
+                    "file",
+                    audio_wav_bytes,
+                    filename="evaluation.wav",
+                    content_type="audio/wav",
+                )
+                async with session.post(
+                    f"{self.service_url}/enrollment/candidates/embed",
+                    data=form_data,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status != 200:
+                        return {"error": "embedding_failed", "status": response.status}
+                    return await response.json()
+        except aiohttp.ClientError as e:
+            logger.error(f"🎤 Failed to extract evaluation embedding: {e}")
+            return {"error": "connection_failed", "message": str(e)}
+
+    async def score_cached_embeddings(
+        self, speaker_id: str, embeddings: list[list[float]]
+    ) -> Dict:
+        """Score cached corpus embeddings against the current live gallery."""
+        if not self.enabled:
+            return {"error": "speaker_recognition_disabled"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.service_url}/enrollment/candidates/score-embeddings",
+                    json={"speaker_id": speaker_id, "embeddings": embeddings},
+                    timeout=aiohttp.ClientTimeout(total=120),
+                ) as response:
+                    if response.status != 200:
+                        return {
+                            "error": "embedding_score_failed",
+                            "status": response.status,
+                            "message": await response.text(),
+                        }
+                    return await response.json()
+        except aiohttp.ClientError as e:
+            logger.error(f"🎤 Failed to score cached embeddings: {e}")
+            return {"error": "connection_failed", "message": str(e)}
+
+    async def get_embedding_info(self) -> Dict:
+        """Return the active speaker embedding model fingerprint."""
+        if not self.enabled:
+            return {"error": "speaker_recognition_disabled"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.service_url}/enrollment/candidates/embedding-info",
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as response:
+                    if response.status != 200:
+                        return {
+                            "error": "embedding_info_failed",
+                            "status": response.status,
+                        }
+                    return await response.json()
+        except aiohttp.ClientError as e:
+            return {"error": "connection_failed", "message": str(e)}
 
     async def reidentify_clusters(
         self,

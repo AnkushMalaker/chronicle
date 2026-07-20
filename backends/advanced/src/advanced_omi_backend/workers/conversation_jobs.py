@@ -1938,6 +1938,17 @@ async def generate_title_summary_job(
         logger.error(f"Conversation {conversation_id} not found")
         return {"success": False, "error": "Conversation not found"}
 
+    if conversation.memory_excluded:
+        logger.info(
+            f"Skipping title/summary generation for memory-excluded conversation {conversation_id[:8]}"
+        )
+        return {
+            "success": True,
+            "skipped": True,
+            "reason": "memory_excluded",
+            "conversation_id": conversation_id,
+        }
+
     set_span_attrs(user_id=str(conversation.user_id))
 
     # Get transcript and segments (properties return data from active transcript version)
@@ -2153,6 +2164,27 @@ async def dispatch_conversation_complete_event_job(
 
     if needs_save:
         await conversation.save()
+
+    if conversation.memory_excluded:
+        actual_end_reason = end_reason or "file_upload"
+        logger.info(
+            f"Skipping conversation.complete plugins for memory-excluded conversation {conversation_id[:8]}"
+        )
+        publish_sse_event(
+            user_id,
+            "conversation.completed",
+            {
+                "conversation_id": conversation_id,
+                "end_reason": actual_end_reason,
+            },
+        )
+        return {
+            "success": True,
+            "skipped": True,
+            "reason": "memory_excluded",
+            "conversation_id": conversation_id,
+            "processing_time_seconds": time.time() - start_time,
+        }
 
     # Get user email for event data
     user = await User.get(user_id)

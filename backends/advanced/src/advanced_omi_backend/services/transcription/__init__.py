@@ -7,9 +7,11 @@ or provider-specific branching is used for batch transcription.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -264,6 +266,98 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
         priority: bool = False,
         **kwargs,
     ) -> dict:
+        """Transcribe with a persistent response cache.
+
+        Batch providers are typically paid, per-minute APIs; re-transcribing
+        identical audio (reprocessing, retries after downstream failures, bulk
+        speaker mining over backup files) must not bill twice. The normalized
+        result is stored in Mongo keyed by the audio content hash plus the
+        provider configuration (minus the API key, so key rotation keeps the
+        cache). Hot-word/context hints are deliberately NOT part of the key —
+        a hint tweak isn't worth re-billing the whole corpus. Cache failures
+        never block transcription.
+        """
+        cache = None
+        cache_key = None
+        if self.model.model_provider != "mock":
+            try:
+                config = (
+                    self.model.model_dump()
+                    if hasattr(self.model, "model_dump")
+                    else dict(vars(self.model))
+                )
+                config.pop("api_key", None)
+                fingerprint = json.dumps(
+                    {
+                        "provider": self._name,
+                        "config": config,
+                        "diarize": diarize,
+                        "sample_rate": sample_rate,
+                    },
+                    sort_keys=True,
+                    default=str,
+                )
+                cache_key = {
+                    "audio_sha256": hashlib.sha256(audio_data).hexdigest(),
+                    "request_sha256": hashlib.sha256(fingerprint.encode()).hexdigest(),
+                }
+                from advanced_omi_backend.models.conversation import Conversation
+
+                cache = Conversation.get_pymongo_collection().database[
+                    "transcription_response_cache"
+                ]
+                row = await cache.find_one(cache_key, {"result": 1})
+                if row and row.get("result") is not None:
+                    logger.info(
+                        f"♻️ Transcription cache hit for '{self._name}' "
+                        f"({len(audio_data)} bytes) — reusing stored response, "
+                        "no provider call"
+                    )
+                    return row["result"]
+            except Exception as e:
+                logger.debug(f"Transcription cache lookup skipped: {e}")
+                cache = None
+
+        result = await self._transcribe_uncached(
+            audio_data,
+            sample_rate,
+            diarize=diarize,
+            context_info=context_info,
+            progress_callback=progress_callback,
+            priority=priority,
+            **kwargs,
+        )
+
+        if cache is not None and cache_key is not None and result:
+            try:
+                # Mongo documents cap at 16MB; skip pathological payloads.
+                if len(json.dumps(result, default=str)) < 12_000_000:
+                    await cache.update_one(
+                        cache_key,
+                        {
+                            "$set": {
+                                "provider": self._name,
+                                "audio_bytes": len(audio_data),
+                                "result": result,
+                                "created_at": datetime.now(timezone.utc),
+                            }
+                        },
+                        upsert=True,
+                    )
+            except Exception as e:
+                logger.debug(f"Transcription cache write skipped: {e}")
+        return result
+
+    async def _transcribe_uncached(
+        self,
+        audio_data: bytes,
+        sample_rate: int,
+        diarize: bool = False,
+        context_info: Optional[str] = None,
+        progress_callback=None,
+        priority: bool = False,
+        **kwargs,
+    ) -> dict:
         # Special handling for mock provider (no HTTP server needed)
         if self.model.model_provider == "mock":
             # Lazy import: test/mock-only provider
@@ -468,15 +562,6 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
             if detail:
                 msg += f"Service error: {detail}"
             raise RuntimeError(msg) from e
-
-            # DEBUG: Log Deepgram response structure
-            if "results" in data and "channels" in data.get("results", {}):
-                channels = data["results"]["channels"]
-                if channels and "alternatives" in channels[0]:
-                    alt = channels[0]["alternatives"][0]
-                    logger.debug(
-                        f"DEBUG Registry: Deepgram alternative keys: {list(alt.keys())}"
-                    )
 
         # Extract normalized shape
         text, words, segments = "", [], []
@@ -740,6 +825,10 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
         except asyncio.TimeoutError:
             # No message available yet
             return None
+        except (ConnectionError, OSError, websockets.exceptions.ConnectionClosed):
+            # Let the consumer reconnect; a dead transport is different from a
+            # healthy socket that simply has no transcript available yet.
+            raise
         except Exception as e:
             logger.error(f"Error processing audio chunk result for {client_id}: {e}")
             return None

@@ -9,6 +9,7 @@ archives (hard-deletes) audio, and splits/merges conversations.
 
 import json
 import logging
+import re
 import shutil
 import statistics
 import uuid
@@ -40,9 +41,18 @@ from advanced_omi_backend.utils.annotation_export import (
     new_export_id,
     validate_export_id,
 )
+from advanced_omi_backend.utils.annotation_import import (
+    AnnotationDatasetError,
+    parse_annotation_dataset,
+)
 from advanced_omi_backend.utils.audio_chunk_utils import (
     audio_cache_duration_matches,
+    convert_audio_to_chunks,
     reconstruct_audio_segment,
+)
+from advanced_omi_backend.utils.audio_utils import (
+    AudioValidationError,
+    validate_and_prepare_audio,
 )
 from advanced_omi_backend.utils.transcript_slicing import (
     build_transcript_text,
@@ -88,6 +98,8 @@ _SCAN_PROJECTION = {
     "archive_reason": 1,
     "processing_status": 1,
     "failure_stage": 1,
+    "external_source_id": 1,
+    "external_source_type": 1,
     "vad_analysis": 1,
     "derived_from": 1,
     "active_transcript_version": 1,
@@ -196,6 +208,7 @@ async def list_for_audit(
     created_before: Optional[datetime] = None,
     include_speakers: Optional[List[str]] = None,
     exclude_speakers: Optional[List[str]] = None,
+    dataset_id: Optional[str] = None,
     archived_only: bool = False,
     hide_failed: bool = False,
     hide_reviewed: bool = False,
@@ -234,6 +247,10 @@ async def list_for_audit(
                     "$ne": Conversation.ConversationStatus.FAILED.value
                 }
 
+        if dataset_id:
+            base["external_source_type"] = "annotation_dataset"
+            base["external_source_id"] = {"$regex": f"^{re.escape(dataset_id)}:"}
+
         # Date range goes into the Mongo query (not the Python predicate) so
         # it narrows the MAX_SCAN working set instead of competing with it.
         if created_after or created_before:
@@ -252,6 +269,28 @@ async def list_for_audit(
         )
         raw_docs = await cursor.to_list(length=MAX_SCAN)
         scan_capped = len(raw_docs) >= MAX_SCAN
+
+        dataset_base: dict = {} if user.is_superuser else {"user_id": str(user.user_id)}
+        dataset_base.update(
+            {
+                "external_source_type": "annotation_dataset",
+                "audio_archived": {"$ne": True},
+                "deleted": {"$ne": True},
+                "audio_chunks_count": {"$gt": 0},
+            }
+        )
+        dataset_docs = await (
+            collection.find(dataset_base, {"external_source_id": 1})
+            .sort("created_at", -1)
+            .limit(MAX_SCAN)
+        ).to_list(length=MAX_SCAN)
+        available_datasets = list(
+            dict.fromkeys(
+                source_id.rsplit(":", 1)[0]
+                for doc in dataset_docs
+                if (source_id := doc.get("external_source_id")) and ":" in source_id
+            )
+        )
 
         # Match threshold the pipeline used + a small comfort margin: an
         # identification within this band of the cutoff is a weak/suspect match
@@ -389,6 +428,7 @@ async def list_for_audit(
             "marginal_margin": marginal_margin,
             "unanalyzed_count": unanalyzed_count,
             "speakers": sorted(available_speakers),
+            "datasets": available_datasets,
         }
 
     except Exception as e:
@@ -1458,8 +1498,139 @@ async def merge_conversations(user: User, conversation_ids: List[str]):
 
 
 # ---------------------------------------------------------------------------
-# Annotation dataset export
+# Annotation dataset import / export
 # ---------------------------------------------------------------------------
+
+
+async def import_annotation_dataset(user: User, archive_bytes: bytes):
+    """Import an export-compatible ZIP as isolated, editor-ready conversations."""
+    try:
+        dataset = parse_annotation_dataset(archive_bytes)
+    except AnnotationDatasetError as exc:
+        return JSONResponse(status_code=422, content={"error": str(exc)})
+
+    client_id = f"{str(user.id)[-6:]}-annotation-import"
+    results = []
+    for clip in dataset.clips:
+        external_source_id = f"{dataset.dataset_id}:{clip.clip_id}"
+        existing = await Conversation.find_one(
+            Conversation.user_id == user.user_id,
+            Conversation.external_source_type == "annotation_dataset",
+            Conversation.external_source_id == external_source_id,
+        )
+        if existing:
+            results.append(
+                {
+                    "clip_id": clip.clip_id,
+                    "status": "skipped",
+                    "reason": "already_imported",
+                    "conversation_id": existing.conversation_id,
+                }
+            )
+            continue
+
+        conversation = None
+        try:
+            audio_data, sample_rate, sample_width, channels, duration = (
+                await validate_and_prepare_audio(
+                    audio_data=clip.audio_bytes,
+                    expected_sample_rate=16000,
+                    convert_to_mono=True,
+                    auto_resample=True,
+                )
+            )
+            segments = [
+                Conversation.SpeakerSegment(**segment) for segment in clip.segments
+            ]
+            conversation = create_conversation(
+                user_id=user.user_id,
+                client_id=client_id,
+                title=clip.conversation_title,
+                summary="Imported annotation dataset; excluded from user memory.",
+                external_source_id=external_source_id,
+                external_source_type="annotation_dataset",
+                data_purpose="annotation",
+                memory_excluded=True,
+                memory_exclusion_reason="annotation_dataset_import",
+            )
+            version_id = str(uuid.uuid4())
+            conversation.add_transcript_version(
+                version_id=version_id,
+                transcript=clip.transcript,
+                segments=segments,
+                provider="annotation-import",
+                model=f"chronicle-dataset-v{dataset.schema_version}",
+                metadata={
+                    "dataset_id": dataset.dataset_id,
+                    "clip_id": clip.clip_id,
+                    "source_conversation_id": clip.source_conversation_id,
+                    "source_client_id": clip.source_client_id,
+                    "source_audio_path": clip.audio_path,
+                    "annotation_notes": clip.notes,
+                },
+                set_as_active=True,
+            )
+            conversation.apply_status(settled=bool(clip.transcript.strip()))
+            await conversation.insert()
+
+            chunk_count = await convert_audio_to_chunks(
+                conversation_id=conversation.conversation_id,
+                audio_data=audio_data,
+                sample_rate=sample_rate,
+                channels=channels,
+                sample_width=sample_width,
+            )
+            results.append(
+                {
+                    "clip_id": clip.clip_id,
+                    "status": "imported",
+                    "conversation_id": conversation.conversation_id,
+                    "duration_seconds": round(duration, 2),
+                    "chunk_count": chunk_count,
+                    "transcript_source": clip.transcript_source,
+                }
+            )
+        except (AudioValidationError, ValueError) as exc:
+            logger.warning(f"Could not import annotation clip {clip.clip_id}: {exc}")
+            if conversation and conversation.id:
+                await AudioChunkDocument.find(
+                    AudioChunkDocument.conversation_id == conversation.conversation_id
+                ).delete()
+                await conversation.delete()
+            results.append(
+                {"clip_id": clip.clip_id, "status": "error", "error": str(exc)}
+            )
+        except Exception as exc:
+            logger.exception(f"Could not import annotation clip {clip.clip_id}")
+            if conversation and conversation.id:
+                await AudioChunkDocument.find(
+                    AudioChunkDocument.conversation_id == conversation.conversation_id
+                ).delete()
+                await conversation.delete()
+            results.append(
+                {"clip_id": clip.clip_id, "status": "error", "error": str(exc)}
+            )
+
+    imported = sum(result["status"] == "imported" for result in results)
+    skipped = sum(result["status"] == "skipped" for result in results)
+    failed = sum(result["status"] == "error" for result in results)
+    response = {
+        "dataset_id": dataset.dataset_id,
+        "schema_version": dataset.schema_version,
+        "message": f"Imported {imported} annotation clip(s)",
+        "results": results,
+        "summary": {
+            "total": len(results),
+            "imported": imported,
+            "skipped": skipped,
+            "failed": failed,
+        },
+    }
+    if failed == len(results):
+        return JSONResponse(status_code=400, content=response)
+    if failed:
+        return JSONResponse(status_code=207, content=response)
+    return response
 
 
 async def start_screening(

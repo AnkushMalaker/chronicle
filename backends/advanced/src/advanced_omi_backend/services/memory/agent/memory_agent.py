@@ -106,6 +106,10 @@ Notes are aggregated by the `categories` property (a wikilink to the category hu
   existing category/property over inventing a near-duplicate.
 - Use `list` properties (`["[[A]]", "[[B]]"]`) for anything that may hold more than one value.
 - Capture what was actually said; quote key facts verbatim; never invent.
+- `Unknown Speaker N` is a diarization placeholder, not a person. Never put it in
+  `people:`, create a `People/Unknown Speaker N.md` note, or wikilink it.
+- Hermes is Chronicle's voice assistant/system, not a human. Link it as the recurring
+  topic `[[Hermes]]`; never create or update `People/Hermes.md`.
 
 # Note templates — fill these EXACTLY (they are the schema)
 Conversation note — `Conversations/<conversation_id>.md`:
@@ -176,6 +180,10 @@ class MemoryAgentResult:
     touched: List[str]
     summary: str
     tool_calls: int = 0
+    # Notes retired by a rename/merge this run (VaultTools.removed entries): each is
+    # {"old_path", "new_path", "before"}. Recorded as ``rename`` audit-ledger entries
+    # so a note disappearing is never invisible in the ledger.
+    removed: List[dict] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     truncated: bool = (
         False  # loop ended on a truncated/empty LLM response, not a deliberate finish
@@ -203,7 +211,13 @@ async def _get_prompt(prompt_id: str, default: str, vault_summary: str = "") -> 
 class MemoryAgent:
     """Runs the tool loop that turns a transcript into vault edits."""
 
-    def __init__(self, vault_root: Path, operation: str = "memory_agent"):
+    def __init__(
+        self,
+        vault_root: Path,
+        operation: str = "memory_agent",
+        *,
+        force_fallback: bool = False,
+    ):
         # `operation` selects the model/params from model_registry. A dedicated
         # "memory_agent" operation is used (not "memory_extraction", which may force
         # response_format=json and conflict with tool calling): reasoning models spend
@@ -211,6 +225,7 @@ class MemoryAgent:
         # operation carries a larger max_tokens budget and a low reasoning_effort.
         self.tools = VaultTools(vault_root)
         self.operation = operation
+        self.force_fallback = force_fallback
 
     async def run(
         self,
@@ -219,6 +234,7 @@ class MemoryAgent:
         *,
         date: Optional[str] = None,
         duration_minutes: Optional[float] = None,
+        title: Optional[str] = None,
         vault_summary: str = "",
         guidance: str = "",
     ) -> MemoryAgentResult:
@@ -233,6 +249,7 @@ class MemoryAgent:
             f"conversation_id: {conversation_id}\n"
             f"date: {date}\n"
             f"duration_minutes: {duration_minutes if duration_minutes is not None else 'unknown'}\n\n"
+            f"source_title: {title or 'unknown'}\n\n"
             f"Transcript (speaker-labelled):\n{transcript}"
             f"{guidance_block}"
         )
@@ -248,7 +265,10 @@ class MemoryAgent:
 
         for round_idx in range(MAX_TOOL_ROUNDS):
             response = await async_chat_with_tools(
-                messages, tools=VAULT_TOOL_SCHEMAS, operation=self.operation
+                messages,
+                tools=VAULT_TOOL_SCHEMAS,
+                operation=self.operation,
+                force_fallback=self.force_fallback,
             )
             choice = response.choices[0]
             msg = choice.message
@@ -285,6 +305,7 @@ class MemoryAgent:
                         touched=sorted(self.tools.touched),
                         summary=summary,
                         tool_calls=tool_calls,
+                        removed=list(self.tools.removed),
                         errors=errors,
                         truncated=True,
                     )
@@ -301,6 +322,7 @@ class MemoryAgent:
                     touched=sorted(self.tools.touched),
                     summary=summary,
                     tool_calls=tool_calls,
+                    removed=list(self.tools.removed),
                     errors=errors,
                 )
 
@@ -351,6 +373,7 @@ class MemoryAgent:
                         touched=sorted(self.tools.touched),
                         summary="(stopped: stalled retrying a failing edit)",
                         tool_calls=tool_calls,
+                        removed=list(self.tools.removed),
                         errors=errors,
                         stalled=True,
                     )
@@ -368,6 +391,7 @@ class MemoryAgent:
             touched=sorted(self.tools.touched),
             summary="(stopped at max rounds)",
             tool_calls=tool_calls,
+            removed=list(self.tools.removed),
             errors=errors,
         )
 

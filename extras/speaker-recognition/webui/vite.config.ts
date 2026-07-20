@@ -1,6 +1,10 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+const speakerServiceHost = process.env.SPEAKER_SERVICE_PROXY_HOST || 'speaker-service'
+const speakerServicePort = process.env.SPEAKER_SERVICE_PORT || '8085'
+const speakerServiceTarget = `http://${speakerServiceHost}:${speakerServicePort}`
+
 // https://vitejs.dev/config/
 // The dev server runs plain HTTP. When HTTPS is enabled, Caddy terminates TLS
 // (Tailscale/Let's Encrypt cert) and reverse-proxies to this server over HTTP —
@@ -17,6 +21,27 @@ export default defineConfig({
           '127.0.0.1',
           '.nip.io'
         ],
+    proxy: {
+      '/api': {
+        target: speakerServiceTarget,
+        changeOrigin: true,
+        rewrite: path => path.replace(/^\/api/, ''),
+      },
+      '/health': {
+        target: speakerServiceTarget,
+        changeOrigin: true,
+      },
+      '/ws': {
+        target: speakerServiceTarget,
+        changeOrigin: true,
+        ws: true,
+      },
+      '/v1': {
+        target: speakerServiceTarget,
+        changeOrigin: true,
+        ws: true,
+      },
+    },
   },
   define: {
     global: 'globalThis',

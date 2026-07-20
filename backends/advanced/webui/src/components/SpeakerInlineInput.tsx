@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
-import { Plus } from 'lucide-react'
+import { Plus, UserX } from 'lucide-react'
 import { useSortedSpeakers } from '../hooks/useSortedSpeakers'
+import { nextUnknownSpeakerLabel } from '../utils/speakerLabels'
 
 interface SpeakerInlineInputProps {
   value: string
@@ -9,6 +10,8 @@ interface SpeakerInlineInputProps {
   enrolledSpeakers: Array<{ speaker_id: string; name: string }>
   recentSpeakers?: string[]
   placeholder?: string
+  allowCreate?: boolean
+  usedSpeakerNames?: string[]
 }
 
 /**
@@ -22,14 +25,21 @@ export default function SpeakerInlineInput({
   enrolledSpeakers,
   recentSpeakers = [],
   placeholder = 'Type speaker name...',
+  allowCreate = true,
+  usedSpeakerNames = [],
 }: SpeakerInlineInputProps) {
   const [isFocused, setIsFocused] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
 
   const sortedSpeakers = useSortedSpeakers(enrolledSpeakers, value, recentSpeakers)
   const hasResults = sortedSpeakers.recent.length > 0 || sortedSpeakers.rest.length > 0
-  const showDropdown = isFocused && (hasResults || value.trim())
-  const canCreate = value.trim() && !enrolledSpeakers.some(s => s.name.toLowerCase() === value.trim().toLowerCase())
+  const unknownSpeakers = [nextUnknownSpeakerLabel(usedSpeakerNames)]
+  const matchingUnknowns = unknownSpeakers.filter((name) =>
+    !value.trim() || name.toLowerCase().includes(value.trim().toLowerCase())
+  )
+  const showDropdown = isFocused && (hasResults || matchingUnknowns.length > 0 || value.trim())
+  const isKnownUnknown = unknownSpeakers.some((name) => name.toLowerCase() === value.trim().toLowerCase())
+  const canCreate = allowCreate && value.trim() && !isKnownUnknown && !enrolledSpeakers.some(s => s.name.toLowerCase() === value.trim().toLowerCase())
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -68,8 +78,11 @@ export default function SpeakerInlineInput({
         onKeyDown={(e) => {
           if (e.key === 'Enter' && value.trim()) {
             // If there's an exact match or results, select first; otherwise create
+            const exactUnknown = unknownSpeakers.find((name) => name.toLowerCase() === value.trim().toLowerCase())
             const first = sortedSpeakers.recent[0] || sortedSpeakers.rest[0]
-            handleSelect(first ? first.name : value.trim())
+            if (exactUnknown) handleSelect(exactUnknown)
+            else if (first) handleSelect(first.name)
+            else if (allowCreate) handleSelect(value.trim())
           }
         }}
         placeholder={placeholder}
@@ -78,6 +91,16 @@ export default function SpeakerInlineInput({
 
       {showDropdown && (
         <div className="absolute top-full left-0 mt-1 w-full min-w-[180px] bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 z-50 max-h-40 overflow-y-auto">
+          {matchingUnknowns.map((name) => (
+            <button
+              key={name}
+              onMouseDown={(e) => { e.preventDefault(); handleSelect(name) }}
+              className="w-full text-left px-3 py-1.5 text-xs hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-500 dark:text-gray-400 flex items-center gap-1.5"
+            >
+              <UserX className="h-3 w-3" /> {name}
+            </button>
+          ))}
+          {matchingUnknowns.length > 0 && hasResults && <div className="border-t border-gray-100 dark:border-gray-700" />}
           {sortedSpeakers.recent.length > 0 && (
             <>
               <div className="px-3 py-0.5 text-[10px] text-gray-400 dark:text-gray-500 uppercase tracking-wider bg-gray-50 dark:bg-gray-800/50">

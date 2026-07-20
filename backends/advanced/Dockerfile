@@ -42,9 +42,31 @@ RUN git clone ${NOTESMD_REPO} /src \
 
 
 # ============================================
+# Codex CLI fetcher - optional memory-agent executor
+# ============================================
+# Static musl binary used when config.yml sets memory.agent_executor: codex (vault
+# recording on a ChatGPT subscription). Auth is NOT baked in — it comes from the
+# CODEX_HOME volume mount (see docker-compose.yml / the setup wizard).
+FROM debian:bookworm-slim AS codex-fetcher
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+ARG CODEX_VERSION=0.144.4
+ARG TARGETARCH
+RUN case "${TARGETARCH:-amd64}" in \
+      arm64) triple=aarch64-unknown-linux-musl ;; \
+      *) triple=x86_64-unknown-linux-musl ;; \
+    esac \
+    && curl -fsSL "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${triple}.tar.gz" \
+       | tar -xz -C /tmp \
+    && install -m 0755 "/tmp/codex-${triple}" /usr/local/bin/codex
+
+
+# ============================================
 # Production stage
 # ============================================
 FROM python:3.12-slim-bookworm AS prod
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libsndfile1 \
@@ -56,6 +78,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # notesmd-cli on PATH so the memory agent auto-detects it (shutil.which).
 COPY --from=notesmd-builder /out/notesmd-cli /usr/local/bin/notesmd-cli
+# Codex CLI on PATH for the optional codex memory-agent executor.
+COPY --from=codex-fetcher /usr/local/bin/codex /usr/local/bin/codex
 
 WORKDIR /app
 
@@ -104,6 +128,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # notesmd-cli on PATH so the memory agent auto-detects it (shutil.which).
 COPY --from=notesmd-builder /out/notesmd-cli /usr/local/bin/notesmd-cli
+# Codex CLI on PATH for the optional codex memory-agent executor.
+COPY --from=codex-fetcher /usr/local/bin/codex /usr/local/bin/codex
 
 WORKDIR /app
 

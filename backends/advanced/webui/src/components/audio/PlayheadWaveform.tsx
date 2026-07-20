@@ -23,6 +23,8 @@ interface PlayheadWaveformProps {
   // belongs to this conversation.
   segmentMarker?: PlayerSegmentMarker | null
   hoverMarker?: { start: number; end: number } | null
+  coloredSegments?: { start: number; end: number; color: string; segmentIndex?: number; label?: string }[]
+  onSegmentClick?: (index: number) => void
 }
 
 export const PlayheadWaveform: React.FC<PlayheadWaveformProps> = ({
@@ -33,6 +35,8 @@ export const PlayheadWaveform: React.FC<PlayheadWaveformProps> = ({
   segments,
   segmentMarker,
   hoverMarker,
+  coloredSegments,
+  onSegmentClick,
 }) => {
   const currentTime = usePlayheadTime(cid)
 
@@ -58,6 +62,8 @@ export const PlayheadWaveform: React.FC<PlayheadWaveformProps> = ({
       height={height}
       segments={segments}
       segmentMarkers={markers}
+      coloredSegments={coloredSegments}
+      onSegmentClick={onSegmentClick}
     />
   )
 }

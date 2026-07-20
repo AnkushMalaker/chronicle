@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
   ShieldCheck, ShieldAlert, ChevronDown, ChevronRight,
-  RefreshCw, Archive, ArrowRightLeft, HelpCircle,
+  RefreshCw, Archive, ArrowRightLeft, HelpCircle, Database,
 } from 'lucide-react'
 import { useUser } from '../contexts/UserContext'
 import { apiService } from '../services/api'
@@ -32,6 +32,13 @@ interface AuditReport {
   total_clips: number
   speakers_without_segments: { speaker_id: string; name: string }[]
 }
+interface BackfillJob {
+  id: number
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  progress: number
+  result: { added: number; failed: number; already_available: number } | null
+  error: string | null
+}
 
 const VERDICT_STYLES: Record<string, string> = {
   contaminated: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
@@ -59,6 +66,8 @@ export default function EnrollmentHealth() {
   const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [busy, setBusy] = useState<number | null>(null)
+  const [backfill, setBackfill] = useState<BackfillJob | null>(null)
+  const [backfillError, setBackfillError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     if (!user) return
@@ -78,6 +87,44 @@ export default function EnrollmentHealth() {
   }, [user])
 
   useEffect(() => { load() }, [load])
+
+  const checkBackfill = useCallback(async () => {
+    if (!user) return
+    try {
+      const res = await apiService.get('/enrollment/segments/backfill', {
+        params: { user_id: user.id },
+      })
+      setBackfill(res.data)
+      return res.data as BackfillJob | null
+    } catch (e: any) {
+      setBackfillError(e?.response?.data?.detail || e?.message || 'Could not check import status')
+      return null
+    }
+  }, [user])
+
+  useEffect(() => { checkBackfill() }, [checkBackfill])
+
+  useEffect(() => {
+    if (!backfill || !['pending', 'running'].includes(backfill.status)) return
+    const interval = setInterval(async () => {
+      const job = await checkBackfill()
+      if (job?.status === 'completed') await load()
+    }, 1500)
+    return () => clearInterval(interval)
+  }, [backfill?.id, backfill?.status, checkBackfill, load])
+
+  const startBackfill = async () => {
+    if (!user) return
+    setBackfillError(null)
+    try {
+      const res = await apiService.post('/enrollment/segments/backfill', undefined, {
+        params: { user_id: user.id },
+      })
+      setBackfill(res.data)
+    } catch (e: any) {
+      setBackfillError(e?.response?.data?.detail || e?.message || 'Could not start enrollment import')
+    }
+  }
 
   const toggle = (id: string) =>
     setExpanded(prev => {
@@ -160,11 +207,35 @@ export default function EnrollmentHealth() {
           </div>
 
           {report.total_clips === 0 && (
-            <div className="bg-yellow-50 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-200 p-4 rounded-md text-sm">
-              No per-clip embeddings found. Run the one-time backfill to import existing enrollment audio:
-              <code className="block mt-2 text-xs">
-                podman exec speaker-recognition_speaker-service-gpu_1 python3 /app/scripts/backfill_segment_embeddings.py
-              </code>
+            <div className="bg-yellow-50 dark:bg-yellow-900/30 text-yellow-900 dark:text-yellow-100 p-4 rounded-md">
+              <div className="font-medium">Existing enrollment clips need analysis</div>
+              <p className="mt-1 text-sm">
+                Build the per-clip embeddings used to find mislabeled and low-quality audio.
+                Existing speaker voiceprints are not changed.
+              </p>
+              <div className="mt-3 flex items-center gap-3">
+                <button
+                  onClick={startBackfill}
+                  disabled={backfill?.status === 'pending' || backfill?.status === 'running'}
+                  className="flex items-center gap-2 px-3 py-2 text-sm font-medium bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-60"
+                >
+                  <Database className={`h-4 w-4 ${backfill?.status === 'running' ? 'animate-pulse' : ''}`} />
+                  {backfill?.status === 'pending' || backfill?.status === 'running'
+                    ? `Analyzing clips · ${Math.round(backfill.progress)}%`
+                    : backfill?.status === 'failed' ? 'Try again' : 'Analyze enrollment clips'}
+                </button>
+                {backfill?.status === 'completed' && backfill.result && (
+                  <span className="text-sm">
+                    Added {backfill.result.added} clips
+                    {backfill.result.failed > 0 ? ` · ${backfill.result.failed} failed` : ''}
+                  </span>
+                )}
+              </div>
+              {(backfillError || backfill?.error) && (
+                <div className="mt-3 text-sm text-red-700 dark:text-red-300">
+                  Analysis failed: {backfillError || backfill?.error}
+                </div>
+              )}
             </div>
           )}
 

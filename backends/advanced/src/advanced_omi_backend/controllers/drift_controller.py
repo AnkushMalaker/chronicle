@@ -13,7 +13,7 @@ need the one-time :func:`backfill_cluster_embeddings` pass.
 
 import logging
 from collections import Counter
-from typing import Optional
+from typing import Callable, Optional
 
 from advanced_omi_backend.config import get_diarization_settings
 from advanced_omi_backend.models.conversation import Conversation
@@ -116,26 +116,33 @@ async def find_drift_conversations() -> dict:
 
 
 async def backfill_cluster_embeddings(
-    limit: Optional[int] = None, only_missing: bool = True
+    limit: Optional[int] = None,
+    only_missing: bool = True,
+    progress_callback: Optional[Callable[[int, int, int, int, int], None]] = None,
 ) -> dict:
     """One-time: embed per-cluster centroids for conversations that lack them.
 
     Reconstructs each conversation's audio and pools one centroid per existing diarized
     speaker (no re-diarization) via ``/v1/embed-clusters``, storing the result keyed by
-    the segments' display labels. GPU-bound (runs the embedder); intended to be invoked
-    from a script inside the backend container.
+    the segments' display labels. GPU-bound (runs the embedder); intended to run as a
+    background job or from the maintenance script inside the backend container.
     """
     client = SpeakerRecognitionClient()
     convs = await Conversation.find({"deleted": {"$ne": True}}).to_list()
 
     done = skipped = failed = 0
+    total = len(convs)
     for conv in convs:
         version = conv.active_transcript
         if not version or not version.segments:
             skipped += 1
+            if progress_callback:
+                progress_callback(done + skipped + failed, total, done, skipped, failed)
             continue
         if only_missing and (version.metadata or {}).get("cluster_centroids"):
             skipped += 1
+            if progress_callback:
+                progress_callback(done + skipped + failed, total, done, skipped, failed)
             continue
 
         speech = _speech_segments(version)
@@ -145,6 +152,8 @@ async def backfill_cluster_embeddings(
         ]
         if not diar:
             skipped += 1
+            if progress_callback:
+                progress_callback(done + skipped + failed, total, done, skipped, failed)
             continue
 
         max_end = max(d["end"] for d in diar)
@@ -157,6 +166,8 @@ async def backfill_cluster_embeddings(
                 "audio reconstruct failed for %s: %s", conv.conversation_id[:8], e
             )
             failed += 1
+            if progress_callback:
+                progress_callback(done + skipped + failed, total, done, skipped, failed)
             continue
 
         resp = await client.embed_clusters(audio, diar)
@@ -167,6 +178,8 @@ async def backfill_cluster_embeddings(
                 resp.get("error") or resp.get("message"),
             )
             failed += 1
+            if progress_callback:
+                progress_callback(done + skipped + failed, total, done, skipped, failed)
             continue
 
         if not version.metadata:
@@ -179,6 +192,8 @@ async def backfill_cluster_embeddings(
             conv.conversation_id[:8],
             len(resp["clusters"]),
         )
+        if progress_callback:
+            progress_callback(done + skipped + failed, total, done, skipped, failed)
         if limit and done >= limit:
             break
 

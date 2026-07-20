@@ -668,6 +668,7 @@ async def export_annotation_dataset_job(
         exported = [s for s in conv_summaries if "skipped_reason" not in s]
         meta = {
             "export_id": export_id,
+            "schema_version": 1,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "created_by": user_id,
             "params": {

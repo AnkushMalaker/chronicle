@@ -19,9 +19,11 @@ import collections
 import json
 import logging
 import os
+from datetime import datetime
 from typing import Optional
 
 import numpy as np
+
 from simple_speaker_recognition.database.models import Speaker, SpeakerAudioSegment
 
 log = logging.getLogger("speaker_service")
@@ -41,13 +43,15 @@ def _norm(v: np.ndarray) -> np.ndarray:
     return v / n if n > 0 else v
 
 
-def _load_segments(session, user_id: Optional[int]):
+def _load_segments(session, user_id: Optional[int], before: Optional[datetime] = None):
     """Return [(SpeakerAudioSegment, Speaker, unit_vec)] with valid embeddings."""
     q = session.query(SpeakerAudioSegment, Speaker).join(
         Speaker, SpeakerAudioSegment.speaker_id == Speaker.id
     )
     if user_id is not None:
         q = q.filter(Speaker.user_id == user_id)
+    if before is not None:
+        q = q.filter(SpeakerAudioSegment.created_at < before)
 
     rows = []
     for seg, spk in q.all():
@@ -63,9 +67,11 @@ def _load_segments(session, user_id: Optional[int]):
     return rows
 
 
-def compute_audit(session, user_id: Optional[int] = None) -> dict:
+def compute_audit(
+    session, user_id: Optional[int] = None, before: Optional[datetime] = None
+) -> dict:
     """Build the enrollment-health report for a user (or all users)."""
-    rows = _load_segments(session, user_id)
+    rows = _load_segments(session, user_id, before)
 
     by_spk: dict = collections.defaultdict(list)  # speaker_id -> [(seg, vec)]
     name_by_id: dict = {}

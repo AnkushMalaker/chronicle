@@ -120,7 +120,7 @@ services:
       - REACT_UI_PORT=${REACT_UI_PORT}
       - REACT_UI_HTTPS=${REACT_UI_HTTPS}
       - VITE_ALLOWED_HOSTS=${VITE_ALLOWED_HOSTS:-localhost 127.0.0.1}
-      - SPEAKER_SERVICE_HOST=${SPEAKER_SERVICE_HOST}
+      - SPEAKER_SERVICE_PROXY_HOST=${SPEAKER_SERVICE_PROXY_HOST:-speaker-service}
       - SPEAKER_SERVICE_PORT=${SPEAKER_SERVICE_PORT}
     restart: unless-stopped
     healthcheck:

@@ -3,6 +3,7 @@ Documentation    Browser Authentication Tests
 Library          Browser
 Resource            ../setup/setup_keywords.robot
 Suite Setup      Suite Setup
+Test Tags        permissions    e2e
 
 
 

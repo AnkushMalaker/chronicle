@@ -23,7 +23,11 @@ services:
       - ../../plugins:/app/plugins  # External plugins directory
       - ../../discovery.py:/app/discovery.py:ro  # Service discovery module
       - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock:ro  # Tailscale socket for minidisc
+      # Codex CLI auth for the optional codex memory-agent executor. The wizard points
+      # CODEX_HOME_DIR at the host's ~/.codex; rw because codex rotates its tokens.
+      - ${CODEX_HOME_DIR:-./data/codex-home}:/codex-home
     environment:
+      - CODEX_HOME=/codex-home
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
@@ -94,7 +98,10 @@ services:
       - ../../plugins:/app/plugins  # External plugins directory
       - ../../discovery.py:/app/discovery.py:ro  # Service discovery module
       - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock:ro  # Tailscale socket for minidisc
+      # Codex CLI auth for the optional codex memory-agent executor (memory jobs run here).
+      - ${CODEX_HOME_DIR:-./data/codex-home}:/codex-home
     environment:
+      - CODEX_HOME=/codex-home
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
       - OPENAI_API_KEY=${OPENAI_API_KEY}

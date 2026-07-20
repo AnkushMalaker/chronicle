@@ -14,6 +14,7 @@ import uuid
 
 from fastapi import UploadFile
 from fastapi.responses import JSONResponse
+from rq import Retry
 
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
@@ -49,6 +50,7 @@ async def upload_and_process_audio_files(
     files: list[UploadFile],
     device_name: str = "upload",
     source: str = "upload",
+    annotation_only: bool = False,
 ) -> dict:
     """
     Upload audio files and process them directly.
@@ -63,6 +65,7 @@ async def upload_and_process_audio_files(
         files: List of uploaded audio files
         device_name: Device identifier
         source: Source of the upload (e.g., 'upload', 'gdrive')
+        annotation_only: Create editable transcription records without memory extraction
     """
     try:
         if not files:
@@ -159,9 +162,18 @@ async def upload_and_process_audio_files(
                     user_id=user.user_id,
                     client_id=client_id,
                     title=title,
-                    summary="Processing uploaded audio file...",
+                    summary=(
+                        "Processing annotation-only audio file..."
+                        if annotation_only
+                        else "Processing uploaded audio file..."
+                    ),
                     external_source_id=external_source_id,
                     external_source_type=external_source_type,
+                    data_purpose="annotation" if annotation_only else None,
+                    memory_excluded=annotation_only,
+                    memory_exclusion_reason=(
+                        "annotation_only_upload" if annotation_only else None
+                    ),
                 )
                 await conversation.insert()
                 conversation_id = (
@@ -229,6 +241,9 @@ async def upload_and_process_audio_files(
                         job_timeout=-1,
                         result_ttl=JOB_RESULT_TTL,
                         job_id=transcribe_job_id,
+                        # Bulk uploads can trip provider rate limits (HTTP 429);
+                        # spread retries out so the batch drains instead of failing.
+                        retry=Retry(max=4, interval=[60, 300, 900, 1800]),
                         description=f"Transcribe uploaded file {conversation_id[:8]}",
                         meta={
                             "conversation_id": conversation_id,
@@ -251,12 +266,14 @@ async def upload_and_process_audio_files(
                     transcript_version_id=version_id,  # Pass the version_id from transcription job
                     depends_on_job=transcription_job,  # Wait for transcription to complete (or None)
                     client_id=client_id,  # Pass client_id for UI tracking
+                    skip_memory_extraction=annotation_only,
                 )
 
                 file_result = {
                     "filename": filename,
                     "status": "started",  # RQ standard: job has been enqueued
                     "conversation_id": conversation_id,
+                    "annotation_only": annotation_only,
                     "transcript_job_id": (
                         transcription_job.id if transcription_job else None
                     ),
@@ -309,6 +326,7 @@ async def upload_and_process_audio_files(
         response_body = {
             "message": f"Uploaded and processing {len(successful_files)} file(s)",
             "client_id": client_id,
+            "annotation_only": annotation_only,
             "files": processed_files,
             "summary": {
                 "total": len(files),

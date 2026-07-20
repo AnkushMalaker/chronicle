@@ -71,39 +71,16 @@ class ApiService {
 
   // User management
   async getUsers(): Promise<User[]> {
-    try {
-      const response = await api.get('/users')
-      return response.data
-    } catch (error) {
-      // If endpoint doesn't exist, return empty array and log
-      console.warn('Users endpoint not available, using local storage')
-      return []
+    const response = await api.get('/users')
+    if (!Array.isArray(response.data)) {
+      throw new Error('Users endpoint returned an invalid response')
     }
+    return response.data
   }
 
   async getOrCreateUser(username: string): Promise<User> {
-    try {
-      const response = await api.post('/users', { username })
-      return response.data
-    } catch (error) {
-      // Fallback to local user creation
-      const existingUsers = JSON.parse(localStorage.getItem('users') || '[]')
-      const existingUser = existingUsers.find((u: User) => u.username === username)
-
-      if (existingUser) {
-        return existingUser
-      }
-
-      const newUser: User = {
-        id: Date.now(),
-        username,
-        created_at: new Date().toISOString()
-      }
-
-      existingUsers.push(newUser)
-      localStorage.setItem('users', JSON.stringify(existingUsers))
-      return newUser
-    }
+    const response = await api.post('/users', { username })
+    return response.data
   }
 
   // Speaker management

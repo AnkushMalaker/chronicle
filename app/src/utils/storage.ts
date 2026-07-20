@@ -100,26 +100,20 @@ export const saveDeepgramApiKey = async (apiKey: string | null): Promise<void> =
   try {
     if (apiKey) {
       await AsyncStorage.setItem(DEEPGRAM_API_KEY_KEY, apiKey);
-      console.log('[Storage] Deepgram API Key saved.'); // Don't log the key itself for security
     } else {
       await AsyncStorage.removeItem(DEEPGRAM_API_KEY_KEY);
-      console.log('[Storage] Deepgram API Key removed.');
     }
   } catch (error) {
-    console.error('[Storage] Error saving Deepgram API Key:', error);
+    throw error;
   }
 };
 
 export const getDeepgramApiKey = async (): Promise<string | null> => {
   try {
     const apiKey = await AsyncStorage.getItem(DEEPGRAM_API_KEY_KEY);
-    if (apiKey) {
-        console.log('[Storage] Retrieved Deepgram API Key.');
-    }
     return apiKey;
   } catch (error) {
-    console.error('[Storage] Error retrieving Deepgram API Key:', error);
-    return null;
+    throw error;
   }
 };
 

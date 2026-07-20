@@ -42,6 +42,10 @@ class MemoryConfig:
     extraction_prompt: str = None
     extraction_enabled: bool = True
     timeout_seconds: int = 1200
+    # How the memory agent executes: "direct" = built-in tool-calling loop (metered
+    # API calls via the model registry); "codex" = OpenAI Codex CLI operating on the
+    # vault directory (ChatGPT subscription). See agent/codex_agent.py.
+    agent_executor: str = "direct"
 
 
 def load_config_yml() -> Dict[str, Any]:
@@ -140,6 +144,7 @@ def build_memory_config_from_env() -> MemoryConfig:
 
         # Timeouts/tunables from registry.memory
         timeout_seconds = int(mem_settings.get("timeout_seconds", 1200))
+        agent_executor = str(mem_settings.get("agent_executor") or "direct").lower()
 
         memory_logger.info(
             f"🔧 Memory config: Provider={memory_provider_enum.value}, "
@@ -154,6 +159,7 @@ def build_memory_config_from_env() -> MemoryConfig:
             extraction_prompt=extraction_prompt,
             extraction_enabled=extraction_enabled,
             timeout_seconds=timeout_seconds,
+            agent_executor=agent_executor,
         )
 
     except ImportError:
