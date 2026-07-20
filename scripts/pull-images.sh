@@ -58,6 +58,7 @@ IMAGES=(
     "chronicle-asr-vibevoice:chronicle-asr-vibevoice"
     "chronicle-asr-vibevoice-strixhalo:chronicle-asr-vibevoice-strixhalo"
     "chronicle-asr-transformers:chronicle-asr-transformers"
+    "chronicle-asr-qwen3-vllm:chronicle-asr-qwen3-vllm"
     "chronicle-asr-qwen3-wrapper:chronicle-asr-qwen3-wrapper"
     "chronicle-asr-qwen3-bridge:chronicle-asr-qwen3-bridge"
     "chronicle-havpe-relay:chronicle-havpe-relay"
