@@ -72,7 +72,6 @@ robotframework = "^6.1.1"
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
-norecursedirs = ["tests/scripts"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*", "*Tests"]
 python_functions = ["test_*"]
