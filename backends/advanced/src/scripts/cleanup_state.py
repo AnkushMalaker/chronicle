@@ -243,11 +243,28 @@ def render_stats_table(stats: Stats, title: str = "Current State") -> Table:
         str(stats.langfuse_prompts),
         "yellow" if stats.langfuse_prompts else "dim",
     )
+    """table.add_section()       #then 
+    row("Redis Jobs", str(stats.redis_jobs), "dim")
+    row("Legacy WAV Files", str(stats.legacy_wav), "dim")
+    row("Vault Files", str(stats.vault_files), "green" if stats.vault_files else "dim")
+    table.add_section()
+    row("Users", str(stats.users), "cyan")
+
+    return table"""
+    #now
     table.add_section()
     row("Redis Jobs", str(stats.redis_jobs), "dim")
     row("Legacy WAV Files", str(stats.legacy_wav), "dim")
     row("Vault Files", str(stats.vault_files), "green" if stats.vault_files else "dim")
     table.add_section()
+    
+    # ----------------------------------------------------
+    # Custom Extension: Disk Storage Metric
+    # Added by Omer Said Bayhan (https://github.com/omer-said-bayhan)
+    # ----------------------------------------------------
+    disk_free = shutil.disk_usage(DATA_DIR).free if DATA_DIR.exists() else 0
+    row("Available Disk Space", _human_size(disk_free), "bold cyan")
+
     row("Users", str(stats.users), "cyan")
 
     return table
