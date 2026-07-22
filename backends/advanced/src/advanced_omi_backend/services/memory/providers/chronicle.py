@@ -14,6 +14,7 @@ how the vault is shaped lives in the memory agent's prompts (see ``..agent``).
 """
 
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -233,14 +234,38 @@ class MemoryService(MemoryServiceBase):
             "short or low-information transcript, summarize the exact utterance rather "
             "than leaving either section blank."
         )
-        recovery = await agent_class(user_root, force_fallback=True).run(
-            transcript,
-            source_id,
-            date=trusted_date,
-            duration_minutes=source_duration_minutes,
-            title=source_title,
-            guidance=recovery_guidance,
-        )
+        # The recovery pass is best-effort: it may fail outright (no
+        # defaults.fallback_llm configured, fallback unreachable, ...). The note
+        # guarantee must survive that — degrade to an empty recovery result and
+        # let the source-preserving fallback note below do its job, rather than
+        # failing the whole memory job with nothing recorded.
+        try:
+            recovery = await agent_class(user_root, force_fallback=True).run(
+                transcript,
+                source_id,
+                date=trusted_date,
+                duration_minutes=source_duration_minutes,
+                title=source_title,
+                guidance=recovery_guidance,
+            )
+        except Exception as exc:  # noqa: BLE001 - degrade, never lose the note
+            # Lazy import: circular dependency (agent → memory_agent → llm_client →
+            # back into providers), same as _agent_class above.
+            from ..agent.memory_agent import MemoryAgentResult
+
+            memory_logger.error(
+                "Memory-agent recovery pass failed for %s (%s); falling back to "
+                "the source-preserving conversation note",
+                source_id,
+                exc,
+            )
+            recovery = MemoryAgentResult(
+                conversation_id=source_id,
+                rounds=0,
+                touched=[],
+                summary="",
+                errors=[f"recovery pass failed: {exc}"],
+            )
         recovery.rounds += result.rounds
         recovery.tool_calls += result.tool_calls
         recovery.touched = list(dict.fromkeys((*result.touched, *recovery.touched)))
@@ -440,27 +465,51 @@ class MemoryService(MemoryServiceBase):
                 ),
             )
 
-    @staticmethod
-    def _speaker_rename_guidance(transcript_diff: Optional[list]) -> str:
+    # Diarization placeholders ("Speaker 0", "Unknown Speaker 1") — the only labels a
+    # conversation-scoped diff may globally rename. A person note under a real name
+    # aggregates facts from many conversations, so renaming it from one conversation's
+    # relabel merges the wrong person's whole history (ankush.md -> roshan.md, 2026-07-17).
+    _PLACEHOLDER_SPEAKER_RE = re.compile(
+        r"^(unknown\s+)?speaker[\s_]*\d+$", re.IGNORECASE
+    )
+
+    @classmethod
+    def _speaker_rename_guidance(cls, transcript_diff: Optional[list]) -> str:
         """Turn a speaker diff into an instruction to rename the matching person notes."""
         if not transcript_diff:
             return ""
         renames: dict[str, str] = {}
+        relabels: dict[str, str] = {}
         for ch in transcript_diff:
             if isinstance(ch, dict) and ch.get("type") == "speaker_change":
                 old, new = ch.get("old_speaker"), ch.get("new_speaker")
                 if old and new and old != new:
-                    renames[old] = new
-        if not renames:
+                    if cls._PLACEHOLDER_SPEAKER_RE.match(old.strip()):
+                        renames[old] = new
+                    else:
+                        relabels[old] = new
+        parts: list[str] = []
+        if renames:
+            pairs = "; ".join(f"'{o}' is now '{n}'" for o, n in renames.items())
+            parts.append(
+                f"Placeholder speakers were identified: {pairs}. For each, if a "
+                "People/<placeholder>.md note exists, call rename_person(old, new) FIRST "
+                "— it renames the note and rewrites every [[wikilink]] across the vault — "
+                "then record the conversation and update the renamed person notes. Do not "
+                "leave notes under placeholder speaker labels."
+            )
+        if relabels:
+            pairs = "; ".join(f"'{o}' is now '{n}'" for o, n in relabels.items())
+            parts.append(
+                f"Attribution changed between named people IN THIS CONVERSATION ONLY: "
+                f"{pairs}. Fix the conversation note and move only facts sourced from "
+                "this conversation between the affected person notes. Do NOT call "
+                "rename_person for these — both notes describe real people whose facts "
+                "come from many other conversations."
+            )
+        if not parts:
             return ""
-        pairs = "; ".join(f"'{o}' is now '{n}'" for o, n in renames.items())
-        return (
-            "This is a REPROCESS after speaker re-identification. Speaker labels changed: "
-            f"{pairs}. For each change, if a People/<old name>.md note exists, call "
-            "rename_person(old, new) FIRST — it renames the note and rewrites every "
-            "[[wikilink]] across the vault — then record the conversation and update the "
-            "renamed person notes. Do not leave notes under the old speaker labels."
-        )
+        return "This is a REPROCESS after speaker re-identification. " + " ".join(parts)
 
     # =========================================================================
     # SEARCH
