@@ -195,8 +195,11 @@ def save_config_section(section_path: str, values: dict) -> bool:
     try:
         config_path = get_config_dir() / "config.yml"
 
-        # Load existing config
-        existing_config = {}
+        # Load existing config. Must be a DictConfig even when the file doesn't
+        # exist yet — OmegaConf.update() raises "Unexpected type" on a plain
+        # dict, which made the very first runtime settings save fail silently
+        # on installs without a config.yml.
+        existing_config = OmegaConf.create({})
         if config_path.exists():
             existing_config = OmegaConf.load(config_path)
 
