@@ -4,6 +4,7 @@ from pathlib import Path
 from chronicle_screenpipe.collector import (
     Checkpoints,
     Collector,
+    activity_is_salient,
     audio_duration,
     build_activity_sessions,
     fold_activity_rows,
@@ -99,6 +100,26 @@ def test_activity_uses_bounded_text_and_its_frame_as_representative():
     assert session["text_source"] == "accessibility"
     assert session["representative_frame_id"] == 2
     assert len(text_excerpt("x" * 3000)) == 2000
+
+
+def test_named_or_textual_changes_are_not_lost_to_time_debounce():
+    base = {
+        "captured_at": "2026-07-22T10:00:00Z",
+        "ended_at": "2026-07-22T10:00:00Z",
+        "frame_count": 1,
+        "app_name": "",
+        "window_name": "",
+    }
+    assert activity_is_salient({**base, "window_name": "A short-lived tab"})
+    assert activity_is_salient({**base, "text": "terminal output"})
+    assert not activity_is_salient(base)
+    assert activity_is_salient(
+        {
+            **base,
+            "ended_at": "2026-07-22T10:00:12Z",
+            "frame_count": 2,
+        }
+    )
 
 
 def test_wav_duration_is_read_from_media(tmp_path: Path):

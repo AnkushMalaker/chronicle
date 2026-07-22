@@ -110,6 +110,18 @@ def update_representative(current: dict[str, Any], row: sqlite3.Row) -> None:
         current["representative_frame_id"] = row["id"]
 
 
+def activity_is_salient(
+    session: dict[str, Any], unknown_min_seconds: float = 10.0
+) -> bool:
+    """Keep named/textual changes immediately; gate unattributed visual noise."""
+    if any(session.get(key) for key in ("app_name", "window_name", "text")):
+        return True
+    duration = timestamp_seconds(session["ended_at"]) - timestamp_seconds(
+        session["captured_at"]
+    )
+    return session.get("frame_count", 0) >= 2 and duration >= unknown_min_seconds
+
+
 def build_activity_sessions(
     rows: Iterable[sqlite3.Row], debounce_seconds: float = 10.0
 ) -> list[dict[str, Any]]:
@@ -322,9 +334,9 @@ class Collector:
         sessions = [
             session
             for session in ([*closed, current] if current else closed)
-            if timestamp_seconds(session["ended_at"])
-            - timestamp_seconds(session["captured_at"])
-            >= self.config.activity_debounce_seconds
+            if activity_is_salient(
+                session, unknown_min_seconds=self.config.activity_debounce_seconds
+            )
         ]
         if not sessions:
             self.activity_path.parent.mkdir(parents=True, exist_ok=True)

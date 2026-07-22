@@ -139,7 +139,7 @@ export default function Timeline() {
             <article key={item.id} className="relative ml-6 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
               <span className="absolute -left-[2.3rem] top-4 rounded-full bg-blue-600 text-white p-1.5"><ItemIcon item={item} /></span>
               <div className="text-xs text-gray-500">{new Date(item.captured_at).toLocaleTimeString()} {item.ended_at && `– ${new Date(item.ended_at).toLocaleTimeString()}`}</div>
-              <h3 className="font-medium mt-1">{item.kind === 'audio' ? 'Audio capture' : item.metadata.app_name || item.metadata.window_name || item.metadata.text || item.kind}</h3>
+              <h3 className="font-medium mt-1">{item.kind === 'audio' ? 'Audio capture' : item.metadata.app_name || item.metadata.window_name || (item.kind === 'activity' ? 'Screen change' : item.kind)}</h3>
               {item.kind === 'audio' && <p className="text-sm text-gray-500">{formatDuration(item)} · {item.metadata.chunk_count} chunks{item.metadata.directions?.length ? ` · ${item.metadata.directions.join(' + ')}` : ''}</p>}
               {item.metadata.window_name && item.metadata.window_name !== item.metadata.app_name && <p className="text-sm text-gray-500 truncate">{item.metadata.window_name}</p>}
               {item.kind === 'activity' && item.metadata.text && <p className="text-sm text-gray-600 dark:text-gray-300 mt-2 line-clamp-3">{item.metadata.text}</p>}
