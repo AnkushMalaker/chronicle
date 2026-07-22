@@ -384,8 +384,11 @@ services:
       - LANGFUSE_PUBLIC_KEY=pk-lf-test-public-key
       - LANGFUSE_SECRET_KEY=sk-lf-test-secret-key
     depends_on:
-      chronicle-backend-test:
-        condition: service_healthy
+      # NOTE: no dependency on chronicle-backend-test. The backend's /readiness
+      # healthcheck requires the worker fleet heartbeat in Redis, so gating the
+      # workers on backend health deadlocks startup (backend waits for workers,
+      # workers wait for backend). Matches prod compose: workers only need
+      # mongo + redis.
       mongo-test:
         condition: service_healthy
       redis-test:
