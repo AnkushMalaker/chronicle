@@ -18,6 +18,7 @@ from .modules import (
     client_router,
     conversation_router,
     data_audit_router,
+    device_input_router,
     finetuning_router,
     memory_router,
     openai_compat_router,
@@ -46,6 +47,7 @@ router.include_router(chat_router)
 router.include_router(client_router)
 router.include_router(conversation_router)
 router.include_router(data_audit_router)
+router.include_router(device_input_router)
 router.include_router(finetuning_router)
 router.include_router(memory_router)
 router.include_router(openai_compat_router)

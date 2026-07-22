@@ -164,6 +164,51 @@ export const conversationsApi = {
   closeActiveConversation: (clientId: string) => api.post(`/api/conversations/${clientId}/close`),
 }
 
+export interface DeviceInputSource {
+  source_id: string
+  name: string
+  provider: 'screenpipe' | 'immich'
+  platform: string
+  status: 'pairing' | 'online' | 'offline' | 'error'
+  health: Record<string, unknown>
+  last_seen_at: string | null
+  capabilities: string[]
+}
+
+export interface DeviceInputItem {
+  id: string
+  source_id: string
+  kind: 'audio' | 'activity' | 'screen_context' | 'immich_memory'
+  source_item_id?: string
+  captured_at: string
+  ended_at: string | null
+  metadata: Record<string, any>
+  state: 'received' | 'linked' | 'promoted' | 'rejected'
+}
+
+export const deviceInputApi = {
+  getSources: () => api.get<{ sources: DeviceInputSource[] }>('/api/device-input/sources'),
+  createPairingCode: () => api.post<{ code: string; expires_at: string }>('/api/device-input/pairing-codes'),
+  getTimeline: (startAt: string, endAt: string) =>
+    api.get<{ items: DeviceInputItem[] }>('/api/device-input/timeline', {
+      params: { start_at: startAt, end_at: endAt },
+    }),
+  getThumbnail: (itemId: string) =>
+    api.get<Blob>(`/api/device-input/items/${itemId}/thumbnail`, {
+      responseType: 'blob',
+    }),
+  requestThumbnail: (itemId: string) =>
+    api.post(`/api/device-input/items/${itemId}/request-thumbnail`),
+  getConversationContext: (conversationId: string) =>
+    api.get<{ items: DeviceInputItem[] }>(`/api/device-input/conversations/${conversationId}/context`),
+  requestConversationContext: (conversationId: string) =>
+    api.post(`/api/device-input/conversations/${conversationId}/request-context`),
+  clearConversationContext: (conversationId: string) =>
+    api.delete(`/api/device-input/conversations/${conversationId}/context`),
+  promoteItem: (itemId: string) =>
+    api.post(`/api/device-input/items/${itemId}/promote`),
+}
+
 // One recorded change to the memory vault (the audit ledger). Content lives in
 // the per-entry diff endpoint, not the list, so the list stays light.
 export interface MemoryAuditEntry {

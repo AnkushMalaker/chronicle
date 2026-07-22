@@ -46,6 +46,12 @@ async def _ensure_beanie_initialized():
 
             from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
             from advanced_omi_backend.models.conversation import Conversation
+            from advanced_omi_backend.models.device_input import (
+                CaptureSource,
+                DeviceInputItem,
+                DeviceInputJob,
+                PairingCode,
+            )
             from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
             from advanced_omi_backend.models.user import User
             from advanced_omi_backend.models.waveform import WaveformData
@@ -71,6 +77,10 @@ async def _ensure_beanie_initialized():
                     AudioChunkDocument,
                     WaveformData,
                     MemoryAuditEntry,
+                    CaptureSource,
+                    PairingCode,
+                    DeviceInputItem,
+                    DeviceInputJob,
                 ],
             )
 

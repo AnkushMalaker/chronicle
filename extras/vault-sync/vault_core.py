@@ -26,6 +26,9 @@ if str(_REPO_ROOT) not in sys.path:
 # Persisted local vault directory (set via the "Choose Vault Folder…" menu item).
 APP_SUPPORT = (
     Path.home() / "Library" / "Application Support" / "Chronicle" / "vault-sync"
+    if sys.platform == "darwin"
+    else Path(os.getenv("XDG_STATE_HOME", Path.home() / ".local/state"))
+    / "chronicle-vault-sync"
 )
 VAULT_DIR_FILE = APP_SUPPORT / "vault_dir.txt"
 

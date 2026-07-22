@@ -798,6 +798,14 @@ cron_jobs:
     description: "Auto-archive speech-free conversations (deletes audio, keeps metadata)"
     enabled: false
     schedule: "0 3 * * *"
+  immich_memories:
+    description: "Discover a bounded set of salient Immich photo candidates"
+    enabled: false
+    schedule: "30 4 * * *"
+  device_audio_ingest:
+    description: "Assemble uploaded device audio into speech-driven conversations"
+    enabled: true
+    schedule: "*/2 * * * *"
 
 # Data Audit / auto-clean "level" (thresholds for the auto_clean cron job).
 # Kept separate from cron_jobs.auto_clean so toggling the schedule in the UI

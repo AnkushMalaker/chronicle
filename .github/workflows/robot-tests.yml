@@ -100,6 +100,15 @@ jobs:
         echo "✓ Logs saved to backends/advanced/logs/"
         ls -lh logs/
 
+    - name: Upload service logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: robot-service-logs
+        path: backends/advanced/logs/
+        if-no-files-found: warn
+        retention-days: 14
+
     - name: Check if test results exist
       if: always()
       id: check_results

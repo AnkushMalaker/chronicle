@@ -1,0 +1,16 @@
+[project]
+name = "chronicle-screenpipe-collector"
+version = "0.1.0"
+description = "Chronicle companion for a local ScreenPipe recorder"
+requires-python = ">=3.11"
+dependencies = ["httpx>=0.28,<1"]
+
+[project.scripts]
+chronicle-screenpipe = "chronicle_screenpipe.main:main"
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

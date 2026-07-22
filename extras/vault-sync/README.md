@@ -1,6 +1,6 @@
-# Chronicle Vault Sync (macOS)
+# Chronicle Desktop Tray and Vault Sync
 
-A menu bar app that keeps your Chronicle Obsidian vault
+A macOS menu bar / Linux system tray app that keeps your Chronicle Obsidian vault
 (`data/conversation_docs/{your_user}` on the server) synced to a folder on your Mac, so
 you can open it in **Obsidian** with full backlinks, graph view, etc.
 
@@ -17,17 +17,27 @@ Server Syncthing  ◀──── sync protocol :22000 (over Tailscale) ──�
         └───────────────  Mac authenticates with its JWT  ───────────  Obsidian
 ```
 
-## Prerequisites (Mac)
+## Prerequisites
 
 ```bash
 brew install syncthing   # the sync engine
 # uv (if you don't have it): curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
+On Arch/CachyOS:
+
+```bash
+sudo pacman -S obsidian syncthing
+```
+
+The Linux tray also shows local ScreenPipe frame/audio counts and storage use, and
+provides start, stop, and restart controls for `screenpipe.service` and
+`chronicle-screenpipe.service`.
+
 You also need the Chronicle **server** side running with vault sync enabled — see
 [Server setup](#server-setup-once) below.
 
-## Setup (Mac)
+## Setup
 
 ```bash
 cd extras/vault-sync
@@ -69,6 +79,10 @@ into `~/ChronicleVault` (or `LOCAL_VAULT_DIR`). From the menu:
 ./start.sh logs
 ./start.sh uninstall
 ```
+
+On macOS this installs a launchd agent. On Linux it installs
+`chronicle-desktop.service` as a systemd user service attached to the graphical
+session.
 
 ## Server setup (once)
 
