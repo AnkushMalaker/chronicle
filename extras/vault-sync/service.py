@@ -16,6 +16,19 @@ LOG_FILE = LOG_DIR / "vault-sync.log"
 APP_BUNDLE = Path.home() / "Applications" / "Chronicle Vault Sync.app"
 
 PROJECT_DIR = Path(__file__).resolve().parent
+ROOT_ENV_FILE = PROJECT_DIR.parents[1] / ".env"
+LOCAL_ENV_FILE = PROJECT_DIR / ".env"
+
+
+def _dotenv_environment() -> dict[str, str]:
+    """Load repo-wide settings, with vault-sync-specific values taking precedence."""
+    env: dict[str, str] = {}
+    for env_file in (ROOT_ENV_FILE, LOCAL_ENV_FILE):
+        if env_file.exists():
+            for key, value in dotenv_values(env_file).items():
+                if value is not None:
+                    env[key] = value
+    return env
 
 
 def _find_uv() -> str:
@@ -80,12 +93,7 @@ def _remove_app_bundle() -> None:
 def _build_plist() -> dict:
     uv = _find_uv()
 
-    env = {}
-    env_file = PROJECT_DIR / ".env"
-    if env_file.exists():
-        for key, value in dotenv_values(env_file).items():
-            if value is not None:
-                env[key] = value
+    env = _dotenv_environment()
     # Ensure Homebrew bin is on PATH so the syncthing binary is found under launchd.
     env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "")
 
@@ -243,14 +251,19 @@ def _linux_install() -> None:
         "After=graphical-session.target network-online.target\n\n"
         "[Service]\nType=simple\n"
         f"WorkingDirectory={PROJECT_DIR}\n"
+        f"EnvironmentFile=-{ROOT_ENV_FILE}\n"
+        f"EnvironmentFile=-{LOCAL_ENV_FILE}\n"
         f"ExecStart={uv} run --project {PROJECT_DIR} python {PROJECT_DIR / 'main.py'} menu\n"
         "Restart=on-failure\nRestartSec=5\n\n"
         "[Install]\nWantedBy=graphical-session.target\n"
     )
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
     subprocess.run(
-        ["systemctl", "--user", "enable", "--now", unit.name], check=True
+        ["systemctl", "--user", "enable", unit.name], check=True
     )
+    # ``enable --now`` leaves an already-running unit untouched, so changes to
+    # EnvironmentFile would not take effect until the next login.
+    subprocess.run(["systemctl", "--user", "restart", unit.name], check=True)
     print(f"Installed and started {unit.name}")
 
 

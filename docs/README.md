@@ -10,6 +10,7 @@ day-to-day operation, and use [AGENTS.md](../AGENTS.md) for development conventi
 - [Testing and coverage](testing.md): fast Python lanes, coverage reports, and integration tests
 - [Audio pipeline](audio-pipeline-architecture.md): session, transcription, and memory flow
 - [Initialization system](init-system.md): setup wizard and service orchestration
+- [ScreenPipe capture nodes](screenpipe.md): local capture, Chronicle ingestion, desktop controls, and logs
 - [Podman](podman.md): rootless containers, GPU access, and engine migration
 - [SSL certificates](ssl-certificates.md): HTTPS setup and certificate trust
 

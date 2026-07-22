@@ -1,7 +1,10 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from advanced_omi_backend.services.device_audio_ingest import group_audio_sessions
+from advanced_omi_backend.services.device_audio_ingest import (
+    audio_stream_key,
+    group_audio_sessions,
+)
 
 
 def item(identifier: str, start: datetime, duration: float = 30):
@@ -10,6 +13,17 @@ def item(identifier: str, start: datetime, duration: float = 30):
         captured_at=start,
         ended_at=start + timedelta(seconds=duration),
     )
+
+
+def test_audio_stream_key_separates_microphone_from_system_output():
+    microphone = SimpleNamespace(
+        user_id="user", source_id="rainbow", metadata={"direction": "input"}
+    )
+    system = SimpleNamespace(
+        user_id="user", source_id="rainbow", metadata={"direction": "output"}
+    )
+
+    assert audio_stream_key(microphone) != audio_stream_key(system)
 
 
 def test_audio_chunks_group_across_input_and_output_devices():

@@ -48,7 +48,18 @@ def group_audio_sessions(items: list[DeviceInputItem]) -> list[list[DeviceInputI
     return sessions
 
 
-async def _mix_session(items: list[DeviceInputItem], workspace: Path, output: Path) -> None:
+def audio_stream_key(item: DeviceInputItem) -> tuple[str, str, str]:
+    """Keep microphone and system output in independent processing streams."""
+    return (
+        item.user_id,
+        item.source_id,
+        str(item.metadata.get("direction", "unknown")),
+    )
+
+
+async def _mix_session(
+    items: list[DeviceInputItem], workspace: Path, output: Path
+) -> None:
     start = min(_as_utc(item.captured_at) for item in items)
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     valid = [item for item in items if item.media_data]
@@ -107,11 +118,11 @@ async def process_device_audio() -> dict[str, Any]:
         .sort([("source_id", 1), ("captured_at", 1)])
         .to_list()
     )
-    by_source: dict[tuple[str, str], list[DeviceInputItem]] = {}
+    by_source: dict[tuple[str, str, str], list[DeviceInputItem]] = {}
     for item in pending:
-        by_source.setdefault((item.user_id, item.source_id), []).append(item)
+        by_source.setdefault(audio_stream_key(item), []).append(item)
     processed = 0
-    for (user_id, source_id), source_items in by_source.items():
+    for (user_id, source_id, direction), source_items in by_source.items():
         try:
             user = await User.get(PydanticObjectId(user_id))
         except Exception:
@@ -136,7 +147,7 @@ async def process_device_audio() -> dict[str, Any]:
                     result = await upload_and_process_audio_files(
                         user,
                         [UploadFile(file=handle, filename=output.name)],
-                        device_name=source_id,
+                        device_name=f"{source_id}-{direction}",
                         source="screenpipe",
                     )
             if (
@@ -153,7 +164,7 @@ async def process_device_audio() -> dict[str, Any]:
                 conversation.created_at = min(
                     _as_utc(item.captured_at) for item in session
                 )
-                conversation.external_source_id = f"screenpipe:{source_id}:{session[0].source_item_id}-{session[-1].source_item_id}"
+                conversation.external_source_id = f"screenpipe:{source_id}:{direction}:{session[0].source_item_id}-{session[-1].source_item_id}"
                 conversation.external_source_type = "screenpipe"
                 await conversation.save()
             for item in session:
