@@ -16,6 +16,55 @@ function ItemIcon({ item }: { item: DeviceInputItem }) {
   return <Activity className="w-5 h-5" />
 }
 
+const AUDIO_SESSION_GAP_MS = 90_000
+const AUDIO_SESSION_MAX_MS = 30 * 60_000
+
+export function groupTimelineAudio(items: DeviceInputItem[]): DeviceInputItem[] {
+  const visible = items.filter(item => item.kind !== 'audio')
+  const bySource = new Map<string, DeviceInputItem[]>()
+  for (const item of items) {
+    if (item.kind !== 'audio') continue
+    bySource.set(item.source_id, [...(bySource.get(item.source_id) || []), item])
+  }
+
+  for (const [sourceId, sourceItems] of bySource) {
+    const ordered = sourceItems.sort((a, b) => Date.parse(a.captured_at) - Date.parse(b.captured_at))
+    let session: DeviceInputItem | null = null
+    for (const item of ordered) {
+      const itemStart = Date.parse(item.captured_at)
+      const itemEnd = Date.parse(item.ended_at || item.captured_at)
+      const sessionStart = session ? Date.parse(session.captured_at) : 0
+      const sessionEnd = session ? Date.parse(session.ended_at || session.captured_at) : 0
+      if (!session || itemStart - sessionEnd > AUDIO_SESSION_GAP_MS || itemStart - sessionStart >= AUDIO_SESSION_MAX_MS) {
+        session = {
+          ...item,
+          id: `audio-session:${sourceId}:${item.id}`,
+          metadata: {
+            chunk_count: 1,
+            directions: item.metadata.direction ? [item.metadata.direction] : [],
+          },
+        }
+        visible.push(session)
+        continue
+      }
+      session.ended_at = new Date(Math.max(sessionEnd, itemEnd)).toISOString()
+      session.metadata.chunk_count += 1
+      const direction = item.metadata.direction
+      if (direction && !session.metadata.directions.includes(direction)) {
+        session.metadata.directions.push(direction)
+      }
+    }
+  }
+  return visible.sort((a, b) => Date.parse(a.captured_at) - Date.parse(b.captured_at))
+}
+
+function formatDuration(item: DeviceInputItem) {
+  const seconds = Math.max(0, Math.round((Date.parse(item.ended_at || item.captured_at) - Date.parse(item.captured_at)) / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  return `${minutes}m ${seconds % 60}s`
+}
+
 export default function Timeline() {
   const [day, setDay] = useState(() => new Date().toISOString().slice(0, 10))
   const [start, end] = useMemo(() => dayBounds(day), [day])
@@ -26,6 +75,7 @@ export default function Timeline() {
   })
   const sources = useQuery({ queryKey: ['device-input-sources'], queryFn: async () => (await deviceInputApi.getSources()).data.sources, refetchInterval: 30_000 })
   const pairing = useMutation({ mutationFn: async () => (await deviceInputApi.createPairingCode()).data })
+  const visibleItems = useMemo(() => groupTimelineAudio(timeline.data || []), [timeline.data])
 
   return (
     <div className="space-y-8">
@@ -62,15 +112,16 @@ export default function Timeline() {
       <section>
         <div className="flex items-center gap-2 mb-4"><h2 className="font-semibold">Activity</h2>{timeline.isFetching && <RefreshCw className="w-4 h-4 animate-spin text-gray-400" />}</div>
         <div className="relative border-l-2 border-blue-100 dark:border-blue-900 ml-3 space-y-4">
-          {(timeline.data || []).map(item => (
+          {visibleItems.map(item => (
             <article key={item.id} className="relative ml-6 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
               <span className="absolute -left-[2.3rem] top-4 rounded-full bg-blue-600 text-white p-1.5"><ItemIcon item={item} /></span>
               <div className="text-xs text-gray-500">{new Date(item.captured_at).toLocaleTimeString()} {item.ended_at && `– ${new Date(item.ended_at).toLocaleTimeString()}`}</div>
-              <h3 className="font-medium mt-1">{item.metadata.app_name || item.metadata.window_name || item.metadata.text || item.kind}</h3>
+              <h3 className="font-medium mt-1">{item.kind === 'audio' ? 'Audio capture' : item.metadata.app_name || item.metadata.window_name || item.metadata.text || item.kind}</h3>
+              {item.kind === 'audio' && <p className="text-sm text-gray-500">{formatDuration(item)} · {item.metadata.chunk_count} chunks{item.metadata.directions?.length ? ` · ${item.metadata.directions.join(' + ')}` : ''}</p>}
               {item.metadata.window_name && item.metadata.window_name !== item.metadata.app_name && <p className="text-sm text-gray-500 truncate">{item.metadata.window_name}</p>}
             </article>
           ))}
-          {!timeline.isLoading && !timeline.data?.length && <div className="ml-6 text-sm text-gray-500 border border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-6">Nothing captured for this day.</div>}
+          {!timeline.isLoading && !visibleItems.length && <div className="ml-6 text-sm text-gray-500 border border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-6">Nothing captured for this day.</div>}
         </div>
       </section>
     </div>
