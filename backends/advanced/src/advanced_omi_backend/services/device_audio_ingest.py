@@ -2,7 +2,7 @@
 
 import asyncio
 import tempfile
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,18 +21,26 @@ _CLOSE_DELAY = timedelta(seconds=90)
 _MAX_SESSION = timedelta(minutes=30)
 
 
+def _as_utc(value: datetime) -> datetime:
+    """Normalize Mongo's naïve UTC datetimes before ordering or arithmetic."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def group_audio_sessions(items: list[DeviceInputItem]) -> list[list[DeviceInputItem]]:
     sessions: list[list[DeviceInputItem]] = []
-    for item in sorted(items, key=lambda row: row.captured_at):
+    for item in sorted(items, key=lambda row: _as_utc(row.captured_at)):
         if not sessions:
             sessions.append([item])
             continue
         previous = sessions[-1][-1]
-        previous_end = previous.ended_at or previous.captured_at
-        session_start = sessions[-1][0].captured_at
+        previous_end = _as_utc(previous.ended_at or previous.captured_at)
+        session_start = _as_utc(sessions[-1][0].captured_at)
+        captured_at = _as_utc(item.captured_at)
         if (
-            item.captured_at - previous_end > _SESSION_GAP
-            or item.captured_at - session_start >= _MAX_SESSION
+            captured_at - previous_end > _SESSION_GAP
+            or captured_at - session_start >= _MAX_SESSION
         ):
             sessions.append([item])
         else:
@@ -41,7 +49,7 @@ def group_audio_sessions(items: list[DeviceInputItem]) -> list[list[DeviceInputI
 
 
 async def _mix_session(items: list[DeviceInputItem], workspace: Path, output: Path) -> None:
-    start = min(item.captured_at for item in items)
+    start = min(_as_utc(item.captured_at) for item in items)
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     valid = [item for item in items if item.media_data]
     if not valid:
@@ -54,7 +62,9 @@ async def _mix_session(items: list[DeviceInputItem], workspace: Path, output: Pa
     chains = []
     labels = []
     for index, item in enumerate(valid):
-        delay_ms = max(0, int((item.captured_at - start).total_seconds() * 1000))
+        delay_ms = max(
+            0, int((_as_utc(item.captured_at) - start).total_seconds() * 1000)
+        )
         label = f"a{index}"
         chains.append(
             f"[{index}:a]aresample=16000,aformat=channel_layouts=mono,adelay={delay_ms}[{label}]"
@@ -109,7 +119,9 @@ async def process_device_audio() -> dict[str, Any]:
         if user is None:
             continue
         for session in group_audio_sessions(source_items):
-            session_end = max((item.ended_at or item.captured_at) for item in session)
+            session_end = max(
+                _as_utc(item.ended_at or item.captured_at) for item in session
+            )
             if session_end > utcnow() - _CLOSE_DELAY:
                 continue
             with tempfile.TemporaryDirectory(
@@ -138,7 +150,9 @@ async def process_device_audio() -> dict[str, Any]:
                 Conversation.conversation_id == conversation_id
             )
             if conversation is not None:
-                conversation.created_at = min(item.captured_at for item in session)
+                conversation.created_at = min(
+                    _as_utc(item.captured_at) for item in session
+                )
                 conversation.external_source_id = f"screenpipe:{source_id}:{session[0].source_item_id}-{session[-1].source_item_id}"
                 conversation.external_source_type = "screenpipe"
                 await conversation.save()

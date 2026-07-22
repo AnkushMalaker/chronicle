@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 # Global config cache
 _config_cache: Optional[DictConfig] = None
 
+# Runtime overrides registered by save_config_section(), keyed by section path.
+# Re-applied on every load_config() so they survive cache reloads even when
+# CONFIG_FILE points away from config.yml (test environments).
+_runtime_overrides: dict = {}
+
 
 def get_config_dir() -> Path:
     """Get config directory path (single source of truth)."""
@@ -117,6 +122,14 @@ def load_config(force_reload: bool = False) -> DictConfig:
                 f"{[m.get('name') for m in extra_defaults]}"
             )
 
+    # Re-apply runtime overrides saved via save_config_section(). When
+    # CONFIG_FILE points away from config.yml (test environments), the saved
+    # values exist only in memory — without this they silently revert on the
+    # next reload, so a runtime toggle only "took" until some unrelated code
+    # path refreshed the config.
+    for section_path, values in _runtime_overrides.items():
+        OmegaConf.update(merged, section_path, values, merge=True)
+
     # Cache result
     _config_cache = merged
 
@@ -182,8 +195,11 @@ def save_config_section(section_path: str, values: dict) -> bool:
     try:
         config_path = get_config_dir() / "config.yml"
 
-        # Load existing config
-        existing_config = {}
+        # Load existing config. Must be a DictConfig even when the file doesn't
+        # exist yet — OmegaConf.update() raises "Unexpected type" on a plain
+        # dict, which made the very first runtime settings save fail silently
+        # on installs without a config.yml.
+        existing_config = OmegaConf.create({})
         if config_path.exists():
             existing_config = OmegaConf.load(config_path)
 
@@ -193,13 +209,16 @@ def save_config_section(section_path: str, values: dict) -> bool:
         # Save back to file
         OmegaConf.save(existing_config, config_path)
 
-        # Reload config from the primary config file (CONFIG_FILE env var)
-        merged = reload_config()
+        # Register a runtime override BEFORE reloading: when CONFIG_FILE points
+        # to a different file than config.yml (test configs), the value we just
+        # saved is not in the file load_config() reads, so it must be re-applied
+        # on every load — a one-shot in-memory patch would silently revert on
+        # the next reload_config() from any code path.
+        _runtime_overrides[section_path] = values
 
-        # Also apply the values to the in-memory cache directly.
-        # This is needed when CONFIG_FILE points to a different file than config.yml
-        # (e.g., test configs), so the saved values still take effect at runtime.
-        OmegaConf.update(merged, section_path, values, merge=True)
+        # Reload config from the primary config file (CONFIG_FILE env var);
+        # load_config() re-applies _runtime_overrides on top.
+        reload_config()
 
         logger.info(f"Saved config section '{section_path}' to {config_path}")
         return True

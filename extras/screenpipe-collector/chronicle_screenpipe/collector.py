@@ -95,7 +95,36 @@ def activity_key(row: sqlite3.Row) -> tuple[str, str, str]:
     return (row["app_name"] or "", row["window_name"] or "", row["browser_url"] or "")
 
 
-def build_activity_sessions(rows: Iterable[sqlite3.Row], debounce_seconds: float = 10.0) -> list[dict[str, Any]]:
+def text_excerpt(value: str | None, limit: int = 2000) -> str:
+    """Keep useful searchable context without mirroring ScreenPipe's full text."""
+    return " ".join((value or "").split())[:limit]
+
+
+def update_representative(current: dict[str, Any], row: sqlite3.Row) -> None:
+    text = text_excerpt(row["full_text"] if "full_text" in row.keys() else None)
+    if text:
+        current["text"] = text
+        current["text_source"] = (
+            row["text_source"] if "text_source" in row.keys() else None
+        )
+        current["representative_frame_id"] = row["id"]
+
+
+def activity_is_salient(
+    session: dict[str, Any], unknown_min_seconds: float = 10.0
+) -> bool:
+    """Keep named/textual changes immediately; gate unattributed visual noise."""
+    if any(session.get(key) for key in ("app_name", "window_name", "text")):
+        return True
+    duration = timestamp_seconds(session["ended_at"]) - timestamp_seconds(
+        session["captured_at"]
+    )
+    return session.get("frame_count", 0) >= 2 and duration >= unknown_min_seconds
+
+
+def build_activity_sessions(
+    rows: Iterable[sqlite3.Row], debounce_seconds: float = 10.0
+) -> list[dict[str, Any]]:
     """Collapse frame headers into transitions; OCR and pixels are intentionally ignored."""
     sessions: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
@@ -106,6 +135,7 @@ def build_activity_sessions(rows: Iterable[sqlite3.Row], debounce_seconds: float
             current["ended_at"] = captured
             current["last_frame_id"] = row["id"]
             current["frame_count"] += 1
+            update_representative(current, row)
             continue
         if current is not None:
             sessions.append(current)
@@ -121,13 +151,17 @@ def build_activity_sessions(rows: Iterable[sqlite3.Row], debounce_seconds: float
             "window_name": key[1],
             "browser_url": key[2],
             "capture_trigger": row["capture_trigger"] or "",
+            "representative_frame_id": row["id"],
         }
+        update_representative(current, row)
     if current is not None:
         sessions.append(current)
     return sessions
 
 
-def fold_activity_rows(rows: Iterable[sqlite3.Row], current: dict[str, Any] | None) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+def fold_activity_rows(
+    rows: Iterable[sqlite3.Row], current: dict[str, Any] | None
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """Extend the open activity across poll boundaries and return closed sessions."""
     closed: list[dict[str, Any]] = []
     for row in rows:
@@ -137,6 +171,7 @@ def fold_activity_rows(rows: Iterable[sqlite3.Row], current: dict[str, Any] | No
             current["ended_at"] = captured
             current["last_frame_id"] = row["id"]
             current["frame_count"] += 1
+            update_representative(current, row)
             continue
         if current is not None:
             closed.append(current)
@@ -152,7 +187,9 @@ def fold_activity_rows(rows: Iterable[sqlite3.Row], current: dict[str, Any] | No
             "window_name": key[1],
             "browser_url": key[2],
             "capture_trigger": row["capture_trigger"] or "",
+            "representative_frame_id": row["id"],
         }
+        update_representative(current, row)
     return closed, current
 
 
@@ -190,7 +227,16 @@ class Collector:
         columns = table_columns(connection, "audio_chunks")
         required = {"id", "file_path", "timestamp"}
         if not required <= columns:
-            raise RuntimeError(f"unsupported ScreenPipe audio_chunks schema; missing {sorted(required - columns)}")
+            # ScreenPipe may expose a migration placeholder briefly before the
+            # first audio segment initializes the final schema.
+            count = connection.execute("SELECT COUNT(*) FROM audio_chunks").fetchone()[
+                0
+            ]
+            if count == 0:
+                return 0
+            raise RuntimeError(
+                f"unsupported ScreenPipe audio_chunks schema; missing {sorted(required - columns)}"
+            )
         cursor = self.checkpoints.get("audio")
         rows = connection.execute(
             "SELECT id, file_path, timestamp FROM audio_chunks WHERE id > ? AND timestamp IS NOT NULL ORDER BY id LIMIT 100",
@@ -202,17 +248,31 @@ class Collector:
             if not path.is_file():
                 captured = timestamp_seconds(iso_timestamp(row["timestamp"]))
                 if time.time() - captured < 120:
-                    logger.warning("audio chunk %s is not available yet: %s", row["id"], path)
+                    logger.warning(
+                        "audio chunk %s is not available yet: %s", row["id"], path
+                    )
                     break
                 self.rejections_path.parent.mkdir(parents=True, exist_ok=True)
                 with self.rejections_path.open("a", encoding="utf-8") as rejected:
-                    rejected.write(json.dumps({"stream": "audio", "source_item_id": row["id"], "detail": "source media missing"}) + "\n")
+                    rejected.write(
+                        json.dumps(
+                            {
+                                "stream": "audio",
+                                "source_item_id": row["id"],
+                                "detail": "source media missing",
+                            }
+                        )
+                        + "\n"
+                    )
                 self.checkpoints.set("audio", row["id"])
                 continue
             before = path.stat()
             time.sleep(0.05)
             after = path.stat()
-            if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
+            if (
+                before.st_size != after.st_size
+                or before.st_mtime_ns != after.st_mtime_ns
+            ):
                 break
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
             content_type = mimetypes.guess_type(path.name)[0] or "audio/wav"
@@ -235,7 +295,17 @@ class Collector:
                 logger.error("audio chunk %s rejected: %s", row["id"], response.text)
                 self.rejections_path.parent.mkdir(parents=True, exist_ok=True)
                 with self.rejections_path.open("a", encoding="utf-8") as rejected:
-                    rejected.write(json.dumps({"stream": "audio", "source_item_id": row["id"], "status": response.status_code, "detail": response.text[:1000]}) + "\n")
+                    rejected.write(
+                        json.dumps(
+                            {
+                                "stream": "audio",
+                                "source_item_id": row["id"],
+                                "status": response.status_code,
+                                "detail": response.text[:1000],
+                            }
+                        )
+                        + "\n"
+                    )
             self.checkpoints.set("audio", row["id"])
             sent += 1
         return sent
@@ -244,11 +314,14 @@ class Collector:
         columns = table_columns(connection, "frames")
         required = {"id", "timestamp", "app_name", "window_name"}
         if not required <= columns:
-            raise RuntimeError(f"unsupported ScreenPipe frames schema; missing {sorted(required - columns)}")
+            raise RuntimeError(
+                f"unsupported ScreenPipe frames schema; missing {sorted(required - columns)}"
+            )
         optional = lambda name: name if name in columns else f"NULL AS {name}"
         cursor = self.checkpoints.get("frames")
         rows = connection.execute(
-            f"SELECT id, timestamp, app_name, window_name, {optional('browser_url')}, {optional('capture_trigger')} "
+            f"SELECT id, timestamp, app_name, window_name, {optional('browser_url')}, "
+            f"{optional('capture_trigger')}, {optional('full_text')}, {optional('text_source')} "
             "FROM frames WHERE id > ? ORDER BY id LIMIT 1000",
             (cursor,),
         ).fetchall()
@@ -261,8 +334,9 @@ class Collector:
         sessions = [
             session
             for session in ([*closed, current] if current else closed)
-            if timestamp_seconds(session["ended_at"]) - timestamp_seconds(session["captured_at"])
-            >= self.config.activity_debounce_seconds
+            if activity_is_salient(
+                session, unknown_min_seconds=self.config.activity_debounce_seconds
+            )
         ]
         if not sessions:
             self.activity_path.parent.mkdir(parents=True, exist_ok=True)
@@ -277,7 +351,11 @@ class Collector:
                     "source_item_id": session["source_item_id"],
                     "captured_at": session["captured_at"],
                     "ended_at": session["ended_at"],
-                    "metadata": {k: v for k, v in session.items() if k not in {"key", "source_item_id", "captured_at", "ended_at"}},
+                    "metadata": {
+                        k: v
+                        for k, v in session.items()
+                        if k not in {"key", "source_item_id", "captured_at", "ended_at"}
+                    },
                 }
                 for session in sessions
             ]
@@ -298,18 +376,46 @@ class Collector:
         if not job:
             return False
         try:
+            if job["kind"] == "thumbnail":
+                frame_id = job.get("payload", {}).get("frame_id")
+                if frame_id is None:
+                    raise RuntimeError("thumbnail job is missing frame_id")
+                headers = (
+                    {"Authorization": f"Bearer {self.config.screenpipe_token}"}
+                    if self.config.screenpipe_token
+                    else None
+                )
+                thumbnail = httpx.get(
+                    f"{self.config.screenpipe_url.rstrip('/')}/frames/{frame_id}/thumbnail",
+                    params={"width": 640, "quality": 75},
+                    headers=headers,
+                    timeout=30,
+                )
+                thumbnail.raise_for_status()
+                done = self.client.post(
+                    f"/api/device-input/jobs/{job['id']}/thumbnail",
+                    files={
+                        "file": (
+                            f"screenpipe-frame-{frame_id}.jpg",
+                            thumbnail.content,
+                            thumbnail.headers.get("content-type", "image/jpeg"),
+                        )
+                    },
+                )
+                done.raise_for_status()
+                return True
             raw_items = []
             offset = 0
             page_size = 500
             while True:
                 params = {
                     "content_type": "ocr",
-                    "start_time": iso_timestamp(job["start_at"])
-                    if job.get("start_at")
-                    else None,
-                    "end_time": iso_timestamp(job["end_at"])
-                    if job.get("end_at")
-                    else None,
+                    "start_time": (
+                        iso_timestamp(job["start_at"]) if job.get("start_at") else None
+                    ),
+                    "end_time": (
+                        iso_timestamp(job["end_at"]) if job.get("end_at") else None
+                    ),
                     "limit": page_size,
                     "offset": offset,
                 }
@@ -336,21 +442,25 @@ class Collector:
                 frame_id = content.get("frame_id")
                 if frame_id is None:
                     continue
-                items.append({
-                    "source_item_id": f"frame:{frame_id}",
-                    "captured_at": content.get("timestamp"),
-                    "metadata": {
-                        "frame_id": frame_id,
-                        "app_name": content.get("app_name"),
-                        "window_name": content.get("window_name"),
-                        "browser_url": content.get("browser_url"),
-                        "text": content.get("text"),
-                    },
-                })
+                items.append(
+                    {
+                        "source_item_id": f"frame:{frame_id}",
+                        "captured_at": content.get("timestamp"),
+                        "metadata": {
+                            "frame_id": frame_id,
+                            "app_name": content.get("app_name"),
+                            "window_name": content.get("window_name"),
+                            "browser_url": content.get("browser_url"),
+                            "text": content.get("text"),
+                        },
+                    }
+                )
             result = {"success": True, "items": items}
         except Exception as exc:
             result = {"success": False, "items": [], "error": str(exc)}
-        done = self.client.post(f"/api/device-input/jobs/{job['id']}/complete", json=result)
+        done = self.client.post(
+            f"/api/device-input/jobs/{job['id']}/complete", json=result
+        )
         done.raise_for_status()
         return True
 

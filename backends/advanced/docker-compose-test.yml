@@ -62,6 +62,11 @@ services:
       - LANGFUSE_BASE_URL=http://langfuse-web-test:3000
       - LANGFUSE_PUBLIC_KEY=pk-lf-test-public-key
       - LANGFUSE_SECRET_KEY=sk-lf-test-secret-key
+    extra_hosts:
+      # Mock services (LLM/STT) publish ports on the host and are addressed as
+      # host.docker.internal. Docker on Linux (CI) does not resolve that name
+      # without an explicit host-gateway mapping; podman resolves it natively.
+      - "host.docker.internal:host-gateway"
     depends_on:
       mongo-test:
         condition: service_healthy
@@ -383,9 +388,16 @@ services:
       - LANGFUSE_BASE_URL=http://langfuse-web-test:3000
       - LANGFUSE_PUBLIC_KEY=pk-lf-test-public-key
       - LANGFUSE_SECRET_KEY=sk-lf-test-secret-key
+    extra_hosts:
+      # See chronicle-backend-test: required for Docker-on-Linux (CI) to reach
+      # the mock LLM/STT services published on the host.
+      - "host.docker.internal:host-gateway"
     depends_on:
-      chronicle-backend-test:
-        condition: service_healthy
+      # NOTE: no dependency on chronicle-backend-test. The backend's /readiness
+      # healthcheck requires the worker fleet heartbeat in Redis, so gating the
+      # workers on backend health deadlocks startup (backend waits for workers,
+      # workers wait for backend). Matches prod compose: workers only need
+      # mongo + redis.
       mongo-test:
         condition: service_healthy
       redis-test:

@@ -3,6 +3,12 @@ chat:
     memories and conversation history.
 defaults:
   embedding: mock-embed
+  # Without a fallback the memory agent's note-guarantee recovery pass
+  # (force_fallback=True) raises "No fallback LLM is configured" and the whole
+  # memory job fails before the source-preserving fallback note can be written.
+  # Must be a DIFFERENT model name than defaults.llm — a fallback identical to
+  # the primary is rejected as pointless (llm_client._get_fallback_model_def).
+  fallback_llm: mock-llm-fallback
   llm: mock-llm
   stt: mock-stt
   stt_stream: mock-stt-stream
@@ -25,6 +31,19 @@ models:
   model_type: llm
   model_url: http://host.docker.internal:11435/v1
   name: mock-llm
+- api_family: openai
+  api_key: dummy-key-not-used
+  description: Same mock LLM server under a distinct name, so it passes the
+    fallback!=primary check and the recovery pass actually runs in tests
+  model_name: gpt-4o-mini
+  model_output: json
+  model_params:
+    max_tokens: 2000
+    temperature: 0.2
+  model_provider: openai
+  model_type: llm
+  model_url: http://host.docker.internal:11435/v1
+  name: mock-llm-fallback
 - api_family: openai
   api_key: dummy-key-not-used
   description: Mock embedding server for testing (local)

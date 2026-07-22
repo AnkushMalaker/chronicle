@@ -32,7 +32,9 @@ from advanced_omi_backend.models.device_input import (
     utcnow,
 )
 from advanced_omi_backend.models.user import User
-from advanced_omi_backend.services.device_context import request_conversation_context_jobs
+from advanced_omi_backend.services.device_context import (
+    request_conversation_context_jobs,
+)
 from advanced_omi_backend.services.memory.vault_manager import ConvDocVaultManager
 
 router = APIRouter(prefix="/device-input", tags=["device-input"])
@@ -180,6 +182,24 @@ async def ingest_activity(
         try:
             await item.insert()
             accepted += 1
+            frame_id = incoming.metadata.get("representative_frame_id")
+            if (
+                frame_id is not None
+                and "screen_context" in source.capabilities
+                and any(
+                    incoming.metadata.get(key)
+                    for key in ("app_name", "window_name", "text")
+                )
+            ):
+                await DeviceInputJob(
+                    user_id=source.user_id,
+                    source_id=source.source_id,
+                    kind="thumbnail",
+                    start_at=incoming.captured_at,
+                    end_at=incoming.ended_at,
+                    purpose="timeline_thumbnail",
+                    payload={"item_id": str(item.id), "frame_id": frame_id},
+                ).insert()
         except DuplicateKeyError:
             duplicates += 1
             existing = await DeviceInputItem.find_one(
@@ -305,6 +325,37 @@ async def complete_job(
     job.completed_at = utcnow()
     await job.save()
     return {"ok": True}
+
+
+@router.post("/jobs/{job_id}/thumbnail")
+async def complete_thumbnail_job(
+    job_id: str,
+    file: UploadFile = File(...),
+    source: CaptureSource = Depends(_device_source),
+):
+    job = await DeviceInputJob.get(job_id)
+    if job is None or job.source_id != source.source_id or job.kind != "thumbnail":
+        raise HTTPException(status_code=404, detail="Thumbnail job not found")
+    item_id = job.payload.get("item_id")
+    item = await DeviceInputItem.get(item_id) if item_id else None
+    if item is None or item.source_id != source.source_id:
+        raise HTTPException(status_code=404, detail="Timeline item not found")
+    content_type = (file.content_type or "").split(";", 1)[0]
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=415, detail="Thumbnail must be an image")
+    data = await file.read(_MAX_IMAGE_BYTES + 1)
+    if len(data) > _MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Thumbnail exceeds the media limit")
+    item.media_data = data
+    item.media_filename = file.filename or "screenpipe-thumbnail.jpg"
+    item.media_content_type = content_type
+    item.content_hash = hashlib.sha256(data).hexdigest()
+    item.metadata = {**item.metadata, "thumbnail_available": True}
+    await item.save()
+    job.status = "complete"
+    job.completed_at = utcnow()
+    await job.save()
+    return {"ok": True, "item_id": str(item.id)}
 
 
 @router.get("/sources")
@@ -476,6 +527,16 @@ async def _immich_bytes(asset_id: str, endpoint: str) -> tuple[bytes, str]:
 @router.get("/items/{item_id}/thumbnail")
 async def context_thumbnail(item_id: str, user: User = Depends(current_active_user)):
     item = await _owned_item(item_id, user)
+    if (
+        item.media_data
+        and item.media_content_type
+        and item.media_content_type.startswith("image/")
+    ):
+        return Response(
+            content=item.media_data,
+            media_type=item.media_content_type,
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
     asset_id = item.metadata.get("asset_id")
     if item.kind != "immich_memory" or not asset_id:
         raise HTTPException(
@@ -487,6 +548,43 @@ async def context_thumbnail(item_id: str, user: User = Depends(current_active_us
         media_type=content_type,
         headers={"Cache-Control": "private, max-age=3600"},
     )
+
+
+@router.post("/items/{item_id}/request-thumbnail")
+async def request_item_thumbnail(
+    item_id: str, user: User = Depends(current_active_user)
+):
+    item = await _owned_item(item_id, user)
+    if item.kind != "activity":
+        raise HTTPException(status_code=409, detail="Only activity items have frames")
+    if item.media_data:
+        return {"status": "complete"}
+    frame_id = (
+        item.metadata.get("representative_frame_id")
+        or item.metadata.get("last_frame_id")
+        or item.metadata.get("first_frame_id")
+    )
+    if frame_id is None:
+        raise HTTPException(status_code=409, detail="Activity has no source frame")
+    existing = await DeviceInputJob.find_one(
+        DeviceInputJob.source_id == item.source_id,
+        DeviceInputJob.kind == "thumbnail",
+        {"payload.item_id": item_id},
+        {"status": {"$in": ["pending", "claimed"]}},
+    )
+    if existing:
+        return {"status": existing.status, "job_id": str(existing.id)}
+    job = DeviceInputJob(
+        user_id=item.user_id,
+        source_id=item.source_id,
+        kind="thumbnail",
+        start_at=item.captured_at,
+        end_at=item.ended_at,
+        purpose="timeline_thumbnail",
+        payload={"item_id": item_id, "frame_id": frame_id},
+    )
+    await job.insert()
+    return {"status": "pending", "job_id": str(job.id)}
 
 
 @router.post("/items/{item_id}/promote")

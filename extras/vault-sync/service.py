@@ -1,4 +1,4 @@
-"""launchd service management for Chronicle Vault Sync on macOS."""
+"""Desktop service management for Chronicle Vault Sync."""
 
 import os
 import plistlib
@@ -112,6 +112,9 @@ def _build_plist() -> dict:
 
 
 def install() -> None:
+    if sys.platform.startswith("linux"):
+        _linux_install()
+        return
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -145,6 +148,9 @@ def install() -> None:
 
 
 def uninstall() -> None:
+    if sys.platform.startswith("linux"):
+        _linux_uninstall()
+        return
     if not PLIST_PATH.exists():
         print(f"No plist found at {PLIST_PATH}")
         return
@@ -165,6 +171,9 @@ def uninstall() -> None:
 
 
 def kickstart() -> None:
+    if sys.platform.startswith("linux"):
+        _linux_systemctl("restart")
+        return
     if not PLIST_PATH.exists():
         print("Service not installed. Run './start.sh install' first.")
         return
@@ -180,6 +189,9 @@ def kickstart() -> None:
 
 
 def status() -> None:
+    if sys.platform.startswith("linux"):
+        _linux_systemctl("status")
+        return
     if not PLIST_PATH.exists():
         print(f"Service not installed (no plist at {PLIST_PATH})")
         return
@@ -200,6 +212,11 @@ def status() -> None:
 
 
 def logs(follow: bool = True) -> None:
+    if sys.platform.startswith("linux"):
+        args = ["journalctl", "--user", "-u", "chronicle-desktop.service"]
+        args += ["-f"] if follow else ["-n", "100", "--no-pager"]
+        subprocess.run(args, check=False)
+        return
     if not LOG_FILE.exists():
         print(f"No log file at {LOG_FILE}")
         return
@@ -211,3 +228,43 @@ def logs(follow: bool = True) -> None:
             pass
     else:
         print(LOG_FILE.read_text()[-5000:])
+
+
+def _linux_unit_path() -> Path:
+    return Path.home() / ".config/systemd/user/chronicle-desktop.service"
+
+
+def _linux_install() -> None:
+    uv = _find_uv()
+    unit = _linux_unit_path()
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(
+        "[Unit]\nDescription=Chronicle desktop tray\n"
+        "After=graphical-session.target network-online.target\n\n"
+        "[Service]\nType=simple\n"
+        f"WorkingDirectory={PROJECT_DIR}\n"
+        f"ExecStart={uv} run --project {PROJECT_DIR} python {PROJECT_DIR / 'main.py'} menu\n"
+        "Restart=on-failure\nRestartSec=5\n\n"
+        "[Install]\nWantedBy=graphical-session.target\n"
+    )
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    subprocess.run(
+        ["systemctl", "--user", "enable", "--now", unit.name], check=True
+    )
+    print(f"Installed and started {unit.name}")
+
+
+def _linux_uninstall() -> None:
+    unit = _linux_unit_path()
+    subprocess.run(
+        ["systemctl", "--user", "disable", "--now", unit.name], check=False
+    )
+    unit.unlink(missing_ok=True)
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    print(f"Removed {unit}")
+
+
+def _linux_systemctl(action: str) -> None:
+    subprocess.run(
+        ["systemctl", "--user", action, "chronicle-desktop.service"], check=False
+    )

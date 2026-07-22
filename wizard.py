@@ -1606,9 +1606,43 @@ def select_setup_type():
     console.print(
         "     advertises it to an existing backend on your Tailnet (no backend here)"
     )
+    console.print(
+        "  3) Capture node — run ScreenPipe + the Chronicle companion (no containers)"
+    )
     console.print()
     choice = Prompt.ask("Enter choice", default="1")
-    return "join" if choice.strip() == "2" else "main"
+    if choice.strip() == "2":
+        return "join"
+    if choice.strip() == "3":
+        return "capture"
+    return "main"
+
+
+def setup_capture_node():
+    """Delegate ScreenPipe capture-node setup to its separate companion."""
+    init_script = Path("extras/screenpipe-collector/init.py")
+    if not init_script.exists():
+        console.print(f"[red]✗ Capture-node setup is missing: {init_script}[/red]")
+        return False
+
+    backend_url = discovery.discover_service(discovery.CHRONICLE_BACKEND)
+    cmd = [
+        "uv",
+        "run",
+        "--with-requirements",
+        "../../setup-requirements.txt",
+        "python",
+        "init.py",
+    ]
+    if backend_url:
+        console.print(f"[green]✅[/green] Found Chronicle at [cyan]{backend_url}[/cyan]")
+        cmd.extend(["--backend", backend_url])
+    try:
+        subprocess.run(cmd, cwd=init_script.parent, check=True)
+        return True
+    except (OSError, subprocess.CalledProcessError) as exc:
+        console.print(f"[red]✗ Capture-node setup failed: {exc}[/red]")
+        return False
 
 
 def join_cluster():
@@ -1848,11 +1882,6 @@ def main():
     config_mgr = ConfigManager()
     config_mgr.ensure_config_yml()
 
-    # Container-engine prereq — everything below runs in containers, so bail early
-    # (with a clear reason) rather than failing deep in a build/start step.
-    if not check_container_engine():
-        return
-
     # Setup git hooks first
     setup_git_hooks()
 
@@ -1862,9 +1891,17 @@ def main():
     # Read existing config.yml once — used as defaults for ALL wizard questions below
     config_yml = config_mgr.get_full_config()
 
-    # Fork: a service-only node joining an existing cluster takes a separate, much
-    # shorter path (no backend / LLM / memory setup here) and returns.
-    if select_setup_type() == "join":
+    # Capture nodes are host-native and intentionally do not require containers.
+    setup_type = select_setup_type()
+    if setup_type == "capture":
+        setup_capture_node()
+        return
+
+    # All hub and compute-node services below run in containers.
+    if not check_container_engine():
+        return
+
+    if setup_type == "join":
         join_cluster()
         return
 

@@ -193,6 +193,12 @@ export const deviceInputApi = {
     api.get<{ items: DeviceInputItem[] }>('/api/device-input/timeline', {
       params: { start_at: startAt, end_at: endAt },
     }),
+  getThumbnail: (itemId: string) =>
+    api.get<Blob>(`/api/device-input/items/${itemId}/thumbnail`, {
+      responseType: 'blob',
+    }),
+  requestThumbnail: (itemId: string) =>
+    api.post(`/api/device-input/items/${itemId}/request-thumbnail`),
   getConversationContext: (conversationId: string) =>
     api.get<{ items: DeviceInputItem[] }>(`/api/device-input/conversations/${conversationId}/context`),
   requestConversationContext: (conversationId: string) =>

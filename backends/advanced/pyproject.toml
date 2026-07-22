@@ -104,6 +104,9 @@ filterwarnings = [
     "ignore::UserWarning",
     "ignore::DeprecationWarning",
     "ignore::PendingDeprecationWarning",
+    # opuslib 3.x uses `is not 0`, a SyntaxWarning on py3.12 that "error" would
+    # promote to SyntaxError on first (uncached) import. Third-party; not ours.
+    "ignore::SyntaxWarning:.*opuslib.*",
 ]
 
 [tool.coverage.run]

@@ -44,3 +44,17 @@ def test_continuous_capture_is_bounded_into_processing_windows():
     rows = [item(str(index), start + timedelta(minutes=index)) for index in range(32)]
     sessions = group_audio_sessions(rows)
     assert [len(session) for session in sessions] == [30, 2]
+
+
+def test_mongo_naive_and_aware_timestamps_group_together():
+    naive = datetime(2026, 7, 22, 10, 0)
+    aware = datetime(2026, 7, 22, 10, 0, 30, tzinfo=timezone.utc)
+    sessions = group_audio_sessions(
+        [
+            item("mongo-naive", naive),
+            item("api-aware", aware),
+        ]
+    )
+    assert [[row.source_item_id for row in session] for session in sessions] == [
+        ["mongo-naive", "api-aware"]
+    ]
