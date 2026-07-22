@@ -4,6 +4,7 @@ from pathlib import Path
 from chronicle_screenpipe.collector import (
     Checkpoints,
     Collector,
+    Config,
     activity_is_salient,
     audio_duration,
     build_activity_sessions,
@@ -140,3 +141,25 @@ def test_collect_audio_accepts_screenpipe_startup_schema():
     db.execute("CREATE TABLE audio_chunks (placeholder TEXT)")
     collector = object.__new__(Collector)
     assert collector.collect_audio(db) == 0
+
+
+def test_collect_audio_checkpoints_sources_excluded_from_forwarding(tmp_path: Path):
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE audio_chunks (id INTEGER, file_path TEXT, timestamp TEXT)")
+    db.execute(
+        "INSERT INTO audio_chunks VALUES (1, ?, ?)",
+        (str(tmp_path / "Microphone (input)_1.wav"), "2026-07-22T10:00:00Z"),
+    )
+    collector = object.__new__(Collector)
+    collector.config = Config(
+        backend_url="http://chronicle",
+        source_id="rainbow",
+        token="token",
+        screenpipe_dir=tmp_path,
+        forward_audio="output",
+    )
+    collector.checkpoints = Checkpoints(tmp_path / "state.json")
+
+    assert collector.collect_audio(db) == 0
+    assert collector.checkpoints.get("audio") == 1

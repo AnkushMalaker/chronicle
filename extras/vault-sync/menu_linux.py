@@ -29,6 +29,7 @@ from desktop_core import SharedState, VaultSyncManager, configure_logging, log_b
 logger = logging.getLogger(__name__)
 SCREENPIPE_DB = Path.home() / ".screenpipe/db.sqlite"
 SCREENPIPE_UNIT = Path.home() / ".config/systemd/user/screenpipe.service"
+COLLECTOR_CONFIG = Path.home() / ".config/chronicle-screenpipe/config.json"
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 
@@ -115,6 +116,21 @@ def _audio_devices() -> list[str]:
     return [entry["name"] for entry in json.loads(result.stdout)["data"]]
 
 
+def _forward_audio_setting(path: Path = COLLECTOR_CONFIG) -> str:
+    value = json.loads(path.read_text(encoding="utf-8"))["forward_audio"]
+    if value not in {"none", "output", "input", "both"}:
+        raise ValueError(f"unsupported forwarding mode: {value}")
+    return value
+
+
+def _save_forward_audio_setting(mode: str, path: Path = COLLECTOR_CONFIG) -> None:
+    if mode not in {"none", "output", "input", "both"}:
+        raise ValueError(f"unsupported forwarding mode: {mode}")
+    config = json.loads(path.read_text(encoding="utf-8"))
+    config["forward_audio"] = mode
+    path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+
+
 def _save_capture_settings(
     audio_mode: str,
     screen_enabled: bool,
@@ -135,8 +151,12 @@ def _save_capture_settings(
     elif audio_mode == "both":
         args.extend(["--use-system-default-audio", "true"])
     else:
-        suffix = f"({ 'output' if audio_mode == 'system' else 'input' })"
-        matching = [name for name in (audio_devices or _audio_devices()) if name.lower().endswith(suffix)]
+        suffix = "(output)" if audio_mode == "system" else "(input)"
+        matching = [
+            name
+            for name in (audio_devices or _audio_devices())
+            if name.lower().endswith(suffix)
+        ]
         if not matching:
             raise ValueError(f"no {audio_mode} audio device is available")
         args.extend(["--use-system-default-audio", "false", "--audio-device", matching[0]])
@@ -186,6 +206,23 @@ class ChronicleTray(QSystemTrayIcon):
         self.screen_capture = settings_menu.addAction("Screen capture")
         self.screen_capture.setCheckable(True)
         self.screen_capture.triggered.connect(self.save_capture_settings)
+        forwarding_menu = settings_menu.addMenu("Send audio to Chronicle")
+        self.forwarding_group = QActionGroup(forwarding_menu)
+        self.forwarding_group.setExclusive(True)
+        self.forwarding_actions: dict[str, QAction] = {}
+        for mode, title in (
+            ("none", "None"),
+            ("output", "System audio"),
+            ("input", "Microphone"),
+            ("both", "System audio + microphone"),
+        ):
+            action = forwarding_menu.addAction(title)
+            action.setCheckable(True)
+            action.triggered.connect(
+                lambda _checked=False, selected=mode: self.save_forwarding(selected)
+            )
+            self.forwarding_group.addAction(action)
+            self.forwarding_actions[mode] = action
         menu.addSeparator()
         self.sync_status = menu.addAction("Vault sync: starting…")
         self.sync_status.setEnabled(False)
@@ -268,6 +305,25 @@ class ChronicleTray(QSystemTrayIcon):
             for action in self.audio_actions.values():
                 action.setEnabled(False)
             self.screen_capture.setEnabled(False)
+        try:
+            forwarding = _forward_audio_setting()
+            self.forwarding_actions[forwarding].setChecked(True)
+            for action in self.forwarding_actions.values():
+                action.setEnabled(True)
+        except (OSError, KeyError, ValueError, json.JSONDecodeError):
+            logger.exception("Could not read collector audio forwarding settings")
+            for action in self.forwarding_actions.values():
+                action.setEnabled(False)
+
+    def save_forwarding(self, mode: str) -> None:
+        try:
+            _save_forward_audio_setting(mode)
+            if _unit_state("chronicle-screenpipe.service") == "active":
+                self.service("restart", "chronicle-screenpipe.service")
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            logger.exception("Could not save collector audio forwarding settings")
+            self.showMessage("Chronicle collector", str(error), QSystemTrayIcon.Warning)
+            self.refresh_capture_settings()
 
     def refresh(self) -> None:
         self.manager.refresh_status()

@@ -1,9 +1,15 @@
+import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from menu_linux import _capture_settings, _save_capture_settings
+from menu_linux import (
+    _capture_settings,
+    _forward_audio_setting,
+    _save_capture_settings,
+    _save_forward_audio_setting,
+)
 
 
 def _unit(tmp_path: Path, flags: str = "") -> Path:
@@ -70,3 +76,13 @@ def test_save_capture_settings_supports_microphone_only(tmp_path):
 
     assert _capture_settings(path) == ("mic", True)
     assert "--audio-device 'Built-in Mic (input)'" in path.read_text(encoding="utf-8")
+
+
+def test_audio_forwarding_setting_is_independent_from_capture_unit(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text('{"source_id": "rainbow", "forward_audio": "both"}')
+
+    _save_forward_audio_setting("output", path)
+
+    assert _forward_audio_setting(path) == "output"
+    assert json.loads(path.read_text())["source_id"] == "rainbow"

@@ -36,7 +36,8 @@ vault-sync orchestration; only the native menu UI is platform-specific. Both pro
 provides start, stop, and restart controls for `screenpipe.service` and
 `chronicle-screenpipe.service`. Its top-level Settings menu can enable or disable audio
 and screen capture, while the ScreenPipe menu can pause capture for 5, 15, or 30
-minutes, or 1, 2, or 8 hours.
+minutes, or 1, 2, or 8 hours. Audio capture and audio forwarding are separate menus:
+each can independently select off/none, system audio, microphone, or both.
 
 You also need the Chronicle **server** side running with vault sync enabled — see
 [Server setup](#server-setup-once) below.

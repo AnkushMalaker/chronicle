@@ -41,6 +41,10 @@ Chronicle. See the full [capture-node architecture](../../docs/screenpipe.md).
    exact platform device names with `screenpipe audio list --output json`. Use
    `--disable-audio` only for screen-only capture.
 
+   Pair with `--forward-audio none|output|input|both` to independently control which
+   locally recorded sources are uploaded. The guided setup asks for both the local
+   capture mode and forwarding mode.
+
 4. Run the companion:
 
    ```bash

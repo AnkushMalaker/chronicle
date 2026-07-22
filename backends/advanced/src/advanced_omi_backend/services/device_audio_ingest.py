@@ -48,7 +48,18 @@ def group_audio_sessions(items: list[DeviceInputItem]) -> list[list[DeviceInputI
     return sessions
 
 
-async def _mix_session(items: list[DeviceInputItem], workspace: Path, output: Path) -> None:
+def audio_stream_key(item: DeviceInputItem) -> tuple[str, str, str]:
+    """Keep microphone and system output in independent processing streams."""
+    return (
+        item.user_id,
+        item.source_id,
+        str(item.metadata.get("direction", "unknown")),
+    )
+
+
+async def _mix_session(
+    items: list[DeviceInputItem], workspace: Path, output: Path
+) -> None:
     start = min(_as_utc(item.captured_at) for item in items)
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     valid = [item for item in items if item.media_data]
@@ -109,8 +120,7 @@ async def process_device_audio() -> dict[str, Any]:
     )
     by_source: dict[tuple[str, str, str], list[DeviceInputItem]] = {}
     for item in pending:
-        direction = str(item.metadata.get("direction", "unknown"))
-        by_source.setdefault((item.user_id, item.source_id, direction), []).append(item)
+        by_source.setdefault(audio_stream_key(item), []).append(item)
     processed = 0
     for (user_id, source_id, direction), source_items in by_source.items():
         try:

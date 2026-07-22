@@ -33,6 +33,12 @@ an explicit `--audio-device "... (output)"` or `--audio-device "... (input)"` wi
 `--use-system-default-audio false`. The collector preserves the source direction when
 it sends audio to Chronicle.
 
+Local capture and Chronicle forwarding are independent policies. The collector's
+`forward_audio` setting accepts `none`, `output`, `input`, or `both`; excluded chunks
+remain in ScreenPipe's local store and are checkpointed without upload. Chronicle also
+processes input and output as separate sessions so microphone and system audio are not
+mixed together before transcription.
+
 The setup wizard's capture-node option delegates to
 `extras/screenpipe-collector/init.py`. Pairing and standalone commands are documented
 in the [companion README](../extras/screenpipe-collector/README.md).
