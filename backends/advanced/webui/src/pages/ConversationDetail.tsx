@@ -13,6 +13,7 @@ import {
 } from '../hooks/useConversations'
 import ConversationVersionHeader from '../components/ConversationVersionHeader'
 import MemoryAuditCard from '../components/MemoryAuditCard'
+import ConversationContextLens from '../components/ConversationContextLens'
 import { useGaplessPlayer } from '../hooks/useGaplessPlayer'
 import { AUDIO_FORMAT } from '../utils/audioFormat'
 import TranscriptEditor from '../components/transcript/TranscriptEditor'
@@ -676,6 +677,7 @@ export default function ConversationDetail() {
 
       {/* Memory change history is intentionally full-width: paths, summaries, and
           timestamps become unreadable in the narrow metadata rail. */}
+      <ConversationContextLens conversationId={conversation.conversation_id} />
       <MemoryAuditCard conversationId={conversation.conversation_id} />
 
       {/* Split modal — on success the conversation is soft-deleted, so leave */}

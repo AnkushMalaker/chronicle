@@ -27,6 +27,7 @@ const SpeakerEnrollment = lazy(() => import('./pages/SpeakerEnrollment'))
 const WakeWordLab = lazy(() => import('./pages/WakeWordLab'))
 const MemoryLedger = lazy(() => import('./pages/MemoryLedger'))
 const SystemEvents = lazy(() => import('./pages/SystemEvents'))
+const Timeline = lazy(() => import('./pages/Timeline'))
 
 
 function PageSkeleton() {
@@ -99,6 +100,11 @@ function App() {
                     <Suspense fallback={<PageSkeleton />}>
                       <ConversationsRouter />
                     </Suspense>
+                  </PageErrorBoundary>
+                } />
+                <Route path="timeline" element={
+                  <PageErrorBoundary>
+                    <Suspense fallback={<PageSkeleton />}><Timeline /></Suspense>
                   </PageErrorBoundary>
                 } />
                 <Route path="memory-ledger" element={

@@ -2165,6 +2165,21 @@ async def dispatch_conversation_complete_event_job(
     if needs_save:
         await conversation.save()
 
+    # Context collection is purpose-bound: only after a conversation has settled
+    # do we ask connected ScreenPipe companions for this time range.
+    try:
+        from advanced_omi_backend.services.device_context import (
+            request_conversation_context_jobs,
+        )
+
+        await request_conversation_context_jobs(conversation)
+    except Exception as exc:
+        logger.warning(
+            "Failed to request device context for conversation %s: %s",
+            conversation_id,
+            exc,
+        )
+
     if conversation.memory_excluded:
         actual_end_reason = end_reason or "file_upload"
         logger.info(

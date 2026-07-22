@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link, useLocation, Outlet } from 'react-router-dom'
-import { Music, MessageSquare, MessageCircle, Users, Upload, Settings, LogOut, Sun, Moon, Shield, Radio, Layers, Puzzle, Zap, Activity, Network, Sparkles, Target, ScrollText, AlertTriangle, Menu, X } from 'lucide-react'
+import { Music, MessageSquare, MessageCircle, Users, Upload, Settings, LogOut, Sun, Moon, Shield, Radio, Layers, Puzzle, Zap, Activity, Network, Sparkles, Target, ScrollText, AlertTriangle, Menu, X, CalendarDays } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
 import { useSSE, SSEStatus } from '../../hooks/useSSE'
@@ -33,6 +33,7 @@ export default function Layout() {
     { path: '/live-record', label: 'Live Record', icon: Radio },
     { path: '/chat', label: 'Chat', icon: MessageCircle },
     { path: '/conversations', label: 'Conversations', icon: MessageSquare },
+    { path: '/timeline', label: 'Timeline', icon: CalendarDays },
     { path: '/memory-ledger', label: 'Memory Ledger', icon: ScrollText },
     { path: '/users', label: 'User Management', icon: Users },
 

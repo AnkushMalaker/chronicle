@@ -10,11 +10,9 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from beanie import init_beanie
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 
 from advanced_omi_backend.app_config import get_app_config
 from advanced_omi_backend.auth import (
@@ -30,6 +28,12 @@ from advanced_omi_backend.middleware.app_middleware import setup_middleware
 from advanced_omi_backend.models.annotation import Annotation
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.device_input import (
+    CaptureSource,
+    DeviceInputItem,
+    DeviceInputJob,
+    PairingCode,
+)
 from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
 from advanced_omi_backend.models.system_event import SystemEvent
 from advanced_omi_backend.models.waveform import WaveformData
@@ -80,6 +84,10 @@ async def lifespan(app: FastAPI):
                 Annotation,
                 MemoryAuditEntry,
                 SystemEvent,
+                CaptureSource,
+                PairingCode,
+                DeviceInputItem,
+                DeviceInputJob,
             ],
         )
         application_logger.info("Beanie initialized for all document models")
@@ -270,6 +278,12 @@ async def lifespan(app: FastAPI):
             from advanced_omi_backend.workers.prompt_optimization_jobs import (
                 run_prompt_optimization_job,
             )
+            from advanced_omi_backend.services.device_audio_ingest import (
+                process_device_audio,
+            )
+            from advanced_omi_backend.services.immich_discovery import (
+                scan_immich_memories,
+            )
 
             register_cron_job("speaker_finetuning", run_speaker_finetuning_job)
             register_cron_job("asr_finetuning", run_asr_finetuning_job)
@@ -277,6 +291,8 @@ async def lifespan(app: FastAPI):
             register_cron_job("prompt_optimization", run_prompt_optimization_job)
             register_cron_job("annotation_suggestions", surface_error_suggestions)
             register_cron_job("auto_clean", run_auto_clean_cron)
+            register_cron_job("immich_memories", scan_immich_memories)
+            register_cron_job("device_audio_ingest", process_device_audio)
 
             scheduler = get_scheduler()
             await scheduler.start()
@@ -564,10 +580,6 @@ def create_app() -> FastAPI:
         prefix="/users",
         tags=["users"],
     )
-
-    # Mount static files LAST (mounts are catch-all patterns)
-    CHUNK_DIR = Path("/app/audio_chunks")
-    app.mount("/audio", StaticFiles(directory=CHUNK_DIR), name="audio")
 
     logger.info(
         "FastAPI application created with all routers and middleware configured"
