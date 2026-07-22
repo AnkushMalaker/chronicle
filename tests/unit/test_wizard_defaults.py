@@ -41,6 +41,7 @@ _wizard = _load_wizard()
 get_existing_stt_provider = _wizard.get_existing_stt_provider
 get_existing_stream_provider = _wizard.get_existing_stream_provider
 select_llm_provider = _wizard.select_llm_provider
+select_setup_type = _wizard.select_setup_type
 
 
 # ---------------------------------------------------------------------------
@@ -150,3 +151,11 @@ def test_select_llm_provider_none_config():
     """Treats None config_yml as empty dict (defaults to openai)."""
     result = _select_llm_with_eof(None)
     assert result == "openai"
+
+
+@pytest.mark.parametrize(
+    "choice, expected", [("1", "main"), ("2", "join"), ("3", "capture")]
+)
+def test_select_setup_type(choice, expected):
+    with patch.object(_wizard.Prompt, "ask", return_value=choice):
+        assert select_setup_type() == expected
