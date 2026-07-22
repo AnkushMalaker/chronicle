@@ -602,10 +602,20 @@ For detailed technical documentation, see:
 - **[@docs/init-system.md](docs/init-system.md)**: Initialization system and service management
 - **[@docs/ssl-certificates.md](docs/ssl-certificates.md)**: HTTPS/SSL setup details
 - **[@docs/podman.md](docs/podman.md)**: Running with Podman instead of Docker (engine selection, rootless/GPU setup)
+- **[@docs/screenpipe.md](docs/screenpipe.md)**: ScreenPipe capture-node architecture, services, desktop controls, and troubleshooting
 - **[@docs/audio-pipeline-architecture.md](docs/audio-pipeline-architecture.md)**: Audio pipeline design
 - **[@docs/backend/auth.md](docs/backend/auth.md)**: Authentication architecture
 - **[@docs/backend/memories.md](docs/backend/memories.md)**: Memory system documentation
 - **[@docs/backend/plugin-development-guide.md](docs/backend/plugin-development-guide.md)**: Plugin development guide
+
+### ScreenPipe Capture Nodes
+
+Before changing ScreenPipe ingestion, the desktop tray, or capture-node services, read
+[@docs/screenpipe.md](docs/screenpipe.md). ScreenPipe owns the high-volume local capture
+store; Chronicle's companion sends compact activity metadata and serves bounded
+snapshot/OCR requests. The desktop entry point is shared across macOS and Linux, with
+platform UI adapters over common state, logging, and vault-sync code. The ScreenPipe UI
+is an optional on-demand viewer and must not be required for background capture.
 
 ## Robot Framework Testing
 

@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import secrets
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -23,14 +25,37 @@ def screenpipe_command() -> str | None:
     return shutil.which("screenpipe")
 
 
-def write_screenpipe_unit(binary: str, api_key: str) -> Path:
+def list_audio_devices(binary: str) -> list[str]:
+    result = subprocess.run(
+        [binary, "audio", "list", "--output", "json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [entry["name"] for entry in json.loads(result.stdout)["data"]]
+
+
+def audio_arguments(mode: str, devices: list[str]) -> list[str]:
+    if mode == "off":
+        return ["--disable-audio"]
+    if mode == "both":
+        return ["--use-system-default-audio", "true"]
+    suffix = "(output)" if mode == "system" else "(input)"
+    matches = [device for device in devices if device.lower().endswith(suffix)]
+    if not matches:
+        raise ValueError(f"no {mode} audio device is available")
+    return ["--use-system-default-audio", "false", "--audio-device", matches[0]]
+
+
+def write_screenpipe_unit(
+    binary: str, api_key: str, audio_mode: str = "both", devices: list[str] | None = None
+) -> Path:
     SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
     path = SYSTEMD_USER_DIR / "screenpipe.service"
     args = [
         binary,
         "record",
         "--audio-transcription-engine", "disabled",
-        "--use-system-default-audio", "true",
         "--use-all-monitors", "true",
         "--use-pii-removal", "true",
         "--disable-keyboard-capture",
@@ -44,11 +69,12 @@ def write_screenpipe_unit(binary: str, api_key: str) -> Path:
         "--retention-mode", "media",
         "--api-auth", "true",
     ]
+    args.extend(audio_arguments(audio_mode, devices or []))
     path.write_text(
         "[Unit]\nDescription=ScreenPipe local recorder for Chronicle\n"
         "After=graphical-session.target\n\n[Service]\nType=simple\n"
         f"Environment=SCREENPIPE_API_KEY={api_key}\n"
-        f"ExecStart={' '.join(args)}\nRestart=on-failure\nRestartSec=5\n\n"
+        f"ExecStart={shlex.join(args)}\nRestart=on-failure\nRestartSec=5\n\n"
         "[Install]\nWantedBy=default.target\n",
         encoding="utf-8",
     )
@@ -76,6 +102,24 @@ def main() -> None:
     console.print(f"[green]✅[/green] ScreenPipe detected: [cyan]{binary}[/cyan]")
 
     backend = Prompt.ask("Chronicle backend URL", default=args.backend or "http://127.0.0.1:8000")
+    devices = list_audio_devices(binary)
+    audio_mode = Prompt.ask(
+        "Local audio capture",
+        choices=("off", "system", "mic", "both"),
+        default="system",
+    )
+    forward_default = (
+        "none"
+        if audio_mode == "off"
+        else "output"
+        if audio_mode == "system"
+        else audio_mode.replace("mic", "input")
+    )
+    forward_audio = Prompt.ask(
+        "Audio sent to Chronicle",
+        choices=("none", "output", "input", "both"),
+        default=forward_default,
+    )
     console.print(
         "Open Chronicle → Timeline → Sources and create a pairing code. "
         "The code expires after 10 minutes."
@@ -92,8 +136,9 @@ def main() -> None:
         "--screenpipe-dir", str(Path.home() / ".screenpipe"),
         "--screenpipe-url", "http://127.0.0.1:3030",
         "--screenpipe-token", api_key,
+        "--forward-audio", forward_audio,
     )
-    write_screenpipe_unit(binary, api_key)
+    write_screenpipe_unit(binary, api_key, audio_mode, devices)
     run("uv", "run", "--project", str(PROJECT), "chronicle-screenpipe", "install-service")
     run("systemctl", "--user", "daemon-reload")
     run("systemctl", "--user", "enable", "--now", "screenpipe.service")

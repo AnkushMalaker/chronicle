@@ -54,6 +54,7 @@ def pair(args: argparse.Namespace) -> None:
                 "screenpipe_dir": str(Path(args.screenpipe_dir).expanduser()),
                 "screenpipe_url": args.screenpipe_url,
                 "screenpipe_token": args.screenpipe_token,
+                "forward_audio": args.forward_audio,
             },
             indent=2,
         ),
@@ -98,6 +99,12 @@ def main() -> None:
         "--screenpipe-token",
         default=os.getenv("SCREENPIPE_API_KEY"),
         help="token used by ScreenPipe's authenticated local API",
+    )
+    pair_parser.add_argument(
+        "--forward-audio",
+        choices=("none", "output", "input", "both"),
+        default="both",
+        help="which locally captured ScreenPipe audio sources Chronicle receives",
     )
     sub.add_parser("run")
     sub.add_parser("install-service")

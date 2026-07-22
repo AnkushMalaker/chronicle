@@ -25,6 +25,7 @@ class Config:
     screenpipe_dir: Path
     screenpipe_url: str = "http://127.0.0.1:3030"
     screenpipe_token: str | None = None
+    forward_audio: str = "both"
     poll_seconds: float = 5.0
     activity_debounce_seconds: float = 10.0
 
@@ -245,6 +246,13 @@ class Collector:
         sent = 0
         for row in rows:
             path = Path(row["file_path"])
+            direction = infer_audio_direction(str(path))
+            if self.config.forward_audio == "none" or (
+                self.config.forward_audio != "both"
+                and direction != self.config.forward_audio
+            ):
+                self.checkpoints.set("audio", row["id"])
+                continue
             if not path.is_file():
                 captured = timestamp_seconds(iso_timestamp(row["timestamp"]))
                 if time.time() - captured < 120:
@@ -284,7 +292,7 @@ class Collector:
                         "captured_at": iso_timestamp(row["timestamp"]),
                         "duration_seconds": str(audio_duration(path)),
                         "device_name": path.stem,
-                        "direction": infer_audio_direction(str(path)),
+                        "direction": direction,
                         "content_hash": digest,
                     },
                     files={"file": (path.name, handle, content_type)},

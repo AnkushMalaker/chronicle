@@ -3,7 +3,7 @@ name = "chronicle-screenpipe-collector"
 version = "0.1.0"
 description = "Chronicle companion for a local ScreenPipe recorder"
 requires-python = ">=3.11"
-dependencies = ["httpx>=0.28,<1"]
+dependencies = ["httpx>=0.28,<1", "rich>=13,<15"]
 
 [project.scripts]
 chronicle-screenpipe = "chronicle_screenpipe.main:main"

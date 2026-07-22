@@ -7,39 +7,17 @@ UI needed — just pick a folder and open it in Obsidian.
 
 import logging
 import subprocess
-import threading
-from collections import deque
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 
-import httpx
 import rumps
 from dotenv import load_dotenv
-from syncthing_manager import SyncthingManager
-from vault_core import VaultSyncConfig, broker_pair, get_jwt_token, save_vault_dir
+from desktop_core import SharedState, VaultSyncManager, configure_logging, log_buffer
 
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-
-
-class MemoryLogHandler(logging.Handler):
-    """Keep recent log lines in memory for display in the menu bar UI."""
-
-    def __init__(self, capacity: int = 500) -> None:
-        super().__init__()
-        self.lines: deque = deque(maxlen=capacity)
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            self.lines.append(self.format(record))
-        except Exception:
-            self.handleError(record)
-
-
-log_buffer = MemoryLogHandler()
 
 
 def _show_logs_dialog(title: str, lines) -> None:
@@ -102,151 +80,6 @@ def _choose_directory(default_path: str) -> Optional[str]:
     if panel.runModal() == 1:  # NSModalResponseOK
         return panel.URLs()[0].path()
     return None
-
-
-# --- shared state ------------------------------------------------------------
-
-
-@dataclass
-class SharedState:
-    """Thread-safe state shared between the rumps UI and the worker thread."""
-
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    status: str = "idle"  # idle | starting | pairing | syncing | error
-    error: Optional[str] = None
-    connected: bool = False
-    completion: Optional[float] = None
-    folder_error: Optional[str] = None  # folder-level error from Syncthing
-    folder_id: Optional[str] = None
-    vault_dir: str = ""
-
-    def snapshot(self) -> dict:
-        with self._lock:
-            return {
-                "status": self.status,
-                "error": self.error,
-                "connected": self.connected,
-                "completion": self.completion,
-                "folder_error": self.folder_error,
-                "folder_id": self.folder_id,
-                "vault_dir": self.vault_dir,
-            }
-
-    def update(self, **kwargs) -> None:
-        with self._lock:
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-
-
-# --- sync manager ------------------------------------------------------------
-
-
-class VaultSyncManager:
-    """Coordinates the local Syncthing and the backend pairing handshake."""
-
-    def __init__(self, state: SharedState) -> None:
-        self.state = state
-        self.config = VaultSyncConfig.from_env()
-        self.syncthing = SyncthingManager()
-        self.state.update(vault_dir=self.config.local_vault_dir)
-        self._lock = threading.Lock()
-        self._logged_errors: set[str] = set()
-
-    def pair_async(self) -> None:
-        """Run the (blocking) pair flow on a background thread."""
-        threading.Thread(target=self._pair, daemon=True).start()
-
-    def _pair(self) -> None:
-        if not self._lock.acquire(blocking=False):
-            logger.info("Pair already in progress")
-            return
-        try:
-            cfg = self.config
-            if not cfg.auth_username or not cfg.auth_password:
-                self.state.update(
-                    status="error",
-                    error="Set AUTH_USERNAME/AUTH_PASSWORD in .env",
-                )
-                return
-
-            self.state.update(status="starting", error=None)
-            self.syncthing.start()
-            local_id = self.syncthing.device_id()
-
-            self.state.update(status="pairing")
-            token = get_jwt_token(cfg.auth_username, cfg.auth_password, cfg.backend_url)
-            if not token:
-                self.state.update(status="error", error="Backend auth failed")
-                return
-
-            info = broker_pair(cfg.backend_url, token, local_id, cfg.device_name)
-
-            sync_address = info.get("sync_address") or ""
-            addresses = [sync_address] if sync_address else ["dynamic"]
-            self.syncthing.ensure_server_device(
-                info["server_device_id"], "Chronicle Server", addresses
-            )
-            self.syncthing.ensure_folder(
-                folder_id=info["folder_id"],
-                path=cfg.local_vault_dir,
-                label=info.get("folder_label", "Chronicle Vault"),
-                server_device_id=info["server_device_id"],
-                self_device_id=local_id,
-            )
-            self.state.update(status="syncing", folder_id=info["folder_id"], error=None)
-            logger.info(
-                "Paired. Folder %s -> %s", info["folder_id"], cfg.local_vault_dir
-            )
-        except httpx.HTTPStatusError as e:
-            detail = e.response.text[:200] if e.response is not None else str(e)
-            self.state.update(status="error", error=f"Pair failed: {detail}")
-            logger.error("Pair failed: %s", detail)
-        except Exception as e:  # noqa: BLE001 - surface any failure in the UI
-            self.state.update(status="error", error=str(e))
-            logger.exception("Pair error")
-        finally:
-            self._lock.release()
-
-    def set_vault_dir(self, path: str) -> None:
-        save_vault_dir(path)
-        self.config.local_vault_dir = path
-        self.state.update(vault_dir=path)
-        logger.info("Vault folder set to %s — re-pairing", path)
-        self.pair_async()
-
-    def refresh_status(self) -> None:
-        if not self.syncthing.is_running():
-            return
-        connected = self.syncthing.connection_count() > 0
-        completion = None
-        folder_error = None
-        snap = self.state.snapshot()
-        if snap["folder_id"]:
-            fstatus = self.syncthing.folder_status(snap["folder_id"])
-            completion = fstatus["completion"]
-            folder_error = fstatus["error"]
-
-        # Pull Syncthing's own detailed errors into the log buffer so "View Logs"
-        # shows the real cause (e.g. a case collision), not just a count. Log each
-        # message once; re-log if it clears and recurs.
-        detailed = self.syncthing.collect_errors()
-        for msg in detailed:
-            if msg not in self._logged_errors:
-                logger.error("Syncthing: %s", msg)
-        self._logged_errors = set(detailed)
-        if detailed:
-            folder_error = (
-                detailed[0]
-                if len(detailed) == 1
-                else f"{detailed[0]} (+{len(detailed) - 1} more)"
-            )
-
-        self.state.update(
-            connected=connected, completion=completion, folder_error=folder_error
-        )
-
-    def shutdown(self) -> None:
-        self.syncthing.stop()
 
 
 # --- rumps menu bar app -------------------------------------------------------
@@ -354,11 +187,7 @@ def main() -> None:
 
     NSApplication.sharedApplication().setActivationPolicy_(1)  # menu bar only
 
-    log_format = "%(asctime)s %(levelname)s %(name)s: %(message)s"
-    logging.basicConfig(format=log_format, level=logging.INFO)
-    log_buffer.setFormatter(logging.Formatter(log_format))
-    logging.getLogger().addHandler(log_buffer)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    configure_logging()
 
     state = SharedState()
     manager = VaultSyncManager(state)
