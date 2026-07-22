@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Activity, AppWindow, CalendarDays, Copy, Image, Link2, Monitor, RefreshCw } from 'lucide-react'
 import { deviceInputApi, DeviceInputItem } from '../services/api'
@@ -14,6 +14,29 @@ function ItemIcon({ item }: { item: DeviceInputItem }) {
   if (item.kind === 'immich_memory') return <Image className="w-5 h-5" />
   if (item.kind === 'activity' || item.kind === 'screen_context') return <AppWindow className="w-5 h-5" />
   return <Activity className="w-5 h-5" />
+}
+
+function TimelineThumbnail({ item }: { item: DeviceInputItem }) {
+  useQuery({
+    queryKey: ['device-input-thumbnail-request', item.id],
+    queryFn: async () => (await deviceInputApi.requestThumbnail(item.id)).data,
+    enabled: item.kind === 'activity' && item.metadata.thumbnail_available !== true,
+    staleTime: Infinity,
+    retry: false,
+  })
+  const thumbnail = useQuery({
+    queryKey: ['device-input-thumbnail', item.id],
+    queryFn: async () => (await deviceInputApi.getThumbnail(item.id)).data,
+    enabled: item.metadata.thumbnail_available === true,
+    staleTime: Infinity,
+  })
+  const url = useMemo(
+    () => thumbnail.data ? URL.createObjectURL(thumbnail.data) : null,
+    [thumbnail.data],
+  )
+  useEffect(() => () => { if (url) URL.revokeObjectURL(url) }, [url])
+  if (!url) return null
+  return <img src={url} alt="Screen captured during this activity" loading="lazy" className="mt-3 w-full max-h-64 object-cover rounded-md bg-gray-100 dark:bg-gray-800" />
 }
 
 const AUDIO_SESSION_GAP_MS = 90_000
@@ -119,6 +142,8 @@ export default function Timeline() {
               <h3 className="font-medium mt-1">{item.kind === 'audio' ? 'Audio capture' : item.metadata.app_name || item.metadata.window_name || item.metadata.text || item.kind}</h3>
               {item.kind === 'audio' && <p className="text-sm text-gray-500">{formatDuration(item)} · {item.metadata.chunk_count} chunks{item.metadata.directions?.length ? ` · ${item.metadata.directions.join(' + ')}` : ''}</p>}
               {item.metadata.window_name && item.metadata.window_name !== item.metadata.app_name && <p className="text-sm text-gray-500 truncate">{item.metadata.window_name}</p>}
+              {item.kind === 'activity' && item.metadata.text && <p className="text-sm text-gray-600 dark:text-gray-300 mt-2 line-clamp-3">{item.metadata.text}</p>}
+              <TimelineThumbnail item={item} />
             </article>
           ))}
           {!timeline.isLoading && !visibleItems.length && <div className="ml-6 text-sm text-gray-500 border border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-6">Nothing captured for this day.</div>}
