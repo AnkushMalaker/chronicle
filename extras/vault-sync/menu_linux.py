@@ -11,7 +11,7 @@ from urllib.parse import quote
 
 from dotenv import load_dotenv
 from PySide6.QtCore import QTimer, QUrl
-from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QIcon
+from PySide6.QtGui import QAction, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -131,6 +131,76 @@ def _save_forward_audio_setting(mode: str, path: Path = COLLECTOR_CONFIG) -> Non
     path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
 
+def _audio_sources(mode: str, *, forwarding: bool = False) -> set[str]:
+    """Expand a persisted audio mode into its enabled source names."""
+    modes = (
+        {
+            "none": set(),
+            "output": {"system"},
+            "input": {"mic"},
+            "both": {"system", "mic"},
+        }
+        if forwarding
+        else {
+            "off": set(),
+            "system": {"system"},
+            "mic": {"mic"},
+            "both": {"system", "mic"},
+        }
+    )
+    if mode not in modes:
+        raise ValueError(f"unsupported audio mode: {mode}")
+    return modes[mode]
+
+
+def _audio_modes(captured: set[str], forwarded: set[str]) -> tuple[str, str]:
+    """Collapse source sets into ScreenPipe and collector configuration values."""
+    if not forwarded <= captured:
+        raise ValueError("forwarded audio sources must also be recorded locally")
+    capture_modes = {
+        frozenset(): "off",
+        frozenset({"system"}): "system",
+        frozenset({"mic"}): "mic",
+        frozenset({"system", "mic"}): "both",
+    }
+    forwarding_modes = {
+        frozenset(): "none",
+        frozenset({"system"}): "output",
+        frozenset({"mic"}): "input",
+        frozenset({"system", "mic"}): "both",
+    }
+    try:
+        return capture_modes[frozenset(captured)], forwarding_modes[frozenset(forwarded)]
+    except KeyError as error:
+        raise ValueError(f"unsupported audio sources: {error.args[0]}") from error
+
+
+def _updated_audio_modes(
+    capture_mode: str,
+    forwarding_mode: str,
+    source: str,
+    setting: str,
+    enabled: bool,
+) -> tuple[str, str]:
+    """Apply one tray toggle while keeping forwarding dependent on capture."""
+    if source not in {"system", "mic"}:
+        raise ValueError(f"unsupported audio source: {source}")
+    if setting not in {"record", "forward"}:
+        raise ValueError(f"unsupported audio setting: {setting}")
+    captured = _audio_sources(capture_mode)
+    forwarded = _audio_sources(forwarding_mode, forwarding=True)
+    target = captured if setting == "record" else forwarded
+    if enabled:
+        target.add(source)
+        if setting == "forward":
+            captured.add(source)
+    else:
+        target.discard(source)
+        if setting == "record":
+            forwarded.discard(source)
+    return _audio_modes(captured, forwarded)
+
+
 def _save_capture_settings(
     audio_mode: str,
     screen_enabled: bool,
@@ -186,43 +256,28 @@ class ChronicleTray(QSystemTrayIcon):
         self._service_actions(menu, "ScreenPipe", "screenpipe.service", capture=True)
         self._service_actions(menu, "Collector", "chronicle-screenpipe.service")
         settings_menu = menu.addMenu("Settings")
-        audio_menu = settings_menu.addMenu("Audio capture")
-        self.audio_group = QActionGroup(audio_menu)
-        self.audio_group.setExclusive(True)
-        self.audio_actions: dict[str, QAction] = {}
-        for mode, title in (
-            ("off", "Off"),
-            ("system", "System audio"),
-            ("mic", "Microphone"),
-            ("both", "System audio + microphone"),
-        ):
-            action = audio_menu.addAction(title)
-            action.setCheckable(True)
-            action.triggered.connect(
-                lambda _checked=False, selected=mode: self.save_capture_settings(selected)
+        audio_menu = settings_menu.addMenu("Audio")
+        self.audio_actions: dict[str, dict[str, QAction]] = {}
+        for source, title in (("system", "System audio"), ("mic", "Microphone")):
+            source_menu = audio_menu.addMenu(title)
+            record = source_menu.addAction("Record locally")
+            record.setCheckable(True)
+            record.triggered.connect(
+                lambda checked=False, selected=source: self.save_audio_source(
+                    selected, "record", checked
+                )
             )
-            self.audio_group.addAction(action)
-            self.audio_actions[mode] = action
+            forward = source_menu.addAction("Send to Chronicle")
+            forward.setCheckable(True)
+            forward.triggered.connect(
+                lambda checked=False, selected=source: self.save_audio_source(
+                    selected, "forward", checked
+                )
+            )
+            self.audio_actions[source] = {"record": record, "forward": forward}
         self.screen_capture = settings_menu.addAction("Screen capture")
         self.screen_capture.setCheckable(True)
         self.screen_capture.triggered.connect(self.save_capture_settings)
-        forwarding_menu = settings_menu.addMenu("Send audio to Chronicle")
-        self.forwarding_group = QActionGroup(forwarding_menu)
-        self.forwarding_group.setExclusive(True)
-        self.forwarding_actions: dict[str, QAction] = {}
-        for mode, title in (
-            ("none", "None"),
-            ("output", "System audio"),
-            ("input", "Microphone"),
-            ("both", "System audio + microphone"),
-        ):
-            action = forwarding_menu.addAction(title)
-            action.setCheckable(True)
-            action.triggered.connect(
-                lambda _checked=False, selected=mode: self.save_forwarding(selected)
-            )
-            self.forwarding_group.addAction(action)
-            self.forwarding_actions[mode] = action
         menu.addSeparator()
         self.sync_status = menu.addAction("Vault sync: starting…")
         self.sync_status.setEnabled(False)
@@ -295,34 +350,47 @@ class ChronicleTray(QSystemTrayIcon):
     def refresh_capture_settings(self) -> None:
         try:
             audio_mode, screen_enabled = _capture_settings()
-            self.audio_actions[audio_mode].setChecked(True)
+            captured = _audio_sources(audio_mode)
+            forwarded = _audio_sources(_forward_audio_setting(), forwarding=True)
+            for source, actions in self.audio_actions.items():
+                actions["record"].setChecked(source in captured)
+                actions["forward"].setChecked(source in forwarded)
+                actions["record"].setEnabled(True)
+                actions["forward"].setEnabled(True)
             self.screen_capture.setChecked(screen_enabled)
-            for action in self.audio_actions.values():
-                action.setEnabled(True)
             self.screen_capture.setEnabled(True)
-        except (OSError, StopIteration, ValueError):
-            logger.exception("Could not read ScreenPipe settings")
-            for action in self.audio_actions.values():
-                action.setEnabled(False)
+        except (OSError, KeyError, StopIteration, ValueError, json.JSONDecodeError):
+            logger.exception("Could not read audio settings")
+            for actions in self.audio_actions.values():
+                actions["record"].setEnabled(False)
+                actions["forward"].setEnabled(False)
             self.screen_capture.setEnabled(False)
-        try:
-            forwarding = _forward_audio_setting()
-            self.forwarding_actions[forwarding].setChecked(True)
-            for action in self.forwarding_actions.values():
-                action.setEnabled(True)
-        except (OSError, KeyError, ValueError, json.JSONDecodeError):
-            logger.exception("Could not read collector audio forwarding settings")
-            for action in self.forwarding_actions.values():
-                action.setEnabled(False)
 
-    def save_forwarding(self, mode: str) -> None:
+    def save_audio_source(self, source: str, setting: str, enabled: bool) -> None:
         try:
-            _save_forward_audio_setting(mode)
-            if _unit_state("chronicle-screenpipe.service") == "active":
+            was_capture_active = _unit_state("screenpipe.service") == "active"
+            was_collector_active = _unit_state("chronicle-screenpipe.service") == "active"
+            capture_mode, screen_enabled = _capture_settings()
+            forwarding_mode = _forward_audio_setting()
+            capture_mode, forwarding_mode = _updated_audio_modes(
+                capture_mode, forwarding_mode, source, setting, enabled
+            )
+            _save_capture_settings(capture_mode, screen_enabled)
+            _save_forward_audio_setting(forwarding_mode)
+            subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+            if was_capture_active:
+                self.service("restart", "screenpipe.service")
+            if was_collector_active:
                 self.service("restart", "chronicle-screenpipe.service")
-        except (OSError, ValueError, json.JSONDecodeError) as error:
-            logger.exception("Could not save collector audio forwarding settings")
-            self.showMessage("Chronicle collector", str(error), QSystemTrayIcon.Warning)
+        except (
+            OSError,
+            StopIteration,
+            ValueError,
+            json.JSONDecodeError,
+            subprocess.CalledProcessError,
+        ) as error:
+            logger.exception("Could not save audio settings")
+            self.showMessage("Audio settings", str(error), QSystemTrayIcon.Warning)
             self.refresh_capture_settings()
 
     def refresh(self) -> None:
