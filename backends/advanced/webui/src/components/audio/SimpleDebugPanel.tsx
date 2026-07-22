@@ -1,4 +1,5 @@
 import { RecordingContextType } from '../../contexts/RecordingContext'
+import { Card } from '../ui'
 
 interface SimpleDebugPanelProps {
   recording: RecordingContextType
@@ -6,7 +7,7 @@ interface SimpleDebugPanelProps {
 
 export default function SimpleDebugPanel({ recording }: SimpleDebugPanelProps) {
   return (
-    <div className="mt-6 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+    <Card className="mt-6 bg-gray-50 dark:bg-gray-900">
       <h3 className="font-medium text-gray-800 dark:text-gray-200 mb-3 flex items-center">
         🐛 Debug Information
       </h3>
@@ -70,6 +71,6 @@ export default function SimpleDebugPanel({ recording }: SimpleDebugPanelProps) {
         <p>• Sequential Flow: Mic → WebSocket → Audio-Start → Streaming</p>
         <p>• Security: {recording.canAccessMicrophone ? '✅ HTTPS/Localhost' : '❌ Insecure Connection'}</p>
       </div>
-    </div>
+    </Card>
   )
 }

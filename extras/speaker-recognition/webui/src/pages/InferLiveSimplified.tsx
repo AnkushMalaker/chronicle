@@ -4,7 +4,7 @@
  * Much simpler than the original - server handles all complexity
  */
 
-import React, { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Mic, Users, Clock, Volume2, Wifi, WifiOff } from 'lucide-react'
 import { useUser } from '../contexts/UserContext'
 import { useSpeakerWebSocket } from '../hooks/useSpeakerWebSocket'
@@ -135,10 +135,11 @@ export default function InferLiveSimplified() {
     } catch (error) {
       console.error('Failed to start audio capture:', error)
 
+      const err = error as DOMException
       let errorMessage = 'Failed to access microphone. '
-      if (error.name === 'NotAllowedError') {
+      if (err.name === 'NotAllowedError') {
         errorMessage += 'Please allow microphone access and try again.'
-      } else if (error.name === 'NotFoundError') {
+      } else if (err.name === 'NotFoundError') {
         errorMessage += 'No microphone found. Please check your device.'
       } else {
         errorMessage += 'Please check permissions and try again.'

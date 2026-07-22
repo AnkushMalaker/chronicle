@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import {
   ShieldCheck, ShieldAlert, ChevronDown, ChevronRight,
   RefreshCw, Archive, ArrowRightLeft, HelpCircle, Database,
+  Check, Undo2,
 } from 'lucide-react'
 import { useUser } from '../contexts/UserContext'
 import { apiService } from '../services/api'
@@ -16,6 +17,8 @@ interface Clip {
   self_score: number | null
   best_other: BestOther | null
   flags: string[]
+  heuristic_flags: string[]
+  review_state: 'confirmed_correct' | null
   suggested: Suggested | null
 }
 interface SpeakerHealth {
@@ -169,6 +172,18 @@ export default function EnrollmentHealth() {
     }
   }
 
+  const reviewFlag = async (segmentId: number, decision: 'confirmed_correct' | 'reset') => {
+    setBusy(segmentId)
+    try {
+      await apiService.post(`/enrollment/segments/${segmentId}/audit-review`, { decision })
+      await load()
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || 'Could not save enrollment review')
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const totalFlagged = report?.speakers.reduce((a, s) => a + s.n_flagged, 0) ?? 0
   const contaminated = report?.speakers.filter(s => s.verdict === 'contaminated').length ?? 0
 
@@ -182,7 +197,7 @@ export default function EnrollmentHealth() {
           </h2>
           <p className="text-sm text-muted mt-1">
             Finds mislabeled, contaminated, and junk enrolled clips from per-clip embeddings.
-            Relabel a clip to who it really sounds like, or delete it — the speaker voiceprint is recomputed.
+            Relabel or quarantine bad evidence, or mark a correct clip so the same heuristic warning stays resolved.
           </p>
         </div>
         <button onClick={load} disabled={loading}
@@ -280,6 +295,11 @@ export default function EnrollmentHealth() {
                               {clip.flags.map(f => (
                                 <span key={f} className={`text-xs px-1.5 py-0.5 rounded ${FLAG_STYLES[f] || 'bg-gray-100 text-gray-700'}`}>{f}</span>
                               ))}
+                              {clip.review_state === 'confirmed_correct' && (
+                                <span className="inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+                                  <Check className="h-3 w-3" /> confirmed correct
+                                </span>
+                              )}
                             </div>
                             <div className="text-xs text-muted mt-1">
                               self <b className={scoreColor(clip.self_score)}>
@@ -297,6 +317,26 @@ export default function EnrollmentHealth() {
                             src={`/api/enrollment/segments/${clip.segment_id}/audio`} />
 
                           <div className="flex items-center gap-2">
+                            {clip.flags.length > 0 && (
+                              <button
+                                disabled={busy === clip.segment_id}
+                                onClick={() => reviewFlag(clip.segment_id, 'confirmed_correct')}
+                                className="text-xs flex items-center gap-1 px-2 py-1 border border-green-300 dark:border-green-700 text-green-700 dark:text-green-300 rounded hover:bg-green-50 dark:hover:bg-green-900/20 disabled:opacity-50"
+                                title={`Keep this clip assigned to ${spk.name} and resolve its warning`}
+                              >
+                                <Check className="h-3 w-3" /> Looks correct
+                              </button>
+                            )}
+                            {clip.review_state === 'confirmed_correct' && (
+                              <button
+                                disabled={busy === clip.segment_id}
+                                onClick={() => reviewFlag(clip.segment_id, 'reset')}
+                                className="text-xs flex items-center gap-1 px-2 py-1 text-gray-600 dark:text-gray-300 rounded hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50"
+                                title="Restore automatic enrollment-health warnings for this clip"
+                              >
+                                <Undo2 className="h-3 w-3" /> Undo review
+                              </button>
+                            )}
                             {clip.suggested && (
                               <button
                                 disabled={busy === clip.segment_id}

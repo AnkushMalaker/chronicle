@@ -2,17 +2,11 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  --bg: #fff;
-  --text: #222;
-}
-[data-theme="dark"] {
-  --bg: #222;
-  --text: #fff;
-}
-body {
-  background: var(--bg);
-  color: var(--text);
+@layer base {
+  /* espresso page surface — driven by the `.dark` class the app actually sets */
+  body {
+    @apply bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100;
+  }
 }
 
 @layer components {

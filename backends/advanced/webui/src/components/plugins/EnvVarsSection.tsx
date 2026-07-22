@@ -1,5 +1,6 @@
 import { Key } from 'lucide-react'
 import FormField, { FieldSchema } from './FormField'
+import { Alert } from '../ui'
 
 interface EnvVarsSectionProps {
   schema: Record<string, FieldSchema>
@@ -80,12 +81,10 @@ export default function EnvVarsSection({
         })}
       </div>
 
-      <div className="p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg">
-        <p className="text-xs text-yellow-800 dark:text-yellow-200">
-          <strong>Note:</strong> Changing environment variables requires a backend restart to take effect.
-          Existing values are masked with <code className="font-mono">••••••••</code> for security.
-        </p>
-      </div>
+      <Alert tone="warning">
+        <strong>Note:</strong> Changing environment variables requires a backend restart to take effect.
+        Existing values are masked with <code className="font-mono">••••••••</code> for security.
+      </Alert>
     </div>
   )
 }

@@ -1,4 +1,5 @@
 import { UseAudioRecordingReturn } from '../../hooks/useAudioRecording'
+import { Button } from '../ui'
 
 interface AudioRecordingControlsProps {
   recording: UseAudioRecordingReturn
@@ -28,13 +29,15 @@ export default function AudioRecordingControls({ recording }: AudioRecordingCont
 
         {/* Audio Start */}
         <div className="text-center">
-          <button
+          <Button
+            variant="primary"
+            size="md"
             onClick={recording.sendAudioStartOnly}
             disabled={!recording.hasValidWebSocket}
-            className="w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full"
           >
             📤 Start
-          </button>
+          </Button>
           <p className="text-xs text-gray-500 mt-1">Send audio-start</p>
         </div>
 

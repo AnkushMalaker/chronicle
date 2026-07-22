@@ -39,7 +39,6 @@ export const useAudioRecording = (options: UseAudioRecordingOptions = {}): UseAu
   const {
     sampleRate = 16000,
     channels = 1,
-    bufferSize = 4096,
     autoProcess = true,
     maxDuration = 300, // 5 minutes default
     onAudioProcessed,
@@ -184,13 +183,13 @@ export const useAudioRecording = (options: UseAudioRecordingOptions = {}): UseAu
           await processRecordingBlob(blob)
         }
       } catch (error) {
-        const errorMsg = `Failed to process recording: ${error.message}`
+        const errorMsg = `Failed to process recording: ${error instanceof Error ? error.message : String(error)}`
         setRecordingState(prev => ({ ...prev, status: 'error', error: errorMsg }))
         onError?.(errorMsg)
       }
     }
 
-    mediaRecorder.onerror = (event) => {
+    mediaRecorder.onerror = (_event) => {
       const errorMsg = 'Recording failed. Please try again.'
       setRecordingState(prev => ({ ...prev, status: 'error', error: errorMsg }))
       onError?.(errorMsg)
@@ -212,7 +211,7 @@ export const useAudioRecording = (options: UseAudioRecordingOptions = {}): UseAu
 
       return processed
     } catch (error) {
-      const errorMsg = `Failed to process recording: ${error.message}`
+      const errorMsg = `Failed to process recording: ${error instanceof Error ? error.message : String(error)}`
       setRecordingState(prev => ({ ...prev, status: 'error', error: errorMsg }))
       onError?.(errorMsg)
       return null

@@ -49,7 +49,7 @@ export interface UseSpeakerIdentificationReturn {
   // Controls
   setProcessingMode: (mode: ProcessingMode) => void
   setConfidenceThreshold: (threshold: number) => void
-  processAudio: (audio: ProcessedAudio, mode?: ProcessingMode) => Promise<ProcessingResult | null>
+  processAudio: (audio: ProcessedAudio, modeOrOptions?: ProcessingMode | Partial<ProcessingOptions>) => Promise<ProcessingResult | null>
   selectResult: (result: ProcessingResult | null) => void
   clearResults: () => void
   exportResult: (result: ProcessingResult) => void

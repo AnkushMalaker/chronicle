@@ -3,6 +3,7 @@ import { MessageCircle, Send, Plus, Trash2, Brain, Clock, User, Bot, BookOpen, L
 import { useQueryClient } from '@tanstack/react-query'
 import { chatApi } from '../services/api'
 import { useChatSessions, useChatMessages, useCreateChatSession, useDeleteChatSession, useExtractChatMemories } from '../hooks/useChat'
+import { IconButton, MetadataChip } from '../components/ui'
 
 interface ChatMessage {
   message_id: string
@@ -272,13 +273,9 @@ export default function Chat() {
               <MessageCircle className="h-6 w-6 text-blue-600" />
               <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Chat</h1>
             </div>
-            <button
-              onClick={createNewSession}
-              className="p-2 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md transition-colors"
-              title="New Chat"
-            >
+            <IconButton label="New Chat" onClick={createNewSession}>
               <Plus className="h-5 w-5" />
-            </button>
+            </IconButton>
           </div>
         </div>
 
@@ -343,13 +340,13 @@ export default function Chat() {
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2 min-w-0">
                   {/* Open sessions list on mobile */}
-                  <button
+                  <IconButton
+                    label="Show chat sessions"
                     onClick={() => setShowSessions(true)}
-                    className="md:hidden p-2 -ml-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 flex-shrink-0"
-                    aria-label="Show chat sessions"
+                    className="md:hidden -ml-2 flex-shrink-0"
                   >
                     <MessageCircle className="h-5 w-5" />
-                  </button>
+                  </IconButton>
                   <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 truncate">
                     {currentSession.title}
                   </h2>
@@ -359,7 +356,7 @@ export default function Chat() {
                   <button
                     onClick={extractMemoriesFromChat}
                     disabled={extractMemories.isPending}
-                    className="flex items-center space-x-2 px-3 py-1 rounded-full text-sm transition-colors bg-green-100 text-green-700 hover:bg-green-200 dark:bg-green-900/30 dark:text-green-300 dark:hover:bg-green-900/50 disabled:opacity-50"
+                    className="flex items-center space-x-2 px-3 py-1 rounded-full text-sm transition-colors border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50"
                     title="Extract memories from this chat session"
                   >
                     {extractMemories.isPending ? (
@@ -470,7 +467,9 @@ export default function Chat() {
                   {error}
                   <button
                     onClick={() => setError(null)}
-                    className="ml-2 text-red-500 hover:text-red-700"
+                    aria-label="Dismiss error"
+                    title="Dismiss"
+                    className="ml-2 rounded text-red-500 hover:text-red-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400"
                   >
                     ✕
                   </button>
@@ -503,13 +502,13 @@ export default function Chat() {
 
               <div className="mt-2 flex items-center justify-between">
                 <div className="flex items-center space-x-4">
-                  <span
-                    className="flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300"
+                  <MetadataChip
+                    className="space-x-1.5"
                     title="The assistant searches your memory vault automatically when a question needs personal context."
                   >
                     <Wrench className="h-3.5 w-3.5" />
                     <span>Agentic memory</span>
-                  </span>
+                  </MetadataChip>
                 </div>
 
                 <div className="flex items-center space-x-2">
@@ -561,7 +560,9 @@ export default function Chat() {
             </h3>
             <button
               onClick={() => setShowMemoryPanel(false)}
-              className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300"
+              aria-label="Close memory context"
+              title="Close"
+              className="rounded text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400"
             >
               ✕
             </button>
@@ -569,9 +570,9 @@ export default function Chat() {
           <div className="text-sm text-gray-600 dark:text-gray-400">
             <p>Using {memoryContext.memory_count} relevant memories to enhance this conversation.</p>
             <div className="mt-4 space-y-2">
-              {memoryContext.memory_ids.slice(0, 3).map((id) => (
-                <div key={id} className="p-2 bg-gray-50 dark:bg-gray-700 rounded text-xs">
-                  Memory ID: {id}
+              {memoryContext.memory_ids.slice(0, 3).map((id, i) => (
+                <div key={id} className="p-2 bg-gray-50 dark:bg-gray-700 rounded text-xs text-gray-600 dark:text-gray-300">
+                  Memory {i + 1}
                 </div>
               ))}
               {memoryContext.memory_ids.length > 3 && (

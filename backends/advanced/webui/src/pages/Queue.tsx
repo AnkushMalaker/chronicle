@@ -26,6 +26,7 @@ import {
 import { useQueryClient } from '@tanstack/react-query';
 import { useQueueDashboard } from '../hooks/useQueue';
 import { queueApi, conversationsApi } from '../services/api';
+import { Button, Card, Checkbox, Modal, Select } from '../components/ui';
 
 interface QueueStats {
   total_jobs: number;
@@ -658,28 +659,30 @@ const Queue: React.FC = () => {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button
+          <Button
+            variant="danger"
+            size="md"
+            icon={<Trash2 className="w-4 h-4" />}
             onClick={() => setShowFlushModal(true)}
-            className="flex items-center space-x-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
           >
-            <Trash2 className="w-4 h-4" />
-            <span>Flush Jobs</span>
-          </button>
-          <button
+            Flush Jobs
+          </Button>
+          <Button
+            variant="primary"
+            size="md"
+            icon={<RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />}
             onClick={invalidateQueue}
             disabled={refreshing}
-            className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
           >
-            <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
-            <span>Refresh</span>
-          </button>
+            Refresh
+          </Button>
         </div>
       </div>
 
       {/* Stats Cards */}
       {stats && (
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
-          <div className="bg-white rounded-lg border p-4">
+          <Card raised>
             <div className="flex items-center space-x-2">
               <Layers className="w-5 h-5 text-gray-600" />
               <div>
@@ -687,9 +690,9 @@ const Queue: React.FC = () => {
                 <p className="text-xl font-semibold">{stats.total_jobs}</p>
               </div>
             </div>
-          </div>
+          </Card>
 
-          <div className="bg-white rounded-lg border p-4">
+          <Card raised>
             <div className="flex items-center space-x-2">
               <Clock className="w-5 h-5 text-yellow-600" />
               <div>
@@ -697,9 +700,9 @@ const Queue: React.FC = () => {
                 <p className="text-xl font-semibold text-yellow-600">{stats.queued_jobs}</p>
               </div>
             </div>
-          </div>
+          </Card>
 
-          <div className="bg-white rounded-lg border p-4">
+          <Card raised>
             <div className="flex items-center space-x-2">
               <Play className={`w-5 h-5 text-blue-600 ${stats.started_jobs > 0 ? 'animate-pulse' : ''}`} />
               <div>
@@ -707,9 +710,9 @@ const Queue: React.FC = () => {
                 <p className="text-xl font-semibold text-blue-600">{stats.started_jobs}</p>
               </div>
             </div>
-          </div>
+          </Card>
 
-          <div className="bg-white rounded-lg border p-4">
+          <Card raised>
             <div className="flex items-center space-x-2">
               <CheckCircle className="w-5 h-5 text-green-600" />
               <div>
@@ -717,9 +720,9 @@ const Queue: React.FC = () => {
                 <p className="text-xl font-semibold text-green-600">{stats.finished_jobs}</p>
               </div>
             </div>
-          </div>
+          </Card>
 
-          <div className="bg-white rounded-lg border p-4">
+          <Card raised>
             <div className="flex items-center space-x-2">
               <XCircle className="w-5 h-5 text-red-600" />
               <div>
@@ -727,9 +730,9 @@ const Queue: React.FC = () => {
                 <p className="text-xl font-semibold text-red-600">{stats.failed_jobs}</p>
               </div>
             </div>
-          </div>
+          </Card>
 
-          <div className="bg-white rounded-lg border p-4">
+          <Card raised>
             <div className="flex items-center space-x-2">
               <StopCircle className="w-5 h-5 text-gray-600" />
               <div>
@@ -737,9 +740,9 @@ const Queue: React.FC = () => {
                 <p className="text-xl font-semibold text-gray-600">{stats.canceled_jobs}</p>
               </div>
             </div>
-          </div>
+          </Card>
 
-          <div className="bg-white rounded-lg border p-4">
+          <Card raised>
             <div className="flex items-center space-x-2">
               <Pause className="w-5 h-5 text-blue-600" />
               <div>
@@ -747,7 +750,7 @@ const Queue: React.FC = () => {
                 <p className="text-xl font-semibold text-blue-600">{stats.deferred_jobs}</p>
               </div>
             </div>
-          </div>
+          </Card>
         </div>
       )}
 
@@ -766,7 +769,11 @@ const Queue: React.FC = () => {
                 <span>Cleanup Old Sessions</span>
               </button>
               {streamingStatus?.stream_health && Object.keys(streamingStatus.stream_health).length > 0 && (
-                <button
+                <Button
+                  variant="danger"
+                  size="md"
+                  icon={<Trash2 className="w-4 h-4" />}
+                  title="Force remove ALL active streams"
                   onClick={async () => {
                     const streamCount = Object.keys(streamingStatus.stream_health).length;
                     if (!streamingStatus || !confirm(`Remove ALL ${streamCount} active streams? This will force-delete all streams including actively streaming ones.`)) return;
@@ -781,12 +788,9 @@ const Queue: React.FC = () => {
                       alert(`Failed to remove streams: ${error.response?.data?.error || error.message}`);
                     }
                   }}
-                  className="flex items-center space-x-2 px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition-colors text-sm"
-                  title="Force remove ALL active streams"
                 >
-                  <Trash2 className="w-4 h-4" />
-                  <span>Remove All Streams ({Object.keys(streamingStatus.stream_health).length})</span>
-                </button>
+                  Remove All Streams ({Object.keys(streamingStatus.stream_health).length})
+                </Button>
               )}
               <button
                 onClick={cleanupStuckWorkers}
@@ -1108,7 +1112,11 @@ const Queue: React.FC = () => {
                               </div>
                               {/* Close Conversation Button - only for actively running conversations */}
                               {openConvJob && openConvJob.status === 'started' && (
-                                <button
+                                <Button
+                                  variant="danger"
+                                  className="flex-shrink-0 ml-3"
+                                  icon={<StopCircle className="w-4 h-4" />}
+                                  title="Close the current active conversation"
                                   onClick={async (e) => {
                                     e.stopPropagation();
                                     if (!confirm(`Close the active conversation for ${clientId}? This will end the current conversation and trigger post-processing.`)) return;
@@ -1120,12 +1128,9 @@ const Queue: React.FC = () => {
                                       alert(`Failed to close conversation: ${error.response?.data?.error || error.message}`);
                                     }
                                   }}
-                                  className="flex items-center space-x-1 px-3 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition-colors text-sm font-medium flex-shrink-0 ml-3"
-                                  title="Close the current active conversation"
                                 >
-                                  <StopCircle className="w-4 h-4" />
-                                  <span>Close</span>
-                                </button>
+                                  Close
+                                </Button>
                               )}
                             </div>
 
@@ -1954,31 +1959,23 @@ const Queue: React.FC = () => {
                             Showing {startIndex + 1}-{Math.min(endIndex, totalConversations)} of {totalConversations} conversations
                           </div>
                           <div className="flex items-center space-x-2">
-                            <button
+                            <Button
+                              variant="primary"
                               onClick={() => setCompletedConvPage(Math.max(1, completedConvPage - 1))}
                               disabled={completedConvPage === 1}
-                              className={`px-3 py-1 text-xs rounded ${
-                                completedConvPage === 1
-                                  ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                                  : 'bg-blue-500 text-white hover:bg-blue-600'
-                              }`}
                             >
                               Previous
-                            </button>
+                            </Button>
                             <span className="text-xs text-gray-600">
                               Page {completedConvPage} of {totalPages}
                             </span>
-                            <button
+                            <Button
+                              variant="primary"
                               onClick={() => setCompletedConvPage(Math.min(totalPages, completedConvPage + 1))}
                               disabled={completedConvPage === totalPages}
-                              className={`px-3 py-1 text-xs rounded ${
-                                completedConvPage === totalPages
-                                  ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                                  : 'bg-blue-500 text-white hover:bg-blue-600'
-                              }`}
                             >
                               Next
-                            </button>
+                            </Button>
                           </div>
                         </div>
                       )}
@@ -2171,15 +2168,14 @@ const Queue: React.FC = () => {
       </div>
 
       {/* Filters */}
-      <div className="bg-white rounded-lg border p-4">
+      <Card raised>
         <h3 className="text-lg font-medium mb-4">Filters</h3>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Status</label>
-            <select
+            <Select
               value={filters.status}
               onChange={(e) => setFilters({ ...filters, status: e.target.value })}
-              className="w-full border border-gray-300 rounded-md px-3 py-2"
             >
               <option value="">All Statuses</option>
               <option value="queued">Queued</option>
@@ -2188,46 +2184,40 @@ const Queue: React.FC = () => {
               <option value="failed">Failed</option>
               <option value="canceled">Canceled</option>
               <option value="deferred">Deferred</option>
-            </select>
+            </Select>
           </div>
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Job Type</label>
-            <select
+            <Select
               value={filters.job_type}
               onChange={(e) => setFilters({ ...filters, job_type: e.target.value })}
-              className="w-full border border-gray-300 rounded-md px-3 py-2"
             >
               <option value="">All Types</option>
               <option value="process_audio_files">Audio File Processing</option>
               <option value="process_single_audio_file">Single Audio File</option>
               <option value="reprocess_transcript">Reprocess Transcript</option>
               <option value="reprocess_memory">Reprocess Memory</option>
-            </select>
+            </Select>
           </div>
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Priority</label>
-            <select
+            <Select
               value={filters.priority}
               onChange={(e) => setFilters({ ...filters, priority: e.target.value })}
-              className="w-full border border-gray-300 rounded-md px-3 py-2"
             >
               <option value="">All Priorities</option>
               <option value="high">High</option>
               <option value="normal">Normal</option>
               <option value="low">Low</option>
-            </select>
+            </Select>
           </div>
 
           <div className="flex items-end space-x-2">
-            <button
-              onClick={applyFilters}
-              className="flex items-center space-x-1 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
-            >
-              <Filter className="w-4 h-4" />
-              <span>Apply</span>
-            </button>
+            <Button variant="primary" size="md" icon={<Filter className="w-4 h-4" />} onClick={applyFilters}>
+              Apply
+            </Button>
             <button
               onClick={clearFilters}
               className="flex items-center space-x-1 px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
@@ -2237,7 +2227,7 @@ const Queue: React.FC = () => {
             </button>
           </div>
         </div>
-      </div>
+      </Card>
 
           {/* Jobs Table */}
       <div className="bg-white rounded-lg border overflow-hidden">
@@ -2383,15 +2373,18 @@ const Queue: React.FC = () => {
 
       {/* Job Details Modal */}
       {selectedJob && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-11/12 max-w-6xl shadow-lg rounded-md bg-white">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-medium text-gray-900">Job Details</h3>
-              <button onClick={() => setSelectedJob(null)} className="text-gray-400 hover:text-gray-600">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
+        <Modal
+          open
+          onClose={() => setSelectedJob(null)}
+          title="Job Details"
+          maxWidthClassName="max-w-6xl"
+          className="max-h-[90vh] overflow-y-auto"
+          footer={
+            <Button variant="secondary" onClick={() => setSelectedJob(null)}>
+              Close
+            </Button>
+          }
+        >
             {loadingJobDetails ? (
               <div className="flex items-center justify-center py-12">
                 <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
@@ -2610,21 +2603,23 @@ const Queue: React.FC = () => {
                 )}
               </div>
             )}
-          </div>
-        </div>
+        </Modal>
       )}
 
       {/* Event Detail Modal */}
       {selectedEvent && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-11/12 md:w-2/3 lg:w-1/2 shadow-lg rounded-md bg-white">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-medium text-gray-900">Event Details</h3>
-              <button onClick={() => setSelectedEvent(null)} className="text-gray-400 hover:text-gray-600">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
+        <Modal
+          open
+          onClose={() => setSelectedEvent(null)}
+          title="Event Details"
+          maxWidthClassName="max-w-3xl"
+          className="max-h-[90vh] overflow-y-auto"
+          footer={
+            <Button variant="secondary" onClick={() => setSelectedEvent(null)}>
+              Close
+            </Button>
+          }
+        >
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div>
@@ -2703,24 +2698,51 @@ const Queue: React.FC = () => {
                 </details>
               )}
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {/* Flush Jobs Modal */}
       {showFlushModal && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-11/12 md:w-1/2 lg:w-1/3 shadow-lg rounded-md bg-white">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-medium text-gray-900 flex items-center">
-                <Trash2 className="w-5 h-5 mr-2" />
-                Flush Jobs
-              </h3>
-              <button onClick={() => setShowFlushModal(false)} className="text-gray-400 hover:text-gray-600">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
+        <Modal
+          open
+          onClose={() => { setShowFlushModal(false); setFlushPreview(null); }}
+          title="Flush Jobs"
+          icon={<Trash2 className="w-5 h-5" />}
+          maxWidthClassName="max-w-lg"
+          className="max-h-[90vh] overflow-y-auto"
+          footer={
+            <>
+              <Button
+                variant="secondary"
+                size="md"
+                className="flex-1"
+                onClick={() => { setShowFlushModal(false); setFlushPreview(null); }}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="secondary"
+                size="md"
+                className="flex-1"
+                onClick={previewFlush}
+                disabled={previewing || (!flushSettings.flush_all && flushSettings.statuses.length === 0)}
+                icon={previewing ? <RotateCcw className="w-4 h-4 animate-spin" /> : <Eye className="w-4 h-4" />}
+              >
+                {previewing ? 'Previewing...' : 'Preview'}
+              </Button>
+              <Button
+                variant={flushSettings.flush_all ? 'danger' : 'primary'}
+                size="md"
+                className="flex-1"
+                onClick={flushJobs}
+                disabled={flushing || (!flushSettings.flush_all && flushSettings.statuses.length === 0)}
+                icon={flushing ? <RotateCcw className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+              >
+                {flushing ? 'Flushing...' : flushSettings.flush_all ? 'Flush ALL Jobs' : 'Flush Selected Jobs'}
+              </Button>
+            </>
+          }
+        >
             <div className="space-y-4">
               <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
                 <div className="flex items-center">
@@ -2746,10 +2768,9 @@ const Queue: React.FC = () => {
                     <div className="ml-6 mt-2 space-y-2">
                       <div>
                         <label className="block text-xs text-gray-600 mb-1">Remove jobs older than:</label>
-                        <select
+                        <Select
                           value={flushSettings.older_than_hours}
                           onChange={(e) => setFlushSettings(prev => ({ ...prev, older_than_hours: parseInt(e.target.value) }))}
-                          className="w-full text-sm border border-gray-300 rounded px-2 py-1"
                         >
                           <option value={1}>1 hour</option>
                           <option value={6}>6 hours</option>
@@ -2757,34 +2778,31 @@ const Queue: React.FC = () => {
                           <option value={24}>24 hours</option>
                           <option value={72}>3 days</option>
                           <option value={168}>1 week</option>
-                        </select>
+                        </Select>
                       </div>
 
                       <div>
                         <label className="block text-xs text-gray-600 mb-1">Job statuses to remove:</label>
                         <div className="space-y-1">
                           {['finished', 'failed', 'canceled'].map(status => (
-                            <label key={status} className="flex items-center space-x-2">
-                              <input
-                                type="checkbox"
-                                checked={flushSettings.statuses.includes(status)}
-                                onChange={(e) => {
-                                  if (e.target.checked) {
-                                    setFlushSettings(prev => ({
-                                      ...prev,
-                                      statuses: [...prev.statuses, status]
-                                    }));
-                                  } else {
-                                    setFlushSettings(prev => ({
-                                      ...prev,
-                                      statuses: prev.statuses.filter(s => s !== status)
-                                    }));
-                                  }
-                                }}
-                                className="text-blue-600"
-                              />
-                              <span className="text-xs capitalize">{status}</span>
-                            </label>
+                            <Checkbox
+                              key={status}
+                              checked={flushSettings.statuses.includes(status)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setFlushSettings(prev => ({
+                                    ...prev,
+                                    statuses: [...prev.statuses, status]
+                                  }));
+                                } else {
+                                  setFlushSettings(prev => ({
+                                    ...prev,
+                                    statuses: prev.statuses.filter(s => s !== status)
+                                  }));
+                                }
+                              }}
+                              label={<span className="text-xs capitalize">{status}</span>}
+                            />
                           ))}
                         </div>
                       </div>
@@ -2815,25 +2833,17 @@ const Queue: React.FC = () => {
                       </div>
 
                       <div className="space-y-1">
-                        <label className="flex items-center space-x-2">
-                          <input
-                            type="checkbox"
-                            checked={flushSettings.include_failed}
-                            onChange={(e) => setFlushSettings(prev => ({ ...prev, include_failed: e.target.checked }))}
-                            className="text-red-600"
-                          />
-                          <span className="text-xs text-gray-700">Also flush failed jobs</span>
-                        </label>
+                        <Checkbox
+                          checked={flushSettings.include_failed}
+                          onChange={(e) => setFlushSettings(prev => ({ ...prev, include_failed: e.target.checked }))}
+                          label={<span className="text-xs text-gray-700">Also flush failed jobs</span>}
+                        />
 
-                        <label className="flex items-center space-x-2">
-                          <input
-                            type="checkbox"
-                            checked={flushSettings.include_finished}
-                            onChange={(e) => setFlushSettings(prev => ({ ...prev, include_finished: e.target.checked }))}
-                            className="text-red-600"
-                          />
-                          <span className="text-xs text-gray-700">Also flush finished jobs</span>
-                        </label>
+                        <Checkbox
+                          checked={flushSettings.include_finished}
+                          onChange={(e) => setFlushSettings(prev => ({ ...prev, include_finished: e.target.checked }))}
+                          label={<span className="text-xs text-gray-700">Also flush finished jobs</span>}
+                        />
                       </div>
                     </div>
                   )}
@@ -2874,56 +2884,8 @@ const Queue: React.FC = () => {
                   )}
                 </div>
               )}
-
-              <div className="flex space-x-2 pt-4 border-t">
-                <button
-                  onClick={() => { setShowFlushModal(false); setFlushPreview(null); }}
-                  className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={previewFlush}
-                  disabled={previewing || (!flushSettings.flush_all && flushSettings.statuses.length === 0)}
-                  className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50"
-                >
-                  {previewing ? (
-                    <>
-                      <RotateCcw className="w-4 h-4 animate-spin inline mr-2" />
-                      Previewing...
-                    </>
-                  ) : (
-                    <>
-                      <Eye className="w-4 h-4 inline mr-2" />
-                      Preview
-                    </>
-                  )}
-                </button>
-                <button
-                  onClick={flushJobs}
-                  disabled={flushing || (!flushSettings.flush_all && flushSettings.statuses.length === 0)}
-                  className={`flex-1 px-4 py-2 text-white rounded-lg disabled:opacity-50 ${
-                    flushSettings.flush_all
-                      ? 'bg-red-600 hover:bg-red-700'
-                      : 'bg-blue-600 hover:bg-blue-700'
-                  }`}
-                >
-                  {flushing ? (
-                    <>
-                      <RotateCcw className="w-4 h-4 animate-spin inline mr-2" />
-                      Flushing...
-                    </>
-                  ) : (
-                    <>
-                      <Trash2 className="w-4 h-4 inline mr-2" />
-                      {flushSettings.flush_all ? 'Flush ALL Jobs' : 'Flush Selected Jobs'}
-                    </>
-                  )}
-                </button>
-              </div>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

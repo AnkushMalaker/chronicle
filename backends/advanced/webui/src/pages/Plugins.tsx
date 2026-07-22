@@ -3,6 +3,7 @@ import { Code, Layout, Sparkles } from 'lucide-react'
 import PluginSettings from '../components/PluginSettings'
 import PluginSettingsForm from '../components/PluginSettingsForm'
 import PluginAssistant from '../components/plugins/PluginAssistant'
+import { Tabs } from '../components/ui'
 
 type ViewMode = 'form' | 'assistant' | 'yaml'
 
@@ -19,22 +20,12 @@ export default function Plugins() {
     <div className="p-6">
       {/* View Mode Toggle */}
       <div className="mb-6 flex justify-end">
-        <div className="inline-flex rounded-lg border border-gray-300 dark:border-gray-600 overflow-hidden">
-          {tabs.map((tab) => (
-            <button
-              key={tab.key}
-              onClick={() => setViewMode(tab.key)}
-              className={`flex items-center space-x-2 px-4 py-2 text-sm transition-colors ${
-                viewMode === tab.key
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600'
-              }`}
-            >
-              {tab.icon}
-              <span>{tab.label}</span>
-            </button>
-          ))}
-        </div>
+        <Tabs
+          tabs={tabs.map((tab) => ({ value: tab.key, label: tab.label, icon: tab.icon }))}
+          value={viewMode}
+          onChange={setViewMode}
+          variant="pill"
+        />
       </div>
 
       {/* Content */}

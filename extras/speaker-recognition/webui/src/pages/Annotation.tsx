@@ -14,17 +14,11 @@ import {
 } from '../utils/audioUtils'
 import { databaseService } from '../services/database'
 import { apiService, type Annotation } from '../services/api'
-import {
-  transcribeWithDeepgram,
-  convertToAnnotationSegments,
-  DEFAULT_DEEPGRAM_OPTIONS
-} from '../services/deepgram'
 import { speakerIdentificationService } from '../services/speakerIdentification'
 import FileUploader from '../components/FileUploader'
 import WaveformPlot from '../components/WaveformPlot'
 import EmbeddingPlot from '../components/EmbeddingPlot'
 import ProcessingModeSelector from '../components/ProcessingModeSelector'
-import { audioProcessingService } from '../services/audioProcessing'
 import { useSpeakerIdentification } from '../hooks/useSpeakerIdentification'
 
 interface AudioData {
@@ -60,7 +54,6 @@ export default function Annotation() {
   // Add speaker processing hook for unified processing modes
   const speakerProcessing = useSpeakerIdentification({
     defaultMode: 'speaker-identification',
-    userId: user?.id,
     onError: (error) => console.error('Processing error:', error),
   })
   const [availableSpeakers, setAvailableSpeakers] = useState<AvailableSpeaker[]>([
@@ -72,7 +65,7 @@ export default function Annotation() {
   const [playingSegmentId, setPlayingSegmentId] = useState<string | null>(null)
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
   const [enrollingSpeaker, setEnrollingSpeaker] = useState<string | null>(null)
-  const [deepgramResponse, setDeepgramResponse] = useState<any>(null)
+  const [deepgramResponse] = useState<any>(null)
   const [showJsonOutput, setShowJsonOutput] = useState(false)
   const [minSpeakers, setMinSpeakers] = useState(1)
   const [maxSpeakers, setMaxSpeakers] = useState(4)
@@ -196,19 +189,6 @@ export default function Annotation() {
     if (!audioData || !user) return
 
     try {
-      // Convert audioData to ProcessedAudio format expected by speaker processing
-      const processedAudio = {
-        file: audioData.file, // <-- This was missing!
-        filename: audioData.file.name,
-        buffer: {
-          samples: audioData.samples,
-          sampleRate: audioData.buffer.sampleRate,
-          channels: audioData.buffer.numberOfChannels,
-          duration: audioData.buffer.duration
-        },
-        quality: null // Not needed for annotation processing
-      }
-
       // Validate requirements for diarize-identify-match mode
       if (mode === 'diarize-identify-match' && !uploadedJson) {
         alert('Please upload a transcript JSON file first to use Transcript + Diarize mode')
@@ -258,7 +238,7 @@ export default function Annotation() {
         if (uniqueSpeakerLabels.size > 0) {
           setAvailableSpeakers(prev => [
             ...prev,
-            ...Array.from(uniqueSpeakerLabels).map(label => ({ label }))
+            ...Array.from(uniqueSpeakerLabels).map(label => ({ label: label as string }))
           ])
         }
 
@@ -323,7 +303,7 @@ export default function Annotation() {
             if (uniqueSpeakerLabels.size > 0) {
               setAvailableSpeakers(prev => [
                 ...prev,
-                ...Array.from(uniqueSpeakerLabels).map(label => ({ label }))
+                ...Array.from(uniqueSpeakerLabels).map(label => ({ label: label as string }))
               ])
             }
           }
@@ -823,6 +803,7 @@ export default function Annotation() {
             onModeChange={speakerProcessing.setProcessingMode}
             onProcessAudio={handleProcessAudio}
             audioData={{
+              file: audioData.file,
               filename: audioData.file.name,
               buffer: {
                 samples: audioData.samples,
@@ -885,24 +866,11 @@ export default function Annotation() {
               </button>
             </div>
 
+            {/* WaveformPlot renders the waveform only; segment overlay/selection is
+                handled by the segment list below (these props were never consumed). */}
             <WaveformPlot
               samples={audioData.samples}
               sampleRate={audioData.buffer.sampleRate}
-              segments={segments}
-              selectedSegment={selectedSegmentId ?
-                segments.find(s => s.id === selectedSegmentId) ?
-                [segments.find(s => s.id === selectedSegmentId)!.start, segments.find(s => s.id === selectedSegmentId)!.end] : null
-                : null}
-              onSegmentSelect={(segment) => {
-                // Find closest segment to selection
-                const midpoint = (segment[0] + segment[1]) / 2
-                const closest = segments.reduce((prev, curr) => {
-                  const prevDist = Math.abs((prev.start + prev.end) / 2 - midpoint)
-                  const currDist = Math.abs((curr.start + curr.end) / 2 - midpoint)
-                  return prevDist < currDist ? prev : curr
-                })
-                setSelectedSegmentId(closest?.id || null)
-              }}
             />
           </div>
 

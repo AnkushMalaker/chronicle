@@ -1,4 +1,5 @@
 import { UseAudioRecordingReturn } from '../../hooks/useAudioRecording'
+import { Card } from '../ui'
 
 interface DebugPanelProps {
   recording: UseAudioRecordingReturn
@@ -6,7 +7,7 @@ interface DebugPanelProps {
 
 export default function DebugPanel({ recording }: DebugPanelProps) {
   return (
-    <div className="mt-6 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+    <Card className="mt-6 bg-gray-50 dark:bg-gray-900">
       <h3 className="font-medium text-gray-800 dark:text-gray-200 mb-3 flex items-center">
         🐛 Debug Information
       </h3>
@@ -70,6 +71,6 @@ export default function DebugPanel({ recording }: DebugPanelProps) {
         <p>• Protocol: Wyoming (JSON headers + binary payloads)</p>
         <p>• Direct Checks: WS={recording.hasValidWebSocket ? '✅' : '❌'} Mic={recording.hasValidMicrophone ? '✅' : '❌'} Ctx={recording.hasValidAudioContext ? '✅' : '❌'}</p>
       </div>
-    </div>
+    </Card>
   )
 }

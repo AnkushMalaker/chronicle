@@ -9,7 +9,6 @@ import Speakers from './pages/Speakers'
 import Inference from './pages/Inference'
 import InferLive from './pages/InferLive'
 import InferLiveSimplified from './pages/InferLiveSimplified'
-import './App.css'
 import { ThemeProvider } from './contexts/ThemeContext'
 
 function App() {

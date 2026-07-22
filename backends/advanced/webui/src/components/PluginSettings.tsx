@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { Puzzle, RefreshCw, CheckCircle, Save, RotateCcw, AlertCircle } from 'lucide-react'
 import { systemApi } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
+import { Alert, Button, Card, Textarea } from './ui'
 
 interface PluginSettingsProps {
   className?: string
@@ -100,7 +101,7 @@ export default function PluginSettings({ className }: PluginSettingsProps) {
 
   return (
     <div className={className}>
-      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+      <Card raised padded={false} className="p-6">
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center space-x-2">
@@ -110,47 +111,45 @@ export default function PluginSettings({ className }: PluginSettingsProps) {
             </h3>
           </div>
           <div className="flex items-center space-x-2">
-            <button
+            <Button
+              variant="ghost"
               onClick={resetConfig}
               disabled={loading || saving}
-              className="flex items-center space-x-1 px-3 py-1.5 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 disabled:opacity-50"
+              icon={<RotateCcw className="h-4 w-4" />}
             >
-              <RotateCcw className="h-4 w-4" />
-              <span>Reset</span>
-            </button>
-            <button
+              Reset
+            </Button>
+            <Button
+              variant="ghost"
               onClick={loadPluginsConfig}
               disabled={loading || saving}
-              className="flex items-center space-x-1 px-3 py-1.5 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 disabled:opacity-50"
+              icon={<RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />}
             >
-              <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-              <span>Reload</span>
-            </button>
+              Reload
+            </Button>
           </div>
         </div>
 
         {/* Messages */}
         {message && (
-          <div className="mb-4 p-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md flex items-start space-x-2">
-            <CheckCircle className="h-5 w-5 text-green-600 dark:text-green-400 mt-0.5" />
-            <p className="text-sm text-green-700 dark:text-green-300">{message}</p>
-          </div>
+          <Alert tone="success" icon={<CheckCircle className="h-5 w-5" />} className="mb-4">
+            {message}
+          </Alert>
         )}
 
         {error && (
-          <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md flex items-start space-x-2">
-            <AlertCircle className="h-5 w-5 text-red-600 dark:text-red-400 mt-0.5" />
-            <p className="text-sm text-red-700 dark:text-red-300">{error}</p>
-          </div>
+          <Alert tone="danger" icon={<AlertCircle className="h-5 w-5" />} className="mb-4">
+            {error}
+          </Alert>
         )}
 
         {/* Editor */}
         <div className="mb-4">
-          <textarea
+          <Textarea
             value={configYaml}
             onChange={(e) => setConfigYaml(e.target.value)}
             disabled={loading || saving}
-            className="w-full h-96 p-4 font-mono text-sm bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-600 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-y"
+            className="h-96 p-4 font-mono bg-gray-50 dark:bg-gray-900"
             placeholder="Loading configuration..."
             spellCheck={false}
           />
@@ -158,23 +157,25 @@ export default function PluginSettings({ className }: PluginSettingsProps) {
 
         {/* Actions */}
         <div className="flex space-x-3">
-          <button
+          <Button
+            variant="secondary"
+            size="md"
             onClick={validateConfig}
             disabled={loading || validating || saving}
-            className="flex items-center space-x-2 px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-600 disabled:opacity-50"
+            icon={<CheckCircle className="h-4 w-4" />}
           >
-            <CheckCircle className="h-4 w-4" />
-            <span>{validating ? 'Validating...' : 'Validate'}</span>
-          </button>
+            {validating ? 'Validating...' : 'Validate'}
+          </Button>
 
-          <button
+          <Button
+            variant="primary"
+            size="md"
             onClick={saveConfig}
             disabled={loading || saving || validating}
-            className="flex items-center space-x-2 px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50"
+            icon={<Save className="h-4 w-4" />}
           >
-            <Save className="h-4 w-4" />
-            <span>{saving ? 'Saving...' : 'Save Changes'}</span>
-          </button>
+            {saving ? 'Saving...' : 'Save Changes'}
+          </Button>
         </div>
 
         {/* Help text */}
@@ -189,7 +190,7 @@ export default function PluginSettings({ className }: PluginSettingsProps) {
             <li>Changes require backend restart to take effect</li>
           </ul>
         </div>
-      </div>
+      </Card>
     </div>
   )
 }

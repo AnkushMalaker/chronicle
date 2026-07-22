@@ -1,5 +1,6 @@
 import { Mic, Square } from 'lucide-react'
 import { UseAudioRecordingReturn } from '../../hooks/useAudioRecording'
+import { Card } from '../ui'
 
 interface MainRecordingControlsProps {
   recording: UseAudioRecordingReturn
@@ -9,7 +10,7 @@ export default function MainRecordingControls({ recording }: MainRecordingContro
   const isHttps = window.location.protocol === 'https:'
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
+    <Card raised padded={false} className="p-6 mb-6">
       <div className="text-center">
         <div className="mb-6 flex justify-center">
           <div className="relative">
@@ -55,6 +56,6 @@ export default function MainRecordingControls({ recording }: MainRecordingContro
           </p>
         </div>
       </div>
-    </div>
+    </Card>
   )
 }

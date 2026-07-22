@@ -1,7 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { Mic, MicOff, Upload, Play, Pause, Save, Trash2, CheckCircle, AlertCircle } from 'lucide-react'
+import { Mic, MicOff, Play, Pause, Save, Trash2, CheckCircle, AlertCircle } from 'lucide-react'
 import { useUser } from '../contexts/UserContext'
-import { calculateFileHash, isAudioFile } from '../utils/fileHash'
 import {
   loadAudioBuffer,
   createAudioContext,
@@ -9,7 +8,6 @@ import {
   extractAudioSamples,
   calculateSNR,
   formatDuration,
-  createAudioBlob,
   convertBlobToWav
 } from '../utils/audioUtils'
 import { apiService } from '../services/api'
@@ -202,12 +200,13 @@ export default function Enrollment() {
         recordingIntervalRef.current = null
       }
 
+      const err = error as DOMException
       let errorMessage = 'Failed to access microphone. '
-      if (error.name === 'NotAllowedError') {
+      if (err.name === 'NotAllowedError') {
         errorMessage += 'Please allow microphone access and try again.'
-      } else if (error.name === 'NotFoundError') {
+      } else if (err.name === 'NotFoundError') {
         errorMessage += 'No microphone found. Please check your device.'
-      } else if (error.name === 'NotSupportedError') {
+      } else if (err.name === 'NotSupportedError') {
         errorMessage += 'Recording not supported in this browser.'
       } else {
         errorMessage += 'Please check permissions and try again.'
@@ -297,12 +296,13 @@ export default function Enrollment() {
     } catch (error) {
       console.error('Failed to process recording:', error)
 
+      const err = error as DOMException
       let errorMessage = 'Failed to process recording. '
-      if (error.name === 'EncodingError' || error.message.includes('decode')) {
+      if (err.name === 'EncodingError' || err.message.includes('decode')) {
         errorMessage += 'Audio format not supported. Try using a different browser or check your microphone settings.'
-      } else if (error.message.includes('context')) {
+      } else if (err.message.includes('context')) {
         errorMessage += 'Audio processing failed. Please try again.'
-      } else if (error.message.includes('conversion')) {
+      } else if (err.message.includes('conversion')) {
         errorMessage += 'Audio conversion failed. Please try again or use a different browser.'
       } else {
         errorMessage += 'Please try again or refresh the page.'

@@ -1,3 +1,5 @@
+import { StateBadge } from '../ui'
+
 interface Plugin {
   plugin_id: string
   name: string
@@ -71,51 +73,27 @@ export default function PluginListSidebar({
 
   const getStatusBadge = (plugin: Plugin) => {
     if (!plugin.enabled) {
-      return (
-        <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400">
-          Disabled
-        </span>
-      )
+      return <StateBadge tone="neutral">Disabled</StateBadge>
     }
 
     const conn = connectivity[plugin.plugin_id]
     if (conn?.ok) {
       const label = conn.latency_ms != null ? `Active (${conn.latency_ms}ms)` : 'Active'
-      return (
-        <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300">
-          {label}
-        </span>
-      )
+      return <StateBadge tone="success">{label}</StateBadge>
     }
 
     if (conn && !conn.ok) {
-      return (
-        <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300">
-          Error
-        </span>
-      )
+      return <StateBadge tone="danger">Error</StateBadge>
     }
 
     // Fallback to status-based badge
     switch (plugin.status) {
       case 'active':
-        return (
-          <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300">
-            Active
-          </span>
-        )
+        return <StateBadge tone="success">Active</StateBadge>
       case 'error':
-        return (
-          <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300">
-            Error
-          </span>
-        )
+        return <StateBadge tone="danger">Error</StateBadge>
       default:
-        return (
-          <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400">
-            Unknown
-          </span>
-        )
+        return <StateBadge tone="neutral">Unknown</StateBadge>
     }
   }
 

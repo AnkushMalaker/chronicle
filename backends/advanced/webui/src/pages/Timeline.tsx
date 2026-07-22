@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Activity, AppWindow, CalendarDays, Copy, Image, Link2, Monitor, RefreshCw } from 'lucide-react'
 import { deviceInputApi, DeviceInputItem } from '../services/api'
+import { Button, Card, IconButton } from '../components/ui'
 
 function dayBounds(day: string) {
   const start = new Date(`${day}T00:00:00`)
@@ -113,20 +114,20 @@ export default function Timeline() {
       <section>
         <div className="flex items-center justify-between mb-3">
           <h2 className="font-semibold text-gray-900 dark:text-gray-100">Sources</h2>
-          <button onClick={() => pairing.mutate()} className="inline-flex items-center gap-2 text-sm px-3 py-2 rounded-md border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700"><Link2 className="w-4 h-4" />Pair ScreenPipe</button>
+          <Button variant="secondary" size="md" onClick={() => pairing.mutate()} icon={<Link2 className="w-4 h-4" />}>Pair ScreenPipe</Button>
         </div>
         {pairing.data && (
           <div className="mb-3 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/30 p-3 text-sm">
             Pairing code <code className="font-mono font-bold mx-1">{pairing.data.code}</code> expires {new Date(pairing.data.expires_at).toLocaleTimeString()}.
-            <button onClick={() => navigator.clipboard.writeText(pairing.data!.code)} className="ml-2"><Copy className="inline w-4 h-4" /></button>
+            <IconButton label="Copy pairing code" onClick={() => navigator.clipboard.writeText(pairing.data!.code)} className="ml-2"><Copy className="w-4 h-4" /></IconButton>
           </div>
         )}
         <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">
           {(sources.data || []).map(source => (
-            <div key={source.source_id} className="rounded-lg border border-gray-200 dark:border-gray-700 p-4 flex gap-3">
+            <Card key={source.source_id} className="flex gap-3">
               <Monitor className="w-5 h-5 text-gray-500" />
               <div className="min-w-0"><div className="font-medium truncate">{source.name}</div><div className="text-xs text-gray-500">{source.provider} · {source.platform}</div><div className={`text-xs mt-1 ${source.status === 'online' ? 'text-green-600' : source.status === 'error' ? 'text-red-600' : 'text-gray-500'}`}>{source.status}{source.last_seen_at ? ` · ${new Date(source.last_seen_at).toLocaleTimeString()}` : ''}</div></div>
-            </div>
+            </Card>
           ))}
           {!sources.isLoading && !sources.data?.length && <div className="text-sm text-gray-500 border border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-4">No capture sources paired.</div>}
         </div>

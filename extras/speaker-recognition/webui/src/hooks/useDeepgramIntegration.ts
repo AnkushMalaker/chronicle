@@ -175,7 +175,7 @@ export const useDeepgramIntegration = (
 
   // Speaker identification for utterances
   const identifyUtteranceSpeaker = useCallback(async (
-    utteranceBuffer: Float32Array,
+    _utteranceBuffer: Float32Array,
     utteranceStartTime: number,
     utteranceEndTime: number
   ): Promise<IdentifyResult> => {
@@ -459,7 +459,7 @@ export const useDeepgramIntegration = (
   }, [])
 
   // Send audio data
-  const sendAudio = useCallback((audioData: ArrayBuffer, sampleRate?: number) => {
+  const sendAudio = useCallback((audioData: ArrayBuffer, _sampleRate?: number) => {
     if (deepgramRef.current && isConnected && isStreaming) {
       deepgramRef.current.sendAudio(audioData)
 

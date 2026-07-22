@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { Mic, MicOff, Square, Play, Pause, Volume2, Settings } from 'lucide-react'
 
 interface AudioCaptureConfig {
@@ -378,11 +378,11 @@ export default function LiveAudioCapture({
       setAudioLevel(average / 255)
 
       // Draw waveform
-      ctx.fillStyle = '#f3f4f6'
+      ctx.fillStyle = '#f2ece2'
       ctx.fillRect(0, 0, canvas.width, canvas.height)
 
       ctx.lineWidth = 2
-      ctx.strokeStyle = status === 'recording' ? '#3b82f6' : '#6b7280'
+      ctx.strokeStyle = status === 'recording' ? '#d2694a' : '#6b5f4f'
       ctx.beginPath()
 
       const sliceWidth = canvas.width / bufferLength
@@ -515,7 +515,8 @@ export default function LiveAudioCapture({
           {status === 'idle' || status === 'error' ? (
             <button
               onClick={startRecording}
-              disabled={status === 'requesting'}
+              // status is narrowed to 'idle' | 'error' in this branch, so it can never be 'requesting'
+              disabled={false}
               className="flex items-center space-x-2 px-6 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Mic className="h-5 w-5" />

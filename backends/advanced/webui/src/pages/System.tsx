@@ -8,6 +8,7 @@ import { useSystemData, useRestartWorkers, useRestartBackend, useBackendVersion 
 import { systemApi } from '../services/api'
 import ExternalServices from '../components/ExternalServices'
 import RemoteControl from '../components/RemoteControl'
+import { Alert, Button, IconButton, Modal } from '../components/ui'
 
 function getBackendHttpUrl(): string {
   const { protocol, hostname, port } = window.location
@@ -299,24 +300,21 @@ export default function System() {
               Last updated: {lastUpdated.toLocaleTimeString()}
             </span>
           )}
-          <button
+          <Button
+            variant="primary"
+            size="md"
+            icon={<RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />}
             onClick={loadSystemData}
             disabled={loading}
-            className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
           >
-            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-            <span>Refresh</span>
-          </button>
+            Refresh
+          </Button>
 
           {/* Three-dot menu */}
           <div className="relative" ref={menuRef}>
-            <button
-              onClick={() => setMenuOpen(prev => !prev)}
-              className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-              title="System actions"
-            >
-              <MoreVertical className="h-5 w-5 text-gray-600 dark:text-gray-400" />
-            </button>
+            <IconButton label="System actions" onClick={() => setMenuOpen(prev => !prev)}>
+              <MoreVertical className="h-5 w-5" />
+            </IconButton>
             {menuOpen && (
               <div className="absolute right-0 mt-1 w-52 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-20 py-1">
                 <button
@@ -349,118 +347,79 @@ export default function System() {
 
       {/* Confirmation Modals */}
       {confirmModal && (
-        <div className="fixed inset-0 z-40 bg-black/50 flex items-center justify-center" onClick={() => setConfirmModal(null)}>
-          <div
-            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full mx-4 p-6"
-            onClick={e => e.stopPropagation()}
-          >
-            {confirmModal === 'workers' ? (
-              <>
-                <div className="flex items-center space-x-3 mb-4">
-                  <div className="p-2 rounded-full bg-blue-100 dark:bg-blue-900/30">
-                    <RotateCcw className="h-5 w-5 text-blue-600 dark:text-blue-400" />
-                  </div>
-                  <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-                    Restart Workers
-                  </h3>
-                </div>
-                <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
-                  Workers will finish their current jobs before restarting. This is safe to run at any time.
-                </p>
-                <p className="text-sm text-gray-500 dark:text-gray-500 mb-6">
-                  Use this after changing plugin configuration or config.yml settings.
-                </p>
-                <div className="flex justify-end space-x-3">
-                  <button
-                    onClick={() => setConfirmModal(null)}
-                    className="px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleRestartWorkers}
-                    className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-                  >
-                    Restart Workers
-                  </button>
-                </div>
-              </>
+        <Modal
+          open
+          onClose={() => setConfirmModal(null)}
+          title={
+            confirmModal === 'workers' ? 'Restart Workers'
+              : confirmModal === 'backend' ? 'Restart Backend'
+              : 'Restart Both'
+          }
+          icon={
+            confirmModal === 'workers' ? (
+              <div className="p-2 rounded-full bg-blue-100 dark:bg-blue-900/30">
+                <RotateCcw className="h-5 w-5 text-blue-600 dark:text-blue-400" />
+              </div>
             ) : confirmModal === 'backend' ? (
-              <>
-                <div className="flex items-center space-x-3 mb-4">
-                  <div className="p-2 rounded-full bg-red-100 dark:bg-red-900/30">
-                    <Power className="h-5 w-5 text-red-600 dark:text-red-400" />
-                  </div>
-                  <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-                    Restart Backend
-                  </h3>
-                </div>
-                <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
-                  This will restart the entire backend process. The service will be briefly unavailable.
-                </p>
-                <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md p-3 mb-6">
-                  <p className="text-sm text-red-700 dark:text-red-300">
-                    Active WebSocket connections and streaming sessions will be dropped.
-                  </p>
-                </div>
-                <div className="flex justify-end space-x-3">
-                  <button
-                    onClick={() => setConfirmModal(null)}
-                    className="px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleRestartBackend}
-                    className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
-                  >
-                    Restart Backend
-                  </button>
-                </div>
-              </>
+              <div className="p-2 rounded-full bg-red-100 dark:bg-red-900/30">
+                <Power className="h-5 w-5 text-red-600 dark:text-red-400" />
+              </div>
             ) : (
-              <>
-                <div className="flex items-center space-x-3 mb-4">
-                  <div className="p-2 rounded-full bg-red-100 dark:bg-red-900/30">
-                    <RefreshCw className="h-5 w-5 text-red-600 dark:text-red-400" />
-                  </div>
-                  <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-                    Restart Both
-                  </h3>
-                </div>
-                <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
-                  This will restart workers and then the backend. The service will be briefly unavailable.
-                </p>
-                <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md p-3 mb-6">
-                  <p className="text-sm text-red-700 dark:text-red-300">
-                    Active WebSocket connections and streaming sessions will be dropped.
-                  </p>
-                </div>
-                <div className="flex justify-end space-x-3">
-                  <button
-                    onClick={() => setConfirmModal(null)}
-                    className="px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleRestartBoth}
-                    className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
-                  >
-                    Restart Both
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
+              <div className="p-2 rounded-full bg-red-100 dark:bg-red-900/30">
+                <RefreshCw className="h-5 w-5 text-red-600 dark:text-red-400" />
+              </div>
+            )
+          }
+          footer={
+            <>
+              <Button variant="ghost" size="md" onClick={() => setConfirmModal(null)}>
+                Cancel
+              </Button>
+              <Button
+                variant={confirmModal === 'workers' ? 'primary' : 'danger'}
+                size="md"
+                onClick={
+                  confirmModal === 'workers' ? handleRestartWorkers
+                    : confirmModal === 'backend' ? handleRestartBackend
+                    : handleRestartBoth
+                }
+              >
+                {confirmModal === 'workers' ? 'Restart Workers'
+                  : confirmModal === 'backend' ? 'Restart Backend'
+                  : 'Restart Both'}
+              </Button>
+            </>
+          }
+        >
+          {confirmModal === 'workers' ? (
+            <>
+              <p className="mb-2">
+                Workers will finish their current jobs before restarting. This is safe to run at any time.
+              </p>
+              <p className="text-gray-500 dark:text-gray-500">
+                Use this after changing plugin configuration or config.yml settings.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="mb-2">
+                {confirmModal === 'backend'
+                  ? 'This will restart the entire backend process. The service will be briefly unavailable.'
+                  : 'This will restart workers and then the backend. The service will be briefly unavailable.'}
+              </p>
+              <Alert tone="danger">
+                Active WebSocket connections and streaming sessions will be dropped.
+              </Alert>
+            </>
+          )}
+        </Modal>
       )}
 
       {/* Error Message */}
       {error && (
-        <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md p-4 mb-6">
-          <p className="text-sm text-red-700 dark:text-red-300">{error}</p>
-        </div>
+        <Alert tone="danger" className="mb-6">
+          {error}
+        </Alert>
       )}
 
       {/* Overall Health Status */}
@@ -565,19 +524,19 @@ export default function System() {
 
               {/* Info */}
               {configDiagnostics.info.map((info: any, idx: number) => (
-                <div key={`info-${idx}`} className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md p-3">
+                <div key={`info-${idx}`} className="bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-md p-3">
                   <div className="flex items-start space-x-2">
-                    <CheckCircle className="h-5 w-5 text-blue-600 dark:text-blue-400 flex-shrink-0 mt-0.5" />
+                    <CheckCircle className="h-5 w-5 text-gray-400 dark:text-gray-500 flex-shrink-0 mt-0.5" />
                     <div className="flex-1">
                       <div className="flex items-center space-x-2 mb-1">
-                        <span className="text-xs font-semibold text-blue-700 dark:text-blue-300 uppercase">
+                        <span className="text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase">
                           {info.component}
                         </span>
-                        <span className="text-xs px-2 py-0.5 bg-blue-200 dark:bg-blue-800 text-blue-800 dark:text-blue-200 rounded">
+                        <span className="text-xs px-2 py-0.5 bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300 rounded">
                           INFO
                         </span>
                       </div>
-                      <p className="text-sm text-blue-700 dark:text-blue-300">
+                      <p className="text-sm text-gray-600 dark:text-gray-400">
                         {info.message}
                       </p>
                     </div>
@@ -629,7 +588,7 @@ export default function System() {
                       </span>
                     )}
                     {(status as any).provider && (
-                      <span className="text-xs text-blue-600 dark:text-blue-400">
+                      <span className="text-xs text-gray-500 dark:text-gray-400">
                         ({(status as any).provider})
                       </span>
                     )}
@@ -708,11 +667,7 @@ export default function System() {
                       </div>
                       <div className="flex items-center space-x-3">
                         <span className="text-gray-600 dark:text-gray-400 text-xs">{worker.queues?.join(', ')}</span>
-                        <span className={`px-2 py-0.5 rounded text-xs ${
-                          worker.state === 'idle'
-                            ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
-                            : 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
-                        }`}>
+                        <span className="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600 dark:bg-gray-600 dark:text-gray-300">
                           {worker.state}
                         </span>
                       </div>
@@ -795,17 +750,13 @@ export default function System() {
             <code className="px-3 py-1.5 bg-gray-100 dark:bg-gray-700 rounded text-sm text-gray-800 dark:text-gray-200 font-mono">
               {backendUrl}
             </code>
-            <button
-              onClick={handleCopyUrl}
-              className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors text-gray-600 dark:text-gray-300"
-              title="Copy URL"
-            >
+            <IconButton label="Copy URL" onClick={handleCopyUrl}>
               {copied ? (
                 <Check className="h-4 w-4 text-green-500" />
               ) : (
                 <Copy className="h-4 w-4" />
               )}
-            </button>
+            </IconButton>
           </div>
         </div>
       </div>

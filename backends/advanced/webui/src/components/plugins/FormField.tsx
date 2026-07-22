@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { AlertCircle, Eye, EyeOff } from 'lucide-react'
+import { Checkbox, IconButton, Input, Label, Select, Textarea } from '../ui'
 
 export interface FieldSchema {
   type: 'string' | 'number' | 'boolean' | 'password' | 'enum' | 'array' | 'object'
@@ -40,35 +41,23 @@ export default function FormField({
     switch (schema.type) {
       case 'boolean':
         return (
-          <div className="flex items-center space-x-2">
-            <input
-              type="checkbox"
-              id={fieldKey}
-              checked={value || false}
-              onChange={(e) => onChange(e.target.checked)}
-              disabled={disabled}
-              className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded disabled:opacity-50"
-            />
-            <label
-              htmlFor={fieldKey}
-              className="text-sm text-gray-700 dark:text-gray-300"
-            >
-              {schema.label}
-            </label>
-          </div>
+          <Checkbox
+            id={fieldKey}
+            checked={value || false}
+            onChange={(e) => onChange(e.target.checked)}
+            disabled={disabled}
+            label={schema.label}
+          />
         )
 
       case 'number':
         return (
           <div>
-            <label
-              htmlFor={fieldKey}
-              className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
-            >
+            <Label htmlFor={fieldKey} className="mb-1">
               {schema.label}
               {schema.required && <span className="text-red-500 ml-1">*</span>}
-            </label>
-            <input
+            </Label>
+            <Input
               type="number"
               id={fieldKey}
               value={value ?? schema.default ?? ''}
@@ -76,7 +65,6 @@ export default function FormField({
               min={schema.min}
               max={schema.max}
               disabled={disabled}
-              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
             />
             {schema.help_text && (
               <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -91,10 +79,7 @@ export default function FormField({
 
         return (
           <div>
-            <label
-              htmlFor={fieldKey}
-              className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
-            >
+            <Label htmlFor={fieldKey} className="mb-1">
               {schema.label}
               {schema.required && <span className="text-red-500 ml-1">*</span>}
               {schema.env_var && (
@@ -102,9 +87,9 @@ export default function FormField({
                   (${schema.env_var})
                 </span>
               )}
-            </label>
+            </Label>
             <div className="relative">
-              <input
+              <Input
                 type={showPassword ? 'text' : 'password'}
                 id={fieldKey}
                 value={displayValue}
@@ -121,21 +106,20 @@ export default function FormField({
                 }}
                 disabled={disabled}
                 placeholder={isMaskedValue ? 'Enter new password to change' : 'Enter password'}
-                className="w-full px-3 py-2 pr-10 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="pr-10"
               />
-              <button
-                type="button"
+              <IconButton
+                label={showPassword ? 'Hide password' : 'Show password'}
                 onClick={() => setShowPassword(!showPassword)}
-                title={showPassword ? 'Hide password' : 'Show password'}
-                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors"
                 disabled={disabled}
+                className="absolute right-2 top-1/2 -translate-y-1/2"
               >
                 {showPassword ? (
                   <EyeOff className="h-4 w-4" />
                 ) : (
                   <Eye className="h-4 w-4" />
                 )}
-              </button>
+              </IconButton>
             </div>
             {schema.help_text && (
               <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -158,26 +142,22 @@ export default function FormField({
       case 'enum':
         return (
           <div>
-            <label
-              htmlFor={fieldKey}
-              className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
-            >
+            <Label htmlFor={fieldKey} className="mb-1">
               {schema.label}
               {schema.required && <span className="text-red-500 ml-1">*</span>}
-            </label>
-            <select
+            </Label>
+            <Select
               id={fieldKey}
               value={value ?? schema.default ?? ''}
               onChange={(e) => onChange(e.target.value)}
               disabled={disabled}
-              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {schema.options?.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
               ))}
-            </select>
+            </Select>
             {schema.help_text && (
               <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                 {schema.help_text}
@@ -190,14 +170,11 @@ export default function FormField({
         const jsonStr = typeof value === 'string' ? value : JSON.stringify(value ?? schema.default ?? {}, null, 2)
         return (
           <div>
-            <label
-              htmlFor={fieldKey}
-              className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
-            >
+            <Label htmlFor={fieldKey} className="mb-1">
               {schema.label}
               {schema.required && <span className="text-red-500 ml-1">*</span>}
-            </label>
-            <textarea
+            </Label>
+            <Textarea
               id={fieldKey}
               value={jsonStr}
               onChange={(e) => {
@@ -210,7 +187,7 @@ export default function FormField({
               }}
               rows={Math.min(Math.max(jsonStr.split('\n').length, 3), 12)}
               disabled={disabled}
-              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="font-mono"
             />
             {schema.help_text && (
               <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -225,20 +202,16 @@ export default function FormField({
       default:
         return (
           <div>
-            <label
-              htmlFor={fieldKey}
-              className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
-            >
+            <Label htmlFor={fieldKey} className="mb-1">
               {schema.label}
               {schema.required && <span className="text-red-500 ml-1">*</span>}
-            </label>
-            <input
+            </Label>
+            <Input
               type="text"
               id={fieldKey}
               value={value ?? schema.default ?? ''}
               onChange={(e) => onChange(e.target.value)}
               disabled={disabled}
-              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
             />
             {schema.help_text && (
               <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">

@@ -2,7 +2,6 @@
  * Component for API key configuration when manual entry is required
  */
 
-import React from 'react'
 import { AlertCircle } from 'lucide-react'
 
 export interface ApiKeyConfigurationProps {

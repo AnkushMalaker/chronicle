@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Zap } from 'lucide-react'
 import { wakewordApi } from '../../services/api'
+import { Checkbox, Input, Label } from '../ui'
 
 type ConditionType = 'always' | 'wake_word' | 'keyword_anywhere' | 'acoustic_wake_word'
 
@@ -179,10 +180,10 @@ export default function OrchestrationSection({
 
       {/* Events Selection */}
       <div>
-        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+        <Label className="mb-2">
           Events
           <span className="text-red-500 ml-1">*</span>
-        </label>
+        </Label>
         <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
           Select which events should trigger this plugin
         </p>
@@ -222,10 +223,10 @@ export default function OrchestrationSection({
 
       {/* Condition Type */}
       <div>
-        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+        <Label className="mb-2">
           Condition
           <span className="text-red-500 ml-1">*</span>
-        </label>
+        </Label>
         <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
           When should this plugin execute?
         </p>
@@ -266,21 +267,17 @@ export default function OrchestrationSection({
       {/* Wake Words Input (conditional) */}
       {config.condition.type === 'wake_word' && (
         <div className="pl-7">
-          <label
-            htmlFor="wake-words"
-            className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
-          >
+          <Label htmlFor="wake-words" className="mb-1">
             Wake Words
             <span className="text-red-500 ml-1">*</span>
-          </label>
-          <input
+          </Label>
+          <Input
             type="text"
             id="wake-words"
             value={config.condition.wake_words?.join(', ') || ''}
             onChange={(e) => !disabled && handleWakeWordsChange(e.target.value)}
             placeholder="e.g., hey jarvis, ok assistant"
             disabled={disabled}
-            className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
           />
           <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
             Comma-separated list of wake words. The transcript must start with one of these words (case-insensitive).
@@ -291,21 +288,17 @@ export default function OrchestrationSection({
       {/* Keywords Input (conditional) */}
       {config.condition.type === 'keyword_anywhere' && (
         <div className="pl-7">
-          <label
-            htmlFor="keywords"
-            className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
-          >
+          <Label htmlFor="keywords" className="mb-1">
             Keywords
             <span className="text-red-500 ml-1">*</span>
-          </label>
-          <input
+          </Label>
+          <Input
             type="text"
             id="keywords"
             value={config.condition.keywords?.join(', ') || ''}
             onChange={(e) => !disabled && handleKeywordsChange(e.target.value)}
             placeholder="e.g., hermes, hey chronicle"
             disabled={disabled}
-            className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
           />
           <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
             Comma-separated list of keywords. Triggers when any keyword appears anywhere in the transcript (case-insensitive).
@@ -318,9 +311,9 @@ export default function OrchestrationSection({
         <div className="pl-7 space-y-4">
           {/* Wake-word model picker — limited to models the service has */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+            <Label className="mb-1">
               Wake Word
-            </label>
+            </Label>
             {modelsError ? (
               <p className="text-xs text-amber-600 dark:text-amber-400">{modelsError}</p>
             ) : models.length === 0 ? (
@@ -330,19 +323,13 @@ export default function OrchestrationSection({
             ) : (
               <div className="space-y-1.5">
                 {models.map((model) => (
-                  <label
+                  <Checkbox
                     key={model}
-                    className={`flex items-center space-x-2 text-sm ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={config.condition.wake_words?.includes(model) || false}
-                      onChange={() => !disabled && handleAcousticWakeToggle(model)}
-                      disabled={disabled}
-                      className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-                    />
-                    <span className="text-gray-900 dark:text-gray-100">{model}</span>
-                  </label>
+                    checked={config.condition.wake_words?.includes(model) || false}
+                    onChange={() => !disabled && handleAcousticWakeToggle(model)}
+                    disabled={disabled}
+                    label={<span className="text-gray-900 dark:text-gray-100">{model}</span>}
+                  />
                 ))}
               </div>
             )}
@@ -353,12 +340,9 @@ export default function OrchestrationSection({
 
           {/* Detection threshold */}
           <div>
-            <label
-              htmlFor="acoustic-threshold"
-              className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
-            >
+            <Label htmlFor="acoustic-threshold" className="mb-1">
               Detection threshold
-            </label>
+            </Label>
             <input
               type="number"
               id="acoustic-threshold"

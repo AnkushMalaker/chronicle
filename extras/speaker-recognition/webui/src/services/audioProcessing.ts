@@ -4,9 +4,10 @@
  * used across Inference, InferLive, and Speakers pages
  */
 
-import { createWAVHeader, createWAVBlob, concatenateAudioBuffers, extractAudioSegmentFromBuffers } from '../utils/audioUtils'
+import { createWAVBlob, extractAudioSegmentFromBuffers } from '../utils/audioUtils'
 
-export interface AudioBuffer {
+// Named distinctly to avoid shadowing the DOM `AudioBuffer` lib type used below.
+export interface ProcessedAudioBuffer {
   samples: Float32Array
   sampleRate: number
   channels: number
@@ -25,7 +26,7 @@ export interface AudioSegmentInfo {
 export interface ProcessedAudio {
   file: File | Blob
   filename: string
-  buffer: AudioBuffer
+  buffer: ProcessedAudioBuffer
   quality?: {
     snr: number
     level: string
@@ -52,8 +53,6 @@ export class AudioProcessingService {
   // Audio processing constants
   private readonly SUPPORTED_FORMATS = ['audio/wav', 'audio/webm', 'audio/mp4']
   private readonly TARGET_SAMPLE_RATE = 16000
-  private readonly BUFFER_DURATION_MS = 256 // Each buffer represents ~256ms
-  private readonly MAX_BUFFERS = 750 // 30 seconds at 4096 samples per 250ms
 
   static getInstance(): AudioProcessingService {
     if (!AudioProcessingService.instance) {
@@ -97,7 +96,7 @@ export class AudioProcessingService {
 
       return processed
     } catch (error) {
-      throw new Error(`Failed to process audio file: ${error.message}`)
+      throw new Error(`Failed to process audio file: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -116,7 +115,7 @@ export class AudioProcessingService {
       const file = new File([processedBlob], `${filename}.wav`, { type: 'audio/wav' })
       return await this.processAudioFile(file)
     } catch (error) {
-      throw new Error(`Failed to process recording: ${error.message}`)
+      throw new Error(`Failed to process recording: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -134,7 +133,7 @@ export class AudioProcessingService {
     audioBuffers: Float32Array[],
     utteranceStartTime: number,
     utteranceEndTime: number,
-    streamStartTime?: number,
+    _streamStartTime?: number,
     sampleRate: number = this.TARGET_SAMPLE_RATE
   ): UtteranceExtractionResult {
     try {
@@ -201,7 +200,7 @@ export class AudioProcessingService {
         audioBuffer: new Float32Array(0),
         duration: 0,
         isValid: false,
-        error: `Audio extraction failed: ${error.message}`
+        error: `Audio extraction failed: ${error instanceof Error ? error.message : String(error)}`
       }
     }
   }

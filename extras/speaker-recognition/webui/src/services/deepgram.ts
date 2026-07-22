@@ -595,7 +595,7 @@ export class DeepgramStreaming {
 /**
  * Utility function to convert audio samples to the format expected by Deepgram
  */
-export function convertAudioForDeepgram(audioBuffer: Float32Array, sampleRate: number = 16000): ArrayBuffer {
+export function convertAudioForDeepgram(audioBuffer: Float32Array, _sampleRate: number = 16000): ArrayBuffer {
   // Convert float32 samples to int16
   const int16Array = new Int16Array(audioBuffer.length)
 

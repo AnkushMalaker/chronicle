@@ -1,4 +1,5 @@
 import { CheckCircle2, GitMerge, Loader2, PackageOpen, Trash2, UserCheck, VolumeX } from 'lucide-react'
+import { Button } from '../ui'
 
 interface Props {
   total: number
@@ -43,76 +44,80 @@ export default function AuditToolbar({
       </div>
       <div className="flex flex-wrap items-center gap-2">
         {triagePendingCount > 0 && (
-          <button
+          <Button
+            variant="primary"
+            size="md"
             onClick={onApplyTriage}
             disabled={applyingTriage}
-            className="flex items-center space-x-2 px-4 py-2 rounded-lg text-sm font-medium bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             title="Apply all speaker-triage decisions: relabel transcripts, enroll voiceprints, reprocess memory"
+            icon={
+              applyingTriage ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <UserCheck className="h-4 w-4" />
+              )
+            }
           >
-            {applyingTriage ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <UserCheck className="h-4 w-4" />
-            )}
-            <span>
-              {applyingTriage
-                ? 'Applying…'
-                : `Apply triage (${triagePendingCount} across ${triageConversationCount})`}
-            </span>
-          </button>
+            {applyingTriage
+              ? 'Applying…'
+              : `Apply triage (${triagePendingCount} across ${triageConversationCount})`}
+          </Button>
         )}
-        <button
+        <Button
+          variant="secondary"
+          size="md"
           onClick={onAnalyze}
           disabled={analyzing || nothingToAnalyze}
-          className="flex items-center space-x-2 px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           title={
             nothingToAnalyze
               ? 'All conversations already have cached VAD analysis'
               : 'Run VAD over conversations without cached analysis'
           }
+          icon={
+            analyzing ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : nothingToAnalyze ? (
+              <CheckCircle2 className="h-4 w-4" />
+            ) : (
+              <VolumeX className="h-4 w-4" />
+            )
+          }
         >
-          {analyzing ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : nothingToAnalyze ? (
-            <CheckCircle2 className="h-4 w-4" />
-          ) : (
-            <VolumeX className="h-4 w-4" />
-          )}
-          <span>
-            {analyzing
-              ? 'Analyzing…'
-              : nothingToAnalyze
-                ? 'Audio analyzed'
-                : unanalyzedCount != null
-                  ? `Analyze audio (${unanalyzedCount})`
-                  : 'Analyze audio'}
-          </span>
-        </button>
-        <button
+          {analyzing
+            ? 'Analyzing…'
+            : nothingToAnalyze
+              ? 'Audio analyzed'
+              : unanalyzedCount != null
+                ? `Analyze audio (${unanalyzedCount})`
+                : 'Analyze audio'}
+        </Button>
+        <Button
+          variant="secondary"
+          size="md"
           onClick={onExport}
-          className="flex items-center space-x-2 px-4 py-2 rounded-lg text-sm font-medium border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
           title="Export speech-cropped clips + transcripts for annotation"
+          icon={<PackageOpen className="h-4 w-4" />}
         >
-          <PackageOpen className="h-4 w-4" />
-          <span>Export…</span>
-        </button>
-        <button
+          Export…
+        </Button>
+        <Button
+          variant="secondary"
+          size="md"
           onClick={onMerge}
           disabled={!mergeEligible}
-          className="flex items-center space-x-2 px-4 py-2 rounded-lg text-sm font-medium border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           title={
             mergeEligible
               ? 'Merge the selected adjacent conversations'
               : 'Select 2+ conversations from the same device to merge'
           }
+          icon={<GitMerge className="h-4 w-4" />}
         >
-          <GitMerge className="h-4 w-4" />
-          <span>Merge selected</span>
-        </button>
+          Merge selected
+        </Button>
         <button
           onClick={onArchive}
           disabled={selectedCount === 0 || archiving}
-          className="flex items-center space-x-2 px-4 py-2 rounded-lg text-sm font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          className="flex items-center space-x-2 px-4 py-2 rounded-lg text-sm font-medium border border-red-300 dark:border-red-700 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
           {archiving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
           <span>Archive selected</span>

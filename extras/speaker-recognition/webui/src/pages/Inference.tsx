@@ -3,7 +3,7 @@
  * Now supports all processing modes with dramatically reduced code complexity
  */
 
-import React, { useState } from 'react'
+import { useState } from 'react'
 import { Upload, Users } from 'lucide-react'
 import { useUser } from '../contexts/UserContext'
 import { useAudioRecording } from '../hooks/useAudioRecording'
@@ -30,12 +30,10 @@ export default function Inference() {
   // Use our new shared hooks
   const recording = useAudioRecording({
     onError: (error) => console.error('Recording error:', error),
-    onRecordingStart: () => setUploadedAudio(null), // Clear uploaded audio when recording starts
   })
 
   const speakerProcessing = useSpeakerIdentification({
     defaultMode: 'speaker-identification',
-    userId: user?.id,
     onError: (error) => console.error('Processing error:', error),
   })
 

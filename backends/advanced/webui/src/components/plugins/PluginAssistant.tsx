@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { Send, Bot, User, Wrench, AlertCircle, ShieldCheck, ShieldX } from 'lucide-react'
 import { systemApi } from '../../services/api'
+import { Alert, Button } from '../ui'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -315,14 +316,15 @@ export default function PluginAssistant() {
                 <ShieldCheck className="h-4 w-4" />
                 Approve
               </button>
-              <button
+              <Button
+                variant="secondary"
+                size="md"
                 onClick={() => handleConfirmation(false)}
                 disabled={isSending}
-                className="flex items-center gap-1.5 px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 disabled:opacity-50 transition-colors text-sm font-medium"
+                icon={<ShieldX className="h-4 w-4" />}
               >
-                <ShieldX className="h-4 w-4" />
                 Reject
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -347,13 +349,14 @@ export default function PluginAssistant() {
 
       {/* Error */}
       {error && (
-        <div className="mx-4 mb-2 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-300 text-sm flex items-center">
-          <AlertCircle className="h-4 w-4 mr-2 flex-shrink-0" />
-          {error}
-          <button onClick={() => setError(null)} className="ml-auto text-red-500 hover:text-red-700">
-            ✕
-          </button>
-        </div>
+        <Alert tone="danger" className="mx-4 mb-2" icon={<AlertCircle className="h-4 w-4 flex-shrink-0" />}>
+          <span className="flex w-full items-center justify-between gap-2">
+            <span>{error}</span>
+            <button onClick={() => setError(null)} className="flex-shrink-0 text-red-500 hover:text-red-700">
+              ✕
+            </button>
+          </span>
+        </Alert>
       )}
 
       {/* Input area */}
@@ -372,14 +375,14 @@ export default function PluginAssistant() {
               disabled={isSending || !!confirmation}
             />
           </div>
-          <button
+          <Button
+            variant="primary"
+            size="md"
             onClick={() => sendMessage()}
             disabled={!inputMessage.trim() || isSending || !!confirmation}
-            className="p-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             title="Send Message (Enter)"
-          >
-            <Send className="h-5 w-5" />
-          </button>
+            icon={<Send className="h-5 w-5" />}
+          />
         </div>
       </div>
     </div>

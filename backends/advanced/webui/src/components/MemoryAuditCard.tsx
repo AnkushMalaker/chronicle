@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ArrowUp, Loader2 } from 'lucide-react'
 import { conversationsApi } from '../services/api'
+import { Card, MetadataChip, StateBadge } from './ui'
 
 interface MemoryAuditEntry {
   id: string
@@ -13,12 +14,9 @@ interface MemoryAuditEntry {
   created_at?: string | null
 }
 
-const OPERATION_STYLES: Record<string, string> = {
-  create: 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300',
-  update: 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300',
-  delete: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300',
-  delete_all: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300',
-}
+// Deletions keep a restrained danger tint in this audit list; other operations
+// are plain metadata (mirrors MemoryLedger).
+const isDestructiveOp = (op: string) => op === 'delete' || op === 'delete_all'
 
 function formatTime(value?: string | null): string {
   if (!value) return ''
@@ -55,12 +53,12 @@ export default function MemoryAuditCard({ conversationId }: { conversationId: st
   if (!loading && !error && entries.length === 0) return null
 
   return (
-    <div id="memory-history" className="bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4 scroll-mt-6">
+    <Card id="memory-history" className="bg-gray-50 dark:bg-gray-800/50 scroll-mt-6">
       <div className="mb-3 flex items-center justify-between gap-3">
         <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase">
           Memory History
         </h3>
-        <a href="#transcript" className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400">
+        <a href="#transcript" className="inline-flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200">
           <ArrowUp className="h-3.5 w-3.5" /> Back to transcript
         </a>
       </div>
@@ -80,14 +78,11 @@ export default function MemoryAuditCard({ conversationId }: { conversationId: st
             <li key={entry.id} className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
-                  <span
-                    className={`px-1.5 py-0.5 rounded text-xs font-medium ${
-                      OPERATION_STYLES[entry.operation] ||
-                      'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300'
-                    }`}
-                  >
-                    {entry.operation}
-                  </span>
+                  {isDestructiveOp(entry.operation) ? (
+                    <StateBadge tone="danger">{entry.operation}</StateBadge>
+                  ) : (
+                    <MetadataChip>{entry.operation}</MetadataChip>
+                  )}
                   <span className="text-gray-900 dark:text-gray-100 break-all">
                     {entry.note_path || '(whole vault)'}
                   </span>
@@ -104,6 +99,6 @@ export default function MemoryAuditCard({ conversationId }: { conversationId: st
           ))}
         </ul>
       )}
-    </div>
+    </Card>
   )
 }

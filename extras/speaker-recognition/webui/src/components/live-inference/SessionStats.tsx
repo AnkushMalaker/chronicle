@@ -2,7 +2,6 @@
  * Component for displaying live session statistics
  */
 
-import React from 'react'
 import { Clock, Volume2, Users } from 'lucide-react'
 import { formatDuration } from '../../utils/common'
 

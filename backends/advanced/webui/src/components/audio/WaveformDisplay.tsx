@@ -103,7 +103,7 @@ export const WaveformDisplay: React.FC<WaveformDisplayProps> = ({
         if (index === hoveredSegment) {
           ctx.fillStyle = `${seg.color}55`;
           ctx.fillRect(x1, 0, x2 - x1, height);
-          ctx.strokeStyle = '#111827';
+          ctx.strokeStyle = '#191410';
           ctx.lineWidth = 2.5;
           ctx.strokeRect(Math.max(1, x1), 1, Math.max(3, x2 - x1), height - 2);
         }
@@ -138,7 +138,7 @@ export const WaveformDisplay: React.FC<WaveformDisplayProps> = ({
     const barWidth = width / samples.length;
     const centerY = height / 2;
 
-    ctx.fillStyle = '#3b82f6'; // Blue bars (Tailwind blue-500)
+    ctx.fillStyle = '#d2694a'; // Terracotta bars (brand accent)
 
     samples.forEach((amplitude, i) => {
       const x = i * barWidth;
@@ -194,7 +194,7 @@ export const WaveformDisplay: React.FC<WaveformDisplayProps> = ({
     const x = progress * width;
 
     // Draw vertical line
-    ctx.strokeStyle = '#ef4444'; // Red line (Tailwind red-500)
+    ctx.strokeStyle = '#dc4a3a'; // Red playhead (danger-500)
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(x, 0);

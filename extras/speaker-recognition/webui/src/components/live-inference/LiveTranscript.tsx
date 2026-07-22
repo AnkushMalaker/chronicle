@@ -2,7 +2,7 @@
  * Component for displaying live transcript with speaker identification
  */
 
-import React, { useRef, useEffect } from 'react'
+import { useRef, useEffect } from 'react'
 import { Mic } from 'lucide-react'
 
 export interface SpeakerPart {

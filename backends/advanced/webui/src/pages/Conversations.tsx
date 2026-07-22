@@ -1,13 +1,14 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { MessageSquare, RefreshCw, Calendar, User, Play, Pause, MoreVertical, RotateCcw, Zap, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Trash2, Save, X, AlertTriangle, Pencil, Search, Brain, Star, ArrowUpDown, Clock, UserX, Mic } from 'lucide-react'
+import { MessageSquare, RefreshCw, Calendar, User, Play, Pause, MoreVertical, RotateCcw, Zap, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Trash2, Save, X, AlertTriangle, Pencil, Search, Brain, Star, ArrowUpDown, Clock, UserX, Mic, Regex, ListFilter, Check } from 'lucide-react'
 import { conversationsApi, annotationsApi, speakerApi } from '../services/api'
 import { useConversations, useDeleteConversation, useReprocessTranscript, useReprocessMemory, useReprocessSpeakers, useReprocessOrphan, useToggleStar } from '../hooks/useConversations'
 import ConversationVersionHeader from '../components/ConversationVersionHeader'
 import { PlayheadTimeLabel } from '../components/audio/PlayheadWaveform'
 import { useGaplessPlayer } from '../hooks/useGaplessPlayer'
 import TranscriptEditor from '../components/transcript/TranscriptEditor'
+import { Button, Checkbox } from '../components/ui'
 
 interface Conversation {
   conversation_id: string
@@ -45,11 +46,11 @@ interface Conversation {
 }
 
 
-// "Unknown Speaker N", bare "Unknown", "Background/Noise" → styled as muted chips.
+// Unknown and background labels are metadata, not enrolled people.
 const isUnknownLabel = (name?: string): boolean => {
   if (!name || !name.trim()) return true
   const n = name.trim().toLowerCase()
-  return n === 'background/noise' || /^unknown(?:[ _]speaker)?(?:[ _]*\d+)?$/.test(n)
+  return ['noise', 'background speech'].includes(n) || /^unknown(?:[ _]speaker)?(?:[ _]*\d+)?$/.test(n)
 }
 
 const PAGE_SIZE = 20
@@ -127,11 +128,15 @@ export default function Conversations() {
   const [savingTitle, setSavingTitle] = useState<boolean>(false)
   const [titleEditError, setTitleEditError] = useState<string | null>(null)
 
-  // Search state
+  // Search state (regex-only; semantic search was removed for performance reasons)
   const [searchQuery, setSearchQuery] = useState('')
+  type SearchField = 'title' | 'summary' | 'speakers'
+  const allSearchFields: SearchField[] = ['title', 'summary', 'speakers']
+  const [searchFields, setSearchFields] = useState<SearchField[]>(allSearchFields)
   const [searchResults, setSearchResults] = useState<Conversation[] | null>(null)
   const [isSearching, setIsSearching] = useState(false)
   const [searchTotal, setSearchTotal] = useState(0)
+  const [searchError, setSearchError] = useState<string | null>(null)
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const loadEnrolledSpeakers = async () => {
@@ -160,7 +165,34 @@ export default function Conversations() {
     return () => document.removeEventListener('click', handleClickOutside)
   }, [])
 
-  // Debounced search
+  const allFieldsSelected = searchFields.length === allSearchFields.length
+
+  const toggleSearchField = (field: SearchField) => {
+    setSearchFields((current) =>
+      current.includes(field)
+        ? current.filter((selected) => selected !== field)
+        : [...current, field]
+    )
+  }
+
+  const runSearch = async (query: string, fields: SearchField[]) => {
+    setIsSearching(true)
+    try {
+      const response = await conversationsApi.search(query, 50, 0, fields)
+      setSearchResults(response.data.conversations ?? [])
+      setSearchTotal(response.data.total ?? 0)
+      setSearchError(response.data.error ?? null)
+    } catch (err: any) {
+      console.error('Search failed:', err)
+      setSearchResults([])
+      setSearchTotal(0)
+      setSearchError(err?.response?.data?.error || 'Search failed')
+    } finally {
+      setIsSearching(false)
+    }
+  }
+
+  // Regex search runs live, debounced.
   useEffect(() => {
     if (searchTimeoutRef.current) {
       clearTimeout(searchTimeoutRef.current)
@@ -170,29 +202,26 @@ export default function Conversations() {
     if (!trimmed) {
       setSearchResults(null)
       setSearchTotal(0)
+      setSearchError(null)
+      setIsSearching(false)
+      return
+    }
+
+    if (searchFields.length === 0) {
+      setSearchResults([])
+      setSearchTotal(0)
+      setSearchError(null)
       setIsSearching(false)
       return
     }
 
     setIsSearching(true)
-    searchTimeoutRef.current = setTimeout(async () => {
-      try {
-        const response = await conversationsApi.search(trimmed, 50)
-        setSearchResults(response.data.conversations ?? [])
-        setSearchTotal(response.data.total ?? 0)
-      } catch (err: any) {
-        console.error('Search failed:', err)
-        setSearchResults([])
-        setSearchTotal(0)
-      } finally {
-        setIsSearching(false)
-      }
-    }, 300)
+    searchTimeoutRef.current = setTimeout(() => runSearch(trimmed, searchFields), 300)
 
     return () => {
       if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current)
     }
-  }, [searchQuery])
+  }, [searchQuery, searchFields])
 
   const formatDate = (timestamp: number | string) => {
     // Handle both Unix timestamp (number) and ISO string
@@ -421,7 +450,9 @@ export default function Conversations() {
     }
 
     // Find the conversation by conversation_id
-    const conversation = conversations.find(c => c.conversation_id === conversationId)
+    const conversation = (searchResults ?? conversations).find(
+      c => c.conversation_id === conversationId,
+    )
     if (!conversation || !conversation.conversation_id) {
       console.error('Cannot expand detailed summary: conversation_id missing')
       return
@@ -519,6 +550,11 @@ export default function Conversations() {
             ),
           }
         })
+        setSearchResults(prev => prev?.map(c =>
+          c.conversation_id === conversationId
+            ? { ...c, ...response.data.conversation }
+            : c
+        ) ?? null)
         // Expand the transcript (the editor loads its own annotations)
         setExpandedTranscripts(prev => new Set(prev).add(conversationId))
       }
@@ -549,12 +585,9 @@ export default function Conversations() {
     return (
       <div className="text-center">
         <div className="text-red-600 dark:text-red-400 mb-4">{error}</div>
-        <button
-          onClick={() => { setActionError(null); refetch() }}
-          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-        >
+        <Button variant="primary" size="md" onClick={() => { setActionError(null); refetch() }}>
           Try Again
-        </button>
+        </Button>
       </div>
     )
   }
@@ -595,22 +628,19 @@ export default function Conversations() {
               <UserX className="h-4 w-4" />
               <span>{hideUnknownSpeakers ? 'Unknown speakers hidden' : 'Hide unknown speakers'}</span>
             </button>
-            <label className="flex items-center space-x-2 text-sm">
-              <input
-                type="checkbox"
-                checked={debugMode}
-                onChange={(e) => { setDebugMode(e.target.checked); setPage(0) }}
-                className="rounded border-gray-300"
-              />
-              <span className="text-gray-700 dark:text-gray-300">Debug Mode</span>
-            </label>
-            <button
+            <Checkbox
+              checked={debugMode}
+              onChange={(e) => { setDebugMode(e.target.checked); setPage(0) }}
+              label="Debug Mode"
+            />
+            <Button
+              variant="primary"
+              size="md"
               onClick={() => refetch()}
-              className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+              icon={<RefreshCw className="h-4 w-4" />}
             >
-              <RefreshCw className="h-4 w-4" />
-              <span>Refresh</span>
-            </button>
+              Refresh
+            </Button>
           </div>
         </div>
 
@@ -622,7 +652,7 @@ export default function Conversations() {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search conversations..."
+              placeholder="Search conversations or people..."
               className="w-full pl-9 pr-9 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
             />
             {searchQuery && (
@@ -634,14 +664,73 @@ export default function Conversations() {
               </button>
             )}
           </div>
-          <button
-            disabled
-            title="Semantic search coming soon"
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 text-gray-400 dark:text-gray-500 cursor-not-allowed text-sm"
-          >
-            <Brain className="h-4 w-4" />
-            <span>Semantic</span>
-          </button>
+          {/* Match mode: compact icons keep the search row scannable. */}
+          <div className="inline-flex rounded-lg border border-gray-300 dark:border-gray-600 overflow-hidden">
+            <button
+              type="button"
+              aria-label="Regex search"
+              title="Regex search — case-insensitive text matching"
+              className="flex h-9 w-9 items-center justify-center bg-blue-600 text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-inset"
+            >
+              <Regex className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              disabled
+              aria-label="Semantic search unavailable"
+              title="Semantic search — unavailable because of performance issues"
+              className="flex h-9 w-9 items-center justify-center border-l border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-400 dark:text-gray-500 cursor-not-allowed"
+            >
+              <Brain className="h-4 w-4" />
+            </button>
+          </div>
+          {/* Search fields: Everything mirrors the three individual checkboxes. */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation()
+                setOpenDropdown(openDropdown === 'search-fields' ? null : 'search-fields')
+              }}
+              aria-haspopup="menu"
+              aria-expanded={openDropdown === 'search-fields'}
+              className="flex h-9 items-center gap-1.5 rounded-lg border border-gray-300 bg-white pl-2.5 pr-2 text-sm text-gray-700 hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
+            >
+              <ListFilter className="h-4 w-4 text-gray-400" />
+              <span>{allFieldsSelected ? 'Everything' : searchFields.length === 0 ? 'No fields' : `${searchFields.length} fields`}</span>
+              <ChevronDown className={`h-3.5 w-3.5 text-gray-400 transition-transform ${openDropdown === 'search-fields' ? 'rotate-180' : ''}`} />
+            </button>
+            {openDropdown === 'search-fields' && (
+              <div
+                role="menu"
+                onClick={(event) => event.stopPropagation()}
+                className="absolute left-0 z-30 mt-1 w-52 rounded-lg border border-gray-200 bg-white p-1.5 shadow-lg dark:border-gray-600 dark:bg-gray-800"
+              >
+                {[
+                  { key: 'all', label: 'Everything', selected: allFieldsSelected },
+                  { key: 'title', label: 'Titles', selected: searchFields.includes('title') },
+                  { key: 'summary', label: 'Summaries', selected: searchFields.includes('summary') },
+                  { key: 'speakers', label: 'Speakers', selected: searchFields.includes('speakers') },
+                ].map((option, index) => (
+                  <button
+                    key={option.key}
+                    type="button"
+                    role="menuitemcheckbox"
+                    aria-checked={option.selected}
+                    onClick={() => option.key === 'all'
+                      ? setSearchFields(allFieldsSelected ? [] : allSearchFields)
+                      : toggleSearchField(option.key as SearchField)}
+                    className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:bg-gray-700 ${index === 0 ? 'mb-1 border-b border-gray-100 pb-2 dark:border-gray-700' : ''}`}
+                  >
+                    <span className={`flex h-4 w-4 items-center justify-center rounded border ${option.selected ? 'border-blue-500 bg-blue-600 text-white' : 'border-gray-300 dark:border-gray-600'}`}>
+                      {option.selected && <Check className="h-3 w-3" />}
+                    </span>
+                    <span>{option.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           {/* Sort Dropdown */}
           <div className="relative">
             <select
@@ -659,14 +748,24 @@ export default function Conversations() {
 
         {/* Search status */}
         {searchQuery.trim() && (
-          <div className="text-sm text-gray-500 dark:text-gray-400">
+          <div className="text-sm text-gray-500 dark:text-gray-400 space-y-1">
             {isSearching ? (
               <span className="flex items-center gap-1">
                 <RefreshCw className="h-3 w-3 animate-spin" />
                 Searching...
               </span>
+            ) : searchError ? (
+              <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                <AlertTriangle className="h-3.5 w-3.5" />
+                {searchError}
+              </span>
+            ) : searchFields.length === 0 ? (
+              <span>Select at least one field to search.</span>
             ) : searchResults !== null ? (
-              <span>{searchTotal} result{searchTotal !== 1 ? 's' : ''} for "{searchQuery.trim()}"</span>
+              <span>
+                {searchTotal} result{searchTotal !== 1 ? 's' : ''}
+                {` for “${searchQuery.trim()}”`}
+              </span>
             ) : null}
           </div>
         )}
@@ -685,10 +784,15 @@ export default function Conversations() {
           displayConversations.map((conversation) => (
             <div
               key={conversation.conversation_id}
-              className={`rounded-lg p-6 border ${
+              onClick={(event) => {
+                const target = event.target as HTMLElement
+                if (target.closest('button, a, input, textarea, select, [role="button"]')) return
+                navigate(`/conversations/${conversation.conversation_id}`)
+              }}
+              className={`rounded-lg p-6 border cursor-pointer ${
                 conversation.is_orphan
                   ? 'bg-amber-50 dark:bg-amber-900/10 border-amber-300 dark:border-amber-700'
-                  : 'bg-gray-50 dark:bg-gray-700 border-gray-200 dark:border-gray-600'
+                  : 'bg-gray-50 dark:bg-gray-700 border-gray-200 dark:border-gray-600 hover:border-gray-300 dark:hover:border-gray-500'
               }`}
             >
               {/* Orphan Audio Session Banner */}
@@ -713,7 +817,7 @@ export default function Conversations() {
                   <button
                     onClick={() => handleReprocessOrphan(conversation)}
                     disabled={reprocessingOrphan.has(conversation.conversation_id)}
-                    className="flex items-center space-x-1 px-3 py-1.5 text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="flex items-center space-x-1 px-3 py-1.5 text-sm font-medium text-amber-700 dark:text-amber-300 bg-white dark:bg-transparent border border-amber-300 dark:border-amber-700 hover:bg-amber-50 dark:hover:bg-amber-900/20 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {reprocessingOrphan.has(conversation.conversation_id) ? (
                       <RefreshCw className="h-3.5 w-3.5 animate-spin" />
@@ -724,40 +828,6 @@ export default function Conversations() {
                   </button>
                 </div>
               )}
-
-              {/* Version Selector Header */}
-              <ConversationVersionHeader
-                conversationId={conversation.conversation_id}
-                  versionInfo={{
-                    transcript_count: conversation.transcript_version_count || 0,
-                    active_transcript_version: conversation.active_transcript_version,
-                    active_transcript_version_number: conversation.active_transcript_version_number
-                  }}
-                  onVersionChange={async () => {
-                    // Update only this specific conversation without reloading all conversations
-                    // This prevents page scroll jump
-                    try {
-                      const response = await conversationsApi.getById(conversation.conversation_id!)
-                      if (response.status === 200 && response.data.conversation) {
-                        queryClient.setQueryData(conversationsQueryKey, (old: any) => {
-                          if (!old) return old
-                          return {
-                            ...old,
-                            conversations: old.conversations.map((c: Conversation) =>
-                              c.conversation_id === conversation.conversation_id
-                                ? { ...c, ...response.data.conversation }
-                                : c
-                            ),
-                          }
-                        })
-                      }
-                    } catch (err: any) {
-                      console.error('Failed to refresh conversation:', err)
-                      // Fallback to full reload on error
-                      refetch()
-                    }
-                  }}
-                />
 
               {/* Conversation Header */}
               <div className="flex justify-between items-start mb-4 gap-2">
@@ -817,7 +887,7 @@ export default function Conversations() {
                     <div className="mt-2">
                       <button
                         onClick={() => toggleDetailedSummary(conversation.conversation_id!)}
-                        className="text-xs text-blue-600 dark:text-blue-400 hover:underline flex items-center space-x-1"
+                        className="text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:underline flex items-center space-x-1"
                       >
                         <span>
                           {expandedDetailedSummaries.has(conversation.conversation_id) ? '▼' : '▶'} Detailed Summary
@@ -826,7 +896,7 @@ export default function Conversations() {
 
                       {/* Detailed Summary Content */}
                       {expandedDetailedSummaries.has(conversation.conversation_id) && conversation.detailed_summary && (
-                        <div className="mt-2 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800 animate-in slide-in-from-top-2 duration-200">
+                        <div className="mt-2 p-3 bg-gray-50 dark:bg-gray-800/50 rounded-lg border border-gray-200 dark:border-gray-700 animate-in slide-in-from-top-2 duration-200">
                           <p className="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
                             {conversation.detailed_summary}
                           </p>
@@ -837,6 +907,35 @@ export default function Conversations() {
 
                   {/* Metadata */}
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                    <ConversationVersionHeader
+                      conversationId={conversation.conversation_id}
+                      versionInfo={{
+                        transcript_count: conversation.transcript_version_count || 0,
+                        active_transcript_version: conversation.active_transcript_version,
+                        active_transcript_version_number: conversation.active_transcript_version_number,
+                      }}
+                      onVersionChange={async () => {
+                        try {
+                          const response = await conversationsApi.getById(conversation.conversation_id!)
+                          if (response.status === 200 && response.data.conversation) {
+                            queryClient.setQueryData(conversationsQueryKey, (old: any) => {
+                              if (!old) return old
+                              return {
+                                ...old,
+                                conversations: old.conversations.map((c: Conversation) =>
+                                  c.conversation_id === conversation.conversation_id
+                                    ? { ...c, ...response.data.conversation }
+                                    : c
+                                ),
+                              }
+                            })
+                          }
+                        } catch (err: any) {
+                          console.error('Failed to refresh conversation:', err)
+                          refetch()
+                        }
+                      }}
+                    />
                     <div className="flex items-center space-x-2 text-sm text-gray-600 dark:text-gray-400">
                       <Calendar className="h-4 w-4 flex-shrink-0" />
                       <span>{formatDate(conversation.created_at || '')}</span>
@@ -882,15 +981,6 @@ export default function Conversations() {
                         </div>
                       ) : null
                     })()}
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        navigate(`/conversations/${conversation.conversation_id}`)
-                      }}
-                      className="text-sm text-blue-600 dark:text-blue-400 hover:underline"
-                    >
-                      View Details
-                    </button>
                   </div>
 
                   {/* Speakers at a glance (active version) */}
@@ -902,8 +992,8 @@ export default function Conversations() {
                           key={i}
                           className={`px-2 py-0.5 rounded-full text-xs font-medium ${
                             isUnknownLabel(sp)
-                              ? 'bg-gray-100 dark:bg-gray-700/60 text-gray-500 dark:text-gray-400'
-                              : 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 ring-1 ring-inset ring-blue-200 dark:ring-blue-800'
+                              ? 'bg-gray-100 dark:bg-gray-700/60 text-gray-400 dark:text-gray-500'
+                              : 'bg-gray-200 dark:bg-gray-600 text-gray-700 dark:text-gray-200'
                           }`}
                         >
                           {sp}
@@ -1009,7 +1099,7 @@ export default function Conversations() {
               </div>
 
               {/* Transcript */}
-              <div className="space-y-2">
+              <div className="space-y-2" onClick={(event) => event.stopPropagation()}>
                 {(() => {
                   // Get segments directly from conversation (returned by detail endpoint)
                   const segments = conversation.segments || []
@@ -1017,17 +1107,18 @@ export default function Conversations() {
                   return (
                     <>
                       {/* Transcript Header with Expand/Collapse */}
-                      <div
-                        className="flex items-center justify-between cursor-pointer p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors"
+                      <button
+                        type="button"
+                        className="flex w-full items-center justify-between p-2 rounded-lg text-left hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors"
                         onClick={() => conversation.conversation_id && toggleTranscriptExpansion(conversation.conversation_id)}
                       >
-                        <h3 className="font-medium text-gray-900 dark:text-gray-100">
+                        <span className="font-medium text-gray-900 dark:text-gray-100">
                           Transcript {(segments.length > 0 || conversation.segment_count) && (
                             <span className="text-sm text-gray-500 dark:text-gray-400 ml-1">
                               ({segments.length || conversation.segment_count || 0} segments)
                             </span>
                           )}
-                        </h3>
+                        </span>
                         <div className="flex items-center space-x-2">
                           {conversation.conversation_id && expandedTranscripts.has(conversation.conversation_id) ? (
                             <ChevronUp className="h-5 w-5 text-gray-500 dark:text-gray-400 transition-transform duration-200" />
@@ -1035,7 +1126,7 @@ export default function Conversations() {
                             <ChevronDown className="h-5 w-5 text-gray-500 dark:text-gray-400 transition-transform duration-200" />
                           )}
                         </div>
-                      </div>
+                      </button>
 
                       {/* Transcript Content - Conditionally Rendered */}
                       {conversation.conversation_id && expandedTranscripts.has(conversation.conversation_id) && (

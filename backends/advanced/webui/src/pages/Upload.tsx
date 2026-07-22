@@ -14,6 +14,7 @@ import {
 import { useNavigate } from 'react-router-dom'
 import { dataAuditApi, uploadApi } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
+import { Button, IconButton, Input, Alert } from '../components/ui'
 
 const SUPPORTED_EXTENSIONS = ['.wav', '.mp3', '.m4a', '.flac', '.ogg', '.mp4', '.webm']
 const VIDEO_EXTENSIONS = ['.mp4', '.webm']
@@ -320,33 +321,29 @@ export default function Upload() {
         </label>
 
         <div className="flex flex-col gap-2 sm:flex-row">
-          <input
+          <Input
             type="text"
             value={gdriveFolderId}
             onChange={(e) => setGdriveFolderId(e.target.value)}
             placeholder="1AbCdEfGhIjKlMnOpQrStUvWxYz123456"
-            className="min-w-0 flex-1 px-3 py-2 border rounded-lg dark:bg-gray-800 dark:text-gray-100"
+            className="min-w-0 flex-1"
           />
 
-          <button
+          <Button
+            variant="primary"
+            size="md"
             onClick={handleGDriveSubmit}
             disabled={isUploading || !gdriveFolderId}
-            className="w-full whitespace-nowrap px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 sm:w-auto"
+            className="w-full whitespace-nowrap sm:w-auto"
           >
             {isUploading ? 'Submitting...' : annotationOnly ? 'Import for review' : 'Process folder'}
-          </button>
+          </Button>
         </div>
 
         {gdriveUploadStatus.type && (
-          <div
-            className={`mt-3 p-3 rounded-lg text-sm ${
-              gdriveUploadStatus.type === 'success'
-                ? 'bg-green-100 text-green-800 border border-green-300'
-                : 'bg-red-100 text-red-800 border border-red-300'
-            }`}
-          >
+          <Alert tone={gdriveUploadStatus.type === 'success' ? 'success' : 'danger'} className="mt-3">
             {gdriveUploadStatus.message}
-          </div>
+          </Alert>
         )}
       </div>
 
@@ -381,23 +378,16 @@ export default function Upload() {
           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
         />
 
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-        >
+        <Button type="button" variant="primary" size="md" onClick={() => fileInputRef.current?.click()}>
           Select files
-        </button>
+        </Button>
       </div>
 
       {/* Video Warning */}
       {videoWarning && (
-        <div className="mt-4 p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded-lg flex items-start gap-2">
-          <AlertCircle className="h-5 w-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
-          <p className="text-sm text-amber-800 dark:text-amber-300">
-            Video files detected — only the audio track will be extracted.
-          </p>
-        </div>
+        <Alert tone="warning" className="mt-4" icon={<AlertCircle className="h-5 w-5 flex-shrink-0" />}>
+          Video files detected — only the audio track will be extracted.
+        </Alert>
       )}
 
       {/* File List */}
@@ -408,16 +398,14 @@ export default function Upload() {
               Files ({files.length})
             </h2>
             <div className="flex space-x-2">
-              <button
-                onClick={clearCompleted}
-                className="px-3 py-1 text-sm bg-gray-600 text-white rounded hover:bg-gray-700"
-              >
+              <Button variant="secondary" onClick={clearCompleted}>
                 Clear Completed
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="primary"
+                size="md"
                 onClick={uploadFiles}
                 disabled={isUploading || files.every((f) => f.status !== 'pending')}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
               >
                 {isUploading
                   ? 'Uploading...'
@@ -426,7 +414,7 @@ export default function Upload() {
                       ? 'Import dataset'
                       : 'Add to annotation workspace'
                     : 'Process files'}
-              </button>
+              </Button>
             </div>
           </div>
 
@@ -469,12 +457,9 @@ export default function Upload() {
                   </span>
 
                   {uploadFile.status === 'pending' && (
-                    <button
-                      onClick={() => removeFile(uploadFile.id)}
-                      className="p-1 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded"
-                    >
+                    <IconButton label="Remove file" danger onClick={() => removeFile(uploadFile.id)}>
                       <X className="h-4 w-4" />
-                    </button>
+                    </IconButton>
                   )}
                 </div>
               </div>

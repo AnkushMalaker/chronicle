@@ -3,6 +3,7 @@ import { Settings, CheckCircle, XCircle, Loader2 } from 'lucide-react'
 import OrchestrationSection from './OrchestrationSection'
 import EnvVarsSection from './EnvVarsSection'
 import FormField, { FieldSchema } from './FormField'
+import { Button, Tabs } from '../ui'
 
 interface PluginMetadata {
   plugin_id: string
@@ -93,51 +94,17 @@ export default function PluginConfigPanel({
       </div>
 
       {/* Tabs */}
-      <div className="flex border-b border-gray-200 dark:border-gray-700 px-6">
-        <button
-          onClick={() => setActiveTab('orchestration')}
-          className={`
-            px-4 py-3 text-sm font-medium border-b-2 transition-colors
-            ${
-              activeTab === 'orchestration'
-                ? 'border-blue-600 text-blue-600 dark:text-blue-400'
-                : 'border-transparent text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
-            }
-          `}
-        >
-          Orchestration
-        </button>
-        {hasSettings && (
-          <button
-            onClick={() => setActiveTab('settings')}
-            className={`
-              px-4 py-3 text-sm font-medium border-b-2 transition-colors
-              ${
-                activeTab === 'settings'
-                  ? 'border-blue-600 text-blue-600 dark:text-blue-400'
-                  : 'border-transparent text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
-              }
-            `}
-          >
-            Settings
-          </button>
-        )}
-        {hasEnvVars && (
-          <button
-            onClick={() => setActiveTab('secrets')}
-            className={`
-              px-4 py-3 text-sm font-medium border-b-2 transition-colors
-              ${
-                activeTab === 'secrets'
-                  ? 'border-blue-600 text-blue-600 dark:text-blue-400'
-                  : 'border-transparent text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
-              }
-            `}
-          >
-            Secrets
-          </button>
-        )}
-      </div>
+      <Tabs
+        variant="underline"
+        className="px-6"
+        value={activeTab}
+        onChange={(value) => setActiveTab(value)}
+        tabs={[
+          { value: 'orchestration', label: 'Orchestration' },
+          ...(hasSettings ? [{ value: 'settings' as const, label: 'Settings' }] : []),
+          ...(hasEnvVars ? [{ value: 'secrets' as const, label: 'Secrets' }] : []),
+        ]}
+      />
 
       {/* Tab Content */}
       <div className="flex-1 overflow-y-auto p-6">
@@ -264,23 +231,16 @@ export default function PluginConfigPanel({
             <span>Reset</span>
           </button>
 
-          <button
+          <Button
+            variant="primary"
+            size="md"
             onClick={onSave}
             disabled={saving || disabled}
-            className="flex items-center justify-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-w-[160px]"
+            className="min-w-[160px] justify-center"
+            icon={saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle className="h-4 w-4" />}
           >
-            {saving ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin" />
-                <span>Saving...</span>
-              </>
-            ) : (
-              <>
-                <CheckCircle className="h-4 w-4" />
-                <span>Save Changes</span>
-              </>
-            )}
-          </button>
+            {saving ? 'Saving...' : 'Save Changes'}
+          </Button>
         </div>
       </div>
     </div>

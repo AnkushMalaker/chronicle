@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AppWindow, Image, Loader2, RefreshCw, Save, Trash2 } from 'lucide-react'
 import { deviceInputApi, DeviceInputItem } from '../services/api'
+import { Button, Card, IconButton } from './ui'
 
 function label(item: DeviceInputItem) {
   return item.metadata.app_name || item.metadata.window_name || item.metadata.text || item.kind
@@ -28,7 +29,7 @@ export default function ConversationContextLens({ conversationId }: { conversati
   const items = query.data || []
 
   return (
-    <section className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-6">
+    <Card raised padded={false} className="p-6">
       <div className="flex items-center justify-between gap-3 mb-4">
         <div>
           <h2 className="font-medium text-gray-900 dark:text-gray-100">Conversation Lens</h2>
@@ -36,14 +37,18 @@ export default function ConversationContextLens({ conversationId }: { conversati
         </div>
         <div className="flex gap-2">
           {items.length > 0 && (
-            <button onClick={() => clear.mutate()} disabled={clear.isPending} className="p-2 rounded-md text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700" title="Clear non-vault context">
+            <IconButton onClick={() => clear.mutate()} disabled={clear.isPending} label="Clear non-vault context">
               <Trash2 className="w-4 h-4" />
-            </button>
+            </IconButton>
           )}
-          <button onClick={() => request.mutate()} disabled={request.isPending} className="inline-flex items-center gap-2 px-3 py-2 text-sm rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
-            {request.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+          <Button
+            variant="primary"
+            onClick={() => request.mutate()}
+            disabled={request.isPending}
+            icon={request.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+          >
             Find context
-          </button>
+          </Button>
         </div>
       </div>
       {query.isLoading ? (
@@ -63,15 +68,21 @@ export default function ConversationContextLens({ conversationId }: { conversati
                 {item.metadata.text && <p className="text-xs text-gray-600 dark:text-gray-300 mt-1 line-clamp-3">{item.metadata.text}</p>}
               </div>
               {item.kind === 'immich_memory' && item.state !== 'promoted' && (
-                <button onClick={() => promote.mutate(item.id)} disabled={promote.isPending} className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 hover:bg-white dark:hover:bg-gray-800" title="Copy this photo into the vault">
-                  <Save className="w-3.5 h-3.5" /> Vault
-                </button>
+                <Button
+                  variant="secondary"
+                  onClick={() => promote.mutate(item.id)}
+                  disabled={promote.isPending}
+                  title="Copy this photo into the vault"
+                  icon={<Save className="w-3.5 h-3.5" />}
+                >
+                  Vault
+                </Button>
               )}
               {item.state === 'promoted' && <span className="text-xs text-green-600">In vault</span>}
             </div>
           ))}
         </div>
       )}
-    </section>
+    </Card>
   )
 }

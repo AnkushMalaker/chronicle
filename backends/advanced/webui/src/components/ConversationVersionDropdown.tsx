@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { ChevronDown, CheckCircle, Loader2 } from 'lucide-react'
 import { conversationsApi } from '../services/api'
+import { MetadataChip } from './ui'
 
 interface TranscriptVersion {
   version_id: string
@@ -91,15 +92,15 @@ export default function ConversationVersionDropdown({
     return new Date(dateString).toLocaleDateString()
   }
 
-  // Human label + chip color for where speaker labels came from.
-  const diarizationInfo = (source?: string | null) => {
+  // Human label for where speaker labels came from (descriptive metadata).
+  const diarizationLabel = (source?: string | null) => {
     switch (source) {
       case 'provider':
-        return { label: 'diarized: ASR provider', cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' }
+        return 'diarized: ASR provider'
       case 'pyannote':
-        return { label: 'diarized: speaker-recognition', cls: 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300' }
+        return 'diarized: speaker-recognition'
       default:
-        return { label: 'no diarization', cls: 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400' }
+        return 'no diarization'
     }
   }
 
@@ -122,10 +123,10 @@ export default function ConversationVersionDropdown({
               loadVersionHistory()
             }
           }}
-          className="flex items-center space-x-1 px-3 py-1 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-600 rounded text-blue-700 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/30"
+          className="inline-flex items-center gap-0.5 text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition-colors"
         >
           <span>
-            Transcript: {versionHistory ?
+            Transcript {versionHistory ?
               `v${versionHistory.transcript_versions.findIndex(v => v.version_id === versionHistory.active_transcript_version) + 1}` :
               (versionInfo?.active_transcript_version_number ? `v${versionInfo.active_transcript_version_number}` : '-')
             }
@@ -157,9 +158,9 @@ export default function ConversationVersionDropdown({
                     </div>
                     <div className="text-xs text-gray-500 dark:text-gray-400 mt-1 flex items-center flex-wrap gap-1">
                       <span>{formatDate(version.created_at)} • {version.segments?.length || 0} segments</span>
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${diarizationInfo(version.diarization_source).cls}`}>
-                        {diarizationInfo(version.diarization_source).label}
-                      </span>
+                      <MetadataChip className="text-[10px]">
+                        {diarizationLabel(version.diarization_source)}
+                      </MetadataChip>
                     </div>
                   </div>
                   {activating === version.version_id && (

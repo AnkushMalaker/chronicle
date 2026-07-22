@@ -3,6 +3,7 @@ import { RefreshCw, AlertCircle } from 'lucide-react'
 import { systemApi } from '../services/api'
 import PluginListSidebar from './plugins/PluginListSidebar'
 import PluginConfigPanel from './plugins/PluginConfigPanel'
+import { Alert, Card } from './ui'
 
 interface PluginMetadata {
   plugin_id: string
@@ -259,7 +260,7 @@ export default function PluginSettingsForm({ className }: PluginSettingsFormProp
 
   return (
     <div className={className}>
-      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
+      <Card raised padded={false} className="overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-gray-200 dark:border-gray-700">
           <div>
@@ -282,18 +283,13 @@ export default function PluginSettingsForm({ className }: PluginSettingsFormProp
 
         {/* Status Messages */}
         {message && (
-          <div className="mx-6 mt-4 p-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-md">
-            <p className="text-sm text-green-700 dark:text-green-300">{message}</p>
-          </div>
+          <Alert tone="success" className="mx-6 mt-4">{message}</Alert>
         )}
 
         {error && (
-          <div className="mx-6 mt-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md">
-            <div className="flex">
-              <AlertCircle className="h-5 w-5 text-red-400 mr-2 flex-shrink-0" />
-              <p className="text-sm text-red-700 dark:text-red-300">{error}</p>
-            </div>
-          </div>
+          <Alert tone="danger" icon={<AlertCircle className="h-5 w-5" />} className="mx-6 mt-4">
+            {error}
+          </Alert>
         )}
 
         {/* Main Content */}
@@ -333,7 +329,7 @@ export default function PluginSettingsForm({ className }: PluginSettingsFormProp
             )}
           </div>
         </div>
-      </div>
+      </Card>
     </div>
   )
 }

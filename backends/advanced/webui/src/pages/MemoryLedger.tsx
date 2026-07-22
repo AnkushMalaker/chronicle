@@ -7,13 +7,15 @@ import {
 import { useAuth } from '../contexts/AuthContext'
 import { useMemoryLedger, useMemoryAuditDiff } from '../hooks/useMemoryLedger'
 import type { MemoryAuditEntry } from '../services/api'
+import { Button, MetadataChip, StateBadge } from '../components/ui'
 
 // ---- Provenance classification -------------------------------------------
 // The ledger answers "who changed this memory and why". The backend owns the
 // taxonomy (cause × actor → source_kind/source_label, see services/memory/
-// audit.py); the UI only maps the coarse `source_kind` to an icon + colour and
+// audit.py); the UI maps the coarse `source_kind` to a distinguishing icon and
 // prints the precise `source_label` (e.g. "Speaker reprocess" vs "Transcript
-// reprocess" both share the cyan reprocess family).
+// reprocess" both share the reprocess family). The chip stays muted — the icon
+// and label carry the category; provenance is metadata, not a state signal.
 
 type SourceKind = MemoryAuditEntry['source_kind']
 
@@ -21,31 +23,25 @@ interface SourceMeta {
   kind: SourceKind
   label: string
   Icon: LucideIcon
-  chip: string // tailwind classes for the chip
 }
 
-const KIND_STYLE: Record<SourceKind, { Icon: LucideIcon; chip: string }> = {
-  extraction: { Icon: Sparkles, chip: 'text-blue-700 bg-blue-50 dark:bg-blue-900/30 dark:text-blue-300' },
-  reprocess: { Icon: RefreshCw, chip: 'text-cyan-700 bg-cyan-50 dark:bg-cyan-900/30 dark:text-cyan-300' },
-  human: { Icon: PenLine, chip: 'text-purple-700 bg-purple-50 dark:bg-purple-900/30 dark:text-purple-300' },
-  agent: { Icon: Bot, chip: 'text-amber-700 bg-amber-50 dark:bg-amber-900/30 dark:text-amber-300' },
-  bulk: { Icon: Trash2, chip: 'text-red-700 bg-red-50 dark:bg-red-900/30 dark:text-red-300' },
-  other: { Icon: FileText, chip: 'text-gray-600 bg-gray-100 dark:bg-gray-700 dark:text-gray-300' },
+const KIND_ICON: Record<SourceKind, LucideIcon> = {
+  extraction: Sparkles,
+  reprocess: RefreshCw,
+  human: PenLine,
+  agent: Bot,
+  bulk: Trash2,
+  other: FileText,
 }
 
 function classifySource(e: MemoryAuditEntry): SourceMeta {
   const kind = e.source_kind ?? 'other'
-  const style = KIND_STYLE[kind] ?? KIND_STYLE.other
-  return { kind, label: e.source_label || 'system', Icon: style.Icon, chip: style.chip }
+  return { kind, label: e.source_label || 'system', Icon: KIND_ICON[kind] ?? FileText }
 }
 
-const OPERATION_CHIP: Record<string, string> = {
-  create: 'text-green-700 bg-green-50 dark:bg-green-900/30 dark:text-green-300',
-  update: 'text-blue-700 bg-blue-50 dark:bg-blue-900/30 dark:text-blue-300',
-  delete: 'text-red-700 bg-red-50 dark:bg-red-900/30 dark:text-red-300',
-  rename: 'text-amber-700 bg-amber-50 dark:bg-amber-900/30 dark:text-amber-300',
-  delete_all: 'text-red-700 bg-red-50 dark:bg-red-900/30 dark:text-red-300',
-}
+// Deletions are the safety-relevant operation to scan for in an audit log, so
+// they keep a restrained danger tint; every other operation is plain metadata.
+const isDestructiveOp = (op: string) => op === 'delete' || op === 'delete_all'
 
 const SOURCE_FILTERS: { value: SourceKind | 'all'; label: string }[] = [
   { value: 'all', label: 'All sources' },
@@ -116,14 +112,16 @@ function LedgerRow({ entry }: { entry: MemoryAuditEntry }) {
           {expandable ? (open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />) : null}
         </span>
 
-        <span className={`inline-flex items-center gap-1 flex-shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${src.chip}`}>
+        <MetadataChip className="flex-shrink-0 gap-1">
           <SrcIcon className="h-3.5 w-3.5" />
           {src.label}
-        </span>
+        </MetadataChip>
 
-        <span className={`flex-shrink-0 rounded px-1.5 py-0.5 text-xs font-medium ${OPERATION_CHIP[entry.operation] || 'text-gray-600 bg-gray-100 dark:bg-gray-700'}`}>
-          {entry.operation}
-        </span>
+        {isDestructiveOp(entry.operation) ? (
+          <StateBadge tone="danger" className="flex-shrink-0">{entry.operation}</StateBadge>
+        ) : (
+          <MetadataChip className="flex-shrink-0">{entry.operation}</MetadataChip>
+        )}
 
         <span className="min-w-0 flex-1 truncate font-mono text-sm text-gray-800 dark:text-gray-200" title={entry.note_path || ''}>
           {entry.note_path || (entry.operation === 'delete_all' ? `entire vault${entry.extra?.count ? ` (${String(entry.extra.count)} notes)` : ''}` : '—')}
@@ -164,20 +162,20 @@ function SummaryStrip({ entries }: { entries: MemoryAuditEntry[] }) {
     return c
   }, [entries])
 
-  const cards: { label: string; value: number; cls: string }[] = [
-    { label: 'Total changes', value: entries.length, cls: 'text-gray-900 dark:text-gray-100' },
-    { label: 'AI extraction', value: counts.extraction, cls: 'text-blue-600 dark:text-blue-400' },
-    { label: 'Memory agent', value: counts.agent, cls: 'text-amber-600 dark:text-amber-400' },
-    { label: 'Reprocess', value: counts.reprocess, cls: 'text-cyan-600 dark:text-cyan-400' },
-    { label: 'Human (Obsidian)', value: counts.human, cls: 'text-purple-600 dark:text-purple-400' },
-    { label: 'Bulk delete', value: counts.bulk, cls: 'text-red-600 dark:text-red-400' },
+  const cards: { label: string; value: number }[] = [
+    { label: 'Total changes', value: entries.length },
+    { label: 'AI extraction', value: counts.extraction },
+    { label: 'Memory agent', value: counts.agent },
+    { label: 'Reprocess', value: counts.reprocess },
+    { label: 'Human (Obsidian)', value: counts.human },
+    { label: 'Bulk delete', value: counts.bulk },
   ]
 
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
       {cards.map(c => (
         <div key={c.label} className="rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-gray-900/40">
-          <div className={`text-2xl font-bold ${c.cls}`}>{c.value}</div>
+          <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">{c.value}</div>
           <div className="text-xs text-gray-500 dark:text-gray-400">{c.label}</div>
         </div>
       ))}
@@ -234,14 +232,15 @@ export default function MemoryLedger() {
           <ScrollText className="h-6 w-6 text-blue-600" />
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Memory Ledger</h1>
         </div>
-        <button
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={() => refetch()}
           disabled={isFetching}
-          className="flex items-center gap-2 rounded-md bg-gray-100 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
+          icon={<RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />}
         >
-          <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
           Refresh
-        </button>
+        </Button>
       </div>
 
       <p className="mb-5 text-sm text-gray-500 dark:text-gray-400">
@@ -358,9 +357,9 @@ function NoteGroup({ notePath, items }: { notePath: string; items: MemoryAuditEn
         {open ? <ChevronDown className="h-4 w-4 text-gray-400" /> : <ChevronRight className="h-4 w-4 text-gray-400" />}
         <FileText className="h-4 w-4 text-gray-400" />
         <span className="min-w-0 flex-1 truncate font-mono text-sm font-medium text-gray-800 dark:text-gray-200">{notePath}</span>
-        <span className="flex-shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600 dark:bg-gray-700 dark:text-gray-300">
+        <MetadataChip className="flex-shrink-0">
           {items.length} {items.length === 1 ? 'change' : 'changes'}
-        </span>
+        </MetadataChip>
       </button>
       {open && (
         <div className="space-y-2 p-2 pt-0">

@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Archive as ArchiveIcon, RefreshCw, Calendar, User, RotateCcw, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
 import { conversationsApi, authApi } from '../services/api'
 import { useConversations, useRestoreConversation, usePermanentDeleteConversation } from '../hooks/useConversations'
+import { Button } from '../components/ui'
 
 interface Conversation {
   conversation_id: string
@@ -167,12 +168,9 @@ export default function Archive() {
     return (
       <div className="text-center">
         <div className="text-red-600 dark:text-red-400 mb-4">{error}</div>
-        <button
-          onClick={() => { setActionError(null); refetch() }}
-          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-        >
+        <Button variant="primary" size="md" onClick={() => { setActionError(null); refetch() }}>
           Try Again
-        </button>
+        </Button>
       </div>
     )
   }
@@ -187,13 +185,9 @@ export default function Archive() {
             Archived Conversations
           </h1>
         </div>
-        <button
-          onClick={() => refetch()}
-          className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-        >
-          <RefreshCw className="h-4 w-4" />
-          <span>Refresh</span>
-        </button>
+        <Button variant="primary" size="md" onClick={() => refetch()} icon={<RefreshCw className="h-4 w-4" />}>
+          Refresh
+        </Button>
       </div>
 
       {/* Archive Info */}

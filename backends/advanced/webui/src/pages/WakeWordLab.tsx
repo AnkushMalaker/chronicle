@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Mic, Radio, Trash2, Check, X, RefreshCw, Target, AlertTriangle, Square, Volume2, ShieldCheck, Eye, HelpCircle, CopyX, ArrowRightLeft } from 'lucide-react'
 import { wakewordApi, WakeStream, WakeSample, WakeWordConfig, WakeStats } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
+import { Alert, Button, Card, IconButton, StatCard, Tabs } from '../components/ui'
 
 type Bucket = 'pending' | 'positive' | 'negative'
 
@@ -113,13 +114,13 @@ export default function WakeWordLab() {
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Wake-Word Lab</h1>
         </div>
         <div className="flex items-center gap-2">
-          <button
+          <Button
+            variant="secondary"
+            icon={<RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />}
             onClick={refreshAll}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600"
           >
-            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
             Refresh
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -144,13 +145,13 @@ export default function WakeWordLab() {
       </p>
 
       {error && (
-        <div className="mb-4 flex items-center gap-2 rounded-lg border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 px-4 py-2 text-sm text-red-700 dark:text-red-300">
-          <AlertTriangle className="h-4 w-4" /> {error}
-        </div>
+        <Alert tone="danger" icon={<AlertTriangle className="h-4 w-4" />} className="mb-4">
+          {error}
+        </Alert>
       )}
 
       {/* Shared active-streams indicator */}
-      <div className="mb-6 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+      <Card className="mb-6">
         <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold text-gray-800 dark:text-gray-200">
           <Radio className="h-4 w-4" /> Active streams
         </h2>
@@ -174,7 +175,7 @@ export default function WakeWordLab() {
             ))}
           </ul>
         )}
-      </div>
+      </Card>
 
       {/* One section per wake word */}
       {words.length === 0 ? (
@@ -445,9 +446,9 @@ function WakeWordSection({
 
       <div className="p-4">
         {primedMsg && (
-          <div className="mb-4 flex items-center gap-2 rounded-lg border border-green-300 dark:border-green-700 bg-green-50 dark:bg-green-900/20 px-4 py-3 text-sm font-medium text-green-800 dark:text-green-200 animate-pulse">
-            <Mic className="h-4 w-4" /> {primedMsg}
-          </div>
+          <Alert tone="success" icon={<Mic className="h-4 w-4" />} className="mb-4 font-medium animate-pulse">
+            {primedMsg}
+          </Alert>
         )}
 
         {/* Stats */}
@@ -460,19 +461,12 @@ function WakeWordSection({
 
         {/* Bucket tabs + labeling help */}
         <div className="mb-3 flex items-center gap-2">
-          {(Object.keys(BUCKET_LABELS) as Bucket[]).map((b) => (
-            <button
-              key={b}
-              onClick={() => setBucket(b)}
-              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                bucket === b
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600'
-              }`}
-            >
-              {BUCKET_LABELS[b]}
-            </button>
-          ))}
+          <Tabs
+            variant="pill"
+            value={bucket}
+            onChange={setBucket}
+            tabs={(Object.keys(BUCKET_LABELS) as Bucket[]).map((b) => ({ value: b, label: BUCKET_LABELS[b] }))}
+          />
           <div className="ml-auto">
             <LabelGuide word={pretty(word.name)} />
           </div>
@@ -643,21 +637,6 @@ function LabelGuide({ word }: { word: string }) {
   )
 }
 
-function StatCard({ label, value, tone }: { label: string; value: number; tone: string }) {
-  const tones: Record<string, string> = {
-    amber: 'text-amber-600 dark:text-amber-400',
-    green: 'text-green-600 dark:text-green-400',
-    red: 'text-red-600 dark:text-red-400',
-    blue: 'text-blue-600 dark:text-blue-400',
-  }
-  return (
-    <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-3 text-center">
-      <div className={`text-2xl font-bold ${tones[tone]}`}>{value}</div>
-      <div className="text-xs text-gray-500 dark:text-gray-400">{label}</div>
-    </div>
-  )
-}
-
 function ClipRow({
   sample,
   allWords,
@@ -766,13 +745,9 @@ function ClipRow({
         >
           <X className="h-3.5 w-3.5" /> Not
         </button>
-        <button
-          onClick={() => onDelete(sample.id)}
-          title="Delete clip"
-          className="rounded-md p-1 text-gray-400 hover:text-red-600 hover:bg-gray-100 dark:hover:bg-gray-700"
-        >
+        <IconButton label="Delete clip" danger onClick={() => onDelete(sample.id)}>
           <Trash2 className="h-3.5 w-3.5" />
-        </button>
+        </IconButton>
       </div>
     </li>
   )

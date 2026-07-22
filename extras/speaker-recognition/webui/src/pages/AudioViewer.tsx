@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { Play, Pause, Download, Volume2 } from 'lucide-react'
+import { Play, Pause, Download } from 'lucide-react'
 import { useUser } from '../contexts/UserContext'
 import { calculateFileHash, isAudioFile } from '../utils/fileHash'
 import {
