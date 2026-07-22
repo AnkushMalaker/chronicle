@@ -11,6 +11,7 @@ import os
 import secrets
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import List, Optional
@@ -21,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 APP_SUPPORT = (
     Path.home() / "Library" / "Application Support" / "Chronicle" / "vault-sync"
+    if sys.platform == "darwin"
+    else Path(os.getenv("XDG_STATE_HOME", Path.home() / ".local/state"))
+    / "chronicle-vault-sync"
 )
 SYNCTHING_HOME = APP_SUPPORT / "syncthing"  # config, keys, index db
 APIKEY_FILE = APP_SUPPORT / "apikey"
@@ -33,18 +37,19 @@ VAULT_IGNORE_PATTERNS = [".obsidian", ".obsidian/**"]
 
 
 def _find_binary() -> str:
-    """Locate the syncthing binary, preferring PATH then common Homebrew locations."""
+    """Locate the syncthing binary, preferring PATH then common install locations."""
     exe = shutil.which("syncthing")
     if exe:
         return exe
     for candidate in (
         Path("/opt/homebrew/bin/syncthing"),
         Path("/usr/local/bin/syncthing"),
+        Path("/usr/bin/syncthing"),
     ):
         if candidate.exists():
             return str(candidate)
     raise FileNotFoundError(
-        "syncthing not found. Install it with: brew install syncthing"
+        "syncthing not found. Install it with your system package manager"
     )
 
 
