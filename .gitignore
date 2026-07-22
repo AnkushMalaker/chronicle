@@ -80,8 +80,9 @@ extras/speaker-omni-experimental/cache/*
 # Discovery agent PID file
 edge/.discovery-agent.pid
 
-# AI Stuff
-.claude
+# AI Stuff: keep machine-local Claude state ignored, but track the shared skill link.
+.claude/*
+!.claude/skills
 
 # SSL / TLS certificates (centralized)
 certs/*.crt
