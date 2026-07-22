@@ -18,13 +18,23 @@ client). Reads tolerate both bytes and str values since clients differ in their
 ``decode_responses`` setting.
 """
 
+import asyncio
 import json
 import logging
 import time
+import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import AsyncIterator, Literal, Optional
+
+from redis.exceptions import WatchError
+
+from advanced_omi_backend.redis_keys import (
+    conversation_create_lock as conversation_create_lock_key,
+)
+from advanced_omi_backend.redis_keys import conversation_current
 
 logger = logging.getLogger(__name__)
 
@@ -390,6 +400,184 @@ class SessionStore:
 
     async def delete(self, session_id: str) -> None:
         await self._redis.delete(self._key(session_id))
+
+    # ------------------------------------------------ conversation assignment
+    async def set_current_conversation(
+        self,
+        session_id: str,
+        conversation_id: str,
+        *,
+        ttl: Optional[int] = 86400,
+    ) -> None:
+        """Assign the conversation that receives this session's persisted audio.
+
+        ``ttl=None`` is reserved for an ``always_persist`` placeholder, whose
+        lifetime is tied to the session rather than a rotation timeout.
+        """
+        key = conversation_current(session_id)
+        if ttl is None:
+            await self._redis.set(key, conversation_id)
+        else:
+            await self._redis.set(key, conversation_id, ex=ttl)
+
+    async def get_current_conversation_id(self, session_id: str) -> Optional[str]:
+        """Return the decoded current-conversation assignment, if one exists."""
+        return _to_str(await self._redis.get(conversation_current(session_id)))
+
+    async def assign_current_conversation_if_active(
+        self,
+        session_id: str,
+        conversation_id: str,
+        *,
+        ttl: Optional[int] = 86400,
+    ) -> bool:
+        """Assign only when the session is active and has no current owner.
+
+        The session status check and pointer creation share one Redis transaction,
+        closing the finalization race between a separate ``get_status`` and ``set``.
+        """
+        session_key = self._key(session_id)
+        current_key = conversation_current(session_id)
+
+        while True:
+            async with self._redis.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(session_key, current_key)
+                    status = _to_str(await pipe.hget(session_key, "status"))
+                    current_id = _to_str(await pipe.get(current_key))
+                    if status != SessionStatus.ACTIVE.value or current_id is not None:
+                        await pipe.unwatch()
+                        return False
+
+                    pipe.multi()
+                    if ttl is None:
+                        pipe.set(current_key, conversation_id)
+                    else:
+                        pipe.set(current_key, conversation_id, ex=ttl)
+                    await pipe.execute()
+                    return True
+                except WatchError:
+                    continue
+
+    async def replace_current_conversation_if_active(
+        self,
+        session_id: str,
+        expected_id: str,
+        replacement_id: str,
+        *,
+        ttl: Optional[int] = 86400,
+    ) -> bool:
+        """Atomically rotate an active session from one owner to its successor.
+
+        There is no unassigned interval: an audio XADD watching the same pointer
+        observes either ``expected_id`` or ``replacement_id``. Finalization and a
+        competing rotation both make the compare-and-swap fail without mutation.
+        """
+        session_key = self._key(session_id)
+        current_key = conversation_current(session_id)
+
+        while True:
+            async with self._redis.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(session_key, current_key)
+                    status = _to_str(await pipe.hget(session_key, "status"))
+                    current_id = _to_str(await pipe.get(current_key))
+                    if (
+                        status != SessionStatus.ACTIVE.value
+                        or current_id != expected_id
+                    ):
+                        await pipe.unwatch()
+                        return False
+
+                    pipe.multi()
+                    if ttl is None:
+                        pipe.set(current_key, replacement_id)
+                    else:
+                        pipe.set(current_key, replacement_id, ex=ttl)
+                    await pipe.execute()
+                    return True
+                except WatchError:
+                    continue
+
+    async def clear_current_conversation(
+        self,
+        session_id: str,
+        *,
+        expected_id: Optional[str] = None,
+    ) -> bool:
+        """Clear the assignment, optionally only when it still has ``expected_id``.
+
+        The compare-and-delete form prevents a late cleanup for conversation A
+        from deleting a successor assignment to conversation B.
+        """
+        key = conversation_current(session_id)
+        if expected_id is None:
+            return bool(await self._redis.delete(key))
+
+        while True:
+            async with self._redis.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(key)
+                    if _to_str(await pipe.get(key)) != expected_id:
+                        await pipe.unwatch()
+                        return False
+                    pipe.multi()
+                    pipe.delete(key)
+                    result = await pipe.execute()
+                    return bool(result[0])
+                except WatchError:
+                    continue
+
+    async def expire_current_conversation(self, session_id: str, ttl: int) -> bool:
+        """Apply a cleanup TTL only when a conversation assignment exists."""
+        return bool(await self._redis.expire(conversation_current(session_id), ttl))
+
+    @asynccontextmanager
+    async def conversation_create_lock(
+        self,
+        session_id: str,
+        *,
+        wait_timeout: float = 5.0,
+        lease_seconds: int = 30,
+        poll: float = 0.05,
+    ):
+        """Serialize get/create/assign sequences for one streaming session.
+
+        Creation remains available if Redis locking is unhealthy: after
+        ``wait_timeout`` the caller runs unlocked and receives ``False``. This
+        avoids deadlocking audio ingestion while making the degraded mode visible
+        to callers and logs.
+        """
+        key = conversation_create_lock_key(session_id)
+        token = uuid.uuid4().hex
+        deadline = time.monotonic() + wait_timeout
+        acquired = False
+
+        while time.monotonic() < deadline:
+            acquired = bool(
+                await self._redis.set(key, token, nx=True, ex=lease_seconds)
+            )
+            if acquired:
+                break
+            await asyncio.sleep(poll)
+
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                while True:
+                    async with self._redis.pipeline(transaction=True) as pipe:
+                        try:
+                            await pipe.watch(key)
+                            if _to_str(await pipe.get(key)) != token:
+                                await pipe.unwatch()
+                                break
+                            pipe.multi()
+                            pipe.delete(key)
+                            await pipe.execute()
+                            break
+                        except WatchError:
+                            continue
 
     # ----------------------------------------------------------- field writes
     async def set_audio_format(self, session_id: str, audio_format: dict) -> None:
