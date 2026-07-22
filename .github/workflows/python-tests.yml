@@ -90,6 +90,11 @@ jobs:
         with:
           version: "latest"
 
+      - name: Install system dependencies
+        # libopus0: native library behind opuslib (services/device_audio.py),
+        # imported transitively during test collection.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libopus0
+
       - name: Install test dependencies
         run: uv sync --locked --group test
 
