@@ -1,7 +1,7 @@
 import sqlite3
 from pathlib import Path
 
-from chronicle_screenpipe.collector import Checkpoints, audio_duration, build_activity_sessions, fold_activity_rows, infer_audio_direction
+from chronicle_screenpipe.collector import Checkpoints, Collector, audio_duration, build_activity_sessions, fold_activity_rows, infer_audio_direction
 
 
 def test_activity_sessions_collapse_same_window():
@@ -54,3 +54,11 @@ def test_wav_duration_is_read_from_media(tmp_path: Path):
         audio.setframerate(16000)
         audio.writeframes(b"\0\0" * 8000)
     assert audio_duration(target) == 0.5
+
+
+def test_collect_audio_accepts_screenpipe_startup_schema():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE audio_chunks (placeholder TEXT)")
+    collector = object.__new__(Collector)
+    assert collector.collect_audio(db) == 0

@@ -19,7 +19,11 @@ function ItemIcon({ item }: { item: DeviceInputItem }) {
 export default function Timeline() {
   const [day, setDay] = useState(() => new Date().toISOString().slice(0, 10))
   const [start, end] = useMemo(() => dayBounds(day), [day])
-  const timeline = useQuery({ queryKey: ['device-timeline', day], queryFn: async () => (await deviceInputApi.getTimeline(start, end)).data.items })
+  const timeline = useQuery({
+    queryKey: ['device-timeline', day],
+    queryFn: async () => (await deviceInputApi.getTimeline(start, end)).data.items,
+    refetchInterval: 10_000,
+  })
   const sources = useQuery({ queryKey: ['device-input-sources'], queryFn: async () => (await deviceInputApi.getSources()).data.sources, refetchInterval: 30_000 })
   const pairing = useMutation({ mutationFn: async () => (await deviceInputApi.createPairingCode()).data })
 

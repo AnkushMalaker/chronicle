@@ -190,6 +190,11 @@ class Collector:
         columns = table_columns(connection, "audio_chunks")
         required = {"id", "file_path", "timestamp"}
         if not required <= columns:
+            # ScreenPipe may expose a migration placeholder briefly before the
+            # first audio segment initializes the final schema.
+            count = connection.execute("SELECT COUNT(*) FROM audio_chunks").fetchone()[0]
+            if count == 0:
+                return 0
             raise RuntimeError(f"unsupported ScreenPipe audio_chunks schema; missing {sorted(required - columns)}")
         cursor = self.checkpoints.get("audio")
         rows = connection.execute(
