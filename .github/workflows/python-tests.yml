@@ -75,6 +75,18 @@ jobs:
     defaults:
       run:
         working-directory: backends/advanced
+    services:
+      # Some backend tests hit real local services (vault locks are Redis-backed
+      # and fail closed; test_leading_silence_trim_db uses Mongo). Match the
+      # defaults the code assumes: redis://localhost:6379, mongodb://localhost:27018.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+      mongo:
+        image: mongo:8
+        ports:
+          - 27018:27017
 
     steps:
       - name: Checkout code
