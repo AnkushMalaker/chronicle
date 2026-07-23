@@ -68,6 +68,14 @@ docker compose --profile https up --build -d
 - **HTTP**: http://localhost:8081/ (redirects to HTTPS)
 - **Features**: Speaker enrollment, audio analysis, live inference
 
+**Langfuse (Observability - ports 3002/3443):**
+- **HTTPS Dashboard**: https://localhost:3443/ or https://your-ip:3443/
+- **Direct HTTP fallback**: http://localhost:3002/
+- **Features**: LLM traces, sessions, prompt management
+
+The authenticated **System** page in Chronicle lists the canonical browser URL for
+each browser-facing managed service, including services on remote Tailnet nodes.
+
 **Features available with HTTPS:**
 - 🎤 **Live Recording** - Real-time audio streaming with WebSocket
 - 🔒 **Secure WebSocket** connections (WSS)

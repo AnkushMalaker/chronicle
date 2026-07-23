@@ -274,19 +274,6 @@ class BaseAudioStreamConsumer(ABC):
                                 stream_name, self.group_name, msg_id
                             )
 
-                        # Trim stream to remove ACKed messages (keep only last 1000 for safety)
-                        try:
-                            await self.redis_client.xtrim(
-                                stream_name, maxlen=1000, approximate=True
-                            )
-                            logger.debug(
-                                f"🧹 Trimmed audio stream {stream_name} to max 1000 entries"
-                            )
-                        except Exception as trim_error:
-                            logger.warning(
-                                f"Failed to trim stream {stream_name}: {trim_error}"
-                            )
-
                         logger.info(
                             f"➡️ [{self.consumer_name}] {self.provider_name}: Flushed buffer for session {session_id} "
                             f"in {processing_time:.2f}s (transcript: {len(result.get('text', ''))} chars)"
@@ -395,17 +382,6 @@ class BaseAudioStreamConsumer(ABC):
                 # ACK all buffered messages
                 for msg_id in buffer["message_ids"]:
                     await self.redis_client.xack(stream_name, self.group_name, msg_id)
-
-                # Trim stream to remove ACKed messages (keep only last 1000 for safety)
-                try:
-                    await self.redis_client.xtrim(
-                        stream_name, maxlen=1000, approximate=True
-                    )
-                    logger.debug(
-                        f"🧹 Trimmed audio stream {stream_name} to max 1000 entries"
-                    )
-                except Exception as trim_error:
-                    logger.warning(f"Failed to trim stream {stream_name}: {trim_error}")
 
                 logger.info(
                     f"➡️ [{self.consumer_name}] {self.provider_name}: Completed {combined_chunk_id} in {processing_time:.2f}s "

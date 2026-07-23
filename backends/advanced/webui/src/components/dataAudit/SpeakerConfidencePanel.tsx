@@ -190,6 +190,29 @@ export default function SpeakerConfidencePanel() {
                   </thead>
                   <tbody>
                     {data.speakers.map((s) => {
+                      if (s.never_identified) {
+                        return (
+                          <tr
+                            key={s.name}
+                            className="border-b border-gray-100 dark:border-gray-800"
+                          >
+                            <td className="py-1 pr-3 font-medium text-gray-800 dark:text-gray-200">
+                              {s.name}
+                            </td>
+                            <td className="text-right px-2">0</td>
+                            <td className="text-right px-2">0</td>
+                            <td className="text-right px-2 text-gray-400" colSpan={4}>
+                              —
+                            </td>
+                            <td className="pl-3">
+                              <span className="text-blue-600 dark:text-blue-400">
+                                enrolled, no identified segments yet — run the drift scan
+                                and reprocess matches
+                              </span>
+                            </td>
+                          </tr>
+                        )
+                      }
                       const magnet = s.marginal_pct >= 50
                       const weak = s.marginal_pct >= 25
                       return (

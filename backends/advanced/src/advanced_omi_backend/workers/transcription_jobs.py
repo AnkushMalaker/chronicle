@@ -43,6 +43,9 @@ from advanced_omi_backend.observability.otel_setup import (
 )
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggregator
+from advanced_omi_backend.services.audio_stream.conversation_lifecycle import (
+    ensure_active_session_placeholder,
+)
 from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
     SessionStore,
@@ -848,17 +851,9 @@ async def transcribe_full_audio_job(
 async def create_audio_only_conversation(
     session_id: str, user_id: str, client_id: str
 ) -> "Conversation":
-    """
-    Create or reuse conversation for batch transcription fallback.
-
-    Handles two scenarios:
-    1. always_persist=True - Reuses existing placeholder conversation
-    2. always_persist=False - Creates new conversation from audio chunks
-    """
-    # CASE 1: Check if always_persist placeholder conversation exists
-    # The audio_streaming_persistence_job may have created it already
+    """Resolve the session's required durable owner for batch transcription."""
     placeholder_conversation = await Conversation.find_one(
-        Conversation.client_id == session_id,
+        Conversation.source_session_id == session_id,
         Conversation.always_persist == True,
         In(
             Conversation.processing_status,
@@ -889,29 +884,10 @@ async def create_audio_only_conversation(
         # (stored by audio_streaming_persistence_job)
         return placeholder_conversation
 
-    # CASE 2: No placeholder exists - create a new conversation.
-    # This happens when always_persist=False or audio_persistence_job didn't run.
-    # The conversation_id is auto-generated (unique): a session rotates into many
-    # conversations, so it must NOT be reused as the conversation_id.
-    logger.info(
-        f"✅ No placeholder found, creating new conversation for session {session_id[:12]}"
+    raise RuntimeError(
+        f"Session {session_id} has no durable conversation owner; refusing to "
+        "invent an alternate batch owner"
     )
-
-    conversation = Conversation(
-        user_id=user_id,
-        client_id=client_id,
-        title="Audio Recording (Batch Transcription...)",
-        summary="Processing audio with offline transcription...",
-        processing_status=Conversation.ConversationStatus.ACTIVE.value,
-        always_persist=False,  # Mark as False since this is fallback
-        created_at=datetime.now(timezone.utc),
-    )
-    await conversation.insert()
-
-    logger.info(
-        f"✅ Created batch transcription conversation {session_id[:12]} for fallback"
-    )
-    return conversation
 
 
 @async_job(redis=True, beanie=True)
@@ -947,14 +923,14 @@ async def transcription_fallback_check_job(
 
     logger.info(f"🔍 Checking transcription status for session {session_id[:12]}")
 
-    # Find the exact conversation if conversation_id is known, otherwise fall back to client_id lookup
+    # Find the exact conversation if known, otherwise resolve by immutable session.
     if conversation_id:
         conversation = await Conversation.find_one(
             Conversation.conversation_id == conversation_id
         )
     else:
         conversation = await Conversation.find_one(
-            Conversation.client_id == session_id,
+            Conversation.source_session_id == session_id,
             Conversation.always_persist == True,
             In(
                 Conversation.processing_status,
@@ -1673,10 +1649,10 @@ async def stream_speech_detection_job(
         f"🔍 Checking MongoDB for always_persist conversation with client_id: {client_id}"
     )
 
-    # Find conversation by client_id that matches this session
-    # session_id == client_id for streaming sessions (set in _initialize_streaming_session)
+    # Resolve by immutable capture session, never by device id. A reconnect can
+    # have an older session draining while a new session for the same client runs.
     conversation = await Conversation.find_one(
-        Conversation.client_id == session_id,
+        Conversation.source_session_id == session_id,
         Conversation.always_persist == True,
         Conversation.processing_status == Conversation.ConversationStatus.ACTIVE.value,
     )
@@ -1778,11 +1754,34 @@ async def stream_speech_detection_job(
         if status == SessionStatus.ACTIVE:
             next_count = await store.increment_conversation_count(session_id)
 
-            # Clear conversation:current so audio_streaming_persistence_job opens a
-            # fresh placeholder for the continuing audio (its rotation path). The
-            # fallback above keeps the previous conversation_id, so the window we just
-            # closed and the next window stay separate conversations.
-            await redis_client.delete(f"conversation:current:{session_id}")
+            # Rotate through the lifecycle module. Persistence no longer creates
+            # Mongo conversations in response to an absent pointer; it waits for a
+            # deliberate assignment so every placeholder has a finalization owner.
+            async with store.conversation_create_lock(session_id):
+                await store.clear_current_conversation(
+                    session_id, expected_id=conversation_id
+                )
+            assignment = await ensure_active_session_placeholder(
+                store,
+                session_id=session_id,
+                user_id=user_id,
+                client_id=client_id,
+            )
+            if assignment is None:
+                logger.info(
+                    f"⏱️ off-mode rotation for {session_id[:12]} was overtaken by "
+                    "session finalization — not re-enqueueing"
+                )
+                return {
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "client_id": client_id,
+                    "no_speech_detected": True,
+                    "fallback_job_id": fallback_job.id,
+                    "rotated_speech_detection_job_id": None,
+                    "reason": reason,
+                    "runtime_seconds": time.time() - start_time,
+                }
 
             # replaces_current=True: this job IS the tracked live detector and is
             # deliberately handing off to its successor, so skip the single-flight

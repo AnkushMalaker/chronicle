@@ -76,24 +76,14 @@ def pair(args: argparse.Namespace) -> None:
 
 
 def install_service() -> None:
-    uv = shutil.which("uv")
-    if uv is None:
-        raise SystemExit("uv is required to install the user service")
-    project = Path(__file__).resolve().parents[1]
-    unit_dir = Path.home() / ".config/systemd/user"
-    unit_dir.mkdir(parents=True, exist_ok=True)
-    unit = unit_dir / "chronicle-screenpipe.service"
-    unit.write_text(
-        "[Unit]\nDescription=Chronicle ScreenPipe companion\nAfter=network-online.target screenpipe.service\n\n"
-        "[Service]\nType=simple\n"
-        f"ExecStart={uv} run --project {project} chronicle-screenpipe run\n"
-        "Restart=on-failure\nRestartSec=5\n\n"
-        "[Install]\nWantedBy=default.target\n",
-        encoding="utf-8",
-    )
-    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-    subprocess.run(["systemctl", "--user", "enable", "--now", unit.name], check=True)
-    print(f"installed and started {unit.name}")
+    # Unit definition lives in the repo-root clients.py (shared with the
+    # unified tray, `services.py client`, and the node agent's update path).
+    repo_root = Path(__file__).resolve().parents[3]
+    sys.path.insert(0, str(repo_root))
+    import clients
+
+    clients.install_component("screenpipe-collector")
+    print("installed and started the chronicle-screenpipe user service")
 
 
 def main() -> None:

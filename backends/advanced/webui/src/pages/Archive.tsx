@@ -178,14 +178,20 @@ export default function Archive() {
   return (
     <div>
       {/* Header */}
-      <div className="flex justify-between items-center mb-6">
-        <div className="flex items-center space-x-2">
+      <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center space-x-2">
           <ArchiveIcon className="h-6 w-6 text-orange-600" />
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
+          <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100 sm:text-2xl">
             Archived Conversations
           </h1>
         </div>
-        <Button variant="primary" size="md" onClick={() => refetch()} icon={<RefreshCw className="h-4 w-4" />}>
+        <Button
+          variant="primary"
+          size="md"
+          onClick={() => refetch()}
+          icon={<RefreshCw className="h-4 w-4" />}
+          className="self-start sm:self-auto"
+        >
           Refresh
         </Button>
       </div>
@@ -208,13 +214,13 @@ export default function Archive() {
           conversations.map((conversation) => (
             <div
               key={conversation.conversation_id}
-              className="rounded-lg p-6 border bg-red-50 dark:bg-red-900/20 border-red-300 dark:border-red-700"
+              className="rounded-lg border border-red-300 bg-red-50 p-4 dark:border-red-700 dark:bg-red-900/20 sm:p-6"
             >
               {/* Deleted Conversation Banner */}
               <div className="mb-4 p-3 bg-red-100 dark:bg-red-900/40 rounded-lg border border-red-300 dark:border-red-700">
                 <div className="flex items-start space-x-2">
                   <ArchiveIcon className="h-5 w-5 text-red-600 dark:text-red-400 mt-0.5 flex-shrink-0" />
-                  <div className="flex-1">
+                  <div className="min-w-0 flex-1">
                     <p className="font-semibold text-red-800 dark:text-red-300 text-sm">Archived Conversation</p>
                     <p className="text-xs text-red-700 dark:text-red-400 mt-1">
                       Reason: {conversation.deletion_reason === 'user_deleted'
@@ -242,8 +248,8 @@ export default function Archive() {
               </div>
 
               {/* Conversation Header */}
-              <div className="flex justify-between items-start mb-4">
-                <div className="flex flex-col space-y-2">
+              <div className="mb-4 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                <div className="flex min-w-0 flex-col space-y-2">
                   <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
                     {conversation.title || "Conversation"}
                   </h2>
@@ -255,7 +261,7 @@ export default function Archive() {
                   )}
 
                   {/* Metadata */}
-                  <div className="flex items-center space-x-4">
+                  <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:gap-4">
                     <div className="flex items-center space-x-2 text-sm text-gray-600 dark:text-gray-400">
                       <Calendar className="h-4 w-4" />
                       <span>{formatDate(conversation.created_at || '')}</span>
@@ -268,13 +274,13 @@ export default function Archive() {
                 </div>
 
                 {/* Action Buttons */}
-                <div className="flex items-center space-x-2">
+                <div className="grid w-full grid-cols-1 gap-2 min-[380px]:grid-cols-2 sm:flex sm:w-auto sm:flex-shrink-0 sm:items-center">
                   {conversation.conversation_id && (
                     <>
                       <button
                         onClick={() => handleRestoreConversation(conversation.conversation_id!)}
                         disabled={restoringConversation.has(conversation.conversation_id)}
-                        className="flex items-center space-x-2 px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="flex min-w-0 items-center justify-center space-x-2 rounded-lg bg-green-600 px-3 py-2 text-white transition-colors hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
                         title="Restore conversation to active view"
                       >
                         {restoringConversation.has(conversation.conversation_id) ? (
@@ -289,7 +295,7 @@ export default function Archive() {
                         <button
                           onClick={() => handlePermanentDelete(conversation.conversation_id!)}
                           disabled={deletingConversation.has(conversation.conversation_id)}
-                          className="flex items-center space-x-2 px-3 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          className="flex min-w-0 items-center justify-center space-x-2 rounded-lg bg-red-600 px-3 py-2 text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
                           title="Permanently delete (admin only)"
                         >
                           {deletingConversation.has(conversation.conversation_id) ? (

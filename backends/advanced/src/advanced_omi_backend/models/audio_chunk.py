@@ -12,6 +12,7 @@ from typing import List, Optional
 from beanie import Document, Indexed
 from bson import Binary
 from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from pymongo import IndexModel
 
 
 class VADResult(BaseModel):
@@ -93,6 +94,23 @@ class AudioChunkDocument(Document):
         default=1, description="Number of audio channels (1=mono, 2=stereo)"
     )
 
+    # Redis write-ahead-log provenance. The first message ID is the idempotency
+    # key for an encoded Mongo chunk: if a worker dies after insert but before
+    # XACK, pending replay finds this document instead of inserting duplicate audio.
+    source_stream: Optional[str] = Field(
+        default=None, description="Redis raw-audio stream that supplied this chunk"
+    )
+    source_first_message_id: Optional[str] = Field(
+        default=None, description="First Redis message included in this chunk"
+    )
+    source_last_message_id: Optional[str] = Field(
+        default=None, description="Last Redis message included in this chunk"
+    )
+    source_message_ids: List[str] = Field(
+        default_factory=list,
+        description="Ordered Redis message IDs included in this chunk",
+    )
+
     # Optional analysis
     vad: Optional[VADResult] = Field(
         default=None, description="Voice-activity scores (set by data-audit analysis)"
@@ -138,6 +156,17 @@ class AudioChunkDocument(Document):
             "created_at",
             # Soft delete filtering
             "deleted",
+            # At-least-once delivery without duplicate Mongo audio. The partial
+            # filter keeps imported/pre-WAL chunks with missing or null IDs out.
+            IndexModel(
+                [("source_stream", 1), ("source_first_message_id", 1)],
+                unique=True,
+                partialFilterExpression={
+                    "source_stream": {"$type": "string"},
+                    "source_first_message_id": {"$type": "string"},
+                },
+                name="unique_audio_wal_chunk",
+            ),
         ]
 
     @property

@@ -52,7 +52,7 @@ class PluginServices:
         speech detection phase, no conversation is open — the flag would go unread.
 
         Args:
-            session_id: The streaming session ID (typically same as client_id)
+            session_id: The immutable streaming recording-session ID
             reason: Why the conversation is being closed
 
         Returns:
@@ -61,9 +61,9 @@ class PluginServices:
         """
         # Gate: only set the flag when open_conversation_job is running and will read it.
         # The conversation:current key is set right before the polling loop starts.
-        conversation_id = await self._async_redis.get(
-            f"conversation:current:{session_id}"
-        )
+        conversation_id = await SessionStore(
+            self._async_redis
+        ).get_current_conversation_id(session_id)
         if not conversation_id:
             logger.warning(
                 f"No open conversation for session {session_id} — close request ignored"
@@ -90,9 +90,9 @@ class PluginServices:
         from advanced_omi_backend.controllers.conversation_controller import toggle_star
 
         # Look up current conversation_id from Redis
-        conversation_id = await self._async_redis.get(
-            f"conversation:current:{session_id}"
-        )
+        conversation_id = await SessionStore(
+            self._async_redis
+        ).get_current_conversation_id(session_id)
         if not conversation_id:
             logger.warning(f"No current conversation for session {session_id}")
             return False

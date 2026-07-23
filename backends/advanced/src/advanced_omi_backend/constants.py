@@ -9,7 +9,8 @@ OMI_SAMPLE_WIDTH = 2  # bytes (16‑bit)
 # applying it sets the segment's speaker to this label AND reclassifies it to a
 # non-speech (event) segment, and the enroll step skips it (you never enroll a
 # noise voiceprint). Kept in sync with the frontend constant of the same name.
-NOISE_LABEL = "Background/Noise"
+NOISE_LABEL = "Noise"
+BACKGROUND_SPEECH_LABEL = "Background Speech"
 
 # Display label for a diarized speaker that was NOT matched to an enrolled
 # voiceprint. Speaker recognition assigns "Unknown Speaker 1", "Unknown Speaker 2",
@@ -40,4 +41,6 @@ def is_non_enrollable_speaker(name: str | None) -> bool:
     """
     if not name or not name.strip():
         return True
-    return name == NOISE_LABEL or is_unknown_speaker_label(name)
+    return name in {NOISE_LABEL, BACKGROUND_SPEECH_LABEL} or is_unknown_speaker_label(
+        name
+    )

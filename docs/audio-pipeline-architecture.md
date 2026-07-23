@@ -27,8 +27,8 @@ Chronicle's audio pipeline is built on:
                     └────────────┬───────────┘
                                  ↓
                     ┌────────────────────────────────┐
-                    │  Redis Stream (Per Client)     │
-                    │  audio:stream:{client_id}      │
+                    │ Redis WAL (Per Recording)      │
+                    │ audio:stream:{session_id}      │
                     └─────┬──────────────────┬───────┘
                           ↓                  ↓
           ┌───────────────────────┐  ┌──────────────────────┐
@@ -89,15 +89,16 @@ Chronicle's audio pipeline is built on:
 
 ### Audio Stream
 
-Key: `audio:stream:{client_id}` (e.g., `audio:stream:user01-phone`)
+Key: `audio:stream:{session_id}`
 
-- Client-specific isolation (one stream per device)
+- Recording-specific isolation (a reconnect cannot mutate an older capture)
 - Fan-out: multiple consumer groups read the same stream
-- Auto-trimmed: MAXLEN 25,000 entries (~104 min at 0.25s chunks)
+- Uncapped and unexpired until terminal consumer-group drain is proven
+- Every audio entry carries its immutable `conversation_id` owner
 
 ### Session Metadata
 
-Key: `audio:session:{session_id}` — Redis Hash, TTL 1 hour
+Key: `audio:session:{session_id}` — Redis Hash, no TTL while active
 
 Fields: `user_id`, `client_id`, `connection_id`, `stream_name`, `status` (`active` → `finalizing` → `complete`), `chunks_published`, `speech_detection_job_id`, `audio_persistence_job_id`, `websocket_connected`, `transcription_error`
 
@@ -111,7 +112,7 @@ Fields: `user_id`, `client_id`, `connection_id`, `stream_name`, `status` (`activ
 | `conversation:current:{session_id}` | String | Current conversation ID (signals WAV rotation) | 24 hours |
 | `audio:file:{conversation_id}` | String | Audio file path on disk | 24 hours |
 | `session:conversation_count:{session_id}` | Counter | Conversations in session | 1 hour |
-| `speech_detection_job:{client_id}` | String | Job ID for cleanup | 1 hour |
+| `speech_detection_job:{session_id}` | String | Job ID for cleanup | 1 hour after close |
 | `system:event_log` | List | Plugin event audit log (capped at 1000) | None |
 
 ## Producer: AudioStreamProducer
@@ -119,8 +120,8 @@ Fields: `user_id`, `client_id`, `connection_id`, `stream_name`, `status` (`activ
 **File**: `services/audio_stream/producer.py` — runs in `chronicle-backend` container
 
 1. **`init_session()`**: Creates `audio:session:{session_id}` hash, initializes in-memory buffer
-2. **`add_audio_chunk()`**: Buffers incoming audio, creates fixed 0.25s chunks (8,000 bytes @ 16kHz/16-bit/mono), publishes to `audio:stream:{client_id}` via XADD
-3. **`send_session_end_signal()`**: Publishes `{"type": "END"}` message, updates session to `"finalizing"`
+2. **`add_audio_chunk()`**: Buffers incoming audio and atomically checks `ACTIVE`, snapshots `conversation:current:{session_id}`, and appends a fixed 0.25s entry to `audio:stream:{session_id}`
+3. **`finalize_session()`**: Appends the residual audio and END marker before advancing producer state
 
 ## Dual-Consumer Architecture
 
@@ -138,17 +139,24 @@ Redis Consumer Groups enable two independent consumers on the same audio stream.
 **B. Batch** (`services/audio_stream/consumer.py`)
 - Consumer group: `{provider}_workers` (e.g., `deepgram_workers`, `parakeet_workers`)
 - Buffers 30 chunks (~7.5s), batch transcribes, adjusts timestamps, publishes results
-- ACKs after publishing, trims stream to last 1,000 entries
+- ACKs after publishing; it never trims the shared raw WAL
 
 ### Consumer 2: Audio Persistence
 
 **File**: `workers/audio_jobs.py` — `audio_streaming_persistence_job()`
 
 - Consumer group: `audio_persistence`
-- Writes chunks to WAV files in real-time (`data/chunks/`)
-- Monitors `conversation:current:{session_id}` for file rotation signals
-- Stores file path in `audio:file:{conversation_id}`
-- File naming: `{timestamp_ms}_{client_id}_{conversation_id}.wav`
+- Encodes PCM to Opus and writes `audio_chunks` documents to MongoDB in real time
+- Reads the immutable `conversation_id` stamped on each WAL entry
+- Replays pending entries before reading new entries
+- Commits a majority+journaled Mongo chunk before ACKing exact Redis message IDs
+- Updates each owning conversation's chunk-count, duration, and compression metadata
+
+Placeholder creation and assignment are owned by
+`services/audio_stream/conversation_lifecycle.py`. The module serializes creation per
+session, checks that the session is still active, and atomically publishes an assignment
+only when no current owner exists. This prevents a conversation close immediately followed
+by session finalization from creating an empty, permanently active placeholder.
 
 ### Fan-Out Visualization
 
@@ -206,7 +214,9 @@ Polls `TranscriptionResultsAggregator` at 1s intervals. Speech criteria: word co
 4. Tracks inactivity (60s timeout). End conditions: disconnect, manual stop, inactivity, plugin close
 5. Waits for transcription completion (30s max) and audio file path
 6. Enqueues post-conversation pipeline
-7. Calls `handle_end_of_conversation()` → cleans up, re-enqueues speech detection if session active
+7. Calls `handle_end_of_conversation()` → conditionally clears its own assignment and,
+   only if the session remains active, assigns the next always-persist placeholder before
+   re-enqueuing speech detection
 
 ### Post-Conversation Jobs
 

@@ -44,6 +44,7 @@ async def _ensure_beanie_initialized():
             from motor.motor_asyncio import AsyncIOMotorClient
             from pymongo.errors import ConfigurationError
 
+            from advanced_omi_backend.models.annotation import Annotation
             from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
             from advanced_omi_backend.models.conversation import Conversation
             from advanced_omi_backend.models.device_input import (
@@ -61,7 +62,10 @@ async def _ensure_beanie_initialized():
 
             # Create MongoDB client
             mongodb_database = os.getenv("MONGODB_DATABASE", "chronicle")
-            client = AsyncIOMotorClient(mongodb_uri)
+            # RQ ACKs Redis source messages after Beanie writes return. Require the
+            # return to mean journaled majority commit, not merely accepted into the
+            # mongod process cache.
+            client = AsyncIOMotorClient(mongodb_uri, w="majority", journal=True)
             try:
                 database = client.get_default_database(mongodb_database)
             except ConfigurationError:
@@ -76,6 +80,7 @@ async def _ensure_beanie_initialized():
                     Conversation,
                     AudioChunkDocument,
                     WaveformData,
+                    Annotation,
                     MemoryAuditEntry,
                     CaptureSource,
                     PairingCode,

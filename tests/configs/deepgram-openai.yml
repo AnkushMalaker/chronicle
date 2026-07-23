@@ -103,11 +103,6 @@ models:
       smart_format: true
     start:
       message: {}
-backend:
-  audio:
-    # Enable always_persist for testing - creates placeholder conversations immediately
-    always_persist_enabled: true
-
 speaker_recognition:
   enabled: true  # Using mock client by default (USE_MOCK_SPEAKER_CLIENT=true in docker-compose-test.yml)
   timeout: 60

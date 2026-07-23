@@ -1620,14 +1620,13 @@ class ChronicleSetup:
                             "TAILSCALE_IP", server_ip
                         )
 
-                        # Static mode serves a host-issued cert file; caddy mode lets
-                        # Caddy obtain/renew the cert itself (no tls directive).
+                        # Static mode serves the shared host-issued cert in every site
+                        # block (Chronicle + LangFuse). Caddy mode leaves the marker as
+                        # a comment and obtains/renews certificates itself.
                         if cert_mode == "static":
                             caddyfile_content = caddyfile_content.replace(
-                                f"localhost {server_ip} {{",
-                                f"localhost {server_ip} {{\n"
-                                "    tls /certs/server.crt /certs/server.key",
-                                1,
+                                "# TLS_CERT_DIRECTIVE",
+                                "tls /certs/server.crt /certs/server.key",
                             )
 
                         with open(caddyfile_path, "w") as f:

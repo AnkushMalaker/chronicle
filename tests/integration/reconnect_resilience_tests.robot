@@ -43,14 +43,14 @@ Reconnect Mid Session Does Not Orphan Transcripts
     ${client_id}=    Get Client ID From Device Name    ${device}
 
     # Arrange + Act — first leg: speak, so the placeholder gains a real transcript.
-    ${stream}=    Open Audio Stream With Always Persist    device_name=${device}
+    ${stream}=    Open Durable Audio Stream    device_name=${device}
     Send Audio Chunks To Stream    ${stream}    ${SPEECH_AUDIO}    num_chunks=60
     Sleep    8s    # let streaming transcription land a transcript on the conversation
 
     # Abrupt disconnect (network drop), then reconnect on the SAME device.
     Close Audio Stream Without Stop Event    ${stream}
     Sleep    3s
-    ${stream2}=    Open Audio Stream With Always Persist    device_name=${device}
+    ${stream2}=    Open Durable Audio Stream    device_name=${device}
     Send Audio Chunks To Stream    ${stream2}    ${SPEECH_AUDIO}    num_chunks=60
     Sleep    5s
     Close Audio Stream    ${stream2}
@@ -74,7 +74,7 @@ Leading Silence Is Trimmed Off The Conversation
     ${client_id}=    Get Client ID From Device Name    ${device}
 
     # Arrange + Act — 60s of silence, then speech, in one continuous session.
-    ${stream}=    Open Audio Stream With Always Persist    device_name=${device}
+    ${stream}=    Open Durable Audio Stream    device_name=${device}
     Send Audio Chunks To Stream    ${stream}    ${SILENCE_AUDIO}
     Send Audio Chunks To Stream    ${stream}    ${SPEECH_AUDIO}    num_chunks=60
     Sleep    8s

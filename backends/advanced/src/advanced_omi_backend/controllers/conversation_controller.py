@@ -3,13 +3,13 @@ Conversation controller for handling conversation-related business logic.
 """
 
 import logging
+import re
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi.responses import JSONResponse
-from pymongo.errors import OperationFailure
 
 from advanced_omi_backend.client_manager import (
     client_belongs_to_user,
@@ -142,6 +142,7 @@ async def get_conversation(conversation_id: str, user: User):
         conversation, error = await _get_conversation_or_error(conversation_id, user)
         if error:
             return error
+        active_version = conversation.active_transcript
 
         # Build response with explicit curated fields
         response = {
@@ -180,6 +181,14 @@ async def get_conversation(conversation_id: str, user: User):
             "active_transcript_version": conversation.active_transcript_version,
             "transcript_version_count": conversation.transcript_version_count,
             "active_transcript_version_number": conversation.active_transcript_version_number,
+            "speaker_recognition": (
+                active_version.metadata.get("speaker_recognition")
+                if active_version and active_version.metadata
+                else None
+            ),
+            "diarization_source": (
+                active_version.diarization_source if active_version else None
+            ),
             "starred": conversation.starred,
             "starred_at": (
                 conversation.starred_at.isoformat() if conversation.starred_at else None
@@ -341,9 +350,10 @@ _LIST_PROJECTION = {
     "starred": 1,
     "starred_at": 1,
     "active_transcript_version": 1,
-    # Lightweight version metadata (exclude transcript, words, segment text)
+    # Lightweight version metadata. Full segments (including text and word-level
+    # timestamps) are loaded by the detail endpoint only when a transcript is opened.
     "transcript_versions.version_id": 1,
-    "transcript_versions.segments": 1,
+    "transcript_versions.segments.speaker": 1,
 }
 
 
@@ -471,75 +481,126 @@ async def get_conversations(
         )
 
 
-async def search_conversations(
+# MongoDB fields covered by each independently selectable search category.
+_SEARCH_CATEGORY_FIELDS: dict[str, list[str]] = {
+    "title": ["title"],
+    "summary": ["summary", "detailed_summary"],
+    "speakers": ["_search_active_version.segments.speaker"],
+}
+
+
+def _search_fields(categories: list[str]) -> list[str]:
+    return [
+        field
+        for category in categories
+        for field in _SEARCH_CATEGORY_FIELDS.get(category, [])
+    ]
+
+
+def _search_query_stages(query: str, fields: list[str]) -> list[dict]:
+    """Build query stages, resolving speaker labels from the active version only."""
+    if not query:
+        return []
+
+    stages: list[dict] = []
+    if any(field.startswith("_search_active_version.") for field in fields):
+        stages.append(
+            {
+                "$set": {
+                    "_search_active_version": {
+                        "$arrayElemAt": [
+                            {
+                                "$filter": {
+                                    "input": {"$ifNull": ["$transcript_versions", []]},
+                                    "as": "version",
+                                    "cond": {
+                                        "$eq": [
+                                            "$$version.version_id",
+                                            "$active_transcript_version",
+                                        ]
+                                    },
+                                }
+                            },
+                            0,
+                        ]
+                    }
+                }
+            }
+        )
+
+    regex = {"$regex": re.escape(query), "$options": "i"}
+    stages.append({"$match": {"$or": [{field: regex} for field in fields]}})
+    return stages
+
+
+async def _regex_search_conversations(
     query: str,
     user: User,
-    limit: int = 50,
-    offset: int = 0,
+    fields: list[str],
+    limit: int,
+    offset: int,
 ):
-    """Full-text search across conversation titles, summaries, and transcripts."""
-    try:
-        collection = Conversation.get_pymongo_collection()
+    """Filter conversations by text across the selected conversation fields."""
+    collection = Conversation.get_pymongo_collection()
 
-        match_filter: dict = {"$text": {"$search": query}, "deleted": False}
-        if not user.is_superuser:
-            match_filter["user_id"] = str(user.user_id)
+    match_filter: dict = {"deleted": False}
+    if not user.is_superuser:
+        match_filter["user_id"] = str(user.user_id)
 
-        pipeline = [
-            {"$match": match_filter},
-            {"$addFields": {"score": {"$meta": "textScore"}}},
-            {"$sort": {"score": -1}},
+    pipeline: list[dict] = [{"$match": match_filter}]
+    pipeline.extend(_search_query_stages(query, fields))
+
+    pipeline.extend(
+        [
+            {"$sort": {"created_at": -1}},
             {
                 "$facet": {
                     "results": [
                         {"$skip": offset},
                         {"$limit": limit},
-                        {"$project": {**_LIST_PROJECTION, "score": 1}},
+                        {"$project": _LIST_PROJECTION},
                     ],
                     "count": [{"$count": "total"}],
                 }
             },
         ]
+    )
 
-        try:
-            cursor = collection.aggregate(pipeline)
-            facet_result = await cursor.to_list(length=1)
-        except OperationFailure as op_err:
-            if op_err.code == 27:  # No text index
-                logger.warning(
-                    "Text search failed: no text index on conversations collection. "
-                    "Restart the backend to let Beanie create the index."
-                )
-                return {
-                    "conversations": [],
-                    "total": 0,
-                    "limit": limit,
-                    "offset": offset,
-                    "query": query,
-                    "error": "Text search index not available. Try restarting the backend.",
-                }
-            raise
+    cursor = collection.aggregate(pipeline)
+    facet_result = await cursor.to_list(length=1)
+    facet = facet_result[0] if facet_result else {"results": [], "count": []}
 
-        facet = facet_result[0] if facet_result else {"results": [], "count": []}
+    raw_docs = facet.get("results", [])
+    count_list = facet.get("count", [])
+    total = count_list[0]["total"] if count_list else 0
 
-        raw_docs = facet.get("results", [])
-        count_list = facet.get("count", [])
-        total = count_list[0]["total"] if count_list else 0
+    conversations = []
+    for doc in raw_docs:
+        d = _raw_doc_to_list_dict(doc)
+        d["is_orphan"] = False
+        conversations.append(d)
 
-        conversations = []
-        for doc in raw_docs:
-            score = doc.pop("score", 0)
-            d = _raw_doc_to_list_dict(doc)
-            d["score"] = round(score, 4)
-            d["is_orphan"] = False
-            conversations.append(d)
+    return {"conversations": conversations, "total": total}
 
+
+async def search_conversations(
+    query: str,
+    user: User,
+    limit: int = 50,
+    offset: int = 0,
+    categories: list[str] | None = None,
+):
+    """Search conversations by literal pattern across selected field categories."""
+    categories = categories or ["title", "summary", "speakers"]
+    fields = _search_fields(categories)
+    try:
+        result = await _regex_search_conversations(query, user, fields, limit, offset)
         return {
-            "conversations": conversations,
-            "total": total,
+            **result,
             "limit": limit,
             "offset": offset,
             "query": query,
+            "fields": categories,
         }
 
     except Exception as e:
@@ -972,6 +1033,7 @@ def _enqueue_speaker_reprocessing_chain(
     conversation_id: str,
     version_id: str,
     source_version_id: str,
+    diarization_source: str | None = None,
 ) -> dict:
     """Enqueue speaker -> memory -> title_summary chain.
 
@@ -984,6 +1046,7 @@ def _enqueue_speaker_reprocessing_chain(
         "",  # transcript_text: read from source version
         None,  # words: read from source version
         source_version_id,  # create-on-success: read from this version, create version_id
+        diarization_source,
         job_timeout=1200,
         result_ttl=JOB_RESULT_TTL,
         job_id=f"reprocess_speaker_{conversation_id[:12]}",
@@ -994,6 +1057,7 @@ def _enqueue_speaker_reprocessing_chain(
                 "conversation_id": conversation_id,
                 "version_id": version_id,
                 "source_version_id": source_version_id,
+                "diarization_source": diarization_source,
                 "trigger": "reprocess",
             },
         ),
@@ -1282,7 +1346,10 @@ async def reprocess_memory(
 
 
 async def reprocess_speakers(
-    conversation_id: str, transcript_version_id: str, user: User
+    conversation_id: str,
+    transcript_version_id: str,
+    user: User,
+    diarization_source: str | None = None,
 ):
     """
     Reprocess speaker identification for a specific transcript version.
@@ -1336,6 +1403,40 @@ async def reprocess_speakers(
         )
         if error:
             return error
+
+        # A Pyannote reprocess replaces the version's segments. When the user asks
+        # to switch back to provider diarization, follow the reprocess lineage to
+        # the nearest version that still contains the original provider segments.
+        if (
+            diarization_source == "provider"
+            and source_version.diarization_source != "provider"
+        ):
+            visited = {source_version.version_id}
+            lineage_version = source_version
+            while lineage_version.metadata:
+                parent_id = lineage_version.metadata.get("source_version_id")
+                if not parent_id or parent_id in visited:
+                    break
+                visited.add(parent_id)
+                parent = conversation_model.get_transcript_version(parent_id)
+                if not parent:
+                    break
+                if parent.diarization_source == "provider":
+                    source_version = parent
+                    source_version_id = parent.version_id
+                    break
+                lineage_version = parent
+
+            if source_version.diarization_source != "provider":
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": (
+                            "No provider-diarized source version is available "
+                            "for this transcript."
+                        )
+                    },
+                )
 
         # 4. Validate transcript has content and words (or provider-diarized segments)
         if not source_version.transcript:
@@ -1393,6 +1494,7 @@ async def reprocess_speakers(
             conversation_id,
             new_version_id,
             source_version_id,
+            diarization_source,
         )
 
         # 9. Return job information
@@ -1404,6 +1506,7 @@ async def reprocess_speakers(
                 "title_summary_job_id": job_ids["title_summary"],
                 "version_id": new_version_id,
                 "source_version_id": source_version_id,
+                "diarization_source": diarization_source,
                 "status": "queued",
             }
         )

@@ -64,8 +64,9 @@ async def _record_failure(annotation, reason: str) -> None:
 async def run_speaker_finetuning_job() -> dict:
     """Process applied diarization annotations and send to speaker recognition service.
 
-    This mirrors the logic in ``finetuning_routes.process_annotations_for_training``
-    but is invocable from the cron scheduler without an HTTP request.
+    Invoked from the cron scheduler (Settings → Automation) to auto-enroll
+    applied diarization relabels without an HTTP request. The deliberate,
+    quality-gated manual path is ``/finetuning/enroll-selected`` (Data Audit).
     """
     # Find annotations ready for training
     annotations = await Annotation.find(
@@ -158,7 +159,10 @@ async def run_speaker_finetuning_job() -> dict:
                         annotation, f"Append failed: {result.get('error')}"
                     )
                     continue
-                appended += 1
+                if result.get("status") == "already_enrolled":
+                    skipped += 1
+                else:
+                    appended += 1
             else:
                 result = await speaker_client.enroll_new_speaker(
                     speaker_name=annotation.corrected_speaker,
@@ -171,7 +175,10 @@ async def run_speaker_finetuning_job() -> dict:
                         annotation, f"Enroll failed: {result.get('error')}"
                     )
                     continue
-                enrolled += 1
+                if result.get("status") == "already_enrolled":
+                    skipped += 1
+                else:
+                    enrolled += 1
 
             # Mark as trained (clear any prior failure record)
             annotation.processed_by = (

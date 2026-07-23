@@ -120,9 +120,39 @@ class SpeakerAudioSegment(Base):
 
     # Relationships
     speaker = relationship("Speaker", back_populates="audio_segments")
+    audit_decision = relationship(
+        "EnrollmentAuditDecision",
+        back_populates="segment",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
     def __repr__(self):
         return f"<SpeakerAudioSegment(id={self.id}, speaker_id='{self.speaker_id}', duration={self.duration_seconds})>"
+
+
+class EnrollmentAuditDecision(Base):
+    """A human decision that overrides a heuristic enrollment-health flag."""
+
+    __tablename__ = "enrollment_audit_decisions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    segment_id = Column(
+        Integer,
+        ForeignKey("speaker_audio_segments.id"),
+        nullable=False,
+        unique=True,
+    )
+    decision = Column(String(30), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    segment = relationship("SpeakerAudioSegment", back_populates="audit_decision")
 
 
 class Annotation(Base):

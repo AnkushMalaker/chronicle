@@ -14,7 +14,8 @@ import { confidenceBadgeClass, formatClock } from './format'
 // Reserved label for background/noise (kept in sync with the backend
 // constants.NOISE_LABEL). Applying it relabels the segment AND reclassifies it
 // to non-speech; enrollment skips it.
-const NOISE_LABEL = 'Background/Noise'
+const NOISE_LABEL = 'Noise'
+const BACKGROUND_SPEECH_LABEL = 'Background Speech'
 
 // Placeholder label for a speaker that couldn't be matched (kept in sync with the
 // backend constants.UNKNOWN_SPEAKER_PREFIX). It relabels the segment for display
@@ -278,7 +279,7 @@ export default function SegmentTriage({
         corrected_speaker: correctedSpeaker,
         segment_start_time: seg.segment_start_time,
       })
-      if (correctedSpeaker !== NOISE_LABEL && correctedSpeaker !== UNKNOWN_SPEAKER) {
+      if (![NOISE_LABEL, BACKGROUND_SPEECH_LABEL, UNKNOWN_SPEAKER].includes(correctedSpeaker)) {
         setRecent((prev) => [correctedSpeaker, ...prev.filter((s) => s !== correctedSpeaker)])
         setEnrolled((prev) =>
           prev.some((s) => s.name === correctedSpeaker)
@@ -362,13 +363,15 @@ export default function SegmentTriage({
           {visibleSegments.map((seg) => {
             const pending = pendingByIndex.get(seg.index)
             const sug = suggestions[seg.index]
-            const isNoisePending = pending?.corrected_speaker === NOISE_LABEL
+            const isBackgroundPending = [NOISE_LABEL, BACKGROUND_SPEECH_LABEL].includes(
+              pending?.corrected_speaker || ''
+            )
             return (
               <div
                 key={seg.index}
                 className={`flex items-center gap-2 py-1.5 ${
                   pending
-                    ? `border-l-2 pl-2 ${isNoisePending ? 'border-zinc-400' : 'border-blue-400'}`
+                    ? `border-l-2 pl-2 ${isBackgroundPending ? 'border-zinc-400' : 'border-blue-400'}`
                     : 'pl-2'
                 }`}
               >
@@ -433,7 +436,7 @@ export default function SegmentTriage({
                   <span className="flex-shrink-0 flex items-center gap-1">
                     <span
                       className={`px-1.5 py-0.5 rounded text-xs ${
-                        isNoisePending
+                        isBackgroundPending
                           ? 'bg-zinc-200 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-200'
                           : 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-200'
                       }`}
@@ -499,6 +502,14 @@ export default function SegmentTriage({
                     >
                       <Volume2 className="h-3 w-3" />
                       Noise
+                    </button>
+                    <button
+                      onClick={() => decide(seg, BACKGROUND_SPEECH_LABEL)}
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border border-zinc-300 dark:border-zinc-600 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700"
+                      title="Mark as speech from TV, media, or another background source"
+                    >
+                      <Volume2 className="h-3 w-3" />
+                      BG speech
                     </button>
                   </span>
                 )}

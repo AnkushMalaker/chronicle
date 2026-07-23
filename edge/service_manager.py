@@ -53,6 +53,7 @@ from rich.console import Console
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+import clients  # noqa: E402  (repo-root clients.py — native client components)
 import discovery  # noqa: E402  (repo-root discovery.py)
 import services  # noqa: E402  (repo-root services.py)
 import status  # noqa: E402  (repo-root status.py — restart-count helper)
@@ -310,7 +311,7 @@ def _effective_health(name: str) -> tuple[str, str]:
     return health, detail
 
 
-def _service_entry(name: str) -> dict:
+def _service_entry(name: str, public_host: str | None = None) -> dict:
     service = services.SERVICES[name]
     health, detail = _effective_health(name)
     return {
@@ -321,6 +322,7 @@ def _service_entry(name: str) -> dict:
         "health": health,
         "health_detail": detail,
         "provider": _provider_info(name),
+        "ui_url": services.service_ui_url(name, public_host or os.uname().nodename),
     }
 
 
@@ -565,6 +567,7 @@ def node_info():
     offer GPU-only services on an arm64 box with no NVIDIA GPU.
     """
     dns, ip = detect_tailscale_info()
+    public_host = dns or ip or _self_host()
     return {
         "host": os.uname().nodename,
         "tailscale": {"dns": dns, "ip": ip},
@@ -576,7 +579,13 @@ def node_info():
         },
         "agent_port": PORT,
         "version": updates.repo_version(),
-        "services": [_service_entry(name) for name in services.SERVICES],
+        "services": [_service_entry(name, public_host) for name in services.SERVICES],
+        # Native client components (tray, ScreenPipe collector — clients.py):
+        # user units, not containers, so they ride the same update flow but are
+        # controlled via /clients/{name}/{action} instead of compose.
+        "clients": [
+            clients.component_status(name) for name in clients.CLIENT_COMPONENTS
+        ],
     }
 
 
@@ -597,8 +606,14 @@ def list_services(scope: str = "cluster"):
     with _ops_lock:
         running = [o for o in _operations.values() if o["status"] == "running"]
     self_host = _self_host()
+    dns, ip = detect_tailscale_info()
+    public_host = dns or ip or self_host
     local = [
-        {**_service_entry(name), "node": self_host, "remote": False}
+        {
+            **_service_entry(name, public_host),
+            "node": self_host,
+            "remote": False,
+        }
         for name in services.SERVICES
     ]
     operation = running[0] if running else None
@@ -781,6 +796,43 @@ def service_action(name: str, action: str, body: ActionBody | None = None):
 
     op = _start_operation(name, action, fn)
     return {"operation": op}
+
+
+# ── Client components (native user units — tray, ScreenPipe collector) ────────
+# These aren't compose services: they're login units managed by clients.py.
+# Actions are quick (systemctl/launchctl), so they run inline — no operation id.
+
+
+@app.get("/clients", dependencies=[Depends(require_token)])
+def list_clients(node: str | None = None):
+    if node and node != _self_host():
+        return _remote_request(node, "GET", "/clients")
+    return {
+        "clients": [
+            clients.component_status(name) for name in clients.CLIENT_COMPONENTS
+        ],
+        "binaries": clients.binary_checks(),
+    }
+
+
+@app.post("/clients/{name}/{action}", dependencies=[Depends(require_token)])
+def client_action(name: str, action: str, body: ActionBody | None = None):
+    body = body or ActionBody()
+    if body.node and body.node != _self_host():
+        return _remote_request(
+            body.node, "POST", f"/clients/{name}/{action}", {**body.dict(), "node": None}
+        )
+    if name not in clients.CLIENT_COMPONENTS:
+        raise HTTPException(status_code=404, detail=f"Unknown client component: {name}")
+    if action not in VALID_ACTIONS:
+        raise HTTPException(status_code=404, detail=f"Unknown action: {action}")
+    if not clients.component_installed(name):
+        raise HTTPException(
+            status_code=400, detail=f"{name} is not installed on this node"
+        )
+    if not clients.component_action(name, action):
+        raise HTTPException(status_code=500, detail=f"{name} {action} failed")
+    return clients.component_status(name)
 
 
 # ── Node self-update ──────────────────────────────────────────────────────────

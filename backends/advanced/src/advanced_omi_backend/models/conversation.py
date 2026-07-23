@@ -180,6 +180,10 @@ class Conversation(Document):
     )
     user_id: Indexed(str) = Field(description="User who owns this conversation")
     client_id: Indexed(str) = Field(description="Client device identifier")
+    source_session_id: Optional[str] = Field(
+        None,
+        description="Immutable recording session that originally owned this conversation",
+    )
 
     # External file tracking (for deduplication of imported files)
     external_source_id: Optional[str] = Field(
@@ -520,6 +524,11 @@ class Conversation(Document):
                 [("external_source_id", 1)], sparse=True
             ),  # Sparse index for deduplication
             IndexModel(
+                [("source_session_id", 1)],
+                sparse=True,
+                name="source_session_lookup",
+            ),
+            IndexModel(
                 [
                     ("title", "text"),
                     ("summary", "text"),
@@ -551,6 +560,7 @@ def create_conversation(
     data_purpose: Optional[str] = None,
     memory_excluded: bool = False,
     memory_exclusion_reason: Optional[str] = None,
+    source_session_id: Optional[str] = None,
 ) -> Conversation:
     """
     Factory function to create a new conversation.
@@ -583,6 +593,7 @@ def create_conversation(
         "data_purpose": data_purpose,
         "memory_excluded": memory_excluded,
         "memory_exclusion_reason": memory_exclusion_reason,
+        "source_session_id": source_session_id,
     }
 
     # Only set conversation_id if provided, otherwise let the model auto-generate it

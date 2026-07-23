@@ -42,6 +42,7 @@ get_existing_stt_provider = _wizard.get_existing_stt_provider
 get_existing_stream_provider = _wizard.get_existing_stream_provider
 select_llm_provider = _wizard.select_llm_provider
 select_setup_type = _wizard.select_setup_type
+derive_langfuse_public_url = _wizard.derive_langfuse_public_url
 
 
 # ---------------------------------------------------------------------------
@@ -159,3 +160,31 @@ def test_select_llm_provider_none_config():
 def test_select_setup_type(choice, expected):
     with patch.object(_wizard.Prompt, "ask", return_value=choice):
         assert select_setup_type() == expected
+
+
+# ---------------------------------------------------------------------------
+# Langfuse public browser URL
+# ---------------------------------------------------------------------------
+
+
+def test_local_langfuse_uses_caddy_https_when_https_is_enabled():
+    assert (
+        derive_langfuse_public_url("local", {}, "node.example.ts.net", True)
+        == "https://node.example.ts.net:3443"
+    )
+
+
+def test_local_langfuse_uses_direct_http_without_https():
+    assert (
+        derive_langfuse_public_url("local", {}, "chronicle.local", False)
+        == "http://chronicle.local:3002"
+    )
+
+
+def test_external_langfuse_keeps_its_configured_url():
+    assert (
+        derive_langfuse_public_url(
+            "external", {"host": "https://cloud.langfuse.com"}, None, True
+        )
+        == "https://cloud.langfuse.com"
+    )

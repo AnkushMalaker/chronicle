@@ -128,6 +128,10 @@ class IdentifyResponse(BaseModel):
     status: SpeakerStatus = Field(description="Speaker identification status")
     similarity_threshold: float = Field(description="Threshold used for identification")
     duration: float = Field(description="Duration of the processed audio in seconds")
+    candidates: List[dict] = Field(
+        default_factory=list,
+        description="Ranked enrolled-speaker candidates, including rejected matches",
+    )
 
 
 class InferenceRequest(BaseModel):

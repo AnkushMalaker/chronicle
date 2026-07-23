@@ -1,13 +1,14 @@
-"""Desktop service management for Chronicle Vault Sync."""
+"""Legacy login-service management for the pre-tray vault-sync app.
+
+The tray moved to extras/chronicle-tray (installed via the repo-root
+clients.py). Only uninstall/status/logs remain here, to manage installs
+made before the move."""
 
 import os
-import plistlib
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-
-from dotenv import dotenv_values
 
 LABEL = "com.chronicle.vault-sync"
 PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
@@ -29,59 +30,6 @@ def _dotenv_environment() -> dict[str, str]:
                 if value is not None:
                     env[key] = value
     return env
-
-
-def _find_uv() -> str:
-    uv = shutil.which("uv")
-    if uv:
-        return uv
-    for candidate in (
-        Path.home() / ".local" / "bin" / "uv",
-        Path.home() / ".cargo" / "bin" / "uv",
-        Path("/usr/local/bin/uv"),
-        Path("/opt/homebrew/bin/uv"),
-    ):
-        if candidate.exists():
-            return str(candidate)
-    print(
-        "Error: could not find 'uv'. Install it: curl -LsSf https://astral.sh/uv/install.sh | sh"
-    )
-    sys.exit(1)
-
-
-def _create_app_bundle() -> None:
-    """Create a .app via osacompile so Spotlight/Raycast treat it as a real app."""
-    if APP_BUNDLE.exists():
-        shutil.rmtree(APP_BUNDLE)
-
-    applescript = (
-        f'do shell script "launchctl kickstart gui/" & '
-        f'(do shell script "id -u") & "/{LABEL}"'
-    )
-    result = subprocess.run(
-        ["osacompile", "-o", str(APP_BUNDLE), "-e", applescript],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        print(f"osacompile failed: {result.stderr.strip()}")
-        return
-
-    info_plist = APP_BUNDLE / "Contents" / "Info.plist"
-    with open(info_plist, "rb") as f:
-        info = plistlib.load(f)
-    info.update(
-        {
-            "CFBundleName": "Chronicle Vault Sync",
-            "CFBundleDisplayName": "Chronicle Vault Sync",
-            "CFBundleIdentifier": LABEL,
-            "CFBundleVersion": "1.0",
-            "CFBundleShortVersionString": "1.0",
-            "LSUIElement": True,
-        }
-    )
-    with open(info_plist, "wb") as f:
-        plistlib.dump(info, f)
 
 
 def _remove_app_bundle() -> None:
@@ -176,24 +124,6 @@ def uninstall() -> None:
     PLIST_PATH.unlink(missing_ok=True)
     print(f"Removed {PLIST_PATH}")
     _remove_app_bundle()
-
-
-def kickstart() -> None:
-    if sys.platform.startswith("linux"):
-        _linux_systemctl("restart")
-        return
-    if not PLIST_PATH.exists():
-        print("Service not installed. Run './start.sh install' first.")
-        return
-    result = subprocess.run(
-        ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{LABEL}"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0:
-        print(f"Service '{LABEL}' restarted.")
-    else:
-        print(f"Failed to restart: {result.stderr.strip()}")
 
 
 def status() -> None:

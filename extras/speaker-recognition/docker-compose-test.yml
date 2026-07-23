@@ -16,7 +16,6 @@ services:
       # Persist Hugging Face cache (models) between restarts
       - ./model_cache:/models
       # Test-specific data directories to avoid clobbering dev data
-      - ./audio_chunks_test:/app/audio_chunks
       - ./debug_test:/app/debug
       - ./speaker_data_test:/app/data
     env_file:

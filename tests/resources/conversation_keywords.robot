@@ -225,8 +225,8 @@ Conversation Should Have Live Transcript
     ...    msg=Expected active_transcript_version='live-v0', got '${conversation}[active_transcript_version]'
     RETURN    ${conversation}
 
-Verify Conversation Always Persist Flag
-    [Documentation]    Verify conversation has always_persist=True
+Verify Durable Audio Placeholder Flag
+    [Documentation]    Verify conversation is the session's durable audio placeholder
     [Arguments]    ${conversation_id}
 
     ${conversation}=    Get Conversation By ID    ${conversation_id}

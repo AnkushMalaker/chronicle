@@ -582,18 +582,33 @@ class SpeakerRecognitionClient:
 
         # Majority-vote per label
         label_votes: Dict[str, List[tuple[str, float]]] = {}
+        identification_evidence: Dict[str, Dict] = {}
         for label, tasks in label_tasks.items():
             votes: List[tuple[str, float]] = []
-            for task in tasks:
+            sample_evidence = []
+            for sample, task in zip(label_samples[label], tasks):
                 try:
                     result = task.result()
                 except Exception:
+                    result = None
+                sample_evidence.append(
+                    {
+                        "start": sample["start"],
+                        "end": sample["end"],
+                        "duration": sample["end"] - sample["start"],
+                        "found": bool(result and result.get("found")),
+                        "confidence": (result or {}).get("confidence", 0.0),
+                        "candidates": (result or {}).get("candidates", []),
+                    }
+                )
+                if not result:
                     continue
                 if result and result.get("found"):
                     name = result.get("speaker_name", "Unknown")
                     confidence = result.get("confidence", 0.0)
                     votes.append((name, confidence))
             label_votes[label] = votes
+            identification_evidence[label] = {"samples": sample_evidence}
             if not votes:
                 logger.info(
                     f"🎤 Label '{label}' -> no identification (keeping original)"
@@ -603,6 +618,10 @@ class SpeakerRecognitionClient:
         )
         for label, (name, confidence) in label_mapping.items():
             logger.info("🎤 Label %r -> %r (conf=%.3f)", label, name, confidence)
+        for label, evidence in identification_evidence.items():
+            mapped = label_mapping.get(label)
+            evidence["assigned_name"] = mapped[0] if mapped else None
+            evidence["assigned_confidence"] = mapped[1] if mapped else 0.0
 
         # Build result segments in same format as diarize_identify_match()
         # Non-speech segments are kept but not speaker-identified
@@ -641,7 +660,14 @@ class SpeakerRecognitionClient:
             f"{len(result_segments)} total segments ({len(non_speech_indices)} non-speech kept as-is)"
         )
 
-        return {"segments": result_segments}
+        return {
+            "segments": result_segments,
+            "identification_evidence": {
+                "mode": "majority_vote",
+                "similarity_threshold": similarity_threshold,
+                "labels": identification_evidence,
+            },
+        }
 
     async def _identify_per_segment(
         self,
@@ -1297,7 +1323,15 @@ class SpeakerRecognitionClient:
                         return {"error": "enrollment_failed", "status": response.status}
 
                     result = await response.json()
-                    logger.info(f"🎤 ✅ Successfully enrolled speaker '{speaker_name}'")
+                    if result.get("status") == "already_enrolled":
+                        logger.info(
+                            "🎤 Enrollment for '%s' was already satisfied; no-op",
+                            speaker_name,
+                        )
+                    else:
+                        logger.info(
+                            "🎤 ✅ Successfully enrolled speaker '%s'", speaker_name
+                        )
                     return result
 
         except aiohttp.ClientError as e:
@@ -1348,7 +1382,15 @@ class SpeakerRecognitionClient:
                         return {"error": "append_failed", "status": response.status}
 
                     result = await response.json()
-                    logger.info(f"🎤 ✅ Successfully appended to speaker {speaker_id}")
+                    if result.get("status") == "already_enrolled":
+                        logger.info(
+                            "🎤 Speaker %s already contains this audio; no-op",
+                            speaker_id,
+                        )
+                    else:
+                        logger.info(
+                            "🎤 ✅ Successfully appended to speaker %s", speaker_id
+                        )
                     return result
 
         except aiohttp.ClientError as e:
@@ -1570,6 +1612,8 @@ class SpeakerRecognitionClient:
         clusters: Dict[str, list],
         user_id: int = 1,
         similarity_threshold: Optional[float] = None,
+        identify_margin: Optional[float] = None,
+        exclusive: Optional[bool] = None,
     ) -> Dict:
         """Re-identify stored per-cluster centroids against the CURRENT gallery.
 
@@ -1582,6 +1626,10 @@ class SpeakerRecognitionClient:
         payload: Dict = {"clusters": clusters, "user_id": user_id}
         if similarity_threshold is not None:
             payload["similarity_threshold"] = similarity_threshold
+        if identify_margin is not None:
+            payload["identify_margin"] = identify_margin
+        if exclusive is not None:
+            payload["exclusive"] = exclusive
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(

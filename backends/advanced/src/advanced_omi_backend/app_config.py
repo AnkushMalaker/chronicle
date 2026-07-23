@@ -34,7 +34,9 @@ class AppConfig:
         # MongoDB Configuration
         self.mongodb_uri = os.getenv("MONGODB_URI", "mongodb://mongo:27017")
         self.mongodb_database = os.getenv("MONGODB_DATABASE", "chronicle")
-        self.mongo_client = AsyncIOMotorClient(self.mongodb_uri)
+        self.mongo_client = AsyncIOMotorClient(
+            self.mongodb_uri, w="majority", journal=True
+        )
         self.db = self.mongo_client.get_default_database(self.mongodb_database)
         self.users_col = self.db["users"]
         self.speakers_col = self.db["speakers"]

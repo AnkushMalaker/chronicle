@@ -28,6 +28,7 @@ from simple_speaker_recognition.core.enrollment_audit import (
 from simple_speaker_recognition.core.unified_speaker_db import UnifiedSpeakerDB
 from simple_speaker_recognition.database import get_db_session
 from simple_speaker_recognition.database.models import (
+    EnrollmentAuditDecision,
     ProcessingJob,
     Speaker,
     SpeakerAudioSegment,
@@ -67,6 +68,38 @@ def _resolve_seg_path(seg: SpeakerAudioSegment) -> Path:
             403, "Segment audio path is outside the enrollment directory"
         )
     return path
+
+
+def _remove_manifest_audio_path(audio_file_path: str) -> None:
+    """Remove a deleted/quarantined clip from its enrollment manifest."""
+    base = get_auth().enrollment_audio_dir.resolve()
+    relative_path = Path(audio_file_path)
+    manifest_path = base / relative_path.parent / "enrollment_manifest.json"
+    if not manifest_path.exists():
+        return
+
+    with manifest_path.open() as manifest_file:
+        manifest = json.load(manifest_file)
+    audio_files = manifest.get("audio_files", [])
+    if not isinstance(audio_files, list):
+        raise ValueError(f"Invalid audio_files in enrollment manifest {manifest_path}")
+
+    normalized_path = relative_path.as_posix()
+    retained_files = [
+        item
+        for item in audio_files
+        if not isinstance(item, dict) or item.get("path") != normalized_path
+    ]
+    if len(retained_files) == len(audio_files):
+        return
+
+    manifest["audio_files"] = retained_files
+    manifest["total_files"] = len(retained_files)
+    manifest["last_updated"] = datetime.now().isoformat()
+    temporary_path = manifest_path.with_suffix(".json.tmp")
+    with temporary_path.open("w") as manifest_file:
+        json.dump(manifest, manifest_file, indent=2)
+    temporary_path.replace(manifest_path)
 
 
 @router.get("/enrollment/health")
@@ -274,6 +307,10 @@ class EmbeddingScoreRequest(BaseModel):
     embeddings: list[list[float]] = Field(..., min_length=1, max_length=5000)
 
 
+class EnrollmentAuditReviewRequest(BaseModel):
+    decision: str = Field(pattern="^(confirmed_correct|reset)$")
+
+
 def _score_embeddings(embeddings: list[list[float]], speaker_id: str) -> list[dict]:
     """Compare precomputed unit embeddings with one live speaker gallery."""
     session = get_db_session()
@@ -309,36 +346,44 @@ def _score_embeddings(embeddings: list[list[float]], speaker_id: str) -> list[di
                 if vector is not None:
                     others.append((other, vector))
 
-        results = []
-        for values in embeddings:
+        # Score a corpus batch as matrix multiplications. The old nested Python loops
+        # did one np.dot call per corpus/gallery pair, which dominated the supposedly
+        # cheap cached-embedding refresh at a few thousand corpus vectors.
+        valid: list[tuple[int, np.ndarray]] = []
+        results: list[dict] = [{"error": "invalid_embedding"} for _ in embeddings]
+        for index, values in enumerate(embeddings):
             emb = _unit(values)
-            if emb is None or emb.shape != centroid.shape:
-                results.append({"error": "invalid_embedding"})
-                continue
+            if emb is not None and emb.shape == centroid.shape:
+                valid.append((index, emb))
+        if not valid:
+            return results
+
+        matrix = np.stack([embedding for _, embedding in valid])
+        centroid_scores = matrix @ centroid
+        gallery_scores = matrix @ np.stack(clip_vectors).T if clip_vectors else None
+        other_scores = (
+            matrix @ np.stack([vector for _, vector in others]).T if others else None
+        )
+        for row, (result_index, _embedding) in enumerate(valid):
             best_other = None
-            for other, vector in others:
-                score = float(np.dot(emb, vector))
-                if best_other is None or score > best_other["score"]:
-                    best_other = {
-                        "speaker_id": other.id,
-                        "name": other.name,
-                        "score": round(score, 4),
-                    }
-            results.append(
-                {
-                    "sim_centroid": round(float(np.dot(emb, centroid)), 4),
-                    "max_clip_sim": (
-                        round(
-                            max(float(np.dot(emb, vector)) for vector in clip_vectors),
-                            4,
-                        )
-                        if clip_vectors
-                        else None
-                    ),
-                    "n_gallery_clips": len(clip_vectors),
-                    "best_other": best_other,
+            if other_scores is not None:
+                best_index = int(np.argmax(other_scores[row]))
+                other, _vector = others[best_index]
+                best_other = {
+                    "speaker_id": other.id,
+                    "name": other.name,
+                    "score": round(float(other_scores[row, best_index]), 4),
                 }
-            )
+            results[result_index] = {
+                "sim_centroid": round(float(centroid_scores[row]), 4),
+                "max_clip_sim": (
+                    round(float(np.max(gallery_scores[row])), 4)
+                    if gallery_scores is not None
+                    else None
+                ),
+                "n_gallery_clips": len(clip_vectors),
+                "best_other": best_other,
+            }
         return results
     finally:
         session.close()
@@ -521,6 +566,49 @@ async def relabel_segment(
         session.close()
 
 
+@router.post("/enrollment/segments/{segment_id}/audit-review")
+async def review_enrollment_flag(
+    segment_id: int,
+    request: EnrollmentAuditReviewRequest,
+):
+    """Confirm a heuristic flag as a false positive, or restore automatic review."""
+    session = get_db_session()
+    try:
+        segment = (
+            session.query(SpeakerAudioSegment)
+            .filter(SpeakerAudioSegment.id == segment_id)
+            .first()
+        )
+        if not segment:
+            raise HTTPException(404, "Segment not found")
+
+        existing = (
+            session.query(EnrollmentAuditDecision)
+            .filter(EnrollmentAuditDecision.segment_id == segment_id)
+            .first()
+        )
+        if request.decision == "reset":
+            if existing:
+                session.delete(existing)
+        elif existing:
+            existing.decision = request.decision
+            existing.updated_at = datetime.utcnow()
+        else:
+            session.add(
+                EnrollmentAuditDecision(
+                    segment_id=segment_id,
+                    decision=request.decision,
+                )
+            )
+        session.commit()
+        return {
+            "segment_id": segment_id,
+            "review_state": None if request.decision == "reset" else request.decision,
+        }
+    finally:
+        session.close()
+
+
 @router.post("/enrollment/segments/{segment_id}/delete")
 async def delete_segment(
     segment_id: int,
@@ -548,6 +636,7 @@ async def delete_segment(
         if not seg:
             raise HTTPException(404, "Segment not found")
         src_id = seg.speaker_id
+        audio_file_path = seg.audio_file_path
 
         quarantined_to = None
         try:
@@ -565,7 +654,11 @@ async def delete_segment(
         except HTTPException:
             raise
         except Exception as e:
-            log.warning("Could not move/delete audio for segment %s: %s", segment_id, e)
+            raise HTTPException(
+                500, f"Could not move/delete audio for segment {segment_id}: {e}"
+            ) from e
+
+        _remove_manifest_audio_path(audio_file_path)
 
         session.delete(seg)
         session.commit()

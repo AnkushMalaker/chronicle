@@ -21,7 +21,6 @@ from rq.exceptions import NoSuchJobError
 from rq.job import Dependency, Job, JobStatus
 from rq.registry import DeferredJobRegistry, ScheduledJobRegistry
 
-from advanced_omi_backend.config import get_misc_settings
 from advanced_omi_backend.config_loader import get_service_config
 from advanced_omi_backend.heartbeat import (
     FLEET_HEALTH_KEY,
@@ -29,6 +28,15 @@ from advanced_omi_backend.heartbeat import (
     is_rq_worker_fresh,
 )
 from advanced_omi_backend.redis_factory import create_sync_redis
+from advanced_omi_backend.services.audio_stream.durability import (
+    AUDIO_PERSISTENCE_GROUP,
+    delete_stream_if_durable,
+    parse_consumer_groups,
+)
+from advanced_omi_backend.services.audio_stream.session_store import (
+    SessionStatus,
+    SessionStore,
+)
 from advanced_omi_backend.services.memory.audit import MemoryCause, UpdateStrategy
 from advanced_omi_backend.services.sse_publisher import publish_sse_event
 
@@ -461,20 +469,12 @@ def enqueue_audio_persistence(
     session_id: str,
     user_id: str,
     client_id: str,
-    *,
-    always_persist: bool,
 ) -> str:
     """Single-flight enqueue of the per-session audio-persistence job.
 
-    The persistence job is SESSION-scoped — one consumer for the whole
-    ``audio:stream:{client_id}``, surviving WebSocket reconnects. A reconnect
-    re-runs ``start_streaming_jobs``; if a persistence job is already live we must
-    NOT enqueue a second one. Two persistence jobs share the same Redis consumer
-    name (``persistence-{session_id[:8]}``), so each new stream message is
-    delivered to only one of them — the audio gets split between the jobs, and the
-    speech-detected conversations created after the reconnect find no chunks under
-    their id and get deleted as ``audio_chunks_not_ready`` while their transcripts
-    are stranded on a different conversation.
+    The persistence job is scoped to one immutable recording session and its
+    ``audio:stream:{session_id}`` WAL. Repeated liveness checks for that session
+    must not enqueue a second consumer.
 
     The job id is deterministic per session, so liveness is checked by fetching it
     directly; a short Redis mutex collapses a simultaneous reconnect burst into one
@@ -510,11 +510,11 @@ def enqueue_audio_persistence(
             session_id,
             user_id,
             client_id,
-            always_persist,
             job_timeout=86400,  # 24 hours for all-day sessions
             ttl=None,  # No pre-run expiry (job can wait indefinitely in queue)
             result_ttl=JOB_RESULT_TTL,  # Cleanup AFTER completion
-            failure_ttl=86400,  # Cleanup failed jobs after 24h
+            failure_ttl=604800,
+            retry=Retry(max=1000, interval=[1, 5, 15, 30, 60, 300]),
             job_id=job_id,
             description=f"Audio persistence for session {session_id}",
             meta={"client_id": client_id, "session_level": True},
@@ -526,6 +526,25 @@ def enqueue_audio_persistence(
         return audio_job.id
     finally:
         redis_conn.delete(lock_key)
+
+
+def ensure_audio_persistence(
+    session_id: str,
+    user_id: str,
+    client_id: str,
+) -> str:
+    """Return a verified-live persistence job for an audio session.
+
+    This is the data-integrity boundary used both at session startup and by the
+    WebSocket watchdog. Merely returning a deterministic RQ job id is insufficient:
+    a prior recording may have left a finished job with that id behind.
+    """
+    job_id = enqueue_audio_persistence(session_id, user_id, client_id)
+    if not _job_is_live(job_id):
+        raise RuntimeError(
+            f"Audio persistence job {job_id} is not live for session {session_id}"
+        )
+    return job_id
 
 
 def enqueue_speech_detection(
@@ -644,30 +663,8 @@ def start_streaming_jobs(
 
     Note:
         - user_email is fetched from the database when needed.
-        - always_persist setting is read from global config at enqueue time and passed to worker.
+        - raw audio always receives a durable owner before this function is called.
     """
-    # Lazy import: circular dependency with the `workers` package (its __init__
-    # imports back from this module).
-    from advanced_omi_backend.workers.audio_jobs import audio_streaming_persistence_job
-
-    # Read always_persist from global config NOW (backend process has fresh config)
-    misc_settings = get_misc_settings()
-    always_persist = misc_settings.get("always_persist_enabled", False)
-
-    # In "off" live-segmentation mode there is no live transcript to gate on, so batch
-    # transcription is the ONLY path to a transcript — and batch reads audio from
-    # MongoDB. always_persist=False would mean nothing is persisted (no speech signal
-    # to trigger it), so the audio would only ever exist in the soon-trimmed Redis
-    # stream and never get transcribed. Force persistence so off mode always has audio
-    # for batch; no-speech sessions are still hidden via post-batch soft-delete.
-    live_segmentation = misc_settings.get("live_segmentation", "streaming_stt")
-    if live_segmentation == "off" and not always_persist:
-        logger.info(
-            "🔒 live_segmentation=off → forcing always_persist=True so batch "
-            "transcription has persisted audio to read"
-        )
-        always_persist = True
-
     # Enqueue speech detection job (single-flight: skips if one is already live
     # for this session, e.g. on a WebSocket reconnect mid-session).
     speech_job_id = (
@@ -679,9 +676,7 @@ def start_streaming_jobs(
     # reconnect mid-session reuses the live job instead of starting a second
     # consumer that would split the audio stream). This job handles file rotation
     # for multiple conversations and runs for the entire session.
-    audio_job_id = enqueue_audio_persistence(
-        session_id, user_id, client_id, always_persist=always_persist
-    )
+    audio_job_id = ensure_audio_persistence(session_id, user_id, client_id)
 
     # Notify frontend that streaming jobs are queued
     publish_sse_event(
@@ -1128,13 +1123,14 @@ def get_queue_health() -> Dict[str, Any]:
     return health
 
 
-# needs tidying but works for now
 async def cleanup_stuck_stream_workers(request):
-    """Clean up stuck Redis Stream consumers and pending messages from all active streams."""
-    try:
-        # Get Redis client from request.app.state (initialized during startup)
-        redis_client = request.app.state.redis_audio_stream
+    """Delete only empty consumers and audio streams proven durably consumed.
 
+    Pending deliveries are never claimed or acknowledged here. Only the consumer
+    that committed its side effect may ACK a message.
+    """
+    try:
+        redis_client = request.app.state.redis_audio_stream
         if not redis_client:
             return JSONResponse(
                 status_code=503,
@@ -1142,201 +1138,43 @@ async def cleanup_stuck_stream_workers(request):
             )
 
         cleanup_results = {}
-        total_cleaned = 0
         total_deleted_consumers = 0
         total_deleted_streams = 0
-        current_time = time.time()
-
-        # Discover all audio streams (per-client streams)
         stream_keys = await redis_client.keys("audio:stream:*")
 
         for stream_key in stream_keys:
             stream_name = (
                 stream_key.decode() if isinstance(stream_key, bytes) else stream_key
             )
-
             try:
-                # First check stream age - delete old streams (>1 hour) immediately
-                stream_info = await redis_client.execute_command(
-                    "XINFO", "STREAM", stream_name
-                )
-
-                # Parse stream info
-                info_dict = {}
-                for i in range(0, len(stream_info), 2):
-                    key_name = (
-                        stream_info[i].decode()
-                        if isinstance(stream_info[i], bytes)
-                        else str(stream_info[i])
-                    )
-                    info_dict[key_name] = stream_info[i + 1]
-
-                stream_length = int(info_dict.get("length", 0))
-                last_entry = info_dict.get("last-entry")
-
-                # Check if stream is old
-                should_delete_stream = False
-                stream_age = 0
-
-                if stream_length == 0:
-                    should_delete_stream = True
-                    stream_age = 0
-                elif (
-                    last_entry and isinstance(last_entry, list) and len(last_entry) > 0
-                ):
-                    try:
-                        last_id = last_entry[0]
-                        if isinstance(last_id, bytes):
-                            last_id = last_id.decode()
-                        last_timestamp_ms = int(last_id.split("-")[0])
-                        last_timestamp_s = last_timestamp_ms / 1000
-                        stream_age = current_time - last_timestamp_s
-
-                        # Delete streams older than 1 hour (3600 seconds)
-                        if stream_age > 3600:
-                            should_delete_stream = True
-                    except (ValueError, IndexError):
-                        pass
-
-                if should_delete_stream:
-                    await redis_client.delete(stream_name)
-                    total_deleted_streams += 1
-                    cleanup_results[stream_name] = {
-                        "message": f"Deleted old stream (age: {stream_age:.0f}s, length: {stream_length})",
-                        "cleaned": 0,
-                        "deleted_consumers": 0,
-                        "deleted_stream": True,
-                        "stream_age": stream_age,
-                    }
-                    continue
-
-                # Get consumer groups
-                groups = await redis_client.execute_command(
+                # Defuse legacy expiry before any inspection. If inspection fails,
+                # retaining raw bytes is the fail-closed outcome.
+                await redis_client.persist(stream_name)
+                raw_groups = await redis_client.execute_command(
                     "XINFO", "GROUPS", stream_name
                 )
-
-                if not groups:
-                    cleanup_results[stream_name] = {
-                        "message": "No consumer groups found",
-                        "cleaned": 0,
-                        "deleted_stream": False,
-                    }
-                    continue
-
-                # Parse first group
-                group_dict = {}
-                group = groups[0]
-                for i in range(0, len(group), 2):
-                    key = (
-                        group[i].decode()
-                        if isinstance(group[i], bytes)
-                        else str(group[i])
-                    )
-                    value = group[i + 1]
-                    if isinstance(value, bytes):
-                        try:
-                            value = value.decode()
-                        except UnicodeDecodeError:
-                            value = str(value)
-                    group_dict[key] = value
-
-                group_name = group_dict.get("name", "unknown")
-                if isinstance(group_name, bytes):
-                    group_name = group_name.decode()
-
-                pending_count = int(group_dict.get("pending", 0))
-
-                # Get consumers for this group to check per-consumer pending
-                consumers = await redis_client.execute_command(
-                    "XINFO", "CONSUMERS", stream_name, group_name
-                )
-
-                cleaned_count = 0
-                total_consumer_pending = 0
-
-                # Clean up pending messages for each consumer AND delete dead consumers
+                groups = parse_consumer_groups(raw_groups or [])
                 deleted_consumers = 0
-                for consumer in consumers:
-                    consumer_dict = {}
-                    for i in range(0, len(consumer), 2):
-                        key = (
-                            consumer[i].decode()
-                            if isinstance(consumer[i], bytes)
-                            else str(consumer[i])
-                        )
-                        value = consumer[i + 1]
-                        if isinstance(value, bytes):
-                            try:
+
+                for group_name in groups:
+                    consumers = await redis_client.execute_command(
+                        "XINFO", "CONSUMERS", stream_name, group_name
+                    )
+                    for consumer in consumers:
+                        values = {}
+                        for index in range(0, len(consumer), 2):
+                            key = consumer[index]
+                            value = consumer[index + 1]
+                            if isinstance(key, bytes):
+                                key = key.decode()
+                            if isinstance(value, bytes):
                                 value = value.decode()
-                            except UnicodeDecodeError:
-                                value = str(value)
-                        consumer_dict[key] = value
+                            values[str(key)] = value
 
-                    consumer_name = consumer_dict.get("name", "unknown")
-                    if isinstance(consumer_name, bytes):
-                        consumer_name = consumer_name.decode()
-
-                    consumer_pending = int(consumer_dict.get("pending", 0))
-                    consumer_idle_ms = int(consumer_dict.get("idle", 0))
-                    total_consumer_pending += consumer_pending
-
-                    # Check if consumer is dead (idle > 5 minutes = 300000ms)
-                    is_dead = consumer_idle_ms > 300000
-
-                    if consumer_pending > 0:
-                        logger.info(
-                            f"Found {consumer_pending} pending messages for consumer {consumer_name} (idle: {consumer_idle_ms}ms)"
-                        )
-
-                        # Get pending messages for this specific consumer
-                        try:
-                            pending_messages = await redis_client.execute_command(
-                                "XPENDING",
-                                stream_name,
-                                group_name,
-                                "-",
-                                "+",
-                                str(consumer_pending),
-                                consumer_name,
-                            )
-
-                            # XPENDING returns flat list: [msg_id, consumer, idle_ms, delivery_count, msg_id, ...]
-                            # Parse in groups of 4
-                            for i in range(0, len(pending_messages), 4):
-                                if i < len(pending_messages):
-                                    msg_id = pending_messages[i]
-                                    if isinstance(msg_id, bytes):
-                                        msg_id = msg_id.decode()
-
-                                    # Claim the message to a cleanup worker
-                                    try:
-                                        await redis_client.execute_command(
-                                            "XCLAIM",
-                                            stream_name,
-                                            group_name,
-                                            "cleanup-worker",
-                                            "0",
-                                            msg_id,
-                                        )
-
-                                        # Acknowledge it immediately
-                                        await redis_client.xack(
-                                            stream_name, group_name, msg_id
-                                        )
-                                        cleaned_count += 1
-                                    except Exception as claim_error:
-                                        logger.warning(
-                                            f"Failed to claim/ack message {msg_id}: {claim_error}"
-                                        )
-
-                        except Exception as consumer_error:
-                            logger.error(
-                                f"Error processing consumer {consumer_name}: {consumer_error}"
-                            )
-
-                    # Delete dead consumers (idle > 5 minutes with no pending messages)
-                    if is_dead and consumer_pending == 0:
-                        try:
+                        consumer_name = str(values.get("name", "unknown"))
+                        pending = int(values.get("pending", 0))
+                        idle_ms = int(values.get("idle", 0))
+                        if idle_ms > 300000 and pending == 0:
                             await redis_client.execute_command(
                                 "XGROUP",
                                 "DELCONSUMER",
@@ -1345,49 +1183,58 @@ async def cleanup_stuck_stream_workers(request):
                                 consumer_name,
                             )
                             deleted_consumers += 1
-                            logger.info(
-                                f"🧹 Deleted dead consumer {consumer_name} (idle: {consumer_idle_ms}ms)"
-                            )
-                        except Exception as delete_error:
-                            logger.warning(
-                                f"Failed to delete consumer {consumer_name}: {delete_error}"
-                            )
 
-                if total_consumer_pending == 0 and deleted_consumers == 0:
+                total_deleted_consumers += deleted_consumers
+                session_id = stream_name.removeprefix("audio:stream:")
+                status = await SessionStore(redis_client).get_status(session_id)
+                if status not in (SessionStatus.FINALIZING, SessionStatus.FINISHED):
                     cleanup_results[stream_name] = {
-                        "message": "No pending messages or dead consumers",
+                        "message": f"session_not_terminal:{status}",
                         "cleaned": 0,
-                        "deleted_consumers": 0,
+                        "deleted_consumers": deleted_consumers,
                         "deleted_stream": False,
+                        "retained_pending": sum(
+                            group.pending for group in groups.values()
+                        ),
                     }
                     continue
 
-                total_cleaned += cleaned_count
-                total_deleted_consumers += deleted_consumers
-                cleanup_results[stream_name] = {
-                    "message": f"Cleaned {cleaned_count} pending messages, deleted {deleted_consumers} dead consumers",
-                    "cleaned": cleaned_count,
-                    "deleted_consumers": deleted_consumers,
-                    "deleted_stream": False,
-                    "original_pending": pending_count,
-                }
+                decision = await delete_stream_if_durable(
+                    redis_client,
+                    stream_name,
+                    required_groups={AUDIO_PERSISTENCE_GROUP},
+                )
+                if decision.safe_to_delete:
+                    total_deleted_streams += 1
 
-            except Exception as e:
-                cleanup_results[stream_name] = {"error": str(e), "cleaned": 0}
+                cleanup_results[stream_name] = {
+                    "message": decision.reason,
+                    "cleaned": 0,
+                    "deleted_consumers": deleted_consumers,
+                    "deleted_stream": decision.safe_to_delete,
+                    "retained_pending": sum(
+                        group.pending for group in decision.groups.values()
+                    ),
+                }
+            except Exception as error:
+                cleanup_results[stream_name] = {
+                    "error": str(error),
+                    "cleaned": 0,
+                    "deleted_stream": False,
+                }
 
         return {
             "success": True,
-            "total_cleaned": total_cleaned,
+            "total_cleaned": 0,
             "total_deleted_consumers": total_deleted_consumers,
             "total_deleted_streams": total_deleted_streams,
-            "streams": cleanup_results,  # New key for per-stream results
-            "providers": cleanup_results,  # Keep for backward compatibility with frontend
+            "streams": cleanup_results,
+            "providers": cleanup_results,
             "timestamp": time.time(),
         }
-
-    except Exception as e:
-        logger.error(f"Error cleaning up stuck workers: {e}", exc_info=True)
+    except Exception as error:
+        logger.error(f"Error cleaning up stuck workers: {error}", exc_info=True)
         return JSONResponse(
             status_code=500,
-            content={"error": f"Failed to cleanup stuck workers: {str(e)}"},
+            content={"error": f"Failed to cleanup stuck workers: {str(error)}"},
         )

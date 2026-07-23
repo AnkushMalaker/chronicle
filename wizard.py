@@ -572,6 +572,8 @@ def run_service_setup(
                 cmd.extend(["--admin-email", admin_email])
             if admin_password:
                 cmd.extend(["--admin-password", admin_password])
+            if langfuse_public_url:
+                cmd.extend(["--public-url", langfuse_public_url])
 
     console.print(f"\n🔧 [bold]Setting up {service_name}...[/bold]")
 
@@ -1231,17 +1233,18 @@ def select_live_segmentation(batch_provider):
     return "streaming_stt"
 
 
-def derive_langfuse_public_url(langfuse_mode, langfuse_external, server_ip):
+def derive_langfuse_public_url(
+    langfuse_mode, langfuse_external, server_ip, https_enabled
+):
     """Derive the browser-accessible LangFuse URL used for dashboard deep-links.
 
     This becomes ``observability.langfuse.public_url`` in config.yml, which the
     backend serves to the web UI for Langfuse trace/session links.
 
     - external mode: the host the user entered is already browser-accessible.
-    - local mode: the bundled instance is exposed on plain HTTP port 3002
-      (see extras/langfuse/docker-compose.yml). Use the Tailscale name/IP chosen
-      for HTTPS when available, otherwise fall back to detected Tailscale info,
-      otherwise localhost.
+    - local mode with Chronicle HTTPS: Caddy serves the bundled instance on 3443.
+    - local mode without HTTPS: fall back to the directly-published HTTP port 3002.
+      In both cases use the selected/detected Tailscale name when available.
     """
     if langfuse_mode == "external":
         return langfuse_external.get("host")
@@ -1250,7 +1253,9 @@ def derive_langfuse_public_url(langfuse_mode, langfuse_external, server_ip):
     if not host:
         ts_dns, ts_ip = detect_tailscale_info()
         host = ts_dns or ts_ip or "localhost"
-    return f"http://{host}:3002"
+    scheme = "https" if https_enabled else "http"
+    port = "3443" if https_enabled else "3002"
+    return f"{scheme}://{host}:{port}"
 
 
 def setup_langfuse_choice():
@@ -2257,7 +2262,7 @@ def main():
     # Browser-accessible URL for Langfuse dashboard deep-links (stored in config.yml).
     # Derived from server_ip/Tailscale so links don't hardcode localhost.
     langfuse_public_url = derive_langfuse_public_url(
-        langfuse_mode, langfuse_external, server_ip
+        langfuse_mode, langfuse_external, server_ip, https_enabled
     )
 
     # Determine setup order: langfuse first (to get API keys), then backend (with langfuse keys), then others

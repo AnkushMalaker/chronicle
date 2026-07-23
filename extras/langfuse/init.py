@@ -66,6 +66,11 @@ def run(args):
 
     env_path = Path(".env")
     env_template = Path(".env.template")
+    public_url = (
+        getattr(args, "public_url", None)
+        or read_env_value(".env", "NEXTAUTH_URL")
+        or "http://localhost:3002"
+    )
 
     # --- Internal secrets (auto-generate if not already set) ---
     print_section("Internal Secrets")
@@ -182,6 +187,7 @@ def run(args):
         "LANGFUSE_SALT": salt,
         "LANGFUSE_ENCRYPTION_KEY": enc_key,
         "LANGFUSE_NEXTAUTH_SECRET": nextauth_secret,
+        "NEXTAUTH_URL": public_url,
         "LANGFUSE_INIT_PROJECT_PUBLIC_KEY": public_key,
         "LANGFUSE_INIT_PROJECT_SECRET_KEY": secret_key,
         "LANGFUSE_INIT_ORG_ID": "chronicle",
@@ -208,7 +214,7 @@ def run(args):
     table.add_column("Setting", style="cyan")
     table.add_column("Value", style="green")
 
-    table.add_row("Web UI", "http://localhost:3002")
+    table.add_row("Web UI", public_url)
     table.add_row("Admin Email", admin_email)
     table.add_row("Public Key", mask_value(public_key))
     table.add_row("Secret Key", mask_value(secret_key))
@@ -229,6 +235,9 @@ def main():
     parser = argparse.ArgumentParser(description="LangFuse Setup")
     parser.add_argument("--admin-email", help="Admin email (reuse from backend)")
     parser.add_argument("--admin-password", help="Admin password (reuse from backend)")
+    parser.add_argument(
+        "--public-url", help="Canonical browser URL (for example, https://host:3443)"
+    )
 
     args = parser.parse_args()
 

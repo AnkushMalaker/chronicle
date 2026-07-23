@@ -17,7 +17,6 @@ services:
     volumes:
       - ./src:/app/src
       - ./model_cache:/models
-      - ./audio_chunks:/app/audio_chunks
       - ./debug:/app/debug
       - ./speaker_data:/app/data
       - ../../config:/app/config:ro

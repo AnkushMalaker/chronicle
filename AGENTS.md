@@ -643,6 +643,11 @@ Key Testing Rules:
 - Skip reading the guidelines before writing tests
 
 ## Notes for Coding Agents
+For frontend UI changes and reviews, read
+**[@docs/agents/frontend-ux-review.md](docs/agents/frontend-ux-review.md)**. Apply the
+installed `frontend-design-principles` skill for hierarchy and visual judgment, and
+the repository `screenshots` skill for rendered-page verification.
+
 Check if the src/ is volume mounted. If not, do compose build so that code changes are reflected. Do not simply run `docker compose restart` as it will not rebuild the image.
 Check `docs/backend/` for up-to-date information on the advanced backend.
 All docker projects have .dockerignore following the exclude pattern. That means files need to be included for them to be visible to docker.

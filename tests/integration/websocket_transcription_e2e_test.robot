@@ -48,6 +48,8 @@ WebSocket Stream Produces Final Transcripts In Redis
     # Open stream and send audio
     ${stream_id}=    Open Audio Stream    device_name=${device_name}
     Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=100
+    ${session_id}=    Wait Until Keyword Succeeds    10s    250ms
+    ...    Get Active Session ID For Client    ${client_id}
 
     # Critical: Close stream triggers the entire finalization flow
     Log    Closing stream - should trigger: end_marker → CloseStream → final results
@@ -55,7 +57,7 @@ WebSocket Stream Produces Final Transcripts In Redis
 
     # Wait for streaming consumer to process end_marker and write final results to Redis
     # Use retry loop instead of fixed sleep - consumer processing time varies
-    ${stream_name}=    Set Variable    transcription:results:${client_id}
+    ${stream_name}=    Set Variable    transcription:results:${session_id}
     Wait Until Keyword Succeeds    30s    2s
     ...    Redis Stream Should Not Be Empty    ${stream_name}
 
@@ -185,18 +187,15 @@ Stream Close Sends End Marker To Redis Stream
     # Open stream and send some audio
     ${stream_id}=    Open Audio Stream    device_name=${device_name}
     Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=50
-
-    # Get the audio stream name (where chunks are sent)
-    ${audio_stream_name}=    Set Variable    audio:stream:${client_id}
+    ${session_id}=    Wait Until Keyword Succeeds    10s    250ms
+    ...    Get Active Session ID For Client    ${client_id}
 
     # Close stream - this MUST send end_marker
     Close Audio Stream    ${stream_id}
 
-    # The audio stream is intentionally deleted ~1.2s after close by _try_delete_finished_stream(),
-    # so we can't rely on XRANGE to find end_marker. Instead, verify via transcription:complete
-    # which is a durable key (5-min TTL) set by StreamingTranscriptionConsumer.end_session_stream()
-    # only AFTER it processes the end_marker.
-    ${completion_key}=    Set Variable    transcription:complete:${client_id}
+    # Verify via transcription:complete, which is set only after the streaming
+    # consumer processes this session's end marker.
+    ${completion_key}=    Set Variable    transcription:complete:${session_id}
     Wait Until Keyword Succeeds    30s    1s
     ...    Verify Redis Key Exists    ${completion_key}
 
@@ -218,6 +217,8 @@ Streaming Consumer Closes Deepgram Connection On End Marker
     # Stream and close
     ${stream_id}=    Open Audio Stream    device_name=${device_name}
     Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=100
+    ${session_id}=    Wait Until Keyword Succeeds    10s    250ms
+    ...    Get Active Session ID For Client    ${client_id}
     Close Audio Stream    ${stream_id}
 
     # Wait for streaming consumer to process end_marker
@@ -369,7 +370,7 @@ Streaming Completion Signal Is Set Before Transcript Read
     Close Audio Stream    ${stream_id}
 
     # Wait for streaming consumer to complete and set the completion signal
-    ${completion_key}=    Set Variable    transcription:complete:${client_id}
+    ${completion_key}=    Set Variable    transcription:complete:${session_id}
     Wait Until Keyword Succeeds    30s    1s
     ...    Verify Redis Key Exists    ${completion_key}
 

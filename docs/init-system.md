@@ -116,6 +116,7 @@ Note (Linux): If `host.docker.internal` is unavailable, add `extra_hosts: - "hos
 |---------|----------|-------------|------------|
 | **Advanced Backend** | 8000 | 5173 | http://localhost:8000 (API), http://localhost:5173 (Dashboard) |
 | **Speaker Recognition** | 8085 | 5175* | http://localhost:8085 (API), http://localhost:5175 (WebUI) |
+| **Langfuse** | 3002 | 3002 | http://localhost:3002 (WebUI/API) |
 | **Parakeet ASR** | 8767 | - | http://localhost:8767 (API) |
 
 *Speaker Recognition WebUI port is configurable via REACT_UI_PORT
@@ -128,8 +129,9 @@ Note: Browsers require HTTPS for microphone access over network.
 |---------|-----------|------------|------------|
 | **Advanced Backend** | 80->443 | 443 | https://localhost/ (Main), https://localhost/api/ (API) |
 | **Speaker Recognition** | 8081->8444 | 8444 | https://localhost:8444/ (Main), https://localhost:8444/api/ (API) |
+| **Langfuse** | 3002 (direct fallback) | 3443 | https://localhost:3443/ (WebUI/API) |
 
-nginx services start automatically with the standard docker compose command.
+Caddy services start automatically with the standard compose command when HTTPS is configured.
 
 See [ssl-certificates.md](ssl-certificates.md) for HTTPS/SSL setup details.
 

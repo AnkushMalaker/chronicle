@@ -98,29 +98,23 @@ Open Audio Stream
     Log    Started audio stream ${stream_id} for device ${device_name}
     RETURN    ${stream_id}
 
-Open Audio Stream With Always Persist
-    [Documentation]    Start a WebSocket audio stream with always_persist enabled.
-    ...                always_persist is a backend-level setting (not per-session).
-    ...                This keyword ensures the setting is enabled before opening the stream.
+Open Durable Audio Stream
+    [Documentation]    Start a WebSocket stream on the mandatory durable-audio path.
     ...                Returns stream_id for sending chunks.
     [Arguments]    ${device_name}=robot-test    ${recording_mode}=streaming
 
-    # Open a regular stream - always_persist is read from backend config at enqueue time
     ${stream_id}=    Open Audio Stream    device_name=${device_name}    recording_mode=${recording_mode}
 
-    Log    Started audio stream ${stream_id} (always_persist is a backend setting)
+    Log    Started durable audio stream ${stream_id}
     RETURN    ${stream_id}
 
-Stream Audio File With Always Persist
-    [Documentation]    Stream a WAV file via WebSocket with always_persist enabled.
-    ...                always_persist is a backend-level setting (not per-session).
-    ...                Caller should ensure the setting is enabled via API before calling.
+Stream Audio File Durably
+    [Documentation]    Stream a WAV file through the mandatory durable-audio path.
     [Arguments]    ${audio_file_path}    ${device_name}=robot-test    ${recording_mode}=streaming
 
-    # Stream normally - always_persist is read from backend config at enqueue time
     ${chunks_sent}=    Stream Audio File Via WebSocket    ${audio_file_path}    device_name=${device_name}    recording_mode=${recording_mode}
 
-    Log    Streamed ${chunks_sent} chunks (always_persist is a backend setting)
+    Log    Streamed ${chunks_sent} durable chunks
     Should Be True    ${chunks_sent} > 0
     RETURN    ${chunks_sent}
 

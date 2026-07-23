@@ -6,13 +6,16 @@ Handles conversation CRUD operations, audio processing, and transcript managemen
 
 import logging
 import time
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from advanced_omi_backend.auth import current_active_user, current_superuser
 from advanced_omi_backend.controllers import conversation_controller
-from advanced_omi_backend.controllers.drift_controller import find_drift_conversations
+from advanced_omi_backend.controllers.drift_controller import (
+    find_drift_conversations,
+    get_cached_drift_report,
+)
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
     default_queue,
@@ -25,7 +28,10 @@ from advanced_omi_backend.utils.audio_chunk_utils import (
     get_trimmed_opus_for_time_range,
     reconstruct_audio_segment,
 )
-from advanced_omi_backend.workers.drift_jobs import cluster_embedding_backfill_job
+from advanced_omi_backend.workers.drift_jobs import (
+    cluster_embedding_backfill_job,
+    drift_scan_job,
+)
 from advanced_omi_backend.workers.waveform_jobs import generate_waveform_data
 
 logger = logging.getLogger(__name__)
@@ -79,14 +85,18 @@ async def get_conversations(
 
 @router.get("/search")
 async def search_conversations(
-    q: str = Query(..., min_length=1, description="Text search query"),
+    q: str = Query("", description="Optional text search query"),
     limit: int = Query(50, ge=1, le=200, description="Max results to return"),
     offset: int = Query(0, ge=0, description="Number of results to skip"),
+    fields: list[Literal["title", "summary", "speakers"]] = Query(
+        default=["title", "summary", "speakers"],
+        description="Search categories: title, summary, and/or speakers",
+    ),
     current_user: User = Depends(current_active_user),
 ):
-    """Full-text search across conversation titles, summaries, and transcripts."""
+    """Search conversations and identified people by literal case-insensitive pattern."""
     return await conversation_controller.search_conversations(
-        q, current_user, limit, offset
+        q.strip(), current_user, limit, offset, fields
     )
 
 
@@ -99,6 +109,35 @@ async def identify_drift(current_user: User = Depends(current_superuser)):
     Declared before ``/{conversation_id}`` so the static path isn't captured as an id.
     """
     return await find_drift_conversations()
+
+
+@router.post("/drift/scan")
+async def scan_drift(
+    force: bool = Query(
+        False, description="Recompute even if the cached report is current"
+    ),
+    current_user: User = Depends(current_superuser),
+):
+    """Drift scan with input-fingerprint caching.
+
+    If nothing the report depends on has changed (gallery, active versions,
+    centroids, threshold), returns the cached report immediately. Otherwise queues
+    the scan as a job so the UI can show per-conversation progress; fetch the
+    report via the job-result endpoint when finished. Same computation as
+    ``GET /drift`` (kept for scripts).
+    """
+    if not force:
+        cached = await get_cached_drift_report()
+        if cached:
+            return {"status": "cached", "report": cached}
+    job = default_queue.enqueue(
+        drift_scan_job,
+        job_timeout=3600,
+        result_ttl=JOB_RESULT_TTL,
+        description="Scan conversations for speaker-label drift",
+    )
+    logger.info("Enqueued drift scan job %s for admin %s", job.id, current_user.user_id)
+    return {"job_id": job.id, "status": "queued"}
 
 
 @router.post("/drift/backfill-cluster-embeddings")
@@ -176,6 +215,7 @@ async def reprocess_speakers(
     conversation_id: str,
     current_user: User = Depends(current_active_user),
     transcript_version_id: str = Query(default="active"),
+    diarization_source: Literal["provider", "pyannote"] | None = Query(default=None),
 ):
     """
     Re-run speaker identification/diarization on existing transcript.
@@ -186,12 +226,13 @@ async def reprocess_speakers(
     Args:
         conversation_id: Conversation to reprocess
         transcript_version_id: Which transcript version to use as source (default: "active")
+        diarization_source: Diarization engine for this run. Defaults to the configured engine.
 
     Returns:
         Job status with job_id and new version_id
     """
     return await conversation_controller.reprocess_speakers(
-        conversation_id, transcript_version_id, current_user
+        conversation_id, transcript_version_id, current_user, diarization_source
     )
 
 

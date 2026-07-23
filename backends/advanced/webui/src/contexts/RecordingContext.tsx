@@ -7,6 +7,11 @@ import { setActiveWakeClientId } from '../hooks/useWakeFeedback'
 
 const log = import.meta.env.DEV ? console.log.bind(console) : () => {}
 
+// Firefox-based browsers (incl. Zen, LibreWolf) don't implement audio capture in
+// getDisplayMedia — their share picker has no "Share audio" option, so meeting/tab
+// modes can never get sound from it (bugzilla #1541425).
+export const supportsDisplayAudio = !/firefox/i.test(navigator.userAgent)
+
 export type RecordingStep = 'idle' | 'mic' | 'display-audio' | 'websocket' | 'audio-start' | 'streaming' | 'stopping' | 'error'
 export type RecordingMode = 'batch' | 'streaming'
 export type AudioSource = 'mic' | 'meeting' | 'tab'
@@ -41,6 +46,15 @@ export interface RecordingContextType {
   selectedDeviceId: string | null
   setSelectedDeviceId: (id: string | null) => void
 
+  // System-audio loopback device (Firefox meeting/tab mode)
+  monitorDeviceId: string | null
+  setMonitorDeviceId: (id: string | null) => void
+  requestDeviceAccess: () => Promise<void>
+
+  // What the system-audio capture is actually doing (meeting/tab mode)
+  systemAudioLabel: string | null
+  systemAudioStatus: 'unknown' | 'active' | 'silent'
+
   // For components
   analyser: AnalyserNode | null
   debugStats: DebugStats
@@ -48,6 +62,7 @@ export interface RecordingContextType {
   // Utilities
   formatDuration: (seconds: number) => string
   canAccessMicrophone: boolean
+  supportsDisplayAudio: boolean
 }
 
 const RecordingContext = createContext<RecordingContextType | undefined>(undefined)
@@ -68,6 +83,23 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   // Microphone selection
   const [availableDevices, setAvailableDevices] = useState<MediaDeviceInfo[]>([])
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null)
+  // System-audio loopback device for Firefox meeting/tab mode ("Monitor of …").
+  // Persisted: auto-detect can't know which sink the user actually listens through
+  // (each output has its own monitor), so remember the last working choice.
+  const [monitorDeviceId, setMonitorDeviceIdState] = useState<string | null>(
+    () => localStorage.getItem(getStorageKey('monitorDeviceId'))
+  )
+  const setMonitorDeviceId = useCallback((id: string | null) => {
+    setMonitorDeviceIdState(id)
+    if (id) {
+      localStorage.setItem(getStorageKey('monitorDeviceId'), id)
+    } else {
+      localStorage.removeItem(getStorageKey('monitorDeviceId'))
+    }
+  }, [])
+  // Diagnostics for the system-audio capture: which device, and is it delivering signal
+  const [systemAudioLabel, setSystemAudioLabel] = useState<string | null>(null)
+  const [systemAudioStatus, setSystemAudioStatus] = useState<'unknown' | 'active' | 'silent'>('unknown')
 
   // Debug stats
   const [debugStats, setDebugStats] = useState<DebugStats>({
@@ -88,6 +120,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   const displayStreamRef = useRef<MediaStream | null>(null)
   const durationIntervalRef = useRef<ReturnType<typeof setInterval>>()
   const keepAliveIntervalRef = useRef<ReturnType<typeof setInterval>>()
+  const systemAudioWatchRef = useRef<ReturnType<typeof setInterval>>()
   const chunkCountRef = useRef(0)
   const audioProcessingStartedRef = useRef(false)
 
@@ -113,6 +146,18 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       console.warn('Failed to enumerate audio devices:', e)
     }
   }, [])
+
+  // Device labels are hidden until an audio permission is granted — run a
+  // throwaway capture so "Monitor of …" entries become selectable up front.
+  const requestDeviceAccess = useCallback(async () => {
+    try {
+      const probe = await navigator.mediaDevices.getUserMedia({ audio: true })
+      probe.getTracks().forEach(t => t.stop())
+    } catch (e) {
+      console.warn('Device access probe failed:', e)
+    }
+    await refreshDevices()
+  }, [refreshDevices])
 
   // Initial device enumeration + listen for device changes
   useEffect(() => {
@@ -176,6 +221,13 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       keepAliveIntervalRef.current = undefined
     }
 
+    if (systemAudioWatchRef.current) {
+      clearInterval(systemAudioWatchRef.current)
+      systemAudioWatchRef.current = undefined
+    }
+    setSystemAudioLabel(null)
+    setSystemAudioStatus('unknown')
+
     // Reset counters
     chunkCountRef.current = 0
   }, [])
@@ -229,6 +281,14 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   const getDisplayAudio = useCallback(async (): Promise<MediaStream> => {
     log('Step 1b: Requesting display/tab audio')
 
+    if (!supportsDisplayAudio) {
+      throw new Error(
+        'This browser (Firefox-based) cannot capture tab/screen audio — its share dialog has no "Share audio" option. ' +
+        'Either use a Chromium-based browser for Meeting/Tab mode, or switch to Mic mode and pick a "Monitor of …" ' +
+        'device in the Microphone dropdown to record system audio.'
+      )
+    }
+
     const stream = await navigator.mediaDevices.getDisplayMedia({
       video: true,   // Required for picker to show
       audio: true,   // Request audio track
@@ -238,10 +298,14 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     stream.getVideoTracks().forEach(t => t.stop())
 
     if (stream.getAudioTracks().length === 0) {
-      throw new Error('No audio shared. Please check "Share audio" when selecting a tab or screen.')
+      throw new Error(
+        'No audio shared. Share a browser tab (not a window) and enable "Also share tab audio" in the picker — ' +
+        'on Linux, window and screen sharing never include audio.'
+      )
     }
 
     displayStreamRef.current = stream
+    setSystemAudioLabel(stream.getAudioTracks()[0].label || 'Shared tab audio')
 
     // Handle user clicking "Stop sharing" in browser chrome
     stream.getAudioTracks()[0].onended = () => {
@@ -252,6 +316,52 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     log('Display audio access granted')
     return stream
   }, [])
+
+  // Step 1b (Firefox fallback): capture system audio from a PipeWire/PulseAudio
+  // "Monitor of …" loopback input via a second getUserMedia call, since Firefox's
+  // getDisplayMedia can't deliver audio. Mixed into the graph exactly like the
+  // Chromium display stream. No auto-detect: only the OS knows which output sink
+  // audio is routed to, so the user must pick the matching monitor explicitly.
+  const getMonitorAudio = useCallback(async (): Promise<MediaStream> => {
+    log('Step 1b (Firefox): Capturing system audio via monitor device')
+
+    if (!monitorDeviceId) {
+      throw new Error(
+        'No system-audio device selected. In the "System audio" dropdown, choose the "Monitor of …" entry ' +
+        'matching the output you\'re listening through (e.g. your headphones), then start again.'
+      )
+    }
+
+    const devices = await navigator.mediaDevices.enumerateDevices()
+    const target = devices.find(d => d.kind === 'audioinput' && d.deviceId === monitorDeviceId)
+    if (!target) {
+      throw new Error(
+        'The selected system-audio device is no longer available (output disconnected, or the browser reset ' +
+        'device IDs — grant persistent microphone permission to prevent that). Re-select a "Monitor of …" ' +
+        'device in the System audio dropdown.'
+      )
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        deviceId: { exact: target.deviceId },
+        channelCount: 1,
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
+    })
+
+    displayStreamRef.current = stream
+    setSystemAudioLabel(target.label)
+    stream.getAudioTracks()[0].onended = () => {
+      log('Monitor audio track ended')
+      displayStreamRef.current = null
+    }
+
+    log('Monitor audio capture started:', target.label)
+    return stream
+  }, [monitorDeviceId])
 
   // Step 2: Connect WebSocket
   const connectWebSocket = useCallback(async (): Promise<WebSocket> => {
@@ -461,6 +571,28 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
         displaySource.connect(analyser)
       }
       log('Display audio connected to recording pipeline')
+
+      // Watch the system-audio level so a silent capture (wrong monitor device,
+      // idle output sink) is surfaced in the UI instead of discovered post-hoc.
+      const sysAnalyser = audioContext.createAnalyser()
+      sysAnalyser.fftSize = 2048
+      displaySource.connect(sysAnalyser)
+      const levelBuf = new Float32Array(sysAnalyser.fftSize)
+      let silentTicks = 0
+      systemAudioWatchRef.current = setInterval(() => {
+        sysAnalyser.getFloatTimeDomainData(levelBuf)
+        let peak = 0
+        for (let i = 0; i < levelBuf.length; i++) {
+          const v = Math.abs(levelBuf[i])
+          if (v > peak) peak = v
+        }
+        if (peak > 0.003) {
+          silentTicks = 0
+          setSystemAudioStatus('active')
+        } else if (++silentTicks >= 4) {
+          setSystemAudioStatus('silent')
+        }
+      }, 1000)
     }
 
     processor.connect(audioContext.destination)
@@ -573,10 +705,15 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       audioContextRef.current = audioContext
       log(`AudioContext created, sample rate: ${audioContext.sampleRate}Hz`)
 
-      // Step 1b: Get display/tab audio if needed
+      // Step 1b: Get display/tab audio if needed. Firefox-based browsers can't
+      // deliver audio via getDisplayMedia, so capture a monitor device instead.
       if (needsDisplayAudio) {
         setCurrentStep('display-audio')
-        await getDisplayAudio()
+        if (supportsDisplayAudio) {
+          await getDisplayAudio()
+        } else {
+          await getMonitorAudio()
+        }
       }
 
       setCurrentStep('websocket')
@@ -613,7 +750,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       }))
       cleanup()
     }
-  }, [getMicrophoneAccess, getDisplayAudio, audioSource, connectWebSocket, sendAudioStartMessage, startAudioStreaming, cleanup])
+  }, [getMicrophoneAccess, getDisplayAudio, getMonitorAudio, audioSource, connectWebSocket, sendAudioStartMessage, startAudioStreaming, cleanup])
 
   // Stop recording function
   const stopRecording = useCallback(() => {
@@ -691,15 +828,22 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     availableDevices,
     selectedDeviceId,
     setSelectedDeviceId,
+    monitorDeviceId,
+    setMonitorDeviceId,
+    requestDeviceAccess,
+    systemAudioLabel,
+    systemAudioStatus,
     analyser: analyserState,
     debugStats,
     formatDuration,
-    canAccessMicrophone
+    canAccessMicrophone,
+    supportsDisplayAudio
   }), [
     currentStep, isRecording, recordingDuration, error, mode, liveTranscript,
     startRecording, stopRecording, setMode,
     audioSource, setAudioSource,
     availableDevices, selectedDeviceId, setSelectedDeviceId,
+    monitorDeviceId, setMonitorDeviceId, requestDeviceAccess, systemAudioLabel, systemAudioStatus,
     analyserState, debugStats, formatDuration, canAccessMicrophone
   ])
 

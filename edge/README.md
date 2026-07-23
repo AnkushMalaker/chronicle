@@ -2,6 +2,13 @@
 
 Deploy Chronicle services on remote machines (RPi, GPU VMs) with one command. Services auto-discover each other via Tailscale.
 
+Two node flavours share the same installer and update flow:
+
+- **Edge node** — runs one or more compose services (GPU boxes, RPis).
+- **Client node** — only captures/streams data: the desktop tray (vault sync,
+  ScreenPipe controls, optional pendant streaming) and the ScreenPipe collector
+  run as native user units. No container engine, no GPU.
+
 ## Prerequisites
 
 On the remote machine:
@@ -9,6 +16,9 @@ On the remote machine:
 - Tailscale (connected to your Tailnet)
 - `uv` (Python package manager)
 - `git`
+
+Client nodes (`--client`) need only `git` + `uv` (Tailscale recommended so the
+hub can discover/control the node, but not required).
 
 ## Deploy a Service
 
@@ -40,7 +50,30 @@ curl -sSL https://raw.githubusercontent.com/SimpleOpenSoftware/chronicle/feat/ta
 
 # Custom install directory (default: ~/chronicle)
 CHRONICLE_HOME=~/my-services curl -sSL ... | bash -s -- havpe-relay
+
+# Client node: unified tray + node agent, no containers
+curl -sSL .../edge/install.sh | bash -s -- --client
+# ... with BLE wearable (pendant) streaming support
+curl -sSL .../edge/install.sh | bash -s -- --client --pendant
 ```
+
+## Client Nodes
+
+`--client` installs the [unified Chronicle tray](../extras/chronicle-tray/) as a
+login user unit plus the node agent, and prints install hints for missing
+companion binaries (`screenpipe`, `syncthing`). Manage components with:
+
+```bash
+cd ~/chronicle
+uv run --with-requirements setup-requirements.txt python services.py client status
+uv run --with-requirements setup-requirements.txt python services.py client install screenpipe-collector
+uv run --with-requirements setup-requirements.txt python services.py client uninstall tray
+```
+
+The component units are defined in the repo-root `clients.py` and `uv run`
+straight from the checkout, so node updates (below) restart them on the new
+code automatically; the hub can also see and control them via the agent's
+`/clients` routes.
 
 ## What Happens
 
@@ -83,9 +116,10 @@ uv run --with-requirements setup-requirements.txt python services.py update
 
 Branch installs pull their branch; release-tag installs move to the latest `v*`
 tag. Enabled services are rebuilt and restarted from the new code (rolled back
-if one fails to come up). Nodes running the node agent can also be updated
-remotely from the hub's WebUI System page (the hub fans out to peer agents over
-the Tailnet). See `docs/fleet-updates.md`.
+if one fails to come up), and installed client components (tray, ScreenPipe
+collector) are restarted so they pick up the new code too. Nodes running the
+node agent can also be updated remotely from the hub's WebUI System page (the
+hub fans out to peer agents over the Tailnet). See `docs/fleet-updates.md`.
 
 ## How It Works
 

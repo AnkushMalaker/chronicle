@@ -18,6 +18,7 @@ import pytest_asyncio
 from beanie import init_beanie
 from bson import Binary
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import DuplicateKeyError
 
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
@@ -236,6 +237,33 @@ class TestMongoDBChunkStorage:
         assert chunks[0].chunk_index == 5
         assert chunks[1].chunk_index == 6
         assert chunks[2].chunk_index == 7
+
+    async def test_redis_source_id_is_an_idempotent_commit_key(self, clean_db):
+        """A replay after insert-before-XACK cannot create duplicate audio."""
+        common = {
+            "audio_data": Binary(b"opus"),
+            "original_size": 320,
+            "compressed_size": 4,
+            "start_time": 0.0,
+            "end_time": 0.01,
+            "duration": 0.01,
+            "source_stream": "audio:stream:test-client",
+            "source_first_message_id": "1-0",
+            "source_last_message_id": "1-0",
+            "source_message_ids": ["1-0"],
+        }
+        await AudioChunkDocument(
+            conversation_id="test-conv-idempotent",
+            chunk_index=0,
+            **common,
+        ).insert()
+
+        with pytest.raises(DuplicateKeyError):
+            await AudioChunkDocument(
+                conversation_id="test-conv-idempotent",
+                chunk_index=1,
+                **common,
+            ).insert()
 
 
 @pytest.mark.asyncio(loop_scope="session")
