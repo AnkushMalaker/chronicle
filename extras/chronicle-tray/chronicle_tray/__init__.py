@@ -1,0 +1,1 @@
+"""Unified Chronicle desktop tray."""
